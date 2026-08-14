@@ -1508,6 +1508,15 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // otherwise read as coverage of everything that could carry captured bytes into the
 // returns.
 //
+// #1462's Ordering IS A SECOND WHOLE-CARRIED VALUE UNDER THAT SAME ARGUMENT, and it
+// reaches this note by a different road: it is NOT a fourth input for the count
+// above, because trailCertifyOrdering's whole input is three bools and no captured
+// byte can reach a trailOrderResult through it — but a HAND-PLANTED needle would ride
+// it onto the readings by design just the same, and the only fix for such a red is
+// the identical narrowing. Its gather-tier sweep is
+// TestFinGatherOrderingCarriesNoCapturedBytes, which states in its own doc why the
+// counts above survive it unchanged.
+//
 // The stderr plant sits ON THE ANCHORED LINE, after the pgids= list, which is
 // #1280's position and the only non-vacuous one: tdnClassifyReapLog skips every
 // line not carrying tdnReapMessage BEFORE it fills any field
@@ -2627,8 +2636,12 @@ func TestFinGatherHalfStagedRouteMovesNoOutcome(t *testing.T) {
 //
 // NO NEEDLE PLANT AND NO CAPTURED-BYTES SWEEP, and none is owed at this route's
 // producer: trailCertifyOrdering's whole input is three bools, so no captured byte
-// can reach a trailOrderResult through it. The gather tier's sweep over the route
-// is #1463's, on #1452's precedent that a new route gets a sibling test of its own.
+// can reach a trailOrderResult through it. The gather tier's sweep over the route is
+// TestFinGatherOrderingCarriesNoCapturedBytes, immediately below, on #1452's
+// precedent that a new route gets a sibling test of its own. Named rather than left
+// as a ticket number: a reader of this doc is one declaration from the test they
+// want, and the two are a pair — this one pins that the certification crosses WHOLE,
+// which is the premise that sweep's needle needs to have a route at all.
 //
 // NO ADMIT VALUE beside these rows, which is trailRunAbsentOwesNoneReadings()'
 // constraint arriving at this tier: C4 and C5 sit above step 1, so a proof here
@@ -2762,6 +2775,227 @@ func TestFinGatherStagedOrderingReachesTheSightingOutcomes(t *testing.T) {
 					tc.wantReason)
 			}
 		})
+	}
+}
+
+// TestFinGatherOrderingCarriesNoCapturedBytes is the GATHER TIER's half of the
+// fence around the route the sibling above pins the shape of: a needle planted in
+// the caller's certified ordering travels the shipped finGatherReadings and reaches
+// none of the six channels a published artifact is built from.
+//
+// # Why a sibling test and not a third plant on TestFinGatherReturnsNoCapturedBytes
+//
+// That test marshals READINGS, and the pass-through onto trailRunReadings.Ordering is
+// whole and unnormalised — which the sibling above asserts on purpose. So those bytes
+// ride that value BY DESIGN and an ordering plant added there is red against a
+// correct build, whose only fix narrows the pass-through and leaves the needle no
+// route to travel at all. #1452's precedent — a new route gets a sibling test of its
+// own — points the same way; this is the harder reason, and it is the same pair of
+// reasons TestFinGatherPinnedPidCarriesNoCapturedBytes gives one input earlier.
+//
+// # The marshalled trailRunReadings is DELIBERATELY NOT A ROW BELOW
+//
+// Same reason, stated in its own right so the next reader does not "fix" the omission
+// by adding the row that breaks it. Every subject below is a value the classifier or
+// the gather BUILDS from those readings, never the readings.
+//
+// # THAT DOC'S INPUT COUNTS ARE NOT INCREMENTED BY THIS TEST
+//
+// TestFinGatherReturnsNoCapturedBytes counts the inputs that COULD carry captured
+// bytes into the returns, and the ordering is not one of them: trailCertifyOrdering's
+// whole input is three bools and every arm builds its Detail out of source-authored
+// clauses, so no captured byte can reach a trailOrderResult through the one producer
+// there is. An ordering counted there would assert a live channel that does not
+// exist.
+//
+// # The plant is a STRUCT LITERAL here, and that is a statement about the producer
+//
+// No live producer emits this shape, so the literal is a FIXTURE and must be read as
+// one, exactly as finGatherPinnedReadings' doc labels its own. The constraint is
+// arithmetic as well: trailCertifyOrdering(true, true, true) renders a Detail of some
+// four hundred bytes, and the control below composes ON TOP of the step-8 arm's own
+// rendering — so the real producer's value could not be the plant even with its
+// Detail overwritten in place, because the pair overruns trailDetail's cap by three
+// hundred bytes.
+//
+// trailOrderResult has exactly TWO members, so the plant fills both and there is no
+// third-field surface to maximise. A reader arriving from
+// TestFinGatherPinnedPidCarriesNoCapturedBytes will look for that test's deliberate
+// surface maximisation, and finds its absence explained here rather than as an
+// oversight.
+//
+// # ALL SIX channels pass STRUCTURALLY, and none of them is a live leak
+//
+// A stronger statement of absence than the pid sibling's four-of-six, and it must not
+// be dressed up as the weaker one. On the arm the premise pins the classifier never
+// consults Ordering at all — the whole sighting route sits behind the gate-absent
+// branch of step 1, and this fixture's gate is usable — and NO SHIPPED ARM ANYWHERE
+// renders Ordering.Detail into a published string: the sighting arms render
+// sighting.Value and sighting.Reason, which are trailEstablishSighting's own answers.
+// There is no live leak route to fence here.
+//
+// The rows are guards and not vacuities all the same: they are the fabric a FUTURE
+// field on one of these records, or a future arm folding the ordering's Detail in for
+// a better failure message, would break — the natural mistake, and the same framing
+// #1440 used for its own trailOrderResult plant one tier up. The pair such an arm
+// would show at is the marshalled outcome and its Detail, which is where the mutation
+// proof lands.
+//
+// IT DOES NOT STAND IN FOR #1458's PID-READ PLANT. That one is the live route — its
+// producer's instrument-failed branch puts raw ps stderr into ToolStderr and folds it
+// into Detail — and it is swept by TestFinGatherPinnedPidCarriesNoCapturedBytes. A
+// reader who takes this test as coverage of a live channel has learned the wrong
+// thing.
+//
+// NO FORBIDDEN-KEY WALK. This route publishes no key at any of the six subjects, and
+// the key fabric over these exact values is already held by
+// TestFinGatherReturnsNoCapturedBytes for the record and the sighting and by
+// TestTrailRunOutcomeCarriesNoCapturedBytes for the outcome.
+//
+// # The control must die on the NEEDLE and never on the budget
+//
+// A sweep whose needle has no route to travel measures nothing, so the control
+// renders what a republishing arm would have rendered — through the SHIPPED
+// trailDetail, off the SHIPPED outcome.Detail, never off a re-typed copy of the arm's
+// format string — and shows the needle survives UNDER reachMaxCommandBytes with no
+// reachTruncationMarker. That is the discrimination demonstrated rather than
+// asserted: the outcome.Detail row below travels the same rendering path on the same
+// arm against the same budget, and differs only in whether the classifier republished
+// its input.
+//
+// THE BYTE BUDGET BELONGS TO THE ARM THE PREMISE PINS and to no other. The arms that
+// consult trailEstablishSighting render far more of the 512 by their own documented
+// budgets, so a later fixture change that moved the outcome must re-measure rather
+// than inherit this headroom. For THIS field that warning is not hypothetical:
+// TestTrailRunOutcomeCarriesNoCapturedBytes' own doc records that Ordering.Detail was
+// the one plant of three that reddened at the classifier tier, and that it reddened
+// on the TRUNCATION MARKER rather than on the needle — a budget kill wearing a leak
+// kill's clothes, on this exact field.
+func TestFinGatherOrderingCarriesNoCapturedBytes(t *testing.T) {
+	// A FUNCTION rather than a value, for finGatherPinnedReadings' stated reason. The
+	// DETAIL's prose is kept SHORT deliberately: the control below pays for it twice
+	// out of what the step-8 arm leaves of the 512-byte cap, once in the rendering it
+	// composes on and once in what it appends. Measured on the arm the premise pins, a
+	// Detail past some 54 bytes makes the mutation run die on the cap instead of on the
+	// needle. The Value is the honest one for this fixture — the gather sights the
+	// trailer, PyryExited is true in the base, and holdHeld is the caller's own fact —
+	// and it keeps the plant clear of the classifier's Ordering.Value == "" guard,
+	// which this arm does not reach but which a later fixture drift might.
+	plantedOrdering := func() trailOrderResult {
+		return trailOrderResult{
+			Value:  trailOrderCertified,
+			Detail: "ordering: " + trailNeedle,
+		}
+	}
+
+	// The negative composition with the ordering replaced and NOTHING else varied.
+	// Staging a certified ordering does NOT move the outcome off the step-8 arm, which
+	// is measured rather than assumed: the arm is decided by the GATE, and under a
+	// usable gate the sighting route behind step 1's gate-absent branch is never
+	// consulted. TestFinGatherStagedOrderingReachesTheSightingOutcomes' recipe is what
+	// reaches that route, and its arms render far more of the cap by their own
+	// documented budgets — which is why this test does not borrow it.
+	var stdout probeSyncBuffer
+	in := finGatherNegativeInputs(t, &stdout)
+	in.Ordering = plantedOrdering()
+
+	readings, record, sighting := finGatherReadings(in)
+
+	// --- the premises, each of which turns a vacuous sweep into a named failure ---
+
+	if !strings.Contains(in.Ordering.Detail, trailNeedle) {
+		t.Fatalf("the planted ordering's Detail does not carry the needle, so every negative " +
+			"below passes over a record that never held captured bytes")
+	}
+	// The route is real. This is TestFinGatherStagedOrderingReachesTheSightingOutcomes'
+	// SUBJECT arriving as this test's PREMISE: against a narrowed pass-through every
+	// absence below would be a fact about the gather having dropped the value rather
+	// than about the classifier not republishing it. trailOrderResult is two strings,
+	// so == compares the WHOLE value.
+	if readings.Ordering != in.Ordering {
+		t.Fatalf("the readings carry ordering %+v; want the %+v that was handed in — the needle "+
+			"has no route to travel and every negative below is about nothing",
+			readings.Ordering, in.Ordering)
+	}
+	// The two Details swept below are their arms' own rendered sentences and not empty
+	// strings, which a needle search passes over whatever the gather did.
+	if readings.Gate.Detail == "" || readings.Admit.Detail == "" {
+		t.Fatalf("the gate detail is %d byte(s) and the attribution detail %d; want both "+
+			"non-empty — a needle search over an empty string asserts nothing",
+			len(readings.Gate.Detail), len(readings.Admit.Detail))
+	}
+
+	outcome := trailClassifyRun(readings)
+
+	if outcome.Value != trailOutcomeNoRowMatched {
+		t.Fatalf("the readings classify as %q; want %q — the control's byte budget is THAT arm's, "+
+			"so a fixture that drifted to another one invalidates the control rather than the "+
+			"sweep", outcome.Value, trailOutcomeNoRowMatched)
+	}
+	if strings.Contains(outcome.Detail, reachTruncationMarker) {
+		t.Fatalf("the shipped detail is already truncated at %d bytes, so the control below cannot "+
+			"reproduce the one-shot rendering and its needle check would be measuring the cap "+
+			"rather than the republication", len(outcome.Detail))
+	}
+
+	// --- the negative: six channels, each named so a failure says which leaked ---
+
+	for _, subject := range []struct {
+		what  string
+		value any
+	}{
+		{"run outcome", outcome},
+		{"attribution record", record},
+		{"sighting", sighting},
+	} {
+		encoded, err := json.Marshal(subject.value)
+		if err != nil {
+			t.Fatalf("marshalling the %s: %v", subject.what, err)
+		}
+		if bytes.Contains(encoded, []byte(trailNeedle)) {
+			t.Errorf("the marshalled %s carries captured bytes from the certified ordering, which "+
+				"crosses the gather whole and which nothing downstream may republish: %s",
+				subject.what, encoded)
+		}
+	}
+	// The three published Details, named individually rather than left to the marshal
+	// sweep: they are the strings an operator reads, and the ones a future arm would
+	// interpolate the ordering into for a better failure message.
+	for _, named := range []struct {
+		what  string
+		value string
+	}{
+		{"outcome's Detail", outcome.Detail},
+		{"gate's Detail", readings.Gate.Detail},
+		{"attribution's Detail", readings.Admit.Detail},
+	} {
+		if strings.Contains(named.value, trailNeedle) {
+			t.Errorf("the %s carries captured bytes from the certified ordering: %s", named.what,
+				named.value)
+		}
+	}
+
+	// --- the control: the needle WOULD have travelled -------------------------
+
+	// The counterfactual arm, built through the shipped renderer off the shipped
+	// rendering: "step 8 appended the certified ordering's Detail for a better failure
+	// message". It composes ON TOP of that rendering, so a build that had ALREADY
+	// republished pays for the plant twice and can redden here as well — in which case
+	// the needle rows above are the diagnosis and this one is a consequence.
+	control := trailDetail("%s ordering: %s", outcome.Detail, readings.Ordering.Detail)
+	if !strings.Contains(control, trailNeedle) {
+		t.Fatalf("a Detail that republished the certified ordering carries no needle, so the " +
+			"negative above cannot tell a sealed channel from an unreachable one")
+	}
+	if len(control) >= reachMaxCommandBytes {
+		t.Fatalf("the republishing rendering is %d bytes against the %d-byte cap, so it would be "+
+			"TRUNCATED rather than leaked and the control demonstrates a BUDGET kill instead of a "+
+			"leak kill. Shorten the plant's Detail; never weaken the sweep", len(control),
+			reachMaxCommandBytes)
+	}
+	if strings.Contains(control, reachTruncationMarker) {
+		t.Fatalf("the republishing rendering carries %q, so the needle survived a truncated "+
+			"string by luck: same budget kill as above, and the same fix", reachTruncationMarker)
 	}
 }
 
