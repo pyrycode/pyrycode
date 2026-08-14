@@ -217,8 +217,9 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 
 // finGatherInputs is what a live probe holds when it composes one run's
 // readings: #1281's four values, the two #1282 left staged in the gather's own
-// body, the runner-path reading #1452 routed in from the caller, and the
-// pinned-pid read #1458 routed in from the same place.
+// body, the runner-path reading #1452 routed in from the caller, the
+// pinned-pid read #1458 routed in from the same place, and the certified
+// ordering #1462 routed in from there too.
 //
 // NAMED FIELDS RATHER THAN POSITIONAL PARAMETERS, for a reason that has GROWN
 // INTO finRecordInputs' (finding_run_record_test.go:205-212). That type's reason
@@ -231,16 +232,20 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 // The reason that applied from the start is
 // TestFinGatherPyryExitIsObservableAtTheOutcome's: its two arms must be
 // identical in stdout seed, needles, stderr and pinned set BYTE FOR BYTE and
-// differ in one field. Across eight positional arguments that identity is a
+// differ in one field. Across nine positional arguments that identity is a
 // discipline retyped at each call site and checkable only by reading; over a
 // struct it is `copy the value, set one field` — the package's own
 // vary-one-dimension idiom (trailRunWellFormed) —
 // and it holds BY CONSTRUCTION. Same doctrine either way: prefer the shape that
-// cannot be got wrong over the discipline that must not be. Secondarily, a
-// reader of finGatherReadings(&stdout, needles, stderr, pinned, true, "", "", pin)
-// has no way to know what that true asserts.
+// cannot be got wrong over the discipline that must not be. The count is LIVE
+// rather than a snapshot of when this paragraph was written, because the
+// argument is made FROM it and gets stronger as it grows. Secondarily, a reader
+// of
+// finGatherReadings(&stdout, needles, stderr, pinned, true, "", "", pin, ordering)
+// has no way to know what that true asserts — nor, with TWO struct-valued
+// positionals rather than one, what either opaque one carries.
 //
-// # All four staged fields keep the readings' own names, types and ZERO-POLARITY
+// # All five staged fields keep the readings' own names, types and ZERO-POLARITY
 //
 //   - PyryExited's zero is false, which reads as "did not exit" and reaches Step
 //     3's void. That is the SAFE direction, and it is the identical argument
@@ -261,11 +266,19 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 //   - PinnedPid's zero is the zero pinStateOutcome, carrying Verdict "" — which
 //     trailSightingReasonPidReadFailed's own doc names among the shapes the
 //     sighting route answers for. That argued home INSIDE the route is what
-//     carries the closing sentence below over a fourth field, and it is why the
-//     empty case takes no read at all rather than a pinReadState(0), which would
-//     answer pinStateInstrumentFailed and so claim an instrument ran.
+//     carries the closing sentence below over a fourth field — the ordering
+//     below carries it over a fifth — and it is why the empty case takes no read
+//     at all rather than a pinReadState(0), which would answer
+//     pinStateInstrumentFailed and so claim an instrument ran.
+//   - Ordering's zero is the zero trailOrderResult, carrying Value "" — which is
+//     exactly what the step-1 guard in trailClassifyRun's trailGateAbsentOwesNone
+//     arm reads to answer trailOutcomeVoidSightingRouteNotStaged. So an unfilled
+//     field degrades to a NAMED not-staged reading rather than to a claim, and
+//     that argued home is what carries the closing sentence over a fifth field.
+//     Deliberately NOT any member of the ordering's own space: those say a
+//     premise was MEASURED and refused, where "" says no instrument was there.
 //
-// Because all four zeros land on a named nothing-was-measured rather than on a
+// Because all five zeros land on a named nothing-was-measured rather than on a
 // claim, an incompletely-filled finGatherInputs degrades honestly.
 type finGatherInputs struct {
 	// Stdout is the buffer the trailer leg polls. It is read through Bytes(),
@@ -366,6 +379,53 @@ type finGatherInputs struct {
 	// shape is the caller's obligation; the gather validates nothing here, and that
 	// is a statement about the gather rather than a licence for its caller.
 	PinnedPid pinStateOutcome
+	// Ordering is the sighting route's OTHER input: the certified-ordering result,
+	// PRODUCED AT THE CALL SITE and handed in whole.
+	//
+	// ITS ONE ADMISSIBLE PRODUCER IS trailCertifyOrdering's own output. NEVER a
+	// trailOrderResult{Value: trailOrderCertified} literal, which would let
+	// everything downstream go on passing against an ordering predicate that
+	// certifies nothing — the bypass trailSightingPremisesFor closed on the fixture
+	// side, and the reason trailRunSightingEstablishedReadings calls the real
+	// predicate rather than typing the value.
+	//
+	// IT TRAVELS WHOLE, for PinnedPid's reason above arriving at a different
+	// destination. trailEstablishSighting takes a trailOrderResult whole and says so
+	// in its own first arm — passed through WHOLE and never re-decided there — so a
+	// field narrowed to its Value string would have to be reconstituted by literal
+	// at the point of use, which is the producer rule above defeated one step along.
+	//
+	// THE ZERO IS ADMISSIBLE AND IS THE HONEST REPORT for a caller that staged no
+	// ordering, and its argued home is the one the bullets above state: Value "" is
+	// what the step-1 guard reads, so an unfilled field lands on a NAMED not-staged
+	// reading and no contract check is owed — see the no-C10 note inside
+	// trailClassifyRun.
+	//
+	// NO CAPTURED BYTE CAN REACH IT THROUGH THAT PRODUCER, which is why this field
+	// carries no "NEVER a raw ps column" prohibition of the kind ClaudeState and
+	// RunnerPath do above. trailCertifyOrdering's whole input is three bools, so no
+	// argv-shaped or ps-shaped value can arrive here by the admissible route at all:
+	// the reduction is STRUCTURAL rather than disciplinary, which is the same
+	// narrow-the-parameter argument that predicate's own doc makes for its
+	// signature.
+	//
+	// NO LIVE CALLER FILLS IT, AND NONE MAY BE ADDED HERE. trailCertifyOrdering
+	// needs trailerSighted, and neither gather that sights a trailer hands its
+	// caller the sighting before the call the premise would have to be passed to:
+	// finGatherReadings reports the state on its third return and trailRigGather
+	// returns the observation, both AFTER. Recovering it with an earlier
+	// trailWaitForTrailer degrades the gather's OWN sighting to trailBoundFromStart
+	// — the discriminator whose own doc says it BOUNDS NOTHING — and that is the
+	// observation which fills the published BoundFrom, the Staleness and the gate.
+	// Resolving that circularity is design work, and no ticket for it exists yet. A
+	// probe closing the gap by GUESSING holdHeld is a shape to refuse rather than to
+	// review: it would publish trailOutcomeAliveAtSightingByOrdering on a run where
+	// the hold was released, and a released hold means the pinned pid could have
+	// been retired and reissued between the sighting and the later read — so the
+	// artifact would name a process it cannot show is the same one. That is the case
+	// trailOrderVoidUnheld exists to refuse, and why it outranks the other two
+	// premises.
+	Ordering trailOrderResult
 }
 
 // finSighting is what the trailer poll MEASURED, handed back without handing
@@ -776,7 +836,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 		readings.Liveness = append(readings.Liveness, pinReadState(match.PID))
 	}
 
-	// The caller's own three readings, carried WHOLE. No default, no zero-value
+	// The caller's own four readings, carried WHOLE. No default, no zero-value
 	// rewrite, no fill-in-if-unset, no normalisation and no pinIsVerdict call: C7
 	// is the classifier's check over the claude verdict and it is already
 	// shipped, so a second opinion here would repair exactly the record C7 exists
@@ -801,9 +861,19 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// design (`trailClassifyRun`) and proofPyryLive pins it
 	// (:1336-1337, :1564-1565) — and so is a run whose gate is not usable, which Step
 	// 1 answers first.
+	//
+	// THE ORDERING IS NOT CERTIFIED HERE, even though it looks possible: two of
+	// trailCertifyOrdering's three premises are already in reach, since in.PyryExited
+	// is an input and this function sights the trailer itself just above. holdHeld is
+	// the one it cannot know — a fact about a FIFO the CALLER holds — and a
+	// certification computed from two premises and a guess is worse than none.
+	// Splitting one certification across two sites is also how two computations
+	// required to agree stop agreeing, which is this function's own argument about
+	// its key-name cap above.
 	readings.PyryExited = in.PyryExited
 	readings.ClaudeState = in.ClaudeState
 	readings.PinnedPid = in.PinnedPid
+	readings.Ordering = in.Ordering
 
 	return readings, record, sighting
 }
@@ -2372,8 +2442,8 @@ func TestFinGatherPinnedPidCarriesNoCapturedBytes(t *testing.T) {
 //
 // # The half-staged pair is now the SHIPPED state, not a hypothesis
 //
-// It is what every live run through finGatherReadings produces, because this ticket
-// stages the pin and #1457 has not yet staged the ordering. The arm's guard is
+// It is what every live run through finGatherReadings produces, because that gather
+// stages the pin and nothing fills the ordering. The arm's guard is
 // single-sided ON PURPOSE — the "Testing both fields with &&" note inside
 // trailClassifyRun argues that an && guard falls through on exactly this pair and
 // publishes a premise as MEASURED and failed — so a pass-through that let the guard
@@ -2387,10 +2457,21 @@ func TestFinGatherPinnedPidCarriesNoCapturedBytes(t *testing.T) {
 // elsewhere and every assertion below is about a different arm, which is why the
 // gate value is a Fatalf premise rather than a corroboration.
 //
-// Ordering is unfilled AUTOMATICALLY: finGatherInputs has no field for it yet. When
-// #1457 adds one, this test needs revisiting — the pair it drives stops being what
-// a live run produces, and the guard it exercises stops being single-sidedly
-// load-bearing.
+// # The ordering is unfilled BY CHOICE, and that is what this test proves now
+//
+// It used to be unfilled STRUCTURALLY: finGatherInputs had no field for it, so the
+// premise below asserting readings.Ordering.Value == "" was a tautology and this
+// test was an observation about the compiler. #1462 added the field, the rows leave
+// it zero deliberately, and that premise became a CHECK — the one that says these
+// rows really are half-staged. A reader must not mistake the one for the other,
+// which is what that paragraph in this doc was left here to be revisited about.
+//
+// The claim itself is unchanged and the strengthening runs one way: a caller
+// filling one input without the other must not defeat the single-sided guard, and
+// since the filling is now POSSIBLE this is a behavioural check where it was a
+// compile-time impossibility. #1448 chose the guard for exactly this reason. No
+// live caller fills the field either — finGatherInputs.Ordering says why, and it is
+// why the pair driven here is still what every live run brings.
 //
 // # Why the whole-value equality is taken over ONE gather's readings
 //
@@ -2491,6 +2572,196 @@ func TestFinGatherHalfStagedRouteMovesNoOutcome(t *testing.T) {
 		t.Errorf("a gather staging nothing classifies as %q (%s) while one staging a pinned-pid "+
 			"read classifies as %q — the two must agree, because the ordering guard answers "+
 			"before either reading is consulted", got.Value, got.Detail, withPin.Value)
+	}
+}
+
+// TestFinGatherStagedOrderingReachesTheSightingOutcomes is #1462's carriage claim:
+// driven offline through the SHIPPED gather and the SHIPPED classifier, a certified
+// ordering staged beside a pinned-pid read gets the gate-absent-owes-none arm PAST
+// its step-1 guard and onto the two outcomes that were reachable only from
+// hand-built classifier-tier fixtures before.
+//
+// # The recipe is the sibling's above, and it is not optional
+//
+// Seed trailKeyNamesNoTerminalReason() — a trailer with no terminal_reason key at
+// all — under a reading tdnRunnerFromArgv reduces to streamrunner. Without BOTH
+// halves the gate lands elsewhere, step 1 answers first, and every assertion below
+// is about a different arm. That is why the gate value is a Fatalf premise rather
+// than a corroboration.
+//
+// # The ordering comes from the SHIPPED PRODUCER and never from a literal
+//
+// trailCertifyOrdering(true, true, true), for the reason
+// trailRunSightingEstablishedReadings gives one tier up: a hand-built
+// trailOrderResult{Value: trailOrderCertified} would let every row here go on
+// passing against an ordering predicate that certifies nothing. The three trues are
+// the CALLER'S premises and this fixture is honest about all three — the trailer is
+// sighted (the gather sights it), pyry exited (PyryExited is true in the base), and
+// holdHeld is the caller's own fact that no gather can recover. Supplied, not
+// recovered, which is that predicate's own statement about its parameters.
+//
+// # The pin fixtures are the SHAPES pinClassifyState actually fills
+//
+// Not trailSightingPin, which finGatherInputs.PinnedPid rules out BY NAME at this
+// tier: it sets no StateColumn and no ToolStderr, precisely the shape a live
+// FAILING read produces. Each row carries instead what that classifier fills on the
+// arm it names — the running row a PPID and a live state column, the awaiting-reap
+// row both with a zombie column at ExitStatus 0, and the gone row a non-zero
+// ExitStatus and NEITHER, because that arm returns before any row is parsed. A row
+// whose pin were a verdict string with everything else zero would prove the gather
+// routes a VERDICT rather than the value.
+//
+// # Why the reason is asserted and not only the value
+//
+// The two refutation rows SHARE trailOutcomeVoidPinnedPidDidNotEstablish and differ
+// only in the published reason, so a build that hard-coded either onto the arm
+// passes with one row and fails with both. Each row's declared reason is then
+// cross-checked against trailEstablishSighting's OWN answer, taken over the
+// readings THE GATHER PRODUCED rather than over the inputs: that pins the declared
+// constant as the shipped predicate's rather than one that drifted, and witnesses
+// the carriage a second way. Without it a row could declare a reason the predicate
+// no longer emits and still agree with a classifier that hardcoded the same stale
+// string.
+//
+// # What this test does not do
+//
+// NO NEEDLE PLANT AND NO CAPTURED-BYTES SWEEP, and none is owed at this route's
+// producer: trailCertifyOrdering's whole input is three bools, so no captured byte
+// can reach a trailOrderResult through it. The gather tier's sweep over the route
+// is #1463's, on #1452's precedent that a new route gets a sibling test of its own.
+//
+// NO ADMIT VALUE beside these rows, which is trailRunAbsentOwesNoneReadings()'
+// constraint arriving at this tier: C4 and C5 sit above step 1, so a proof here
+// would re-prove the contract block instead of the arm. The gather produces the
+// zero Admit by itself, because it calls the fan-out only under a certified gate
+// Reason and this gate certifies none.
+//
+// NO SCAN-SIDE PREMISE, unlike the two siblings above. Step 1 answers before steps
+// 3-8, so neither count can move an assertion here; and this package makes many
+// t.Parallel() calls and re-execs itself, so the counts must never be compared
+// across rows anyway.
+func TestFinGatherStagedOrderingReachesTheSightingOutcomes(t *testing.T) {
+	var stdout probeSyncBuffer
+	finGatherSeed(t, &stdout, trailKeyNamesNoTerminalReason())
+	// ONE buffer and ONE needle slice across the rows, for the siblings' stated
+	// reason: finGatherNeedles calls t.TempDir() and would vary a second dimension,
+	// and sharing the buffer is sound because trailWaitForTrailer only ever calls
+	// Bytes(), which returns a copy.
+	base := finGatherInputs{
+		Stdout:     &stdout,
+		Needles:    finGatherNeedles(t),
+		PyryExited: true,
+		RunnerPath: tdnRunnerFromArgv(tdnFixtureStreamArgv),
+		Ordering:   trailCertifyOrdering(true, true, true),
+	}
+
+	for _, tc := range []struct {
+		name string
+		// pin is the caller's pinned-pid read, in the shape pinClassifyState fills
+		// on the arm the row is about.
+		pin        pinStateOutcome
+		want       string
+		wantReason string
+	}{
+		{
+			name: "a still-running pinned pid establishes aliveness at the sighting",
+			pin: pinStateOutcome{
+				Verdict:     pinStateRunning,
+				Detail:      "a per-pid read that found the pinned group in the table",
+				PID:         finGatherPinnedReadPID,
+				PPID:        1,
+				StateColumn: "S+",
+			},
+			want:       trailOutcomeAliveAtSightingByOrdering,
+			wantReason: trailSightingReasonPidRunning,
+		},
+		{
+			// pinClassifyState fills PPID and StateColumn BEFORE its zombie check,
+			// so a real read on this arm carries both, at ExitStatus 0.
+			name: "a pinned pid awaiting a reap does not establish it",
+			pin: pinStateOutcome{
+				Verdict:     pinStateExitedNotReaped,
+				Detail:      "a per-pid read that found the pinned group awaiting a reap",
+				PID:         finGatherPinnedReadPID,
+				PPID:        1,
+				StateColumn: "Z+",
+			},
+			want:       trailOutcomeVoidPinnedPidDidNotEstablish,
+			wantReason: trailSightingReasonPidReapedPending,
+		},
+		{
+			// pinClassifyState returns on this arm BEFORE a row is parsed, so a real
+			// read carries a non-zero ExitStatus and neither PPID nor StateColumn.
+			name: "a pinned pid no longer in the table does not establish it either",
+			pin: pinStateOutcome{
+				Verdict:    pinStateNoSuchProcess,
+				Detail:     "ps exited 1 with empty stdout and empty stderr: the pid is not in the table",
+				PID:        finGatherPinnedReadPID,
+				ExitStatus: 1,
+			},
+			want:       trailOutcomeVoidPinnedPidDidNotEstablish,
+			wantReason: trailSightingReasonPidGone,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := base
+			in.PinnedPid = tc.pin
+			readings, _, _ := finGatherReadings(in)
+
+			// --- the premises, each of which turns a vacuous comparison into a stop ---
+
+			if readings.Gate.Value != trailGateAbsentOwesNone {
+				t.Fatalf("the row reads gate %q (%s); want %q — that arm is the only one that "+
+					"consults the sighting route, and at any other gate value step 1 answers first "+
+					"and every claim below is about a different arm", readings.Gate.Value,
+					readings.Gate.Detail, trailGateAbsentOwesNone)
+			}
+			// WHOLE-VALUE equality and never on .Value alone: trailOrderResult is two
+			// strings, so == compares both, and a gather narrowing the field to its
+			// verdict string would pass a Value-only check while the claim below became
+			// one about a field the gather rebuilt.
+			if readings.Ordering != in.Ordering {
+				t.Fatalf("the row carries ordering %+v; want %+v — without the certification having "+
+					"crossed WHOLE, everything below is about an ordering this gather composed",
+					readings.Ordering, in.Ordering)
+			}
+			if readings.PinnedPid != in.PinnedPid {
+				t.Fatalf("the row carries pinned-pid read %+v; want %+v — without the reading having "+
+					"crossed, the pair the route is handed is not the pair this row staged",
+					readings.PinnedPid, in.PinnedPid)
+			}
+
+			// --- the claims, taken over the readings THIS GATHER produced ---
+
+			got := trailClassifyRun(readings)
+			if got.Value != tc.want {
+				t.Errorf("the gather's own readings classify as %q (%s); want %q — a staged ordering "+
+					"is what takes the arm past its step-1 guard, and this row is where the outcome "+
+					"behind it becomes reachable from a gather at all", got.Value, got.Detail, tc.want)
+			}
+			// The arm publishes both, so a build that reached the right value by another
+			// path moves one of them.
+			if got.Route != trailRouteSighting {
+				t.Errorf("the outcome names evidence route %q; want %q — the arm answers from the "+
+					"pinned-pid sighting route and names it, and an unnamed route on a measured "+
+					"answer reports a reading as though no instrument produced it", got.Route,
+					trailRouteSighting)
+			}
+			if got.RouteReason != tc.wantReason {
+				t.Errorf("the outcome names route reason %q; want %q — the two refutation rows share "+
+					"one value and differ only here, so a build hard-coding either reason onto the "+
+					"arm passes with one row and fails with both", got.RouteReason, tc.wantReason)
+			}
+			// The non-vacuity cross-check: the declared reason is the SHIPPED
+			// predicate's own answer rather than a constant that drifted, taken over
+			// the readings the gather produced so it witnesses the carriage too.
+			if reason := trailEstablishSighting(readings.Ordering, readings.PinnedPid).Reason; reason != tc.wantReason {
+				t.Errorf("the sighting route answers reason %q over the gather's own readings while "+
+					"this row declares %q — the row would then agree with a classifier that "+
+					"hardcoded the same stale string and with no shipped predicate at all", reason,
+					tc.wantReason)
+			}
+		})
 	}
 }
 
