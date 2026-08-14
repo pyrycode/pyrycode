@@ -2294,10 +2294,10 @@ func TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone(t *testing.T) {
 // PinnedPid its caller fills from pinReadState, whose instrument-failed branch puts
 // RAW ps STDERR into ToolStderr and folds it into Detail — so on a live run those
 // bytes genuinely enter trailRunReadings, and the only thing standing between them
-// and a published record is the non-rendering above. THE ROUTE IS OPEN AND IS NOT
-// YET SWEPT AT THE GATHER TIER, which is #1459's: until it lands, this block is the
-// whole of the coverage, one tier above where the channel opens. #1459 re-points
-// this paragraph once its own sweep exists.
+// and a published record is the non-rendering above. THE ROUTE IS NOW SWEPT AT THE
+// GATHER TIER TOO, by TestFinGatherPinnedPidCarriesNoCapturedBytes, so this block
+// is the classifier-tier half of a two-tier fabric rather than the whole of the
+// coverage, one tier above where the channel opens.
 func TestTrailRunOutcomeCarriesNoCapturedBytes(t *testing.T) {
 	// The needle-planted per-pid read both blocks use. Shared as a function rather
 	// than a value for trailRunWellFormed()'s reason.
