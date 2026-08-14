@@ -191,7 +191,7 @@ type trailOrderResult struct {
 // No shipped gather records "the hold was still held for the whole of the wait":
 // finStageSubject (finding_stage_held_group_test.go:175-188) carries needles,
 // pinned pids, a group and a row count, and trailRunReadings
-// (trail_run_outcome_test.go:394-459) has no such field either. So the fact is a
+// (trail_run_outcome_test.go:402-467) has no such field either. So the fact is a
 // parameter a caller hands in — and it is nonetheless CHECKABLE rather than
 // assumed: holdProbeFIFO keeps the write
 // end, hands the caller a receive-only channel with no release path of its own,
@@ -457,7 +457,7 @@ func TestTrailOrderAllEightPremiseCombinations(t *testing.T) {
 //
 // Each subtest asserts the all-true base certifies BEFORE flipping anything —
 // the premise assertion is what stops the test passing by classifying garbage,
-// the discipline trail_run_outcome_test.go:2304-2309 states.
+// the discipline trail_run_outcome_test.go:2355-2360 states.
 //
 // These three are also the anti-swap check: any pairwise swap of the three
 // parameters at trailCertifyOrdering's definition reddens at least two of them,
@@ -571,7 +571,7 @@ func TestTrailOrderValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailOrderResultCarriesNoCapturedBytes is AC5's structural half, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2271-2292): marshal the record, decode to
+// (trail_run_outcome_test.go:2322-2343): marshal the record, decode to
 // map[string]json.RawMessage, and refuse any command/args/comm/argv-shaped key.
 //
 // THE trailNeedle BYTE-SWEEP IS GENUINELY ABSENT HERE, NOT DEFERRED BY

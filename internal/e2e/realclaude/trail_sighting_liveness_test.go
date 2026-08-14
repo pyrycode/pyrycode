@@ -19,7 +19,7 @@ package realclaude
 // point of use (:1001-1005) that those readings "are expected to be late — the reap
 // completes in the time of one ps exec while the observation of the trailer trails
 // the write by up to a poll interval — so resting a verdict on them manufactures a
-// systematic false negative". :1346-1348 makes that executable.
+// systematic false negative". :1381-1383 makes that executable.
 //
 // That route is structurally unavailable on PYRY_USE_STREAMJSON=1. The two runners
 // reap in different places:
@@ -108,7 +108,7 @@ package realclaude
 // not touch the step-1 gate switch: that switch ANSWERED trailGateAbsentOwesNone
 // with an unconditional return, so a route wired below it would not have fired on
 // the one gate value it exists to serve. #1446 reached it — by consulting this
-// predicate INSIDE that arm (trail_run_outcome_test.go:844-976), which is the only
+// predicate INSIDE that arm (trail_run_outcome_test.go:865-1002), which is the only
 // placement that does not award a scan-side answer to a record the gate says
 // certifies nothing, and by publishing the finding under an evidence route of its
 // own. Nothing here changed for it: the predicate still stands alone, is still
@@ -846,7 +846,7 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 
 // TestTrailSightingResultCarriesNoCapturedBytes is AC5 made executable, in
 // TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2209-2475) and reusing the shipped trailNeedle.
+// (trail_run_outcome_test.go:2249-2526) and reusing the shipped trailNeedle.
 //
 // THIS SWEEP IS LOAD-BEARING HERE IN A WAY IT COULD NOT BE FOR #1439, and the
 // family's existing sweeps prove nothing about this record: they are

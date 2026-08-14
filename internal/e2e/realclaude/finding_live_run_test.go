@@ -108,9 +108,10 @@ import (
 //   - No finOutcomeStaging record. Its own doc says "INPUT ONLY — NEVER
 //     PUBLISHED"; the verdict crosses, the record does not.
 //   - No workdir and no session id. Both are consumed INSIDE the driver, by the
-//     assembly. finGatherInputs' seven fields need neither — six until #1452
-//     added the runner-path reading, which the consumer fills by reducing a
-//     field this handle already carries.
+//     assembly. finGatherInputs' eight fields need neither — six until #1452 added
+//     the runner-path reading and #1458 the pinned-pid read, both of which the
+//     consumer fills by reducing a field this handle already carries
+//     (Pin.ClaudeCommand and Pin.PGIDs respectively).
 //   - No staged command field. It is not lost, it is DERIVED:
 //     finLiveStageCommand(h.FIFOPath) is a pure function of a field the handle
 //     already carries, from the one source the driver itself used. A second copy

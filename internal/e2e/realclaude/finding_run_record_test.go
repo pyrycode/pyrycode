@@ -46,7 +46,7 @@ package realclaude
 // because finRecordInputs carries neither a trailObservation
 // (`trailObservation`) nor a trailScanResult (:98). That is
 // the property trailRunReadings.BoundFrom's comment states as its own reason for
-// taking a plain value (trail_run_outcome_test.go:425-431): taking the
+// taking a plain value (trail_run_outcome_test.go:433-439): taking the
 // observation "would promote that pointer back into reach". It is the STRONGER
 // property #1290 could not buy; #1320 bought it — finTrailerBuild's input is now a
 // finSighting carrying neither .Line nor the pointer, as finTrailerBuild's doc says.
@@ -107,9 +107,9 @@ import (
 // parent, which is exactly what distinguishes wrapper from command. A reader of
 // the issue can check that from the integers; they could not check it from the
 // bare count 2, which is all trailRunOutcome.MatchCount publishes
-// (trail_run_outcome_test.go:521-524). Widening this type to the argv would put
+// (trail_run_outcome_test.go:529-532). Widening this type to the argv would put
 // model-chosen text into the artifact and contradict the rule that comment and
-// trailRunReadings.MatchCount (:411-414) both state.
+// trailRunReadings.MatchCount (:419-422) both state.
 type finRecordProc struct {
 	PID  int `json:"pid"`
 	PPID int `json:"ppid"`
@@ -131,7 +131,7 @@ type finRecordProc struct {
 // not a validated one, because no builder in this family validates its inputs
 // and no such miswrite has been observed. If a live run ever publishes
 // exit_code: 0 for a pyry that did not exit, the fix is a PyryExited bool beside
-// it, mirroring trailRunReadings.PyryExited (trail_run_outcome_test.go:421-424)
+// it, mirroring trailRunReadings.PyryExited (trail_run_outcome_test.go:429-432)
 // whose zero value points the safe way — not validation inside the builder.
 //
 // # What is carried whole, and why that is safe
@@ -140,7 +140,7 @@ type finRecordProc struct {
 // trap-free by their own enforcing tests (TestFinAttributeRecordCarriesNoCapturedBytes,
 // TestFinTrailerRecordCarriesNoCapturedBytes). Neither is re-derived and neither
 // is re-read. Liveness is []pinStateOutcome carried whole for
-// trailRunReadings.Liveness' stated reason (:417-420): "pinStateOutcome carries
+// trailRunReadings.Liveness' stated reason (:425-428): "pinStateOutcome carries
 // no command column by construction" — pinStateColumns is `pid=,ppid=,stat=` and
 // carries an explicit never-add-command/args/comm prohibition with an enforcing
 // test (`pinStateColumns`). Its PID and PPID are what tie
@@ -152,7 +152,7 @@ type finRecordProc struct {
 //
 // # The Detail's content rule, pinned rather than left to judgement
 //
-// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:465-475) and
+// In trailRunOutcome.Detail's shape (trail_run_outcome_test.go:473-483) and
 // finAttributeRecord.Detail's (finding_attribution_fanout_test.go:116-124), it
 // MAY name: the exit code, the row and liveness COUNTS, the three runner
 // readings and their agreement verdict, the attribution's selected admissibility
@@ -783,7 +783,7 @@ func TestFinRecordEmbedsTrailerRecordWhole(t *testing.T) {
 		// is nil unless State == trailSeen and a consumer dereferencing it without
 		// checking panics loudly (result_trailer_observation_test.go:108-118); this
 		// record's builder never has the chance, which is the stronger property
-		// trailRunReadings.BoundFrom's comment describes (trail_run_outcome_test.go:425-431).
+		// trailRunReadings.BoundFrom's comment describes (trail_run_outcome_test.go:433-439).
 		inputs := reflect.TypeOf(finRecordInputs{})
 		for _, forbidden := range []reflect.Type{
 			reflect.TypeOf(trailObservation{}),

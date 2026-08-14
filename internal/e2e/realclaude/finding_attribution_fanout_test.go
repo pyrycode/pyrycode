@@ -132,7 +132,7 @@ type finAttributeRecord struct {
 // A FUNCTION rather than a package-level var, for trailRunWellFormed's stated
 // reason (`trailRunWellFormed`): a shared backing array is
 // reachable from every test in this package, and this slice is read on every
-// fan-out call. trailRunOutcomeValues (:2480) is the same shape for the same
+// fan-out call. trailRunOutcomeValues (:2531) is the same shape for the same
 // reason.
 //
 // # The argument for this order
@@ -655,7 +655,7 @@ func TestFinAttributeOrderCoversTheAdmitSpace(t *testing.T) {
 // THESE TWO ROWS ARE THE OTHER LAYER. They stage an Admit on a trailRunReadings
 // BY LITERAL and hand it to a DIFFERENT function — they are inputs to
 // trailClassifyRun, not attributions this fan-out produced, exactly as
-// trailRunProofReadings stages one (trail_run_outcome_test.go:1128-1136). The
+// trailRunProofReadings stages one (trail_run_outcome_test.go:1154-1162). The
 // no-hand-built rule binds what the fan-out PRODUCES, and the shipped predicate
 // is not a route to either value here anyway: trailAdmitOutOfContract comes out
 // of it only on an empty certified, which no fan-out row may pass.
@@ -720,8 +720,8 @@ func TestFinAttributeEmptySetAlternativesArePublishedFalsehoods(t *testing.T) {
 // trailAdmitAttribution splices certified with %q into two of its Details
 // (`trailGate`, :597). It is trailGate's certified Reason,
 // i.e. the trailer's terminal_reason, which shipped code already treats as publishable
-// (trailClassifyRun puts it into its own Details
-// and :1023, and TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves Reason
+// (trailClassifyRun puts it into its own Details, and
+// TestTrailRunOutcomeCarriesNoCapturedBytes deliberately leaves Reason
 // alone). Planting it there would go red, and the only fix would be to stop carrying
 // trailAdmitResult whole — which the record's shape requires. The
 // exposure is pre-existing and unchanged in content, but this fan-out
@@ -750,7 +750,7 @@ func TestFinAttributeRecordCarriesNoCapturedBytes(t *testing.T) {
 		t.Errorf("the marshalled record carries pyry's captured stderr: %s", encoded)
 	}
 
-	// The structural half, following trail_run_outcome_test.go:2270-2292. line
+	// The structural half, following trail_run_outcome_test.go:2321-2343. line
 	// and stderr join #1271's list because the channel THIS record is exposed to
 	// is tdnReapOutcome.Line, not a ps column.
 	var keyed map[string]json.RawMessage

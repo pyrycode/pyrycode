@@ -195,7 +195,7 @@ func TestTrailComposesUnderAPtyrunnerReading(t *testing.T) {
 	//
 	// A gate-VALUE premise is deliberately not among the premises above. Any
 	// mutation to trailGate's usable arm's value cascades: a different in-space
-	// value trips C5 (trail_run_outcome_test.go:712-718), an out-of-space one
+	// value trips C5 (trail_run_outcome_test.go:720-726), an out-of-space one
 	// trips C1, and either way the run-level outcome moves too — so it could never
 	// be the sole red for anything, and it would be an assertion this test owes a
 	// mutation for and cannot have. "Reached through trailGateUsable and
