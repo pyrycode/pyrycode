@@ -265,9 +265,17 @@ const (
 	// HALF-STAGED pair — pin filled, ordering unfilled — rather than an empty one,
 	// and this value is still the answer: the arm's guard reads the ordering and
 	// answers before the route is consulted, so a route missing the half it cannot
-	// run without was never staged. No shipped gather fills the ordering (#1457 is
-	// the ticket that stages it), and until one does, every run reaching this arm
-	// lands here.
+	// run without was never staged.
+	//
+	// SINCE #1462 A GATHER CARRIES A FIELD THE ORDERING CAN ARRIVE ON, AND NO LIVE
+	// CALLER FILLS IT. The two claims that used to travel welded together have come
+	// apart and must be read apart: finGatherInputs now has an Ordering field, so
+	// "no gather could carry it" is flatly false — while "every run reaching this
+	// arm lands here" is unchanged, and rests now on the carriage being UNWIRED
+	// rather than absent. That field's own doc says why no probe can fill it: the
+	// premise trailCertifyOrdering needs is not in a caller's hand before the call
+	// it would be passed to. The wiring has no ticket, so until one exists the
+	// half-staged pair is still what every live run brings here.
 	//
 	// THE ABSENCE OF AN INSTRUMENT, never a reading one produced. Still a void, for
 	// its neighbours' reason — nothing was certified, so there is no "when the turn
@@ -285,10 +293,12 @@ const (
 	// them.
 	//
 	// Deliberately NOT trailOutcomeOutOfContract, for the reason #1417 exists. An
-	// input no shipped gather stages — since #1458 the ordering rather than both —
-	// is a routine reading rather than the caller's bug that value names, and no
-	// contract check fires on it: the no-C10 note inside trailClassifyRun carries
-	// that argument in full, and this value is what lets the note stay true.
+	// input that arrives unfilled on every run that exists — since #1458 the
+	// ordering rather than both, and since #1462 because nothing fills the field
+	// rather than because there is none — is a routine reading rather than the
+	// caller's bug that value names, and no contract check fires on it: the no-C10
+	// note inside trailClassifyRun carries that argument in full, and this value is
+	// what lets the note stay true.
 	//
 	// Deliberately NOT a `run-`-prefixed transform of any value in the sighting
 	// space, for the containment reason trailOutcomeAliveAtSightingByOrdering's doc
@@ -783,11 +793,21 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// the obvious next line.
 	//
 	// OVER Ordering it would answer run-out-of-contract ON EVERY RUN THAT EXISTS
-	// TODAY. No shipped gather stages it: trailRigGather assembles neither input,
-	// and finGatherInputs still carries no field the ordering could arrive on. A
-	// zero trailOrderResult carries Value "", not a member of its own closed space
-	// — and an UNSTAGED INPUT IS A ROUTINE READING, not a caller's bug. Filing it
-	// as one is the collapse #1417 exists to prevent, one value along.
+	// TODAY. Nothing stages it: trailRigGather assembles neither input, and since
+	// #1462 finGatherInputs carries a field the ordering could arrive on that NO
+	// LIVE CALLER FILLS — the premise trailCertifyOrdering needs is not in a
+	// probe's hand before the call it would be passed to, as that field's own doc
+	// sets out, and the wiring has no ticket. A zero trailOrderResult carries Value
+	// "", not a member of its own closed space — and an UNSTAGED INPUT IS A ROUTINE
+	// READING, not a caller's bug. Filing it as one is the collapse #1417 exists to
+	// prevent, one value along.
+	//
+	// SO ON THIS SIDE TOO THE PREMISE HAS MOVED AND THE CONCLUSION HAS NOT, and no
+	// new argument is owed for it: the last paragraph of this note already carries
+	// the one the conclusion rests on. The ordering side is decided by the step-1
+	// guard in the arm below rather than by a check here, which makes it a READING
+	// and not a contract violation — an argument that owes the every-run premise
+	// nothing, and would stand on the day a caller does fill the field.
 	//
 	// ON THE PIN SIDE THE PREMISE HAS MOVED AND THE CONCLUSION HAS NOT. #1458 gave
 	// the finding gather a PinnedPid its caller stages, so an unfilled pin is no
@@ -895,8 +915,10 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 		// publishes the exact false claim this guard exists to remove, one shape
 		// along. SINCE #1458 THAT PAIR IS NOT A SHAPE REASONED ABOUT. It is what
 		// every live run through finGatherReadings produces, because that gather
-		// stages the pin and #1457 has not yet staged the ordering — so this guard
-		// is doing live work rather than standing by for a hypothetical.
+		// stages the pin while nothing fills the ordering — and #1462 did not move
+		// it: that ticket gave the gather a field the ordering can arrive on, but
+		// no live caller fills it and none can be wired yet, so this guard is
+		// doing live work rather than standing by for a hypothetical.
 		// TestFinGatherHalfStagedRouteMovesNoOutcome drives the pair through the
 		// shipped gather and this classifier, which is what keeps it that way.
 		//
@@ -1180,8 +1202,10 @@ func trailRunProofReadings() trailRunReadings {
 // is deliberately. The finding gather stages a PinnedPid its caller fills, so a
 // live run reaches this value HALF-STAGED — pin filled, ordering unfilled — and
 // reaches it for the same reason, since the arm's guard reads the ordering alone.
-// What this fixture pins is that an absent ROUTE is a reading rather than a
-// caller's bug; the half-staged pair is driven through the shipped gather by
+// #1462 gave that gather a field the ordering can arrive on and wired no caller to
+// fill it, so the pair a live run brings is unchanged. What this fixture pins is
+// that an absent ROUTE is a reading rather than a caller's bug; the half-staged
+// pair is driven through the shipped gather by
 // TestFinGatherHalfStagedRouteMovesNoOutcome, which is where it belongs, because
 // only a gather can show what a gather produces.
 //
@@ -1216,10 +1240,14 @@ func trailRunAbsentOwesNoneReadings() trailRunReadings {
 //
 // Admit stays ZERO, inherited from the fixture this builds on and required by C4
 // for the same reason: a gate certifying nothing was owed no call to the
-// attribution predicate. No shipped gather stages the ORDERING — #1458 gave the
-// finding gather the pin half and #1457 owes the other — so this shape is still a
+// attribution predicate. NO LIVE RUN STAGES THE ORDERING — #1458 gave the finding
+// gather the pin half, #1462 gave it a field the ordering can arrive on, and no
+// caller fills that field or can be wired to yet — so this shape is still a
 // fixture rather than a reading any run produces today, which is the whole reason
-// the arm is safe to land alone.
+// the arm is safe to land alone. What #1462 did move is where an equivalent shape
+// can be driven from: TestFinGatherStagedOrderingReachesTheSightingOutcomes reaches
+// both of the route's verdicts through the SHIPPED gather, so this fixture is no
+// longer the only way to that arm's far side.
 //
 // A function rather than a package-level var, for trailRunWellFormed()'s reason:
 // Liveness is a slice and go test -race runs this package's tests in parallel.
@@ -1534,9 +1562,10 @@ func trailRunCases() []trailRunCase {
 			// what proves it never reports a premise as having been measured and
 			// failed, since its wantReason is "" and the biconditional below forbids a
 			// reason beside an unnamed route. Since #1458 this pair is no longer the
-			// only shape a shipped gather produces — the finding gather stages the pin
-			// — and the row deliberately keeps the empty pair, which is the one that
-			// separates an absent route from a staged one.
+			// only shape a shipped gather produces — the finding gather stages the pin,
+			// and since #1462 it carries a field the ordering can arrive on that no
+			// live caller fills — and the row deliberately keeps the empty pair, which
+			// is the one that separates an absent route from a staged one.
 			name: "an unstaged sighting route is the absence of an instrument, not a reading it produced",
 			in:   trailRunAbsentOwesNoneReadings(),
 			want: trailOutcomeVoidSightingRouteNotStaged,
@@ -1969,10 +1998,11 @@ func TestTrailRunComposesWithGateCases(t *testing.T) {
 // trailOutcomeVoidSightingRouteNotStaged: the fixture leaves the sighting route's
 // two inputs unstaged, so the arm answers before consulting the route. Since #1458
 // that pair is no longer what a live run produces — the finding gather stages the
-// pin half — but the arm's answer is unchanged, because the guard reads the
-// ordering alone. The FIXTURE is unchanged and deliberately so — this test's
-// subject is the GATE reading, which neither #1448 nor #1458 touched, and swapping
-// in a staged pair would make it a test of the route instead.
+// pin half, and since #1462 it carries a field the ordering can arrive on that no
+// live caller fills — but the arm's answer is unchanged, because the guard reads
+// the ordering alone. The FIXTURE is unchanged and deliberately so — this test's
+// subject is the GATE reading, which none of #1448, #1458 and #1462 touched, and
+// swapping in a staged pair would make it a test of the route instead.
 //
 // # Why it is not a row of trailGateCases()
 //
