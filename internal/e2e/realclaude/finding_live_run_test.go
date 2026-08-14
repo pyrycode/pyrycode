@@ -19,13 +19,13 @@ package realclaude
 // the pin reduction and its count (#1338), the staged command literal, prompt,
 // FIFO name and the two env deltas (#1342, #1349), and the eight-field record
 // assembly (#1343). What is left here is the part that genuinely needs a live
-// process, and it is exercised end-to-end only by the live entry point in #1337.
+// process, and it is exercised end-to-end only by the two live entry points.
 //
-// So finLiveRunStage's ONLY caller is that entry point
-// (`finExitRunProbe`), which is itself behind an opt-in env
-// gate and a credential skip — nothing offline reaches this function. Do NOT
-// invent a second caller to silence a lint that does not run, and do NOT add an
-// offline test that spawns pyry or a real claude.
+// So finLiveRunStage's two callers are the live entry points finExitRunProbe
+// (#1337, ptyrunner) and finStreamExitRunProbe (#1353, headless stream), each
+// behind an opt-in env gate and a credential skip — nothing offline reaches
+// this function. Do NOT invent a third caller to silence a lint that does not
+// run, and do NOT add an offline test that spawns pyry or a real claude.
 // This file's exercise is compilation and `go test`'s vet subset under
 // `make e2e-realclaude`, on a machine with no Claude login — which is why
 // `needs-real-claude` sits on #1337 and not here. Note that `go vet` and
