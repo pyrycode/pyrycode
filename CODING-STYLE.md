@@ -91,14 +91,7 @@ Follow stdlib conventions:
 - **For a spot inside a function, name the enclosing symbol and describe the spot.** ``the nil-PID guard in `probeAnnotateCommands` `` beats a line number, and survives every insertion.
 - **Name the symbol at any depth. There is no "too deep to name" exemption.** If a symbol name is not precise enough to locate what you mean, the declaration is too big, and that is the finding. A line number used to navigate inside an oversized function accommodates the problem instead of describing it. `make cite-guard` flags every citation that resolves to a declaration, however deep, and says so when the depth suggests the declaration itself needs splitting.
 - **Never use a bare `:NNN`.** It inherits the last-named file in the comment rather than the current one, which reads as this file and is not. It has already produced wrong references.
-- **A range is a citation too, and gets the same treatment** (changed 2026-08-14; ranges used to be exempt). `:2063-2107` rots exactly as `:2063` does, and the span is almost never the information — measured across this repo, nearly every range is one of three shapes, each with a symbol to name:
-  - a doc comment sitting above a declaration, so name the declaration
-  - a slice inside one declaration, so name it and describe the spot, per the bullet above
-  - a span across several declarations, so name them, or split it into separate references
-
-  `make cite-guard` resolves both ends. When they agree it asks for that one symbol; when they disagree it names both and asks you to say which you mean.
-
-**Existing ranges are not a build failure.** The guard is diff-scoped, so it checks only the lines a branch added or modified. It stops new citations rather than revalidating the stock, which shrinks as people touch those comments for real reasons. A citation displaced by your own insertions is not yours to fix, and is not a review finding either.
+- **Ranges are fine** (`:2063-2107`) where the span is the information.
 
 Why this is a build gate and not just guidance: comments are the one thing no test covers, so a wrong one is silent. Before the 2026-08-10 cleanup this package carried ~800 line citations, 22 of them already dead, and pure renumbering accounted for 35-49% of the added lines in some commits — enough to exhaust two developer budgets. See `cmd/cite-guard`.
 
