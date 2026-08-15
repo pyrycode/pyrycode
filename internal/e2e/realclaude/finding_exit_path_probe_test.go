@@ -256,6 +256,38 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 	// that window the command is dead-by-reap while claude still reads alive.
 	claudeState := pinReadState(h.ClaudePID).Verdict
 
+	// 3b. The pinned-pid read #1440's sighting route consumes. A SECOND pinReadState
+	// call and never a reuse of the one above: that outcome is over h.ClaudePID, an
+	// int naming CLAUDE ITSELF, while this route's pid comes from the during-turn
+	// pinned set. Same instant, different pid — a reuse reads correct and answers
+	// about the wrong process.
+	//
+	// THE FIRST ENTRY OF THAT SET, which is not an arbitrary pick among differing
+	// groups: finLivePinReduce projects one entry per FIFO-matched row with
+	// duplicates deliberately intact, so on a healthy run the set is two entries
+	// naming ONE detached process group — TestFinLivePinReduce's raw-projection
+	// subtest is the measurement. AN EMPTY SET TAKES NO READ AT ALL. The set is nil
+	// whenever the pin scan failed, so an unguarded index panics here; and
+	// pinReadState(0) is the wrong stand-in for the empty case, because it answers
+	// pinStateInstrumentFailed and so claims an instrument ran. The zero
+	// pinStateOutcome carries Verdict "", which trailSightingReasonPidReadFailed's
+	// own doc names among the shapes the route answers for.
+	//
+	// TAKEN HERE, AFTER THE EXIT WAIT, because the route's claim is about a pid
+	// re-read at an instant later than pyry's exit — the obligation
+	// finGatherInputs.PinnedPid states and the gather structurally cannot check.
+	// Hoisting it above the select would take an early reading rather than a racy
+	// one: unlike h.ExitStatus, h.Pin.PGIDs is written before the handle is returned
+	// and the driver's cmd.Wait goroutine never touches it.
+	//
+	// No dedupe and no cardinality assertion. Whether the set has the expected size
+	// is finOutcomeStaging's count arm's business, checked against
+	// finLivePinWantRows; a second opinion here would duplicate a shipped gate.
+	var pinnedPid pinStateOutcome
+	if len(h.Pin.PGIDs) > 0 {
+		pinnedPid = pinReadState(h.Pin.PGIDs[0])
+	}
+
 	// 4. Gather, on the pass-through of everything above. One call.
 	readings, attribution, sighting := finGatherReadings(finGatherInputs{
 		// The LIVE buffer; the gather polls it. Bytes() returns a copy under a
@@ -304,6 +336,14 @@ func finExitRunProbe(t *testing.T, artifactDir string) {
 		// run, where a healthy trailer is claude's own result line and carries no
 		// terminal_reason at all.
 		RunnerPath: tdnRunnerFromArgv(h.Pin.ClaudeCommand),
+		// THE PINNED-PID READ, TAKEN AT STEP 3b AND NEVER INSIDE THE GATHER.
+		// #1452's RunnerPath doctrine one field along, and the reason here is
+		// TIMING rather than credentials: the gather's own per-matched-pid loop
+		// reads the argv scan's live matches at gather time, so it answers at an
+		// instant this route is not about. It crosses WHOLE — narrowing it to a
+		// verdict string would leave TestFinGatherPinnedPidCarriesNoCapturedBytes
+		// no route to build.
+		PinnedPid: pinnedPid,
 	})
 
 	// 5. Staging first; the classifier only on the pass-through.
