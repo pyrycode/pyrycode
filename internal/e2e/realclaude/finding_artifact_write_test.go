@@ -24,35 +24,36 @@ package realclaude
 // below reads every file os.ReadDir returns rather than the two names it wrote.
 //
 // finWriteArtifacts' SIGNATURE is the design. It takes the built finRecordRun and
-// nothing else — finRecordProc's doctrine (finding_run_record_test.go:92-112) one
-// layer out: prefer the shape that cannot be got wrong over the discipline that
-// must not be. writeReachArtifacts takes *reachRecord, whose unexported rawPS
-// field is what produces the sidecar; finRecordRun has no unexported field and no
-// field able to hold captured bytes, so there is nothing raw in this writer's
-// reach to write out.
+// nothing else — finRecordProc's doctrine one layer out: prefer the shape that
+// cannot be got wrong over the discipline that must not be. writeReachArtifacts
+// takes *reachRecord, whose unexported rawPS field is what produces the sidecar;
+// finRecordRun has no unexported field and no field able to hold captured bytes,
+// so there is nothing raw in this writer's reach to write out.
 //
 // # Nothing on this path may exec, and the check for that has to name symbols
 //
 // A grep for the os/exec package selector is NOT sufficient on its own: every
 // route off this offline path runs through a SHIPPED HELPER that execs internally
 // rather than through a visible call to that package. The version probe
-// (`probeClaudeVersion`) execs the binary, which is why the
-// version here is a caller-supplied string; the claude-binary resolver
-// (`resolveClaudeBin`) skips when claude is absent, and a skip that exits 0
-// reads as a pass under `make e2e-realclaude`; the worktree credentials gate
-// (`WithWorktreeAuthenticated`) is the "no credentials" rule; the per-pid state read
-// (`pinReadState`) execs `ps` at :293, which is why the
-// liveness fixture below is hand-built; the exit-1 borrow (:1088) execs `false`
-// to obtain an *os.ProcessState Go cannot synthesize; and the argv scan (:191),
-// the process snapshot (`probeProcessSnapshot`), the teardown scan
-// (`tdnScan`) and the FIFO hold
-// (`holdProbeFIFO`) each reach a process or the table.
+// (`probeClaudeVersion`) execs the binary, which is why the version here is a
+// caller-supplied string; the claude-binary resolver (`resolveClaudeBin`) skips
+// when claude is absent, and a skip that exits 0 reads as a pass under
+// `make e2e-realclaude`; the worktree credentials gate
+// (`WithWorktreeAuthenticated`) is the "no credentials" rule; the per-pid state
+// read (`pinReadState`) execs `ps`, which is why the liveness fixture below is
+// hand-built; the exit-1 borrow (`pinExit1`) execs `false` to obtain an
+// *os.ProcessState Go cannot synthesize; and the argv scan (`pinScanArgv`), the
+// process snapshot (`probeProcessSnapshot`), the teardown scan (`tdnScan`) and
+// the FIFO hold (`holdProbeFIFO`) each reach a process or the table.
 //
-// EVERY ONE OF THEM IS REFERENCED ABOVE BY FILE AND LINE RATHER THAN BY NAME, so
-// that the forbidden-symbol grep reports on this file's CODE and cannot be
-// defeated by this file's own prose. A check that cannot report clean is as
+// EVERY ONE OF THEM IS NAMED IN THE PROSE ABOVE, so a check over this file has
+// to read its CODE and skip its comments: run over the whole file it matches
+// this paragraph rather than any call. A check that cannot report clean is as
 // useless as one that cannot fail — #1290's spec wrote a bare `t.Skip` grep that
 // matched that file's own header sentence and so could never come back empty.
+//
+// TestFinOfflineFilesReachNoExecHelper is that check. It parses instead of
+// grepping, so the comments are skipped by construction.
 //
 // Writing files under t.TempDir() is expected and is not an exec: os.ReadDir,
 // os.ReadFile and os.WriteFile are pure filesystem calls on a directory the test
@@ -62,8 +63,8 @@ package realclaude
 //
 // THE WRITER NEVER FAILS A TEST. It is the instrument under measurement, and an
 // instrument failure is a datum: a marshal error or a lost file is t.Errorf and
-// the remaining write still happens, mirroring writeReachArtifacts:827-853 and
-// the family's pure-builder contract (`finRecordBuild`).
+// the remaining write still happens, mirroring writeReachArtifacts and the
+// family's pure-builder contract (`finRecordBuild`).
 //
 // THE SWEEP'S OWN READS FAIL LOUDLY. finWriteReadDir and every decode below are
 // t.Fatalf, because a sweep that silently skipped a file it could not read would
@@ -153,9 +154,9 @@ const (
 //
 // # Errors are loud and non-fatal
 //
-// Following writeReachArtifacts:827-853: a marshal failure returns, a write
-// failure names the path and CONTINUES to the next file. A lost artifact is loud
-// but does not abort the remaining writes, and 0o600 matches the shipped writer's
+// Following writeReachArtifacts: a marshal failure returns, a write failure
+// names the path and CONTINUES to the next file. A lost artifact is loud but
+// does not abort the remaining writes, and 0o600 matches the shipped writer's
 // mode — the proof that the content is clean is what the tests assert, not
 // something the mode may assume.
 func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
@@ -198,11 +199,10 @@ func finWriteArtifacts(t *testing.T, dir string, rec finRecordRun) {
 // it is the pre-build clean check on the trailer sub-record rather than a channel
 // of the directory sweep.
 //
-// trailNeedle's own comment says it is "placed PAST the cap"
-// (`trailNeedle`). Against trailPaddedTrailer(0)
-// that is not what happens: the line renders 385 bytes and the needle ends at
-// byte 146, comfortably inside reachCapCommand's 512-byte cap, so trailScan
-// records it into Line INTACT (:192-206).
+// trailNeedle's own comment says it is "placed PAST the cap". Against
+// trailPaddedTrailer(0) that is not what happens: the line renders 385 bytes and
+// the needle ends at byte 146, comfortably inside reachCapCommand's 512-byte
+// cap, so trailScan records it into Line INTACT.
 //
 // THAT IS THE PLANT THE SURVIVING GUARD NEEDS. A needle past the cap never
 // reaches Line in the first place, so its absence downstream proves nothing about
@@ -250,13 +250,12 @@ func finWritePlantedTrailerScan() trailScanResult {
 
 // finWritePlantedReapLog renders pyry's own captured stderr with the needle on an
 // ANCHORED line, reusing #1280's plant verbatim
-// (`TestFinAttributeRecordCarriesNoCapturedBytes`) for its stated reason: trailReapLine
-// splices its pgids argument raw and tdnParsePGIDs stops at the first ]
-// (teardown_liveness_test.go:246-254), so the list still parses and the needle
-// lands in tdnReapOutcome.Line — the channel the fan-out drops. A needle on a
-// NON-anchored line would be skipped before any field was filled
-// (:161-163) and the sweep would go green over a record that kept the whole
-// outcome.
+// (`TestFinAttributeRecordCarriesNoCapturedBytes`) for its stated reason:
+// trailReapLine splices its pgids argument raw and tdnParsePGIDs stops at the
+// first ], so the list still parses and the needle lands in tdnReapOutcome.Line
+// — the channel the fan-out drops. A needle on a NON-anchored line would be
+// skipped by tdnClassifyReapLog's anchor check before any field was filled, and
+// the sweep would go green over a record that kept the whole outcome.
 func finWritePlantedReapLog() []byte {
 	return []byte(trailReapLine(1, fmt.Sprintf("[%d] %s", finRecordSharedPGID, trailNeedle)) + "\n")
 }
@@ -277,14 +276,15 @@ func finWritePlantedReapLog() []byte {
 // build. The record carries several inputs verbatim BY DESIGN — Liveness whole
 // including its Detail, StateColumn and ToolStderr; Attribution whole; Trailer
 // whole including the four decoded scalars; RunnerFromEnv; ClaudeVersion (capped)
-// — and finding_run_record_test.go:137-151 states it while
+// — and finRecordRun's doc states it under "What is carried whole" while
 // TestFinRecordEmbedsTrailerRecordWhole pins it. A needle in any of those WILL
 // appear in the artifact, correctly. The three plants are therefore exactly the
 // inputs that are reduced or dropped:
 //
-//  1. each matched row's Command — verbatim argv, reduced to finRecordProc's
-//     three integers (finding_run_record_test.go:372-374)
-//  2. ClaudeCommand — reduced to one of tdnRunnerFromArgv's three constants (:379)
+//  1. each matched row's Command — verbatim argv, reduced by finRecordBuild's
+//     row loop to finRecordProc's three integers
+//  2. ClaudeCommand — reduced, also in finRecordBuild, to one of
+//     tdnRunnerFromArgv's three constants
 //  3. the reap stderr — pyry's own captured bytes (`tdnReapOutcome`),
 //     dropped by finAttributeFanOut
 //
@@ -304,19 +304,18 @@ func finWritePlantedReapLog() []byte {
 // pinStateOutcome's seven keys; that gap is precisely what this census closes.
 // Passing pgid 1 alongside the real group is what fills Conditions and
 // Unreportable in one call: finAttributeFanOut partitions pgid <= 1 as
-// unreportable (finding_attribution_fanout_test.go:238-248) while 7788 still
-// produces the entry AC2's premise reads.
+// unreportable while 7788 still produces the entry AC2's premise reads.
 //
 // # The liveness outcome is hand-built, and it is not a shortcut
 //
-// pinReadState execs `ps`, which this file
-// forbids, so no shipped producer is available. Nor would one serve: NO SINGLE ARM
-// OF pinClassifyState FILLS ALL SEVEN FIELDS — the running arm fills StateColumn
-// and leaves ToolStderr empty, and the instrument-failed-with-stderr arm (:347)
-// fills ToolStderr and leaves StateColumn empty. The maximal shape is therefore
-// not a reading, and nothing here reads it as one; its job is that every key
-// renders. ToolStderr is non-empty AND RIG-AUTHORED: the field is carried whole,
-// so a needle there would be a plant in the wrong place.
+// pinReadState execs `ps`, which this file forbids, so no shipped producer is
+// available. Nor would one serve: NO SINGLE ARM OF pinClassifyState FILLS ALL
+// SEVEN FIELDS — the running arm fills StateColumn and leaves ToolStderr empty,
+// and the instrument-failed-with-stderr arm fills ToolStderr and leaves
+// StateColumn empty. The maximal shape is therefore not a reading, and nothing
+// here reads it as one; its job is that every key renders. ToolStderr is
+// non-empty AND RIG-AUTHORED: the field is carried whole, so a needle there
+// would be a plant in the wrong place.
 //
 // # The certified reason is "completed" and not the budget one
 //
@@ -380,7 +379,7 @@ func finWriteRender(t *testing.T) map[string][]byte {
 // os.ReadDir rather than the two names the writer wrote, and that is the whole
 // point: a later edit that adds a third file inherits the sweep for free.
 // reach.ps.txt is the proof that "a later edit adds a third file" is a thing that
-// happens (background_reach_probe_test.go:834-844).
+// happens (`writeReachArtifacts`).
 //
 // Fatal on any read error: a sweep that silently skipped a file it could not read
 // would report clean on the one file that leaked.
@@ -430,8 +429,8 @@ func finWriteReadDir(t *testing.T, dir string) map[string][]byte {
 // struct- or slice-valued fields, so a top-level scan inspects ten keys, misses
 // every nested one, and reads as a structural guarantee it is not providing —
 // "vacuous coverage is worse than none" (`TestFinRecordCarriesNoCapturedBytes`).
-// Same shape as finRecordInputReaches (:731), which answers a different question
-// and is called directly by AC4 rather than reimplemented.
+// Same shape as finRecordInputReaches, which answers a different question and
+// is called directly by AC4 rather than reimplemented.
 //
 // `stack` closes the walk against a self-referential type. It is a RECURSION
 // STACK rather than a visited set: the same type reached at two different paths
@@ -552,7 +551,7 @@ func finWriteLeafKey(path string) string {
 // has to name WHICH Detail overran and the key scan deliberately discards the
 // path. It names the path and the byte length and never the string itself:
 // printing the content of a Detail that just failed a leak check would write the
-// leak into CI logs, which is the shape finding_run_record_test.go:1036-1041
+// leak into CI logs, which is the shape TestFinRecordCarriesNoCapturedBytes
 // already follows.
 func finWriteObservedDetails(raw json.RawMessage, into map[string]string) error {
 	var value any
@@ -757,16 +756,15 @@ func TestFinWriteArtifactRendersEveryDeclaredField(t *testing.T) {
 // failure mode this family has shipped once (#1284). Both were applied, observed
 // RED and reverted:
 //
-//   - M1 — the pipeline sweep is live. In finRecordBuild
-//     (finding_run_record_test.go:386-390) the Detail format was changed to
-//     interpolate in.Rows[0].Command — the %v-on-an-input slip finRecordRun's own
-//     comment names at :168-173 — INSIDE the format string rather than appended
-//     after trailDetail returns. Appended, reachCapCommand has already run and the
-//     needle survives regardless, which proves nothing about #1284's defect;
-//     injected inside, the cap applies and the headroom step below is what keeps
-//     the needle visible. Observed: RED, naming BOTH run.json and run.md — red on
-//     only one file would mean the directory walk was not reading every file —
-//     and red a second time on AC4's local pairing check.
+//   - M1 — the pipeline sweep is live. In finRecordBuild the Detail format was
+//     changed to interpolate in.Rows[0].Command — the %v-on-an-input slip
+//     finRecordRun's own comment names — INSIDE the format string rather than
+//     appended after trailDetail returns. Appended, reachCapCommand has already
+//     run and the needle survives regardless, which proves nothing about #1284's
+//     defect; injected inside, the cap applies and the headroom step below is
+//     what keeps the needle visible. Observed: RED, naming BOTH run.json and
+//     run.md — red on only one file would mean the directory walk was not
+//     reading every file — and red a second time on AC4's local pairing check.
 //   - M2 — the directory walk is live, and does not rest on key names.
 //     finWriteArtifacts was temporarily widened to take finRecordInputs alongside
 //     the record and to write a third file run.notes.txt holding
@@ -798,9 +796,9 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 		t.Fatalf("channel 3 (reap stderr): the synthetic reap log carries no needle")
 	}
 	// The premise doubles as the non-vacuity proof, following
-	// finding_attribution_fanout_test.go:739-743: trailAdmitProof is reachable only
-	// if the needle-bearing line was recognised as anchored, parsed and found to
-	// name the held group. A plant that stopped being anchored lands here.
+	// TestFinAttributeRecordCarriesNoCapturedBytes: trailAdmitProof is reachable
+	// only if the needle-bearing line was recognised as anchored, parsed and found
+	// to name the held group. A plant that stopped being anchored lands here.
 	//
 	// The COUNT and the closed-set Value, never the entries themselves: a %+v on
 	// them renders every Admit.Detail, and the rule is to name the count, the path
@@ -818,10 +816,10 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	}
 
 	// The two embedded sub-records asserted CLEAN before the build, per
-	// finding_run_record_test.go:996-1014, so a red sweep below names THIS ticket's
-	// writer rather than a sibling's builder. Both are built from planted inputs;
-	// what is asserted is that the plant did not survive the sub-builder — and the
-	// two sub-builders are different functions. The attribution's is
+	// TestFinRecordCarriesNoCapturedBytes, so a red sweep below names THIS
+	// ticket's writer rather than a sibling's builder. Both are built from planted
+	// inputs; what is asserted is that the plant did not survive the sub-builder —
+	// and the two sub-builders are different functions. The attribution's is
 	// finAttributeFanOut, which drops the reap line channel 3 plants in. The
 	// trailer's is finTrailerSighting, which is where the scanned line is dropped:
 	// finTrailerBuild never sees it.
@@ -886,7 +884,8 @@ func TestFinWriteArtifactsCarryNoCapturedBytes(t *testing.T) {
 	files := finWriteReadDir(t, dir)
 
 	// THE HEADROOM, ASSERTED ON WHAT WAS ACTUALLY WRITTEN rather than on the built
-	// record (#1291 asserts that at :1036). trailDetail caps at
+	// record (#1291 asserts it there, in TestFinRecordCarriesNoCapturedBytes).
+	// trailDetail caps at
 	// reachMaxCommandBytes, so a Detail that had wrongly interpolated an argv would
 	// be truncated before the needle if the surrounding prose left no room — and
 	// the sweep below would then pass against a leaking writer. That is the defect
@@ -970,11 +969,10 @@ func TestFinWriteArtifactCarriesNoCapturedByteShapedKey(t *testing.T) {
 		"tool_stderr": "a permitted field on the carried pinStateOutcome",
 		// Matches the substring "argv" and its reason is a DIFFERENT one: the key
 		// names the READING, not the argv. Every arm of tdnRunnerFromArgv returns a
-		// constant (teardown_liveness_probe_test.go:773-789), so no input byte
-		// reaches its value and the field's space is the closed set {ptyrunner ...,
-		// streamrunner ..., indeterminate ...}. AC2's second plant is the enforcing
-		// proof. Without this exemption the family's shipped list fails on a field
-		// that carries no bytes.
+		// constant, so no input byte reaches its value and the field's space is the
+		// closed set {ptyrunner ..., streamrunner ..., indeterminate ...}. AC2's
+		// second plant is the enforcing proof. Without this exemption the family's
+		// shipped list fails on a field that carries no bytes.
 		"runner_from_argv": "a closed-set reading of the argv, never the argv",
 	}
 
@@ -1021,9 +1019,9 @@ func TestFinWriteArtifactPublishesNoVerbatimModelOutput(t *testing.T) {
 	files := finWriteRender(t)
 
 	t.Run("resultTrailer structurally cannot carry the assistant payload", func(t *testing.T) {
-		// The claim three shipped comments state in prose
-		// (`trailScanResult`,
-		// finding_trailer_evidence_test.go:38 and :690) and none of them checks.
+		// The claim three shipped comments state in prose: `trailScanResult`,
+		// finding_trailer_evidence_test.go's file header, and
+		// TestFinTrailerRecordCarriesNoCapturedBytes. None of them checks it.
 		// The decode is what feeds the four published scalars, so its SHAPE is what
 		// makes them safe.
 		typ := reflect.TypeOf(resultTrailer{})

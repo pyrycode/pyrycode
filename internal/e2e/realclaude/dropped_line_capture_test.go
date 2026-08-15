@@ -21,8 +21,8 @@ package realclaude
 // as a measured absence.
 //
 // The Unrecognized lane cannot carry these bytes either: an ignored type
-// returns at `benignRateLimitStatus` before emitUnrecognized is reached, and truncateRaw
-// (:311) caps at 16 KiB AND runs strings.ToValidUTF8(…, ""), which deletes
+// returns at `benignRateLimitStatus` before emitUnrecognized is reached, and
+// truncateRaw caps at 16 KiB AND runs strings.ToValidUTF8(…, ""), which deletes
 // invalid UTF-8 while reporting only the length cap.
 //
 // # What "dropped" means here
@@ -414,7 +414,7 @@ func dropcapSlug(path string) string {
 // dropcapPathSpellings enumerates the spellings of one path a payload can carry:
 // the path itself, its filepath.EvalSymlinks form (on macOS the temp root
 // resolves /var/… -> /private/var/…, and agentrun.ResolveWorkdir performs the
-// same mapping at streamsup/runner.go:69-73), and the project-slug encoding of
+// same mapping, per streamsup Config's WorkDir), and the project-slug encoding of
 // each. Duplicates and empties are dropped, so a path whose forms coincide
 // contributes one spelling, not four.
 func dropcapPathSpellings(path string) []string {
@@ -441,7 +441,7 @@ func dropcapPathSpellings(path string) []string {
 //
 // The empty-value guard is load-bearing, not defensive noise:
 // strings.ReplaceAll(s, "", x) inserts x between EVERY character
-// (bgIdleRedact:821-823 is the same lesson).
+// (bgIdleRedact is the same lesson).
 func newDropcapRedactor(tempHome, artifactDir, workdir, fifoPath, sessionID string, nonce int64) *dropcapRedactor {
 	r := &dropcapRedactor{counts: map[string]int{}}
 	addPath := func(class, replacement, path string) {
@@ -491,7 +491,7 @@ func (r *dropcapRedactor) redact(b []byte) []byte {
 
 // str is redact for a string field. Every field assigned into the record, every
 // t.Logf and both fifoLiveOutcome values go through it — fifoLiveOutcome carries
-// the FIFO path in BOTH Path and Detail (fifo_reader_liveness_test.go:136-156),
+// the FIFO path in BOTH Path and Detail (`fifoLiveRead` fills them),
 // so those two fields leak an absolute path with no payload involved.
 func (r *dropcapRedactor) str(s string) string { return string(r.redact([]byte(s))) }
 
@@ -751,11 +751,11 @@ func (rec *dropcapRecord) set(outcome, format string, args ...any) {
 // --- the argv observer -------------------------------------------------------
 
 // dropcapArgvHandler is a slog.Handler that WRITES NOTHING and keeps only the
-// argv from the runner's own "spawning claude" record (streamsup/runner.go:473).
+// argv from the runner's own "spawning claude" record (logged by `Restart`).
 // spawn_shape is therefore OBSERVED from production's buildArgs output rather
 // than transcribed into this file, where it could drift from the shape it claims
 // to measure. It doubles as the explicit discard handler the runner needs:
-// Config.Logger == nil falls back to slog.Default() (runner.go:233-235), which
+// Config.Logger == nil falls back to slog.Default() (streamsup's `Run`), which
 // would put the runner's lifecycle lines into CI output.
 type dropcapArgvHandler struct {
 	mu   *sync.Mutex
@@ -867,7 +867,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 	t.Cleanup(func() { dropcapWriteRecord(t, artifactDir, red, scanner, rec) })
 
 	// MUST precede the runner: Config.Env stays nil so cmd.Env is nil and the
-	// child inherits this process's environment verbatim (runner.go:555-557).
+	// child inherits this process's environment verbatim (streamsup's `Run`).
 	t.Setenv(dropcapBashTimeoutEnv, dropcapBashTimeoutMS)
 
 	rendezvous := holdProbeFIFO(t, fifoPath)
@@ -901,7 +901,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 		_ = runner.Run(ctx)
 	}()
 	// Registered after holdProbeFIFO, so it runs BEFORE the FIFO release: the
-	// descendant reap on ctx cancel (runner.go:566-569) kills the backgrounded
+	// descendant reap on ctx cancel (streamsup's `Run`) kills the backgrounded
 	// `cat`, and closing the last write end is the backstop if the reap missed.
 	t.Cleanup(func() {
 		cancel()
@@ -919,7 +919,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 	// default arm. It is not what unblocks the receive: `rendezvous` is closed by
 	// holdProbeFIFO's HOLD goroutine once its open(O_WRONLY) returns, which the
 	// helper's cleanup arranges by opening the read end non-blockingly
-	// (background_trigger_probe_test.go:689-703) — and which does not happen at
+	// (`holdProbeFIFO`) — and which does not happen at
 	// all if that open errored, leaving this goroutine parked on the receive for
 	// the rest of the binary. One parked, non-writing goroutine is the bounded
 	// residue; a racing field write would not be.
@@ -983,7 +983,7 @@ func TestRealClaude_DroppedLineCapture(t *testing.T) {
 }
 
 // dropcapWaitForChild polls Runner.Stdin() until a child is live. WriteTurn maps
-// a nil writer to ErrNoLiveChild (envelope.go:149-152), so this is the pre-spawn
+// a nil writer to ErrNoLiveChild, so this is the pre-spawn
 // window the turn has to poll through.
 func dropcapWaitForChild(runner *streamsup.Runner) io.Writer {
 	deadline := time.Now().Add(dropcapSpawnWait)
@@ -1142,7 +1142,7 @@ func dropcapExpectedAbsent(census map[string]int) []string {
 //
 //   - an Unrecognized{Site: user_block, Kind: "text"} present => it did NOT match
 //   - absent => it matched, and this is the SECOND confirmed observation
-//     harnessNoOutputNudge's doc comment (parser.go:112-114) names as the thing
+//     harnessNoOutputNudge's doc comment names as the thing
 //     that promotes the constant to a set with a pin test.
 func dropcapFindNudge(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) dropcapNudge {
 	t.Helper()
@@ -1971,7 +1971,7 @@ func TestDropcapFixtureIsACapture(t *testing.T) {
 				}
 			}
 
-			// The pin harnessNoOutputNudge's doc comment (parser.go:112-114) asks
+			// The pin harnessNoOutputNudge's doc comment asks
 			// for: a second confirmed payload, replayed through the shipped parser.
 			if rec.HarnessNudge.Observed && rec.HarnessNudge.PayloadEncoding == dropcapEncodingJSONString {
 				if !rec.HarnessNudge.MatchesShippedConstant {

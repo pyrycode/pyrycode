@@ -482,7 +482,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		// ok=false conflates missing / unparseable / no bootstrap row, so it renders as
 		// a sentinel — never as "", which would read as "the rotation lost the id" and
 		// fabricate a finding out of a broken instrument. The `e.ID != ""` clause is the
-		// same guard M2's read carries ~200 lines up (:284): readBootstrapIfPresent does
+		// same guard M2's own read carries: readBootstrapIfPresent does
 		// not require a non-empty id, and an empty one would print as a MANUFACTURED
 		// second-rotation proof — flagged in docs/knowledge/codebase/1273.md as a
 		// fold-in for the next ticket touching this file, which is this one.
@@ -559,7 +559,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// the fresh child produces for turn #2 is dropped at the drain's active-session
 	// gate with a Debug "relay: stream-turn drop; not active session"
 	// (cmd/pyry/stream_turn_drain.go) — the very divergence this file's header
-	// documents at :64-74, and the reason M4 asserts stdin rather than a phone-side
+	// documents, and the reason M4 asserts stdin rather than a phone-side
 	// delta. So on any run where M4 goes green, turn #2's echo owes at least one such
 	// record. The assertion is deliberately the WEAKER "some Debug record exists
 	// anywhere in the capture": the level flip is the thing under test, and pinning a

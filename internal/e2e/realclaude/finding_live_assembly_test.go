@@ -4,7 +4,7 @@ package realclaude
 
 // The join: the one place the run's transcript reading and the rig's own facts
 // meet, filling all eight finOutcomeStaging fields (`finOutcomeStaging`)
-// and returning finOutcomeStagingGate's decision (:262) as returned.
+// and returning finOutcomeStagingGate's decision as returned.
 //
 // This file reaches no verdict about pyry and takes no measurement. It ships the
 // assembly and one offline trap on it: no live run, no pyry spawn, no real
@@ -49,9 +49,9 @@ package realclaude
 // Arriving as two independent parameters they can drift, and drift there is
 // doubly silent: the identity arm reports stage-command-not-staged AND
 // TriggerFired is zeroed — one defect, two failure arms, both discovered on a
-// burned live turn. The blocker records the same hazard at
-// finding_live_staging_test.go:29-32. The assembly closes it by taking exactly
-// ONE value for the staged string, so there is no second value to disagree with.
+// burned live turn. The blocker records the same hazard in its own header. The
+// assembly closes it by taking exactly ONE value for the staged string, so there
+// is no second value to disagree with.
 //
 // # What this file does NOT prove, because it is already proven
 //
@@ -87,8 +87,8 @@ package realclaude
 //     Catching it needs a no-Bash-call or wrong-command row, which is exactly
 //     TestFinTranscriptFill's rows 2 and 3 — the assertions AC2 forbids
 //     reproducing. Held by the no-literal-on-any-right-hand-side rule and by
-//     review; the fill's own route to those outcomes is proven at
-//     finding_staging_fill_test.go:577-587.
+//     review; the fill's own route to those outcomes is proven by that test's
+//     reached-value sweep.
 //
 // # This file execs nothing, and the check is the symbol list
 //
@@ -103,32 +103,31 @@ package realclaude
 //     ANTHROPIC_API_KEY.
 //   - spawnProbePyry, holdProbeFIFO — spawn pyry, create a real FIFO. #1340's
 //     job, explicitly out of scope here.
-//   - WithWorktreeAuthenticated — it t.Skipf's when neither
-//     ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set (:100-107), AND A SKIP
-//     EXITS 0. Reaching for it would silently convert an offline test into one
-//     that never runs on a credential-free machine and still reports green.
+//   - WithWorktreeAuthenticated — it t.Skipf's when neither ANTHROPIC_API_KEY nor
+//     CLAUDE_CODE_OAUTH_TOKEN is set, AND A SKIP EXITS 0. Reaching for it would
+//     silently convert an offline test into one that never runs on a
+//     credential-free machine and still reports green.
 //   - os.Getenv, os.Environ, os.Setenv — no DIRECT environment call is made here.
 //     That is not the same as "no environment is read"; see the next section.
-//   - finTranscriptStagedCaller — the fixture
-//     to contrast against, never to call. Its PinMatchCount: 1, PinWantCount: 1
-//     (:360-361) is exactly the poison the assembly must not inherit.
-//   - finOutcomeStagedBase, finOutcomeGateCases (`finOutcomeStagedBase`,
-//     :411) — gate-side fixtures; calling either makes this a copy of the gate test.
-//   - finLivePinReduce, finLivePinWantRows (`finLivePinReduce`, :140) IN
-//     THE ASSEMBLY'S BODY. Both are the driver's to call. finLivePinWantRows is
-//     permitted below as a ROW VALUE — the rule is scoped by layer, not by file.
+//   - finTranscriptStagedCaller — the fixture to contrast against, never to call.
+//     Its PinMatchCount: 1, PinWantCount: 1 is exactly the poison the assembly
+//     must not inherit.
+//   - finOutcomeStagedBase, finOutcomeGateCases — gate-side fixtures; calling
+//     either makes this a copy of the gate test.
+//   - finLivePinReduce, finLivePinWantRows IN THE ASSEMBLY'S BODY. Both are the
+//     driver's to call. finLivePinWantRows is permitted below as a ROW VALUE —
+//     the rule is scoped by layer, not by file.
 //
 // # WithWorktree is the containment boundary — REQUIRED here, not forbidden
 //
-// The blocker's header forbids WithWorktree and t.TempDir()
-// (finding_live_staging_test.go:46-50) because it declares constants and touches
-// no filesystem. This file must write a transcript and read it back through the
-// fill, and BOTH ends of that I/O resolve HOME:
+// The blocker's header forbids WithWorktree and t.TempDir() because it declares
+// constants and touches no filesystem. This file must write a transcript and
+// read it back through the fill, and BOTH ends of that I/O resolve HOME:
 //
 //   - write: writeFixtureLines → os.UserHomeDir() →
 //     tuidriver.SessionJSONLPath(home, workdir, sessionID)
 //   - read: finTranscriptFill → ReadJSONL →
-//     resolveAndOpenJSONL → os.UserHomeDir() (:397)
+//     resolveAndOpenJSONL → os.UserHomeDir()
 //
 // WithWorktree's t.Setenv("HOME", t.TempDir()) is what makes
 // both resolve inside this test's own temp dir. Omit it and writeFixtureLines
@@ -158,10 +157,11 @@ package realclaude
 // carry either command IN ANY FORM, including a length or a prefix
 // (`finOutcomeResult`); this file formats none, so that rule
 // holds structurally. A test t.Errorf is not a published record, and its house
-// form is LENGTHS ONLY (finding_staging_fill_test.go:556-562) — the two counts
-// and the two outcome values are named freely below, and no command is printed
-// in any form. If ever unsure which sink applies, print neither: the one
-// resolution that is always wrong is printing the command itself.
+// form is LENGTHS ONLY, the way TestFinTranscriptFill compares the two commands
+// — the two counts and the two outcome values are named freely below, and no
+// command is printed in any form. If ever unsure which sink applies, print
+// neither: the one resolution that is always wrong is printing the command
+// itself.
 //
 // NO JSON TAGS on finLiveAssembleFacts, the rule finTranscriptReading
 // (`finTranscriptReading`) and finOutcomeStaging
@@ -268,8 +268,8 @@ type finLiveAssembleFacts struct {
 // abort a turn, and every wrong or missing reading already has a named home among
 // the gate's seven outcomes. It adds no t.Fatal and no t.Error. It inherits
 // exactly one abort path — ReadJSONL t.Fatalf's on a transcript it cannot open or
-// parse (`ReadJSONL`, :163) — which is #1304's shipped behaviour, named here
-// so a live caller knows this call can abort a turn on an unreadable transcript.
+// parse — which is #1304's shipped behaviour, named here so a live caller knows
+// this call can abort a turn on an unreadable transcript.
 // A MISSING file is not fatal: probeWaitForBashToolUse guards with os.Stat first
 // (`probeWaitForBashToolUse`), so it times out to "no Bash call
 // issued", which is the safe direction.
@@ -303,7 +303,7 @@ func finLiveAssembleStaging(t *testing.T, workdir, sessionID string, facts finLi
 // finLivePinWantRows would delete the only check that the want travels at all.
 //
 // Non-producible by design and stating its reason at itself, following the house
-// form at finding_staging_gate_test.go:433-436.
+// form of the errored-scan fixture in `finOutcomeGateCases`.
 const finLiveAssembleContractWant = finLivePinWantRows + 1
 
 // --- the trap -------------------------------------------------------------------------

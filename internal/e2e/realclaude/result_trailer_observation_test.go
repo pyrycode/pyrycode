@@ -30,8 +30,7 @@ package realclaude
 //
 // resultTrailer is the decode, reachCapCommand
 // (`reachCapCommand`) the cap, probeSyncBuffer and
-// probePollInterval (`probeSyncBuffer`, :131) the buffer and
-// the tick. parseResultTrailer and its nine call sites are NOT edited: all nine
+// probePollInterval the buffer and the tick. parseResultTrailer and its nine call sites are NOT edited: all nine
 // want today's two-valued behaviour, so widening its error contract for this
 // instrument's benefit would be a nine-site cascade that gains none of them
 // anything. The new scan lives alongside it and copies its matching rule
@@ -300,8 +299,8 @@ func trailWaitForTrailer(stdout *probeSyncBuffer, timeout time.Duration) trailOb
 
 // --- fixtures ----------------------------------------------------------------
 
-// trailFixtureTrailer is one ordinary trailer in emitter.go:456-468's pinned
-// wire order, carrying the values wireFields (emitter.go:428-437) renders for a
+// trailFixtureTrailer is one ordinary trailer in streamjson.trailer's pinned
+// wire order, carrying the values wireFields renders for a
 // clean completion. Short enough to survive the cap intact, which is what lets
 // the seen rows assert Line verbatim.
 const trailFixtureTrailer = `{"type":"result","subtype":"success","is_error":false,` +

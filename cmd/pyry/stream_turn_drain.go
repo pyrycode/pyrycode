@@ -31,7 +31,7 @@ const streamTurnSinkBuf = 256
 //
 // It is an explicit field, never a nil ev used as a sentinel. A nil sentinel would
 // have to be re-checked at every consumer and would make eventKind(nil) reachable
-// — that returns "unknown" rather than failing (interactive_turn_v2.go:419-421),
+// — that returns "unknown" rather than failing (the emitter's `emit`),
 // so a missed check would be silent. More to the point, a nil sentinel IS a value
 // of the type interactiveTurnEmitterV2.Handle accepts; with a separate field
 // "Handle cannot receive a non-event" stays a type-level fact rather than a
@@ -101,17 +101,18 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 
 // exitFor returns the per-runner child-exit closure for the runner constructed
 // with sessionID. Its func() type is exactly that of streamsup's child-exit seam
-// (internal/streamsup/runner.go:105-143), so the wiring binds it at the same
+// (a callback field on streamsup.Config), so the wiring binds it at the same
 // construction point as sinkFor — newStreamRunnerFactory (streamsup_runner.go,
 // #1210), one line below the sinkFor install — and the two lanes carry identical
 // session tags by construction. Production installs it on every stream runner
 // built there; the unit tests call it directly as well, the precedent
 // startStreamTurnDrainV2 itself set in #1098.
 //
-// The seam is named here by location rather than by symbol on purpose: the
-// unfiredness gate for this slice is a grep for that symbol across non-test
-// cmd/pyry code, and a comment mentioning it would make that check report wiring
-// where there is none.
+// The seam is named here by its CONTAINING TYPE rather than by its own name on
+// purpose: the unfiredness gate for this slice is a grep for that field name
+// across non-test cmd/pyry code, and a comment spelling it would make that check
+// report wiring where there is none. That is also why no line number stands in
+// for it — the name is what must not appear, not the address.
 //
 // Same NON-BLOCKING send as sinkFor, for the same reason: it runs on the runner's
 // supervision goroutine and must not be wedged by a stalled drain, so a full
@@ -121,7 +122,7 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 // whole diagnostic value of this branch. A dropped event is a lost delta; a
 // dropped exit is a conversation that stays busy forever once a producer is wired,
 // which is degraded operation and must be visible at the daemon's default
-// LevelInfo (Debug is not — main.go:734-737).
+// LevelInfo (Debug is not — see the level selection in `runSupervisor`).
 //
 // The select is deliberately NOT factored into a helper shared with sinkFor: the
 // common part is one statement while the divergent part is the entire diagnostic
@@ -210,7 +211,7 @@ func startStreamTurnDrainV2(
 					// a deferred clear could land after a turn opened by the RESPAWNED
 					// child and report a live turn idle. clearForSession is reused as-is
 					// — no second session→conversation resolution and no second copy of
-					// the membership-mutation protocol (stream_turn_busy.go:266-302) —
+					// the membership-mutation protocol (`setBusy`) —
 					// and it is a nil-receiver no-op, so a drain with no tracker is
 					// unaffected.
 					busy.clearForSession(env.sessionID)

@@ -19,8 +19,7 @@ package realclaude
 // the attribution on the TEST PROCESS's own group. tdnClassifyReapLog(nil, ...)
 // can only reach tdnReapNoLine (LineCount == 0), which trailAdmitAttribution
 // answers with trailAdmitVoidNoLine — so trailAdmitProof is unreachable, and
-// with it trailOutcomeRunningAtTrailer (trail_run_outcome_test.go:118), the only
-// outcome that is a finding. Fed a live pyry's stdout that gather still composes,
+// with it trailOutcomeRunningAtTrailer, the only outcome that is a finding. Fed a live pyry's stdout that gather still composes,
 // still classifies and still returns a plausible outcome: it reports a CLEAN
 // NEGATIVE ON EVERY RUN, FOREVER, WITH NO SYMPTOM. Both hardcodings are correct
 // where they are — #1268's nil is what makes "no reap line was synthesised" a
@@ -28,9 +27,9 @@ package realclaude
 //
 // # The pin and the scan are two inputs, not one
 //
-// ptyrunner.Run's pinned teardown order (runner.go:479-485, the reap defer at
-// :398) runs the reap immediately AFTER the trailer is written, completing in the
-// time of one ps exec (reap.go:75-76). A scan taken after the trailer is observed
+// ptyrunner.Run's pinned teardown order (its defer-LIFO chain, and the reap
+// defer in it) runs the reap immediately AFTER the trailer is written, completing
+// in one ps exec (descendantPGIDs). A scan taken after the trailer is observed
 // therefore matches NOTHING on a healthy run — the predicted reading, not a
 // failure. So the pgid the attribution joins on cannot come from a post-trailer
 // scan; it must be pinned DURING the turn while the hold guarantees the command
@@ -72,15 +71,15 @@ package realclaude
 // needle in every string-bearing input" makes them red against shipped code:
 //
 //   - trailGate fills Reason from res.Trailer.TerminalReason and splices it %q
-//     into Detail on BOTH certifying arms (`trailDetail`,
-//     :399); readings.Gate takes that result whole;
+//     into Detail on BOTH certifying arms (`trailDetail`); readings.Gate takes
+//     that result whole;
 //   - the gather hands the same Reason to the fan-out as certified, and
-//     trailAdmitAttribution splices it %q into Detail on the budget arm (:534)
-//     and the proof arm (:598); readings.Admit takes that result whole too;
+//     trailAdmitAttribution splices it %q into Detail on the budget arm and on
+//     the proof arm; readings.Admit takes that result whole too;
 //   - finGatherInputs.ClaudeState is copied into readings.ClaudeState whole,
 //     trailClassifyRun republishes it as claude_state
-//     (`trailRunOutcome`, :650), and C7 quotes an out-of-contract
-//     value %q into the published Detail (:740-745).
+//     (`trailRunOutcome`), and C7 quotes an out-of-contract value %q into the
+//     published Detail.
 //
 // So a needle in terminal_reason lands in readings.Gate.Detail and, on the
 // finding row, in readings.Admit.Detail as well; a needle in the claude verdict
@@ -88,7 +87,7 @@ package realclaude
 // stop publishing a field the operator reads to interpret the run — the
 // certified reason, or the corroboration verdict. #1280 met the first one layer
 // down and resolved it by planting only in the stderr
-// (finding_attribution_fanout_test.go:731-732). THE NEEDLE'S HOME IN THAT SWEEP
+// (TestFinAttributeRecordCarriesNoCapturedBytes). THE NEEDLE'S HOME IN THAT SWEEP
 // IS THE TRAILER'S `result` FIELD AND THE REAP-LOG STDERR; it may enter neither
 // terminal_reason nor ClaudeState. That plant is the STRONGER test, not a
 // weakened one: resultTrailer has no `result` member so trailScanResult.Trailer
@@ -160,7 +159,7 @@ const (
 	//     600ms — THESE TWO ARE THIS FILE'S ONLY WALL CLOCK, and what the miss
 	//     bound costs;
 	//   - the non-certifying row seeds an over-long line, which trailWaitForTrailer
-	//     returns from IMMEDIATELY (result_trailer_observation_test.go:289-291)
+	//     returns from IMMEDIATELY (trailWaitForTrailer's trailAborted arm)
 	//     because abortion is monotone.
 	finGatherTrailerWait = 10 * time.Second
 	// finGatherNamedPGID is the group the synthetic reap line names. It is
@@ -186,7 +185,7 @@ const (
 	finGatherUndocumentedState = "fin-gather-verdict-nobody-defined"
 )
 
-// finGatherNeedleTrailer is an ORDINARY trailer in emitter.go:456-468's pinned
+// finGatherNeedleTrailer is an ORDINARY trailer in streamjson.trailer's pinned
 // wire order whose `result` field carries trailNeedle.
 //
 // Two properties are load-bearing:
@@ -203,7 +202,7 @@ const (
 //     exclusion structural in the fixture rather than a discipline at the plant
 //     site. trailPaddedTrailer is the wrong fixture here for a second reason as
 //     well: it renders "max_turns", and on that path trailAdmitAttribution returns
-//     its structural void BEFORE reading the verdict at all (:425-435), so the
+//     its structural void BEFORE reading the verdict at all, so the
 //     needle-bearing line's classification would be discarded and the test would
 //     go green even against a leak on the proof arm.
 const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":false,` +
@@ -222,7 +221,7 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 // ordering #1462 routed in from there too.
 //
 // NAMED FIELDS RATHER THAN POSITIONAL PARAMETERS, for a reason that has GROWN
-// INTO finRecordInputs' (finding_run_record_test.go:205-212). That type's reason
+// INTO finRecordInputs' own. That type's reason
 // — two adjacent same-typed strings — did not apply while the staged pair was a
 // bool and a string, which cannot transpose without a compile error. Since #1452
 // ClaudeState and RunnerPath are both string and adjacent, so it does. Neither
@@ -249,11 +248,10 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 //
 //   - PyryExited's zero is false, which reads as "did not exit" and reaches Step
 //     3's void. That is the SAFE direction, and it is the identical argument
-//     trailRunReadings.PyryExited makes for itself
-//     (trail_run_outcome_test.go:429-432): a caller who omits the field gets a
-//     void, never a finding.
-//   - ClaudeState's zero is "", which is C7's shipped "not read" (:440-443,
-//     :748) — an honest report rather than an unfilled field.
+//     trailRunReadings.PyryExited makes for itself in its own doc: a caller who
+//     omits the field gets a void, never a finding.
+//   - ClaudeState's zero is "", which is C7's shipped "not read" — an honest
+//     report rather than an unfilled field.
 //   - RunnerPath's zero is "", which finGatherRunnerPath maps to the shipped
 //     not-read answer before the gate sees it. The two spellings reach the SAME
 //     gate decision — finRecordRunnerLabel("") matches neither runner label, so
@@ -282,7 +280,7 @@ const finGatherNeedleTrailer = `{"type":"result","subtype":"success","is_error":
 // claim, an incompletely-filled finGatherInputs degrades honestly.
 type finGatherInputs struct {
 	// Stdout is the buffer the trailer leg polls. It is read through Bytes(),
-	// which returns a COPY (background_trigger_probe_test.go:736-742), so
+	// which returns a COPY (probeSyncBuffer.Bytes), so
 	// handing one buffer to two gathers is non-destructive.
 	Stdout *probeSyncBuffer
 	// Needles is the post-trailer argv scan's match set: the content join and
@@ -437,7 +435,7 @@ type finGatherInputs struct {
 // recovering it with a SECOND trailWaitForTrailer is not equivalent: by then the
 // trailer is already in the buffer, the second call matches on its first poll and
 // reports trailBoundFromStart, a discriminator whose own doc says it BOUNDS
-// NOTHING (result_trailer_observation_test.go:80-84). The difference is a
+// NOTHING (trailBoundFromStart). The difference is a
 // mis-report and not a cost. So the gather copies the measurements onto this
 // value, which carries neither .Line nor the decoded pointer. #1320 moved
 // finTrailerBuild onto it, and that builder is now its consumer.
@@ -445,7 +443,7 @@ type finGatherInputs struct {
 // # What it deliberately does not carry
 //
 //   - NO Bounded. lateness_bounded is BoundFrom == trailBoundFromMiss AND NOTHING
-//     ELSE (finding_trailer_evidence_test.go:309-315), and that stays its one
+//     ELSE (finTrailerBuild), and that stays its one
 //     source; this value supplies the discriminator that derivation reads. A
 //     second source would let a record publish a non-bound wearing a bound's
 //     label.
@@ -457,12 +455,12 @@ type finGatherInputs struct {
 //     by an assertion: with no formatted string here there is no 512-byte budget
 //     for a leak to hide behind, so the sweep below owes no per-row headroom
 //     check. Adding a Detail later would owe it in full
-//     (finding_trailer_evidence_test.go:723-737).
+//     (TestFinTrailerRecordFillsTheFourScalarsOnlyBehindCarriesTrailer).
 //
 // # Staleness travels as PUBLISHED EVIDENCE and is not a classifier input
 //
-// trailRunReadings deliberately has no field for it
-// (trail_run_outcome_test.go:436-439): trailBoundFromStart carries a real duration
+// trailRunReadings deliberately has no field for it, and says so on BoundFrom:
+// trailBoundFromStart carries a real duration
 // that bounds nothing, so a classifier able to read a staleness could be tempted
 // to discriminate on it. Carrying it HERE does not admit it THERE, and the two
 // types stay separate for exactly that reason.
@@ -480,28 +478,29 @@ type finGatherInputs struct {
 //
 // Its zero is false, which routes to the no-decoded-trailer arm where the four
 // scalars are zeroes — an honest nothing-was-measured, the same argument
-// finGatherInputs.PyryExited makes for itself (:415-419). An incompletely-filled
+// finGatherInputs.PyryExited makes for itself. An incompletely-filled
 // sighting degrades to a named nothing rather than to a claim.
 //
 // # What the four decoded scalars are worth
 //
-// wireFields (emitter.go:428-437) derives Subtype, IsError and TerminalReason from
+// wireFields derives Subtype, IsError and TerminalReason from
 // a SINGLE ExitReason, so their agreement is one value rendered three ways and not
 // three corroborating reads; TerminalReason is pyry's own synthesis and claude
 // never emitted it. Only StopReason is independently sourced, forwarded from the
 // model's last message unvalidated (`Emit`): it is the one
 // model-influenced field crossing this value UNCAPPED, exactly as it crosses
-// finTrailerRecord (finding_trailer_evidence_test.go:114-124). Capping it is out
+// finTrailerRecord. Capping it is out
 // of scope there and here; naming it is what keeps a later sweep author from
 // planting a needle in a field this value must carry verbatim.
 //
 // # The json keys, and the absence of omitempty
 //
 // Tagged because encoding/json renders a Duration as a bare nanosecond count and
-// the unit belongs in the key — trailObservation:133-135 and finTrailerRecord:206
+// the unit belongs in the key — trailObservation.Staleness and
+// finTrailerRecord.Staleness
 // both give that reason — and MIRRORING finTrailerRecord's keys, so #1320's move
 // onto this value was a rename-free projection. NO FIELD CARRIES omitempty, for
-// that record's own reason (:102-110): the discriminator must always be present
+// that record's own reason, under § Field order: the discriminator must always be present
 // beside the four, and dropping a false IsError or an honest zero Staleness
 // collapses distinctions this type exists to keep.
 //
@@ -523,10 +522,10 @@ type finGatherInputs struct {
 // against is unreachable on this field anyway. trailScan's match return is past
 // tr.Type == "result" and so reachable only from a line that already decoded as a
 // JSON object, which means the map decode always succeeds and always carries at
-// least `type` (result_trailer_observation_test.go:199-205). A SEEN trailer
+// least `type` (trailScan). A SEEN trailer
 // therefore cannot produce an empty name set: "no names" is reachable only from
 // the not-seen arm, so the byte-identical rendering omitempty would cause cannot
-// occur. trailScanResult's own tier uses omitempty (:135) and is not a precedent
+// occur. trailScanResult's own tier uses omitempty on KeyNames and is not a precedent
 // here.
 type finSighting struct {
 	State          string        `json:"trailer_state"`
@@ -683,8 +682,8 @@ func finGatherRunnerPath(reading string) string {
 // # What it returns, and what it deliberately does not
 //
 // The trailer observation is STILL a FUNCTION-LOCAL INTERMEDIATE and is still
-// never returned. trailObservation embeds trailScanResult
-// (result_trailer_observation_test.go:141-142), so handing it back would promote
+// never returned. trailObservation embeds trailScanResult, so handing it back
+// would promote
 // .Line and .Trailer straight into the caller's reach — and both withholdings
 // stand. .Line is verbatim model output marked OPERATOR-REVIEW-BEFORE-PASTE,
 // roughly 415 of its retained 512 bytes being the trailer's `result` field, which
@@ -706,7 +705,7 @@ func finGatherRunnerPath(reading string) string {
 // the observation and copies out what a reader needs. Staleness travels from
 // #1309 onward, ON THE CARRIER AND AS PUBLISHED EVIDENCE. It is still NOT a
 // classifier input and must not be used as one, which is why trailRunReadings
-// still has no field for it (trail_run_outcome_test.go:436-439) and why the two
+// still has no field for it and why the two
 // types stay separate.
 //
 // The second return is #1280's own finAttributeRecord, returned WHOLE. It is
@@ -739,10 +738,10 @@ func finGatherRunnerPath(reading string) string {
 //     a non-empty Reason. The gate is fed a real scanned trailer, so the reason
 //     arrives filled; a hand-built trailGateResult{Value: trailGateUsable} is
 //     exactly the fixture C2 exists to reject.
-//   - C3/C4 (:694, :706) make the Admit guard MANDATORY rather than defensive.
+//   - C3/C4 (`trailClassifyRun`) make the Admit guard MANDATORY, not defensive.
 //     Calling the predicate unconditionally fails C4 on every non-certifying gate;
 //     skipping it unconditionally fails C3 on every certifying one.
-//   - C8/C9 (:755, :767) require the counts and the errored flag to be one
+//   - C8/C9 (`trailClassifyRun`) require the counts and the errored flag to be one
 //     pinScanArgv call's own, which is why nothing here types one in. pinScanArgv
 //     returns the ZERO pinScan on error, so the three are consistent by
 //     construction.
@@ -771,7 +770,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// What that sighting MEASURED, copied out of the same obs that just filled
 	// BoundFrom and fed the gate: one poll, no second scan, no second wait and no
 	// clock reading of this function's own — trailWaitForTrailer stamped both
-	// durations itself (result_trailer_observation_test.go:281-287).
+	// durations itself (trailWaitForTrailer).
 	//
 	// Inline rather than behind a finSightingFrom constructor, for the reason
 	// stated above: funnelling the whole composition through one function is what
@@ -798,9 +797,8 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 		sighting.IsError = obs.Trailer.IsError
 		sighting.TerminalReason = obs.Trailer.TerminalReason
 		sighting.StopReason = obs.Trailer.StopReason
-		// trailObservation EMBEDS trailScanResult
-		// (result_trailer_observation_test.go:141-142), so the names the scan
-		// already read are in reach here with no new plumbing.
+		// trailObservation EMBEDS trailScanResult, so the names the scan already
+		// read are in reach here with no new plumbing.
 		sighting.KeyNames = finBoundKeyNames(obs.KeyNames)
 	}
 
@@ -810,7 +808,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// Outside the guard the fan-out is not called at all and record stays zero.
 	//
 	// Selected is copied in ONLY when the fan-out attributed a group. Its doc
-	// comment (finding_attribution_fanout_test.go:106-114) states the obligation
+	// comment on finAttributeRecord.Selected states the obligation
 	// this function is the caller of: branch on Conditions, and never copy a zero
 	// Selected into Admit — under a certifying gate that reaches
 	// trailOutcomeOutOfContract via C3, a caller bug dressed as a reading. The
@@ -859,7 +857,7 @@ func finGatherReadings(in finGatherInputs) (trailRunReadings, finAttributeRecord
 	// staging void where the constant reported a scan-side answer or a Step 4-6
 	// void. A proof-carrying run is unchanged — Step 2 sits above Step 3 by
 	// design (`trailClassifyRun`) and proofPyryLive pins it
-	// (:1336-1337, :1564-1565) — and so is a run whose gate is not usable, which Step
+	// (`trailRunCases`) — and so is a run whose gate is not usable, which Step
 	// 1 answers first.
 	//
 	// THE ORDERING IS NOT CERTIFIED HERE, even though it looks possible: two of
@@ -1056,7 +1054,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 	}
 
 	if tc.wantReason != "" {
-		// C3 (:694): the attribution predicate is called EXACTLY WHEN the gate
+		// C3 (`trailClassifyRun`): the attribution predicate is called EXACTLY WHEN the gate
 		// certified a reason, and what it produced is what reached Admit. The
 		// fan-out is pure over its three arguments, so this recomputation is
 		// deterministic: a gather that passed a different certified string, or that
@@ -1078,7 +1076,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 				"pinned %v", readings.Admit.Value, tc.wantAdmit, finGatherNamedPGID, tc.pinned)
 		}
 	} else {
-		// C4 (:706): Admit is left ZERO when the gate certified nothing. This is
+		// C4 (`trailClassifyRun`): Admit is left ZERO when the gate certified nothing. This is
 		// the zero-value comparison the package uses for "not classified"
 		// (`trailRunCases`, `TestFinAttributeEmptySetAlternativesArePublishedFalsehoods`) —
 		// a comparison against an existing consumer's idiom, not a reading the
@@ -1096,7 +1094,7 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 		}
 	}
 
-	// C8 (:451): both counts are ONE SCAN's own. {MatchCount: 1} with RowsScanned
+	// C8 (`trailClassifyRun`): both counts are ONE SCAN's own. {MatchCount: 1} with RowsScanned
 	// unfilled is the hand-typed fixture C8 exists to catch.
 	if readings.MatchCount < 0 || readings.RowsScanned < 0 ||
 		readings.MatchCount > readings.RowsScanned {
@@ -1104,11 +1102,11 @@ func finGatherAssertContract(t *testing.T, tc finGatherCase, in finGatherInputs,
 			"cannot emit", readings.MatchCount, readings.RowsScanned)
 	}
 
-	// C9 (:463): the errored flag comes from the SAME call as the counts.
+	// C9 (`trailClassifyRun`): the errored flag comes from the SAME call as the counts.
 	// pinScanArgv returns the ZERO pinScan on error, so the three are consistent
 	// by construction — what is pinned here is that invariant. The errored arm has
 	// NO LIVE REPRO in an offline rig, which is this package's own idiom for an
-	// unproducible contract arm (trailer_admissibility_test.go:375-381).
+	// unproducible contract arm (`trailDetail`).
 	if readings.ArgvScanErrored && (readings.MatchCount != 0 || readings.RowsScanned != 0) {
 		t.Fatalf("C9: the argv scan is recorded as errored yet reports %d match(es) across %d "+
 			"row(s), a pair pinScanArgv cannot emit", readings.MatchCount, readings.RowsScanned)
@@ -1171,9 +1169,9 @@ func TestFinGatherEmptyPinnedSetIsNotAReading(t *testing.T) {
 			pinned: nil,
 		},
 		{
-			// reap.go:52 skips pgid <= 1 before it kills anything, so no reap line
-			// can carry one and tdnClassifyReapLog's :147 guard would blame the
-			// instrument for a consumer that simply failed to capture a pgid.
+			// ReapDescendantGroups skips pgid <= 1 before it kills anything, so no
+			// reap line can carry one and tdnClassifyReapLog's held-pgid guard would
+			// blame the instrument for a consumer that failed to capture a pgid.
 			name:             "a set in which every group is one the reaper can never report",
 			pinned:           []int{0, 1},
 			wantUnreportable: []int{0, 1},
@@ -1289,7 +1287,7 @@ func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInp
 // (`trailClassifyRun`, "Voiding it for a staging failure would
 // SUPPRESS A FINDING THE RUN GENUINELY ESTABLISHED") and is pinned by
 // proofPyryLive, a proof carrying PyryExited false that wants
-// trailOutcomeRunningAtTrailer (:1371-1372, :1602-1603). Building this pair on the
+// trailOutcomeRunningAtTrailer (`trailRunCases`). Building this pair on the
 // proof arm would require reordering the classifier, which is a defect and not
 // a fix.
 //
@@ -1300,7 +1298,7 @@ func finGatherNegativeInputs(t *testing.T, stdout *probeSyncBuffer) finGatherInp
 // same values rather than equal-looking rebuilds. Sharing one buffer is sound:
 // trailWaitForTrailer only ever calls stdout.Bytes()
 // (`trailWaitForTrailer`), which returns a COPY of an
-// append-only buffer (background_trigger_probe_test.go:736-742), so the read is
+// append-only buffer (probeSyncBuffer.Bytes), so the read is
 // non-destructive, both arms observe the same bytes on their first poll and both
 // take BoundFrom trailBoundFromStart. Rebuilding the needles instead of sharing
 // them would vary a second dimension, because finGatherNeedles calls t.TempDir()
@@ -1383,7 +1381,7 @@ func TestFinGatherPyryExitIsObservableAtTheOutcome(t *testing.T) {
 //
 // # Why the gather validates nothing
 //
-// C7 (trail_run_outcome_test.go:748-753) is the classifier's check over this
+// C7 (`trailClassifyRun`) is the classifier's check over this
 // field and it is already shipped. A pinIsVerdict call in the gather would
 // repair exactly the record C7 exists to reject, putting the out-of-contract
 // answer out of reach through this composition — and it would break the LAST row
@@ -1481,8 +1479,8 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // into the returns: the reap-log stderr, and the stdout buffer at the trailer's
 // `result` field, which is what trailNeedle already stands in for. IT MAY NOT GO INTO
 // terminal_reason: trailGate and trailAdmitAttribution both quote the certified
-// reason %q into their Details BY DESIGN (`trailDetail`,
-// :399, :534, :598), and readings.Gate and readings.Admit take those results
+// reason %q into their Details BY DESIGN (`trailDetail`), and readings.Gate
+// and readings.Admit take those results
 // whole — so such a plant would be red against shipped code whose only fix
 // deletes the field the operator reads to interpret the gate. The exclusion is
 // stated here and made structural by finGatherNeedleTrailer, which renders
@@ -1520,7 +1518,7 @@ func TestFinGatherCarriesTheClaudeVerdictAsHandedIn(t *testing.T) {
 // The stderr plant sits ON THE ANCHORED LINE, after the pgids= list, which is
 // #1280's position and the only non-vacuous one: tdnClassifyReapLog skips every
 // line not carrying tdnReapMessage BEFORE it fills any field
-// (teardown_liveness_test.go:161-163), so a needle on a non-anchored line enters
+// (tdnClassifyReapLog), so a needle on a non-anchored line enters
 // nothing and the test would go green over a record that captured everything.
 //
 // # The structural half fixes #1280's flat scan
@@ -3015,7 +3013,7 @@ func TestFinGatherOrderingCarriesNoCapturedBytes(t *testing.T) {
 // other than the poll whose scan result was classified.
 //
 // Staleness has no counterpart on the readings to agree with — trailRunReadings
-// deliberately carries no staleness field (trail_run_outcome_test.go:436-439) — so
+// deliberately carries no staleness field — so
 // it is pinned as FILLED FROM THIS SIGHTING RATHER THAN LEFT BEHIND: non-zero and
 // under the poll's own timeout. A left-behind field is exactly zero, which is why
 // the weakened >= 0 form would be vacuous rather than merely lenient.
@@ -3058,14 +3056,14 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // TestFinGatherRecordPublishesTheMeasuredMissBound below, which leaves it
 // unseeded for this row's own reason and costs the same wall clock. A seeded
 // buffer makes the first poll hit, so lastMiss stays zero and the bound is
-// trailBoundFromStart — the discriminator whose own doc says it BOUNDS NOTHING
-// (result_trailer_observation_test.go:80-85).
-// trailBoundFromMiss is produced only where a poll missed first (:281-287 there),
+// trailBoundFromStart — the discriminator whose own doc says it BOUNDS NOTHING.
+// trailBoundFromMiss is produced only where a poll missed first, in
+// trailWaitForTrailer,
 // and reaching it costs a real sleep: polls at ~0, ~200 and ~400ms miss, the
 // append lands at ~500ms, and the poll at ~600ms hits with the bound measured
 // from the ~400ms miss. There is no cheaper route to the interesting value.
 //
-// The structure is TestTrailWaitForTrailer's first subtest (:554-594 there),
+// The structure is TestTrailWaitForTrailer's first subtest,
 // mirrored rather than reinvented — including the goroutine split, which is not
 // style: probeSyncBuffer.Write returns an error that must be reported with
 // t.Fatalf, and calling t.* from a spawned goroutine after the test function has
@@ -3089,7 +3087,8 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // THE DISCRIMINATOR IS READ OFF THE CALL AND THE OBSERVATION IS NEVER BOUND. That
 // value is a trailObservation, so it carries .Line and the decoded pointer — the
 // two things the carrier exists to keep out of a caller's reach and the two the
-// header forbids a message from naming (:114-116). With no observation in scope a
+// header forbids a message from naming, under § Failure messages. With no
+// observation in scope a
 // later edit CANNOT %v one into a failure; with one in scope only attention would
 // stop it, and the failure would be SILENT, because trailFixtureTrailer carries no
 // needle and a stray print would trip no sweep. Prefer the shape that cannot be
@@ -3103,9 +3102,9 @@ func TestFinGatherSightingComesFromTheClassifiedPoll(t *testing.T) {
 // property of the source rather than of this fixture: the fill sits at the trailer
 // leg and the attribution guard on Gate.Reason sits below it. Staleness is
 // TestFinGatherSightingComesFromTheClassifiedPoll's, the claim that a staleness
-// covers the true lateness is TestTrailWaitForTrailer's (:584-587 there), and
-// lateness_bounded is derived from this discriminator at one place only
-// (finding_trailer_evidence_test.go:309-315). This row adds a second source of none
+// covers the true lateness is TestTrailWaitForTrailer's, and lateness_bounded is
+// derived from this discriminator at one place only
+// (finTrailerBuild). This row adds a second source of none
 // of the three, and plants no needle.
 func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 	var stdout probeSyncBuffer
@@ -3202,8 +3201,8 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 //
 // By the time the composition has classified, the trailer is in the buffer, so a
 // second trailWaitForTrailer matches on its FIRST poll and reports
-// trailBoundFromStart — the discriminator whose own doc says it BOUNDS NOTHING
-// (result_trailer_observation_test.go:80-85). A record built from it publishes
+// trailBoundFromStart — the discriminator whose own doc says it BOUNDS NOTHING.
+// A record built from it publishes
 // lateness_bounded false for a run that was genuinely bounded. Both records come
 // out of one builder over one set of bytes under the SAME outcome argument, so
 // the published difference is attributable to the bound and not to the verdict,
@@ -3212,8 +3211,8 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 // THE DISCRIMINATOR IS READ OFF THE CALL AND THE OBSERVATION IS NEVER BOUND, in
 // the row above's own words and for its reason: a trailObservation carries .Line
 // and the decoded pointer, the two things the carrier exists to keep out of a
-// caller's reach and the two the header forbids a message from naming
-// (:114-116). With no observation in scope a later edit CANNOT %v one into a
+// caller's reach and the two the header forbids a message from naming, under
+// § Failure messages. With no observation in scope a later edit CANNOT %v one into a
 // failure. That is also why the second carrier is derived through
 // finTrailerSighting over
 // trailScan(stdout.Bytes()): the shipped derivation, pure over bytes, taking a
@@ -3247,7 +3246,7 @@ func TestFinGatherSightingReportsTheMissBound(t *testing.T) {
 //
 // It leaves the buffer empty and appends past two poll ticks exactly as the row
 // above does and for the same reason — a pre-seeded buffer cannot reach the miss
-// bound at all (result_trailer_observation_test.go:281-287), so the delayed
+// bound at all (trailWaitForTrailer), so the delayed
 // append is load-bearing rather than decorative — and it costs the same roughly
 // 600ms. finGatherTrailerWait's own accounting names both rows, and NO ROW EVER
 // WAITS THAT CONSTANT OUT.
@@ -3306,7 +3305,8 @@ func TestFinGatherRecordPublishesTheMeasuredMissBound(t *testing.T) {
 	// The measured record, built from the carrier the poll that CLASSIFIED this
 	// run filled. The outcome is held IDENTICAL across both builds so the
 	// published difference is attributable to the bound and not to the verdict; it
-	// is what the header documents for these inputs (:59-66), but this row makes
+	// is what the header documents for these inputs, under § An empty match set,
+	// but this row makes
 	// no claim that the composition reached it and does not call trailClassifyRun
 	// to find out — that would add a leg it asserts nothing about.
 	first := finTrailerBuild(trailOutcomeNoRowMatched, sighting)
@@ -3553,8 +3553,7 @@ const finGatherOverCapPad = 200
 // TestFinGatherSightingScalarsComeFromTheFullLineDecode proves the carrier's four
 // decoded scalars are what the FULL trailer line decoded to and never a re-read of
 // the capped copy, MEASURED on a fixture where the two reads give different answers
-// rather than trusted because trailScanResult.Trailer's doc says which one it is
-// (result_trailer_observation_test.go:108-118).
+// rather than trusted because trailScanResult.Trailer's doc says which one it is.
 //
 // That separation is what licenses the cap being applied to Line alone: truncation
 // degrades human-readable evidence and never a field the consumer branches on.
@@ -3591,7 +3590,7 @@ const finGatherOverCapPad = 200
 //
 // # Failure messages
 //
-// The header's rule (:114-116) binds harder here than anywhere else in this file.
+// The header's § Failure messages binds harder here than anywhere else in this file.
 // At this pad the retained Line genuinely carries padded stand-in payload AND
 // trailNeedle within the cap, and no sweep covers this row —
 // TestFinGatherReturnsNoCapturedBytes runs over its own fixture, not this one, so a
@@ -3607,7 +3606,7 @@ const finGatherOverCapPad = 200
 //
 // The gate and the attribution. terminal_reason "max_turns" makes trailGate answer
 // trailGateBudgetFired carrying a NON-EMPTY Reason
-// (trailer_admissibility_test.go:384-394), so the gather's attribution guard is
+// (trailGate's budget arm), so the gather's attribution guard is
 // satisfied and that leg RUNS here, returning a structural void for the budget path.
 // Incidental: this row is about the trailer leg, and asserting on either would
 // restate rows the file already ships. That the carrier fill is independent of the
@@ -3718,7 +3717,7 @@ func TestFinGatherSightingScalarsComeFromTheFullLineDecode(t *testing.T) {
 // second traversal.
 //
 // Scope is the carrier alone. trailRunReadings argues its own non-reachability at
-// trail_run_outcome_test.go:433-439 and finRecordRun's is pinned by
+// trailRunReadings.BoundFrom and finRecordRun's is pinned by
 // TestFinRecordEmbedsTrailerRecordWhole; restating either here would be scope
 // creep.
 func TestFinSightingReachesNoScanType(t *testing.T) {
@@ -3754,10 +3753,10 @@ func finGatherForbiddenKeys() []string {
 func finGatherExemptKeys() map[string]string {
 	return map[string]string{
 		// ArgvScanErrored is a bool discriminator recording THAT the scan failed
-		// and never what it said (trail_run_outcome_test.go:411-418).
+		// and never what it said (trailRunReadings.ArgvScanErrored).
 		"argvscanerrored": "the errored discriminator, which records that the scan failed",
 		// pinStateOutcome.ToolStderr. #1271 admits pinStateOutcome into the
-		// readings WHOLE (trail_run_outcome_test.go:425-428) because it carries no
+		// readings WHOLE (trailRunReadings.Liveness) because it carries no
 		// command column by construction — pinStateColumns is `pid=,ppid=,stat=`
 		// with an enforcing test. Named here rather than left to fire later: this
 		// file's rows match nothing, so Liveness is empty today and the first row

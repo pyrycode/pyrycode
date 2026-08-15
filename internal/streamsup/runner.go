@@ -201,7 +201,7 @@ type Runner struct {
 	// WINNER's gate. Two overlapping new_session frames are an ordinary shape, not
 	// a contrivance (#1330's e2e re-sends the frame every ~250 ms): frame 2's
 	// rotate() wins the re-key, frame 1's then fails ErrSessionNotFound
-	// (sessions/transition.go:120-123 — the ordinary outcome of losing that race)
+	// (`RotateForNewSession` — the ordinary outcome of losing that race)
 	// and runs its abort, which unstamped would clear the arm frame 2 is holding
 	// while frame 2's outgoing child is still alive. That reproduces the defect on
 	// demand from two frames, and no test driving one rotation at a time can see
@@ -402,7 +402,7 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		// INFO, NOT DEBUG, and the level is load-bearing rather than taste. #1330's
 		// AC4 measures the fix against the e2e's AC-1 instrument guard, which greps
 		// the daemon's WHOLE captured stderr for the literal "level=DEBUG"
-		// (relay_v2_stream_new_session_test.go:577-600) and which AC5 forbids
+		// (`TestRelayV2_StreamNewSessionRotatesAndRestartsFresh`) and which AC5 forbids
 		// editing. A Debug record here fires on essentially every rotation, so it
 		// would satisfy that guard from the fix's own diagnostic and turn the
 		// measurement into a near-tautology — the false-green shape the ticket

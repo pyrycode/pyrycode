@@ -13,8 +13,8 @@ package realclaude
 //
 // # The question, and why the code does not answer it
 //
-// cmd/pyry/interactive_turn_v2.go:208-217 emits turn_end and then transitions
-// to idle in the turnevent.TurnEnd arm, unconditionally — nothing consults
+// The emitter's `Handle` emits turn_end and then transitions
+// to idle in its turnevent.TurnEnd arm, unconditionally — nothing consults
 // whether the tool left work behind. Since claude returns a tool_result the
 // moment a Bash command's timeout expires and leaves the command running in
 // the background (claude 2.1.220, observed 2026-07-27), that code PREDICTS a
@@ -24,8 +24,8 @@ package realclaude
 // the command was alive at that instant rather than killed.
 //
 // TestInteractiveStreamRunningTurn already treats an early idle as a TEST
-// HAZARD and steers around it (runningTurnPrompt, ":225 — do NOT run it in the
-// background"). Whether the same early idle is a defect for real clients has
+// HAZARD and steers around it: runningTurnPrompt says "do NOT run it in the
+// background". Whether the same early idle is a defect for real clients has
 // never been settled. That is what this probe records.
 //
 // # The lever
@@ -38,8 +38,8 @@ package realclaude
 // axis.
 //
 // Two hops carry the lever, both os.Environ()-based, so it reaches claude with
-// no production change: test -> daemon (interactive_bootstrap_liveness_test.go
-// :403) -> claude (internal/streamsup/runner.go:555). The second hop's append
+// no production change: test -> daemon (`spawnBootstrapDaemon`) -> claude
+// (streamsup's `setIterCancel` neighbourhood). The second hop's append
 // sits inside `if r.cfg.Env != nil`, which LOOKS like a broken chain, but
 // passthrough survives both arms — non-nil appends to os.Environ(), and nil
 // leaves cmd.Env nil, which makes os/exec inherit the parent environment
@@ -85,8 +85,8 @@ package realclaude
 //
 // turn_state{idle} reaches the wire from exactly one site:
 // `Handle` in interactive_turn_v2.go, inside the turnevent.TurnEnd arm, which is
-// entered only when inTurn is true (:209) and which immediately calls
-// endTurn(). inTurn is set only by startTurnIfNeeded (:267), which every
+// entered only when inTurn is true and which immediately calls
+// endTurn(). inTurn is set only by startTurnIfNeeded, which every
 // content arm calls together with a transitionTo(thinking|responding) — so no
 // idle can reach the wire without a preceding non-idle turn_state for the same
 // conversation, in the same record. One turn is driven, into one conversation
@@ -109,7 +109,7 @@ package realclaude
 // extracted there can never reach the artefact. EnvDelta is a fixed literal:
 // nothing in this file may call os.Environ() or read any child's environment,
 // because the test process and the daemon both carry CLAUDE_CODE_OAUTH_TOKEN /
-// ANTHROPIC_API_KEY (fixtures.go:98-99) and this record is pasted into a PUBLIC
+// ANTHROPIC_API_KEY (`WithWorktreeAuthenticated`) and this record is pasted into a PUBLIC
 // issue.
 //
 // # Running it
@@ -166,8 +166,8 @@ const (
 // misstate AC1.
 const bgIdleMaxFrames = 2000
 
-// The truncation tell (AC3(c)). turnbridge/outbound.go:47 caps a summary at
-// maxSummaryLen = 200 runes and :189-194 appends one ellipsis rune past the
+// The truncation tell (AC3(c)). turnbridge's `maxSummaryLen` caps a summary at
+// 200 runes and its `truncate` helper appends one ellipsis rune past the
 // cap, so a truncated summary is EXACTLY 201 runes ending "…". A truncated
 // input_summary that cut off the FIFO path is an UNRESOLVED match, not a
 // non-match.
@@ -210,9 +210,9 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 	"is ordered by receive time, so this is refuted by the record itself rather than assumed."
 
 // The runner path and its attribution status (AC4), taken deliberately on the
-// criterion's SECOND arm. selectInteractiveRunner (cmd/pyry/main.go:667) never
+// criterion's SECOND arm. `selectInteractiveRunner` never
 // logs its choice, so the config value only echoes what the rig wrote. The one
-// non-authored artefact — the MCP-approve config main.go:795-801 writes iff
+// non-authored artefact — the MCP-approve config `runSupervisor` writes iff
 // InteractiveRunner == "stream-json" — is created by os.CreateTemp("",
 // "pyry-mcp-approve-*.json") (cmd/pyry/`writeMCPApproveConfig`) in a SHARED $TMPDIR
 // where any other stream-json pyry on the operator's machine also has one; its
@@ -237,7 +237,7 @@ const (
 // extraction allowlist in bgIdleFrameFromEnvelope.
 //
 // IsError is a *bool, not a bool. is_error:false is the load-bearing value
-// here — turnbridge/outbound.go:84 sets it from Status == ToolStatusFailed, so
+// here — turnbridge's `MapEvent` sets it from Status == ToolStatusFailed, so
 // the background path carries the SAME false a clean success carries.
 // omitempty on a plain bool would erase exactly the field AC3(a) needs.
 //
@@ -461,8 +461,8 @@ func bgIdlePrompt(fifoPath string, nonce int64) string {
 // bgIdleRecordTurn reads binary->phone frames until one of exactly TWO terminal
 // conditions and records every one it decrypts.
 //
-// The decrypt discipline is transcribed from drainForResponding
-// (interactive_stream_running_turn_test.go:242-290) and is load-bearing: the
+// The decrypt discipline is transcribed from drainForResponding and is
+// load-bearing: the
 // receive nonce is sequential, so EVERY noise_msg must be decrypted in receive
 // order or the CipherState desyncs, while a non-noise_msg control frame must be
 // skipped WITHOUT decrypting so it does not advance the nonce. Getting that
@@ -631,7 +631,7 @@ func bgIdleFrameFromEnvelope(env protocol.Envelope) bgIdleFrame {
 // Attribution is sound iff matched == 1 && truncatedCandidates == 0.
 //
 // The match is deliberately NOT gated on Name == "Bash": ToolUsePayload.Name
-// comes from turnevent.ToolStart.Title (outbound.go:74), a value this design
+// comes from turnevent.ToolStart.Title (copied by turnbridge's `MapEvent`), a value this design
 // has not measured, and gating on it would add a second unvetted matcher whose
 // failure is silent. The FIFO path in the summary is the discriminator; Name is
 // recorded verbatim so a non-Bash tool naming the path is visible to a reader.

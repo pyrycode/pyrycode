@@ -13,19 +13,19 @@ package realclaude
 //
 // # The three defects it closes
 //
-//  1. IDENTIFICATION BY POSITION AND LEAF NAME. probeAnnotateCommands (:930)
-//     stores filepath.Base(fields[1]), so a held `cat <fifo>` records as `cat`
-//     and matches any unrelated `cat` on the machine. #1230 already solved this
+//  1. IDENTIFICATION BY POSITION AND LEAF NAME. probeAnnotateCommands stores
+//     filepath.Base(fields[1]), so a held `cat <fifo>` records as `cat` and
+//     matches any unrelated `cat` on the machine. #1230 already solved this
 //     with reachMatchArgvRows' full-argv content match, so that matcher is
 //     CALLED here, never rebuilt. What is genuinely missing is the caller's
 //     exclusion set with recorded reasons — see pinPartition.
 //
 //  2. THE ONLY PROCESS VIEW IS A SUBTREE WALK ROOTED AT PYRY. On one of the two
 //     staged paths claude exits before the observation window and the detached
-//     Bash group re-parents to init, so probeDescendantsFromPS (:891) reports a
-//     live, FIFO-held command as ABSENT — indistinguishable from the probes'
-//     negative verdict. pinReadState is a direct `ps -p <pid>` lookup: no root,
-//     no walk, no descendant requirement.
+//     Bash group re-parents to init, so probeDescendantsFromPS reports a live,
+//     FIFO-held command as ABSENT — indistinguishable from the probes'
+//     negative verdict. pinReadState is a direct `ps -p <pid>` lookup: no
+//     root, no walk, no descendant requirement.
 //
 //  3. A STATE READ THAT IS NOT FOUR-VALUED COLLAPSES TWO DIFFERENT FINDINGS.
 //     `ps` lists a SIGKILLed-but-unreaped process as a row (measured in #1224),
@@ -59,13 +59,14 @@ package realclaude
 //
 // # Redaction — inherited from #1230's ruleset, and one rule strengthened
 //
-// background_reach_probe_test.go:57-92 governs this family. Rule 1 binds the
-// new per-pid lookup too: NEVER `ps -E`, `ps -e` with an environment column, or
-// the BSD-syntax `ps eww`. Those print each process's full ENVIRONMENT, which
-// here means the operator's CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY, into
-// an artifact destined for a public issue. This instrument needs no environment
-// read at all, so the safe design is to NOT HAVE THE CAPABILITY: the whole
-// column set is pinStateColumns, three kernel-generated integers-and-flags, and
+// The § Redaction section of background_reach_probe_test.go's file header
+// governs this family. Rule 1 binds the new per-pid lookup too: NEVER `ps -E`,
+// `ps -e` with an environment column, or the BSD-syntax `ps eww`. Those print
+// each process's full ENVIRONMENT, which here means the operator's
+// CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY, into an artifact destined for a
+// public issue. This instrument needs no environment read at all, so the safe
+// design is to NOT HAVE THE CAPABILITY: the whole column set is
+// pinStateColumns, three kernel-generated integers-and-flags, and
 // TestPinStateColumns_ReadsNoEnvironment is the deterministic tripwire that
 // fires the moment someone widens it to "improve the record".
 //
@@ -76,15 +77,15 @@ package realclaude
 //
 // # What is deliberately NOT touched
 //
-// probeProcessSnapshot (:867) and probeDescendantsFromPS (:891) are unchanged,
-// and the per-pid read uses its own narrow `ps -p` rather than widening their
-// snapshot. probeDescendantsFromPS skips any line where len(fields) != 3
-// (:896-898), so adding a state column to `ps -axo pid=,ppid=,pgid=` would make
-// EVERY line fail that guard and the walk return empty — reading as "the
-// command is absent", the exact false negative this instrument exists to
-// prevent. reachMatchArgvRows and TestReachMatchArgvRows are untouched too:
-// exclusion is a strictly downstream filter, so the existing caller's behaviour
-// is unchanged by construction rather than by promise.
+// probeProcessSnapshot and probeDescendantsFromPS are unchanged, and the
+// per-pid read uses its own narrow `ps -p` rather than widening their snapshot.
+// probeDescendantsFromPS skips any line where len(fields) != 3, so adding a
+// state column to `ps -axo pid=,ppid=,pgid=` would make EVERY line fail that
+// guard and the walk return empty — reading as "the command is absent", the
+// exact false negative this instrument exists to prevent. reachMatchArgvRows
+// and TestReachMatchArgvRows are untouched too: exclusion is a strictly
+// downstream filter, so the existing caller's behaviour is unchanged by
+// construction rather than by promise.
 
 import (
 	"context"
@@ -122,7 +123,7 @@ type pinExclusion struct {
 // Matches is a SLICE and MatchCount an int: nothing here ever resolves to "the"
 // pid, so a run that matched more than one row is visible as such in the record
 // rather than silently resolved to the first — the defect
-// probeWaitForBashToolUse (:762) still carries.
+// probeWaitForBashToolUse still carries.
 //
 // RowsScanned is reachMatchArgvRows' total, carried through unaltered. It is
 // what separates "the scan ran and nothing matched" from "the scan parsed no
@@ -265,10 +266,10 @@ func pinStateArgs(pid int) []string {
 // pinReadState reads the state of one pid.
 //
 // It is a DIRECT lookup: no root, no walk, no requirement that the pid still be
-// a descendant of anything. That is the whole point — probeDescendantsFromPS
-// (:891) is a subtree walk rooted at pyry's pid, so a command whose group has
-// re-parented to init reads as ABSENT there, which is indistinguishable from the
-// consuming probes' negative verdict.
+// a descendant of anything. That is the whole point — probeDescendantsFromPS is
+// a subtree walk rooted at pyry's pid, so a command whose group has re-parented
+// to init reads as ABSENT there, which is indistinguishable from the consuming
+// probes' negative verdict.
 //
 // It takes no *testing.T and never fails a test: an instrument failure observed
 // mid-turn is a datum to publish, not a reason to abort the turn.
@@ -403,7 +404,7 @@ func pinClassifyState(pid int, stdout []byte, err error) pinStateOutcome {
 
 // pinStateRow parses the first well-formed row out of the lookup's stdout,
 // using this package's Fields / exactly-three-fields / Atoi discipline
-// (probeDescendantsFromPS:894-903, reachIndexFromPS:970-980).
+// (probeDescendantsFromPS, reachIndexFromPS).
 //
 // Exactly three fields, not "at least three": the state column is a short flag
 // string from a small kernel-generated alphabet (S, Ss, Us, Z, ZN, Z+) and never

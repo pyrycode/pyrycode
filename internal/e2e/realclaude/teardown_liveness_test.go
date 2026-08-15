@@ -23,21 +23,22 @@ package realclaude
 //
 // # The reaper line, and the two ways a matcher over it inverts
 //
-// reap.go:65 is the only line classified here. Measured 2026-07-30 (Darwin
-// 25.5), both renderings on one machine:
+// The Info line ReapDescendantGroups emits once it has killed at least one
+// group is the only line classified here. Measured 2026-07-30 (Darwin 25.5),
+// both renderings on one machine:
 //
 //	time=… level=INFO msg="agentrun: reaped claude descendant process groups" count=2 pgids="[4242 77]"
 //	2026/07/30 23:18:29 INFO agentrun: reaped claude descendant process groups count=2 pgids="[4242 77]"
 //
-// The first is slog.NewTextHandler (cmd/pyry/main.go:743). The second is
-// slog.Default(), and it is the one that matters: runAgentRunPty
-// (cmd/pyry/`runAgentRunStreamRunner`) sets no Logger on ptyrunner.Config, so
-// ptyrunner.Run falls back to slog.Default() (runner.go:289-292), and every
-// probe in this package spawns `pyry agent-run` and captures its stderr. A
-// matcher anchored on `msg="agentrun: reaped…"` finds nothing on the live path
-// and answers "no line" — read as "the reaper never fired" — with nothing going
-// red. So the anchor is the BARE message text, a string literal in this file,
-// never a level token, a timestamp, or a reference to what reap.go defines.
+// The first is the slog.NewTextHandler runSupervisor installs. The second is
+// slog.Default(), and it is the one that matters: runAgentRunPty sets no Logger
+// on ptyrunner.Config, so ptyrunner.Run falls back to slog.Default() on a nil
+// Logger, and every probe in this package spawns `pyry agent-run` and captures
+// its stderr. A matcher anchored on `msg="agentrun: reaped…"` finds nothing on
+// the live path and answers "no line" — read as "the reaper never fired" — with
+// nothing going red. So the anchor is the BARE message text, a string literal
+// in this file, never a level token, a timestamp, or a reference to what
+// reap.go defines.
 //
 // Membership is over PARSED INTEGERS, never a substring, because the matcher
 // inverts in both directions. A `pgids=[<held>]` substring probe is correct for
@@ -78,10 +79,11 @@ import (
 // tdnTicket is this instrument's provenance, carried into every record.
 const tdnTicket = "1250"
 
-// tdnReapMessage is reap.go:65's message text as a STRING LITERAL, deliberately
-// not a reference to anything reap.go defines: a renamed message must break the
-// self-checks below rather than silently follow the rename into a live run
-// where "no line" reads as "the reaper never fired".
+// tdnReapMessage is the message text ReapDescendantGroups logs, copied here as
+// a STRING LITERAL and deliberately not a reference to anything reap.go
+// defines: a renamed message must break the self-checks below rather than
+// silently follow the rename into a live run where "no line" reads as "the
+// reaper never fired".
 //
 // The anchor is the bare text. It carries no `msg="`, no level token and no
 // timestamp, because the two handlers render all three differently and the one
@@ -99,10 +101,10 @@ const (
 	// tdnReapHeldPGIDAbsent: the reaper emitted its line and the held pgid was
 	// not among the groups it reported killing.
 	tdnReapHeldPGIDAbsent = "reap-line-without-held-pgid"
-	// tdnReapNoLine: no such line. AMBIGUOUS by construction — reap.go:64
-	// guards the emit on len(reaped) > 0, so silence means the reaper ran and
-	// reaped nothing OR it never fired. The name says "no line", never "no
-	// reap", and the ambiguity is spelled out in the Detail.
+	// tdnReapNoLine: no such line. AMBIGUOUS by construction —
+	// ReapDescendantGroups guards the emit on len(reaped) > 0, so silence means
+	// the reaper ran and reaped nothing OR it never fired. The name says "no
+	// line", never "no reap", and the ambiguity is spelled out in the Detail.
 	tdnReapNoLine = "no-reap-line"
 	// tdnReapInstrumentFailed: the line could not be read. Never a statement
 	// about the reaper.
@@ -145,10 +147,11 @@ func tdnClassifyReapLog(stderr []byte, heldPGID int) tdnReapOutcome {
 	out := tdnReapOutcome{HeldPGID: heldPGID}
 
 	if heldPGID <= 1 {
-		// reap.go:52 skips pgid <= 1 before it kills anything, so no line can
-		// ever carry one. Answering "absent" here would publish a leak finding
-		// manufactured out of a consumer that failed to capture its pgid — the
-		// same shape as pinReadState's pid <= 0 guard, and the same reason.
+		// ReapDescendantGroups skips pgid <= 1 before it kills anything, so no
+		// line can ever carry one. Answering "absent" here would publish a leak
+		// finding manufactured out of a consumer that failed to capture its
+		// pgid — the same shape as pinReadState's pid <= 0 guard, and the same
+		// reason.
 		out.Verdict = tdnReapInstrumentFailed
 		out.Detail = tdnDetail("held pgid %d is not one the reaper can ever report: reap.go:52 "+
 			"skips pgid <= 1 before it kills anything, so no answer about it could be read "+
@@ -289,8 +292,8 @@ func tdnCountAttr(line string) (int, bool) {
 // Without that bound, a key is matched anywhere it appears as a tail: a
 // handler's WithAttrs adding `reap_pgids=` would otherwise be read as this
 // line's `pgids=`. Anchoring on the message first and then on the attribute
-// boundary is also what keeps reap.go:59's Warn — whose attribute is `pgid=`,
-// singular — out of the answer entirely.
+// boundary is also what keeps ReapDescendantGroups's kill-group-failed Warn —
+// whose attribute is `pgid=`, singular — out of the answer entirely.
 func tdnAttrIndex(line, attr string) int {
 	for i := 0; i+len(attr) <= len(line); {
 		next := strings.Index(line[i:], attr)
@@ -344,7 +347,8 @@ const (
 	// tdnDispositionReaperKilled: the command is dead, it could not have
 	// finished on its own (the FIFO write end was held across the teardown),
 	// and the reaper reported killing its group — so kill(2) succeeded, because
-	// reap.go:56-62 skips ESRCH BEFORE the append. The full-strength reading.
+	// ReapDescendantGroups skips ESRCH BEFORE it appends the pgid to the reaped
+	// list. The full-strength reading.
 	tdnDispositionReaperKilled = "dead-by-reaper"
 	// tdnDispositionDeadUnattributed: the command is dead and could not have
 	// finished on its own, but the reaper's hand is not established.
@@ -490,9 +494,10 @@ const (
 	tdnFixtureDefaultTwo = `2026/07/30 23:18:29 INFO ` +
 		`agentrun: reaped claude descendant process groups count=2 pgids="[89355 4242]"`
 
-	// tdnFixtureOtherLines carries reap.go:59's Warn, whose attribute is `pgid=`
-	// (SINGULAR) and whose pgid is the held one. Nothing in it is the Info line,
-	// so the held pgid appearing in the bytes must not produce an answer.
+	// tdnFixtureOtherLines carries ReapDescendantGroups's kill-group-failed
+	// Warn, whose attribute is `pgid=` (SINGULAR) and whose pgid is the held
+	// one. Nothing in it is the Info line, so the held pgid appearing in the
+	// bytes must not produce an answer.
 	tdnFixtureOtherLines = `2026/07/30 23:18:28 INFO pyry: agent-run starting workdir=/tmp/wd
 2026/07/30 23:18:29 WARN agentrun: descendant reap: kill group failed pgid=89355 err="operation not permitted"
 2026/07/30 23:18:31 INFO pyry: claude exited status=0`
@@ -578,15 +583,16 @@ func TestTdnClassifyReapLog(t *testing.T) {
 			wantCount:   1,
 		},
 		{
-			// reap.go:59's Warn carries `pgid=` (singular) and the held pgid, so
-			// bytes alone are not an answer: the anchor is the message.
+			// ReapDescendantGroups's kill-group-failed Warn carries `pgid=`
+			// (singular) and the held pgid, so bytes alone are not an answer: the
+			// anchor is the message.
 			name:        "other pyry lines, including the singular-pgid Warn, are not the reap line",
 			stderr:      tdnFixtureOtherLines,
 			held:        tdnFixtureHeldPGID,
 			wantVerdict: tdnReapNoLine,
 			wantLines:   0,
-			// reap.go:64 guards the emit on len(reaped) > 0, so silence has TWO
-			// readings and collapsing them into either one is the defect.
+			// ReapDescendantGroups guards the emit on len(reaped) > 0, so silence
+			// has TWO readings and collapsing them into either one is the defect.
 			wantDetailIn: []string{"reaped nothing", "never fired"},
 		},
 		{
@@ -692,10 +698,10 @@ func TestTdnClassifyReapLog(t *testing.T) {
 	}
 
 	t.Run("a pgid the reaper could never report is rejected rather than answered", func(t *testing.T) {
-		// reap.go:52 skips pgid <= 1 before it kills anything, so no line can
-		// ever carry one. Answering "absent" for such a caller would manufacture
-		// a leak finding out of a consumer that failed to capture its pgid —
-		// the exact fail-safe rule this instrument is built on.
+		// ReapDescendantGroups skips pgid <= 1 before it kills anything, so no
+		// line can ever carry one. Answering "absent" for such a caller would
+		// manufacture a leak finding out of a consumer that failed to capture its
+		// pgid — the exact fail-safe rule this instrument is built on.
 		for _, held := range []int{0, -1, 1} {
 			got := tdnClassifyReapLog([]byte(tdnFixtureDefaultOne), held)
 			if got.Verdict != tdnReapInstrumentFailed {
@@ -722,10 +728,10 @@ func TestTdnClassifyReapLog(t *testing.T) {
 // # Which of these shapes can occur through pinReadState in production
 //
 //   - A non-numeric pid: UNREACHABLE. pinReadState takes an int.
-//   - A non-positive pid: UNREACHABLE past the guard at :276, and already
-//     covered by TestPinClassifyState's final subtest (:919). Not duplicated.
+//   - A non-positive pid: UNREACHABLE past pinReadState's pid <= 0 guard, and
+//     already covered by TestPinClassifyState's final subtest. Not duplicated.
 //   - Arms A, B and C: UNREACHABLE without an edit to pinStateColumns or
-//     pinStateArgs, which TestPinStateColumns_ReadsNoEnvironment (:950) already
+//     pinStateArgs, which TestPinStateColumns_ReadsNoEnvironment already
 //     catches. They are proven here as PLATFORM facts, not as reachable paths.
 //   - Arm D: structurally REACHABLE. pinReadState bounds the pid below and
 //     never above, so any caller holding a garbage-but-positive pid reaches it.
@@ -1003,9 +1009,9 @@ func TestTdnRecordWriter(t *testing.T) {
 		}
 
 		// The narrow per-pid read's column set is pinned by
-		// TestPinStateColumns_ReadsNoEnvironment (:950) and is not restated
-		// here. This is the record-level tripwire against a FUTURE field: it
-		// holds structurally today because none of these types has one. Both
+		// TestPinStateColumns_ReadsNoEnvironment and is not restated here. This
+		// is the record-level tripwire against a FUTURE field: it holds
+		// structurally today because none of these types has one. Both
 		// snapshots are walked, not just one: #1251 widened the record to carry
 		// a before/after pair, and a tripwire that only watched one half would
 		// let a future field through on the other.

@@ -55,8 +55,9 @@ package realclaude
 // (interrupt_routing_test.go) — the belt; this e2e is the different-fabric suspenders
 // confirming the wired path runs live against real claude. A documented scope choice.
 //
-// Vacuous-pass guard (mirrors the fakeclaude analog relay_v2_stream_interrupt_test.go
-// :288-296): real claude WILL end the turn naturally at ~40s if the interrupt no-ops, so
+// Vacuous-pass guard (mirrors the fakeclaude analog
+// `TestRelayV2_StreamInterruptStopsRunningTurn`): real claude WILL end the turn
+// naturally at ~40s if the interrupt no-ops, so
 // "the turn just ended" is not enough. drainForCancelledTurnEnd asserts the FIRST
 // turn_end for convID carries StopReason == "cancelled" (a spontaneous natural end
 // reports "end_turn"); the responding-drained → interrupt-sent → turn_end-drained
@@ -134,7 +135,7 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 // as drainForResponding, retargeted from turn_state{responding} to turn_end.
 //
 // The StopReason check is the vacuous-pass guard (mirrors the fakeclaude analog
-// relay_v2_stream_interrupt_test.go:288-296): the FIRST terminal event of the running
+// `TestRelayV2_StreamInterruptStopsRunningTurn`): the FIRST terminal event of the running
 // turn must be cancelled, not a spontaneous natural end. A running-turn loop that
 // completes naturally at ~40s reports "end_turn"; only the interrupt's
 // error_during_execution path reports "cancelled". A non-cancelled first turn_end →

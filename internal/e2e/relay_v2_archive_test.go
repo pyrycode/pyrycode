@@ -26,8 +26,9 @@ import (
 // closes the same gap shape #949 exposed for promote_conversation: a handler
 // nothing exercised end-to-end.
 //
-// RED on main if either registration in cmd/pyry/relay.go (TypeArchiveConversation
-// at :410, TypeUnarchiveConversation at :411) were removed: the verb would fall
+// RED on main if either registration in cmd/pyry/relay.go — the ones for
+// TypeArchiveConversation and TypeUnarchiveConversation — were removed: the verb
+// would fall
 // through to the no-handler protocol.unsupported arm and the round-trip's
 // `want conversation_updated` assertion would fail. The test is a live guard on
 // both lines.

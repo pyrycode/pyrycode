@@ -34,7 +34,7 @@ package realclaude
 // runner. On that path new_session is a DAEMON-minted rotation (Pool.RotateForNewSession
 // mints a fresh id; (*streamsup.Runner).RestartFresh re-arms first-run form so the
 // next spawn is `claude --session-id <newID>` — a FRESH transcript, never `--resume`
-// — see internal/streamsup/runner.go:314-351,583-604). No /clear, no watcher. That
+// — see streamsup's `Stdin` / `turnTarget` neighbourhood and its `Run`). No /clear, no watcher. That
 // fresh-spawn form is what mints a brand-new <newID>.jsonl on disk, and that
 // on-disk transcript is the real-claude-specific, word-independent observable at
 // the heart of AC3 (§ the fresh-spawn observable below).

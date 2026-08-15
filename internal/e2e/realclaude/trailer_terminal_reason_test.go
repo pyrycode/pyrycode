@@ -15,21 +15,21 @@ package realclaude
 // # Why the PAIR of readings, and neither alone
 //
 // The fixed decode cannot separate an ABSENT terminal_reason from one emitted as
-// "" — the argument is trailer_key_names_test.go:14-24 and is not re-derived
-// here. #1357's key-name reading (result_trailer_observation_test.go:120-135)
-// makes that separation, and it is still not enough on its own, because ABSENCE
-// MEANS OPPOSITE THINGS ON THE TWO RUNNER PATHS:
+// "" — the argument is trailer_key_names_test.go's § What the fixed decode
+// cannot answer, and is not re-derived here. #1357's key-name reading
+// (`trailScanResult.KeyNames`) makes that separation, and it is still not enough
+// on its own, because ABSENCE MEANS OPPOSITE THINGS ON THE TWO RUNNER PATHS:
 //
-//   - ptyrunner constructs the emitter itself (ptyrunner/runner.go:468), and
-//     streamjson/emitter.go:383-391 is a chokepoint substituting the recorded
-//     detail or "unclassified" before marshalling. On that path the field is
-//     present and non-empty BY CONSTRUCTION, so absence is a departure.
+//   - ptyrunner constructs the emitter itself in its `Run`, and streamjson's
+//     `Close` is a chokepoint substituting the recorded detail or
+//     "unclassified" before marshalling. On that path the field is present and
+//     non-empty BY CONSTRUCTION, so absence is a departure.
 //   - streamrunner.Run tees claude's stdout for the watchdog and passes the
-//     bytes through UNCHANGED (streamrunner/runner.go:177-179), synthesising a
-//     trailer of its own only when the idle-stall watchdog fired and claude
-//     emitted no result. So on every healthy run of that path the trailer is
-//     claude's OWN result line and carries no terminal_reason at all, and
-//     absence is that path's healthy shape.
+//     bytes through UNCHANGED, synthesising a trailer of its own only when the
+//     idle-stall watchdog fired and claude emitted no result. So on every
+//     healthy run of that path the trailer is claude's OWN result line and
+//     carries no terminal_reason at all, and absence is that path's healthy
+//     shape.
 //
 // The decoded scalar alone cannot see presence, and the key names alone cannot
 // say what presence is worth. The pair can, which is why the predicate takes
@@ -42,8 +42,9 @@ package realclaude
 // and three distinct indeterminate answers for both-or-neither-or-unread.
 // reachRunnerPathFromArgv is deliberately
 // NOT used — it keys on --append-system-prompt-file, which BOTH argv builders
-// pass (cmd/pyry/`buildStreamRunnerClaudeArgs`, ptyrunner/runner.go:621), so it labels a
-// correctly-wired stream run "ptyrunner" and has no streamrunner answer at all.
+// pass (cmd/pyry's `buildStreamRunnerClaudeArgs` and ptyrunner's `buildArgs`),
+// so it labels a correctly-wired stream run "ptyrunner" and has no streamrunner
+// answer at all.
 //
 // # Scope
 //
@@ -56,7 +57,7 @@ package realclaude
 // The hazard the shipped paragraph here held open — a new gate value registered
 // in trailIsGateValue but unhandled in that switch, which no closure test
 // catches — is therefore discharged rather than deferred, and it is recorded at
-// the switch itself (trail_run_outcome_test.go:830-1026) rather than here.
+// the switch itself, the step-1 switch in `trailClassifyRun`, rather than here.
 //
 // This file's own six values are unchanged by either: they say what a
 // terminal_reason MEANS against a path, and what a consumer does with that
@@ -75,7 +76,7 @@ import (
 
 // What a terminal_reason means against the observed runner path, as a closed set
 // of six. Every value carries a `reason-` prefix, and the prefix is load-bearing
-// for the same reason `gate-` is (trailer_admissibility_test.go:95-101): this
+// for the same reason `gate-` is on the space `trailGateUsable` heads: this
 // space's words mean nearly what the gate's, the admit's and the run outcomes'
 // words mean, so a copy-paste between spaces must be a visible mistake rather
 // than a plausible line.
@@ -93,14 +94,13 @@ const (
 	//
 	// THE CLAIM LIMIT IS THE POINT OF THIS VALUE. It says the line is not that
 	// path's documented healthy shape, and it never says pyry wrote it. Because
-	// streamrunner.Run passes claude's bytes through unchanged
-	// (internal/agentrun/streamrunner/runner.go:177-179), a terminal_reason on a
-	// line from that path could equally be one CLAUDE emitted, and no reading of
-	// the line can tell the two apart. Pyry's own synthesis there is
-	// unconditional when it happens (streamrunner/watchdog.go:253, :280), but
-	// that is a statement about what pyry writes and never about what claude
-	// cannot. A value claiming more would let claude's own output name pyry as
-	// its author.
+	// streamrunner.Run passes claude's bytes through unchanged, a terminal_reason
+	// on a line from that path could equally be one CLAUDE emitted, and no
+	// reading of the line can tell the two apart. Pyry's own synthesis there is
+	// unconditional when it happens — streamrunner's `idleStallResult` declares
+	// the field and `writeIdleStallResult` always fills it — but that is a
+	// statement about what pyry writes and never about what claude cannot. A
+	// value claiming more would let claude's own output name pyry as its author.
 	//
 	// EMPTINESS IS NOT DISTINGUISHED HERE, deliberately: a present-and-empty
 	// terminal_reason from streamrunner is as much "not that path's documented
@@ -111,9 +111,9 @@ const (
 	// path, which owes one by construction.
 	trailReasonAbsentOwesOne = "reason-absent-on-owes-one-path"
 	// trailReasonBlankOwesOne: terminal_reason is on a line from the ptyrunner
-	// path and decodes empty — emitter.go:383-391's chokepoint substitutes the
-	// recorded detail or "unclassified" rather than marshal an empty one, so its
-	// guarantee is violated.
+	// path and decodes empty — the chokepoint in streamjson's `Close` substitutes
+	// the recorded detail or "unclassified" rather than marshal an empty one, so
+	// its guarantee is violated.
 	trailReasonBlankOwesOne = "reason-blank-on-owes-one-path"
 	// trailReasonNamedOwesOne: terminal_reason is on a line from the ptyrunner
 	// path and names a reason. That path's documented healthy shape.
@@ -145,9 +145,8 @@ const trailReasonKeyName = "terminal_reason"
 
 // --- the record ---------------------------------------------------------------
 
-// trailReasonResult is what the predicate produces, in trailAdmitResult's shape
-// (trailer_admissibility_test.go:349-352): two fields, no pointer into any input,
-// and no quote of any captured string.
+// trailReasonResult is what the predicate produces, in trailAdmitResult's shape:
+// two fields, no pointer into any input, and no quote of any captured string.
 //
 // It deliberately carries no certified reason, unlike trailGateResult: copying
 // the decoded scalar out would put a value FROM THE TRAILER into this record's
@@ -174,12 +173,12 @@ type trailReasonResult struct {
 //
 // It takes neither trailScanResult nor trailObservation, for two reasons. Taking
 // the record would drag Line — verbatim model output, marked
-// OPERATOR-REVIEW-BEFORE-PASTE (result_trailer_observation_test.go:100-107) —
-// into reach, and it would inherit the nil-Trailer pointer trap that trailGate
-// had to answer with a contract check. Three inputs the caller has already
-// reduced is what makes this function have NO unsafe input at all. It makes no
-// claim that the key names and the decoded scalar came from the same line; that
-// is the caller's obligation and it lands on #1367/#1368.
+// OPERATOR-REVIEW-BEFORE-PASTE on `trailScanResult.Line` — into reach, and it
+// would inherit the nil-Trailer pointer trap that trailGate had to answer with a
+// contract check. Three inputs the caller has already reduced is what makes this
+// function have NO unsafe input at all. It makes no claim that the key names and
+// the decoded scalar came from the same line; that is the caller's obligation
+// and it lands on #1367/#1368.
 //
 // # Parameter order is not accidental
 //
@@ -197,7 +196,8 @@ type trailReasonResult struct {
 //     allows (`finRecordRunnerAgreement`): a reduced label compared
 //     against a KNOWN-EXPECTED literal, not two unknowns prefix-matched. The two
 //     runner labels are bare string literals, following the five shipped
-//     comparison sites (`TestFinLiveStageEnvDeltaNamesTheRunner`, :498, :576, :597 and
+//     comparison sites (two each in `TestFinLiveStageEnvDeltaNamesTheRunner` and
+//     `TestFinLiveStageStreamEnvDeltaNamesTheRunner`, plus one in
 //     `TestFinRecordRunnerAgreement`); this ticket introduces no constants for
 //     them.
 //   - Presence comes from the KEY NAMES ALONE. Taking it from decodedReason != ""
@@ -212,12 +212,11 @@ type trailReasonResult struct {
 // cites — never runnerReading, never its reduced label, never a key name, never
 // decodedReason. That is stronger than the ticket requires (the reading is
 // admissible, being one of tdnRunnerFromArgv's constant answers, by the rule
-// finRecordRun already states for ClaudeCommand at
-// finding_run_record_test.go:235-238), and it is chosen because it makes the
-// guarantee STRUCTURAL rather than a discipline — the same doctrine that made
-// trailKeyNames return []string. A hand-built reading is not one of those
-// constant answers, and a Detail echoing the label would publish whatever a
-// caller passed. Nothing is lost: the consumer's record publishes the reading
+// `finRecordInputs.ClaudeCommand` already states), and it is chosen because it
+// makes the guarantee STRUCTURAL rather than a discipline — the same doctrine
+// that made trailKeyNames return []string. A hand-built reading is not one of
+// those constant answers, and a Detail echoing the label would publish whatever
+// a caller passed. Nothing is lost: the consumer's record publishes the reading
 // separately (finRecordRun.RunnerFromArgv).
 func trailReasonAgainstPath(runnerReading string, keyNames []string, decodedReason string) trailReasonResult {
 	present := slices.Contains(keyNames, trailReasonKeyName)
@@ -301,7 +300,7 @@ func trailIsReasonValue(v string) bool {
 
 // trailReasonNeedles is one DISTINCT needle per INPUT POSITION of the predicate.
 // A shared needle could not say WHICH position leaked, which is
-// trailKeyNamesNeedles' rule (trailer_key_names_test.go:125-137).
+// trailKeyNamesNeedles' rule.
 func trailReasonNeedles() map[string]string {
 	return map[string]string{
 		"reading":  "TRAIL-REASON-READING-NEEDLE-MUST-NOT-REACH-A-PUBLIC-ISSUE",

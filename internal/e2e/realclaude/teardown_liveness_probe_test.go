@@ -43,12 +43,13 @@ package realclaude
 // Both discriminators are STRUCTURAL, never prose. (2) is ruled out by the still
 // held FIFO: `cat` cannot reach EOF while this rig holds the write end, and the
 // hold outlives the teardown by construction (§ The cleanup-ordering trap). (3)
-// is ruled out by a pgid appearing in the reap line, because reap.go:56-62 skips
-// ESRCH BEFORE the append — membership in that list proves kill(2) succeeded.
+// is ruled out by a pgid appearing in the reap line, because
+// ReapDescendantGroups skips ESRCH BEFORE it appends the pgid to the reaped
+// list — membership in that list proves kill(2) succeeded.
 //
 // RUNNER-INDEPENDENCE IS AN ARGUMENT FROM THE CODE, NOT A MEASUREMENT.
-// ptyrunner (runner.go:314,398,499), streamrunner (runner.go:201) and streamsup
-// (runner.go:567) each route teardown through the identical
+// ptyrunner.Run (three teardown call sites), streamrunner.Run and streamsup's
+// Runner.spawnAndWait each route teardown through the identical
 // agentrun.ReapDescendantGroups behind a reapDescendantGroupsFn seam. Strong
 // argument; still an argument. This rig measures ONE runner per run and the
 // record names which — from the process table (RunnerFromArgv), not from the
@@ -58,10 +59,9 @@ package realclaude
 //
 // runReachProbe registers its cleanups so the FIFO is released FIRST,
 // deliberately, "so pyry gets a real chance to finish the turn and exit on its
-// own" (background_reach_probe_test.go:355-356). Copying that structure here
-// silently destroys the measurement: `cat` reaches EOF and exits by itself, and
-// the after-snapshot still reads "dead" — producing exactly the clean-but-
-// unearned reading (2) describes.
+// own". Copying that structure here silently destroys the measurement: `cat`
+// reaches EOF and exits by itself, and the after-snapshot still reads "dead" —
+// producing exactly the clean-but-unearned reading (2) describes.
 //
 // holdProbeFIFO is correct as-is and needs no edit: its release is a t.Cleanup,
 // which by construction runs after the test body. So the SIGTERM, the wait and
@@ -149,7 +149,7 @@ const (
 	// this run's content match.
 	tdnFIFOName = "teardown-hold"
 	// tdnClaudeNeedle pins claude's own row for the runner label. BOTH runners
-	// emit it (ptyrunner/runner.go:620, cmd/pyry/`buildStreamRunnerClaudeArgs`), which is
+	// emit it (ptyrunner.buildArgs and buildStreamRunnerClaudeArgs), which is
 	// exactly why it identifies claude and never the runner — see
 	// tdnRunnerFromArgv.
 	//
@@ -247,9 +247,9 @@ func runTdnProbe(t *testing.T, artifactDir string) {
 	rendezvous := holdProbeFIFO(t, fifoPath)
 
 	// Registered AFTER holdProbeFIFO — the deliberate inversion of
-	// runReachProbe:355-356. LIFO therefore runs kill-then-release, which is
-	// harmless because the body has already taken every reading, and it never
-	// releases the FIFO before the measurement.
+	// runReachProbe's release-first cleanup order. LIFO therefore runs
+	// kill-then-release, which is harmless because the body has already taken
+	// every reading, and it never releases the FIFO before the measurement.
 	pyryExited := make(chan struct{})
 	t.Cleanup(func() {
 		// LOAD-BEARING. Without this guard a failure before cmd.Start reaches
@@ -756,19 +756,18 @@ func tdnDecideAfter(rec *tdnRecord) {
 
 // tdnRunnerFromArgv names the runner from claude's own command line.
 //
-// reachRunnerPathFromArgv is deliberately
-// NOT reused: it keys on --append-system-prompt-file and its comment calls that
-// "the ptyrunner-shape marker", but buildStreamRunnerClaudeArgs
-// (cmd/pyry/`buildStreamRunnerClaudeArgs`) emits the identical flag, so it answers
-// "ptyrunner" on the streamrunner path too. That is harmless in #1230, which
-// skips outright under PYRY_USE_STREAMJSON=1; this rig deliberately does not
-// copy that gate, so reusing the helper would mislabel the record on the stream
-// path with nothing going red.
+// reachRunnerPathFromArgv is deliberately NOT reused: it keys on
+// --append-system-prompt-file and its comment calls that "the ptyrunner-shape
+// marker", but buildStreamRunnerClaudeArgs emits the identical flag, so it
+// answers "ptyrunner" on the streamrunner path too. That is harmless in #1230,
+// which skips outright under PYRY_USE_STREAMJSON=1; this rig deliberately does
+// not copy that gate, so reusing the helper would mislabel the record on the
+// stream path with nothing going red.
 //
 // The two discriminating markers, each emitted by exactly one argv builder:
-// --session-id by ptyrunner.buildArgs (runner.go:618) and --input-format by
-// buildStreamRunnerClaudeArgs. Both or neither is
-// indeterminate rather than a guess.
+// --session-id by ptyrunner.buildArgs and --input-format by
+// buildStreamRunnerClaudeArgs. Both or neither is indeterminate rather than a
+// guess.
 func tdnRunnerFromArgv(claudeCommand string) string {
 	if strings.TrimSpace(claudeCommand) == "" {
 		return "indeterminate (no single claude row was pinned, so the runner was not read " +
@@ -890,9 +889,8 @@ func tdnOrNone(s string) string {
 
 // tdnFixturePtyArgv and tdnFixtureStreamArgv are the two runners' real claude
 // command lines, built from their actual argv builders — ptyrunner.buildArgs
-// (runner.go:616-625) and buildStreamRunnerClaudeArgs.
-// Both carry --append-system-prompt-file, which is precisely why that flag
-// cannot name a runner.
+// and buildStreamRunnerClaudeArgs. Both carry --append-system-prompt-file,
+// which is precisely why that flag cannot name a runner.
 const (
 	tdnFixturePtyArgv = `/opt/node/bin/node /opt/claude/cli.js --session-id ` +
 		`11111111-2222-3333-4444-555555555555 --settings /tmp/s.json --permission-mode ` +

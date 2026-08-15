@@ -19,13 +19,13 @@ package realclaude
 // over a closed set of sixteen values, and it ASSUMES THE RUN STAGED: that a Bash
 // call was issued, that it was the rig's hold command, that the rendezvous
 // completed. Two conditions this probe can hit have no value among the sixteen and
-// no field in its input record trailRunReadings (:402) — the model never issued
-// the Bash call, and the trigger did not fire.
+// no field in its input record trailRunReadings — the model never issued the Bash
+// call, and the trigger did not fire.
 //
 // Handing such a run over is not a neutral act. On an unstaged run the argv scan
 // still runs over a healthy process table, parses rows and matches nothing, so
-// the classifier falls past Steps 1-7 to trailOutcomeNoRowMatched (:150) — one of
-// its four ANSWERS, whose own comment calls it "a statement about THE SCAN, not
+// the classifier falls past Steps 1-7 to trailOutcomeNoRowMatched — one of its
+// four ANSWERS, whose own comment calls it "a statement about THE SCAN, not
 // about the command having exited" and notes there is "deliberately no 'exited
 // normally' value in this space for it to decay into". Both statements are true
 // of a run where a command existed. Published about a run where none ever did,
@@ -72,7 +72,7 @@ package realclaude
 //
 // trailDetail (`trailGateInput`) is reused rather than given a
 // finDetail twin, for the reason #1280 already settled in merged code
-// (finding_attribution_fanout_test.go:37-44): trailDetail's own "the trail*
+// (finding_attribution_fanout_test.go's header): trailDetail's own "the trail*
 // family stays out of the tdn* teardown classifier's reach" argument does not
 // transfer, because trailDetail carries no decision (it is fmt.Sprintf plus
 // reachCapCommand's 512-byte cap) and this file is BY DESIGN inside the trail
@@ -92,10 +92,10 @@ import (
 // of seven: six failures and one pass-through.
 //
 // Every value carries a `stage-` prefix, and the sub-namespace is load-bearing
-// rather than cosmetic, for the reason trail_run_outcome_test.go:108-113 gives
-// for its own third namespace: several spaces now mean nearly the same words, so
-// a copy-paste between them must read as a visible mistake rather than a
-// plausible line.
+// rather than cosmetic, for the reason the run-outcome const block
+// (`trailOutcomeRunningAtTrailer` and its siblings) gives for its own third
+// namespace: several spaces now mean nearly the same words, so a copy-paste
+// between them must read as a visible mistake rather than a plausible line.
 //
 // THE PASS-THROUGH IS DELIBERATELY NOT THE ZERO VALUE. Six of the seven are
 // failures; if the pass-through were "", a finOutcomeResult nobody filled would
@@ -104,8 +104,7 @@ import (
 // the point twice: TestTrailConstantsAreClosed
 // (`TestTrailConstantsAreClosed`) fails any closed-space value that is
 // the empty string because "a zero-valued field reads as it", and
-// trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way"
-// (trail_run_outcome_test.go:429-432).
+// trailRunReadings.PyryExited documents its own zero as pointing "the SAFE way".
 //
 // There is no out-of-contract value here and none is to be added. Seven is
 // seven: the two inputs that could otherwise want one are closed by the two
@@ -144,8 +143,8 @@ const (
 // embedded in, marshalled into, or quoted by any published record. Only
 // finOutcomeResult crosses into publishable space. The asymmetry is load-bearing
 // rather than incidental — every sibling record in this family states its content
-// rule at the type (trailRunReadings:398-401, trailRunOutcome:469-483,
-// trailGateResult:311-326) and this one states the converse for the same reason.
+// rule at the type (trailRunReadings, trailRunOutcome, trailGateResult) and this
+// one states the converse for the same reason.
 // Adding tags here "for symmetry" is the first step toward publishing two
 // captured strings into a public issue.
 //
@@ -156,11 +155,10 @@ const (
 // exists" from turning an identity check into a filesystem read or a subprocess
 // spawn.
 type finOutcomeStaging struct {
-	// BashIssued records THAT a Bash call was issued. findBashToolUse
-	// (sigterm_mid_tool_use_test.go:1488-1500) returns a tool_use ID and an event
-	// index and no command — the decoder behind it, contentBlock
-	// (tool_loop_test.go:160-168), has no `input` member — so "was a call issued"
-	// and "what was it" are genuinely two separate readings.
+	// BashIssued records THAT a Bash call was issued. findBashToolUse returns a
+	// tool_use ID and an event index and no command — the decoder behind it,
+	// contentBlock, has no `input` member — so "was a call issued" and "what was
+	// it" are genuinely two separate readings.
 	BashIssued bool
 	// IssuedCommand is what claude actually issued: VERBATIM MODEL OUTPUT, supplied
 	// by the caller because the shipped tool_use path cannot yield it.
@@ -174,9 +172,8 @@ type finOutcomeStaging struct {
 	TriggerFired   bool
 	RendezvousDone bool
 	// PinScanErrored records THAT the during-turn pin scan failed, never what it
-	// said, mirroring trailRunReadings.ArgvScanErrored
-	// (trail_run_outcome_test.go:411-418). ps stderr is a captured string on the
-	// same footing as argv.
+	// said, mirroring trailRunReadings.ArgvScanErrored. ps stderr is a captured
+	// string on the same footing as argv.
 	PinScanErrored bool
 	// PinMatchCount and PinWantCount are the scan's match count and the count the
 	// staging expected. Counts only: pinScan.Matches holds verbatim argv and stays
@@ -254,10 +251,10 @@ func finOutcomeValues() []string {
 //     something else, reporting "the trigger did not fire" is true but files "the
 //     model ran the wrong thing" under "our trigger is broken".
 //   - INSTRUMENT FAILURE BEFORE ITS RESULT (arm 5 before arm 6). pinScanArgv
-//     returns the ZERO pinScan on error (process_pin_liveness_test.go:191-196), so
-//     an errored scan arrives with PinMatchCount == 0. Checking the count first
-//     would report "matched an unexpected count" about a scan that never ran — the
-//     same defect trailOutcomeVoidArgvScanErrored is kept distinct from
+//     returns the ZERO pinScan on error, so an errored scan arrives with
+//     PinMatchCount == 0. Checking the count first would report "matched an
+//     unexpected count" about a scan that never ran — the same defect
+//     trailOutcomeVoidArgvScanErrored is kept distinct from
 //     trailOutcomeVoidNoRowsParsed to avoid, one tier up.
 func finOutcomeStagingGate(s finOutcomeStaging) finOutcomeResult {
 	if !s.BashIssued {
@@ -681,7 +678,7 @@ func TestFinOutcomeFailuresAreNotRunOutcomes(t *testing.T) {
 // against a leaking implementation. trailNeedle is placed past the cap
 // deliberately in trailPaddedTrailer
 // for the opposite kind of test; here that placement would be the defect. These
-// mirror the ~73-byte planted strings at trail_run_outcome_test.go:2308-2309, :2348-2351.
+// mirror the ~73-byte planted strings in TestTrailRunOutcomeCarriesNoCapturedBytes.
 const (
 	finOutcomePlantedStaged = "a staged hold command that also carries " + trailNeedle
 	finOutcomePlantedIssued = "a different issued command that also carries " + trailNeedle

@@ -103,7 +103,7 @@ func assertRegressionFixture(t *testing.T, path string) {
 			Subtype string `json:"subtype"`
 		}
 		if err := json.Unmarshal(ev, &hdr); err != nil {
-			// Mirrors allowed_tools_enforcement_test.go:60-67: a single
+			// Mirrors TestRealClaude_AllowedToolsEnforcement: a single
 			// malformed line must not abort the whole subtest.
 			t.Errorf("%s: stdout_events[%d] header unmarshal: %v", name, i, err)
 			continue

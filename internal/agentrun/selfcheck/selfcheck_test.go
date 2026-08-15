@@ -109,7 +109,7 @@ func TestSelfCheck_Pass(t *testing.T) {
 // that SelfCheckDenyDefault populates ptyrunner.Config.AllowedTools with the
 // canonicalAllow constant. Regression net for the silent-drift pattern that
 // produced bug #526: a required field was added to ptyrunner.Config (the
-// runner.go:245 nil-check), but the selfcheck's Config literal was not
+// AllowedTools nil-check in ptyrunner.Run), but the selfcheck's Config literal was not
 // updated, and no existing test in this package exercises the real Config
 // contract — the ptyRun mock accepts anything.
 func TestSelfCheck_PassesCanonicalAllowToPtyRunner(t *testing.T) {

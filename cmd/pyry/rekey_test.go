@@ -214,7 +214,7 @@ func TestRekeyVerdict(t *testing.T) {
 // TestRunRekey_BogusSocket_ReturnsWrappedError pins AC4 bullet 1: the
 // transport-error path. Verb invoked against a bogus socket path returns
 // a wrapped error with the `rekey:` substring. Mirrors
-// TestRunSessions_RmDispatch at cmd/pyry/sessions_test.go:73-93.
+// TestRunSessions_RmDispatch.
 func TestRunRekey_BogusSocket_ReturnsWrappedError(t *testing.T) {
 	t.Setenv("PYRY_NAME", "")
 	bogusSock := filepath.Join(t.TempDir(), "no-such.sock")

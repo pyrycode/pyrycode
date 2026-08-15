@@ -15,23 +15,22 @@ package realclaude
 // # Why an ordering argument at all: the top-ranked evidence is EMPTY here
 //
 // trailClassifyRun ranks an admissible reap-log attribution second, above every
-// point-in-time reading (`trailClassifyRun`), and argues at the
-// point of use (:1001-1005) that those readings "are expected to be late — the reap
-// completes in the time of one ps exec while the observation of the trailer trails
-// the write by up to a poll interval — so resting a verdict on them manufactures a
-// systematic false negative". :1381-1383 makes that executable.
+// point-in-time reading, and argues at the point of use — its step-2 comment —
+// that those readings "are expected to be late — the reap completes in the time
+// of one ps exec while the observation of the trailer trails the write by up to a
+// poll interval — so resting a verdict on them manufactures a systematic false
+// negative". The late-reads row in trailRunCases makes that executable.
 //
 // That route is structurally unavailable on PYRY_USE_STREAMJSON=1. The two runners
 // reap in different places:
 //
 //   - ptyrunner reaps in a defer that fires on EVERY teardown reaching it —
-//     "watchdog-fire, normal end-of-turn, and any post-Spawn early return"
-//     (internal/agentrun/ptyrunner/runner.go:387-398). Three reap call sites.
-//   - streamrunner reaps inside cmd.Cancel only — its single reap call site
-//     (internal/agentrun/streamrunner/runner.go:207-208) — and its own comment
-//     states: "It never fires on a clean exit: cancelChild there runs only after
-//     cmd.Wait returns, by which point os/exec has stopped its ctx watcher"
-//     (:203-205).
+//     "watchdog-fire, normal end-of-turn, and any post-Spawn early return" — the
+//     reap defer in ptyrunner's `Run`. Three reap call sites.
+//   - streamrunner reaps inside the cmd.Cancel hook its own `Run` installs, its
+//     single reap call site, and the comment on that hook states: "It never
+//     fires on a clean exit: cancelChild there runs only after cmd.Wait returns,
+//     by which point os/exec has stopped its ctx watcher".
 //
 // So on a healthy stream-path run pyry writes NO REAP LOG AT ALL. The attribution
 // leg is not late here — it is empty, and lateness is the wrong objection to raise
@@ -56,8 +55,7 @@ package realclaude
 // It establishes ALIVE WHEN THE TRAILER LINE WAS SIGHTED ON PYRY'S STDOUT. It does
 // NOT establish "alive when pyry declared the turn finished": on this path no
 // terminal reason is certified, so no such instant exists at all, and the shipped
-// classifier says exactly that at each of its void arms
-// (`trailClassifyRun`, :971-976, :981-990).
+// classifier says exactly that at each of `trailClassifyRun`'s void arms.
 //
 // Every value here is named after the SIGHTING, every Detail ends with
 // trailSightingInstantClause, and TestTrailSightingVoidsNeverReadAsNegative
@@ -66,12 +64,11 @@ package realclaude
 //
 // # The naming collision is this ticket's central risk
 //
-// trailOutcomeRunningAtTrailer = "run-running-at-trailer"
-// (trail_run_outcome_test.go:114-118) already ships, and its doc reads: "an
-// admissible attribution proves the process group was alive when the trailer was
-// written. THE FINDING, and the only path to one." That is the SAME ENGLISH
-// SENTENCE this predicate establishes, from the REAP-LOG evidence class this file
-// exists because the stream path lacks. A value here named for
+// trailOutcomeRunningAtTrailer = "run-running-at-trailer" already ships, and its
+// doc reads: "an admissible attribution proves the process group was alive when
+// the trailer was written. THE FINDING, and the only path to one." That is the
+// SAME ENGLISH SENTENCE this predicate establishes, from the REAP-LOG evidence
+// class this file exists because the stream path lacks. A value here named for
 // aliveness-at-the-trailer is one word from it, and a consumer that confused the
 // two would read reap-log-backed and ordering-backed evidence as one finding.
 //
@@ -79,11 +76,10 @@ package realclaude
 // different noun, and a -by-ordering suffix that names the evidence class the
 // collision is about. The second, subtler pair is handled the same way:
 // sighting-reason-pid-read-failed rather than …-liveness-instrument-failed,
-// because the shipped trailOutcomeVoidLivenessInstrument
-// (trail_run_outcome_test.go:180-184) is "run-void-liveness-instrument-failed" and
-// a reason ending in the same four words would be distinct to a map and confusable
-// to a reader. Naming it after THE PID READ keeps the run space's phrasing out of
-// this one.
+// because the shipped trailOutcomeVoidLivenessInstrument is
+// "run-void-liveness-instrument-failed" and a reason ending in the same four
+// words would be distinct to a map and confusable to a reader. Naming it after
+// THE PID READ keeps the run space's phrasing out of this one.
 //
 // Prose cannot enforce either. A per-space membership predicate is scoped to one
 // space per call and CANNOT SEE A PAIR, so all eight values below join the union
@@ -108,10 +104,9 @@ package realclaude
 // not touch the step-1 gate switch: that switch ANSWERED trailGateAbsentOwesNone
 // with an unconditional return, so a route wired below it would not have fired on
 // the one gate value it exists to serve. #1446 reached it — by consulting this
-// predicate INSIDE that arm (trail_run_outcome_test.go:865-1002), which is the only
-// placement that does not award a scan-side answer to a record the gate says
-// certifies nothing, and by publishing the finding under an evidence route of its
-// own. Nothing here changed for it: the predicate still stands alone, is still
+// predicate INSIDE that arm of `trailClassifyRun`, which is the only placement
+// that does not award a scan-side answer to a record the gate says certifies
+// nothing, and by publishing the finding under an evidence route of its own. Nothing here changed for it: the predicate still stands alone, is still
 // pure over its input, and is still driven from fixtures.
 //
 // THE OBSERVATION: the stream path leaves a backgrounded group unreaped where
@@ -151,10 +146,10 @@ const (
 	// the earlier sighting. The finding, and the only path to one HERE.
 	//
 	// Deliberately NOT anything containing "running-at-trailer": the shipped
-	// trailOutcomeRunningAtTrailer (trail_run_outcome_test.go:118) states the same
-	// English sentence from the REAP-LOG evidence class, and the whole reason this
-	// file exists is that the stream path has no reap log. The -by-ordering suffix
-	// names the evidence class, which is the axis the two differ on.
+	// trailOutcomeRunningAtTrailer states the same English sentence from the
+	// REAP-LOG evidence class, and the whole reason this file exists is that the
+	// stream path has no reap log. The -by-ordering suffix names the evidence
+	// class, which is the axis the two differ on.
 	trailSightingEstablished = "sighting-alive-by-ordering"
 	// trailSightingUnestablished: the ordering was certified and the pinned pid was
 	// not alive at the later read. A statement about THIS EVIDENCE ROUTE, not about
@@ -192,10 +187,9 @@ const (
 	// nothing was measured.
 	//
 	// Deliberately NOT …-liveness-instrument-failed: the shipped
-	// trailOutcomeVoidLivenessInstrument is "run-void-liveness-instrument-failed"
-	// (trail_run_outcome_test.go:184), and a reason ending in those four words would
-	// be distinct to the union map and confusable to a reader. This one is named
-	// after THE PID READ.
+	// trailOutcomeVoidLivenessInstrument is "run-void-liveness-instrument-failed",
+	// and a reason ending in those four words would be distinct to the union map
+	// and confusable to a reader. This one is named after THE PID READ.
 	trailSightingReasonPidReadFailed = "sighting-reason-pid-read-failed"
 	// trailSightingReasonOrderingUncertified: the ordering result was any of
 	// #1439's three trailOrderVoid* values. Passed through, never re-decided, and
@@ -231,8 +225,8 @@ const trailSightingInstantClause = "the instant this verdict is about is the tra
 // smallest possible set.
 //
 // Unlike trailOrderResult, this record's producer CAN see captured bytes: a
-// pinStateOutcome carries subprocess stderr in ToolStderr
-// (`pinClassifyState`) and folds it into Detail (:348-349). That is
+// pinStateOutcome carries subprocess stderr in ToolStderr and folds it into
+// Detail, both in `pinClassifyState`'s stderr branch. That is
 // why TestTrailSightingResultCarriesNoCapturedBytes ships both halves — the needle
 // sweep AND the structural key walk — where #1439 could honestly ship only the
 // second (`TestTrailOrderResultCarriesNoCapturedBytes`).
@@ -251,10 +245,9 @@ type trailSightingResult struct {
 // Pure over its input: no exec, no clock, no filesystem. That is what lets every
 // arm be driven with no live turn and no credentials. It takes no *testing.T and
 // never fails a test — an instrument failure observed mid-turn is a datum to
-// publish, not a reason to abort the turn, the same contract as trailGate
-// (trailer_admissibility_test.go:371-372), trailCertifyOrdering, trailScan,
-// tdnClassifyReapLog, pinReadState and fifoLiveRead. It consults no parentage and
-// requires no reap line.
+// publish, not a reason to abort the turn, the same contract as trailGate,
+// trailCertifyOrdering, trailScan, tdnClassifyReapLog, pinReadState and
+// fifoLiveRead. It consults no parentage and requires no reap line.
 //
 // # Two whole records, and the parameter list IS the enforcement
 //
@@ -298,9 +291,8 @@ type trailSightingResult struct {
 //     negative may be read from it.
 //  2. AN INSTRUMENT FAILURE NEVER READS AS A CLEAN NEGATIVE. Void, never
 //     unestablished — the same collapse trailOutcomeVoidLivenessInstrument's doc
-//     (trail_run_outcome_test.go:180-184) refuses one layer up: folding it into a
-//     soft negative "would manufacture a clean negative out of the instrument's
-//     breakage".
+//     refuses one layer up: folding it into a soft negative "would manufacture a
+//     clean negative out of the instrument's breakage".
 //
 // # One precedence decision, stated and then checked
 //
@@ -346,7 +338,8 @@ type trailSightingResult struct {
 // it catches.
 //
 // All five arms go through trailDetail, so all inherit the 512-byte cap
-// (`reachEnableEnv`), which truncates SILENTLY — and the coverage
+// (`reachMaxCommandBytes`, applied by `reachCapCommand`), which truncates
+// SILENTLY — and the coverage
 // test asserts the truncation marker is absent from every row, so a Detail whose
 // argument would be cut off reddens here rather than reaching an operator's
 // artifact.
@@ -568,10 +561,9 @@ func trailSightingCheck(t *testing.T, got trailSightingResult, want trailSightin
 			"value and reason to interpret")
 	}
 	// The MARKER and not a length against 512: reachCapCommand returns its input
-	// unchanged AT exactly reachMaxCommandBytes and appends the marker only past it
-	// (background_reach_probe_test.go:945-950), so a len < 512 check both
-	// false-fails at the boundary and pins a literal that drifts when the constant
-	// moves. The marker test is the property itself.
+	// unchanged AT exactly reachMaxCommandBytes and appends the marker only past
+	// it, so a len < 512 check both false-fails at the boundary and pins a literal
+	// that drifts when the constant moves. The marker test is the property itself.
 	if strings.Contains(got.Detail, reachTruncationMarker) {
 		t.Errorf("the Detail was truncated at the %d-byte cap, so its argument reaches an "+
 			"operator cut off: %q", reachMaxCommandBytes, got.Detail)
@@ -845,8 +837,8 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 }
 
 // TestTrailSightingResultCarriesNoCapturedBytes is AC5 made executable, in
-// TestTrailRunOutcomeCarriesNoCapturedBytes's shape
-// (trail_run_outcome_test.go:2249-2526) and reusing the shipped trailNeedle.
+// TestTrailRunOutcomeCarriesNoCapturedBytes's shape and reusing the shipped
+// trailNeedle.
 //
 // THIS SWEEP IS LOAD-BEARING HERE IN A WAY IT COULD NOT BE FOR #1439, and the
 // family's existing sweeps prove nothing about this record: they are
@@ -855,9 +847,9 @@ func TestTrailSightingValuesAgreeWithThePredicate(t *testing.T) {
 //
 // The two LIVE capture routes are pinStateOutcome's Detail and ToolStderr:
 // pinClassifyState's branch 1 is "err != nil, stderr non-empty -> instrument-failed,
-// naming exit status + stderr", so raw ps stderr reaches ToolStderr verbatim
-// (`pinClassifyState`) and is folded into Detail (:348-349).
-// StateColumn is string-bearing too and costs one line to include.
+// naming exit status + stderr", so raw ps stderr reaches ToolStderr verbatim there
+// and is folded into that branch's Detail. StateColumn is string-bearing too and
+// costs one line to include.
 //
 // ordering.Detail is planted as well, and it is worth naming what that plant IS AND
 // IS NOT: #1439 pinned its predicate's inputs to three booleans and builds its

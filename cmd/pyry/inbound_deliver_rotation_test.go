@@ -276,7 +276,7 @@ func (w *rotatingWriter) snapshot() []childSnapshot {
 //
 // rekey ADDS the new id and KEEPS the old one, because that is what RebindSession
 // does: CurrentSessionID moves to the new id and the old id is appended to
-// SessionHistory, and conversationForSession (relay.go:845-855) matches either.
+// SessionHistory, and conversationForSession matches either.
 // Keeping the old id is what leaves the child-exit lane's clear — keyed to the
 // runner's CONSTRUCTION-time session id, which RestartFresh does not rotate —
 // resolvable after a rotation; dropping it would turn that lane into a
@@ -349,7 +349,7 @@ func (r *rotatingRunner) BeginRotation() func() { return r.w.BeginRotation() }
 //
 //   - TestInboundDeliver_RotationReleasesHeldTurn_DeliversToFreshChild inverts
 //     steps 6 and 7 relative to production — teardown BEFORE the clear — and says
-//     so at :281-293, naming the un-inverted order as "a DISTINCT window this test
+//     so in its own doc, naming the un-inverted order as "a DISTINCT window this test
 //     deliberately does not decide". This test runs the PRODUCTION order: the
 //     clear fires while the outgoing child is still live.
 //   - The control below never begins a rotation at all.
