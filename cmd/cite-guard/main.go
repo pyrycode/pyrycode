@@ -16,10 +16,14 @@
 // codegraph indexes this repo, including files behind the e2e_realclaude
 // build tag, so a symbol name resolves on demand and never rots.
 //
-// # The rule: name the symbol, at any depth
+// # The rule: name the symbol, at any depth, single line or range
 //
 // If a citation resolves to a declaration -- because the line IS one, or is a
 // doc comment on one, or sits anywhere inside one -- name that declaration.
+// A RANGE is a citation too, and rots the same way. Both its ends are
+// resolved: when they agree it reads exactly like a single-line citation, and
+// when they disagree the range spans declarations and the message names both
+// ends, because there is no single symbol to offer.
 //
 // An earlier version exempted citations more than 20 lines deep, reasoning
 // that there a line number pointed somewhere a name could not reach. The
@@ -41,10 +45,16 @@
 //     that this guard does not do. A cleanup script that assumed self-file
 //     produced confidently wrong symbols; trail_run_outcome_test.go documents
 //     the same hazard on #1434's evidence.
-//   - Line RANGES (`:2103-2147`). A range carries information a symbol name
-//     does not.
+//   - A range whose ends do not both resolve. Same posture as an ambiguous
+//     basename below: a wrong answer is worse than no answer.
 //   - Anything outside a `//` comment. String literals and code are not this
 //     guard's business.
+//
+// Ranges were exempt until 2026-08-14, on the reasoning that a span carries
+// information a symbol name does not. The 2026-08-13 sweep had already
+// converted 151 of them on the opposite argument and left the exemption
+// standing, so the written rule spent a day recruiting exactly the citations
+// the sweep removed. The operator closed it by keeping ranges out.
 //
 // # Why a guard and not just a style rule
 //
@@ -79,19 +89,47 @@ import (
 const deepThreshold = 20
 
 // allowlist holds path suffixes exempt from the scan. This guard's own source
-// is exempt because it must spell the pattern it bans.
+// is exempt because it must spell the pattern it bans, and so is its test,
+// which must spell it in quantity. The scan keys on a line containing `//`,
+// so an un-allowlisted test for this guard would flag itself.
 var allowlist = []string{
 	"cmd/cite-guard/main.go",
+	"cmd/cite-guard/main_test.go",
 }
 
 var (
 	// declRe matches a top-level declaration and captures its name.
 	declRe = regexp.MustCompile(`^(?:func|type|const|var)\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)`)
-	// citeRe matches a qualified citation. The trailing character class
-	// rejects ranges, and rejecting a following digit stops the regex engine
-	// backtracking into a shorter number to satisfy the check -- a cleanup
-	// script hit exactly that, matching ":93" out of ":934-944".
-	citeRe = regexp.MustCompile(`\b([A-Za-z0-9_]+\.go):([0-9]+)([^0-9\-]|$)`)
+	// citeRe matches a qualified citation, single line or range. The end of a
+	// range is optional, so group 3 is empty for a single-line citation.
+	//
+	// # What the trailing character class does, measured rather than assumed
+	//
+	// Before ranges were matched, it did two jobs: it rejected ranges, and it
+	// stopped the engine settling for a shorter number, the failure a cleanup
+	// script hit when it matched ":93" out of ":934-944".
+	//
+	// Adding the optional end group retired the second job. Greedy matching now
+	// takes ":934-944" whole on the first attempt, so there is no backtracking
+	// to prevent. Measured on 2026-08-14 by running both patterns over the same
+	// inputs: dropping the class changes the result on exactly two shapes, and
+	// both are MALFORMED citations rather than well-formed ones.
+	//
+	//	runner.go:934-944-955   with the class: no match. Without: ":934-944",
+	//	                        i.e. a silent prefix of what the author wrote.
+	//	runner.go:934-          with the class: no match. Without: ":934".
+	//
+	// So the class is kept for a different reason than it was written for: it
+	// refuses a citation it cannot read whole, rather than reporting part of
+	// one and quoting a range the comment does not contain. The cost is that a
+	// malformed range escapes the ban entirely, which is accepted because the
+	// shape is rare and already broken.
+	//
+	// TestCiteRe_RejectsMalformedCitations pins the surviving property and
+	// fails if the class is dropped. TestCiteRe_CapturesTheWholeRange pins the
+	// greediness now doing the first job. Both matter because this guard
+	// reports a clean tree and a broken pattern identically, with exit 0.
+	citeRe = regexp.MustCompile(`\b([A-Za-z0-9_]+\.go):([0-9]+)(?:-([0-9]+))?([^0-9\-]|$)`)
 )
 
 func isAllowlisted(rel string) bool {
@@ -330,7 +368,7 @@ func main() {
 			}
 			comment := sc.Text()[idx:]
 			for _, m := range citeRe.FindAllStringSubmatch(comment, -1) {
-				target, numStr := m[1], m[2]
+				target, numStr, endStr := m[1], m[2], m[3]
 				n, cerr := strconv.Atoi(numStr)
 				if cerr != nil {
 					continue
@@ -345,19 +383,42 @@ func main() {
 				if !ok {
 					continue
 				}
+				// cited is what the message echoes back, so a range is quoted
+				// as the author wrote it rather than as its start line alone.
+				cited := fmt.Sprintf("%s:%d", target, n)
+				if endStr != "" {
+					end, eerr := strconv.Atoi(endStr)
+					if eerr != nil {
+						continue
+					}
+					endSym, _, _, endOK := resolve(lines, end)
+					if !endOK {
+						continue
+					}
+					cited = fmt.Sprintf("%s:%d-%d", target, n, end)
+					if endSym != sym {
+						// Spans declarations, so no single symbol replaces it.
+						// Naming both ends is the honest report: it states only
+						// what actually resolved.
+						hits = append(hits, fmt.Sprintf(
+							"%s:%d: name the symbols instead of %s — spans `%s` to `%s`, so say which you mean or split the reference",
+							rel, lineNo, cited, sym, endSym))
+						continue
+					}
+				}
 				switch {
 				case atDecl:
 					hits = append(hits, fmt.Sprintf(
-						"%s:%d: cite `%s` instead of %s:%d — the line IS its declaration",
-						rel, lineNo, sym, target, n))
+						"%s:%d: cite `%s` instead of %s — the line IS its declaration",
+						rel, lineNo, sym, cited))
 				case offset <= deepThreshold:
 					hits = append(hits, fmt.Sprintf(
-						"%s:%d: cite `%s` instead of %s:%d — %d lines into that declaration",
-						rel, lineNo, sym, target, n, offset))
+						"%s:%d: cite `%s` instead of %s — %d lines into that declaration",
+						rel, lineNo, sym, cited, offset))
 				default:
 					hits = append(hits, fmt.Sprintf(
-						"%s:%d: cite `%s` instead of %s:%d — %d lines deep, so `%s` is probably too big",
-						rel, lineNo, sym, target, n, offset, sym))
+						"%s:%d: cite `%s` instead of %s — %d lines deep, so `%s` is probably too big",
+						rel, lineNo, sym, cited, offset, sym))
 				}
 			}
 		}
@@ -378,10 +439,10 @@ func main() {
 		} else {
 			fmt.Fprintln(os.Stderr, "\nScope: whole tree (no merge base resolved, or this IS the base).")
 		}
-		fmt.Fprintln(os.Stderr, "\nWhy: line numbers rot on every insertion and nothing maintains them.")
-		fmt.Fprintln(os.Stderr, "codegraph resolves a symbol name on demand. A line number is fine when it")
-		fmt.Fprintln(os.Stderr, "If a name is not precise enough to locate something, that declaration is too big;")
-		fmt.Fprintln(os.Stderr, "the imprecision is the finding, not a reason to keep the line number.")
+		fmt.Fprintln(os.Stderr, "\nWhy: line numbers rot on every insertion and nothing maintains them,")
+		fmt.Fprintln(os.Stderr, "and codegraph resolves a symbol name on demand. A range rots the same way.")
+		fmt.Fprintln(os.Stderr, "If a name is not precise enough to locate what you mean, that declaration is")
+		fmt.Fprintln(os.Stderr, "too big; the imprecision is the finding, not a reason to keep the number.")
 		os.Exit(1)
 	}
 }
