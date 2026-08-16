@@ -90,7 +90,7 @@ journalctl --user -u pyry -f            # tail the supervisor's structured logs
 pyry logs                               # last 200 supervisor events from in-memory ring
 ```
 
-For claude's actual output, attach: `pyry attach` (Ctrl-B d to detach).
+For claude's actual output, use the desktop or mobile client. `pyry attach` was removed in #1348 along with the terminal path that fed it.
 
 ### Boot persistence
 
@@ -271,13 +271,13 @@ Note that you have to supply the original claude flags again — pyry does not r
 
 **`pyry status` from a different shell can't find the daemon.** Default socket is `~/.pyry/pyry.sock`. If your service-mode pyry is under a non-default name (`-pyry-name foo`) the socket is `~/.pyry/foo.sock` and `pyry status` needs the same name (or `PYRY_NAME=foo` exported in your shell).
 
-**`pyry attach` shows nothing for several seconds.** Normal — claude is waking up, possibly finishing a slow operation, or in mid-restart backoff. `pyry status` from another shell will tell you which phase the supervisor is in.
+**A client shows nothing for several seconds after a send.** Normal — claude is waking up, possibly finishing a slow operation, or in mid-restart backoff. `pyry status` will tell you which phase the runner is in.
 
 **Two pyrys racing for the same socket.** One starts, the other's `Listen` either fails (if the first is genuinely listening) or silently replaces the first's socket file (if the first crashed leaving a stale file). Always `systemctl --user status pyry` / `launchctl list | grep pyrycode` before manually starting another instance — and if you want a second instance deliberately, use `-pyry-name`.
 
 **Channel hooks not firing under pyry.** Pyry doesn't intercept claude's hook execution — hooks fire from inside the claude child. If `<workdir>/.claude/hooks/*.sh` worked under tmux+bash but not under pyry, the most likely cause is the systemd / launchd `PATH` not including the directories your hook scripts call out to (`gh`, `curl`, etc.). Add them to `Environment=` / `EnvironmentVariables` — or, if you have just installed a new shimmed tool after enabling the service, see [Updating PATH after installing new tools](#updating-path-after-installing-new-tools) for the refresh procedure.
 
-**Pyry logs say "spawning claude" but `pyry attach` produces nothing.** You're attaching to the right pyry, but claude has buffered output and isn't sending it until something changes. Type something — anything from your end of the attach — and claude will respond. This is normal terminal-buffering behavior, not a pyry bug.
+**Pyry logs say "spawning claude" but no reply arrives.** The child is up and simply has nothing to say yet; on the stream-json surface claude emits nothing until it is given a turn. Send a message from a paired client. If the logs then show no assistant output at all, check `pyry status` for restart-backoff churn.
 
 **The mobile (or desktop) app connects, then immediately drops and reconnects in a loop.** The relay leg speaks Mobile Protocol v2 (Noise_IK end-to-end encryption) — the only protocol the daemon or the mobile/desktop clients speak. (Before [#913](knowledge/codebase/913.md), `PYRY_MOBILE_V2=0` could force the daemon onto a legacy v1 dispatch path that produced exactly this loop against a v2-only client; that escape hatch no longer exists — a stale `PYRY_MOBILE_V2=0` in the unit/plist `Environment` is now inert and cannot cause this symptom.) If you hit this loop, the remaining cause is a stale relay deployment still sending binary WebSocket frames — redeploy the relay from current `main`.
 

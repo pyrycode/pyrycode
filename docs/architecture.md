@@ -185,14 +185,10 @@ launchd starts /usr/local/bin/pyry --channels plugin:discord …
       ├─ go io.Copy(ptmx, bridge) + io.Copy(bridge, ptmx)
       └─ cmd.Wait()
 
-(meanwhile, in a separate shell:)
-pyry attach
-├─ control.Attach(ctx, sock, cols, rows)
-├─ json handshake → server
-├─ server.handleAttach: bridge.Attach(conn, conn) → done channel
-├─ ack OK back to client
-├─ raw mode on local stdin, escape-detector pumping bytes to conn
-└─ (until Ctrl-B d, server hangup, or local stdin EOF)
+(the `pyry attach` flow that stood here — control-socket handshake, bridge
+handoff, raw mode and the Ctrl-B d escape detector — was removed in #1348 along
+with the terminal path it read from. A running session is reached through a
+paired client over the relay instead.)
 ```
 
 ## Why these choices

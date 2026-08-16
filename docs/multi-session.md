@@ -25,7 +25,7 @@ The structural change for Phase 1 is to lift that single supervisor into a pool.
    external transport ───▶│   Router (channel→session,       │
    (Discord, Telegram,    │           mobile→session)        │
     mobile API,           │             │                    │
-    `pyry attach <id>`)   │             ▼                    │
+    desktop / mobile)     │             ▼                    │
                           │   ┌──────────────────────────┐   │
                           │   │ Pool                     │   │
                           │   │   map[UUID]*Supervisor   │   │
@@ -146,7 +146,7 @@ These are real design problems. None block Phase 1.0–1.1. A few block Phase 1.
 Some scattered items worth pinning before implementation starts:
 
 - Pool refactor (1.0) is a low-risk pure-internal refactor: external behaviour is unchanged, just the data structures lift to multi-capable. CI must remain green throughout. No new tests for "multi" in 1.0 — those land with 1.1.
-- Per-session attach exclusivity should match today's single-attach exclusion. One terminal per session at a time; second `pyry attach <id>` while a first is active gets a clean error. Concurrent attaches across *different* sessions are fine (different PTYs).
+- ~~Per-session attach exclusivity should match today's single-attach exclusion.~~ Moot since #1348 removed `pyry attach`; there is no terminal to hold exclusively.
 - `sessions.json` should be human-readable JSON, atomic-rename writes (write-temp-then-rename), idempotent on reload.
 - The Discord client (Phase 2.0) is a long-lived goroutine inside pyry. Reconnection logic, backoff on disconnect, log-on-restart pattern matches the existing supervisor logic — possibly extractable into a small reusable backoff helper.
 - Don't generalise `Router` until there are two implementations. Phase 2.0 has a single concrete `ChannelsRouter`; abstraction lands when the mobile router shows up.
