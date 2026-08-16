@@ -24,7 +24,7 @@ cmd/substrate-guard/           Build gate: no claude-TUI substrate literals outs
 internal/supervisor/           PTY-hosted claude supervision (non-production; unverified, see #1348)
 internal/streamsup/            Stream-json supervision (production interactive path)
 internal/sessions/             Multi-session pool: registry, /clear rotation, idle eviction
-internal/agentrun/             `pyry agent-run` runners (ptyrunner, streamrunner/streamjson)
+internal/agentrun/             `pyry agent-run` runner (streamrunner/streamjson; the terminal runner was deleted in #1348)
 internal/control/              Unix-socket control plane (status, logs, attach, stop)
 internal/relay/ + transport/   Remote access: relay WSS client + handlers
 internal/noise/ + keys/        Noise_IK E2E crypto + static keypair

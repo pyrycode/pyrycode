@@ -35,7 +35,7 @@ The same `pyry` binary runs in two modes, auto-detected from whether stdin is a 
 | Mode | Trigger | What happens |
 |---|---|---|
 | **Foreground** | You ran `pyry` from a real terminal | PTY is bridged directly to your stdin/stdout. Same UX as running `claude`, plus auto-restart. |
-| **Service** | Pyry was started without a TTY (launchd, systemd, `nohup`, `< /dev/null`, …) | PTY master lives in the supervisor with no local bridge. Output is discarded until a client attaches. `pyry attach` from a separate shell takes over interactively. |
+| **Service** | Pyry was started without a TTY (launchd, systemd, `nohup`, `< /dev/null`, …) | claude runs headless on the stream-json surface. Its output reaches paired clients (desktop, mobile) over the relay; there is no terminal to borrow. |
 
 Foreground is for development and experimentation. Service is for the real deployment — pyry running as a daemon you connect to from any shell, surviving laptop sleep, SSH disconnects, and accidental `/exit`.
 
@@ -128,30 +128,21 @@ In practice this never bites because `claude` doesn't have any `-pyry-*` flags.
 
 Service mode is the load-bearing deployment: pyry running as a long-lived daemon, supervised claude detached from any specific terminal, accessible from any shell. This is how you'd run pyry on a server, on a Linux home box, or under launchd on a Mac.
 
-The mode toggle is automatic — when pyry starts without a controlling terminal it switches to service mode and exposes the `pyry attach` verb. See [`deployment.md`](deployment.md) for systemd and launchd setup walkthroughs.
+The mode toggle is automatic — when pyry starts without a controlling terminal it switches to service mode. See [`deployment.md`](deployment.md) for systemd and launchd setup walkthroughs.
 
-### Attaching
+### Reaching a running session
 
-Once pyry is running as a service, your day-to-day access pattern is:
+There is no terminal to attach to. claude runs on the stream-json surface, so its
+output is a structured event stream rather than screen bytes, and the daemon fans
+that stream to paired clients over the relay. Use the desktop or mobile client to
+watch or steer a live session.
 
-```bash
-pyry attach       # your terminal becomes claude's terminal
-                  # interact normally
-                  # press Ctrl-B then d to detach
-                  # pyry and claude keep running
-```
+`pyry attach` and its `Ctrl-B d` detach existed until #1348 (2026-08-16) and were
+removed with the terminal-driving path they read from. They had been non-functional
+since the 2026-07-24 cutover, because the bridge they read was only ever fed by the
+terminal copy loop.
 
-The escape sequence is `Ctrl-B` then `d` — the same convention as `tmux`. Anything else after `Ctrl-B` (including a typo like `Ctrl-B s`) is forwarded normally; only the literal `Ctrl-B d` triggers detach. False positives are unlikely because `Ctrl-B` is rarely typed in normal claude interaction.
-
-Detach **does not** stop pyry. To actually shut the daemon down, use `pyry stop` or `systemctl --user stop pyry` / `launchctl unload`.
-
-Only one client can attach at a time. A second `pyry attach` while another is connected gets a clean `attach: bridge already has an attached client` error.
-
-### Window size
-
-Pyry sends your terminal's columns and rows in the attach handshake. The current Phase 0 implementation accepts these values but does not yet propagate them to the PTY — claude renders at whatever default size the supervisor's PTY was allocated with. Live SIGWINCH propagation while attached is on the roadmap.
-
-In practice: if claude's rendering looks wrong after attach (wrapped lines, wrong column count), detach and reattach to refresh. This will go away when the geometry plumbing lands.
+`pyry status`, `pyry logs` and `pyry stop` are unaffected and work from any shell.
 
 ## Control verbs
 
@@ -208,14 +199,6 @@ Internally: the server acks `OK`, then triggers the same shutdown path as SIGINT
 
 Under a service manager, `pyry stop` does the same job as `systemctl --user stop pyry` or `launchctl unload`. Either is fine.
 
-### `pyry attach`
-
-Covered above under [Service mode](#service-mode-production). Three rules of thumb:
-
-- Press `Ctrl-B d` to detach, not `Ctrl-C`.
-- Detach leaves the daemon running. Use `pyry stop` to actually stop.
-- Only one attacher at a time.
-
 ## Multiple instances
 
 Sometimes you want more than one pyry running. Common reasons:
@@ -242,7 +225,7 @@ For shells that work primarily with one named instance, set the environment vari
 export PYRY_NAME=elli
 pyry &                          # supervises elli
 pyry status                     # queries elli
-pyry attach                     # attaches to elli
+pyry logs                       # tails elli
 ```
 
 Or alias it for convenience:
@@ -281,7 +264,7 @@ You're used to running `claude` in your terminal. Just run `pyry` instead. Every
 
 ### Running pyry as a background service
 
-See [`deployment.md`](deployment.md). Short version: install the binary, drop the systemd unit or launchd plist into the right place, edit `ExecStart` to add any claude flags you need, enable the service. Use `pyry attach` to talk to it.
+See [`deployment.md`](deployment.md). Short version: install the binary, drop the systemd unit or launchd plist into the right place, edit `ExecStart` to add any claude flags you need, enable the service. Pair a client to talk to it.
 
 ### Multiple project sessions
 
@@ -290,7 +273,7 @@ Use `-pyry-name` per project. Claude's session storage is keyed to working direc
 ```bash
 cd ~/Projects/foo && pyry -pyry-name foo &
 cd ~/Projects/bar && pyry -pyry-name bar &
-pyry attach -pyry-name foo
+pyry status -pyry-name foo
 ```
 
 ### Migrating from `tmux + claude`
@@ -300,8 +283,7 @@ If you currently run claude under tmux for resilience, pyry is a near-drop-in re
 | You used to | You now |
 |---|---|
 | `tmux new -s claude` then `claude --some-flags` inside | `pyry --some-flags` under launchd / systemd |
-| `tmux attach -t claude` | `pyry attach` |
-| `tmux send-keys 'C-b d'` (detach) | `Ctrl-B d` (same key, but routed through pyry's escape detector) |
+| `tmux attach -t claude` | the desktop or mobile client (there is no terminal to attach to) |
 | `tmux kill-session -t claude` | `pyry stop` |
 
 Pyry adds: auto-restart with backoff, session resume on every restart via `--continue`, structured supervisor logs queryable via `pyry logs`, and a stable Unix-socket control plane.
@@ -331,14 +313,6 @@ The daemon isn't running, or it's running under a different name. Check:
 That's the design. Pyry treats *any* child exit as a crash and restarts it. To actually stop the daemon: `pyry stop` from another shell, `systemctl --user stop pyry`, or send SIGTERM to the pyry process directly.
 
 This behavior is deliberate: in production (service mode over SSH), if `/exit` killed pyry you couldn't get back to claude until someone manually started it again. Auto-restart is the always-on contract.
-
-### `attach: bridge already has an attached client`
-
-Someone else is currently attached. Phase 0 enforces single-attacher. Either find them and ask them to detach, or wait. (Long term: `pyry status` could surface the attached client's PID; not yet implemented.)
-
-### `attach: no attach provider configured (daemon may be in foreground mode)`
-
-You ran `pyry attach` against a daemon that started in foreground mode. Foreground pyry has the PTY bridged to its own terminal — there's nothing to attach to. Restart pyry without a TTY (e.g., under launchd / systemd, or `nohup pyry < /dev/null > pyry.log 2>&1 &`).
 
 ### `make check` fails on staticcheck
 

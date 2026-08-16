@@ -42,7 +42,7 @@ The smallest thing that can replace `tmux` + the bash restart loop and host Pyry
 - [x] systemd user unit template
 - [x] launchd plist for macOS (cross-platform: Linux + macOS targeted; Windows out of scope)
 - [x] Cross-compile verified for darwin/amd64 and darwin/arm64
-- [x] Unix control socket — `pyry status`, `pyry stop`, `pyry logs`, `pyry attach` all live
+- [x] Unix control socket — `pyry status`, `pyry stop`, `pyry logs` all live (`pyry attach` shipped here too and was removed in #1348)
 - [x] Tests (unit + integration) for supervisor, bridge, and control plane
 - [x] CLI transparency — pyry forwards unknown args to claude verbatim; pyry's own flags use `-pyry-*` prefix
 - [x] Named instances — `~/.pyry/<name>.sock` socket layout, `-pyry-name` flag, `PYRY_NAME` env var
