@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -11,7 +12,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
 )
 
@@ -22,6 +22,11 @@ const secretModalBody = "ULTRA-SECRET-MODAL-BODY-1234"
 // fakeKeystroker records every safe-answer verb call and returns an injectable
 // error. The resolver is called single-threaded in these tests, so no mutex is
 // needed.
+// errNoLiveSessionForTest stands in for the keystroke-cannot-land error. It was
+// supervisor.ErrNoLiveSession until #1348 deleted that package; the tests below
+// only ever needed *an* error to propagate, never that specific one.
+var errNoLiveSessionForTest = errors.New("no live session")
+
 type fakeKeystroker struct {
 	escCalls    int
 	answerCalls []string // one entry per Answer(choice), in call order
@@ -246,7 +251,7 @@ func TestModalResolverV2_Cancel_KeystrokeError(t *testing.T) {
 
 	reg := modalbridge.New()
 	modalID := recordPermissionModal(t, reg, secretModalBody)
-	kb := &fakeKeystroker{err: supervisor.ErrNoLiveSession}
+	kb := &fakeKeystroker{err: errNoLiveSessionForTest}
 	logger, logBuf := auditLogger()
 	dev := testDevice(t)
 
@@ -379,7 +384,7 @@ func TestModalResolverV2_Timeout_KeystrokeError(t *testing.T) {
 
 	reg := modalbridge.New()
 	modalID := recordPermissionModal(t, reg, secretModalBody)
-	kb := &fakeKeystroker{err: supervisor.ErrNoLiveSession}
+	kb := &fakeKeystroker{err: errNoLiveSessionForTest}
 	logger, logBuf := auditLogger()
 
 	r := newModalResolverV2(reg, kb, logger)
@@ -765,7 +770,7 @@ func TestModalResolverV2_Answer_KeystrokeError(t *testing.T) {
 
 	reg := modalbridge.New()
 	modalID := recordPermissionModal(t, reg, secretModalBody)
-	kb := &fakeKeystroker{err: supervisor.ErrNoLiveSession}
+	kb := &fakeKeystroker{err: errNoLiveSessionForTest}
 	logger, logBuf := auditLogger()
 	dev := eligibleDevice(t)
 
@@ -1031,151 +1036,6 @@ func TestModalResolverV2_NilEmitSeams_Safe(t *testing.T) {
 		}
 		if kb.escCalls != 1 {
 			t.Errorf("SendEsc calls = %d, want 1 (pre-built path intact)", kb.escCalls)
-		}
-	})
-}
-
-// TestModalKeystrokerOrNoop pins the typed-nil-in-interface trap (#1131), the
-// fourth and final w.sup reader guarded (sibling of screenSnapshotterOrNil,
-// #1101). A nil *supervisor.Supervisor (the stream-json bootstrap path, where
-// Session.Supervisor() returns nil per #1077) must become a NON-NIL noopKeystroker,
-// NOT a genuine nil interface and NOT the boxed typed-nil pointer: ResolveCancel /
-// ResolveTimeout call kb.SendEsc() unconditionally, so a boxed typed-nil would
-// nil-deref inside sendModalKey → panic, and a genuine nil interface would panic
-// just the same (the resolver has no nil-kb arm). A non-nil supervisor passes
-// straight through so the PTY path is byte-identical (AC-4).
-func TestModalKeystrokerOrNoop(t *testing.T) {
-	t.Parallel()
-
-	t.Run("nil supervisor yields a non-panicking no-op keystroker", func(t *testing.T) {
-		t.Parallel()
-		kb := modalKeystrokerOrNoop((*supervisor.Supervisor)(nil))
-
-		if kb == nil {
-			t.Fatal("modalKeystrokerOrNoop(nil) = nil interface; want a non-nil no-op keystroker")
-		}
-		// It must NOT be the boxed typed-nil supervisor: a naive `return sup`
-		// (no guard) fails here — the type-assert would succeed and SendEsc below
-		// would nil-deref → panic.
-		if _, isSup := kb.(*supervisor.Supervisor); isSup {
-			t.Fatal("modalKeystrokerOrNoop(nil) returned a *supervisor.Supervisor; want a no-op keystroker")
-		}
-		// All three actuations are tolerated no-ops that return nil without panic.
-		if err := kb.SendEsc(); err != nil {
-			t.Errorf("noop SendEsc() = %v, want nil", err)
-		}
-		if err := kb.Answer("1"); err != nil {
-			t.Errorf("noop Answer() = %v, want nil", err)
-		}
-		if err := kb.AcceptTrust(); err != nil {
-			t.Errorf("noop AcceptTrust() = %v, want nil", err)
-		}
-	})
-
-	t.Run("non-nil supervisor passes straight through", func(t *testing.T) {
-		t.Parallel()
-		// A zero-value &supervisor.Supervisor{} is a legal cross-package non-nil
-		// pointer; the helper never calls a keystroke, so an empty composite literal
-		// suffices to prove pointer-identity pass-through (AC-4).
-		sup := &supervisor.Supervisor{}
-		kb := modalKeystrokerOrNoop(sup)
-
-		got, ok := kb.(*supervisor.Supervisor)
-		if !ok {
-			t.Fatalf("modalKeystrokerOrNoop(sup) is %T; want the same *supervisor.Supervisor", kb)
-		}
-		if got != sup {
-			t.Error("modalKeystrokerOrNoop(sup) returned a different pointer; want pass-through identity")
-		}
-	})
-}
-
-// TestModalResolverV2_StreamMode_NoPanic proves the security-critical AC: in
-// stream mode (the resolver built over a typed-nil supervisor via
-// modalKeystrokerOrNoop) an inbound modal_cancel / deny-on-timeout consumes the
-// modal, returns its dismissal, and does NOT panic on the unconditional SendEsc —
-// while routing NO keystroke to a non-existent PTY. The underlying stream-json
-// approval stays fail-closed: the cancel/timeout paths never touch streamApprovals
-// (it is nil here and both methods never reference it), so no cancel/timeout path
-// can resolve a permbridge completer to allow; the permbridge completer's own
-// deny-on-timeout (#1103) is the deterministic deny. AC-1, AC-2, AC-3.
-func TestModalResolverV2_StreamMode_NoPanic(t *testing.T) {
-	t.Parallel()
-
-	// The resolver as wired in stream mode: keystroker is the no-op, and the
-	// stream-approval verdict seam is left unwired (as in ResolveCancel/Timeout,
-	// which never reference it).
-	newStreamResolver := func(reg *modalbridge.Registry, logger *slog.Logger) *modalResolverV2 {
-		r := newModalResolverV2(reg, modalKeystrokerOrNoop((*supervisor.Supervisor)(nil)), logger)
-		if _, isSup := r.kb.(*supervisor.Supervisor); isSup {
-			t.Fatal("stream-mode resolver holds a *supervisor.Supervisor keystroker; want the no-op")
-		}
-		if r.streamApprovals != nil {
-			t.Fatal("cancel/timeout resolver must not be wired to streamApprovals (fail-closed via permbridge timeout)")
-		}
-		return r
-	}
-
-	t.Run("cancel does not panic and stays fail-closed", func(t *testing.T) {
-		t.Parallel()
-		reg := modalbridge.New()
-		modalID := recordPermissionModal(t, reg, secretModalBody)
-		logger, logBuf := auditLogger()
-		dev := testDevice(t)
-
-		r := newStreamResolver(reg, logger)
-		d, ok := r.ResolveCancel(modalID, dev) // must NOT panic on the nil-safe SendEsc
-		if !ok {
-			t.Fatal("ResolveCancel ok = false, want true")
-		}
-		if d.Outcome != string(audit.OutcomeCancelled) || d.Source != string(audit.SourceRemote) {
-			t.Errorf("dismissal = %+v, want {cancelled remote}", d)
-		}
-		// The modal is consumed: a replayed cancel is the (zero,false) no-op.
-		if d2, ok2 := r.ResolveCancel(modalID, dev); ok2 || d2 != (relay.ModalDismissal{}) {
-			t.Errorf("second ResolveCancel = (%+v, %v), want (zero, false)", d2, ok2)
-		}
-		recs := auditRecords(t, logBuf)
-		if len(recs) != 1 {
-			t.Fatalf("audit records = %d, want exactly 1 {cancelled, remote}", len(recs))
-		}
-		if got, _ := recs[0]["outcome"].(string); got != "cancelled" {
-			t.Errorf("audit outcome = %q, want cancelled", got)
-		}
-	})
-
-	t.Run("deny-on-timeout does not panic", func(t *testing.T) {
-		t.Parallel()
-		reg := modalbridge.New()
-		modalID := recordPermissionModal(t, reg, secretModalBody)
-		logger, logBuf := auditLogger()
-
-		r := newStreamResolver(reg, logger)
-		d, ok := r.ResolveTimeout(modalID) // must NOT panic on the nil-safe SendEsc
-		if !ok {
-			t.Fatal("ResolveTimeout ok = false, want true")
-		}
-		if d.Outcome != string(audit.OutcomeDeniedTimeout) || d.Source != string(audit.SourceTimeout) {
-			t.Errorf("dismissal = %+v, want {denied_timeout timeout}", d)
-		}
-		recs := auditRecords(t, logBuf)
-		if len(recs) != 1 {
-			t.Fatalf("audit records = %d, want exactly 1 {denied_timeout, timeout}", len(recs))
-		}
-		if got, _ := recs[0]["outcome"].(string); got != "denied_timeout" {
-			t.Errorf("audit outcome = %q, want denied_timeout", got)
-		}
-	})
-
-	t.Run("trust deny-on-timeout with nil emit seams does not panic", func(t *testing.T) {
-		t.Parallel()
-		reg := modalbridge.New()
-		modalID := recordTrustModal(t, reg, secretModalBody)
-		logger, _ := auditLogger()
-
-		r := newStreamResolver(reg, logger) // nil activeConv + notifyBlocked
-		if _, ok := r.ResolveTimeout(modalID); !ok {
-			t.Fatal("ResolveTimeout(trust) ok = false, want true")
 		}
 	})
 }

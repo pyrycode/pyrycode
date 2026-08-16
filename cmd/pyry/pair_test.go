@@ -74,10 +74,10 @@ func TestParsePairArgs(t *testing.T) {
 // names that reaches exit 2 through resolveRelay.
 func TestResolveRelay(t *testing.T) {
 	tests := []struct {
-		name      string
-		flag      string
-		cfg       config.Config
-		want      string
+		name string
+		flag string
+		cfg  config.Config
+		want string
 	}{
 		{name: "flag wins", flag: "wss://flag", cfg: config.Config{RelayURL: "wss://cfg"}, want: "wss://flag"},
 		{name: "config wins when flag empty", flag: "", cfg: config.Config{RelayURL: "wss://cfg"}, want: "wss://cfg"},

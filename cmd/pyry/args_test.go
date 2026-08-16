@@ -115,106 +115,14 @@ func TestParseClientFlags_ReturnsRest(t *testing.T) {
 	}
 }
 
-func TestAttachSelectorFromArgs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		in      []string
-		want    string
-		wantErr bool
-	}{
-		{"nil → bootstrap", nil, "", false},
-		{"empty slice → bootstrap", []string{}, "", false},
-		{"one positional flows through verbatim", []string{"abc"}, "abc", false},
-		{"empty-string positional flows through (server lints)", []string{""}, "", false},
-		{"whitespace-only positional flows through", []string{" "}, " ", false},
-		{"two positionals → error", []string{"abc", "def"}, "", true},
-		{"three positionals → error", []string{"abc", "def", "ghi"}, "", true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := attachSelectorFromArgs(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (sel=%q)", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestParseAttachArgs(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                string
-		in                  []string
-		wantSel             string
-		wantStdio           bool
-		wantCreateIfMissing bool
-		wantErr             bool
-	}{
-		{"empty → bootstrap, all flags off", nil, "", false, false, false},
-		{"id only, all flags off", []string{"abc-123"}, "abc-123", false, false, false},
-		{"--stdio alone → bootstrap, stdio on", []string{"--stdio"}, "", true, false, false},
-		{"-stdio (single dash) accepted by flag pkg", []string{"-stdio"}, "", true, false, false},
-		{"--stdio plus id", []string{"--stdio", "abc-123"}, "abc-123", true, false, false},
-		{"--create-if-missing plus id", []string{"--create-if-missing", "abc-123"}, "abc-123", false, true, false},
-		{"--stdio --create-if-missing plus id (SDK shape)",
-			[]string{"--stdio", "--create-if-missing", "abc-123"}, "abc-123", true, true, false},
-		{"--create-if-missing without positional is parse-clean (server lints)",
-			[]string{"--create-if-missing"}, "", false, true, false},
-		{"id then --stdio is rejected (flags must precede positionals)",
-			[]string{"abc-123", "--stdio"}, "abc-123", false, false, true},
-		{"unknown flag errors", []string{"--bogus"}, "", false, false, true},
-		{"too many positionals errors", []string{"--stdio", "a", "b"}, "", false, false, true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			sel, stdio, createIfMissing, err := parseAttachArgs(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (sel=%q stdio=%v createIfMissing=%v)",
-						sel, stdio, createIfMissing)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if sel != tt.wantSel {
-				t.Errorf("selector = %q, want %q", sel, tt.wantSel)
-			}
-			if stdio != tt.wantStdio {
-				t.Errorf("stdio = %v, want %v", stdio, tt.wantStdio)
-			}
-			if createIfMissing != tt.wantCreateIfMissing {
-				t.Errorf("createIfMissing = %v, want %v", createIfMissing, tt.wantCreateIfMissing)
-			}
-		})
-	}
-}
-
 func TestSplitArgs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		args        []string
-		wantPyry    []string
-		wantClaude  []string
+		name       string
+		args       []string
+		wantPyry   []string
+		wantClaude []string
 	}{
 		{
 			name:       "empty",
@@ -517,77 +425,6 @@ func TestSplitClientFlags(t *testing.T) {
 			}
 			if !reflect.DeepEqual(gotRest, tt.wantRest) {
 				t.Errorf("rest = %v, want %v", gotRest, tt.wantRest)
-			}
-		})
-	}
-}
-
-// TestRunAttachArgPath drives the full runAttach arg-parse composition
-// (parseClientFlags → parseAttachArgs) and asserts the dispatch tuple. This
-// is the regression guard for #167: parseClientFlags must pass verb-specific
-// flags through to parseAttachArgs unchanged.
-func TestRunAttachArgPath(t *testing.T) {
-	t.Setenv("PYRY_NAME", "")
-
-	tests := []struct {
-		name                string
-		args                []string
-		wantSocketBase      string
-		wantSocketExplicit  string // non-empty → exact match (overrides Base)
-		wantSel             string
-		wantStdio           bool
-		wantCreateIfMissing bool
-	}{
-		{"--stdio plus id (the bug shape)",
-			[]string{"--stdio", "some-id"},
-			"pyry.sock", "", "some-id", true, false},
-		{"-pyry-socket=… then --stdio plus id (also the bug shape)",
-			[]string{"-pyry-socket=/tmp/foo", "--stdio", "some-id"},
-			"", "/tmp/foo", "some-id", true, false},
-		{"-pyry-socket space-separated, --stdio, id",
-			[]string{"-pyry-socket", "/tmp/foo", "--stdio", "some-id"},
-			"", "/tmp/foo", "some-id", true, false},
-		{"--create-if-missing alone reaches parser",
-			[]string{"--create-if-missing", "some-id"},
-			"pyry.sock", "", "some-id", false, true},
-		{"--stdio --create-if-missing plus id (SDK shape)",
-			[]string{"--stdio", "--create-if-missing", "some-id"},
-			"pyry.sock", "", "some-id", true, true},
-		{"-pyry-name then --stdio composes",
-			[]string{"-pyry-name", "elli", "--stdio", "some-id"},
-			"elli.sock", "", "some-id", true, false},
-		{"no sub-verb flags: bare id still works",
-			[]string{"some-id"},
-			"pyry.sock", "", "some-id", false, false},
-		{"no args at all: bootstrap shape",
-			nil, "pyry.sock", "", "", false, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			socketPath, rest, err := parseClientFlags("pyry attach", tt.args)
-			if err != nil {
-				t.Fatalf("parseClientFlags: %v", err)
-			}
-			sel, stdio, cim, err := parseAttachArgs(rest)
-			if err != nil {
-				t.Fatalf("parseAttachArgs: %v", err)
-			}
-			if tt.wantSocketExplicit != "" {
-				if socketPath != tt.wantSocketExplicit {
-					t.Errorf("socket = %q, want %q", socketPath, tt.wantSocketExplicit)
-				}
-			} else if filepath.Base(socketPath) != tt.wantSocketBase {
-				t.Errorf("socket basename = %q, want %q", filepath.Base(socketPath), tt.wantSocketBase)
-			}
-			if sel != tt.wantSel {
-				t.Errorf("selector = %q, want %q", sel, tt.wantSel)
-			}
-			if stdio != tt.wantStdio {
-				t.Errorf("stdio = %v, want %v", stdio, tt.wantStdio)
-			}
-			if cim != tt.wantCreateIfMissing {
-				t.Errorf("createIfMissing = %v, want %v", cim, tt.wantCreateIfMissing)
 			}
 		})
 	}

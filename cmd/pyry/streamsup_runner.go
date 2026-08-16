@@ -8,7 +8,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // streamRunner adapts *streamsup.Runner to sessions.Runner. The shapes differ in
@@ -26,7 +25,7 @@ import (
 // sessions.Config.RunnerFactory is #1081.
 type streamRunner struct{ r *streamsup.Runner }
 
-func (a streamRunner) State() supervisor.State { return mapStreamState(a.r.State()) }
+func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
 
 func (a streamRunner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return a.r.WriteUserTurn(ctx, conversationID, payload)
@@ -66,9 +65,9 @@ func (a streamRunner) BeginRotation() func() { return a.r.BeginRotation() }
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
-func mapStreamState(s streamsup.State) supervisor.State {
-	return supervisor.State{
-		Phase:        supervisor.Phase(string(s.Phase)),
+func mapStreamState(s streamsup.State) sessions.State {
+	return sessions.State{
+		Phase:        sessions.Phase(string(s.Phase)),
 		ChildPID:     s.ChildPID,
 		StartedAt:    s.StartedAt,
 		RestartCount: s.RestartCount,
@@ -121,7 +120,7 @@ func mapStreamState(s streamsup.State) supervisor.State {
 // factory is never built, so mcpApprovePath is "" and unused there. The live
 // wire is exercised end-to-end by TestInteractiveStreamModalResolution (#1154).
 func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) sessions.RunnerFactory {
-	return func(cfg supervisor.Config) (sessions.Runner, error) {
+	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath)
 		scfg.Stdout = streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
@@ -177,7 +176,7 @@ func withApprovalArgs(args []string, mcpApprovePath string) []string {
 // stays nil HERE — the turnevent Parser that plugs into Stdout is a runtime
 // object installed one layer up in newStreamRunnerFactory (#1098), keeping this
 // mapper pure; Stderr/Env have no supervisor.Config analogue and stay nil.
-func mapStreamsupConfig(cfg supervisor.Config) streamsup.Config {
+func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 	return streamsup.Config{
 		ClaudeBin: cfg.ClaudeBin,
 		WorkDir:   cfg.WorkDir,

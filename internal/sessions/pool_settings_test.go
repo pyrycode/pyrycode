@@ -8,20 +8,109 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
-// argvRecorderScript writes its own positional argv (one token per line) to
-// argv.txt in its cwd, then touches a `done` sentinel so a reader can wait for
-// the write to complete before reading, then execs a long sleep so the child
-// stays alive. Both writes use shell builtins only (no external mv), so PATH
-// resolution can't flake. Because the shell is invoked as `sh -c SCRIPT --
-// <appended args...>`, $0 is "--" and "$@" expands to exactly the tokens
-// buildSession / New appended after the template — the argv we assert on.
-const argvRecorderScript = `printf '%s\n' "$@" > argv.txt; : > done; exec sleep 3600`
+// argvRecorderTemplate stands in for the shell script these tests used to spawn.
+// The old arrangement launched `sh -c 'printf %s "$@" > argv.txt; ...'` through a
+// real terminal supervisor and read the file back, so "what argv did the pool
+// compose" was answered by starting a process and doing filesystem IO.
+//
+// Since #1348 deleted that supervisor there is no child to ask, and the question
+// is answered one layer up instead: the recorder factory below captures the argv
+// at the moment the pool hands it to a runner. Same assertion, more directly
+// made, no process and no polling. The three template tokens are kept because
+// the pool appends after them and the tests assert on the appended tail, so the
+// shape of the slice has to match what it always was.
+var argvRecorderTemplate = []string{"-c", "recorder", "--"}
+
+// argvRecords maps a runner's working directory to the argv it was constructed
+// with. Keyed by directory because that is what the assertions already had in
+// hand, and every test uses its own t.TempDir(), so two parallel pools cannot
+// collide.
+var argvRecords = struct {
+	mu   sync.Mutex
+	byWD map[string][]string
+}{byWD: map[string][]string{}}
+
+// recordingRunnerFactory captures the composed argv, then returns the same
+// lifecycle double every other pool test uses.
+func recordingRunnerFactory(cfg RunnerConfig) (Runner, error) {
+	recordArgv(cfg.WorkDir, cfg.ClaudeArgs)
+	recordSessionID(cfg.WorkDir, cfg.SessionID)
+	return &lifecycleRunner{workDir: cfg.WorkDir, sessionID: cfg.SessionID}, nil
+}
+
+// recordArgv stores the argv most recently composed for a working directory.
+// Both construction and Restart feed it, because a live settings change
+// recomposes argv and restarts rather than rebuilding the runner — the old
+// recorder saw that as the respawned child rewriting its argv file.
+func recordArgv(workDir string, argv []string) {
+	// Construction hands over template + appended; a restart hands over just the
+	// recomposed tail. Normalise here so readers always see the appended tokens,
+	// which is what the old shell recorder saw via "$@".
+	if len(argv) >= len(argvRecorderTemplate) && argv[0] == argvRecorderTemplate[0] {
+		argv = argv[len(argvRecorderTemplate):]
+	}
+	argvRecords.mu.Lock()
+	defer argvRecords.mu.Unlock()
+	argvRecords.byWD[workDir] = append([]string(nil), argv...)
+}
+
+// sessionIDRecords maps a working directory to the session id the pool handed
+// the runner at construction.
+//
+// The pinned bootstrap id used to reach claude as a "--session-id <id>" argv
+// flag, emitted at spawn time by a resolver on the terminal supervisor. The
+// stream runner takes the id as a field and manages session identity itself —
+// it strips session-id flags out of argv on the way past. So the id is still
+// pinned and still asserted; it is just no longer a flag, and a test looking for
+// one would be checking a mechanism rather than the guarantee.
+var sessionIDRecords = struct {
+	mu   sync.Mutex
+	byWD map[string]string
+}{byWD: map[string]string{}}
+
+// ranRecords maps a working directory to the session id of a runner that
+// actually reached Run there.
+var ranRecords = struct {
+	mu   sync.Mutex
+	byWD map[string]string
+}{byWD: map[string]string{}}
+
+func recordRan(workDir, id string) {
+	ranRecords.mu.Lock()
+	defer ranRecords.mu.Unlock()
+	ranRecords.byWD[workDir] = id
+}
+
+func recordSessionID(workDir, id string) {
+	sessionIDRecords.mu.Lock()
+	defer sessionIDRecords.mu.Unlock()
+	sessionIDRecords.byWD[workDir] = id
+}
+
+// waitSessionID blocks until a runner has been constructed for dir and returns
+// the session id it was given.
+func waitSessionID(t *testing.T, dir string) string {
+	t.Helper()
+	var id string
+	if !pollUntil(t, 5*time.Second, func() bool {
+		sessionIDRecords.mu.Lock()
+		defer sessionIDRecords.mu.Unlock()
+		v, ok := sessionIDRecords.byWD[dir]
+		if !ok {
+			return false
+		}
+		id = v
+		return true
+	}) {
+		t.Fatalf("no runner was ever constructed with workdir %q", dir)
+	}
+	return id
+}
 
 // helperPoolArgvRecorder builds a Pool whose template child records its own
 // appended argv via argvRecorderScript. tplWorkDir is the bootstrap child's cwd
@@ -41,14 +130,14 @@ func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string, claud
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: recordingRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sh",
-			ClaudeArgs:     []string{"-c", argvRecorderScript, "--"},
+			ClaudeArgs:     argvRecorderTemplate,
 			WorkDir:        tplWorkDir,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
-			Bridge:         supervisor.NewBridge(logger),
 		},
 		Logger:            logger,
 		RegistryPath:      registryPath,
@@ -69,37 +158,23 @@ func helperPoolArgvRecorder(t *testing.T, registryPath, tplWorkDir string, claud
 // means the child appended nothing (byte-identical baseline).
 func waitArgvRaw(t *testing.T, dir string) []string {
 	t.Helper()
+	var argv []string
 	if !pollUntil(t, 5*time.Second, func() bool {
-		_, err := os.Stat(filepath.Join(dir, "done"))
-		return err == nil
-	}) {
-		t.Fatalf("child never finished recording argv in %q", dir)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "argv.txt"))
-	if err != nil {
-		t.Fatalf("read argv.txt in %q: %v", dir, err)
-	}
-	return splitLines(string(data))
-}
-
-// splitLines returns the non-empty newline-separated tokens of s. The recorder
-// prints one argv token per line; an empty argv yields a single blank line,
-// which we drop to a nil slice (the byte-identical baseline).
-func splitLines(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\n' {
-			if tok := s[start:i]; tok != "" {
-				out = append(out, tok)
-			}
-			start = i + 1
+		argvRecords.mu.Lock()
+		defer argvRecords.mu.Unlock()
+		a, ok := argvRecords.byWD[dir]
+		if !ok {
+			return false
 		}
+		argv = a
+		return true
+	}) {
+		t.Fatalf("no runner was ever constructed with workdir %q", dir)
 	}
-	if tail := s[start:]; tail != "" {
-		out = append(out, tail)
+	if len(argv) == 0 {
+		return nil
 	}
-	return out
+	return argv
 }
 
 // spawnMintedWithSettings mirrors CreateIn's create sequence (build → register
@@ -162,12 +237,13 @@ func TestPool_BootstrapWarmStart_AppliesSettingsToArgv(t *testing.T) {
 	runPoolInBackground(t, pool)
 
 	got := waitArgv(t, tplWorkDir)
-	// #839: the bootstrap resumes via a trailing --session-id (its own persisted
-	// id), appended after the settings flags; it no longer uses --continue.
-	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
-		"--session-id", string(pool.BootstrapID())}
+	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("bootstrap argv = %v, want %v", got, want)
+	}
+	// #839's pinned id is now a field on the handover, not a trailing argv flag.
+	if got, want := waitSessionID(t, tplWorkDir), string(pool.BootstrapID()); got != want {
+		t.Errorf("bootstrap session id = %q, want %q", got, want)
 	}
 }
 
@@ -184,10 +260,15 @@ func TestPool_BootstrapColdStart_SpawnsWithSessionID(t *testing.T) {
 	pool := helperPoolArgvRecorder(t, regPath, tplWorkDir)
 	runPoolInBackground(t, pool)
 
-	got := waitArgv(t, tplWorkDir)
-	want := []string{"--session-id", string(pool.BootstrapID())}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("cold-start bootstrap argv = %v, want %v", got, want)
+	// The pinned id reaches the runner as a field rather than an argv flag since
+	// #1348; the stream runner strips session-id flags out of argv and owns
+	// session identity itself. The guarantee under test — a cold-start bootstrap
+	// is pinned to its own persisted id (#839) — is unchanged.
+	if got, want := waitSessionID(t, tplWorkDir), string(pool.BootstrapID()); got != want {
+		t.Errorf("cold-start bootstrap session id = %q, want %q", got, want)
+	}
+	if got := waitArgv(t, tplWorkDir); len(got) != 0 {
+		t.Errorf("cold-start bootstrap argv = %v, want no appended flags", got)
 	}
 }
 
@@ -268,9 +349,10 @@ func TestPool_New_CorruptYOLO_FailsAndNoSpawn(t *testing.T) {
 	}
 
 	pool, err := New(Config{
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RegistryPath: regPath,
-		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
+		RunnerFactory: testRunnerFactory,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  regPath,
+		Bootstrap:     SessionConfig{ClaudeBin: "/bin/sleep"},
 	})
 	if err == nil {
 		t.Fatalf("New with corrupt yolo = (pool %v, nil), want error", pool)
@@ -303,9 +385,10 @@ func TestPool_BootstrapSettings_SurviveNewPersistReload(t *testing.T) {
 	}
 
 	pool, err := New(Config{
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RegistryPath: regPath,
-		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
+		RunnerFactory: testRunnerFactory,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  regPath,
+		Bootstrap:     SessionConfig{ClaudeBin: "/bin/sleep"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
@@ -10,15 +11,27 @@ import (
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
+// stubRunner is a Runner that never spawns anything. A factory is mandatory on
+// sessions.Config since #1348 — it used to default to the terminal supervisor,
+// which is why this test could previously get away with naming none.
+type stubRunner struct{}
+
+func (stubRunner) State() sessions.State { return sessions.State{} }
+func (stubRunner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
+	return nil
+}
+func (stubRunner) WaitForPTY(ctx context.Context) error { return nil }
+func (stubRunner) Run(ctx context.Context) error        { <-ctx.Done(); return ctx.Err() }
+func (stubRunner) Restart(args []string)                {}
+
 // newRouterTestPool builds a real *sessions.Pool. sessions.New constructs the
-// bootstrap supervisor + session entry without spawning claude, so Pool.Lookup
-// works against the in-memory map. os.Args[0] is a guaranteed absolute,
-// executable path so supervisor.New's exec.LookPath succeeds without a real
-// claude binary on PATH.
+// bootstrap session entry without spawning claude, so Pool.Lookup works against
+// the in-memory map.
 func newRouterTestPool(t *testing.T) *sessions.Pool {
 	t.Helper()
 	pool, err := sessions.New(sessions.Config{
-		Bootstrap: sessions.SessionConfig{ClaudeBin: os.Args[0]},
+		Bootstrap:     sessions.SessionConfig{ClaudeBin: os.Args[0]},
+		RunnerFactory: func(sessions.RunnerConfig) (sessions.Runner, error) { return stubRunner{}, nil },
 	})
 	if err != nil {
 		t.Fatalf("sessions.New: %v", err)

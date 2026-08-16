@@ -1,10 +1,6 @@
 package sessions
 
-import (
-	"context"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
-)
+import "context"
 
 // Runner is the narrow interface internal/sessions dispatches through to drive a
 // supervised claude child (Session.sup). It covers exactly the methods the
@@ -23,17 +19,12 @@ import (
 // return type. Nothing dispatches those methods through Runner this ticket, so
 // they are not on the interface — adding them would be speculative surface.
 type Runner interface {
-	State() supervisor.State
+	State() State
 	WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
 	WaitForPTY(ctx context.Context) error
 	Run(ctx context.Context) error
 	Restart(args []string)
 }
-
-// Assert at compile time that *supervisor.Supervisor satisfies Runner (AC-2).
-// This must build with zero diff under internal/supervisor/ — the interface is
-// fitted to the existing supervisor surface, not the reverse.
-var _ Runner = (*supervisor.Supervisor)(nil)
 
 // RunnerFactory constructs a Runner from a supervisor.Config. It is the
 // injection seam on Config: when Config.RunnerFactory is nil, session
@@ -43,4 +34,4 @@ var _ Runner = (*supervisor.Supervisor)(nil)
 // site (bootstrap in Pool.New and per-session in Pool.buildSession), letting
 // T4/T7 swap in an alternative runner. A returned error propagates through the
 // existing "sessions: … supervisor: %w" wraps at both sites.
-type RunnerFactory func(cfg supervisor.Config) (Runner, error)
+type RunnerFactory func(cfg RunnerConfig) (Runner, error)

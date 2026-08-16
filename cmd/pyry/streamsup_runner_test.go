@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"log/slog"
 	"os"
 	"slices"
@@ -8,11 +9,10 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/streamsup"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // TestMapStreamState asserts the covariant-return adapter maps every streamsup
-// lifecycle field to its supervisor.State twin, and that each Phase value maps to
+// lifecycle field to its sessions.State twin, and that each Phase value maps to
 // the identically-named supervisor phase. The build-time assertion in
 // streamsup_runner.go (var _ sessions.Runner = streamRunner{}) is AC1's real
 // proof; this pins the one non-trivial method the adapter adds.
@@ -22,12 +22,12 @@ func TestMapStreamState(t *testing.T) {
 	// Every streamsup phase maps to its supervisor twin by string identity.
 	phases := []struct {
 		in   streamsup.Phase
-		want supervisor.Phase
+		want sessions.Phase
 	}{
-		{streamsup.PhaseStarting, supervisor.PhaseStarting},
-		{streamsup.PhaseRunning, supervisor.PhaseRunning},
-		{streamsup.PhaseBackoff, supervisor.PhaseBackoff},
-		{streamsup.PhaseStopped, supervisor.PhaseStopped},
+		{streamsup.PhaseStarting, sessions.PhaseStarting},
+		{streamsup.PhaseRunning, sessions.PhaseRunning},
+		{streamsup.PhaseBackoff, sessions.PhaseBackoff},
+		{streamsup.PhaseStopped, sessions.PhaseStopped},
 	}
 	for _, p := range phases {
 		if got := mapStreamState(streamsup.State{Phase: p.in}).Phase; got != p.want {
@@ -46,8 +46,8 @@ func TestMapStreamState(t *testing.T) {
 		NextBackoff:  2 * time.Second,
 	}
 	got := mapStreamState(in)
-	want := supervisor.State{
-		Phase:        supervisor.PhaseRunning,
+	want := sessions.State{
+		Phase:        sessions.PhaseRunning,
 		ChildPID:     4321,
 		StartedAt:    started,
 		RestartCount: 7,
@@ -118,7 +118,7 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.Default()
-	cfg := supervisor.Config{
+	cfg := sessions.RunnerConfig{
 		ClaudeBin:      "/opt/claude",
 		WorkDir:        "/work",
 		SessionID:      "boot-uuid",
@@ -152,7 +152,7 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 		t.Errorf("Stdout = %v, want nil (the #1098 Parser is installed in newStreamRunnerFactory, not the mapper)", got.Stdout)
 	}
 	if got.Stderr != nil || got.Env != nil {
-		t.Errorf("Stderr/Env = %v/%v, want nil (no supervisor.Config analogue)", got.Stderr, got.Env)
+		t.Errorf("Stderr/Env = %v/%v, want nil (no sessions.RunnerConfig analogue)", got.Stderr, got.Env)
 	}
 }
 
@@ -164,7 +164,7 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 func TestMapStreamsupConfig_PerSession(t *testing.T) {
 	t.Parallel()
 
-	cfg := supervisor.Config{
+	cfg := sessions.RunnerConfig{
 		ClaudeBin:  "/opt/claude",
 		WorkDir:    "/work",
 		SessionID:  "sess-uuid",
@@ -294,7 +294,7 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 	for _, s := range shapes {
 		t.Run(s.name, func(t *testing.T) {
 			t.Parallel()
-			cfg := supervisor.Config{
+			cfg := sessions.RunnerConfig{
 				ClaudeBin:  os.Args[0],
 				WorkDir:    t.TempDir(),
 				SessionID:  "id-" + s.name,
@@ -322,7 +322,7 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 	t.Parallel()
 
-	cfg := supervisor.Config{
+	cfg := sessions.RunnerConfig{
 		ClaudeBin:  "pyry-nonexistent-binary-xyz",
 		WorkDir:    t.TempDir(),
 		SessionID:  "sess-uuid",

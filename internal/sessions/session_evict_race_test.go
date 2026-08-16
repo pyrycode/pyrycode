@@ -7,8 +7,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // raceRunner is a Runner double that holds the eviction-teardown window open so a
@@ -28,7 +26,7 @@ type raceRunner struct {
 	runs     atomic.Int32  // invocation counter; distinguishes the first teardown
 }
 
-func (r *raceRunner) State() supervisor.State { return supervisor.State{} }
+func (r *raceRunner) State() State { return State{} }
 
 func (r *raceRunner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return nil

@@ -9,8 +9,6 @@ import (
 	"reflect"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // restartRecorderScript records all its args (one token per line) to argv.txt in
@@ -53,8 +51,9 @@ func helperRestartPool(t *testing.T, regPath, tplWorkDir string, settings Sessio
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pool, err := New(Config{
-		Logger:       logger,
-		RegistryPath: regPath,
+		RunnerFactory: recordingRunnerFactory,
+		Logger:        logger,
+		RegistryPath:  regPath,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      script,
 			WorkDir:        tplWorkDir,
@@ -62,7 +61,6 @@ func helperRestartPool(t *testing.T, regPath, tplWorkDir string, settings Sessio
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   time.Second,
-			Bridge:         supervisor.NewBridge(logger),
 		},
 	})
 	if err != nil {
@@ -135,9 +133,13 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
 
-	// First spawn: baseline settings, plus the deterministic --session-id (#839).
-	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--model", "sonnet", "--session-id", string(id)}) {
-		t.Fatalf("first spawn argv = %v, want [--model sonnet --session-id %s]", got, id)
+	// First spawn: baseline settings. The deterministic id (#839) is a field on
+	// the handover since #1348, checked separately.
+	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--model", "sonnet"}) {
+		t.Fatalf("first spawn argv = %v, want [--model sonnet]", got)
+	}
+	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
+		t.Fatalf("first spawn session id = %q, want %q", gotID, string(id))
 	}
 	clearRecording(t, tplWorkDir)
 
@@ -148,7 +150,7 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	// AC #1 + #2: relaunch resumes via --session-id (#839, not --continue) and
 	// carries the new settings; the id is stable across the restart.
 	got := waitArgv(t, tplWorkDir)
-	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions", "--session-id", string(id)}
+	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("restart argv = %v, want %v", got, want)
 	}
@@ -295,8 +297,11 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
 
-	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions", "--session-id", string(id)}) {
+	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions"}) {
 		t.Fatalf("first spawn argv = %v, want the bypass flag present", got)
+	}
+	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
+		t.Fatalf("first spawn session id = %q, want %q", gotID, string(id))
 	}
 	clearRecording(t, tplWorkDir)
 
@@ -310,10 +315,13 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 			t.Fatalf("post-revoke argv still carries the bypass flag: %v", got)
 		}
 	}
-	// #839: revoked YOLO leaves no settings flags; the bootstrap still resumes via
-	// its deterministic --session-id (not --continue).
-	if want := []string{"--session-id", string(id)}; !reflect.DeepEqual(got, want) {
-		t.Errorf("post-revoke argv = %v, want %v", got, want)
+	// Revoked YOLO leaves no settings flags at all. The deterministic id (#839)
+	// is checked on the handover below, not in argv.
+	if len(got) != 0 {
+		t.Errorf("post-revoke argv = %v, want none", got)
+	}
+	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
+		t.Errorf("post-revoke session id = %q, want %q", gotID, string(id))
 	}
 }
 
@@ -342,9 +350,12 @@ func TestPool_UpdateSettings_YOLOAbsent_NoBypassOnRestart(t *testing.T) {
 			t.Fatalf("absent YOLO yielded a bypass child across restart: %v", got)
 		}
 	}
-	// #839: the bootstrap resumes via --session-id (not --continue), appended
-	// after the new settings.
-	if want := []string{"--model", "opus", "--session-id", string(id)}; !reflect.DeepEqual(got, want) {
+	if want := []string{"--model", "opus"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("restart argv = %v, want %v", got, want)
+	}
+	// #839's pinned id survives the restart; since #1348 it travels as a field on
+	// the handover rather than a trailing argv flag.
+	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
+		t.Errorf("restart session id = %q, want %q", gotID, string(id))
 	}
 }

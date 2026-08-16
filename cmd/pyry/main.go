@@ -59,9 +59,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 	"github.com/pyrycode/pyrycode/internal/sessions"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
-	"github.com/pyrycode/pyrycode/internal/turnbridge"
-	"golang.org/x/term"
 )
 
 // Version is set at build time via -ldflags "-X main.Version=...".
@@ -218,8 +215,6 @@ func run() error {
 			return runStop(os.Args[2:])
 		case "logs":
 			return runLogs(os.Args[2:])
-		case "attach":
-			return runAttach(os.Args[2:])
 		case "sessions":
 			return runSessions(os.Args[2:])
 		case "pair":
@@ -232,8 +227,6 @@ func run() error {
 			return runUpdate(os.Args[2:])
 		case "agent-run":
 			return runAgentRun(os.Stdout, os.Args[2:])
-		case "acp":
-			return runACP(os.Args[2:])
 		case "mcp-approve":
 			return runMCPApprove(os.Args[2:])
 		case "help", "-h", "--help":
@@ -355,79 +348,6 @@ func splitClientFlags(args []string) (pyryArgs, rest []string) {
 		i++
 	}
 	return
-}
-
-// extractSessionID scans claudeArgs for the value of claude's --session-id
-// flag. Accepts the four shapes claude itself accepts: `--session-id <v>`,
-// `--session-id=<v>`, `-session-id <v>`, `-session-id=<v>`. Returns "" when
-// the flag is absent or appears as the last arg with no value. The first
-// occurrence wins.
-//
-// Pure function — no environment, no syscalls. The returned string is
-// opaque to extractSessionID; UUID validation is the daemon's job
-// (sessions.has-id rejects malformed input server-side).
-func extractSessionID(args []string) string {
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--session-id" || a == "-session-id":
-			if i+1 < len(args) {
-				return args[i+1]
-			}
-			return ""
-		case strings.HasPrefix(a, "--session-id="):
-			return strings.TrimPrefix(a, "--session-id=")
-		case strings.HasPrefix(a, "-session-id="):
-			return strings.TrimPrefix(a, "-session-id=")
-		}
-	}
-	return ""
-}
-
-// tryAutoAttach is the foreground-binary auto-attach gate. Called from
-// runSupervisor after pyry-flag parsing but before any supervisor-mode
-// side effect (logger, ring buffer, Bridge, Pool init).
-//
-// Returns (false, nil) on every fall-through path: no --session-id in
-// claudeArgs, PYRY_NO_AUTO_ATTACH=1 in the env, socket file absent, any
-// stat error, transport failure, malformed UUID, or has-id returning
-// false. The caller carries on with the existing supervised-spawn flow.
-//
-// Returns (true, err) when the daemon hosts the requested UUID and we
-// dispatched to control.AttachStdio. err is the AttachStdio result —
-// nil on a clean EOF detach, transport / handshake error otherwise.
-//
-// AC#3 (<50ms in the no-daemon case) is satisfied structurally: when
-// the socket is absent, os.Stat's ENOENT branch returns before any
-// dial / context allocation / goroutine.
-func tryAutoAttach(socketPath string, claudeArgs []string) (handled bool, err error) {
-	// PYRY_NO_AUTO_ATTACH is a dev/test-only escape hatch (set via t.Setenv and the
-	// e2e harness extraEnv, never by production code) that suppresses auto-attach.
-	if os.Getenv("PYRY_NO_AUTO_ATTACH") == "1" {
-		return false, nil
-	}
-	id := extractSessionID(claudeArgs)
-	if id == "" {
-		return false, nil
-	}
-	if _, statErr := os.Stat(socketPath); statErr != nil {
-		// ENOENT is the common no-daemon path; any other stat error
-		// (EACCES, EPERM, …) also falls through — auto-attach is the
-		// exception, never the default.
-		return false, nil
-	}
-
-	probeCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-	has, hasErr := control.SessionsHasID(probeCtx, socketPath, id)
-	if hasErr != nil || !has {
-		return false, nil
-	}
-
-	if attachErr := control.AttachStdio(context.Background(), socketPath, id, os.Stdin, os.Stdout, false); attachErr != nil {
-		return true, fmt.Errorf("attach: %w", attachErr)
-	}
-	return true, nil
 }
 
 // parseFlagSyntax extracts the flag name from a "-foo", "--foo", "-foo=bar",
@@ -648,31 +568,47 @@ func resolveSpawnDir(requested string) (string, error) {
 	return trusted, nil
 }
 
+// selectsStreamRunner reports whether this config selects the stream-json
+// runner, which since #1348 is every valid value including the empty one. It
+// exists so the composition root can prepare the approval-tool config BEFORE
+// calling selectInteractiveRunner, which needs that path as an argument. An
+// invalid value answers true here and then fails loudly one line later, which
+// is harmless: the only effect is a temp file written and removed at shutdown.
+func selectsStreamRunner(cfg config.Config) bool {
+	return cfg.InteractiveRunner != "pty"
+}
+
 // selectInteractiveRunner maps cfg.InteractiveRunner to the runner factory and
 // its turn-event sink at the composition root (#1081, AC4's loud-error path):
 //
-//   - "" / "pty" → (nil, nil, nil): a nil RunnerFactory keeps the PTY path
-//     byte-identical (supervisor.New, the #1077 rollback guarantee), and a nil
-//     sink leaves the relay leg on the PTY interactive streams.
-//   - "stream-json" → (factory, sink, nil): ONE newStreamTurnSink backs both the
-//     factory (which binds sinkFor per runner) and the single relay-leg drain, so
-//     the two ends of the wire share that one instance (#1098 late-bound
+//   - "" / "stream-json" → (factory, sink, nil): ONE newStreamTurnSink backs both
+//     the factory (which binds sinkFor per runner) and the single relay-leg drain,
+//     so the two ends of the wire share that one instance (#1098 late-bound
 //     singleton). The caller threads the returned sink into relayWiring.streamSink.
+//   - "pty" → (nil, nil, error) naming the removal. It gets its own arm rather
+//     than falling into the default, because an operator with that key in a config
+//     file has something to edit and deserves to be told the path was deleted
+//     rather than that the value is unrecognised.
 //   - any other value → (nil, nil, error) naming the offending value and the
-//     accepted set. No silent PTY fallback (AC4).
+//     accepted set. No silent fallback (AC4).
+//
+// The empty default moved from the terminal runner to the stream runner here.
+// It used to select the terminal path, which meant an absent or reset config
+// file came up on the path four live specs failed against. Nothing now selects a
+// terminal runner, because there is no longer one to select.
 //
 // Validation lives here, not in config.Load, because the accepted set is defined
 // by the factory mapping — which the leaf config package cannot import
-// (supervisor/streamsup). config.Load stays parse-only, matching DebugCapture.
+// (streamsup). config.Load stays parse-only, matching DebugCapture.
 func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpApprovePath string) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
-	case "", "pty":
-		return nil, nil, nil
-	case "stream-json":
+	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
 		return newStreamRunnerFactory(sink, mcpApprovePath), sink, nil
+	case "pty":
+		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)
 	default:
-		return nil, nil, fmt.Errorf("interactive_runner %q not recognized (accepted: \"pty\", \"stream-json\")", cfg.InteractiveRunner)
+		return nil, nil, fmt.Errorf("interactive_runner %q not recognized (accepted: \"\", \"stream-json\")", cfg.InteractiveRunner)
 	}
 }
 
@@ -700,13 +636,6 @@ func runSupervisor(args []string) error {
 	convRegistryPath := resolveConversationsRegistryPath(*name)
 	claudeSessionsDir := resolveClaudeSessionsDir(*workdir)
 	defaultCwd := resolveDefaultCwd(*workdir)
-
-	// Phase 1.3c-2: foreground binary auto-attaches when the daemon
-	// hosts the requested --session-id. Conservative — falls through on
-	// every failure mode except "definitely registered".
-	if handled, err := tryAutoAttach(socketPath, claudeArgs); handled {
-		return err
-	}
 
 	// Pre-mark the supervised claude's workdir trusted in ~/.claude.json so it
 	// never wedges on claude's workspace-trust modal — the #421 clean-exit
@@ -744,15 +673,6 @@ func runSupervisor(args []string) error {
 		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}),
 		logRing,
 	))
-
-	// Service vs foreground mode is detected from stdin: if there's no
-	// controlling terminal (e.g. launchd / systemd / nohup), the supervisor
-	// runs detached and PTY I/O routes through a Bridge so a `pyry attach`
-	// client can take over interactively.
-	var bridge *supervisor.Bridge
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		bridge = supervisor.NewBridge(logger)
-	}
 
 	// Two-layer shutdown context so a shutdown's ORIGIN survives to the exit
 	// classification below. The signal layer handles SIGTERM/SIGINT (operator
@@ -792,7 +712,7 @@ func runSupervisor(args []string) error {
 	// every spawn is yolo. The "" / "pty" path never builds the factory, so
 	// mcpApprovePath stays "".
 	var mcpApprovePath string
-	if cfg.InteractiveRunner == "stream-json" {
+	if selectsStreamRunner(cfg) {
 		mcpApprovePath, err = writeMCPApproveConfig(resolveExecutable(), socketPath)
 		if err != nil {
 			return fmt.Errorf("write mcp-approve config: %w", err)
@@ -844,7 +764,6 @@ func runSupervisor(args []string) error {
 			WorkDir:    trustedWorkdir,
 			ResumeLast: *resume,
 			ClaudeArgs: claudeArgs,
-			Bridge:     bridge,
 			RecordDir:  recordDir,
 		},
 	})
@@ -857,39 +776,11 @@ func runSupervisor(args []string) error {
 	// never by production code) that lets the relay client accept an insecure ws://
 	// URL; production leaves it unset and requires wss://.
 	allowInsecure := os.Getenv("PYRY_ALLOW_INSECURE_RELAY") == "1"
-	bootstrap := pool.Default()
 	// One activeConversation holder, shared two ways: the sessionRouter writes it
 	// on each successful route, and startRelay threads it (read-side) to the
 	// structured turn stream as its cursor (#687) and its follow-active switch
 	// signal (#679).
 	active := &activeConversation{}
-	// boundHost is the conv→session→supervisor lookup the follow-active turn
-	// stream re-keys its subscription onto (#679): convReg.Get → CurrentSessionID
-	// (non-empty guard) → pool.Lookup → the bound session's supervisor (which is
-	// both the subscription host and the PTY-state source). Since #686 it also
-	// derives that session's OWN per-Cwd transcript directory from its spawn
-	// WorkDir (the realpath captured at CreateIn time, NOT the raw conv.Cwd):
-	// perConversationSessionsDir routes a default/shared-workdir session to the
-	// startup claudeSessionsDir (AC3, unchanged) and a per-Cwd session to its own
-	// ~/.claude/projects/<encoded-cwd>/ (AC1/AC2). (nil, "", "", false) on an
-	// unknown conversation, an empty binding, a Lookup miss, or an underivable
-	// directory — resolveTarget turns that into a retry, never a bootstrap
-	// fallback (cross-conversation confidentiality).
-	var boundHost boundHostFunc = func(convID string) (turnbridge.SessionHost, string, string, bool) {
-		conv, ok := convReg.Get(conversations.ConversationID(convID))
-		if !ok || conv.CurrentSessionID == "" {
-			return nil, "", "", false
-		}
-		sess, err := pool.Lookup(sessions.SessionID(conv.CurrentSessionID))
-		if err != nil {
-			return nil, "", "", false
-		}
-		dir := perConversationSessionsDir(sess.Supervisor().WorkDir(), trustedWorkdir, claudeSessionsDir)
-		if dir == "" {
-			return nil, "", "", false
-		}
-		return sess.Supervisor(), conv.CurrentSessionID, dir, true
-	}
 	router := sessionRouter{pool: pool, convReg: convReg, active: active}
 
 	// The inbound message queue (#704/#721): send_message enqueues here instead
@@ -924,13 +815,13 @@ func runSupervisor(args []string) error {
 		Deliver:  newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
-		// Pending exempts a legitimately-held turn (claude's startup trust modal is
-		// up, so delivery declined with ErrTrustModalPending) from the give-up
-		// bound: while pending the drain retries without counting the window, so a
-		// slow-but-valid remote trust accept never races a premature give-up
-		// (#1014 AC-1).
-		Pending: func(err error) bool { return errors.Is(err, supervisor.ErrTrustModalPending) },
-		Logger:  logger,
+		// Pending exempted a turn held behind claude's startup trust modal from the
+		// give-up bound (#1014 AC-1). That modal only ever appeared on the terminal
+		// surface, which #1348 removed, so nothing produces the sentinel any more
+		// and the exemption is permanently false. Left unset rather than wired to a
+		// never-true predicate: the stream surface has no equivalent hold today,
+		// and inventing one here would be guessing at a failure nobody has seen.
+		Logger: logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
@@ -1011,7 +902,6 @@ func runSupervisor(args []string) error {
 		router:        router,
 		queue:         queue,
 		active:        active,
-		boundHost:     boundHost,
 		activeInterrupter: activeInterrupter{
 			currentConv: active.CurrentConversation,
 			resolveRunner: func(convID string) (sessions.Runner, bool) {
@@ -1030,8 +920,6 @@ func runSupervisor(args []string) error {
 			},
 			rotate: pool.RotateForNewSession,
 		},
-		sup:               bootstrap.Supervisor(),
-		bridge:            bootstrap.Bridge(),
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
 		defaultCwd:        defaultCwd,
@@ -1748,21 +1636,6 @@ func (a *activeConversation) CurrentConversation() string {
 	return a.id
 }
 
-// watch snapshots the current conversation id AND the channel that closes when
-// the id next changes to a different value — atomically under mu, so a resolver
-// keys host + path + teardown off one consistent view and they never disagree
-// (#679). The capture-then-wait race is benign: if set fires between watch
-// returning and a watcher selecting, the closed channel makes the select fire
-// immediately → re-subscribe → re-snapshot, no missed switch.
-func (a *activeConversation) watch() (id string, changed <-chan struct{}) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.changed == nil {
-		a.changed = make(chan struct{})
-	}
-	return a.id, a.changed
-}
-
 // parseClientFlags handles the shared flags every control verb accepts:
 // -pyry-name (instance name → ~/.pyry/<name>.sock) and -pyry-socket (explicit
 // path that overrides the name). Returns the resolved socket path and any
@@ -1836,105 +1709,6 @@ func runLogs(args []string) error {
 	for _, line := range resp.Lines {
 		fmt.Println(line)
 	}
-	return nil
-}
-
-// parseAttachArgs peels the attach-specific sub-flags (--stdio,
-// --create-if-missing) out of the post-`-pyry-*` remainder and returns the
-// selector positional. Extracted from runAttach so the parsing rules can be
-// unit-tested without dialling the control socket. Mirrors
-// parseSessionsNewArgs's split — flag-set sub-parser first,
-// attachSelectorFromArgs on the post-flag positionals.
-//
-// --create-if-missing with no positional does NOT error at parse time — the
-// empty SessionID flows through to the server, where GetOrCreate's empty-id
-// rejection produces the canonical ErrInvalidSessionID. Parse-time vs.
-// semantic boundary: parsing is purely about shape; semantic rejection
-// lives at the Pool.
-func parseAttachArgs(args []string) (sessionID string, stdio bool, createIfMissing bool, err error) {
-	fs := flag.NewFlagSet("pyry attach", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	stdioFlag := fs.Bool("stdio", false, "no-PTY byte forwarding for SDK consumers")
-	cimFlag := fs.Bool("create-if-missing", false, "create the session if the supplied UUID is not registered")
-	if err := fs.Parse(args); err != nil {
-		return "", false, false, err
-	}
-	sel, err := attachSelectorFromArgs(fs.Args())
-	if err != nil {
-		return "", false, false, err
-	}
-	return sel, *stdioFlag, *cimFlag, nil
-}
-
-// errTooManyAttachArgs is returned by attachSelectorFromArgs when more than
-// one positional follows the recognised -pyry-* flags. runAttach turns this
-// into a usage line + os.Exit(2); the helper exists separately so the
-// argument-shape rule is unit-testable without intercepting os.Exit.
-var errTooManyAttachArgs = errors.New("too many arguments")
-
-// attachSelectorFromArgs returns the session selector string from the
-// post-flag remainder. Empty rest → "" (bootstrap). One arg → that arg
-// passed through verbatim — no trimming, no UUID parsing, no prefix logic.
-// More than one → errTooManyAttachArgs.
-func attachSelectorFromArgs(rest []string) (string, error) {
-	switch len(rest) {
-	case 0:
-		return "", nil
-	case 1:
-		return rest[0], nil
-	default:
-		return "", errTooManyAttachArgs
-	}
-}
-
-// runAttach implements `pyry attach [--stdio] [<id>]`: connect to a running
-// daemon's control socket, hand stdin/stdout over to a supervised claude
-// session. The optional <id> selects the session — full UUID or unique
-// prefix; omitted means the bootstrap session.
-//
-// Default mode allocates a PTY on the client side and prints
-// "pyry: attached…" / "pyry: detached." human-affordance lines; press
-// Ctrl-B d to detach (leaves pyry running).
-//
-// `--stdio` is the no-PTY mode for SDK consumers (stream-json, tooling):
-// stdin/stdout are bridged as raw bytes through the same wire protocol,
-// no raw mode, no SIGWINCH, no escape detection, no stderr noise. EOF on
-// stdin ends the attach cleanly; the session stays alive.
-func runAttach(args []string) error {
-	socketPath, rest, err := parseClientFlags("pyry attach", args)
-	if err != nil {
-		return err
-	}
-
-	sessionID, stdio, createIfMissing, err := parseAttachArgs(rest)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "pyry attach: "+err.Error())
-		fmt.Fprintln(os.Stderr, "usage: pyry attach [flags] [--stdio] [--create-if-missing] [<id>]")
-		os.Exit(2)
-	}
-
-	if stdio {
-		if err := control.AttachStdio(context.Background(), socketPath, sessionID, os.Stdin, os.Stdout, createIfMissing); err != nil {
-			return fmt.Errorf("attach: %w", err)
-		}
-		return nil
-	}
-
-	// Read local terminal geometry so the supervised claude knows the
-	// initial window size.
-	cols, rows := 0, 0
-	if term.IsTerminal(int(os.Stdout.Fd())) {
-		w, h, err := term.GetSize(int(os.Stdout.Fd()))
-		if err == nil {
-			cols, rows = w, h
-		}
-	}
-
-	fmt.Fprintln(os.Stderr, "pyry: attached. Press Ctrl-B d to detach.")
-	if err := control.Attach(context.Background(), socketPath, cols, rows, sessionID, createIfMissing); err != nil {
-		return fmt.Errorf("attach: %w", err)
-	}
-	fmt.Fprintln(os.Stderr, "\npyry: detached.")
 	return nil
 }
 

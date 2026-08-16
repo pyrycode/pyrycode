@@ -3,13 +3,10 @@ package sessions
 import (
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // helperPoolSpawnDir builds a Pool whose template (and therefore every
@@ -27,7 +24,7 @@ import (
 // writes cwd-.txt — distinct from any session's per-uuid marker, even when
 // both share a directory.
 //
-// tplWorkDir is the shared template workdir (supervisor.Config.WorkDir when no
+// tplWorkDir is the shared template workdir (RunnerConfig.WorkDir when no
 // per-session spawnDir is supplied). It must be writable so the recorder can
 // create its marker.
 func helperPoolSpawnDir(t *testing.T, registryPath, tplWorkDir string) *Pool {
@@ -37,6 +34,7 @@ func helperPoolSpawnDir(t *testing.T, registryPath, tplWorkDir string) *Pool {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: recordingRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sh",
 			ClaudeArgs:     []string{"-c", `pwd > "cwd-$2.txt"; exec sleep 3600`, "--"},
@@ -44,7 +42,6 @@ func helperPoolSpawnDir(t *testing.T, registryPath, tplWorkDir string) *Pool {
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
-			Bridge:         supervisor.NewBridge(logger),
 		},
 		Logger:       logger,
 		RegistryPath: registryPath,
@@ -56,10 +53,19 @@ func helperPoolSpawnDir(t *testing.T, registryPath, tplWorkDir string) *Pool {
 	return pool
 }
 
-// markerExists reports whether the cwd-<id>.txt recorder marker exists at dir.
+// markerExists reports whether a runner was constructed for session id with dir
+// as its working directory.
+//
+// It used to stat a cwd-<id>.txt file that a real spawned child wrote into its
+// own working directory, which proved the child's cwd by observing the child.
+// With no child to observe, the same claim is read off the handover: the pool
+// tells the runner which directory to work in, and that is the decision these
+// tests are about.
 func markerExists(dir string, id SessionID) bool {
-	_, err := os.Stat(filepath.Join(dir, "cwd-"+string(id)+".txt"))
-	return err == nil
+	ranRecords.mu.Lock()
+	defer ranRecords.mu.Unlock()
+	got, ok := ranRecords.byWD[dir]
+	return ok && got == string(id)
 }
 
 // TestPool_CreateIn_SpawnsInGivenDir: AC#1 — a session created with an

@@ -3,13 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // fakeExitingClaude writes an executable shell "claude" that reproduces the
@@ -59,7 +58,7 @@ exit 0
 func runFactoryRunner(t *testing.T, sink *streamTurnSink, bin, sessionID string) {
 	t.Helper()
 
-	runner, err := newStreamRunnerFactory(sink, "")(supervisor.Config{
+	runner, err := newStreamRunnerFactory(sink, "")(sessions.RunnerConfig{
 		ClaudeBin: bin,
 		WorkDir:   t.TempDir(),
 		SessionID: sessionID,

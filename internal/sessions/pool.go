@@ -16,8 +16,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
-	"github.com/pyrycode/pyrycode/internal/transcript"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -161,7 +159,6 @@ type SessionConfig struct {
 	WorkDir    string
 	ResumeLast bool
 	ClaudeArgs []string
-	Bridge     *supervisor.Bridge // nil = foreground
 
 	BackoffInitial time.Duration
 	BackoffMax     time.Duration
@@ -358,9 +355,12 @@ func New(cfg Config) (*Pool, error) {
 	// supervisor flows through and the PTY path is byte-identical — the rollback
 	// guarantee. newRunner is threaded through both construction sites (bootstrap
 	// below, per-session via Pool.newRunner in buildSession).
+	// A factory is mandatory since #1348. It used to default to the terminal
+	// supervisor when nil, which meant an unconfigured caller silently got the
+	// runner that no longer exists.
 	newRunner := cfg.RunnerFactory
 	if newRunner == nil {
-		newRunner = func(c supervisor.Config) (Runner, error) { return supervisor.New(c) }
+		return nil, errors.New("sessions: Config.RunnerFactory is required")
 	}
 
 	var reg *registryFile
@@ -442,108 +442,29 @@ func New(cfg Config) (*Pool, error) {
 	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
 	// long after New returns — identical timing to the pidFn holder above.
 	var p *Pool
-	// resolveID reads the current pinned bootstrap id at spawn time (p is
-	// late-bound below). Named once so both the ResolveSessionID provider and the
-	// growth-confirm resolver (line ~511) share the same id source.
-	resolveID := func() string { return string(p.BootstrapID()) }
-	supCfg := supervisor.Config{
+	supCfg := RunnerConfig{
 		ClaudeBin: cfg.Bootstrap.ClaudeBin,
 		WorkDir:   cfg.Bootstrap.WorkDir,
-		// #839: the bootstrap resumes its OWN deterministic id (never --continue),
-		// so a supervisor restart in a shared sessions dir cannot latch onto a
-		// second claude's newer transcript. #1164: resolve (id, resume) fresh each
-		// spawn. When the pinned id's transcript already exists on disk — a hard
-		// daemon restart left <id>.jsonl behind, or an in-process respawn after
-		// the first spawn created it — claude 2.1.199 refuses --session-id ("id is
-		// already in use") and crash-loops; spawn --resume <id> to reattach
-		// instead. An absent transcript keeps #839's --session-id create semantics
-		// byte-identical. StatByID stats exactly <id>.jsonl (no dir scan), so a
-		// second claude writing into the same shared dir cannot redirect the
-		// decision (#839 isolation holds). cfg.ClaudeSessionsDir=="" (unresolvable
-		// $HOME) and an absent/unreadable transcript both fall to resume=false; the
-		// probe is spawn-time, adding no new startup-fatal condition.
-		ResumeLast: false,
-		ResolveSessionID: func() (string, bool) {
-			id := resolveID()
-			if id == "" || cfg.ClaudeSessionsDir == "" {
-				return id, false
-			}
-			_, err := transcript.StatByID(cfg.ClaudeSessionsDir, id)
-			return id, err == nil
-		},
-		// #1165 self-heal safety net: after N consecutive fast non-zero crashes
-		// on the same pinned id (a deterministic wedge the resume fix #1164 does
-		// not cover for a *future* trigger), the supervisor calls this to mint a
-		// fresh pinned id. The ResolveSessionID pull above then resolves the
-		// rotated id on the very next spawn — no separate wiring. Only mutates
-		// p.bootstrap + the registry; no skip-set entry, no client transition
-		// (see RotateBootstrapForSelfHeal). p is late-bound like resolveID above.
-		SelfHeal: func() error {
-			_, err := p.RotateBootstrapForSelfHeal()
-			return err
-		},
-		// #1108 seam: expose the already-minted bootstrap id as a
-		// construction-safe value for a stream-json RunnerFactory (#1109). The
-		// PTY supervisor ignores SessionID and keeps rotating via
-		// ResolveSessionID above; this field is construction-fixed and does NOT
-		// mirror a /clear rotation. Set unconditionally — the seam always
-		// exposes the id; whether a factory consumes it is the factory's concern.
+		// #1108 seam: the already-minted bootstrap id, exposed as a
+		// construction-safe value the stream RunnerFactory reads (#1109). It is
+		// construction-fixed and does NOT mirror a /clear rotation.
+		//
+		// The resume/self-heal/transcript machinery that used to sit here went
+		// with the terminal runner in #1348. Every one of those fields was already
+		// dropped on the floor by the stream factory, so removing them changes no
+		// behaviour — it stops advertising behaviour nothing implements. See
+		// RunnerConfig's doc for the two that represent real gaps.
 		SessionID:      string(bootstrapID),
 		ClaudeArgs:     bootstrapArgs,
-		Bridge:         cfg.Bootstrap.Bridge,
 		Logger:         cfg.Logger,
 		BackoffInitial: cfg.Bootstrap.BackoffInitial,
 		BackoffMax:     cfg.Bootstrap.BackoffMax,
 		BackoffReset:   cfg.Bootstrap.BackoffReset,
-		RecordDir:      cfg.Bootstrap.RecordDir,
-	}
-	if reg := cfg.ConversationsRegistry; reg != nil {
-		supCfg.ValidateConversation = func(id string) error {
-			if _, ok := reg.Get(conversations.ConversationID(id)); !ok {
-				return conversations.ErrConversationNotFound
-			}
-			return nil
-		}
-	}
-	// Growth-confirm for the bootstrap turn-delivery path (#668): when claude's
-	// sessions dir is known, WriteUserTurn confirms a turn committed by observing
-	// its transcript grow instead of trusting tui-driver's chip heuristic, which
-	// false-acks the first mobile turn lost to a --continue restart race. The
-	// --session-id buildSession path keeps the nil-resolver Committed behaviour
-	// (see spec § Out of scope).
-	//
-	// The baseline tracks the transcript the daemon's OWN bootstrap child holds
-	// open (probe + live child PID) rather than the newest file by mtime (#838), so
-	// a second claude writing into the same shared sessions dir cannot redirect the
-	// baseline onto its own newer transcript. pidFn must read the LIVE PID on every
-	// resolve — the child respawns with a fresh PID across backoff — but supCfg is
-	// copied by value into supervisor.New below, before the supervisor (the PID
-	// source) exists. So pidFn closes over a late-bound holder that we assign once
-	// New has built the supervisor; the resolve callers (WriteUserTurn) run long
-	// after New returns, so the read strictly follows the assignment.
-	var bootstrapSup Runner
-	if cfg.ClaudeSessionsDir != "" {
-		probe := newProbe(cfg.Logger)
-		pidFn := func() int {
-			if bootstrapSup == nil {
-				return 0 // pre-late-bind guard; never observed at resolve time
-			}
-			return bootstrapSup.State().ChildPID
-		}
-		// Pinned-id preference (#989): the bootstrap spawns with
-		// --session-id <BootstrapID()> (#839), so the transcript path is
-		// deterministic; pass the SAME id source the spawn uses so the
-		// growth-confirm resolves by path first and only falls back to the fd
-		// probe for a (never-expected) empty id. Real claude defeats the probe —
-		// it holds no persistent fd on its transcript — so without this the
-		// delivery confirm never observes growth.
-		supCfg.ResolveTranscript = newProbePreferredTranscriptResolver(cfg.ClaudeSessionsDir, probe, pidFn, resolveID)
 	}
 	sup, err := newRunner(supCfg)
 	if err != nil {
-		return nil, fmt.Errorf("sessions: bootstrap supervisor: %w", err)
+		return nil, fmt.Errorf("sessions: bootstrap runner: %w", err)
 	}
-	bootstrapSup = sup // late-bind the live-PID source now that the supervisor exists
 	idleTimeout := cfg.Bootstrap.IdleTimeout
 	if idleTimeout == 0 {
 		idleTimeout = cfg.IdleTimeout
@@ -555,7 +476,6 @@ func New(cfg Config) (*Pool, error) {
 	sess := &Session{
 		id:           bootstrapID,
 		sup:          sup,
-		bridge:       cfg.Bootstrap.Bridge,
 		log:          cfg.Logger,
 		label:        label,
 		createdAt:    createdAt,
@@ -1379,42 +1299,27 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
 	base = append(base, "--settings", settingsPath)
 	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
-	var bridge *supervisor.Bridge
-	if tpl.Bridge != nil {
-		bridge = supervisor.NewBridge(p.log)
-	}
-
 	workDir := tpl.WorkDir
 	if spawnDir != "" {
 		workDir = spawnDir
 	}
 
-	supCfg := supervisor.Config{
+	supCfg := RunnerConfig{
 		ClaudeBin: tpl.ClaudeBin,
 		WorkDir:   workDir,
 		// #1108 seam: the same id already baked into ClaudeArgs as
-		// "--session-id <id>" (for the PTY path) is also exposed here so a
-		// stream-json RunnerFactory (#1109) can read it at construction.
+		// "--session-id <id>" is also exposed here so the stream RunnerFactory
+		// (#1109) can read it at construction.
 		SessionID:      string(id),
-		ResumeLast:     false,
 		ClaudeArgs:     args,
-		Bridge:         bridge,
 		Logger:         p.log,
 		BackoffInitial: tpl.BackoffInitial,
 		BackoffMax:     tpl.BackoffMax,
 		BackoffReset:   tpl.BackoffReset,
 	}
-	if reg := p.convReg; reg != nil {
-		supCfg.ValidateConversation = func(id string) error {
-			if _, ok := reg.Get(conversations.ConversationID(id)); !ok {
-				return conversations.ErrConversationNotFound
-			}
-			return nil
-		}
-	}
 	sup, err := p.newRunner(supCfg)
 	if err != nil {
-		return nil, fmt.Errorf("sessions: create supervisor: %w", err)
+		return nil, fmt.Errorf("sessions: create runner: %w", err)
 	}
 
 	idleTimeout := tpl.IdleTimeout
@@ -1426,7 +1331,6 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	return &Session{
 		id:           id,
 		sup:          sup,
-		bridge:       bridge,
 		log:          p.log,
 		label:        label,
 		createdAt:    now,

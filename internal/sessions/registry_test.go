@@ -411,7 +411,7 @@ func TestSave_FilePermissions(t *testing.T) {
 	if err := saveRegistryLocked(path, &registryFile{
 		Version: 1,
 		Sessions: []registryEntry{{
-			ID: SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91"),
+			ID:        SessionID("8a4cf9b2-7e5d-4d3a-9fb2-12c4f8a1de91"),
 			CreatedAt: when, LastActiveAt: when, Bootstrap: true,
 		}},
 	}); err != nil {
