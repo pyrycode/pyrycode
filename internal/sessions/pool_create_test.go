@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // helperPoolCreate builds a Pool whose bootstrap and Pool.Create-spawned
@@ -32,13 +30,13 @@ func helperPoolCreate(t *testing.T, registryPath string, activeCap int) *Pool {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sh",
 			ClaudeArgs:     []string{"-c", "exec sleep 3600", "--"},
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
-			Bridge:         supervisor.NewBridge(logger),
 		},
 		Logger:       logger,
 		RegistryPath: registryPath,
@@ -389,6 +387,7 @@ func helperPoolEvicted(t *testing.T) *Pool {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pool, err := New(Config{
+		RunnerFactory:    testRunnerFactory,
 		BootstrapEvicted: true,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sh",
@@ -396,7 +395,6 @@ func helperPoolEvicted(t *testing.T) *Pool {
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
-			Bridge:         supervisor.NewBridge(logger),
 		},
 		Logger: logger,
 	})

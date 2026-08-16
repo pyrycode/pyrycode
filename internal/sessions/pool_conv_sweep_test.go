@@ -151,6 +151,7 @@ func TestPool_New_HonoursConfigSweepInterval(t *testing.T) {
 	}
 	// No Bridge — test only inspects post-New fields; Run is not called.
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin: "/bin/sleep",
 		},
@@ -176,6 +177,7 @@ func TestPool_New_DefaultSweepIntervalWhenConfigZero(t *testing.T) {
 	}
 	// No Bridge — test only inspects post-New fields; Run is not called.
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin: "/bin/sleep",
 		},

@@ -29,7 +29,10 @@ const testConvIDB = "22222222-2222-4222-8222-222222222222"
 // stubActiveSession is a race-safe activeSession test double: set() stores the
 // current active session id, get() returns it plus ok = (id != ""). Modelled on
 // stubCursor; the drain reads it concurrently with the test goroutine's set().
-type stubActiveSession struct{ mu sync.Mutex; id string }
+type stubActiveSession struct {
+	mu sync.Mutex
+	id string
+}
 
 func (s *stubActiveSession) set(id string) { s.mu.Lock(); s.id = id; s.mu.Unlock() }
 

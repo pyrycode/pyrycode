@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,9 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/ptyrunner"
 	"github.com/pyrycode/pyrycode/internal/agentrun/settings"
-	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // Note: production claude under --output-format stream-json still writes a
@@ -135,7 +132,6 @@ exec %q -test.run=^TestAgentRunStreamJSONFake$
 	}
 	t.Setenv("PYRY_CLAUDE_BIN", script)
 	t.Setenv("PYRY_AGENT_RUN_FAKE", "1")
-	t.Setenv("PYRY_USE_STREAMJSON", "1")
 }
 
 // validArgsFixture builds a fully-valid argv for parseAgentRunArgs. Tests
@@ -653,11 +649,13 @@ func TestAgentRunUsageDescription(t *testing.T) {
 		t.Errorf("agentRunUsageDescription still contains stale %q disclaimer:\n%s",
 			"scaffold only", agentRunUsageDescription)
 	}
-	// Load-bearing substrings: the prose cannot describe the current
-	// runtime behaviour without `stream-json` (the wire shape both modes
-	// emit), `--max-turns` / `--allowed-tools` (the two behavioural
-	// anchors), `PYRY_USE_STREAMJSON` (the operator-facing rollback knob
-	// added by #470), and `PTY` (the new-default disclosure).
+	// Load-bearing substrings: the prose cannot describe the current runtime
+	// behaviour without `stream-json` (the wire shape it emits), `--max-turns`
+	// and `--allowed-tools` (the two behavioural anchors), and — since #1348
+	// removed the second runner — both `PYRY_USE_STREAMJSON` and `PTY`, because
+	// an operator whose fork still sets that variable needs the help text to say
+	// it is ignored and that the path it used to select is gone. Dropping either
+	// leaves the variable looking live.
 	for _, want := range []string{"stream-json", "--max-turns", "--allowed-tools", "PYRY_USE_STREAMJSON", "PTY"} {
 		if !strings.Contains(agentRunUsageDescription, want) {
 			t.Errorf("agentRunUsageDescription missing required substring %q:\n%s",
@@ -670,14 +668,14 @@ func TestAgentRunUsageDescription(t *testing.T) {
 // reads the prompt file, builds the argv, spawns the (faked) claude via
 // streamrunner, and forwards claude's stdout verbatim. Asserts:
 //
-//   (a) the stream-json events (system init / assistant / result success)
-//       appear on stdout in order;
-//   (b) stdout does NOT start with a "settings-file: " marker line (the
-//       marker was removed in #391; claude's `system init` event takes over);
-//   (c) the verb does not write the per-spawn settings file or the
-//       workspace-trust mark in ~/.claude.json;
-//   (d) the prompt file's "hello" content is delivered as a stream-json
-//       user-turn envelope on claude's stdin.
+//	(a) the stream-json events (system init / assistant / result success)
+//	    appear on stdout in order;
+//	(b) stdout does NOT start with a "settings-file: " marker line (the
+//	    marker was removed in #391; claude's `system init` event takes over);
+//	(c) the verb does not write the per-spawn settings file or the
+//	    workspace-trust mark in ~/.claude.json;
+//	(d) the prompt file's "hello" content is delivered as a stream-json
+//	    user-turn envelope on claude's stdin.
 func TestRunAgentRun_StreamJSON_Clean(t *testing.T) {
 	fx := newValidArgsFixture(t)
 	configureFakeClaude(t)
@@ -824,22 +822,22 @@ func TestRunAgentRun_StreamJSON_NonZeroExit(t *testing.T) {
 // require either signal-context dependency injection or sending SIGTERM
 // to the test process — both heavier than the bug they would prevent.
 
-// installFakeSeams installs no-op success stubs for the four ptyrunner-path
-// seams declared in agent_run.go (trustMark / settingsWrite / ptyRun /
-// newSessionID) and registers cleanup so each is restored to its production
-// value at test exit. Individual tests re-override any seam they need a
-// specific behaviour from.
+// installFakeSeams installs no-op success stubs for the seams declared in
+// agent_run.go (trustMark / settingsWrite) and registers cleanup so each is
+// restored to its production value at test exit. Individual tests re-override
+// any seam they need a specific behaviour from.
+//
+// The ptyRun and newSessionID seams went with the terminal path in #1348. The
+// stream path mints no session id of its own — claude does that — and does not
+// pre-mark workdir trust, so trustMark survives here only for the daemon and
+// ACP callers that share this file's seam block.
 func installFakeSeams(t *testing.T) {
 	t.Helper()
 	origTrust := trustMark
 	origSettings := settingsWrite
-	origPty := ptyRun
-	origSid := newSessionID
 	t.Cleanup(func() {
 		trustMark = origTrust
 		settingsWrite = origSettings
-		ptyRun = origPty
-		newSessionID = origSid
 	})
 	trustMark = func(workdir string) (string, error) {
 		return workdir, nil
@@ -851,484 +849,6 @@ func installFakeSeams(t *testing.T) {
 		}
 		_ = f.Close()
 		return f.Name(), nil
-	}
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		return nil
-	}
-	newSessionID = sessions.NewID
-}
-
-// TestRunAgentRun_DispatchesToPtyRunnerByDefault verifies that with
-// PYRY_USE_STREAMJSON unset, runAgentRun dispatches to the ptyrunner
-// path and the captured ptyrunner.Config has every required field
-// populated. Locks the default-branch wiring against future drift.
-func TestRunAgentRun_DispatchesToPtyRunnerByDefault(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-	t.Setenv("PYRY_CLAUDE_BIN", "/usr/local/bin/claude")
-
-	var calls int
-	var captured ptyrunner.Config
-	ptyRun = func(_ context.Context, cfg ptyrunner.Config) error {
-		calls++
-		captured = cfg
-		return nil
-	}
-
-	if err := runAgentRun(io.Discard, fx.argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("ptyRun called %d times, want 1", calls)
-	}
-	if captured.ClaudeBin == "" || captured.WorkDir == "" || captured.SessionID == "" ||
-		captured.SettingsPath == "" || captured.SystemPrompt == "" || captured.Model == "" ||
-		captured.Effort == "" || captured.AllowedTools == nil || captured.MaxTurns == 0 ||
-		len(captured.PromptBytes) == 0 || captured.Stdout == nil || captured.Stderr == nil {
-		t.Fatalf("ptyRun captured Config has unpopulated required fields: %+v", captured)
-	}
-}
-
-// TestRunAgentRun_EnvSet1DispatchesToStreamRunner pins the rollback knob:
-// PYRY_USE_STREAMJSON=1 routes through streamrunner (verified via the
-// existing fake-claude clean path). If ptyrunner is reached, t.Fatal trips.
-func TestRunAgentRun_EnvSet1DispatchesToStreamRunner(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	configureFakeClaude(t) // pins PYRY_USE_STREAMJSON=1
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		t.Fatal("ptyrunner called on streamrunner branch")
-		return nil
-	}
-
-	var stdout bytes.Buffer
-	done := make(chan error, 1)
-	go func() { done <- runAgentRun(&stdout, fx.argv) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("runAgentRun: %v\nstdout=%q", err, stdout.String())
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("runAgentRun did not return within 10s\nstdout so far=%q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), `"type":"result"`) {
-		t.Errorf("stdout missing result event from fake-claude clean path: %q", stdout.String())
-	}
-}
-
-// TestRunAgentRun_EnvNon1ValueDispatchesToPtyRunner pins the predicate's
-// strictness: only the exact string "1" selects the legacy path. Future
-// contributors widening the truthy set ("true", "yes", "on", …) trip this.
-func TestRunAgentRun_EnvNon1ValueDispatchesToPtyRunner(t *testing.T) {
-	for _, val := range []string{"true", "yes", "on", "streamjson", "0", "false", ""} {
-		t.Run(fmt.Sprintf("val=%q", val), func(t *testing.T) {
-			fx := newValidArgsFixture(t)
-			installFakeSeams(t)
-			t.Setenv("PYRY_USE_STREAMJSON", val)
-
-			var calls int
-			ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-				calls++
-				return nil
-			}
-			if err := runAgentRun(io.Discard, fx.argv); err != nil {
-				t.Fatalf("runAgentRun: %v", err)
-			}
-			if calls != 1 {
-				t.Errorf("PYRY_USE_STREAMJSON=%q: ptyRun called %d times, want 1", val, calls)
-			}
-		})
-	}
-}
-
-// TestRunAgentRun_PtyPath_TrustFailure_MentionsClaudeJson pins AC #3:
-// a trust-write failure surfaces with `~/.claude.json` in the message
-// (operator-actionable path is the load-bearing diagnostic).
-func TestRunAgentRun_PtyPath_TrustFailure_MentionsClaudeJson(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	trustMark = func(_ string) (string, error) {
-		return "", errors.New("simulated trust failure")
-	}
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		t.Fatal("ptyrunner called after trust failure")
-		return nil
-	}
-
-	err := runAgentRun(io.Discard, fx.argv)
-	if err == nil {
-		t.Fatal("runAgentRun: got nil, want error from trust failure")
-	}
-	got := err.Error()
-	if !strings.Contains(got, "~/.claude.json") {
-		t.Errorf("error %q missing `~/.claude.json`", got)
-	}
-	if !strings.HasPrefix(got, "agent-run: ") {
-		t.Errorf("error %q missing `agent-run: ` prefix", got)
-	}
-}
-
-// TestRunAgentRun_PtyPath_SettingsFailure_NamesSettingsStep pins AC #3:
-// a settings-write failure surfaces with `settings` in the message.
-func TestRunAgentRun_PtyPath_SettingsFailure_NamesSettingsStep(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	settingsWrite = func(_, _ []string) (string, error) {
-		return "", errors.New("simulated settings failure")
-	}
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		t.Fatal("ptyrunner called after settings failure")
-		return nil
-	}
-
-	err := runAgentRun(io.Discard, fx.argv)
-	if err == nil {
-		t.Fatal("runAgentRun: got nil, want error from settings failure")
-	}
-	got := err.Error()
-	if !strings.Contains(got, "settings") {
-		t.Errorf("error %q missing `settings`", got)
-	}
-	if !strings.HasPrefix(got, "agent-run: ") {
-		t.Errorf("error %q missing `agent-run: ` prefix", got)
-	}
-}
-
-// TestRunAgentRun_PtyPath_PtyRunError_Wrapped pins AC #3: a ptyrunner.Run
-// failure flows through the verb's `agent-run: ` prefix.
-func TestRunAgentRun_PtyPath_PtyRunError_Wrapped(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		return errors.New("simulated ptyrunner failure")
-	}
-
-	err := runAgentRun(io.Discard, fx.argv)
-	if err == nil {
-		t.Fatal("runAgentRun: got nil, want error from ptyrunner failure")
-	}
-	got := err.Error()
-	if !strings.HasPrefix(got, "agent-run: ") {
-		t.Errorf("error %q missing `agent-run: ` prefix", got)
-	}
-	if !strings.Contains(got, "simulated ptyrunner failure") {
-		t.Errorf("error %q missing underlying ptyrunner message", got)
-	}
-}
-
-// TestRunAgentRun_PtyPath_SettingsRemovedOnSuccess pins AC #2: the
-// per-spawn settings tempfile is removed when the verb returns nil.
-// Exercises the production settings.WriteSettings via a capture-wrapped
-// seam (no replacement).
-func TestRunAgentRun_PtyPath_SettingsRemovedOnSuccess(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	var capturedPath string
-	settingsWrite = func(allow, deny []string) (string, error) {
-		p, err := settings.WriteSettingsWithDeny(allow, deny)
-		capturedPath = p
-		return p, err
-	}
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		// Sanity-check the tempfile exists at this moment (before defer fires).
-		if _, err := os.Stat(capturedPath); err != nil {
-			t.Errorf("settings file %q absent during ptyRun: %v", capturedPath, err)
-		}
-		return nil
-	}
-
-	if err := runAgentRun(io.Discard, fx.argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-	if capturedPath == "" {
-		t.Fatal("settingsWrite never called")
-	}
-	if _, err := os.Stat(capturedPath); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("settings file %q still exists after runAgentRun success: stat err=%v", capturedPath, err)
-	}
-}
-
-// TestRunAgentRun_PtyPath_SettingsRemovedOnFailure pins AC #2: the
-// per-spawn settings tempfile is removed even when ptyrunner fails.
-func TestRunAgentRun_PtyPath_SettingsRemovedOnFailure(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	var capturedPath string
-	settingsWrite = func(allow, deny []string) (string, error) {
-		p, err := settings.WriteSettingsWithDeny(allow, deny)
-		capturedPath = p
-		return p, err
-	}
-	ptyRun = func(_ context.Context, _ ptyrunner.Config) error {
-		return errors.New("boom")
-	}
-
-	if err := runAgentRun(io.Discard, fx.argv); err == nil {
-		t.Fatal("runAgentRun: got nil, want error from ptyrunner")
-	}
-	if capturedPath == "" {
-		t.Fatal("settingsWrite never called")
-	}
-	if _, err := os.Stat(capturedPath); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("settings file %q still exists after runAgentRun failure: stat err=%v", capturedPath, err)
-	}
-}
-
-// TestRunAgentRun_PtyPath_WorkDirIsTrustResolvedRealpath pins the
-// realpath-not-parsed-workdir contract: ptyrunner.Config.WorkDir equals
-// the trust function's symlink-resolved return value, not parsed.workdir.
-// Keeps claude's projects[<realpath>] key aligned with cmd.Dir.
-func TestRunAgentRun_PtyPath_WorkDirIsTrustResolvedRealpath(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	const sentinel = "/sentinel/realpath"
-	trustMark = func(_ string) (string, error) { return sentinel, nil }
-	var captured ptyrunner.Config
-	ptyRun = func(_ context.Context, cfg ptyrunner.Config) error {
-		captured = cfg
-		return nil
-	}
-
-	if err := runAgentRun(io.Discard, fx.argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-	if captured.WorkDir != sentinel {
-		t.Errorf("Config.WorkDir = %q, want sentinel realpath %q (must not be parsed.workdir %q)",
-			captured.WorkDir, sentinel, fx.workdir)
-	}
-}
-
-// TestRunAgentRun_PtyPath_SessionIDIsUUIDv4 pins the SessionID shape:
-// canonical UUIDv4 per sessions.ValidID. Guards against a future "we'll
-// just use a short hash" drift.
-func TestRunAgentRun_PtyPath_SessionIDIsUUIDv4(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	var captured ptyrunner.Config
-	ptyRun = func(_ context.Context, cfg ptyrunner.Config) error {
-		captured = cfg
-		return nil
-	}
-
-	if err := runAgentRun(io.Discard, fx.argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-	if !sessions.ValidID(captured.SessionID) {
-		t.Errorf("Config.SessionID = %q is not a canonical UUIDv4", captured.SessionID)
-	}
-}
-
-// TestRunAgentRun_PtyPath_ConfigWiring asserts that each non-SessionID,
-// non-WorkDir field of ptyrunner.Config round-trips byte-for-byte from
-// the parsed args (covered in two fixtures). SessionID + WorkDir have
-// dedicated pins above.
-func TestRunAgentRun_PtyPath_ConfigWiring(t *testing.T) {
-	type wantFields struct {
-		model            string
-		effort           string
-		maxTurns         int
-		allowedTools     []string
-		systemPromptFile string
-		promptBytes      string
-	}
-	tests := []struct {
-		name string
-		fx   func(t *testing.T) (validArgsFixture, wantFields)
-	}{
-		{
-			name: "sonnet medium 3 turns",
-			fx: func(t *testing.T) (validArgsFixture, wantFields) {
-				f := newValidArgsFixture(t)
-				return f, wantFields{
-					model:            "sonnet-4-6",
-					effort:           "medium",
-					maxTurns:         3,
-					allowedTools:     []string{"Read", "Bash"},
-					systemPromptFile: f.systemPromptFile,
-					promptBytes:      "hello",
-				}
-			},
-		},
-		{
-			name: "opus max 12 turns",
-			fx: func(t *testing.T) (validArgsFixture, wantFields) {
-				f := newValidArgsFixture(t)
-				// Rewrite prompt file content for round-trip verification.
-				if err := os.WriteFile(f.promptFile, []byte("greetings"), 0o644); err != nil {
-					t.Fatalf("rewrite prompt file: %v", err)
-				}
-				argv := slices.Clone(f.argv)
-				for i := 0; i < len(argv)-1; i++ {
-					switch argv[i] {
-					case "--model":
-						argv[i+1] = "opus-4-7"
-					case "--effort":
-						argv[i+1] = "max"
-					case "--max-turns":
-						argv[i+1] = "12"
-					case "--allowed-tools":
-						argv[i+1] = "Read"
-					}
-				}
-				f.argv = argv
-				return f, wantFields{
-					model:            "opus-4-7",
-					effort:           "max",
-					maxTurns:         12,
-					allowedTools:     []string{"Read"},
-					systemPromptFile: f.systemPromptFile,
-					promptBytes:      "greetings",
-				}
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fx, want := tc.fx(t)
-			installFakeSeams(t)
-			t.Setenv("PYRY_USE_STREAMJSON", "")
-			t.Setenv("PYRY_CLAUDE_BIN", "/usr/local/bin/claude-fixture")
-
-			var capturedCfg ptyrunner.Config
-			var capturedTools []string
-			settingsWrite = func(tools, _ []string) (string, error) {
-				capturedTools = slices.Clone(tools)
-				f, err := os.CreateTemp("", "pyry-test-settings-*.json")
-				if err != nil {
-					return "", err
-				}
-				_ = f.Close()
-				return f.Name(), nil
-			}
-			ptyRun = func(_ context.Context, cfg ptyrunner.Config) error {
-				capturedCfg = cfg
-				return nil
-			}
-
-			var stdout bytes.Buffer
-			if err := runAgentRun(&stdout, fx.argv); err != nil {
-				t.Fatalf("runAgentRun: %v", err)
-			}
-
-			if capturedCfg.ClaudeBin != "/usr/local/bin/claude-fixture" {
-				t.Errorf("ClaudeBin = %q, want %q", capturedCfg.ClaudeBin, "/usr/local/bin/claude-fixture")
-			}
-			if capturedCfg.SystemPrompt != want.systemPromptFile {
-				t.Errorf("SystemPrompt = %q, want %q", capturedCfg.SystemPrompt, want.systemPromptFile)
-			}
-			if capturedCfg.Model != want.model {
-				t.Errorf("Model = %q, want %q", capturedCfg.Model, want.model)
-			}
-			if capturedCfg.Effort != want.effort {
-				t.Errorf("Effort = %q, want %q", capturedCfg.Effort, want.effort)
-			}
-			if capturedCfg.MaxTurns != want.maxTurns {
-				t.Errorf("MaxTurns = %d, want %d", capturedCfg.MaxTurns, want.maxTurns)
-			}
-			if string(capturedCfg.PromptBytes) != want.promptBytes {
-				t.Errorf("PromptBytes = %q, want %q", string(capturedCfg.PromptBytes), want.promptBytes)
-			}
-			if capturedCfg.Stdout != &stdout {
-				t.Errorf("Stdout pointer mismatch: got %p, want %p", capturedCfg.Stdout, &stdout)
-			}
-			if capturedCfg.Stderr != os.Stderr {
-				t.Errorf("Stderr = %v, want os.Stderr", capturedCfg.Stderr)
-			}
-			if capturedCfg.SettingsPath == "" {
-				t.Errorf("SettingsPath empty in captured Config")
-			}
-			if !slices.Equal(capturedTools, want.allowedTools) {
-				t.Errorf("settingsWrite received tools = %v, want %v", capturedTools, want.allowedTools)
-			}
-		})
-	}
-}
-
-// TestRunAgentRun_PtyPath_AllowedToolsPassedToSettings pins the
-// deny-default allowlist's load-bearing path: the slice handed to
-// settings.WriteSettings equals parsed.allowedTools byte-for-byte.
-func TestRunAgentRun_PtyPath_AllowedToolsPassedToSettings(t *testing.T) {
-	fx := newValidArgsFixture(t)
-	argv := fx.argvReplacing("--allowed-tools", "Read, Bash, Edit")
-	installFakeSeams(t)
-	t.Setenv("PYRY_USE_STREAMJSON", "")
-
-	var captured []string
-	settingsWrite = func(tools, _ []string) (string, error) {
-		captured = slices.Clone(tools)
-		f, err := os.CreateTemp("", "pyry-test-settings-*.json")
-		if err != nil {
-			return "", err
-		}
-		_ = f.Close()
-		return f.Name(), nil
-	}
-
-	if err := runAgentRun(io.Discard, argv); err != nil {
-		t.Fatalf("runAgentRun: %v", err)
-	}
-	want := []string{"Read", "Bash", "Edit"}
-	if !slices.Equal(captured, want) {
-		t.Errorf("settingsWrite received tools = %v, want %v", captured, want)
-	}
-}
-
-// TestRunAgentRun_PtyPath_DisallowedToolsPassedToSettings pins AC1 at the
-// CLI boundary: --disallowed-tools tokens reach the settings writer's deny
-// slice in order; absence produces a nil/empty deny slice.
-func TestRunAgentRun_PtyPath_DisallowedToolsPassedToSettings(t *testing.T) {
-	cases := []struct {
-		name string
-		flag []string // extra argv, or nil to omit --disallowed-tools
-		want []string
-	}{
-		{"present", []string{"--disallowed-tools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
-		{"mixed_separators", []string{"--disallowed-tools", "AskUserQuestion EnterPlanMode,ExitPlanMode"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
-		{"absent", nil, []string{}},
-		{"empty", []string{"--disallowed-tools", ""}, []string{}},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			fx := newValidArgsFixture(t)
-			argv := append(slices.Clone(fx.argv), tc.flag...)
-			installFakeSeams(t)
-			t.Setenv("PYRY_USE_STREAMJSON", "")
-
-			var capturedDeny []string
-			settingsWrite = func(_, deny []string) (string, error) {
-				capturedDeny = slices.Clone(deny)
-				f, err := os.CreateTemp("", "pyry-test-settings-*.json")
-				if err != nil {
-					return "", err
-				}
-				_ = f.Close()
-				return f.Name(), nil
-			}
-
-			if err := runAgentRun(io.Discard, argv); err != nil {
-				t.Fatalf("runAgentRun: %v", err)
-			}
-			if !slices.Equal(capturedDeny, tc.want) {
-				t.Errorf("settingsWrite received deny = %v, want %v", capturedDeny, tc.want)
-			}
-		})
 	}
 }
 
@@ -1434,6 +954,194 @@ func TestSplitAllowedTools(t *testing.T) {
 			got := splitAllowedTools(tc.raw)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("splitAllowedTools(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRunAgentRun_SelectorVariableNoLongerDecides is the inverse of the test it
+// replaces. PYRY_USE_STREAMJSON used to choose between two runners, with the
+// terminal one as the default, so an unset variable took the path #1348 removed.
+// All five dispatcher forks still carry the variable in their .env files, so the
+// property worth pinning now is that NO value of it reaches a second runner —
+// set, unset, truthy, or junk. If a terminal path is ever reintroduced behind
+// this variable, this test is what fails.
+func TestRunAgentRun_SelectorVariableNoLongerDecides(t *testing.T) {
+	for _, val := range []string{"1", "0", "true", "yes", "streamjson", ""} {
+		t.Run(fmt.Sprintf("val=%q", val), func(t *testing.T) {
+			fx := newValidArgsFixture(t)
+			configureFakeClaude(t)
+			t.Setenv("PYRY_USE_STREAMJSON", val)
+
+			var stdout bytes.Buffer
+			if err := runAgentRun(&stdout, fx.argv); err != nil {
+				t.Fatalf("runAgentRun: %v\nstdout=%q", err, stdout.String())
+			}
+			// The fake claude only answers on the stream-json surface, so a
+			// result line is proof the stream runner ran rather than a bare
+			// nil error.
+			if !strings.Contains(stdout.String(), `"type":"result"`) {
+				t.Errorf("PYRY_USE_STREAMJSON=%q: stdout has no result event, so the stream runner did not run: %q", val, stdout.String())
+			}
+		})
+	}
+}
+
+// TestRunAgentRun_SettingsFailure_NamesSettingsStep pins AC #3 on the surviving
+// path: a settings-write failure surfaces with `settings` in the message and
+// aborts before claude is spawned.
+func TestRunAgentRun_SettingsFailure_NamesSettingsStep(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
+	installFakeSeams(t)
+
+	settingsWrite = func(_, _ []string) (string, error) {
+		return "", errors.New("simulated settings failure")
+	}
+
+	err := runAgentRun(io.Discard, fx.argv)
+	if err == nil {
+		t.Fatal("runAgentRun: got nil, want error from settings failure")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "settings") {
+		t.Errorf("error %q missing `settings`", got)
+	}
+	if !strings.HasPrefix(got, "agent-run: ") {
+		t.Errorf("error %q missing `agent-run: ` prefix", got)
+	}
+}
+
+// TestRunAgentRun_SettingsRemovedOnSuccess pins AC #2: the per-spawn settings
+// tempfile is written for real and removed when the verb returns nil. Exercises
+// the production writer through a capture-wrapped seam rather than replacing it,
+// so the file under test is the one production writes.
+func TestRunAgentRun_SettingsRemovedOnSuccess(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
+	installFakeSeams(t)
+
+	var capturedPath string
+	settingsWrite = func(allow, deny []string) (string, error) {
+		p, err := settings.WriteSettingsWithDeny(allow, deny)
+		capturedPath = p
+		if err == nil {
+			if _, statErr := os.Stat(p); statErr != nil {
+				t.Errorf("settings file %q absent immediately after write: %v", p, statErr)
+			}
+		}
+		return p, err
+	}
+
+	if err := runAgentRun(io.Discard, fx.argv); err != nil {
+		t.Fatalf("runAgentRun: %v", err)
+	}
+	if capturedPath == "" {
+		t.Fatal("settingsWrite never called — the stream path must still write the per-spawn settings file, it is the tool boundary (#1387)")
+	}
+	if _, err := os.Stat(capturedPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("settings file %q still exists after runAgentRun success: stat err=%v", capturedPath, err)
+	}
+}
+
+// TestRunAgentRun_SettingsRemovedOnFailure pins the same removal on the error
+// path, driven by a child that exits non-zero.
+func TestRunAgentRun_SettingsRemovedOnFailure(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	configureFakeClaude(t)
+	t.Setenv("GO_AGENT_RUN_FAKE_MODE", "exit1")
+	installFakeSeams(t)
+
+	var capturedPath string
+	settingsWrite = func(allow, deny []string) (string, error) {
+		p, err := settings.WriteSettingsWithDeny(allow, deny)
+		capturedPath = p
+		return p, err
+	}
+
+	if err := runAgentRun(io.Discard, fx.argv); err == nil {
+		t.Fatal("runAgentRun: got nil, want error from exit-1 child")
+	}
+	if capturedPath == "" {
+		t.Fatal("settingsWrite never called")
+	}
+	if _, err := os.Stat(capturedPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("settings file %q still exists after runAgentRun failure: stat err=%v", capturedPath, err)
+	}
+}
+
+// TestRunAgentRun_AllowedToolsPassedToSettings pins the deny-default allowlist's
+// load-bearing path: the slice handed to the settings writer equals
+// parsed.allowedTools byte-for-byte.
+//
+// This is the security-relevant half of the terminal path's test set and it
+// migrated rather than died with it. The settings file, not the command-line
+// flag, is what actually enforces the allowlist — the flag is defeated outright
+// by --dangerously-skip-permissions, which is how every dispatched agent ran
+// unrestricted for two weeks after the 2026-07-25 fleet switch (#1387).
+func TestRunAgentRun_AllowedToolsPassedToSettings(t *testing.T) {
+	fx := newValidArgsFixture(t)
+	argv := fx.argvReplacing("--allowed-tools", "Read, Bash, Edit")
+	configureFakeClaude(t)
+	installFakeSeams(t)
+
+	var captured []string
+	settingsWrite = func(tools, _ []string) (string, error) {
+		captured = slices.Clone(tools)
+		f, err := os.CreateTemp("", "pyry-test-settings-*.json")
+		if err != nil {
+			return "", err
+		}
+		_ = f.Close()
+		return f.Name(), nil
+	}
+
+	if err := runAgentRun(io.Discard, argv); err != nil {
+		t.Fatalf("runAgentRun: %v", err)
+	}
+	want := []string{"Read", "Bash", "Edit"}
+	if !slices.Equal(captured, want) {
+		t.Errorf("settingsWrite received tools = %v, want %v", captured, want)
+	}
+}
+
+// TestRunAgentRun_DisallowedToolsPassedToSettings pins AC1 at the CLI boundary:
+// --disallowed-tools tokens reach the settings writer's deny slice in order;
+// absence produces an empty deny slice.
+func TestRunAgentRun_DisallowedToolsPassedToSettings(t *testing.T) {
+	cases := []struct {
+		name string
+		flag []string // extra argv, or nil to omit --disallowed-tools
+		want []string
+	}{
+		{"present", []string{"--disallowed-tools", "AskUserQuestion,EnterPlanMode,ExitPlanMode"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
+		{"mixed_separators", []string{"--disallowed-tools", "AskUserQuestion EnterPlanMode,ExitPlanMode"}, []string{"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"}},
+		{"absent", nil, []string{}},
+		{"empty", []string{"--disallowed-tools", ""}, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newValidArgsFixture(t)
+			argv := append(slices.Clone(fx.argv), tc.flag...)
+			configureFakeClaude(t)
+			installFakeSeams(t)
+
+			var capturedDeny []string
+			settingsWrite = func(_, deny []string) (string, error) {
+				capturedDeny = slices.Clone(deny)
+				f, err := os.CreateTemp("", "pyry-test-settings-*.json")
+				if err != nil {
+					return "", err
+				}
+				_ = f.Close()
+				return f.Name(), nil
+			}
+
+			if err := runAgentRun(io.Discard, argv); err != nil {
+				t.Fatalf("runAgentRun: %v", err)
+			}
+			if !slices.Equal(capturedDeny, tc.want) {
+				t.Errorf("settingsWrite received deny = %v, want %v", capturedDeny, tc.want)
 			}
 		})
 	}

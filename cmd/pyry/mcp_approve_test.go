@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -132,23 +134,60 @@ func assertVerdict(t *testing.T, tr mcpToolResult, wantText string) {
 	}
 }
 
-// driveMCP feeds one JSON-RPC frame through serveACP with the approve server's
+// shortTempDir mirrors internal/control's helper: t.TempDir() lives under
+// /var/folders/... on macOS which combined with long test names blows past the
+// 104-byte sun_path limit. /tmp is short. Moved here from the auto-attach tests
+// when #1348 deleted them.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pyryapprove")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// testLogger builds a logger writing to w so tests can assert diagnostics land
+// there and never on the stdout frame stream. Moved here from the ACP
+// subcommand's tests when #1348 deleted them.
+func testLogger(w io.Writer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// jsonrpcReply is the decode-by-shape view of a single JSON-RPC response frame:
+// id plus either a raw result or an error object. Result is raw so each test
+// unmarshals it into the concrete result type or inspects it as bytes.
+//
+// It was called jsonrpcReply and lived in the ACP subcommand's tests until
+// #1348 deleted that surface. Nothing about the shape was ACP-specific; it moved
+// here with the one caller that outlived it.
+type jsonrpcReply struct {
+	ID     json.RawMessage `json:"id"`
+	Result json.RawMessage `json:"result"`
+	Error  *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// driveMCP feeds one JSON-RPC frame through serveJSONRPCStdio with the approve server's
 // handlers registered and runs to EOF, returning the single decoded reply and
 // its raw line. Mirrors driveHandshake (acp_test.go).
-func driveMCP(t *testing.T, s *approveServer, frame string) (handshakeReply, []byte) {
+func driveMCP(t *testing.T, s *approveServer, frame string) (jsonrpcReply, []byte) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var stdout, stderr bytes.Buffer
-	if err := serveACP(ctx, strings.NewReader(frame+"\n"), &stdout, testLogger(&stderr), s.register); err != nil {
-		t.Fatalf("serveACP: %v", err)
+	if err := serveJSONRPCStdio(ctx, strings.NewReader(frame+"\n"), &stdout, testLogger(&stderr), s.register); err != nil {
+		t.Fatalf("serveJSONRPCStdio: %v", err)
 	}
 	line := bytes.TrimRight(stdout.Bytes(), "\n")
 	if len(line) == 0 {
 		t.Fatalf("no response frame for %q", frame)
 	}
-	var r handshakeReply
+	var r jsonrpcReply
 	if err := json.Unmarshal(line, &r); err != nil {
 		t.Fatalf("unmarshal reply %q: %v", line, err)
 	}

@@ -13,12 +13,11 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // helperPool builds a Pool with a benign bootstrap config. None of the pool
 // or session tests that use this call Run, so /bin/sleep is never spawned —
-// it is only there to satisfy supervisor.New's exec.LookPath check.
+// it is only there to satisfy the runner's exec.LookPath check.
 //
 // withBridge controls whether the bootstrap session has an attached bridge.
 // The Attach-related session tests need one; the rest do not care.
@@ -28,13 +27,13 @@ func helperPool(t *testing.T, withBridge bool) *Pool {
 		t.Skipf("benign binary not available: %v", err)
 	}
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin: "/bin/sleep",
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	if withBridge {
-		cfg.Bootstrap.Bridge = supervisor.NewBridge(cfg.Logger)
 	}
 	pool, err := New(cfg)
 	if err != nil {
@@ -61,10 +60,10 @@ func helperPoolWithSleepArgs(t *testing.T) *Pool {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
-			Bridge:         supervisor.NewBridge(logger),
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
@@ -172,9 +171,10 @@ func helperPoolPersistent(t *testing.T, registryPath string) *Pool {
 		t.Skipf("benign binary not available: %v", err)
 	}
 	pool, err := New(Config{
-		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RegistryPath: registryPath,
+		RunnerFactory: testRunnerFactory,
+		Bootstrap:     SessionConfig{ClaudeBin: "/bin/sleep"},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  registryPath,
 	})
 	if err != nil {
 		t.Fatalf("sessions.New: %v", err)
@@ -327,6 +327,7 @@ func helperPoolReconciling(t *testing.T, registryPath, claudeSessionsDir string)
 		t.Skipf("benign binary not available: %v", err)
 	}
 	return New(Config{
+		RunnerFactory:     testRunnerFactory,
 		Bootstrap:         SessionConfig{ClaudeBin: "/bin/sleep"},
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		RegistryPath:      registryPath,
@@ -592,6 +593,7 @@ func TestPool_Run_StartsWatcher(t *testing.T) {
 	// flake first flagged in #39's PR review.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pool, err := New(Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			// #839: the bootstrap spawns with a trailing "--session-id <uuid>";
 			// a bare /bin/sleep would crash-loop on the unknown flag and leave the
@@ -599,7 +601,6 @@ func TestPool_Run_StartsWatcher(t *testing.T) {
 			// stays alive, so the rotation watcher sees a stable bootstrap PID.
 			ClaudeBin:      "/bin/sh",
 			ClaudeArgs:     []string{"-c", "exec sleep 3600", "--"},
-			Bridge:         supervisor.NewBridge(logger),
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
@@ -752,8 +753,9 @@ func TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pool, err := New(Config{
-		Logger:       logger,
-		RegistryPath: regPath,
+		RunnerFactory: testRunnerFactory,
+		Logger:        logger,
+		RegistryPath:  regPath,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
@@ -764,7 +766,6 @@ func TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart(t *testing.T) {
 			// reproduces (cmd/pyry/main.go's stdin-redirected branch). It
 			// also keeps the supervisor's I/O pumps off os.Stdin so the
 			// test doesn't contend with `go test`'s stdin.
-			Bridge: supervisor.NewBridge(logger),
 		},
 	})
 	if err != nil {
@@ -779,7 +780,7 @@ func TestPool_BootstrapEvictedOnDisk_StartsClaudeOnWarmStart(t *testing.T) {
 	sess := pool.Default()
 	if !pollUntil(t, 5*time.Second, func() bool {
 		st := sess.State()
-		return st.Phase == supervisor.PhaseRunning && st.ChildPID > 0
+		return st.Phase == PhaseRunning && st.ChildPID > 0
 	}) {
 		t.Fatalf("supervisor did not reach PhaseRunning within 5s; "+
 			"state=%+v lc=%v (would have failed against the v0.10.1 binary)",
@@ -816,10 +817,10 @@ func TestPool_ParityWhenIdleDisabled(t *testing.T) {
 	// deadlock surface #41 surfaced.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
-			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    0, // disabled
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
@@ -858,9 +859,10 @@ func TestPool_New_MalformedRegistryIsFatal(t *testing.T) {
 	}
 	// No Bridge — New is expected to return an error here; Run is never reached.
 	pool, err := New(Config{
-		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RegistryPath: path,
+		RunnerFactory: testRunnerFactory,
+		Bootstrap:     SessionConfig{ClaudeBin: "/bin/sleep"},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  path,
 	})
 	if err == nil {
 		t.Fatalf("New(malformed registry) = %p, want error", pool)
@@ -885,20 +887,9 @@ func helperDummySession(t *testing.T, pool *Pool) *Session {
 		t.Fatalf("NewID: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// Bridge non-nil → service mode (per-supervisor pipes, no os.Stdin
-	// contention). Foreground mode at scale is the deadlock path.
-	sup, err := supervisor.New(supervisor.Config{
-		ClaudeBin:      "/bin/sleep",
-		ClaudeArgs:     []string{"60"},
-		Bridge:         supervisor.NewBridge(logger),
-		Logger:         logger,
-		BackoffInitial: 10 * time.Millisecond,
-		BackoffMax:     10 * time.Millisecond,
-		BackoffReset:   1 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("supervisor.New: %v", err)
-	}
+	// A fake runner: this test is about pool bookkeeping at scale, and a real
+	// child added only startup cost and a tty dependency.
+	var sup Runner = fakeRunner{}
 	now := time.Now().UTC()
 	sess := &Session{
 		id:           id,

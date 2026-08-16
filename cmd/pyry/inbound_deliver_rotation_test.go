@@ -78,6 +78,20 @@ type childSnapshot struct {
 	stdin     []string
 }
 
+// baseRunner is the five trivial sessions.Runner methods in package main, so a
+// test stub can embed it and add only the one method under test. Moved here from
+// the interrupt-routing tests when #1348 deleted them; this file is its last
+// caller. The lifecycle is never driven, so Run returns nil.
+type baseRunner struct{}
+
+func (baseRunner) State() sessions.State { return sessions.State{} }
+func (baseRunner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
+	return nil
+}
+func (baseRunner) WaitForPTY(ctx context.Context) error { return nil }
+func (baseRunner) Run(ctx context.Context) error        { return nil }
+func (baseRunner) Restart(args []string)                {}
+
 func (c childSnapshot) String() string {
 	return fmt.Sprintf("{session=%s dead=%t stdin=%q}", c.sessionID, c.dead, c.stdin)
 }

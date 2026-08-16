@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // fakeSession satisfies control.Session for tests. Safe under concurrent use.
@@ -22,7 +21,7 @@ import (
 // (i.e. tests that exercise non-attach verbs).
 type fakeSession struct {
 	mu            sync.Mutex
-	state         supervisor.State
+	state         sessions.State
 	attachFn      func(in io.Reader, out io.Writer) (<-chan struct{}, error)
 	activateCalls int
 	activateErr   error
@@ -34,7 +33,7 @@ type fakeSession struct {
 // the seam's argument order (mirroring pty.Winsize).
 type resizeCall struct{ Rows, Cols uint16 }
 
-func (f *fakeSession) State() supervisor.State {
+func (f *fakeSession) State() sessions.State {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.state
@@ -62,16 +61,6 @@ func (f *fakeSession) Resize(rows, cols uint16) error {
 	defer f.mu.Unlock()
 	f.resizeCalls = append(f.resizeCalls, resizeCall{Rows: rows, Cols: cols})
 	return f.resizeErr
-}
-
-// recordedResizeCalls returns a copy of the recorded resize history under
-// the lock — callers must not access fakeSession.resizeCalls directly.
-func (f *fakeSession) recordedResizeCalls() []resizeCall {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]resizeCall, len(f.resizeCalls))
-	copy(out, f.resizeCalls)
-	return out
 }
 
 // fakeResolver returns its single fakeSession for any id. Set lookupErr to
@@ -168,8 +157,8 @@ func TestServer_Status(t *testing.T) {
 	t.Parallel()
 
 	startedAt := time.Now().Add(-2 * time.Minute)
-	resolver := &fakeResolver{sess: &fakeSession{state: supervisor.State{
-		Phase:        supervisor.PhaseRunning,
+	resolver := &fakeResolver{sess: &fakeSession{state: sessions.State{
+		Phase:        sessions.PhaseRunning,
 		ChildPID:     12345,
 		StartedAt:    startedAt,
 		RestartCount: 3,
@@ -206,8 +195,8 @@ func TestServer_Status(t *testing.T) {
 func TestServer_StatusInBackoff(t *testing.T) {
 	t.Parallel()
 
-	resolver := &fakeResolver{sess: &fakeSession{state: supervisor.State{
-		Phase:        supervisor.PhaseBackoff,
+	resolver := &fakeResolver{sess: &fakeSession{state: sessions.State{
+		Phase:        sessions.PhaseBackoff,
 		ChildPID:     0,
 		StartedAt:    time.Now(),
 		RestartCount: 1,
@@ -535,8 +524,8 @@ func TestServer_StopWithoutHandler(t *testing.T) {
 func TestServer_Status_ResolvesDefaultSession(t *testing.T) {
 	t.Parallel()
 
-	sess := &fakeSession{state: supervisor.State{
-		Phase:        supervisor.PhaseRunning,
+	sess := &fakeSession{state: sessions.State{
+		Phase:        sessions.PhaseRunning,
 		ChildPID:     999,
 		StartedAt:    time.Now(),
 		RestartCount: 7,

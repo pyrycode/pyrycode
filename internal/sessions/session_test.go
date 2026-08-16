@@ -6,80 +6,25 @@ import (
 	"io"
 	"log/slog"
 	"os/exec"
-	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // TestSession_State_DelegatesToSupervisor confirms that Session.State returns
 // the underlying *supervisor.Supervisor's snapshot. We assert the
 // pre-Run initial state — Phase=PhaseStarting, ChildPID=0 — which is what
-// supervisor.New installs.
+// the runner installs.
 func TestSession_State_DelegatesToSupervisor(t *testing.T) {
 	t.Parallel()
 	pool := helperPool(t, false)
 	sess := pool.Default()
 	st := sess.State()
-	if st.Phase != supervisor.PhaseStarting {
-		t.Errorf("State.Phase = %q, want %q", st.Phase, supervisor.PhaseStarting)
+	if st.Phase != PhaseStarting {
+		t.Errorf("State.Phase = %q, want %q", st.Phase, PhaseStarting)
 	}
 	if st.ChildPID != 0 {
 		t.Errorf("State.ChildPID = %d, want 0 before Run", st.ChildPID)
-	}
-}
-
-// TestSession_Attach_NoBridge verifies that calling Attach on a session built
-// without a bridge surfaces ErrAttachUnavailable.
-func TestSession_Attach_NoBridge(t *testing.T) {
-	t.Parallel()
-	pool := helperPool(t, false)
-	sess := pool.Default()
-	done, err := sess.Attach(strings.NewReader(""), io.Discard)
-	if done != nil {
-		t.Errorf("Attach (no bridge) returned non-nil done %v, want nil", done)
-	}
-	if !errors.Is(err, ErrAttachUnavailable) {
-		t.Errorf("Attach (no bridge) err = %v, want ErrAttachUnavailable", err)
-	}
-}
-
-// TestSession_Attach_DelegatesToBridge verifies the happy-path Attach
-// delegates to supervisor.Bridge.Attach and that a busy second concurrent
-// Attach surfaces supervisor.ErrBridgeBusy verbatim.
-func TestSession_Attach_DelegatesToBridge(t *testing.T) {
-	t.Parallel()
-	pool := helperPool(t, true)
-	sess := pool.Default()
-
-	// First Attach: hand it an io.Pipe whose writer we control. The bridge's
-	// input pump will block on Read, keeping the attachment alive until we
-	// close the writer in t.Cleanup.
-	pr, pw := io.Pipe()
-	done, err := sess.Attach(pr, io.Discard)
-	if err != nil {
-		t.Fatalf("first Attach: %v", err)
-	}
-	if done == nil {
-		t.Fatal("first Attach returned nil done channel")
-	}
-	t.Cleanup(func() {
-		_ = pw.Close() // unblock the input pump so the goroutine exits
-		<-done
-		_ = pr.Close()
-	})
-
-	// Second Attach must observe the busy bridge and surface supervisor's
-	// sentinel verbatim (no wrap), so callers can keep using errors.Is with
-	// supervisor.ErrBridgeBusy.
-	done2, err := sess.Attach(strings.NewReader(""), io.Discard)
-	if done2 != nil {
-		t.Errorf("second Attach returned non-nil done, want nil")
-	}
-	if !errors.Is(err, supervisor.ErrBridgeBusy) {
-		t.Errorf("second Attach err = %v, want supervisor.ErrBridgeBusy", err)
 	}
 }
 
@@ -132,10 +77,10 @@ func helperPoolIdle(t *testing.T, idle time.Duration) *Pool {
 	// live long-lived child these fixtures had before the flag was appended.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sh",
 			ClaudeArgs:     []string{"-c", "exec sleep 3600", "--"},
-			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    idle,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
@@ -193,66 +138,6 @@ func TestSession_IdleEvictionFires(t *testing.T) {
 	}
 }
 
-// TestSession_IdleEvictionDeferredWhileAttached: with attached>0, the timer
-// re-arms instead of evicting. Detaching lets eviction proceed.
-func TestSession_IdleEvictionDeferredWhileAttached(t *testing.T) {
-	t.Parallel()
-	if _, err := exec.LookPath("/bin/sleep"); err != nil {
-		t.Skipf("benign binary not available: %v", err)
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bridge := supervisor.NewBridge(logger)
-	cfg := Config{
-		Bootstrap: SessionConfig{
-			ClaudeBin:      "/bin/sleep",
-			ClaudeArgs:     []string{"3600"},
-			Bridge:         bridge,
-			IdleTimeout:    80 * time.Millisecond,
-			BackoffInitial: 10 * time.Millisecond,
-			BackoffMax:     10 * time.Millisecond,
-			BackoffReset:   1 * time.Second,
-		},
-		Logger: logger,
-	}
-	pool, err := New(cfg)
-	if err != nil {
-		t.Fatalf("sessions.New: %v", err)
-	}
-	sess := pool.Default()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go func() { _ = sess.Run(ctx) }()
-
-	pr, pw := io.Pipe()
-	done, err := sess.Attach(pr, io.Discard)
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-
-	// State should remain active for at least 4× the idle timeout while
-	// the bridge is held attached.
-	deadline := time.Now().Add(400 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if sess.LifecycleState() != stateActive {
-			t.Fatalf("state changed while attached: %v", sess.LifecycleState())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	// Detach: close the writer so the bridge's input pump returns and
-	// `attached` decrements. After that, eviction should fire promptly.
-	_ = pw.Close()
-	<-done
-	_ = pr.Close()
-
-	if !pollUntil(t, 2*time.Second, func() bool {
-		return sess.LifecycleState() == stateEvicted
-	}) {
-		t.Fatalf("session did not evict after detach; state=%v", sess.LifecycleState())
-	}
-}
-
 // TestSession_ActivateRespawns: an evicted session moves back to active when
 // Activate is called, and the supervisor re-enters PhaseRunning.
 func TestSession_ActivateRespawns(t *testing.T) {
@@ -279,7 +164,7 @@ func TestSession_ActivateRespawns(t *testing.T) {
 		t.Errorf("LifecycleState = %v, want active", got)
 	}
 	if !pollUntil(t, 2*time.Second, func() bool {
-		return sess.State().Phase == supervisor.PhaseRunning
+		return sess.State().Phase == PhaseRunning
 	}) {
 		t.Errorf("supervisor did not re-enter PhaseRunning after Activate; phase=%v", sess.State().Phase)
 	}
@@ -419,10 +304,10 @@ func TestSession_IdleEviction_EmitsLogRecord(t *testing.T) {
 	// supervisor. Foreground mode in a Run-reaching fixture is the deadlock
 	// surface #41 surfaced.
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
-			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    80 * time.Millisecond,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
@@ -558,80 +443,6 @@ func TestSession_ShutdownFromActive(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return")
-	}
-}
-
-// infiniteReader yields bytes forever, never returning an error. Driving the
-// bridge input pump with it while nothing drains the bridge's input channel
-// (an evicted session has no supervisor) fills the buffer and parks the pump on
-// the b.in <- send — the send-parked state #863 must clear at shutdown.
-type infiniteReader struct{}
-
-func (infiniteReader) Read(p []byte) (int, error) {
-	for i := range p {
-		p[i] = 'x'
-	}
-	return len(p), nil
-}
-
-// TestSession_Run_ShutdownFiresBridgeShutdown is the AC-2/AC-3 wiring
-// regression for #863: when Session.Run returns on permanent termination (ctx
-// cancel = pool shutdown), its deferred Bridge.Shutdown must fire and release an
-// input pump parked on the bridge's buffered send. A bare evicted session (no
-// supervisor, so nothing drains b.in) isolates the Run-defer → Bridge.Shutdown
-// path without a live claude child. Eviction stays inside Run's loop, so the
-// defer only fires on terminal exit — never on a routine evict.
-func TestSession_Run_ShutdownFiresBridgeShutdown(t *testing.T) {
-	t.Parallel()
-
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	bridge := supervisor.NewBridge(logger)
-	sess := &Session{
-		id:         "shutdown-bridge-test",
-		log:        logger,
-		bridge:     bridge,
-		lcState:    stateEvicted,
-		activeCh:   make(chan struct{}),
-		evictedCh:  closedChan(),
-		activateCh: make(chan struct{}, 1),
-		evictCh:    make(chan struct{}, 1),
-		removedCh:  make(chan struct{}),
-	}
-
-	// Park an input pump on the bridge's buffered send: the evicted session
-	// runs no supervisor, so nothing drains b.in and the pump blocks on b.in <-.
-	done, err := sess.Attach(infiniteReader{}, io.Discard)
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	runDone := make(chan error, 1)
-	go func() { runDone <- sess.Run(ctx) }()
-
-	// Let the pump fill the bridge buffer and park on the send.
-	time.Sleep(50 * time.Millisecond)
-
-	// Cancel the session ctx — Run returns and its deferred Bridge.Shutdown
-	// releases the send-parked pump. The test never closes the attach reader.
-	cancel()
-
-	select {
-	case err := <-runDone:
-		if !errors.Is(err, context.Canceled) {
-			t.Errorf("Run err = %v, want context.Canceled", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after cancel")
-	}
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("send-parked pump did not exit after Session.Run fired Bridge.Shutdown")
-	}
-	if bridge.Attached() {
-		t.Error("bridge.Attached() = true after shutdown")
 	}
 }
 

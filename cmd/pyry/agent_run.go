@@ -9,26 +9,26 @@ import (
 	"os"
 	"os/signal"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"unicode"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/ptyrunner"
 	"github.com/pyrycode/pyrycode/internal/agentrun/settings"
 	"github.com/pyrycode/pyrycode/internal/agentrun/streamrunner"
 	"github.com/pyrycode/pyrycode/internal/agentrun/trust"
-	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // Test-only seams overridden by _test.go files to inject failures at each
-// call site of the ptyrunner default path without spawning real claude.
-// Production never assigns to these.
+// call site without spawning real claude. Production never assigns to these.
+//
+// trustMark outlived the agent-run terminal path that introduced it: it is now
+// reached from the daemon's workdir confinement and from the ACP lane, so it
+// stays here as the shared seam rather than moving, keeping the override set in
+// one place. The session-id seam went with the terminal path, which was its only
+// caller — the stream runner lets claude mint its own.
 var (
 	trustMark     = trust.MarkWorkdirTrusted
 	settingsWrite = settings.WriteSettingsWithDeny
-	ptyRun        = ptyrunner.Run
-	newSessionID  = sessions.NewID
 )
 
 // agentRunArgs is the parsed shape of `pyry agent-run`'s flag set. Field
@@ -52,22 +52,25 @@ type agentRunArgs struct {
 // against stale-disclaimer regressions (see #359).
 const agentRunUsageDescription = `Drive a single supervised claude turn headlessly.
 
-By default, spawns claude as an interactive-TUI process under a PTY
-(the surface Anthropic's 2026-06-15 billing policy names as
-subscription-eligible), pre-marks the workdir as trusted in
-~/.claude.json, writes a per-spawn deny-default permissions JSON,
-delivers the user prompt via a bracketed-paste sequence, tails
-claude's session JSONL, and re-emits each event as stream-json on
-stdout for the dispatcher to consume. --max-turns is enforced by
-pyry (interactive claude does not honour it). --allowed-tools is the
-load-bearing tool gate, written into the per-spawn settings file as
-a deny-default allow-list.
+Spawns claude as a stream-json subprocess (claude with
+--input-format/--output-format stream-json, NOT claude -p/--print),
+writes a per-spawn deny-default permissions JSON, delivers the user
+prompt on stdin, and forwards claude's own stream-json on stdout for
+the dispatcher to consume. --allowed-tools is written into the
+per-spawn settings file as a deny-default allow-list, which is what
+enforces it; the flag alone does not, and is defeated outright by
+--dangerously-skip-permissions (see #1387). --max-turns is honoured by
+claude itself on this surface, so pyry passes it straight through
+rather than counting turns of its own.
 
-Set PYRY_USE_STREAMJSON=1 to fall back to the legacy stream-json
-subprocess path (claude with --input-format/--output-format stream-json,
-NOT claude -p/--print) for billing-classification experimentation. The
-fallback is operator-facing only; the dispatcher receives the same
-stream-json wire shape under both modes.`
+Billing: this surface bills to the Keychain subscription. It passes
+no print flag, and a live run on it reports a subscription five-hour
+rate-limit window. Verified 2026-07-24, which retired the earlier
+belief that only the PTY surface was subscription-eligible.
+
+There is no second runner. The terminal-driving PTY path and its
+PYRY_USE_STREAMJSON selector were removed in #1348; the variable is
+ignored if still set.`
 
 // validEfforts enumerates the accepted values for --effort. The spike
 // (#329) froze this set; if the upstream claude CLI uses different names,
@@ -221,14 +224,11 @@ func requireDir(path string) error {
 }
 
 // runAgentRun implements `pyry agent-run`: parse and validate the full flag
-// surface, then drive claude either via the interactive-TUI PTY path
-// (default) or the stream-json subprocess path (when PYRY_USE_STREAMJSON=1).
-// Both modes emit stream-json on stdout for the dispatcher.
+// surface, then drive claude via the stream-json subprocess path, which is the
+// only path since #1470 moved the default off the terminal-driving runner.
 //
-// Stdout contract: line-delimited stream-json events. Under the streamrunner
-// path it's claude's own stdout forwarded byte-for-byte; under the ptyrunner
-// path it's the streamjson.Emitter's re-emit of claude's per-session JSONL.
-// The dispatcher's parser is satisfied by either.
+// Stdout contract: line-delimited stream-json events, claude's own stdout
+// forwarded byte-for-byte.
 func runAgentRun(stdout io.Writer, args []string) error {
 	// --self-check is a sibling verb mode (#336): boot-time verification
 	// that permissions.defaultMode "dontAsk" in the per-spawn settings file
@@ -258,16 +258,17 @@ func runAgentRun(stdout io.Writer, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
-	// PYRY_USE_STREAMJSON=1 selects the legacy stream-json subprocess
-	// rollback. Only the exact string "1" is truthy; any other value (or
-	// unset) falls through to the ptyrunner default — pinned by
-	// TestRunAgentRun_EnvNon1ValueDispatchesToPtyRunner so a future
-	// contributor cannot quietly widen the truthy set.
-	if os.Getenv("PYRY_USE_STREAMJSON") == "1" {
-		err = runAgentRunStreamRunner(ctx, stdout, parsed, claudeBin, promptBytes)
-	} else {
-		err = runAgentRunPty(ctx, stdout, parsed, claudeBin, promptBytes)
-	}
+	// The stream-json runner is the only path (#1470, ahead of the #1348
+	// deletion). It used to be selected by PYRY_USE_STREAMJSON=1 against a
+	// terminal-driving default, which meant an unconfigured run took the
+	// terminal path — the one nothing has exercised since the 2026-07-25 fleet
+	// switch and which produced zero turns when it was last tried live.
+	//
+	// PYRY_USE_STREAMJSON is deliberately NOT read any more, and setting it is
+	// harmless. All five dispatcher forks carry it in their .env; making it a
+	// no-op rather than an error means none of them needs editing, and the line
+	// can be swept out of the forks whenever convenient rather than urgently.
+	err = runAgentRunStreamRunner(ctx, stdout, parsed, claudeBin, promptBytes)
 	if err == nil {
 		return nil
 	}
@@ -306,43 +307,6 @@ func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agent
 		PromptBytes: promptBytes,
 		Stdout:      stdout,
 		Stderr:      os.Stderr,
-	})
-}
-
-// runAgentRunPty is the default path: pre-mark workdir trust, write the
-// per-spawn deny-default settings JSON, mint a fresh session UUID, and
-// delegate to ptyrunner.Run. The settings tempfile is removed on every
-// exit path via defer.
-func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, claudeBin string, promptBytes []byte) error {
-	realpath, err := trustMark(parsed.workdir)
-	if err != nil {
-		return fmt.Errorf("mark workdir trusted in ~/.claude.json: %w", err)
-	}
-
-	settingsPath, err := settingsWrite(parsed.allowedTools, parsed.disallowedTools)
-	if err != nil {
-		return fmt.Errorf("write per-spawn settings: %w", err)
-	}
-	defer func() { _ = os.Remove(settingsPath) }()
-
-	sid, err := newSessionID()
-	if err != nil {
-		return fmt.Errorf("mint session id: %w", err)
-	}
-
-	return ptyRun(ctx, ptyrunner.Config{
-		ClaudeBin:    claudeBin,
-		WorkDir:      realpath,
-		SessionID:    string(sid),
-		SettingsPath: settingsPath,
-		SystemPrompt: parsed.systemPromptFile,
-		Model:        parsed.model,
-		Effort:       parsed.effort,
-		AllowedTools: parsed.allowedTools,
-		MaxTurns:     parsed.maxTurns,
-		PromptBytes:  promptBytes,
-		Stdout:       stdout,
-		Stderr:       os.Stderr,
 	})
 }
 
@@ -388,40 +352,22 @@ func runAgentRunPty(ctx context.Context, stdout io.Writer, parsed agentRunArgs, 
 //   - `--allowed-tools` is comma-joined; `splitAllowedTools` already
 //     normalised operator input into a clean slice at parse time.
 func buildStreamRunnerClaudeArgs(parsed agentRunArgs, yolo bool, mcpConfigPath, settingsPath string) []string {
-	args := []string{
-		"--input-format", "stream-json",
-		"--output-format", "stream-json",
-		"--verbose",
+	// The shape itself lives in the streamrunner package so the permission
+	// self-check builds the same argv this does. A self-check assembling its own
+	// is a check on a spawn nobody performs, which is exactly how it ended up
+	// attached to a runner production had already left (#1348). This function
+	// stays because the non-yolo branch needs permissionArgs, which lives here.
+	var perm []string
+	if !yolo {
+		perm = permissionArgs(false, mcpConfigPath)
 	}
-	if yolo {
-		// `--permission-mode dontAsk`, NOT `--dangerously-skip-permissions`.
-		// dontAsk is the documented mode for exactly this shape: "auto-denies
-		// every tool call that would otherwise prompt you... use this mode for
-		// CI pipelines or restricted environments where you pre-define exactly
-		// what Claude may do; the session never waits for input."
-		//
-		// The skip flag looked equivalent and is not. It outranks every mode,
-		// including the dontAsk the settings file already asks for, so with it
-		// present the allowlist enforced nothing at all (pyrycode#1387).
-		// Measured 2026-08-08, same settings and allowlist, asking for a curl
-		// no rule covers: with the skip flag it ran and returned 200; under
-		// dontAsk it was denied.
-		args = append(args, "--permission-mode", "dontAsk")
-	} else {
-		args = append(args, permissionArgs(false, mcpConfigPath)...)
-	}
-	// The settings file is the actual tool boundary on this path. Emitted
-	// only when the caller supplies one, so the non-YOLO branch and the
-	// existing unit tables keep their exact shapes.
-	if settingsPath != "" {
-		args = append(args, "--settings", settingsPath)
-	}
-	return append(args,
-		"--append-system-prompt-file", parsed.systemPromptFile,
-		"--model", parsed.model,
-		"--effort", parsed.effort,
-		"--max-turns", strconv.Itoa(parsed.maxTurns),
-		"--allowed-tools", strings.Join(parsed.allowedTools, ","),
-	)
+	return streamrunner.BuildClaudeArgs(streamrunner.ArgsParams{
+		SystemPromptFile: parsed.systemPromptFile,
+		Model:            parsed.model,
+		Effort:           parsed.effort,
+		MaxTurns:         parsed.maxTurns,
+		AllowedTools:     parsed.allowedTools,
+		SettingsPath:     settingsPath,
+		PermissionArgs:   perm,
+	})
 }
-

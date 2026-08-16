@@ -9,8 +9,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // helperPoolCap builds a Pool whose bootstrap session, when Run, spawns
@@ -31,13 +29,13 @@ func helperPoolCap(t *testing.T, cap int) *Pool {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,
 			BackoffReset:   1 * time.Second,
-			Bridge:         supervisor.NewBridge(logger),
 		},
 		Logger:    logger,
 		ActiveCap: cap,
@@ -49,7 +47,7 @@ func helperPoolCap(t *testing.T, cap int) *Pool {
 	return pool
 }
 
-// addCapTestSession builds a Session whose supervisor spawns /bin/sleep 3600,
+// addCapTestSession builds a Session backed by a fake runner,
 // inserts it into pool.sessions under p.mu (write), and starts its lifecycle
 // goroutine on ctx. The session starts in stateEvicted (the cap path's
 // interesting case — Activate must spawn it).
@@ -58,20 +56,11 @@ func helperPoolCap(t *testing.T, cap int) *Pool {
 func addCapTestSession(t *testing.T, pool *Pool, ctx context.Context, id SessionID) *Session {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sup, err := supervisor.New(supervisor.Config{
-		ClaudeBin:      "/bin/sleep",
-		ClaudeArgs:     []string{"3600"},
-		Logger:         logger,
-		BackoffInitial: 10 * time.Millisecond,
-		BackoffMax:     10 * time.Millisecond,
-		BackoffReset:   1 * time.Second,
-		// Bridge mode: per-supervisor pipes for stdin/stdout pump.
-		// See helperPoolCap doc for why foreground mode is unsafe here.
-		Bridge: supervisor.NewBridge(logger),
-	})
-	if err != nil {
-		t.Fatalf("supervisor.New(%s): %v", id, err)
-	}
+	// A fake runner rather than a real child: these tests are about the pool's
+	// active-cap and LRU eviction logic, and the runner only has to look alive.
+	// They used to spawn /bin/sleep under a real terminal supervisor, which is
+	// what made them slow and hostile to a CI box with no tty.
+	var sup Runner = fakeRunner{}
 	now := time.Now().UTC()
 	sess := &Session{
 		id:           id,

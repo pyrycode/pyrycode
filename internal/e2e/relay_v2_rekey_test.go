@@ -47,7 +47,7 @@ import (
 // AC coverage:
 //   - scheduled_happy_path_and_rearm — AC1 (the timer emits rekey_request
 //     {scheduled}, the phone re-handshakes, traffic continues under new keys)
-//     + AC2 (a SECOND rekey_request fires at the shrunk interval, proving the
+//   - AC2 (a SECOND rekey_request fires at the shrunk interval, proving the
 //     timer re-armed at rekeyComplete rather than firing once).
 //   - phone_initiated_spontaneous — AC3 (a cold noise_init in the open state
 //     with no preceding rekey_request is accepted and rotates keys).

@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,7 +14,6 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/sessions"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // ErrInstanceRunning is returned by [Server.Listen] when another live pyry
@@ -45,17 +42,12 @@ const dialProbeTimeout = 200 * time.Millisecond
 // satisfies it structurally; tests fake it directly. Defining it here (where it
 // is consumed) keeps the sessions package free of control-plane concerns.
 type Session interface {
-	State() supervisor.State
-	Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error)
+	State() sessions.State
 	// Activate wakes an evicted session and blocks until the supervisor
 	// is running again (or ctx cancels). A no-op on an already-active
 	// session. handleAttach calls this before Attach so the bridge has a
 	// live claude on the other side.
 	Activate(ctx context.Context) error
-	// Resize applies the given window size (rows-then-cols) to the
-	// session's PTY. Returns sessions.ErrAttachUnavailable for sessions
-	// with no bridge (foreground mode); handleAttach swallows that case.
-	Resize(rows, cols uint16) error
 }
 
 // SessionResolver maps a SessionID to a Session. An empty id resolves to the
@@ -571,14 +563,6 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleLogs(enc)
 	case VerbStop:
 		s.handleStop(enc)
-	case VerbAttach:
-		// Streaming verb. handleAttach takes ownership of conn on
-		// success and is responsible for closing it.
-		if s.handleAttach(conn, enc, req.Attach) {
-			closeConn = false
-		}
-	case VerbResize:
-		s.handleResize(enc, req.Resize)
 	case VerbSessionsNew:
 		s.handleSessionsNew(conn, enc, req.Sessions)
 	case VerbSessionsRm:
@@ -1011,194 +995,8 @@ func toSessionsPolicy(p JSONLPolicy) (sessions.JSONLPolicy, error) {
 	}
 }
 
-// handleAttach serves a VerbAttach request. Returns true iff connection
-// ownership has been transferred to the streaming bridge — in which case the
-// caller MUST NOT close conn (a goroutine spawned here handles that when the
-// attach ends). Returns false on any pre-attach failure (no provider, bridge
-// busy, etc.); in those cases the caller continues to own conn and will
-// close it normally.
-func (s *Server) handleAttach(conn net.Conn, enc *json.Encoder, payload *AttachPayload) (handedOff bool) {
-	var sessionID string
-	var createIfMissing bool
-	if payload != nil {
-		sessionID = payload.SessionID
-		createIfMissing = payload.CreateIfMissing
-	}
-
-	// Wake an evicted session before binding the bridge. The 30s window
-	// caps the documented 2-15s respawn latency with safety margin; a
-	// busted respawn surfaces as a clean error to the client rather than
-	// a hung attach. Built early on the create-if-missing path so
-	// GetOrCreate's internal Activate gets the same budget; the existing
-	// sess.Activate below reuses it.
-	activateCtx, cancelActivate := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancelActivate()
-
-	var id sessions.SessionID
-	var err error
-	if createIfMissing {
-		// GetOrCreate validates that sessionID is a canonical UUIDv4.
-		// ResolveID's prefix logic does NOT apply on this path — a
-		// "prefix that doesn't match" being interpreted as a fresh UUID
-		// to register would yield non-canonical ids that the registry
-		// and `pyry sessions list` are not designed for.
-		if s.sessioner == nil {
-			_ = enc.Encode(Response{Error: "attach: no sessioner configured"})
-			return false
-		}
-		id, err = s.sessioner.GetOrCreate(activateCtx, sessions.SessionID(sessionID), "")
-		if err != nil {
-			_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-			return false
-		}
-	} else {
-		// Two-step resolve-then-lookup. ResolveID maps the loose-input
-		// selector (full UUID, unique prefix, or empty → bootstrap) to a
-		// concrete SessionID; Lookup then guards against the session
-		// being removed between the two RLock acquires. Both errors
-		// encode as "attach: <err>" before any bridge work, leaving the
-		// bridge state untouched on the failure path.
-		id, err = s.sessions.ResolveID(sessionID)
-		if err != nil {
-			_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-			return false
-		}
-	}
-	sess, err := s.sessions.Lookup(id)
-	if err != nil {
-		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-		return false
-	}
-	// Clear the handshake deadline BEFORE registering the bridge or writing
-	// the ack. Once attach starts, both directions are streaming — the
-	// bridge's input goroutine reads from conn until EOF, and the supervisor's
-	// PTY output goroutine writes to conn at unpredictable times. A handshake
-	// deadline still on the conn would mistakenly terminate either side after
-	// a quiet window. A successful attach should keep the conn alive
-	// indefinitely.
-	_ = conn.SetDeadline(time.Time{})
-
-	if err := sess.Activate(activateCtx); err != nil {
-		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: activate: %v", err)})
-		return false
-	}
-
-	// Apply handshake geometry. Zero in either dimension is the protocol
-	// "unknown / don't touch" sentinel — see AttachPayload omitempty tags.
-	// int → uint16 boundary: pathological client sizes >65535 are clamped
-	// silently. The wire's cols-then-rows order is swapped here to match
-	// Bridge.Resize's rows-then-cols (which mirrors pty.Winsize).
-	if payload != nil && payload.Cols > 0 && payload.Rows > 0 {
-		rows := clampUint16(payload.Rows)
-		cols := clampUint16(payload.Cols)
-		if err := sess.Resize(rows, cols); err != nil &&
-			!errors.Is(err, sessions.ErrAttachUnavailable) {
-			s.log.Warn("control: attach geometry resize failed", "err", err, "rows", rows, "cols", cols)
-		}
-	}
-
-	done, err := sess.Attach(conn, conn)
-	if err != nil {
-		// Foreground-mode session has no bridge. Map sessions.ErrAttachUnavailable
-		// to the Phase 0 wire string verbatim — a bare fmt.Sprintf("attach: %v")
-		// would surface "attach: sessions: attach unavailable (no bridge)",
-		// observable drift versus today's client output.
-		if errors.Is(err, sessions.ErrAttachUnavailable) {
-			_ = enc.Encode(Response{Error: "attach: no attach provider configured (daemon may be in foreground mode)"})
-			return false
-		}
-		_ = enc.Encode(Response{Error: fmt.Sprintf("attach: %v", err)})
-		return false
-	}
-	s.log.Info("control: client attached")
-	_ = enc.Encode(Response{OK: true})
-
-	// Register the streaming conn so Server.Close can close it at shutdown,
-	// erroring the bridge input pump's in.Read to unblock an idle attach (#863).
-	// Read s.closed in the same critical section: if Close already snapshotted
-	// the conn set (shutdown raced ahead of this handoff), close conn now — Close
-	// will never see it, so the read-parked pump would otherwise never unblock.
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		// Errors the in-flight bridge in.Read; the detach-watcher below still
-		// fires on `done` and cleans up. delete is then a harmless no-op.
-		_ = conn.Close()
-	} else {
-		s.streamConns[conn] = struct{}{}
-		s.mu.Unlock()
-	}
-
-	// Connection ownership transferred. Close it when the bridge's input pump
-	// ends (client disconnected, or Server.Close closed the conn at shutdown).
-	// Tracked on streamingWG so Serve waits for it before returning.
-	s.streamingWG.Add(1)
-	go func() {
-		defer s.streamingWG.Done()
-		<-done
-		s.mu.Lock()
-		delete(s.streamConns, conn)
-		s.mu.Unlock()
-		_ = conn.Close() // double-close (with Server.Close) is safe
-		s.log.Info("control: client detached")
-	}()
-	return true
-}
-
-// handleResize serves a VerbResize request. Geometry is best-effort: any
-// failure inside the seam (transient EBADF on a closed fd, foreground
-// session with no bridge) is logged and the client gets an OK ack. The
-// only error responses are pre-seam routing failures (resolver lookup
-// failure, missing payload). Decoding errors on the request body itself
-// land in handle's existing decode-error branch and never reach here.
-//
-// The resize conn is independent of the attach conn (each control request
-// is a fresh connection), so a malformed or routing-failed resize cannot
-// tear down an attached session — that property is structural, not coded.
-func (s *Server) handleResize(enc *json.Encoder, payload *ResizePayload) {
-	if payload == nil {
-		_ = enc.Encode(Response{Error: "resize: missing payload"})
-		return
-	}
-	id, err := s.sessions.ResolveID(payload.SessionID)
-	if err != nil {
-		_ = enc.Encode(Response{Error: fmt.Sprintf("resize: %v", err)})
-		return
-	}
-	sess, err := s.sessions.Lookup(id)
-	if err != nil {
-		_ = enc.Encode(Response{Error: fmt.Sprintf("resize: %v", err)})
-		return
-	}
-	// Zero in either dim is the "unknown / don't touch" sentinel — see
-	// ResizePayload omitempty tags. Cols-then-rows on the wire, swapped
-	// here to match Bridge.Resize's rows-then-cols (mirroring pty.Winsize).
-	if payload.Cols > 0 && payload.Rows > 0 {
-		rows := clampUint16(payload.Rows)
-		cols := clampUint16(payload.Cols)
-		if err := sess.Resize(rows, cols); err != nil &&
-			!errors.Is(err, sessions.ErrAttachUnavailable) {
-			s.log.Warn("control: resize failed",
-				"err", err, "rows", rows, "cols", cols, "session", id)
-		}
-	}
-	_ = enc.Encode(Response{OK: true})
-}
-
-// clampUint16 narrows a non-negative int to uint16, clamping out-of-range
-// values to math.MaxUint16. Callers guard against negative inputs (the
-// wire protocol's omitempty + > 0 check). No logging on clamp — a client
-// reporting dimensions over 65535 is buggy or hostile, and logging it
-// would just amplify the noise.
-func clampUint16(v int) uint16 {
-	if v > math.MaxUint16 {
-		return math.MaxUint16
-	}
-	return uint16(v)
-}
-
-// buildStatus converts a supervisor.State snapshot into the wire format.
-func buildStatus(st supervisor.State) *StatusPayload {
+// buildStatus converts a runner State snapshot into the wire format.
+func buildStatus(st sessions.State) *StatusPayload {
 	p := &StatusPayload{
 		Phase:        string(st.Phase),
 		ChildPID:     st.ChildPID,

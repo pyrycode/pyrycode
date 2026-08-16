@@ -44,9 +44,10 @@ func helperPoolWithSettings(t *testing.T, regPath string, settings SessionSettin
 		t.Fatalf("pre-write registry: %v", err)
 	}
 	pool, err := New(Config{
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RegistryPath: regPath,
-		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
+		RunnerFactory: testRunnerFactory,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  regPath,
+		Bootstrap:     SessionConfig{ClaudeBin: "/bin/sleep"},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -331,11 +332,13 @@ func TestPool_UpdateSettings_RoundTripToSpawnArgv(t *testing.T) {
 	runPoolInBackground(t, second)
 
 	got := waitArgv(t, tplWorkDir)
-	// #839: the bootstrap resumes via a trailing --session-id (its own id, stable
-	// across the simulated restart), appended after the settings flags.
-	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions",
-		"--session-id", string(id)}
+	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("post-update bootstrap argv = %v, want %v", got, want)
+	}
+	// #839's pinned id — stable across the simulated restart — travels as a field
+	// on the handover since #1348 rather than a trailing argv flag.
+	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
+		t.Errorf("post-update bootstrap session id = %q, want %q", gotID, string(id))
 	}
 }

@@ -82,7 +82,7 @@ func runMCPApprove(args []string) error {
 		timeout:    mcpApprovalTimeout + mcpApproveClientMargin,
 		log:        logger,
 	}
-	return serveACP(ctx, os.Stdin, os.Stdout, logger, s.register)
+	return serveJSONRPCStdio(ctx, os.Stdin, os.Stdout, logger, s.register)
 }
 
 // register binds the three MCP request handlers on the transport. Notifications

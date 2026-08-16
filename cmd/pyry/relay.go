@@ -22,7 +22,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // resolveRelayURL returns the first non-empty value among:
@@ -176,9 +175,6 @@ type relayWiring struct {
 	// active tracks the active-conversation cursor the interactive turn and modal
 	// streams follow.
 	active *activeConversation
-	// boundHost resolves the host bound to the active conversation for the
-	// interactive turn/modal streams.
-	boundHost boundHostFunc
 	// activeInterrupter routes an inbound interrupt frame to the runner bound to
 	// the ACTIVE conversation, not the bootstrap supervisor — the #1121 isolation
 	// fix. Wired to V2SessionConfig.Interrupter below.
@@ -188,14 +184,6 @@ type relayWiring struct {
 	// isolation fix (the new_session twin of activeInterrupter). Wired to
 	// V2SessionConfig.SessionStarter below.
 	activeSessionStarter relay.SessionStarter
-	// sup is the bootstrap session's supervisor — the keystroke/interrupt/
-	// new-session/snapshot surface and the source of the daemon's own claude
-	// child PID.
-	sup *supervisor.Supervisor
-	// bridge is the bootstrap session's PTY-output bridge. nil in foreground mode
-	// disables the PTY-dependent streams (assistant-turn bridge, structured turn
-	// stream, modal stream).
-	bridge *supervisor.Bridge
 	// claudeSessionsDir is the directory the rotation-following JSONL resolver
 	// scans to tail the daemon's own claude child's transcript (turn stream #633,
 	// snapshot-usage reader #857). Empty disables reconcile, the rotation watcher,
@@ -402,23 +390,6 @@ func relay4409Threshold(logger *slog.Logger) int {
 	return n
 }
 
-// screenSnapshotterOrNil returns a genuine nil relay.ScreenSnapshotter when sup
-// is a nil *supervisor.Supervisor — the stream-json bootstrap path, where
-// Session.Supervisor() returns nil (#1077). Assigning the typed-nil pointer
-// straight to the Snapshotter interface field would leave a non-nil interface
-// holding a nil pointer, so handleRequestSnapshot would skip its nil-Snapshotter
-// arm and call ScreenSnapshot on a nil receiver → panic. Routing to nil instead
-// lands the request in the handler's existing post-gate offline arm — after the
-// KnownConversation gate, so a foreign conversation_id still returns not-found
-// rather than leaking an existence oracle (#1101). No-op on the PTY path: a
-// non-nil sup passes straight through as a non-nil interface.
-func screenSnapshotterOrNil(sup *supervisor.Supervisor) relay.ScreenSnapshotter {
-	if sup == nil {
-		return nil
-	}
-	return sup
-}
-
 // boundSessionIDForActive resolves the pool session id bound to the ACTIVE
 // conversation, for the stream turn drain's AC2 scoping gate (#1081). It mirrors
 // the follow-active cursor the PTY emitter reads (active.CurrentConversation) and
@@ -500,11 +471,11 @@ func startRelayV2(
 	//
 	// The keystroker is nil-safe-wrapped (#1131): PTY mode passes w.sup straight
 	// through, but on the stream-json bootstrap path w.sup is a typed-nil
-	// *supervisor.Supervisor (#1077) — modalKeystrokerOrNoop maps it to a no-op
-	// keystroker so ResolveCancel/ResolveTimeout's unconditional SendEsc does not
-	// nil-deref → panic. A stream-json approval has no PTY modal to dismiss; it
-	// denies fail-closed via the permbridge deny-on-timeout (#1103), never here.
-	modalResolver := newModalResolverV2(modalReg, modalKeystrokerOrNoop(w.sup), logger)
+	// The terminal keystroker argument is gone with #1348: ResolveCancel and
+	// ResolveTimeout used it to press escape at a terminal modal, and there is no
+	// terminal. A stream approval denies fail-closed through the permission
+	// bridge's deny-on-timeout (#1103), which is the only path left.
+	modalResolver := newModalResolverV2(modalReg, noopKeystroker{}, logger)
 	modalResolver.activeConv = w.active.CurrentConversation
 	modalResolver.notifyBlocked = w.blockedNotify
 
@@ -542,7 +513,12 @@ func startRelayV2(
 		// on registry membership (AC #4), mirroring the established
 		// conversations-registry validation pattern but returning a bool so the
 		// relay needs no conversations import or errors.Is coupling.
-		Snapshotter: screenSnapshotterOrNil(w.sup),
+		// Screen snapshot answered by photographing claude's terminal, so it goes
+		// with the terminal (#1348). A nil Snapshotter lands the request in the
+		// handler's existing offline arm, AFTER the KnownConversation gate, so a
+		// foreign conversation id still returns not-found rather than leaking an
+		// existence oracle (#1101).
+		Snapshotter: nil,
 		KnownConversation: func(id string) bool {
 			_, ok := w.convReg.Get(conversations.ConversationID(id))
 			return ok
@@ -723,20 +699,11 @@ func startRelayV2(
 		// write that fails after its mark — the delivery seam's own undo (see
 		// stream_turn_busy.go's feeds note).
 		streamDrainCleanup = startStreamTurnDrainV2(ctx, w.streamSink, emitter, activeSession, w.busy, logger)
-	} else if w.bridge != nil && w.claudeSessionsDir != "" {
-		// PTY MODE (unchanged): the bootstrap-branch resolver tails the transcript
-		// the daemon's OWN claude child has open (probe over its PID) rather than the
-		// newest file by mtime, so a second claude in the shared sessions dir can't
-		// redirect the tail. pidFn re-reads State each resolve — the child respawns
-		// with a new PID and State() is mutex-guarded.
-		probe := newBootstrapProbe(logger)
-		pidFn := func() int { return w.sup.State().ChildPID }
-		streamCleanup = startInteractiveTurnStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, w.claudeSessionsDir, probe, pidFn, w.bootstrapIDFn, logger)
-		modalStreamCleanup = startInteractiveModalStreamV2(ctx, w.sup, w.active, w.boundHost, mgr, modalReg, w.claudeSessionsDir, probe, pidFn, w.bootstrapIDFn, logger)
-	} else if w.bridge != nil {
-		logger.Info("relay: interactive turn + modal streams disabled; claude sessions dir unresolved",
-			"event", "interactive_turn_stream.no_sessions_dir")
 	}
+	// The terminal-mode arm that stood here is gone with #1348. It read claude's
+	// screen to produce the same turn and modal events the drain above produces
+	// from claude's own structured output, and it was the only reason this leg
+	// had a branch at all.
 
 	// Wire the session-transition producer (#657): install #659's pool-side
 	// observer and fan a session_transition envelope to capability-gated

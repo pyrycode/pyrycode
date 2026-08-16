@@ -100,12 +100,6 @@ func (f *fakeSessioner) GetOrCreate(_ context.Context, id sessions.SessionID, la
 	return retID, retErr
 }
 
-func (f *fakeSessioner) recordedGetOrCreates() []getOrCreateCall {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]getOrCreateCall(nil), f.getOrCreateCalls...)
-}
-
 func (f *fakeSessioner) Rename(id sessions.SessionID, newLabel string) error {
 	f.mu.Lock()
 	f.renameCalls = append(f.renameCalls, renameCall{ID: id, NewLabel: newLabel})

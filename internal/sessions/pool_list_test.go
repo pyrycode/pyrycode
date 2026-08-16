@@ -179,9 +179,10 @@ func TestPool_List_RaceClean(t *testing.T) {
 	regPath := filepath.Join(dir, "sessions.json")
 	// No Bridge — exercises Pool.mu lock ordering via List/RotateID only; Run is not called.
 	pool, err := New(Config{
-		Bootstrap:    SessionConfig{ClaudeBin: "/bin/sleep"},
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		RegistryPath: regPath,
+		RunnerFactory: testRunnerFactory,
+		Bootstrap:     SessionConfig{ClaudeBin: "/bin/sleep"},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  regPath,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

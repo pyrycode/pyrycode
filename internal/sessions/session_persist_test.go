@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // helperPoolPersistentIdle builds a Pool with persistence enabled, a long-
@@ -28,10 +26,10 @@ func helperPoolPersistentIdle(t *testing.T, registryPath string, idle time.Durat
 	// the deadlock surface #41 surfaced.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := Config{
+		RunnerFactory: testRunnerFactory,
 		Bootstrap: SessionConfig{
 			ClaudeBin:      "/bin/sleep",
 			ClaudeArgs:     []string{"3600"},
-			Bridge:         supervisor.NewBridge(logger),
 			IdleTimeout:    idle,
 			BackoffInitial: 10 * time.Millisecond,
 			BackoffMax:     10 * time.Millisecond,

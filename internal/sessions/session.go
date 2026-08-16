@@ -3,13 +3,10 @@ package sessions
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"slices"
 	"sync"
 	"time"
-
-	"github.com/pyrycode/pyrycode/internal/supervisor"
 )
 
 // ErrAttachUnavailable is returned by Session.Attach when the session has no
@@ -129,10 +126,9 @@ type Session struct {
 	// Pool.RotateID under BOTH Pool.mu (W) and lcMu on a /clear rotation (#866);
 	// read off the lifecycle goroutine via currentID(), or directly by
 	// Pool.mu-holders (List, ResolveID, Snapshot, saveLocked, Activate).
-	id     SessionID
-	sup    Runner
-	bridge *supervisor.Bridge // nil in foreground mode
-	log    *slog.Logger
+	id  SessionID
+	sup Runner
+	log *slog.Logger
 
 	// Persisted metadata. createdAt and bootstrap are immutable post-New.
 	// label is immutable from the lifecycle goroutine's perspective but may
@@ -220,7 +216,7 @@ func (s *Session) currentID() SessionID {
 // to (*supervisor.Supervisor).State. Note: in stateEvicted, the supervisor's
 // phase is PhaseStopped — that is faithful, since the supervisor really
 // isn't running.
-func (s *Session) State() supervisor.State { return s.sup.State() }
+func (s *Session) State() State { return s.sup.State() }
 
 // WriteUserTurn delegates to the underlying supervisor. Consumed by the
 // send_message handler via the handlers.TurnWriter interface. ctx bounds the
@@ -229,22 +225,6 @@ func (s *Session) State() supervisor.State { return s.sup.State() }
 // rather than hanging the per-conn goroutine.
 func (s *Session) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	return s.sup.WriteUserTurn(ctx, conversationID, payload)
-}
-
-// Supervisor exposes the underlying supervisor handle. Consumed by the
-// assistant-turn bridge in cmd/pyry to read CurrentConversation() at
-// broadcast time. Returned pointer is owned by the session; callers must
-// not retain it past the session's lifetime.
-//
-// Under the nil-RunnerFactory default the sup field always holds a
-// *supervisor.Supervisor, so the assertion is total and this returns the live
-// handle — the rollback guarantee. It returns nil only when an alternative
-// Runner has been injected (T4/T7), which no production caller reaches this
-// ticket; those call sites migrate onto Runner then and retire the assertion.
-// The comma-ok's nil-on-miss is the intended contract, not an ignored error.
-func (s *Session) Supervisor() *supervisor.Supervisor {
-	sup, _ := s.sup.(*supervisor.Supervisor)
-	return sup
 }
 
 // Runner exposes the underlying runner as the Runner interface, so a consumer can
@@ -260,7 +240,6 @@ func (s *Session) Runner() Runner { return s.sup }
 // Bridge exposes the underlying I/O bridge, or nil in foreground mode.
 // Consumed by the assistant-turn bridge in cmd/pyry to register an output
 // observer on the PTY-drain path.
-func (s *Session) Bridge() *supervisor.Bridge { return s.bridge }
 
 // LifecycleState returns a snapshot of the current lifecycle state. Used by
 // tests and (eventually) status payloads. Safe from any goroutine.
@@ -268,60 +247,6 @@ func (s *Session) LifecycleState() lifecycleState {
 	s.lcMu.Lock()
 	defer s.lcMu.Unlock()
 	return s.lcState
-}
-
-// Attach binds a client to this session's bridge. Returns ErrAttachUnavailable
-// when the session has no bridge (foreground mode). Otherwise delegates to
-// (*supervisor.Bridge).Attach, propagating supervisor.ErrBridgeBusy verbatim.
-//
-// Bookkeeping: a successful attach increments `attached`; the wrapper
-// goroutine spawned here decrements it when the bridge's done channel fires.
-// While `attached > 0` the idle timer's eviction is deferred (see runActive).
-//
-// Contract: callers must Activate the session before Attach. An Attach on an
-// evicted session would block on the bridge's pipe forever, since no claude
-// is running to drain it. The control plane is the only attach caller and
-// always Activates first.
-func (s *Session) Attach(in io.Reader, out io.Writer) (done <-chan struct{}, err error) {
-	if s.bridge == nil {
-		return nil, ErrAttachUnavailable
-	}
-	s.lcMu.Lock()
-	s.attached++
-	s.lcMu.Unlock()
-
-	bridgeDone, err := s.bridge.Attach(in, out)
-	if err != nil {
-		s.lcMu.Lock()
-		s.attached--
-		s.lcMu.Unlock()
-		return nil, err
-	}
-
-	wrapped := make(chan struct{})
-	go func() {
-		<-bridgeDone
-		s.lcMu.Lock()
-		s.attached--
-		s.lcMu.Unlock()
-		close(wrapped)
-	}()
-	return wrapped, nil
-}
-
-// Resize applies the given window size to the session's PTY via the bridge.
-// Returns ErrAttachUnavailable when the session has no bridge (foreground
-// mode); the control plane's attach handler swallows that case since
-// foreground mode has its own SIGWINCH watcher.
-//
-// rows-then-cols matches Bridge.Resize and pty.Winsize. No lifecycle locking:
-// Resize doesn't bump lastActiveAt or interact with the active↔evicted state
-// machine. The bridge's own ptyMu serializes against iteration boundaries.
-func (s *Session) Resize(rows, cols uint16) error {
-	if s.bridge == nil {
-		return ErrAttachUnavailable
-	}
-	return s.bridge.Resize(rows, cols)
 }
 
 // Activate moves the session into stateActive if it is currently evicted,
@@ -411,16 +336,6 @@ func (s *Session) Run(ctx context.Context) error {
 	// On permanent termination — outer ctx cancel (pool shutdown) or Pool.Remove
 	// — release any attach input pump parked on the bridge's buffered send so
 	// the daemon exits promptly instead of hanging until SIGKILL (#863). This is
-	// the only layer that both holds the Bridge and can distinguish shutdown
-	// from eviction: eviction stays INSIDE the loop below (runActive→runEvicted),
-	// so this defer fires exactly once, only when Run returns for good. Placing
-	// it in supervisor.Run would poison the bridge on every evict (supervisor.Run
-	// returns on eviction too). The Server layer closes the attached conn to
-	// unblock a read-parked pump; Shutdown covers the send-parked pump a conn
-	// close cannot reach. Guarded because foreground sessions have no bridge.
-	if s.bridge != nil {
-		defer s.bridge.Shutdown()
-	}
 	for {
 		switch s.snapshotState() {
 		case stateActive:
