@@ -1064,10 +1064,26 @@ func trailClassifyRun(readings trailRunReadings) trailRunOutcome {
 	// restating them here would spend cap on a duplicate and, at the cap, cut off
 	// the argument the Detail exists to make.
 	if readings.Admit.Value == trailAdmitProof {
-		// The other evidence class. Its Detail is left EXACTLY as it was: naming
-		// the route in prose here would spend the 68 bytes
-		// TestTrailComposesUnderAPtyrunnerReading requires this arm to keep free,
-		// and the field says it without costing any.
+		// The other evidence class. Its Detail is left EXACTLY as it was, and the
+		// reason stands without a byte argument: the route travels in the Route
+		// field, which publishes it without spending any of trailDetail's cap, so
+		// prose naming it would buy nothing at a cost.
+		//
+		// NOTHING ENFORCES A MARGIN HERE TODAY. The margin had one detector —
+		// #1348 deleted it along with the ptyrunner runner it pinned — and it was
+		// a cap-vacuity guard rather than a style rule: it required the spare to
+		// exceed a runner reading's length, so that its own no-echo claim could not
+		// pass by having the echo truncated away. What survives at this arm is
+		// weaker and asks only that the Detail FIT: TestTrailClassifyRun's per-row
+		// reachTruncationMarker check. Measured for #1428 under `go test -overlay`,
+		// this arm publishes 444 B against reachMaxCommandBytes' 512 — growing its
+		// format string by all 68 spare bytes reddens NOTHING, because
+		// reachCapCommand returns a command of exactly the cap unchanged, and 69
+		// reddens that check in four TestTrailClassifyRun sub-tests. The 68 the old
+		// sentence named is exactly that spare — arithmetic (444 + 68 = 512), not a
+		// requirement anything checks — so a reword of this Detail moves it and no
+		// test moves with it. Replacing the detector is deliberately out of scope
+		// for #1428 and left as a follow-up.
 		out.Route = trailRouteReapLog
 		return decide(trailOutcomeRunningAtTrailer, "pyry's own reap log names the held group on "+
 			"exactly one anchored line under certified terminal reason %q, and emitter.Close() "+

@@ -1001,8 +1001,7 @@ func trailReapLine(count int, pgids string) string {
 // reading does not come from that scan at all: the caller reduces claude's own
 // argv with tdnRunnerFromArgv and hands the answer in, so a live run reaches
 // whichever case its path earns. This value stays the answer for trailRigGather,
-// which runs no claude, and for any caller that stages nothing. Full reason:
-// TestTrailComposesUnderAPtyrunnerReading's header.
+// which runs no claude, and for any caller that stages nothing.
 //
 // A function rather than a package-level var, matching trailRigHeldPGID()'s shape
 // in this family (`trailRigHeldPGID`).
@@ -1859,8 +1858,16 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 //
 // # The mutant x row matrix, each demonstrated under `go test -overlay`
 //
+// A COUNT HERE IS A COUNT WITHIN THE TestTrail FAMILY, and never a claim about the
+// package. Every mutant #1428 re-measured was run under `-run '^TestTrail'` with
+// `-v`, so a sub-test is named rather than collapsed into its parent; the rest of
+// this package needs a live claude, and running it would mix credential failures
+// into the red set. WHAT WAS RE-MEASURED ON THAT BRANCH is the ptyrunner-award
+// paragraph and the deferral section, both below the table. The table's own rows,
+// and the paragraph directly under it, carry #1434's measurement unchanged.
+//
 // Every row is the SOLE RED AMONG THESE ROWS for at least one mutant. Reds
-// elsewhere in the suite are named beside it rather than omitted — a mutant caught
+// elsewhere in the family are named beside it rather than omitted — a mutant caught
 // in two places is caught in two places, and a table that hid the second would
 // misdescribe what this driver is worth:
 //
@@ -1879,18 +1886,62 @@ func TestTrailGateNamesWhichAbsenceCaseFired(t *testing.T) {
 // pre-asserting, so C2's own Detail is quoted verbatim in a red TestTrailClassifyRun.
 // Measured, this mutant reddens four tests rather than two.
 //
-// The remaining mutant — the new answer awarded on a PTYRUNNER reading — reddens
-// NO row here, because every row is driven at a streamrunner reading and the
-// mutant only moves the ptyrunner one. It belongs to the presence companion in
-// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, at reading 0, which is
-// also where rows carrying trailRunnerUnread() are covered; measured, it reddens
-// that companion, that sweep's usable-row premise, and
-// TestTrailComposesUnderAPtyrunnerReading.
+// The remaining mutant of this arm — the new answer awarded on a PTYRUNNER
+// reading — reddens NO row here, because every row is driven at a streamrunner
+// reading and the mutant only moves the ptyrunner one. It belongs to the presence
+// companion in TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, at reading
+// 0, which is also where rows carrying trailRunnerUnread() are covered. Measured,
+// it reddens TWO sub-tests and both live in that one sweep: the companion itself
+// ("the usable arm diverts to the presence case under one reading", on all three
+// of its reading-0 assertions — value, certified reason and marker) and the
+// usable-row premise it rests on ("an ordinary trailer is usable and certifies its
+// reason", at that row's i == 0 premise). There is no third. A third was claimed
+// until #1348 deleted the test that carried it, and two is what this branch
+// measured.
 //
-// Deferred to #1428, the reason x reading matrix ticket this one blocks, named
-// here so the gap is stated rather than implied: discriminating on the literal
-// "idle_stall" rather than on the path, and the two indeterminate-reading
-// confusions.
+// # What #1434's deferral called a gap, measured for #1428
+//
+// That deferral named three mutants as uncovered and left them to a follow-up.
+// None of them is an open gap: two are dead against the shipped tree, and the
+// third is TWO different confusions, caught in two different places.
+//
+// THE "idle_stall" LITERAL IS DEAD BOTH WAYS. Adding `&& reason == "idle_stall"`
+// to this arm's guard, and dropping the reduction consult to key on that literal
+// alone, redden the SAME SIX: P1 here, the presence companion in
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt, TestTrailClassifyRun,
+// TestTrailRunCertifiesNothingArmsNameTheInstant,
+// TestTrailRunComposesUnderANamedReasonOnAPathThatOwesNone and
+// TestTrailAdmissibilityRecordsCarryNoCapturedBytes. The reason column that
+// deferral asked for already ships: trailFixtureTrailer's terminal_reason is
+// "completed" — non-empty, neither idle_stall nor max_turns, and special-cased by
+// no arm — while trailReasonAgainstPath's streamrunner arm never reads
+// decodedReason at all. No fixture in this package renders idle_stall and no arm
+// keys on it, so a guard that demanded it would decide nothing rather than decide
+// wrongly.
+//
+// THE TWO INDETERMINATE CONFUSIONS ARE NOT ONE MUTANT. Widening THIS arm to fire
+// on trailReasonPathUnnamed — an indeterminate reading answered as though it had
+// reduced to streamrunner — reddens NINE: TestTrailGate, TestTrailGateThenAdmit,
+// TestTrailGateReadsTheRunnerPathOnlyWhereARowDeclaresIt,
+// TestTrailRunComposesWithGateCases, TestTrailClassifyRun,
+// TestTrailRunCertifiesNothingArmsNameTheInstant,
+// TestTrailAdmissibilityRecordsCarryNoCapturedBytes and both rig tests,
+// TestTrailRigFlipsAcrossOneSubjectLifetime and
+// TestTrailRigCarriesMoreThanOneMatchedRow. Not one of them is a row here, which
+// is the price of driving every row at a streamrunner reading.
+//
+// ITS MIRROR IS UNKILLABLE ON THIS SIDE, structurally rather than for want of a
+// row: widening trailReasonAgainstPath's `case "ptyrunner"` to take
+// finRecordRunnerIndeterminate makes an indeterminate reading reduce to
+// trailReasonNamedOwesOne instead of trailReasonPathUnnamed, and BOTH fall through
+// to the same usable return below this arm, so no presence-side row can separate a
+// ptyrunner reading from an indeterminate one. Measured it reddens FOUR, none on
+// the presence side: TestTrailReasonAgainstPath at the reduction's own driver
+// (R7-R9 and its "every indeterminate variant reaches the unnamed value" clause),
+// TestTrailGateNamesWhichAbsenceCaseFired's "R3 absent from a path naming no
+// runner", TestTrailGate's "the out-of-contract details name their own sub-case",
+// and the ABSENCE companion in the runner-path sweep. This driver and the presence
+// companion both stay GREEN — that is the finding here, not the gap.
 //
 // # Headroom is asserted ON THE OUTPUT, per row
 //
