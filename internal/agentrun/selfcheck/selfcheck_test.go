@@ -6,17 +6,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/pyrycode/pyrycode/internal/agentrun/ptyrunner"
+	"github.com/pyrycode/pyrycode/internal/agentrun/streamrunner"
 )
 
 // Canned stream-json fixtures used across the self-check tests. Each is a
-// single JSONL line (no trailing newline); the ptyRun mock writes these to
+// single JSONL line (no trailing newline); the streamRun mock writes these to
 // cfg.Stdout with newline separators.
 const (
 	// passLine: assistant entry with stop_reason "end_turn" and a single
@@ -41,22 +41,19 @@ func installSeams(t *testing.T) {
 	t.Helper()
 	origTrust := trustMark
 	origSettings := settingsWrite
-	origSession := newSessionID
-	origPty := ptyRun
+	origStream := streamRun
 	t.Cleanup(func() {
 		trustMark = origTrust
 		settingsWrite = origSettings
-		newSessionID = origSession
-		ptyRun = origPty
+		streamRun = origStream
 	})
 	// Default benign overrides; per-test bodies replace the ones they care
 	// about. Ensures no test accidentally hits ~/.claude.json,
-	// os.TempDir(), or the real ptyrunner.
+	// os.TempDir(), or the real stream runner.
 	trustMark = func(workdir string) (string, error) { return workdir, nil }
 	settingsWrite = func(allowed []string) (string, error) { return "/tmp/test-settings.json", nil }
-	newSessionID = func() (string, error) { return "00000000-0000-4000-8000-000000000000", nil }
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
-		t.Errorf("ptyRun unexpectedly invoked; test should override it")
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
+		t.Errorf("streamRun unexpectedly invoked; test should override it")
 		return nil
 	}
 }
@@ -74,7 +71,7 @@ func baseConfig(t *testing.T) Config {
 
 func TestSelfCheck_Pass(t *testing.T) {
 	installSeams(t)
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
 		if _, err := io.WriteString(cfg.Stdout, passLine+"\n"); err != nil {
 			return err
 		}
@@ -105,48 +102,6 @@ func TestSelfCheck_Pass(t *testing.T) {
 	}
 }
 
-// TestSelfCheck_PassesCanonicalAllowToPtyRunner pins the call-site contract
-// that SelfCheckDenyDefault populates ptyrunner.Config.AllowedTools with the
-// canonicalAllow constant. Regression net for the silent-drift pattern that
-// produced bug #526: a required field was added to ptyrunner.Config (the
-// AllowedTools nil-check in ptyrunner.Run), but the selfcheck's Config literal was not
-// updated, and no existing test in this package exercises the real Config
-// contract — the ptyRun mock accepts anything.
-func TestSelfCheck_PassesCanonicalAllowToPtyRunner(t *testing.T) {
-	installSeams(t)
-	var observedAllow []string
-	var observedMaxTurns int
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
-		observedAllow = cfg.AllowedTools
-		observedMaxTurns = cfg.MaxTurns
-		if _, err := io.WriteString(cfg.Stdout, passLine+"\n"); err != nil {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(50 * time.Millisecond):
-		}
-		return nil
-	}
-
-	if _, err := SelfCheckDenyDefault(context.Background(), baseConfig(t)); err != nil {
-		t.Fatalf("SelfCheckDenyDefault: unexpected error: %v", err)
-	}
-
-	if observedAllow == nil {
-		t.Fatal("ptyrunner.Config.AllowedTools is nil; runner.go:245 nil-check would reject this Config")
-	}
-	if !reflect.DeepEqual(observedAllow, canonicalAllow) {
-		t.Errorf("ptyrunner.Config.AllowedTools = %v, want %v (canonicalAllow)", observedAllow, canonicalAllow)
-	}
-	// Pins AC2: MaxTurns must be >= 2 so claude's runtime reaches the
-	// execute-or-deny step. MaxTurns: 1 was the original bug (SIGTERM
-	// before the boundary). Cheapest guard against a regression.
-	if observedMaxTurns < 2 {
-		t.Errorf("ptyrunner.Config.MaxTurns = %d, want >= 2 (must reach the execute-or-deny step)", observedMaxTurns)
-	}
-}
-
 // TestSelfCheck_SentinelWritten pins the FAIL mechanism after the layer
 // swap: the verdict is the sentinel file on disk, not a tool_use block in
 // the stream. The mock simulates a leaked boundary by writing the sentinel
@@ -156,7 +111,7 @@ func TestSelfCheck_SentinelWritten(t *testing.T) {
 	installSeams(t)
 	cfg := baseConfig(t)
 	wantSentinel := filepath.Join(cfg.WorkDir, probeSentinelName)
-	ptyRun = func(ctx context.Context, pcfg ptyrunner.Config) error {
+	streamRun = func(ctx context.Context, pcfg streamrunner.Config) error {
 		// Boundary leaked: claude's runtime executed Write and the sentinel
 		// landed on disk at the path the prompt named (pcfg.WorkDir is the
 		// trust-marked realpath, identity-mocked to cfg.WorkDir).
@@ -192,7 +147,7 @@ func TestSelfCheck_SentinelWritten(t *testing.T) {
 // PASS it.
 func TestSelfCheck_ToolUseInStreamDoesNotFail(t *testing.T) {
 	installSeams(t)
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
 		// Emit a Write tool_use then end_turn — but create NO file.
 		if _, err := io.WriteString(cfg.Stdout, writeLine+"\n"+passLine+"\n"); err != nil {
 			return err
@@ -232,8 +187,8 @@ func TestProbeToolIsNotInAllowList(t *testing.T) {
 
 func TestSelfCheck_Timeout(t *testing.T) {
 	installSeams(t)
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
-		// Block past the cfg.OverallTimeout. Real ptyrunner.Run collapses
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
+		// Block past the cfg.OverallTimeout. Real streamrunner.Run collapses
 		// ctx-cancel to nil — mirror that contract.
 		<-ctx.Done()
 		return nil
@@ -259,7 +214,7 @@ func TestSelfCheck_Timeout(t *testing.T) {
 // turn a PASS into an inconclusive.
 func TestSelfCheck_MalformedAssistantLineSkipped(t *testing.T) {
 	installSeams(t)
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
 		if _, err := io.WriteString(cfg.Stdout, "{not valid json\n"+passLine+"\n"); err != nil {
 			return err
 		}
@@ -354,28 +309,14 @@ func TestSelfCheck_SettingsWriteFailure(t *testing.T) {
 	}
 }
 
-func TestSelfCheck_SessionIDFailure(t *testing.T) {
-	installSeams(t)
-	newSessionID = func() (string, error) {
-		return "", errors.New("session id failed")
-	}
-
-	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
-	if err == nil {
-		t.Fatal("SelfCheckDenyDefault: nil error, want session-id failure")
-	}
-	if !strings.Contains(err.Error(), "mint session id") {
-		t.Errorf("err = %q, want substring %q", err.Error(), "mint session id")
-	}
-	if !strings.Contains(err.Error(), "session id failed") {
-		t.Errorf("err = %q, want underlying error %q", err.Error(), "session id failed")
-	}
-}
-
 // TestSelfCheck_SettingsCleanedOnLaterFailure pins the defer-ordering
-// invariant: `defer os.Remove(settingsPath)` is registered AFTER
-// settingsWrite succeeds and BEFORE newSessionID is called, so any
-// failure past the settings write still cleans up the tempfile.
+// invariant: `defer os.Remove(settingsPath)` is registered AFTER settingsWrite
+// succeeds and BEFORE the spawn, so any failure past the settings write still
+// cleans up the tempfile.
+//
+// The forced failure used to be a session-id mint, which was the only step
+// between the two. That seam went with the terminal runner, so the spawn itself
+// is now the nearest later step and stands in for it.
 func TestSelfCheck_SettingsCleanedOnLaterFailure(t *testing.T) {
 	installSeams(t)
 
@@ -389,13 +330,13 @@ func TestSelfCheck_SettingsCleanedOnLaterFailure(t *testing.T) {
 		observedPath = f.Name()
 		return observedPath, nil
 	}
-	newSessionID = func() (string, error) {
-		return "", errors.New("forced session-id failure")
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
+		return errors.New("forced spawn failure")
 	}
 
 	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
 	if err == nil {
-		t.Fatal("SelfCheckDenyDefault: nil error, want session-id failure")
+		t.Fatal("SelfCheckDenyDefault: nil error, want spawn failure")
 	}
 	if observedPath == "" {
 		t.Fatal("settingsWrite mock never recorded a path; cannot assert cleanup")
@@ -405,14 +346,85 @@ func TestSelfCheck_SettingsCleanedOnLaterFailure(t *testing.T) {
 	}
 }
 
-func TestSelfCheck_PtyRunnerError(t *testing.T) {
+// argValue returns the value following flag in a claude argv, or "" if absent.
+func argValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestSelfCheck_PassesCanonicalAllowToSpawn replaces the field-level assertion
+// that the terminal runner allowed. Under the stream runner the allowlist and
+// the turn budget are argv, not struct fields, so this reads them back off the
+// argv the check actually spawns with.
+//
+// It is the regression guard for bug #526, where a required input was added to
+// the runner and the self-check's own call site was not updated, so the check
+// silently spawned with a broken configuration. Nothing else pins it: the mock
+// accepts any argv.
+func TestSelfCheck_PassesCanonicalAllowToSpawn(t *testing.T) {
 	installSeams(t)
-	ptyRun = func(ctx context.Context, cfg ptyrunner.Config) error {
-		return ptyrunner.ErrTrustModalDetected
+
+	var observed []string
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
+		observed = append([]string(nil), cfg.Args...)
+		// Emit a clean end-of-turn so the check completes normally; this test
+		// is about the argv, not the verdict.
+		if _, err := io.WriteString(cfg.Stdout, passLine+"\n"); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
 	}
 
-	result, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
-	if !errors.Is(err, ptyrunner.ErrTrustModalDetected) {
-		t.Fatalf("err = %v, want errors.Is(err, ptyrunner.ErrTrustModalDetected)\nresult=%+v", err, result)
+	if _, err := SelfCheckDenyDefault(context.Background(), baseConfig(t)); err != nil {
+		t.Fatalf("SelfCheckDenyDefault: %v", err)
+	}
+	if len(observed) == 0 {
+		t.Fatal("streamRun never invoked, or spawned with an empty argv")
+	}
+
+	if got, want := argValue(observed, "--allowed-tools"), strings.Join(canonicalAllow, ","); got != want {
+		t.Errorf("--allowed-tools = %q, want %q (canonicalAllow)", got, want)
+	}
+	// The settings file is the actual boundary this check exists to verify, so
+	// a spawn without it would make PASS meaningless rather than merely weaker.
+	if argValue(observed, "--settings") == "" {
+		t.Error("--settings absent from the argv; the deny-default file IS the enforcement (#1387), so the check would pass vacuously")
+	}
+	// >= 2 so claude's runtime reaches the execute-or-deny step: turn 1 emits
+	// the tool use, the runtime denies between turns, turn 2 acknowledges.
+	turns, err := strconv.Atoi(argValue(observed, "--max-turns"))
+	if err != nil {
+		t.Fatalf("--max-turns not an integer in argv %v: %v", observed, err)
+	}
+	if turns < 2 {
+		t.Errorf("--max-turns = %d, want >= 2 (must reach the execute-or-deny step)", turns)
+	}
+	// The mode that makes an unlisted tool a hard deny rather than a prompt.
+	if got := argValue(observed, "--permission-mode"); got != "dontAsk" {
+		t.Errorf("--permission-mode = %q, want \"dontAsk\"", got)
+	}
+}
+
+// TestSelfCheck_SpawnError pins that a spawn failure propagates rather than
+// being swallowed into an inconclusive result.
+func TestSelfCheck_SpawnError(t *testing.T) {
+	installSeams(t)
+
+	sentinel := errors.New("spawn exploded")
+	streamRun = func(ctx context.Context, cfg streamrunner.Config) error {
+		return sentinel
+	}
+
+	_, err := SelfCheckDenyDefault(context.Background(), baseConfig(t))
+	if !errors.Is(err, sentinel) {
+		t.Errorf("SelfCheckDenyDefault err = %v, want it to wrap the spawn error", err)
 	}
 }

@@ -1,7 +1,7 @@
-// Package selfcheck implements the boot-time verification that the
-// per-agent tool-allowlist enforcement contract still refuses tools NOT
-// in permissions.allow when claude is spawned as an interactive-TUI
-// process under a PTY with a per-spawn deny-default settings file.
+// Package selfcheck implements the verification that the per-agent
+// tool-allowlist enforcement contract still refuses tools NOT in
+// permissions.allow when claude is spawned headlessly on the stream-json
+// surface with a per-spawn deny-default settings file.
 //
 // The full deny-default contract has three coupled halves; all three
 // must hold for the per-agent security boundary to enforce:
@@ -38,20 +38,27 @@
 // Ticket #539 moved the probe to "Write" to close that gap.
 // See: https://code.claude.com/docs/en/permission-modes
 //
-// What this selfcheck verifies. SelfCheckDenyDefault composes four
-// collaborators — trust.MarkWorkdirTrusted, settings.WriteSettings,
-// sessions.NewID, and ptyrunner.Run — exposed as package-level function
-// variables so tests can mock the entire spawn surface in-process. The
-// Phase A spike (#329) verified empirically the streamrunner shape; the
-// post-#470 production cutover moved the dispatcher to ptyrunner, and
-// the post-#473 rewrite moved the selfcheck along with it so it
-// verifies the ACTUAL production path rather than the fallback. The
-// post-#538 argv addition (`--permission-mode dontAsk` in
-// ptyrunner.buildArgs) is verified transitively: the selfcheck spawns
-// claude via the same ptyrunner.Run the dispatcher uses, so the argv
-// half is whatever ptyrunner.buildArgs currently emits. The CLI wrapper
-// at cmd/pyry/agent_run_selfcheck.go renders the returned Result as
-// PASS / FAIL / inconclusive for operator + CI consumption.
+// What this selfcheck verifies. SelfCheckDenyDefault composes three
+// collaborators — trust.MarkWorkdirTrusted, settings.WriteSettings, and
+// streamrunner.Run — exposed as package-level function variables so tests
+// can mock the entire spawn surface in-process. The CLI wrapper at
+// cmd/pyry/agent_run_selfcheck.go renders the returned Result as
+// PASS / FAIL / inconclusive for operator consumption.
+//
+// The argv half is verified transitively, and that is the whole design:
+// the selfcheck builds its argv with streamrunner.BuildClaudeArgs, the
+// same function `pyry agent-run` spawns with, so whatever the dispatcher
+// currently passes is what gets checked.
+//
+// This coupling is the lesson of the package's own history rather than a
+// nicety. The check has followed the runner twice. It began on the
+// stream-json shape verified by the Phase A spike (#329), moved to the
+// terminal runner when the dispatcher cut over (#470/#473), and came back
+// here in #1348 when the terminal runner was deleted. In between it spent
+// weeks attached to a runner nothing spawned, where it would have passed
+// while production ran unrestricted — which is exactly what #1387 later
+// found had happened. A permission check that assembles its own spawn
+// verifies a spawn nobody performs.
 //
 // Runtime-layer, NOT LLM-layer. This self-check verifies claude's
 // RUNTIME-layer enforcement — the probe sentinel file does NOT appear on
@@ -71,8 +78,8 @@
 // explicit exception: it is the load-bearing security evidence on FAIL,
 // and MUST remain a path this package constructed — never file contents
 // or captured claude output. The wrapper-error namespaces ("mark workdir
-// trusted", "write settings", "mint session id") MUST NOT substitute
-// workdir realpath, settings tempfile path, or session id into their
+// trusted", "write settings") MUST NOT substitute
+// workdir realpath or settings tempfile path into their
 // messages — the underlying error already names the failing operation.
 package selfcheck
 
@@ -89,24 +96,27 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
-	"github.com/pyrycode/pyrycode/internal/agentrun/ptyrunner"
 	"github.com/pyrycode/pyrycode/internal/agentrun/settings"
+	"github.com/pyrycode/pyrycode/internal/agentrun/streamrunner"
 	"github.com/pyrycode/pyrycode/internal/agentrun/trust"
-	"github.com/pyrycode/pyrycode/internal/sessions"
 )
 
 // Test-only seams overridden by _test.go to drive each collaborator
 // failure path without spawning real claude. Production never assigns.
-// Same pattern cmd/pyry/agent_run.go uses for its production ptyrunner
-// path — no new convention.
+// Same pattern cmd/pyry/agent_run.go uses — no new convention.
+//
+// The spawn seam moved from the terminal runner to the stream runner in #1348,
+// which is what makes this check meaningful again rather than merely alive: it
+// now exercises the surface the dispatcher actually runs. A permission check
+// attached to a runner nothing spawns proves nothing about production, and that
+// is precisely what it had become since the 2026-07-25 fleet switch.
+//
+// The session-id seam went with the terminal runner. The stream surface lets
+// claude mint its own session, so there is nothing to inject.
 var (
 	trustMark     = trust.MarkWorkdirTrusted
 	settingsWrite = settings.WriteSettings
-	newSessionID  = func() (string, error) {
-		sid, err := sessions.NewID()
-		return string(sid), err
-	}
-	ptyRun = ptyrunner.Run
+	streamRun     = streamrunner.Run
 )
 
 // canonicalProbeTool is the single source of truth for the tool the
@@ -273,11 +283,6 @@ func SelfCheckDenyDefault(ctx context.Context, cfg Config) (Result, error) {
 	}
 	defer func() { _ = os.Remove(settingsPath) }()
 
-	sid, err := newSessionID()
-	if err != nil {
-		return Result{}, fmt.Errorf("agentrun: self-check: mint session id: %w", err)
-	}
-
 	timeoutCtx, cancel := context.WithTimeout(ctx, overallTimeout)
 	defer cancel()
 
@@ -291,26 +296,29 @@ func SelfCheckDenyDefault(ctx context.Context, cfg Config) (Result, error) {
 		// Close the write end when the child exits so the watcher's
 		// jsonl.Reader sees io.EOF and unblocks. Load-bearing.
 		defer func() { _ = pw.Close() }()
-		runErr := ptyRun(gctx, ptyrunner.Config{
-			ClaudeBin:    cfg.ClaudeBin,
-			WorkDir:      realpath,
-			SessionID:    sid,
-			SettingsPath: settingsPath,
-			AllowedTools: canonicalAllow,
-			// ptyrunner.Config.SystemPrompt is a required path; /dev/null
-			// is a portable 0-byte readable character device on Linux +
-			// macOS (the only targets per project CLAUDE.md). claude's
-			// --append-system-prompt-file reads it as empty bytes and
-			// appends nothing — one fewer tempfile to manage.
-			SystemPrompt: "/dev/null",
-			Model:        "sonnet",
-			Effort:       "low",
-			MaxTurns:     selfCheckMaxTurns,
-			PromptBytes:  []byte(prompt),
-			Stdout:       pw,
-			Stderr:       io.Discard,
-			Env:          cfg.Env,
-			Logger:       logger,
+		runErr := streamRun(gctx, streamrunner.Config{
+			ClaudeBin: cfg.ClaudeBin,
+			WorkDir:   realpath,
+			// Built by the SAME function the dispatcher's spawn uses, which is
+			// the whole point of the check: it verifies the argv production
+			// emits, not an argv assembled here to resemble it.
+			Args: streamrunner.BuildClaudeArgs(streamrunner.ArgsParams{
+				// --append-system-prompt-file is a required path; /dev/null is a
+				// portable 0-byte readable character device on Linux and macOS,
+				// the only targets per project CLAUDE.md. claude reads it as
+				// empty bytes and appends nothing, one fewer tempfile to manage.
+				SystemPromptFile: "/dev/null",
+				Model:            "sonnet",
+				Effort:           "low",
+				MaxTurns:         selfCheckMaxTurns,
+				AllowedTools:     canonicalAllow,
+				SettingsPath:     settingsPath,
+			}),
+			PromptBytes: []byte(prompt),
+			Stdout:      pw,
+			Stderr:      io.Discard,
+			Env:         cfg.Env,
+			Logger:      logger,
 		})
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
 			return runErr
