@@ -82,6 +82,40 @@ the update fails closed with `update: verify signature: …` (never insecure).
 `openssl pkeyutl -sign -rawin` requires OpenSSL 3.0+, which `ubuntu-latest`
 provides; a pinned older image would surface here.
 
+## Live-claude suite — read the count, not the exit code
+
+`make e2e-realclaude` drives real `claude` over the subscription. It has two
+failure modes that report success, and from outside they look the same as a
+clean run:
+
+- **No credentials.** Every live test skips and the run exits 0.
+- **The package does not build.** Zero tests run and the run still exits 0
+  through any shell wrapper.
+
+So the only trustworthy reading is the number of tests that executed. Count the
+`=== RUN` lines. A healthy full run is in the 700s as of August 2026, was 521 on
+2026-08-09, and reads zero when the build is broken.
+
+```sh
+export CLAUDE_CODE_OAUTH_TOKEN=...      # subscription login; without it everything skips
+make e2e-realclaude 2>&1 | tee /tmp/e2e.log
+grep -c '^=== RUN' /tmp/e2e.log         # this is the number that matters
+grep -cE '^\s*--- FAIL' /tmp/e2e.log
+```
+
+**About a dozen tests skip by design.** Some are opt-in evidence probes behind
+their own environment flags, and each says so in its own skip message. The MCP
+smoke tests need `ANTHROPIC_API_KEY`, the metered API credential, which is a
+different thing from the subscription login. Read the skip reasons; the skip
+count alone cannot distinguish design from breakage.
+
+**`make check` does not compile this package.** It is behind the
+`e2e_realclaude` build tag, so the standard gate is blind to it and can be
+green while the package does not build. `make preship` is the gate that
+compiles it, and it is the one to run after deleting or moving test files —
+a deleted test file takes its shared helpers with it, and other tests may be
+calling them.
+
 ## Live-relay smoke test
 
 `make e2e-liverelay` proves the daemon ↔ **real** `pyrycode-relay` pairing with
