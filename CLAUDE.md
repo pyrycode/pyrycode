@@ -143,6 +143,17 @@ Tiers, cheapest first — `docs/release-tooling.md` is the runbook:
 - **`make e2e-liverelay` (opt-in):** one round-trip against a locally built real relay binary — hermetic loopback, no creds
 - **`make preship`:** check + e2e-realclaude + e2e-liverelay — run before every binary swap
 
+**`make check` cannot see the live-claude suite, so its green says nothing about that package.** `internal/e2e/realclaude` is gated behind the `e2e_realclaude` build tag, so the standard gate never compiles it. The package can fail to build while `make check` passes honestly. `make preship` is the gate that compiles it.
+
+**After deleting or moving test files, run `make preship`, not `make check`.** Deleting a test file also deletes whatever shared helpers lived in it, and those helpers are often used by tests in other files. On 2026-08-16 a deletion removed seven files from `internal/e2e/realclaude` and took thirty shared helpers with them; fourteen surviving tests still called them, and the package did not compile for a day while every `make check` stayed green.
+
+**Read the count of tests executed from the live suite, never its exit code.** There are two ways it reports success while proving nothing, and they look identical from outside:
+
+- No claude credentials: every live test skips, exit 0.
+- The package fails to build: zero tests run, exit 0 through any shell wrapper.
+
+Count the `=== RUN` lines. A healthy full run is in the 700s as of August 2026 and reads zero when the build is broken. Roughly a dozen tests skip by design on every run — opt-in evidence probes behind their own environment flags, plus MCP smoke tests needing `ANTHROPIC_API_KEY`, which is a different credential from the subscription login. Read the skip reasons; the skip count alone cannot tell design from breakage.
+
 Conventions:
 
 - **Unit tests:** Table-driven, `go test -race`, stdlib only
