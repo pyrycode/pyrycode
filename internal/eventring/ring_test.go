@@ -2,6 +2,7 @@ package eventring
 
 import (
 	"encoding/json"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -96,20 +97,39 @@ func TestAfter_ReplayReturnsEventsAfterID(t *testing.T) {
 	}
 }
 
-// AC-5: a query at or past the latest id is caught up — distinguishable from a
-// gap by gap==false with empty events.
+// AC-5: a query at — exactly at, not beyond (#1494) — the latest id is caught
+// up, distinguishable from a gap by gap==false with empty events.
 func TestAfter_CaughtUp(t *testing.T) {
 	t.Parallel()
 	r := New(MaxEventsPerConversation)
 	appendControl(t, r, "A", 5) // ids 1..5
 
-	for _, afterID := range []uint64{5, 99} {
+	got, gap := r.After("A", 5)
+	if gap {
+		t.Fatalf("After(A, 5): want caught up (gap=false), got gap=true")
+	}
+	if len(got) != 0 {
+		t.Fatalf("After(A, 5): want no events, got %v", eventIDs(got))
+	}
+}
+
+// #1494: an afterID past the latest id assigned names an event this daemon
+// never issued — the post-daemon-restart shape, where per-conversation ids
+// restart at 1 while the phone still holds a high cursor. It is a gap (the
+// consumer must resync), never caught-up: classifying it caught-up leaves the
+// phone dedup'ing every live event against a cursor the daemon can never reach.
+func TestAfter_GapBeyondIDSpace(t *testing.T) {
+	t.Parallel()
+	r := New(MaxEventsPerConversation)
+	appendControl(t, r, "A", 5) // ids 1..5; latest is 5
+
+	for _, afterID := range []uint64{6, 99, math.MaxUint64} {
 		got, gap := r.After("A", afterID)
-		if gap {
-			t.Fatalf("After(A, %d): want caught up (gap=false), got gap=true", afterID)
+		if !gap {
+			t.Errorf("After(A, %d): want gap=true (an id beyond the ring's id space), got gap=false", afterID)
 		}
 		if len(got) != 0 {
-			t.Fatalf("After(A, %d): want no events, got %v", afterID, eventIDs(got))
+			t.Errorf("After(A, %d): want no events, got %v", afterID, eventIDs(got))
 		}
 	}
 }

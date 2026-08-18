@@ -314,8 +314,57 @@ reads correctly.
 **AC #4 — #663 clamp mutation re-run.**
 
 - Command:
-- Tests reddened:
-- Surviving justification for keeping `min(afterID, newest)`:
+
+  ```bash
+  # overlay maps internal/relay/v2session_replay.go to a scratchpad copy with
+  # `s.replayThrough = min(afterID, newest)` mutated to `s.replayThrough = afterID`
+  # (plus `_ = newest` after the NewestID read, or the mutant does not compile —
+  # dropping the clamp is the only use of `newest`, and a build failure is not a
+  # red test).
+  cd <worktree> && go test -overlay=<abs-path>/overlayB.json ./internal/relay/ -count=1
+  ```
+
+- Tests reddened: **none.** `ok github.com/pyrycode/pyrycode/internal/relay` — the
+  whole package, not just `-run TestV2Session_Reconnect`. This matches the spec's
+  reachability prediction exactly.
+
+  The result is a real delta, not a broken mutant. The same mutation was run against
+  the **pre-#1494 tree** (an overlay mapping `ring.go`, `ring_test.go`,
+  `v2session_replay.go`, `v2session_replay_test.go` to their `HEAD` content, with the
+  clamp mutated identically) and reddened precisely the three rows AC #4 named:
+  `TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered` and both subcases of
+  `TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered`. Post-change,
+  all three still pass **and** still assert live delivery — they now reach it through
+  the gap branch (`replayThrough` never written, guard inert) instead of the clamp.
+
+- Surviving justification for keeping `min(afterID, newest)`: the concurrent-`Append`
+  window between the `NewestID` read and the `After` read. An `Append` landing there
+  makes an `afterID` that was out of range at the first read equal to `latestID` — and
+  so caught-up — at the second; without the clamp the watermark would be set to that
+  `afterID` and `forwardEnvelope` would drop the live frame carrying the very event
+  that was just appended. Not reachable single-goroutine and deliberately given no
+  test seam (`SetReplaySource` takes a concrete `*eventring.Ring`; widening it to an
+  interface is a refactor this ticket does not justify), so **the clamp is now
+  defence-only for that race window**. Its direction is the safe one — it can only
+  lower the watermark, never raise it. The `min(afterID, newest)` comment in
+  `replayMissed` and the `NewestID` doc comment were both rewritten to say this
+  instead of the retired "an out-of-range remote id can never raise the watermark"
+  claim, which #1494 moved to the gap branch.
+
+**AC #1 — classification-revert mutation (confirming the new gap test is load-bearing).**
+
+- Command: same overlay technique, mapping `internal/eventring/ring.go` to a copy with
+  the two new branches collapsed back to the pre-#1494 single
+  `if afterID >= latestID { return nil, false }`.
+- Reddened: `TestAfter_GapBeyondIDSpace` (all three rows — `6`, `99`,
+  `math.MaxUint64`), plus `TestV2Session_Reconnect_BeyondNewest_EmitsResync` (both
+  subcases), `…_OutOfRangeLastEventID_LiveStreamDelivered` (both subcases) and
+  `…_ClearRotation_LiveStreamDelivered` in `internal/relay`.
+- A second variant — flipping only the operator in the shipped two-branch shape
+  (`>` → `>=`, leaving the now-unreachable `==` arm) — reddens the *other* side:
+  `TestAfter_CaughtUp`, `TestAfter_GapWhenOldestFellOff`'s at-latest probe, and
+  `TestV2Session_Reconnect_CaughtUp_NoReplay`. Both boundaries are pinned; neither
+  arm is free.
 
 ---
 

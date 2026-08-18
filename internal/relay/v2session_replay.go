@@ -215,10 +215,11 @@ func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv fun
 // self-synchronised ring (ring.After's own mutex makes the read safe off the
 // emitter goroutine), scoped to the daemon-resolved conversation (cursor()),
 // never to a conversation the phone names. Work is bounded by what the ring
-// retains (MaxEventsPerConversation); a hostile-large id classifies as
-// caught-up (zero work). SECURITY: replayed payloads are the same structured
-// envelopes #649 already streams to this authenticated conn; the bytes are
-// never logged.
+// retains (MaxEventsPerConversation); a hostile-large id classifies as a gap
+// (#1494) — one resync marker, still bounded work, and the untrusted value is
+// never written to per-conn state. SECURITY: replayed payloads are the same
+// structured envelopes #649 already streams to this authenticated conn; the
+// bytes are never logged.
 func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, afterID uint64) {
 	m.pushMu.Lock()
 	ring, cursor := m.replayRing, m.replayCursor
@@ -239,20 +240,25 @@ func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, after
 	newest := ring.NewestID(convID)
 	events, gap := ring.After(convID, afterID)
 	if gap {
-		// The requested position aged out of the bounded ring (AC-4): emit one
-		// honest resync marker telling the phone to full-reload, never a
-		// partial gap-ful replay. Leave replayThrough untouched — the phone
-		// discards its cursor and must accept all live events afterward.
+		// The requested position aged out of the bounded ring (AC-4), or names an
+		// id this daemon never issued — a stale cross-/clear id, a post-restart
+		// cursor, a hostile 2^64-1 (#1494): emit one honest resync marker telling
+		// the phone to full-reload, never a partial gap-ful replay. Leave
+		// replayThrough untouched — the phone discards its cursor and must accept
+		// all live events afterward.
 		m.emitResync(ctx, s, convID)
 		return
 	}
-	// Clamp the watermark to server-known reality (#663). afterID is untrusted:
-	// a stale cross-/clear id or a hostile 2^64-1 would otherwise set the
-	// watermark above this conversation's id space and silently mute every live
-	// frame at or below it. min preserves legitimate same-conversation dedup
-	// (afterID == newest in the caught-up case there); during the loop the
-	// watermark trails one event behind the frame being forwarded, so
-	// forwardEnvelope's guard never self-drops a replay envelope.
+	// Clamp the watermark to server-known reality (#663). Since #1494 every
+	// afterID above this conversation's id space returns at the gap branch above,
+	// so what the clamp still defends is the window between the NewestID and
+	// After reads: an Append landing there makes an afterID that was out of range
+	// at the first read caught-up at the second, and min holds the watermark at
+	// the stale-but-real newest so the concurrently appended event is not muted.
+	// min also preserves legitimate same-conversation dedup (afterID == newest in
+	// the caught-up case there); during the drain the watermark trails one event
+	// behind the frame being forwarded, so forwardEnvelope's guard never
+	// self-drops a replay envelope.
 	s.replayThrough = min(afterID, newest)
 	if len(events) == 0 {
 		return // caught up: After returned no tail; the clamp above is all the work.
@@ -273,12 +279,14 @@ func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, after
 }
 
 // emitResync forwards a single resync marker to s, signalling that its
-// advertised last_event_id aged out of the ring and it must do a full reload of
-// convID (#647, AC-4). The marker is a TypeResync control envelope carrying
-// only convID in an inline anonymous payload — no named protocol payload type,
-// mirroring emitRekeyRequest's payload-less inline-struct control precedent. It
-// carries NO EventID (it is not a structured event), so forwardEnvelope's
-// replay-watermark guard never touches it.
+// advertised last_event_id is not a position the ring can replay from — it aged
+// out of the bounded window (#647, AC-4) or lies beyond the conversation's id
+// space (#1494) — and that it must do a full reload of convID. The marker is a
+// TypeResync control envelope carrying only convID in an inline anonymous
+// payload — no named protocol payload type, mirroring emitRekeyRequest's
+// payload-less inline-struct control precedent. It carries NO EventID (it is not
+// a structured event), so forwardEnvelope's replay-watermark guard never touches
+// it.
 //
 // SECURITY: convID is the daemon's own resolved conversation id, never
 // attacker-derived; the marker exposes no buffered conversation content.
