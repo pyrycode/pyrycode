@@ -179,8 +179,11 @@ func waitArgvRaw(t *testing.T, dir string) []string {
 
 // spawnMintedWithSettings mirrors CreateIn's create sequence (build → register
 // → persist → supervise → activate) but injects an explicit SessionSettings,
-// exercising the minted spawn-argv path end-to-end. #826b will plumb settings
-// through the public Create path; here we drive buildSession directly.
+// exercising the minted spawn-argv path end-to-end. It drives buildSession
+// DIRECTLY, so it can say nothing about what the public mint entry points pass:
+// a test built on it stays green even if CreateIn / GetOrCreateIn never inherit
+// anything. Assertions about that belong in pool_mint_settings_test.go, which
+// drives the entry points.
 func spawnMintedWithSettings(t *testing.T, ctx context.Context, pool *Pool, spawnDir string, settings SessionSettings) SessionID {
 	t.Helper()
 	id, err := NewID()
