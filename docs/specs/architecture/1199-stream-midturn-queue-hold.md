@@ -51,6 +51,8 @@ Two consequences, which are the two halves of the regression:
 
 The signal needed to close the gap already exists and is fully wired: `turnBusyTracker` (`stream_turn_busy.go`), per-conversation, self-synchronised, with `Busy` and `WaitIdle` sitting unused. #1198's slice chain (#1201, #1202, #1206, #1207, #1209, #1210) closed the last feed and the file records the "no reachable sequence leaves a conversation reported busy forever" precondition as SATISFIED. This ticket is the consumer slice the tracker was built for, and the one `relay.go:738-746` names by role.
 
+**Correction (#1496, documentation pass):** the SATISFIED claim depended on `TurnEnd` reliably reaching `observe`, which the fan-in's pre-#1496 class-blind drop-newest did not guarantee under saturation. #1496 reserves fan-in capacity for closing-class envelopes; the precondition this ticket's hold relies on now holds up to a documented, `Warn`-visible reserve headroom. See [`docs/knowledge/codebase/1496.md`](../../knowledge/codebase/1496.md).
+
 **Why now:** `pyrycode-desktop`#483's 8/8 real-claude gate is blocked on this, and that dependency is cross-repo so it will not auto-surface here.
 
 ---
