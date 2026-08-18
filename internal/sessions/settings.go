@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // mcpSettingsFile is the minimal interactive-spawn settings payload. The
@@ -40,20 +41,85 @@ type mcpSettingsFile struct {
 	SkipDangerousModePermissionPrompt bool `json:"skipDangerousModePermissionPrompt"`
 }
 
-// writeMCPSettings creates an os.TempDir settings file containing the
-// mcpSettingsFile payload above and returns its absolute path. os.TempDir
-// (not the pool data dir) keeps the writer self-contained and testable — the
-// data dir is empty in test mode.
+// writeMCPSettings writes the mcpSettingsFile payload above for session id and
+// returns its absolute path. Two branches, selected by registryPath:
 //
-// The file is per-session and must outlive every respawn (backoff restart and
-// the #842 live settings-restart both re-exec with the same --settings path), so
-// the caller — not this helper — removes it at session teardown.
+//   - registryPath != "" — the file is <dataDir>/session-settings/<id>.json,
+//     where dataDir is the absolutised parent of registryPath (the directory
+//     holding sessions.json). session-settings is created on demand at 0700,
+//     mirroring the archived-sessions subdirectory disposeJSONLLocked creates;
+//     cold start needs that, because the data dir itself is created only by
+//     saveRegistryLocked, which has not necessarily run when Pool.New writes the
+//     bootstrap file. This is the production path (#1518). The file must outlive
+//     every respawn — a backoff restart and the #842 live settings-restart both
+//     re-exec with the same --settings path baked into spawnBase, and nothing
+//     re-reads or re-creates it in between — so it does not belong in an OS temp
+//     dir where an age-based reaper can delete it out from under a live session.
+//     Deriving the name from the session id rather than from os.CreateTemp's
+//     random suffix is what bounds the on-disk set by session count instead of by
+//     daemon-restart count, with no startup sweeper.
+//   - registryPath == "" — persistence is disabled (the test-only mode Pool.dataDir
+//     reports as ""), so there is no data dir to write into and the file goes to
+//     os.TempDir with a random name, observably identical to pre-#1518 behaviour.
+//     Most of this package's tests build a pool with no RegistryPath.
 //
-// Error path: if Encode or Close fails after os.CreateTemp succeeds, the
-// tempfile is best-effort removed before returning the error, so callers never
-// see a leaked path on the error path.
-func writeMCPSettings() (string, error) {
-	f, err := os.CreateTemp("", "pyry-session-settings-*.json")
+// The derivation is duplicated from Pool.dataDir rather than shared with it
+// because Pool.New writes the bootstrap file before the *Pool literal exists —
+// which is also why this is a package function and not a method.
+//
+// id is gated on ValidID on the data-dir branch only. A warm-start bootstrap id
+// is decoded straight out of the registry with no shape check anywhere on that
+// path, and after #1518 it names a file, so an id carrying a separator or a ".."
+// segment would place the write outside the data dir. A malformed id is a hard
+// error, matching loadRegistry's "a malformed file is a hard error (operator must
+// fix or remove)" posture; silently falling back to a temp file would hide a
+// corrupt registry. The persistence-disabled branch performs no path join and is
+// deliberately not gated — tests pass hand-made ids there.
+//
+// The write is atomic (scratch file in the target directory, fsync, rename), the
+// same recipe as saveRegistryLocked. Two reasons beyond convention, both
+// introduced by the relocation: deterministic naming means two same-id
+// materialise callers now write the same path concurrently, and a rename hands a
+// live child either the old complete file or the new one rather than a truncated
+// prefix; and os.Rename replaces a symlink at the destination instead of writing
+// through it. os.CreateTemp creates at 0600 and the rename preserves it, so the
+// file is never group- or world-readable — which matters for integrity, not
+// confidentiality: the payload is two public booleans, but anyone who could write
+// this file could add hooks/permissions keys to a file pyry hands claude as
+// --settings, i.e. code execution as the operator.
+//
+// The caller — not this helper — removes the file at session teardown, and on
+// every error return between the write and its own success: in the data dir an
+// orphan is permanent, where in os.TempDir it was eventually reaped.
+func writeMCPSettings(registryPath string, id SessionID) (string, error) {
+	// dir == "" selects os.CreateTemp's own os.TempDir contract and final == ""
+	// means "keep the scratch name" — the persistence-disabled branch leaves both
+	// empty and the data-dir branch sets both.
+	var dir, final string
+	if registryPath != "" {
+		if !ValidID(string(id)) {
+			return "", fmt.Errorf("sessions: settings file for session %q: not a canonical session id", id)
+		}
+		dataDir, err := filepath.Abs(filepath.Dir(registryPath))
+		if err != nil {
+			return "", fmt.Errorf("sessions: resolve settings dir: %w", err)
+		}
+		dir = filepath.Join(dataDir, "session-settings")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("sessions: mkdir settings dir: %w", err)
+		}
+		final = filepath.Join(dir, string(id)+".json")
+	}
+
+	pattern := "pyry-session-settings-*.json"
+	if final != "" {
+		// Dotted .tmp suffix so a scratch file left by a SIGKILL inside the write
+		// window is never mistaken for a session's settings file, and so a *.json
+		// glob of the directory counts sessions exactly. Mirrors
+		// saveRegistryLocked's ".sessions-*.json.tmp".
+		pattern = ".settings-*.json.tmp"
+	}
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", fmt.Errorf("sessions: create settings tempfile: %w", err)
 	}
@@ -67,9 +133,21 @@ func writeMCPSettings() (string, error) {
 		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("sessions: encode settings: %w", err)
 	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("sessions: fsync settings: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("sessions: close settings: %w", err)
 	}
-	return tmpName, nil
+	if final == "" {
+		return tmpName, nil
+	}
+	if err := os.Rename(tmpName, final); err != nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("sessions: rename settings: %w", err)
+	}
+	return final, nil
 }

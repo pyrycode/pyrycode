@@ -3,6 +3,9 @@ package sessions
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,5 +220,192 @@ func TestPool_Run_CleansUpBootstrapSettingsFile(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("bootstrap settings file %q still present after Run returned (err=%v), want removed", path, err)
+	}
+}
+
+// helperPoolFakeRunner builds a Pool against registryPath whose runner factory
+// returns the no-op fakeRunner, so New completes with no PTY, no child, and no
+// lifecycle goroutine. The #1518 tests below need New's on-disk side effects
+// only — they never run the pool.
+func helperPoolFakeRunner(t *testing.T, registryPath string, factory RunnerFactory) (*Pool, error) {
+	t.Helper()
+	return New(Config{
+		Bootstrap:     SessionConfig{ClaudeBin: "/nonexistent/claude-should-never-be-execd"},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		RegistryPath:  registryPath,
+		RunnerFactory: factory,
+	})
+}
+
+// settingsDirOf returns the per-session settings directory for a data dir.
+func settingsDirOf(dataDir string) string {
+	return filepath.Join(dataDir, "session-settings")
+}
+
+// assertSettingsDirEmpty asserts the per-session settings directory holds no
+// entries at all — not even a scratch file. A still-absent directory counts as
+// empty: a construction that failed before the write never created it.
+func assertSettingsDirEmpty(t *testing.T, settingsDir string) {
+	t.Helper()
+	entries, err := os.ReadDir(settingsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		t.Fatalf("readdir %q: %v", settingsDir, err)
+	}
+	if len(entries) == 0 {
+		return
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	t.Errorf("settings dir %q holds %v, want empty (a failed construction orphaned its settings file)", settingsDir, names)
+}
+
+// TestPool_BootstrapSpawn_SettingsFileUnderDataDir (#1518, AC #1): the bootstrap's
+// --settings argv value — the immutable spawnBase element every backoff restart,
+// evict reactivation, and #842 live restart re-execs with — points at
+// <dataDir>/session-settings/<bootstrapID>.json, not into an OS temp dir where a
+// multi-day reaper can delete it out from under a still-live session.
+func TestPool_BootstrapSpawn_SettingsFileUnderDataDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	tplWorkDir := t.TempDir()
+
+	pool := helperPoolArgvRecorder(t, regPath, tplWorkDir)
+	runPoolInBackground(t, pool)
+
+	path := settingsArgPath(t, waitArgvRaw(t, tplWorkDir))
+	if want := filepath.Join(settingsDirOf(dir), string(pool.BootstrapID())+".json"); path != want {
+		t.Errorf("bootstrap --settings = %q, want %q", path, want)
+	}
+	assertMCPSettingsFile(t, path)
+}
+
+// TestPool_MintedSpawn_SettingsFileUnderDataDir (#1518, AC #1): a minted session's
+// --settings argv value likewise lives under the data dir, keyed on its own id.
+func TestPool_MintedSpawn_SettingsFileUnderDataDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	tplWorkDir := t.TempDir()
+	spawnDir := t.TempDir()
+
+	pool := helperPoolArgvRecorder(t, regPath, tplWorkDir)
+	ctx, _ := runPoolInBackground(t, pool)
+
+	id := spawnMintedWithSettings(t, ctx, pool, spawnDir, SessionSettings{})
+
+	path := settingsArgPath(t, waitArgvRaw(t, spawnDir))
+	if want := filepath.Join(settingsDirOf(dir), string(id)+".json"); path != want {
+		t.Errorf("minted --settings = %q, want %q", path, want)
+	}
+	assertMCPSettingsFile(t, path)
+}
+
+// TestPool_RepeatedNew_SettingsFilesBoundedBySessions (#1518, AC #4): restarting
+// the daemon against the same registry must not accumulate settings files. A warm
+// start reuses the persisted bootstrap id, and the filename is derived from it, so
+// restart N overwrites restart N-1's file. This is what makes the bound hold by
+// construction rather than by a startup sweeper, and it goes red the moment the
+// name reverts to a random suffix.
+func TestPool_RepeatedNew_SettingsFilesBoundedBySessions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+
+	var bootstrapID SessionID
+	for i := range 3 {
+		pool, err := helperPoolFakeRunner(t, regPath, func(RunnerConfig) (Runner, error) {
+			return fakeRunner{}, nil
+		})
+		if err != nil {
+			t.Fatalf("New (start %d): %v", i, err)
+		}
+		if i == 0 {
+			bootstrapID = pool.BootstrapID()
+		} else if pool.BootstrapID() != bootstrapID {
+			t.Fatalf("start %d warm-started onto id %q, want the persisted %q", i, pool.BootstrapID(), bootstrapID)
+		}
+	}
+
+	// Glob *.json rather than counting directory entries: the atomic writer's
+	// scratch pattern is ".settings-*.json.tmp", which must never be mistaken for
+	// a session's settings file.
+	settingsDir := settingsDirOf(dir)
+	matches, err := filepath.Glob(filepath.Join(settingsDir, "*.json"))
+	if err != nil {
+		t.Fatalf("glob %q: %v", settingsDir, err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("after 3 daemon starts, settings dir holds %v, want exactly one file (one per session, not one per restart)", matches)
+	}
+}
+
+// TestPool_New_RunnerFailure_RemovesSettingsFile (#1518, AC #5): when the bootstrap
+// runner fails to construct after the settings file has been written, New removes
+// the file before returning. In the OS temp dir the orphan was eventually reaped;
+// in the data dir it would be permanent and would accumulate across every failed
+// start.
+func TestPool_New_RunnerFailure_RemovesSettingsFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+
+	if _, err := helperPoolFakeRunner(t, regPath, func(RunnerConfig) (Runner, error) {
+		return nil, errors.New("runner factory refused")
+	}); err == nil {
+		t.Fatal("New succeeded, want the runner-factory error")
+	}
+
+	assertSettingsDirEmpty(t, settingsDirOf(dir))
+}
+
+// TestPool_BuildSession_RunnerFailure_RemovesSettingsFile (#1518, AC #5): the same
+// at the second write site. The bootstrap's file is asserted still present in the
+// same check, so this also proves the cleanup is scoped to the session that failed
+// rather than wiping the directory.
+func TestPool_BuildSession_RunnerFailure_RemovesSettingsFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+
+	pool, err := helperPoolFakeRunner(t, regPath, func(RunnerConfig) (Runner, error) {
+		return fakeRunner{}, nil
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	pool.mu.RLock()
+	bootstrapPath := pool.sessions[pool.bootstrap].settingsPath
+	pool.mu.RUnlock()
+	if bootstrapPath == "" {
+		t.Fatal("bootstrap session has empty settingsPath")
+	}
+
+	// Same-package swap of the pool's runner factory: nothing is running, so no
+	// goroutine observes the field.
+	pool.newRunner = func(RunnerConfig) (Runner, error) {
+		return nil, errors.New("runner factory refused")
+	}
+
+	id, err := NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	if _, err := pool.buildSession(id, "", "", SessionSettings{}); err == nil {
+		t.Fatal("buildSession succeeded, want the runner error")
+	}
+
+	minted := filepath.Join(settingsDirOf(dir), string(id)+".json")
+	if _, err := os.Stat(minted); !os.IsNotExist(err) {
+		t.Errorf("settings file %q survived a failed buildSession (err=%v), want removed", minted, err)
+	}
+	if _, err := os.Stat(bootstrapPath); err != nil {
+		t.Errorf("bootstrap settings file %q was collateral damage: %v", bootstrapPath, err)
 	}
 }
