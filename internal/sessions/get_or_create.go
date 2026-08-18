@@ -115,6 +115,13 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string) (*Session, bool
 	p.mu.Lock()
 	if existing, ok := p.sessions[id]; ok {
 		p.mu.Unlock()
+		// The discarded session's settings file is deliberately NOT removed here,
+		// nor in either rollback below — the asymmetry with CreateIn is a decision,
+		// not an oversight (#1518). The name is derived from the session id, so the
+		// loser's path is byte-identical to the winner's and the winner's spawnBase
+		// already references it; removing it would delete a live session's settings
+		// file and re-open the #943 modal wedge. The payload is fixed, so the
+		// redundant write is harmless and leaving the file is the correct action.
 		return existing, true, nil
 	}
 

@@ -425,10 +425,22 @@ func New(cfg Config) (*Pool, error) {
 	// fatal at startup: a daemon that started anyway would silently wedge every
 	// turn on the modal — a loud failure is strictly better. Removed when Pool.Run
 	// returns (see the defer in Run); the bootstrap is never Remove-d.
-	settingsPath, err := writeMCPSettings()
+	settingsPath, err := writeMCPSettings(cfg.RegistryPath, bootstrapID)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: write mcp settings: %w", err)
 	}
+	// Since #1518 the file lives in the daemon data dir, where nothing reaps it,
+	// so every error return between here and the successful one has to remove it
+	// or the orphan is permanent. A defer keyed on a success flag covers both of
+	// today's (the newRunner failure and the saveLocked failure) and covers a
+	// future one by construction — this ticket exists because a hand-placed
+	// cleanup was forgotten at two sites.
+	built := false
+	defer func() {
+		if !built {
+			_ = os.Remove(settingsPath)
+		}
+	}()
 
 	// base is the settings-free bootstrap argv (template plus the immutable
 	// --settings pair); bootstrapArgs appends the model/effort/YOLO suffix. Clone
@@ -529,6 +541,7 @@ func New(cfg Config) (*Pool, error) {
 	// it is never rotated to a foreign <uuid>.jsonl found in the shared sessions
 	// dir. The transcript resolvers stay — they still back the #838
 	// growth-confirm baseline.
+	built = true
 	return p, nil
 }
 
@@ -839,8 +852,10 @@ func (p *Pool) Remove(ctx context.Context, id SessionID, opts RemoveOptions) err
 
 	// Remove the per-session MCP-enable settings file (#943). Runs after Evict
 	// returns — the child is confirmed dead, so no backoff respawn can race the
-	// removal into re-reading a deleted path. Best-effort: a leaked tempfile in
-	// os.TempDir is harmless, and the session is going away regardless.
+	// removal into re-reading a deleted path. Best-effort in the sense that a
+	// failure does not fail the Remove, but no longer optional: since #1518 the
+	// file lives in the daemon data dir, where no reaper collects it, so this
+	// removal is what keeps the on-disk set bounded by live sessions.
 	if sess.settingsPath != "" {
 		_ = os.Remove(sess.settingsPath)
 	}
@@ -1085,8 +1100,10 @@ func (p *Pool) Run(ctx context.Context) error {
 
 	// The bootstrap is never Remove-d (ErrCannotRemoveBootstrap), so its
 	// MCP-enable settings file (#943) lives for the daemon-process lifetime and is
-	// removed here, when Run returns on ctx cancel / shutdown. Best-effort: a
-	// leaked tempfile in os.TempDir is harmless.
+	// removed here, when Run returns on ctx cancel / shutdown. Since #1518 the
+	// file sits in the daemon data dir rather than os.TempDir, so nothing reaps
+	// what this defer misses — a SIGKILL still leaks it, which AC #4's id-derived
+	// naming bounds by overwriting on the next start rather than accumulating.
 	defer func() {
 		if bootstrap != nil && bootstrap.settingsPath != "" {
 			_ = os.Remove(bootstrap.settingsPath)
@@ -1242,6 +1259,12 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 	if err := p.saveLocked(); err != nil {
 		delete(p.sessions, id)
 		p.mu.Unlock()
+		// Discarding the session discards its settings file too (#1518): in the
+		// data dir that orphan is permanent, and id came fresh from NewID above so
+		// it is never reused. Safe HERE and deliberately not in materialise's
+		// rollbacks, where the id is caller-supplied and a concurrent same-id
+		// builder may already own the byte-identical path.
+		_ = os.Remove(sess.settingsPath)
 		return "", err
 	}
 	p.mu.Unlock()
@@ -1287,10 +1310,20 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	// It joins spawnBase (below) rather than claudeSettingsArgs so it survives
 	// every recompose (backoff restart, #842 live restart). Removed in Pool.Remove
 	// after the child is confirmed dead.
-	settingsPath, err := writeMCPSettings()
+	settingsPath, err := writeMCPSettings(p.registryPath, id)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: write mcp settings: %w", err)
 	}
+	// Same reasoning as Pool.New's cleanup defer (#1518): in the data dir an
+	// orphan is permanent, so an error return past this point must take the file
+	// with it. Only one such return exists today; the defer shape means a future
+	// one is covered without anyone remembering to add a removal.
+	built := false
+	defer func() {
+		if !built {
+			_ = os.Remove(settingsPath)
+		}
+	}()
 	// base is the settings-free argv (template, resume suffix, and the immutable
 	// --settings pair); full appends the model/effort/YOLO suffix. Storing base on
 	// the Session lets a live restart recompose full argv from the persisted
@@ -1328,7 +1361,7 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	}
 
 	now := time.Now().UTC()
-	return &Session{
+	sess := &Session{
 		id:           id,
 		sup:          sup,
 		log:          p.log,
@@ -1347,7 +1380,9 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		evictedCh:    closedChan(),
 		activateCh:   make(chan struct{}, 1),
 		evictCh:      make(chan struct{}, 1),
-	}, nil
+	}
+	built = true
+	return sess, nil
 }
 
 // Snapshot returns one entry per session, capturing the current
