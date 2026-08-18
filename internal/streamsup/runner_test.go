@@ -793,8 +793,8 @@ func TestRunner_RestartFresh_NoLiveChildIsSafe(t *testing.T) {
 
 // TestRunner_RestartFresh_EmptyIDIsNoOp keeps the deterministic empty-id guard
 // from silently rotting: RestartFresh("") must not rotate the id and must not arm
-// first-run form, so nextSpawnID still returns the original id with forceFirst
-// false. The runner never spawns --session-id "".
+// first-run form, so the next beginSpawn still builds --session-id <original> with
+// forceFirst false. The runner never spawns --session-id "".
 func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 	t.Parallel()
 	cfg := Config{
@@ -810,12 +810,241 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 
 	r.RestartFresh("")
 
-	id, forceFirst := r.nextSpawnID()
-	if id != testSessionID {
-		t.Errorf("nextSpawnID id = %q after RestartFresh(%q), want unchanged %q", id, "", testSessionID)
-	}
+	_, cancel, args, forceFirst := r.beginSpawn(context.Background(), true)
+	defer cancel()
 	if forceFirst {
-		t.Errorf("nextSpawnID forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
+		t.Errorf("beginSpawn forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
+	}
+	if got := idFlagValue(args, "--session-id"); got != testSessionID {
+		t.Errorf("beginSpawn argv --session-id = %q after RestartFresh(%q), want unchanged %q:\n%v",
+			got, "", testSessionID, args)
+	}
+	if slices.Contains(args, "--resume") {
+		t.Errorf("beginSpawn argv unexpectedly carries --resume:\n%v", args)
+	}
+}
+
+// --- #1481: a racer on the spawn-setup seam cannot miss both -----------------
+//
+// The window #1481 closed was the gap between "the spawn id was read" and "this
+// iteration's cancel was published": a Restart/RestartFresh landing there wrote
+// its rotation, read a nil cancel, cancelled nothing, and the spawn proceeded
+// with the pre-rotation id — a live child under an id the pool had already
+// abandoned. These two tests assert the invariant per racer.
+
+// raceModelFlagValue is the pass-through argv token Restart swaps in mid-spawn-
+// setup; helperChild dispatches on the env, not the argv, so an extra flag is
+// inert to the fake claude and only has to be visible in the recorded argv.
+const raceModelFlagValue = "sonnet-1481-test"
+
+// spawnLogHook wraps spawnArgsRecorder and fires hook exactly once, on the
+// "spawning claude" record. slog.Handler.Handle runs SYNCHRONOUSLY on the Run
+// goroutine, so the hook lands a racer at a FIXED point in the spawn-setup
+// statement order — no sleep, no repetition, no window calibration.
+//
+// On the pre-#1481 shape that point sits strictly inside the window (the id was
+// read by the first restartMu acquisition; the cancel is published by a second
+// one further down), so the racer reads a nil cancel and misses both. On the
+// shipped tree the whole section has already run before the log, so the racer
+// finds a live cancel and tears the spawn down — the branch the fix relies on.
+type spawnLogHook struct {
+	*spawnArgsRecorder
+	once sync.Once
+	hook func()
+}
+
+func (h *spawnLogHook) Handle(ctx context.Context, rec slog.Record) error {
+	if err := h.spawnArgsRecorder.Handle(ctx, rec); err != nil {
+		return err
+	}
+	if rec.Message == "spawning claude" {
+		h.once.Do(h.hook)
+	}
+	return nil
+}
+
+// Overridden rather than promoted from the embedded recorder: the promoted
+// versions return the INNER handler, which would silently drop the hook if a
+// caller ever derived a logger via .With().
+func (h *spawnLogHook) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *spawnLogHook) WithGroup(string) slog.Handler      { return h }
+
+// launchRecorder answers "which spawn ATTEMPTS actually launched a child". Run
+// is single-goroutine and logs "spawning claude" strictly before cmd.Start,
+// while onSpawn fires strictly after it, so inside onSpawn the last argv the
+// recorder captured is this child's. An attempt torn down before cmd.Start
+// (spawnAndWait's started == false) leaves no entry — which is exactly the
+// distinction the #1481 invariant is stated over.
+type launchRecorder struct {
+	rec     *spawnArgsRecorder
+	mu      sync.Mutex
+	argv    [][]string
+	spawned chan struct{}
+}
+
+func newLaunchRecorder(rec *spawnArgsRecorder) *launchRecorder {
+	return &launchRecorder{rec: rec, spawned: make(chan struct{}, 4)}
+}
+
+// onSpawn is the Config.onSpawn seam.
+func (l *launchRecorder) onSpawn(int) {
+	all := l.rec.all()
+	l.mu.Lock()
+	l.argv = append(l.argv, all[len(all)-1])
+	l.mu.Unlock()
+	select {
+	case l.spawned <- struct{}{}:
+	default:
+	}
+}
+
+func (l *launchRecorder) all() [][]string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([][]string(nil), l.argv...)
+}
+
+// waitLaunch blocks until one child has launched. The timeout is a FAILURE
+// BOUND, not a calibration: the interleaving is fixed by the log hook, so a
+// healthy run reaches this in milliseconds and only a broken one waits.
+func (l *launchRecorder) waitLaunch(t *testing.T) {
+	t.Helper()
+	select {
+	case <-l.spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no child launched within 5s")
+	}
+}
+
+// TestRunner_RestartFreshRacesSpawnSetup lands a RestartFresh at the one point
+// inside the old window that is synchronously interceptable, and asserts the
+// #1481 invariant: no child ever runs under the pre-rotation id. The rotation is
+// either observed by the spawn being set up (branch (a)) or cancels it (branch
+// (b)); "live child under the old id AND no live iteration cancel" is
+// unreachable.
+//
+// record_block keeps the launched child alive until SIGTERM, so the set of
+// children that actually launched is stable rather than churning through
+// crash-respawns.
+func TestRunner_RestartFreshRacesSpawnSetup(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "record_block", out, stderr)
+	rec := &spawnArgsRecorder{}
+	lr := newLaunchRecorder(rec)
+	cfg.onSpawn = lr.onSpawn
+	var r *Runner
+	cfg.Logger = slog.New(&spawnLogHook{
+		spawnArgsRecorder: rec,
+		hook:              func() { r.RestartFresh(rotatedSessionID) },
+	})
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	lr.waitLaunch(t)
+	cancel()
+	join()
+
+	launched := lr.all()
+	if len(launched) == 0 {
+		t.Fatal("no child launched")
+	}
+	// The invariant, stated positively. Branch-agnostic: it holds under both
+	// orderings AC1 permits, so it is the assertion that must never be weakened.
+	for i, args := range launched {
+		if got := idFlagValue(args, "--session-id"); got != rotatedSessionID {
+			t.Errorf("launched child %d --session-id = %q, want rotated %q — a child launched under a "+
+				"pre-rotation id while the rotation was neither observed nor cancelled (#1481):\n%v",
+				i+1, got, rotatedSessionID, args)
+		}
+		if slices.Contains(args, testSessionID) {
+			t.Errorf("launched child %d references the pre-rotation id %q:\n%v", i+1, testSessionID, args)
+		}
+		// Exactly one id flag, in --session-id form: started == false on the
+		// cancelled attempt must not advance firstRun, so the rotated id is still
+		// established rather than --resume'd against a session that never existed.
+		if n := idFlagCount(args); n != 1 {
+			t.Errorf("launched child %d carries %d id flags, want exactly 1:\n%v", i+1, n, args)
+		}
+	}
+
+	// Branch (b)'s mechanism: the racer found the published cancel, so attempt 1
+	// was torn down before cmd.Start and launched nothing, and attempt 2 is the
+	// only live child. This pins the PRESCRIBED statement order (the log sits
+	// after the fused section); AC1 itself permits branch (a), which the loop
+	// above would still pass.
+	if attempts, live := rec.count(), len(launched); attempts != 2 || live != 1 {
+		t.Errorf("saw %d spawn attempt(s) and %d launched child(ren), want 2 and 1 — the racing "+
+			"RestartFresh must cancel the iteration it raced, leaving that attempt started == false",
+			attempts, live)
+	}
+
+	// The immediate-relaunch path (drainRestart → continue) skips the only site
+	// that increments RestartCount: a cancelled spawn is a restart, not a crash.
+	if got := r.State().RestartCount; got != 0 {
+		t.Errorf("RestartCount = %d, want 0 (a racing restart must not take the crash backoff)", got)
+	}
+}
+
+// TestRunner_RestartRacesSpawnSetup is the argv half of the same invariant
+// (AC2): a Restart landing on the spawn-setup seam either has its swapped argv
+// picked up by the spawn being set up, or cancels it so the immediate relaunch
+// picks it up. A settings swap never waits for the child's next natural death.
+func TestRunner_RestartRacesSpawnSetup(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "record_block", out, stderr)
+	rec := &spawnArgsRecorder{}
+	lr := newLaunchRecorder(rec)
+	cfg.onSpawn = lr.onSpawn
+	var r *Runner
+	cfg.Logger = slog.New(&spawnLogHook{
+		spawnArgsRecorder: rec,
+		hook:              func() { r.Restart([]string{"--model", raceModelFlagValue}) },
+	})
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	lr.waitLaunch(t)
+	cancel()
+	join()
+
+	launched := lr.all()
+	if len(launched) == 0 {
+		t.Fatal("no child launched")
+	}
+	for i, args := range launched {
+		if got := idFlagValue(args, "--model"); got != raceModelFlagValue {
+			t.Errorf("launched child %d --model = %q, want %q — a child launched under the pre-swap "+
+				"argv while the swap was neither observed nor cancelled (#1481):\n%v",
+				i+1, got, raceModelFlagValue, args)
+		}
+		// Restart rotates flags, not identity: the id stays put, in first-run form
+		// because the cancelled attempt never advanced firstRun.
+		if got := idFlagValue(args, "--session-id"); got != testSessionID {
+			t.Errorf("launched child %d --session-id = %q, want %q (Restart must not rotate the id):\n%v",
+				i+1, got, testSessionID, args)
+		}
+		if n := idFlagCount(args); n != 1 {
+			t.Errorf("launched child %d carries %d id flags, want exactly 1:\n%v", i+1, n, args)
+		}
+	}
+
+	if attempts, live := rec.count(), len(launched); attempts != 2 || live != 1 {
+		t.Errorf("saw %d spawn attempt(s) and %d launched child(ren), want 2 and 1 — the racing "+
+			"Restart must cancel the iteration it raced, leaving that attempt started == false",
+			attempts, live)
+	}
+	if got := r.State().RestartCount; got != 0 {
+		t.Errorf("RestartCount = %d, want 0 (a racing restart must not take the crash backoff)", got)
 	}
 }
 

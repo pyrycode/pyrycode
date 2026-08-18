@@ -39,7 +39,7 @@ package realclaude
 //
 // Two hops carry the lever, both os.Environ()-based, so it reaches claude with
 // no production change: test -> daemon (`spawnBootstrapDaemon`) -> claude
-// (streamsup's `setIterCancel` neighbourhood). The second hop's append
+// (streamsup's `spawnAndWait` neighbourhood). The second hop's append
 // sits inside `if r.cfg.Env != nil`, which LOOKS like a broken chain, but
 // passthrough survives both arms — non-nil appends to os.Environ(), and nil
 // leaves cmd.Env nil, which makes os/exec inherit the parent environment
