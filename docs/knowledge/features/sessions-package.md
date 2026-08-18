@@ -111,6 +111,7 @@ func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
 func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID, error) // #684
 func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (SessionID, error)
 func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error) // #684
+func (p *Pool) Revive(id SessionID, label, spawnDir string) (*Session, error) // #1487; no ctx — never spawns
 func (p *Pool) List() []SessionInfo
 func (p *Pool) Rename(id SessionID, newLabel string) error
 func (p *Pool) ResolveID(arg string) (SessionID, error)
@@ -946,7 +947,7 @@ func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (Ses
 
 **ValidID gate at the Pool boundary.** Empty / non-canonical-UUIDv4 ids return `ErrInvalidSessionID` before any Pool state is touched. The validator runs before the lock is taken, so concurrent calls with different ids contend only briefly through `p.mu`.
 
-**Atomic registration — the load-bearing change.** Unlike `Pool.Create` (which releases `p.mu` between persist and supervise), `GetOrCreate` holds `p.mu` across **all five** of:
+**Atomic registration — the load-bearing change.** Unlike `Pool.Create` (which releases `p.mu` between persist and supervise), `GetOrCreate` holds `p.mu` across **all five** of (since #1487 this whole sequence lives in the shared `materialise` core — see [§ `Pool.Revive`](#reviving-a-dropped-session-poolrevive-1487)):
 
 1. Duplicate-id short-circuit (`if existing, ok := p.sessions[id]`).
 2. Registry-map insert.
@@ -1005,11 +1006,31 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 
 **Survives respawn with no new state.** The workdir lives only in `supervisor.Config`, which the supervisor reads as `cmd.Dir` on **every** (re)spawn (`supervisor.go:638-639`, `spawn.go:40-41`), so a custom spawn dir survives child crash-respawns automatically — no new `Session` field, no registry-schema change. It is **not** persisted to `sessions.json` (a spawn-time input only); surviving a daemon *process* restart would be a separate slice if ever needed.
 
+That "separate slice" arrived as [#1487](../codebase/1487.md) and resolved it *without* a registry-schema change: `spawnDir` is still not persisted on the sessions side, so `Pool.Revive`'s caller sources the directory from the **conversations** registry (`Conversation.Cwd`, the one place it is durable) — see [§ `Pool.Revive`](#reviving-a-dropped-session-poolrevive-1487).
+
 **Opaque path — deliberately not `security-sensitive`.** The pool does **not** `os.Stat`, validate, canonicalise, or trust-check `spawnDir`; it is passed verbatim. An inaccessible directory surfaces at spawn time via the supervisor's existing chdir-failure → backoff path, not here. No untrusted input reaches this slice and its only caller after it still passes the default, so the trust / canonicalisation / `$HOME`-containment work (and the `security-sensitive` label) lives in the consumer #685.
 
 **Take-path drops `spawnDir`.** `GetOrCreateIn` applies the workdir only on the *create* path; on the take path (session already registered) `spawnDir` is ignored — the existing session keeps its own workdir, mirroring the existing take-path label-drop.
 
 **Tests** (`pool_spawndir_test.go`): a cwd-recorder fake claude (`/bin/sh -c 'pwd > "cwd-$2.txt"; exec sleep 3600' --`) writes a per-uuid marker into its own cwd, so the marker's *location* proves the spawn directory with no production accessor added. Existence-check (not content-compare) sidesteps the macOS `/tmp`→`/private/tmp` symlink rewrite. Covers `CreateIn` explicit-dir, plain `Create` template-workdir default-leg, the `GetOrCreateIn` create path, and the take-path-ignores-spawnDir negative case. See [codebase/684.md](../codebase/684.md).
+
+### Reviving a dropped session: `Pool.Revive` (#1487)
+
+`Pool.New` materialises exactly one `*Session` from `sessions.json` — the bootstrap (`pickBootstrap` is the only reader of `reg.Sessions`). Every minted entry is parsed, discarded, and then erased by the first `saveLocked`. A conversation whose `CurrentSessionID` points at one of them is left with a healthy binding onto a session the pool does not have.
+
+```go
+func (p *Pool) Revive(id SessionID, label, spawnDir string) (*Session, error)
+```
+
+**No `context.Context` — that absence is the API contract.** `Revive` registers the session and returns; it never spawns claude and never blocks. The returned `*Session` is at `stateEvicted` with an open `activeCh` and a closed `evictedCh`, which is byte-for-byte the shape an idle-evicted session has, so it respawns on the next `Pool.Activate` through the **existing** lazy-respawn path. Reviving introduces no new lifecycle path; the caller owns the `Activate`.
+
+**Shared core with `GetOrCreateIn`.** Both route through the unexported `materialise(id, label, spawnDir) (*Session, took bool, error)`, which holds the whole `ValidID` → build → register → `saveLocked` → skip-set → `runGroup` guard → `g.Go` sequence described under [§ Pool.GetOrCreate](#poolgetorcreate-13b) — including every rollback. The **only** difference between the two callers is what happens after: `GetOrCreateIn` calls `Activate` on the register path (and, per its long-standing contract, *not* on the take path), `Revive` calls it never. That take/register split became the `took` flag rather than an inline early return, so `TestPool_GetOrCreate_Take_DoesNotActivate` pins it — a `Revive`d session is the only fixture that can hold a registered-but-never-activated session to assert against.
+
+**Zero settings — fail-closed by construction.** `materialise` passes `SessionSettings{}`, so a revived session's argv carries no `--dangerously-skip-permissions` even if the dropped entry persisted `yolo: true`. Deliberate, and free: a phone-set permission bypass does not survive a daemon restart. Restoring it would require reading the discarded `registryEntry`, i.e. the rehydrate-at-`New` design this ticket rejected.
+
+**`spawnDir` is opaque here too.** Same contract as `CreateIn` / `GetOrCreateIn`: used verbatim, never validated, canonicalised, or trust-checked pool-side; empty falls back to `tpl.WorkDir`. The caller supplies a pre-resolved `$HOME`-confined realpath. SECURITY: it is a phone-influenced workspace path, so `Revive` must not log it. The consumer — `sessionRouter.revive` in `cmd/pyry` — re-runs `resolveSpawnDir` at revive time rather than trusting the recorded value, because a path valid at mint time can become an escape before the restart; see [conversation-session-binding.md § Restart scope](conversation-session-binding.md#edge-cases--limitations).
+
+**Tests** (`pool_revive_test.go`): registers-without-spawning (Lookup pointer identity, `ChildPID == 0`, on-disk `lifecycle_state: "evicted"`), activates-normally (the child does come up), take-path-returns-existing, `spawnDir` threading both legs, `ErrPoolNotRunning` with a **byte-level** registry-unchanged assertion (the rollback re-persists), and `ErrInvalidSessionID`.
 
 ### Transition observer (#659)
 

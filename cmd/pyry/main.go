@@ -1102,11 +1102,13 @@ type sessionRouter struct {
 // stamping the active-conversation cursor. It is the single resolution
 // authority: the order is load-bearing — the empty-CurrentSessionID guard fires
 // before any Lookup so an unbound conversation never resolves to the bootstrap
-// session that Pool.Lookup("") returns (#678 AC#4). Both Route (handler-side
-// validation, which layers the cursor stamp on top) and newInboundDeliver (the
-// drain seam, which must NOT stamp) go through resolve, so neither path can
-// bypass the guard. The drain re-resolves per attempt because the binding may
-// change between enqueue and delivery (#721).
+// session that Pool.Lookup("") returns (#678 AC#4), and therefore also before
+// the revive branch below, which must never be reachable for an unbound
+// conversation. Both Route (handler-side validation, which layers the cursor
+// stamp on top) and newInboundDeliver (the drain seam, which must NOT stamp) go
+// through resolve, so neither path can bypass the guard. The drain re-resolves
+// per attempt because the binding may change between enqueue and delivery
+// (#721).
 func (r sessionRouter) resolve(conversationID string) (handlers.TurnWriter, error) {
 	conv, ok := r.convReg.Get(conversations.ConversationID(conversationID))
 	if !ok {
@@ -1117,10 +1119,42 @@ func (r sessionRouter) resolve(conversationID string) (handlers.TurnWriter, erro
 	}
 	id := sessions.SessionID(conv.CurrentSessionID)
 	sess, err := r.pool.Lookup(id)
+	if errors.Is(err, sessions.ErrSessionNotFound) {
+		// A healthy binding pointing at an id the pool lacks is the daemon-
+		// restart case: sessions.New materialises only the bootstrap, so every
+		// per-conversation minted session is dropped and its thread would be
+		// permanently dead. Re-materialise it lazily, on first touch (#1487).
+		sess, err = r.revive(id, conversationID, conv.Cwd)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return boundSession{pool: r.pool, sess: sess, id: id}, nil
+}
+
+// revive re-materialises a conversation's dropped session so the caller gets the
+// same write surface a live binding yields. It does NOT spawn claude: Pool.Revive
+// registers the session in the evicted state, and the child comes up on the
+// Activate that boundSession already performs — so resolve stays free of the
+// blocking spawn wait the send_message path removed in #721.
+//
+// resolveSpawnDir is the SAME validator the mint path uses (sessionMinter.Create),
+// re-run here rather than trusting the recorded value: conv.Cwd was confined to
+// $HOME when the conversation was minted, but a path valid then can be turned
+// into an escape before the restart, and this is the spawn site that would
+// otherwise believe the stale check (#685/#696, #1487 AC#4). A rejected Cwd
+// returns wrapping handlers.ErrSpawnDirRejected before any pool state is touched,
+// leaving the conversation rejected exactly as it is today — never spawning
+// outside the boundary.
+//
+// The label is the conversation id, matching what create_conversation originally
+// minted the session with.
+func (r sessionRouter) revive(id sessions.SessionID, label, cwd string) (*sessions.Session, error) {
+	spawnDir, err := resolveSpawnDir(cwd)
+	if err != nil {
+		return nil, err
+	}
+	return r.pool.Revive(id, label, spawnDir)
 }
 
 // Route resolves conversationID to its bound session's write surface and stamps

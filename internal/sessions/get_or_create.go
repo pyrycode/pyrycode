@@ -56,8 +56,46 @@ func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (Ses
 // Otherwise identical to GetOrCreate: see its docstring for the full
 // take/create semantics, concurrency, and return shapes.
 func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error) {
+	_, took, err := p.materialise(id, label, spawnDir)
+	if err != nil {
+		return "", err
+	}
+	// The take path returns WITHOUT activating — the caller owns that step
+	// (handleAttach already does it). Only the register path activates.
+	if took {
+		return id, nil
+	}
+	if err := p.Activate(ctx, id); err != nil {
+		return id, err
+	}
+	return id, nil
+}
+
+// materialise is the take-or-register core shared by GetOrCreateIn and Revive:
+// validate the id, build the session off-lock, then under p.mu either hand back
+// the entry already registered for id (took == true) or register the freshly
+// built one, persist it, prime the rotation skip-set, and schedule its
+// lifecycle goroutine.
+//
+// It never spawns claude. A registered session is in stateEvicted with its
+// lifecycle goroutine parked on the activate signal, so waking it is the
+// caller's business — which is exactly what separates the two callers:
+// GetOrCreateIn activates after a register, Revive deliberately does not.
+//
+// See GetOrCreate's docstring for the semantics this implements; the
+// concurrency contract there (register + persist + g.Go held under p.mu, so the
+// loser of a same-id race can never Activate before the winner's lifecycle
+// goroutine exists) lives here.
+//
+// Returns:
+//   - (sess, true, nil) — id was already registered; sess is the EXISTING entry
+//     and the caller's label + spawnDir are silently dropped
+//   - (sess, false, nil) — sess was registered, persisted, and scheduled
+//   - (nil, false, err) — nothing registered; ErrInvalidSessionID, a buildSession
+//     error, a saveLocked error, or ErrPoolNotRunning, each rolled back
+func (p *Pool) materialise(id SessionID, label, spawnDir string) (*Session, bool, error) {
 	if !ValidID(string(id)) {
-		return "", ErrInvalidSessionID
+		return nil, false, ErrInvalidSessionID
 	}
 
 	// buildSession touches no Pool state and is non-blocking
@@ -65,25 +103,26 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 	// p.mu so the critical section stays small for concurrent same-id
 	// callers and so we can discard the loser's freshly-built session
 	// cheaply.
-	// This ticket passes zero settings (byte-identical minted argv); #826b
-	// plumbs real per-session settings through this mint path.
+	// Zero settings are deliberate on both paths: they keep the minted argv
+	// byte-identical (#826b plumbs real per-session settings through the mint
+	// path) AND make a revive fail closed, so a phone-set --dangerously-skip-
+	// permissions never survives a daemon restart (#1487 security review).
 	sess, err := p.buildSession(id, label, spawnDir, SessionSettings{})
 	if err != nil {
-		return "", err
+		return nil, false, err
 	}
 
 	p.mu.Lock()
 	if existing, ok := p.sessions[id]; ok {
 		p.mu.Unlock()
-		_ = existing // take-path: caller's label is silently dropped; documented
-		return id, nil
+		return existing, true, nil
 	}
 
 	p.sessions[id] = sess
 	if err := p.saveLocked(); err != nil {
 		delete(p.sessions, id)
 		p.mu.Unlock()
-		return "", err
+		return nil, false, err
 	}
 
 	// Prime the rotation watcher's skip-set inside the same critical
@@ -101,7 +140,7 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 		delete(p.sessions, id)
 		_ = p.saveLocked()
 		p.mu.Unlock()
-		return "", ErrPoolNotRunning
+		return nil, false, ErrPoolNotRunning
 	}
 
 	// Schedule the lifecycle goroutine while still holding p.mu — closes
@@ -112,9 +151,5 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 	// on the buffered activate signal); holding p.mu across it is safe.
 	g.Go(func() error { return sess.Run(gctx) })
 	p.mu.Unlock()
-
-	if err := p.Activate(ctx, id); err != nil {
-		return id, err
-	}
-	return id, nil
+	return sess, false, nil
 }

@@ -105,6 +105,47 @@ func TestPool_GetOrCreate_Take_ReturnsExisting(t *testing.T) {
 	}
 }
 
+// TestPool_GetOrCreate_Take_DoesNotActivate pins the half of the take-path
+// contract TestPool_GetOrCreate_Take_ReturnsExisting cannot see: "returns
+// without activating the session". Its target is already active, so an
+// unwanted Activate there is a no-op LRU touch.
+//
+// The fixture is Pool.Revive because it is the only way to hold a registered,
+// never-activated session — exactly the state the assertion needs. Since the
+// take/register split became a `took` flag out of the shared materialise core
+// (#1487) rather than an inline early return, nothing else would notice the
+// take path starting to spawn.
+func TestPool_GetOrCreate_Take_DoesNotActivate(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+	pool := helperPoolCreate(t, regPath, 0)
+	ctx, _ := runPoolInBackground(t, pool)
+
+	target, err := NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	sess, err := pool.Revive(target, "x", "")
+	if err != nil {
+		t.Fatalf("Revive: %v", err)
+	}
+
+	got, err := pool.GetOrCreate(ctx, target, "y")
+	if err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	if got != target {
+		t.Errorf("GetOrCreate id = %q, want %q", got, target)
+	}
+	if lc := sess.LifecycleState(); lc != stateEvicted {
+		t.Errorf("take-path GetOrCreate left lifecycle state %v, want %v (it must not activate)", lc, stateEvicted)
+	}
+	if pid := sess.State().ChildPID; pid != 0 {
+		t.Errorf("take-path GetOrCreate spawned a child (pid %d); Activate is the caller's step", pid)
+	}
+}
+
 // TestPool_GetOrCreate_Create_Persists: caller-supplied id flows verbatim
 // into the registry; the new session is supervised and spawns a real child.
 func TestPool_GetOrCreate_Create_Persists(t *testing.T) {
