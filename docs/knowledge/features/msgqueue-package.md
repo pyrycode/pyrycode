@@ -201,20 +201,31 @@ semantics untouched.
   A pure read: mints no id, dequeues nothing. Built for, and so far only consumed
   by, the `cmd/pyry` `outstandingQueues` adapter that feeds `internal/relay`'s
   `OutstandingQueues` seam.
-- **`Remove(convID, id)` — the in-flight-head no-op is the load-bearing rule.**
-  `advanceLocked` blindly drops index 0 (`items[1:]`) on the assumption it is
-  still the just-delivered head; `Enqueue` only ever appends to the tail, so
-  `Remove` is the **first** op that can touch index 0. It refuses index 0 **iff**
-  `c.draining`, decided under the same `q.mu` the drain uses to set/clear
-  `draining` and to peek/advance — making the check-and-splice atomic w.r.t. the
-  drain. `draining == false` ⟺ no goroutine owns `items` (safe to drop index 0);
-  `draining == true` ⟹ no-op on the head, so `advanceLocked` can never drop the
-  wrong message. Non-head removal (`idx >= 1`) is always safe — the drain only
-  touches index 0 and holds a value copy of the head. Unknown conv / unknown /
-  already-delivered id / in-flight head ⇒ `false` no-op (no panic, no reorder);
-  surviving order preserved. This is what guarantees `dequeue_message` **cannot
-  cancel an in-flight delivery** (the #723 handler relies on it via the `QueueRemover`
-  seam).
+- **`Remove(convID, id)` — a waiting head is droppable; the advance is what keeps
+  that safe.** `Enqueue` only ever appends to the tail, so `Remove` is the
+  **first** op that can touch index 0. It refuses index 0 **iff** `c.committing`
+  (narrowed from `c.draining` in #1085), decided under the same `q.mu` that sets
+  and clears the flag, so the claim-versus-drop decision is atomic: either
+  `commitGate` claims the head first and the drop no-ops, or the drop lands first
+  and the gate refuses the write. `committing` is set only once the delivery seam
+  is past the idle-gate wait and is actually writing, so a head that is merely
+  **waiting** for claude to go idle (`draining && !committing`) is droppable **by
+  design** (#487) — that is the message a user queued behind a running turn
+  precisely so they could still cancel it — and dropping it cancels the in-flight
+  delivery ctx so the seam's wait unblocks at once. Non-head removal (`idx >= 1`)
+  is always safe: the drain only touches index 0 and holds a value copy of the
+  head. Unknown conv / unknown / already-delivered id / committing head ⇒ `false`
+  no-op (no panic, no reorder); surviving order preserved. So `dequeue_message`
+  (the #723 handler, via the `QueueRemover` seam) **cannot cancel a write already
+  in progress**, but can cancel anything before it.
+
+  Head-drop safety does **not** come from this gate — it comes from
+  `advanceLocked`, which drops the front only when the FIFO is non-empty **and**
+  its front still carries the id the drain attempted (#1484). See § Concurrency
+  model. Until #1484 the argument ran the other way (`draining == true` ⟹ no-op
+  on the head ⟹ a blind `items[1:]` can never drop the wrong message); #1085
+  retired the premise while the blind splice stayed, which is the bug #1484
+  fixed.
 - **`shrinkLocked` — shared backing-array hygiene.** The trailing "release at
   empty / compact when `cap > 2*len`" `switch` was lifted out of `advanceLocked`
   into `convQueue.shrinkLocked()`, now called by both `advanceLocked` (head drop)
@@ -264,17 +275,32 @@ to bridge.
   zero for the next head, so a wedge that clears for one message doesn't poison
   the bound for the next — each head gets a fresh give-up window.
 - **Give-up drops one head and exits the drain, it does not skip to the next
-  head.** Because a startup wedge would fail every subsequent head identically,
-  continuing would burn a full `GiveUpAfter` window per head and emit one
-  give-up event per queued message for a single wedge. Instead `giveUp` drops
-  only the abandoned head (`advanceLocked`), clears `draining`, fires both seams
-  off-lock (`notify(OnChange)` then `notifyGiveUp(OnGiveUp)`, in that order —
+  head — when there is still a head to abandon.** Because a startup wedge would
+  fail every subsequent head identically, continuing would burn a full
+  `GiveUpAfter` window per head and emit one give-up event per queued message for
+  a single wedge. So when the front of the FIFO is still the head that failed,
+  `giveUp` drops only that head (`advanceLocked`), clears `draining`, fires both
+  seams off-lock (`notify(OnChange)` then `notifyGiveUp(OnGiveUp)`, in that order —
   clearing `draining` first means an observer can safely re-`Enqueue` without
   racing a still-`true` flag), and the drain goroutine **returns**. Any items
   still behind the dropped head stay queued; `draining == false` with
   `len(items) > 0` is exactly `maybeSpawnDrainLocked`'s respawn precondition, so
   the next `Enqueue` respawns the drain — the same lifecycle the pre-existing
   empty-exit path already uses.
+- **A head dequeued inside the failure window is cancelled, not abandoned
+  (#1484).** `Remove` can take a merely-waiting head at any point in the window,
+  including after the drain's post-delivery `dropped` read. When it has, the
+  id-checked `advanceLocked` drops **nothing**, and nothing is reported either:
+  the advance decides **before** the `Warn`, so `OnGiveUp` never fires, no
+  give-up line names that id, and the backlog behind the cancelled head is
+  untouched. `draining` stays set and the drain **continues** with a fresh
+  give-up clock — the same treatment the loop already gives a head dropped before
+  it committed ("a clean cancellation, not a delivery failure"). The
+  exit-don't-skip rule above bounds *abandonment*; here nothing was abandoned.
+  `giveUp`'s bool return is welded to that: `true` ⟺ `draining` was cleared ⟺ the
+  drain returns. Decoupling them would either strand the conversation (a live
+  drain with `draining == false` lets `maybeSpawnDrainLocked` start a second one)
+  or block respawn forever.
 - **`GiveUpFunc` mirrors `ChangeFunc`'s seam contract** (never under `q.mu`, must
   not block, concurrency-safe, nil ⇒ disabled) and carries a daemon-generated
   `reason` (the elapsed window + `err.Error()`) that **never** contains
@@ -309,9 +335,19 @@ See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007
   called lock-free. This is the same "release before the seconds-long delivery"
   discipline `WriteUserTurn` itself uses.
 - **TOCTOU on the FIFO head:** the drain **peeks** under the lock and advances only
-  **after** a confirmed commit, under the lock again. A concurrent `Enqueue` can
-  only append (FIFO tail), never mutate the head, so the in-flight head can't be
-  swapped out from under the delivery.
+  **after** a confirmed commit, under the lock again — and it advances **by id**.
+  A concurrent `Enqueue` can only append (FIFO tail), but a concurrent `Remove`
+  **can** take the head, deliberately: a merely-waiting head is droppable for the
+  whole idle-gate wait and for the drain's post-delivery bookkeeping (#487,
+  #1085). So `advanceLocked(head.id)` drops the front only when the FIFO is
+  non-empty **and** its front still carries the id the drain attempted — the same
+  predicate `commitGate` uses to accept or refuse the write, now asked in the
+  lock hold that actually splices. That makes check-and-splice atomic against
+  `Remove` under the one leaf lock, **closing** the window rather than narrowing
+  it: a `Remove` of the in-flight head turns the advance into a **no-op** instead
+  of dropping the message queued behind it, or panicking on the empty slice the
+  removal left (`shrinkLocked` sets `items = nil`). Both advance sites carry the
+  check — the confirmed-delivery one and `giveUp`'s (#1484).
 - **Lazy-spawn / exit-on-empty race** is closed under a single lock hold: the
   empty-check and the `draining = false` write are atomic w.r.t. a concurrent
   `Enqueue`, which either appends before the drain takes the lock (drain sees

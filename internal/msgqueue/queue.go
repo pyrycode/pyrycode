@@ -380,6 +380,11 @@ func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
 // under q.mu, the same lock this method takes, so the claim-versus-drop decision
 // is atomic: either the claim wins and the drop no-ops, or the drop wins and the
 // claim reports the head dropped.
+//
+// Dropping the waiting head is safe against the drain's own advance because the
+// drain advances by id: advanceLocked drops the front only when it still carries
+// the id the drain attempted, under this same lock (#1484). Nothing here has to
+// keep the head un-droppable for that to hold.
 func (q *Queue) Remove(convID string, id uint64) bool {
 	q.mu.Lock()
 	c := q.convs[convID]
@@ -554,15 +559,20 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 
 		if err == nil {
 			q.mu.Lock()
-			c.advanceLocked()
+			advanced := c.advanceLocked(head.id)
 			q.mu.Unlock()
 
 			// A confirmed-delivered head left the backlog. Reset the give-up clock so
-			// the next head starts with a fresh bound. Fire after unlock; do NOT fire
-			// on the empty-exit, drop, or delivery-error/retry paths — those aren't
-			// confirmed deliveries.
+			// the next head starts with a fresh bound. Fire after unlock, and only if
+			// the advance actually dropped this head: !advanced means a Remove took it
+			// during its own delivery — a cancellation, whose backlog change that
+			// Remove already notified — so the next iteration simply re-peeks. Do NOT
+			// fire on the empty-exit, drop, or delivery-error/retry paths either —
+			// those aren't confirmed deliveries.
 			firstFailedAt = time.Time{}
-			q.notify(convID)
+			if advanced {
+				q.notify(convID)
+			}
 			continue
 		}
 
@@ -610,8 +620,15 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			"queued_at", head.ts,
 			"err", err)
 		if elapsed := time.Since(firstFailedAt); elapsed >= q.giveUpAfter {
-			q.giveUp(convID, c, head, elapsed, err)
-			return
+			if q.giveUp(convID, c, head, elapsed, err) {
+				return
+			}
+			// Nothing was abandoned: a Remove took the head inside the failure
+			// window, which is the same clean cancellation the dropped branch above
+			// handles. Keep draining the next head with a fresh clock — #1000's
+			// exit-don't-skip rule bounds abandonment, and nothing was abandoned.
+			firstFailedAt = time.Time{}
+			continue
 		}
 		if !sleepCtx(ctx, q.retry) {
 			q.mu.Lock()
@@ -630,7 +647,30 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 // so the next Enqueue respawns the drain, the same lifecycle as the empty-exit
 // path. The caller must hold NO lock. reason is built only from daemon-generated
 // values (the elapsed window and the delivery err); it NEVER carries head.text.
-func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Duration, err error) {
+//
+// It returns false, having abandoned nothing, when the head is no longer at the
+// front of the FIFO: the user dequeued it inside the failure window, which is a
+// cancellation, not an abandonment. Nothing is dropped and nothing is reported —
+// the advance decides BEFORE the Warn, so a cancelled head produces no give-up
+// trace at all — draining stays true, and the caller keeps draining. giveUp
+// returning true ⟺ draining was cleared ⟺ the caller exits the drain; do not
+// decouple those. Clearing draining under a live drain would let
+// maybeSpawnDrainLocked start a second one for the conversation, and leaving it
+// set on the abandon path would block respawn forever.
+func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Duration, err error) bool {
+	// Drop the abandoned head and clear draining under q.mu. Clearing draining
+	// BEFORE firing the seams means a give-up observer can safely re-Enqueue
+	// without racing a still-true draining flag.
+	q.mu.Lock()
+	abandoned := c.advanceLocked(head.id)
+	if abandoned {
+		c.draining = false
+	}
+	q.mu.Unlock()
+	if !abandoned {
+		return false
+	}
+
 	elapsed = elapsed.Round(time.Second)
 	reason := fmt.Sprintf("delivery failed persistently for %s; claude session may be wedged (last error: %v)", elapsed, err)
 	q.log.Warn("msgqueue: giving up on head after persistent delivery failure",
@@ -639,26 +679,34 @@ func (q *Queue) giveUp(convID string, c *convQueue, head queued, elapsed time.Du
 		"elapsed", elapsed,
 		"err", err)
 
-	// Drop the abandoned head and clear draining under q.mu. Clearing draining
-	// BEFORE firing the seams means a give-up observer can safely re-Enqueue
-	// without racing a still-true draining flag.
-	q.mu.Lock()
-	c.advanceLocked()
-	c.draining = false
-	q.mu.Unlock()
-
 	// notify fires because the backlog shrank (the dropped head), keeping the
 	// wired queue_state view correct; notifyGiveUp carries the give-up event to
 	// its (currently nil) consumer. Both fire strictly after q.mu is released.
 	q.notify(convID)
 	q.notifyGiveUp(convID, reason)
+	return true
 }
 
-// advanceLocked drops the just-delivered head and runs the backing-array
-// hygiene. The caller must hold q.mu.
-func (c *convQueue) advanceLocked() {
+// advanceLocked drops the head IF it is still the message identified by id, runs
+// the backing-array hygiene, and reports whether it dropped anything. The guard
+// is the exact mirror of commitGate's reject condition — the same "is this still
+// my head" question, now asked in the lock hold that actually splices: an empty
+// FIFO or a different id at the front means a concurrent Remove already took
+// that head (a head that is merely waiting for claude is droppable by design,
+// #487), so the caller must treat its message as cancelled rather than delivered
+// or abandoned. A false return mutates nothing.
+//
+// Both conjuncts are load-bearing and the emptiness test must come first:
+// shrinkLocked leaves items nil once the FIFO empties, so on a backlog of one
+// the id comparison alone would panic where the length test returns cleanly.
+// The caller must hold q.mu.
+func (c *convQueue) advanceLocked(id uint64) bool {
+	if len(c.items) == 0 || c.items[0].id != id {
+		return false
+	}
 	c.items = c.items[1:]
 	c.shrinkLocked()
+	return true
 }
 
 // shrinkLocked releases the backing array when the FIFO empties and compacts
