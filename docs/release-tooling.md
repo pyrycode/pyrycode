@@ -92,6 +92,17 @@ clean run:
 - **The package does not build.** Zero tests run and the run still exits 0
   through any shell wrapper.
 
+A third mode — the suite replaying a cached `ok` without spawning
+anything — existed here until #1501 added `-count=1` to this recipe (and to
+`e2e-liverelay`, `e2e-install`, `e2e-update`, the other three opt-in recipes
+with the same blind spot). This suite builds its `cmd/pyry` binary under test
+with a **subprocess** `go build`, whose file reads never enter the test
+binary's cache key — so an edit confined to `cmd/pyry` left the key
+unchanged and `go test` replayed the previous `ok` without spawning claude at
+all. `-count=1` forces every invocation to execute for real; it does not
+change what the count-not-exit-code check below needs to catch, since a
+build failure still exits 0 with nothing run.
+
 So the only trustworthy reading is the number of tests that executed. Count the
 `=== RUN` lines. A healthy full run is in the 700s as of August 2026, was 521 on
 2026-08-09, and reads zero when the build is broken.
@@ -166,7 +177,7 @@ the release checklist and before touching the code it exercises.
 ### `make e2e-install`
 
 ```sh
-make e2e-install   # go test -tags e2e_install ./internal/e2e/...
+make e2e-install   # go test -tags e2e_install -count=1 ./internal/e2e/...
 ```
 
 Drives a real install round-trip: writes the service file via `install.Install`,
@@ -188,7 +199,7 @@ When: on the release checklist, and before touching install-service code
 ### `make e2e-update`
 
 ```sh
-make e2e-update   # go test -tags e2e_update ./cmd/pyry/...
+make e2e-update   # go test -tags e2e_update -count=1 ./cmd/pyry/...
 ```
 
 Drives the full `pyry update` flow — fetch → verify → atomic binary replace →

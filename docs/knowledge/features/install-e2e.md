@@ -32,7 +32,7 @@ covers both platforms when intended.
 ## Invocation
 
 ```
-make e2e-install                       # go test -tags e2e_install ./internal/e2e/...
+make e2e-install                       # go test -tags e2e_install -count=1 ./internal/e2e/...
 ```
 
 `make e2e-install` (#969) is the named entry point — run it on the release

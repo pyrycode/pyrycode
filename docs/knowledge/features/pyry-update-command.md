@@ -190,7 +190,7 @@ Real `os.Stat` paths and the real `exec.CommandContext` wrapper are deliberately
 Run with:
 
 ```bash
-make e2e-update                                                    # go test -tags e2e_update ./cmd/pyry/...
+make e2e-update                                                    # go test -tags e2e_update -count=1 ./cmd/pyry/...
 PYRY_E2E_BIN=$(pwd)/pyry go test -tags=e2e_update ./cmd/pyry/...   # CI prebuild short-circuit
 ```
 
