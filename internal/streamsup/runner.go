@@ -219,24 +219,33 @@ type Runner struct {
 	// restartMu is a leaf mutex guarding the live-restart seam: args, iterCancel,
 	// and the RestartFresh id-rotation pair (sessionID + rotatePending). The
 	// streamsup analogue of supervisor's restartMu. args is the live spawn base
-	// argv, swapped by Restart and read by liveArgs at the top of each Run
-	// iteration; iterCancel is the current spawn's cancel, published each iteration
-	// so Restart/RestartFresh can force the child to exit. Kept separate from mu
+	// argv, swapped by Restart; iterCancel is the current spawn's cancel, so
+	// Restart/RestartFresh can force the child to exit. Kept separate from mu
 	// and stateMu — Restart/RestartFresh touch only this mutex + restartCh (never a
 	// Pool lock), so the sessions layer can call them after releasing Pool.mu with
 	// no lock-order concern.
+	//
+	// The charter is ONE ACQUISITION PER SPAWN SETUP (#1481): beginSpawn both reads
+	// the spawn inputs (args + the id pair) and publishes iterCancel in a single
+	// section, so a racing Restart/RestartFresh is serialised either fully before it
+	// (the spawn observes the swap) or fully after it (it finds a live cancel and
+	// tears that spawn down). Splitting the read from the publish — which is what
+	// this loop did until #1481 — leaves a gap where iterCancel is still nil from
+	// the previous iteration: the racer writes its rotation, cancels NOTHING, and
+	// the spawn launches a live child under the pre-rotation id, for that child's
+	// whole lifetime. Do not re-split it as a "simplification".
 	restartMu  sync.Mutex
 	args       []string
 	iterCancel context.CancelFunc
 
 	// sessionID is the live claude session id read by each spawn's buildArgs (via
-	// nextSpawnID). Seeded from cfg.SessionID in New; rotated to a new id by
+	// beginSpawn). Seeded from cfg.SessionID in New; rotated to a new id by
 	// RestartFresh. The mutable analogue of the immutable cfg.SessionID — that
 	// field stays the construction-time input and New's non-empty validation
 	// source; after construction the live id is r.sessionID.
 	sessionID string
 
-	// rotatePending is set by RestartFresh and consumed once by nextSpawnID: it
+	// rotatePending is set by RestartFresh and consumed once by beginSpawn: it
 	// re-arms first-run form so the next spawn uses --session-id <newID> (a fresh
 	// transcript), not --resume <newID>. firstRun stays Run-goroutine-private;
 	// rotatePending is the only cross-goroutine signal that re-arms it.
@@ -520,26 +529,42 @@ func (r *Runner) RestartFresh(newID string) {
 	}
 }
 
-// liveArgs returns a clone of the live spawn base argv under restartMu. Run reads
-// it (rather than cfg.Args) at the top of each iteration so a Restart-swapped
-// argv takes effect on the next spawn.
-func (r *Runner) liveArgs() []string {
-	r.restartMu.Lock()
-	defer r.restartMu.Unlock()
-	return slices.Clone(r.args)
-}
+// beginSpawn captures one iteration's spawn inputs — the live (possibly
+// Restart-swapped) base argv and the (possibly RestartFresh-rotated) id pair,
+// consuming the fresh-restart request — AND publishes that iteration's cancel, in
+// a SINGLE restartMu section. That single acquisition is the whole point (#1481):
+// a racing Restart/RestartFresh takes restartMu exactly once, so it is serialised
+// either fully before this section (the spawn observes its swap) or fully after it
+// (it finds the just-published cancel and tears this spawn down). There is no
+// third position, so the forbidden outcome — a live child under a pre-rotation id
+// with no live iteration cancel — is unreachable rather than merely narrowed.
+//
+// It reads the fields directly instead of calling accessors: restartMu is not
+// reentrant, so any helper that takes it (as the now-deleted liveArgs and
+// nextSpawnID accessors did) would deadlock here. buildArgs is pure and copies
+// base into a fresh slice, so passing r.args needs no clone — the slice never
+// escapes the section.
+//
+// forceFirst reports that a fresh-restart request was consumed; the caller re-arms
+// its Run-goroutine-private firstRun on true. Returning it rather than a new
+// firstRun keeps that local a plain assignment at the call site, where a := would
+// shadow it and silently break the started-gated flip.
+func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
+	iterCtx context.Context, cancel context.CancelFunc, args []string, forceFirst bool,
+) {
+	// Derived BEFORE the acquisition on purpose: context.WithCancel takes the
+	// parent cancelCtx's own internal mutex, and restartMu must never be held
+	// across another package's locking. It touches no Runner state, so nothing it
+	// does can observe the pre-publish window.
+	iterCtx, cancel = context.WithCancel(ctx)
 
-// nextSpawnID snapshots the live session id and whether this spawn must use
-// first-run form, consuming the fresh-restart request in the same critical
-// section (no TOCTOU between reading the id and the flag). Run calls it at the top
-// of each iteration in place of the plain cfg.SessionID read, so a RestartFresh
-// rotation takes effect on the next spawn.
-func (r *Runner) nextSpawnID() (sessionID string, forceFirst bool) {
 	r.restartMu.Lock()
 	defer r.restartMu.Unlock()
-	sessionID, forceFirst = r.sessionID, r.rotatePending
+	forceFirst = r.rotatePending
 	r.rotatePending = false
-	return sessionID, forceFirst
+	args = buildArgs(r.args, firstRun || forceFirst, r.sessionID)
+	r.iterCancel = cancel
+	return iterCtx, cancel, args, forceFirst
 }
 
 // liveSessionID snapshots the live session id under restartMu, for a diagnostic
@@ -553,11 +578,14 @@ func (r *Runner) liveSessionID() string {
 	return r.sessionID
 }
 
-// setIterCancel publishes (or clears, when c is nil) the current iteration's
-// cancel func under restartMu so Restart can interrupt the running child.
-func (r *Runner) setIterCancel(c context.CancelFunc) {
+// clearIterCancel drops the finished iteration's cancel under restartMu. It takes
+// no argument on purpose: beginSpawn's section is the only place that may publish
+// a non-nil cancel, since publishing it anywhere else is exactly the #1481 window,
+// so the API is narrowed until it cannot express that. A future re-split has to
+// add the parameter back before it can reintroduce the defect.
+func (r *Runner) clearIterCancel() {
 	r.restartMu.Lock()
-	r.iterCancel = c
+	r.iterCancel = nil
 	r.restartMu.Unlock()
 }
 
@@ -604,24 +632,27 @@ func (r *Runner) Run(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		// nextSpawnID reads the live (possibly rotated) id and consumes any pending
-		// RestartFresh request; forceFirst re-arms first-run form so the rotated id
-		// spawns with --session-id (a fresh transcript). firstRun's flip-back to
-		// false on a successful spawn (below) then makes the next respawn --resume
-		// the new id — see the started-gated flip.
-		sessionID, forceFirst := r.nextSpawnID()
+		// beginSpawn reads the live (possibly Restart-swapped) argv and the
+		// (possibly rotated) id, consumes any pending RestartFresh request, and
+		// publishes this iteration's cancel — all in ONE restartMu section, so a
+		// racer is serialised wholly before or wholly after it and can never miss
+		// both (#1481). forceFirst re-arms first-run form so the rotated id spawns
+		// with --session-id (a fresh transcript). firstRun's flip-back to false on a
+		// successful spawn (below) then makes the next respawn --resume the new id —
+		// see the started-gated flip.
+		iterCtx, cancel, args, forceFirst := r.beginSpawn(ctx, firstRun)
 		if forceFirst {
 			firstRun = true
 		}
-		args := buildArgs(r.liveArgs(), firstRun, sessionID)
+		// Logged AFTER the section: synchronous log I/O must never run under a leaf
+		// mutex. It is also what puts a racer arriving here on the already-published
+		// cancel's side of the invariant.
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()
-		iterCtx, cancel := context.WithCancel(ctx)
-		r.setIterCancel(cancel)
 		started, waitErr := r.spawnAndWait(iterCtx, args)
 		cancel()
-		r.setIterCancel(nil)
+		r.clearIterCancel()
 		uptime := time.Since(start)
 
 		// The child is gone and the loop has not yet branched on why, so this one
