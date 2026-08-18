@@ -14,6 +14,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // AC3 (no transcript on the stream path) is asserted structurally: nothing in
@@ -527,5 +528,326 @@ func TestStreamTurnDrainV2_ToolEvents(t *testing.T) {
 	}
 	if !slices.Equal(envTypes(got), wantTypes) {
 		t.Fatalf("tool envelope types:\n got %v\nwant %v", envTypes(got), wantTypes)
+	}
+}
+
+// --- #1496: the closing-class reserve ----------------------------------------
+
+// saturatingBuf is the fixture buffer for the reserve tests: small enough to
+// saturate by hand and timing-free, large enough that the reserve arithmetic
+// leaves BOTH a non-empty droppable band and a non-empty reserve (droppableCap 4,
+// reserve 4). A buffer of 1 degenerates to reserve 0 and would pin nothing.
+const saturatingBuf = 8
+
+// startBusyDrainFor starts a drain that feeds tr and pushes nothing: the active
+// session is never set, so every event drops at the drain's gate AFTER observe.
+// The tracker is the only thing under test, so the emitter is a real one wired to
+// a bcast nothing reads.
+func startBusyDrainFor(t *testing.T, ctx context.Context, sink *streamTurnSink, tr *turnBusyTracker) {
+	t.Helper()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	emitter := newInteractiveTurnEmitterV2(cur, newChanBcast("conn-a"), discardLogger())
+	active := &stubActiveSession{} // never set → ok=false, so nothing reaches Push
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, tr, discardLogger())
+	t.Cleanup(cleanup) // the caller's deferred cancel runs first: cancel-then-join
+}
+
+// awaitObserves blocks until n resolve calls have been seen, which is the drain's
+// own goroutine reporting progress through the FIFO. Since observe resolves BEFORE
+// it marks and the drain is serial, seeing call n proves call n-1's mark landed.
+func awaitObserves(t *testing.T, resolved <-chan struct{}, n int) {
+	t.Helper()
+	for i := range n {
+		select {
+		case <-resolved:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("drain reached the tracker %d/%d times", i, n)
+		}
+	}
+}
+
+// #1496: the reserve arithmetic. The reserve PARTITIONS the buffer and adds none
+// of it, which is what keeps the fan-in strictly bounded against a runaway child —
+// so cap(ch) is asserted alongside droppableCap on every row.
+//
+// Both bounds of the min() are pinned: the constant binds at the production 256,
+// the buf/2 clamp binds below 2*streamTurnSinkCloseReserve, and the degenerate
+// buffer of 1 yields a reserve of 0 rather than starving the droppable class.
+func TestNewStreamTurnSink_ReserveArithmetic(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		buf          int
+		wantCap      int
+		wantDroppabl int
+	}{
+		{"default fills in the production buffer", 0, streamTurnSinkBuf, 224},
+		{"production buffer: the constant binds", streamTurnSinkBuf, 256, 224},
+		{"twice the reserve: the two bounds meet", 2 * streamTurnSinkCloseReserve, 64, 32},
+		{"below that: the buf/2 clamp binds", saturatingBuf, 8, 4},
+		{"small even buffer", 4, 4, 2},
+		{"degenerate single slot: reserve 0, every slot droppable", 1, 1, 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newStreamTurnSink(tc.buf, discardLogger())
+			if got := cap(s.ch); got != tc.wantCap {
+				t.Errorf("cap(ch) = %d, want %d (the reserve partitions capacity, it never adds any)", got, tc.wantCap)
+			}
+			if s.droppableCap != tc.wantDroppabl {
+				t.Errorf("droppableCap = %d, want %d", s.droppableCap, tc.wantDroppabl)
+			}
+			if s.droppableCap < 1 || s.droppableCap > cap(s.ch) {
+				t.Errorf("droppableCap = %d out of range [1, %d]", s.droppableCap, cap(s.ch))
+			}
+		})
+	}
+}
+
+// AC1: a turn-closing event survives a saturated fan-in. saturatingBuf openers are
+// pushed before any drain exists — on the pre-#1496 policy every one of them is
+// admitted, the channel is full, and the TurnEnd that follows is dropped, leaving
+// the conversation busy with nothing left that could ever clear it. The reserve is
+// what keeps the tail slots free for the closer.
+//
+// The fill is done with the drain STOPPED, so it is deterministic and timing-free;
+// the drain starts afterwards and consumes what is already queued.
+func TestStreamTurnSink_TurnEndSurvivesSaturatedFanIn(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sink := newStreamTurnSink(saturatingBuf, discardLogger())
+	send := sink.sinkFor("sess-a")
+	for range saturatingBuf {
+		send(turnevent.TextChunk{MessageID: "m1", Text: "burst"})
+	}
+	send(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	resolved := make(chan struct{}, saturatingBuf+2)
+	tr := newTurnBusyTracker(func(sid string) (string, bool) {
+		select {
+		case resolved <- struct{}{}:
+		default:
+		}
+		return testConvID, sid == "sess-a"
+	}, discardLogger())
+
+	startBusyDrainFor(t, ctx, sink, tr)
+
+	// Barrier before the wait: the SECOND observe proves the FIRST opener's mark
+	// already landed, so the conversation is busy by the time WaitIdle is called.
+	// Without it WaitIdle could return nil having never seen an open turn at all,
+	// which would pass on the unmodified tree too.
+	awaitObserves(t, resolved, 2)
+
+	waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer waitCancel()
+	if err := tr.WaitIdle(waitCtx, testConvID); err != nil {
+		t.Fatalf("conversation still busy after the drain emptied the fan-in: %v "+
+			"(a TurnEnd crowded out of the fan-in can never be re-sent)", err)
+	}
+}
+
+// AC2: the close stays ordered behind what was already queued. The tracker's
+// resolve records Busy at the instant it is called, and observe resolves BEFORE it
+// marks on a serial drain — so the recorded slice IS the processing order.
+//
+// Exactly one false reading, and it is the first: every envelope after the opening
+// one, the TurnEnd included, sees a conversation already reported busy. That is
+// "never idle while an earlier envelope is unprocessed" as a deterministic
+// sequence rather than a timing window.
+func TestStreamTurnSink_CloseStaysOrderedBehindQueued(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sink := newStreamTurnSink(saturatingBuf, discardLogger())
+	send := sink.sinkFor("sess-a")
+	for range saturatingBuf {
+		send(turnevent.TextChunk{MessageID: "m1", Text: "burst"})
+	}
+	send(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	var (
+		tr   *turnBusyTracker
+		mu   sync.Mutex
+		seen []bool
+	)
+	resolved := make(chan struct{}, saturatingBuf+2)
+	// tr is assigned before the drain goroutine is spawned, so the closure's read
+	// of it is ordered by that go statement.
+	tr = newTurnBusyTracker(func(sid string) (string, bool) {
+		// Safe from inside resolve: observe calls it OUTSIDE t.mu, deliberately.
+		busy := tr.Busy(testConvID)
+		mu.Lock()
+		seen = append(seen, busy)
+		mu.Unlock()
+		select {
+		case resolved <- struct{}{}:
+		default:
+		}
+		return testConvID, sid == "sess-a"
+	}, discardLogger())
+
+	startBusyDrainFor(t, ctx, sink, tr)
+
+	awaitObserves(t, resolved, 2)
+	waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer waitCancel()
+	if err := tr.WaitIdle(waitCtx, testConvID); err != nil {
+		t.Fatalf("conversation still busy after the drain emptied the fan-in: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) < 2 {
+		t.Fatalf("recorded %d observes, want at least the opener and the closer", len(seen))
+	}
+	if seen[0] {
+		t.Errorf("first observed reading = busy, want idle (nothing had opened the turn yet)")
+	}
+	for i, busy := range seen[1:] {
+		if !busy {
+			t.Errorf("observe %d read idle while envelope %d was still unprocessed; readings = %v",
+				i+1, i+1, seen)
+		}
+	}
+}
+
+// AC3: the producer is never wedged. With the drain never started, every send past
+// capacity must still return — a blocking send here would stall claude's stdout
+// forwarder, which is the failure sinkFor exists to prevent. Both closing-class
+// lanes are driven (TurnEnd through sinkFor, the exit envelope through exitFor)
+// because both bypass the droppable watermark.
+func TestStreamTurnSink_ProducerNeverBlocksWithoutDrain(t *testing.T) {
+	t.Parallel()
+
+	sink := newStreamTurnSink(saturatingBuf, discardLogger())
+	send := sink.sinkFor("sess-a")
+	exit := sink.exitFor("sess-a")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range saturatingBuf * 4 {
+			send(turnevent.TextChunk{MessageID: "m1", Text: "burst"})
+			send(turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"})
+			send(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+			exit()
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a sink send blocked on a full fan-in with the drain stopped")
+	}
+}
+
+// AC4: delta-class loss is unchanged — still dropped-newest, still Debug, still
+// exactly event + kind + session_id, still carrying none of the event's content.
+// Green on both sides of #1496; it is the pin that the reserve narrowed WHEN a
+// droppable is dropped without touching WHAT the drop reports.
+func TestStreamTurnSink_DroppableDropUnchanged(t *testing.T) {
+	t.Parallel()
+
+	const secret = "SECRET-ASSISTANT-TEXT"
+	recs := make(chan slog.Record, 32)
+	sink := newStreamTurnSink(saturatingBuf, slog.New(dropWatcher{recs: recs}))
+	send := sink.sinkFor("sess-a")
+
+	// No drain: one send past the whole buffer drops on either policy.
+	for range saturatingBuf + 1 {
+		send(turnevent.TextChunk{MessageID: "m1", Text: secret})
+	}
+
+	rec := waitRecord(t, recs, "stream_turn.sink_full")
+	if rec.Level != slog.LevelDebug {
+		t.Errorf("droppable drop level = %v, want %v (a lost delta is not degraded operation)",
+			rec.Level, slog.LevelDebug)
+	}
+	attrs := map[string]string{}
+	rec.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	if got := attrs["kind"]; got != "text_chunk" {
+		t.Errorf("droppable drop kind = %q, want %q", got, "text_chunk")
+	}
+	if got := attrs["session_id"]; got != "sess-a" {
+		t.Errorf("droppable drop session_id = %q, want %q", got, "sess-a")
+	}
+	if len(attrs) != 3 {
+		t.Errorf("droppable drop attrs = %v, want exactly event + kind + session_id", attrs)
+	}
+	// Content-free: the fed text reaches no attribute and no message.
+	for k, v := range attrs {
+		if strings.Contains(v, secret) {
+			t.Errorf("droppable drop attr %q carries event content: %q", k, v)
+		}
+	}
+	if strings.Contains(rec.Message, secret) {
+		t.Errorf("droppable drop message carries event content: %q", rec.Message)
+	}
+}
+
+// AC5: a lost turn-closer is never silent. Loss is narrowed rather than made
+// impossible — past the reserve a TurnEnd can still be crowded out — so the
+// remaining path must be visible at the daemon's default LevelInfo, exactly as
+// TestStreamTurnSink_ExitDropWhenFull requires of the exit lane.
+//
+// The record carries "kind" where the exit drop does not, and that is the same
+// content-free discipline rather than a departure from it: discriminant and
+// session id only, and here there IS an event to name.
+//
+// No drain is started: with no reader the buffer-of-1 fill is deterministic and
+// timing-free. The watcher goes on the SINK's logger — the drop is emitted from
+// the sink closure, never from the drain.
+func TestStreamTurnSink_TurnEndDropWhenFull(t *testing.T) {
+	t.Parallel()
+
+	recs := make(chan slog.Record, 8)
+	// newStreamTurnSink only replaces buf when it is <= 0, so 1 survives; at 1 the
+	// reserve degenerates to 0, which is what makes the single slot occupiable by a
+	// droppable and the closer's drop reachable.
+	sink := newStreamTurnSink(1, slog.New(dropWatcher{recs: recs}))
+	send := sink.sinkFor("sess-a")
+
+	send(turnevent.TextChunk{MessageID: "m1", Text: "occupies the slot"}) // silently
+	send(turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})       // no room: dropped and logged
+
+	var rec slog.Record
+	select {
+	case rec = <-recs:
+	default:
+		t.Fatal("no record logged for a TurnEnd dropped on a full sink")
+	}
+
+	if rec.Level != slog.LevelWarn {
+		t.Errorf("turn-close drop level = %v, want %v (a wedged conversation is degraded operation, not a lost delta)",
+			rec.Level, slog.LevelWarn)
+	}
+
+	attrs := map[string]string{}
+	rec.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
+	if got := attrs["event"]; got != "stream_turn.close_sink_full" {
+		t.Errorf("turn-close drop event = %q, want %q", got, "stream_turn.close_sink_full")
+	}
+	if got := attrs["kind"]; got != "turn_end" {
+		t.Errorf("turn-close drop kind = %q, want %q", got, "turn_end")
+	}
+	if got := attrs["session_id"]; got != "sess-a" {
+		t.Errorf("turn-close drop session_id = %q, want %q", got, "sess-a")
+	}
+	if len(attrs) != 3 {
+		t.Errorf("turn-close drop attrs = %v, want exactly event + kind + session_id", attrs)
 	}
 }

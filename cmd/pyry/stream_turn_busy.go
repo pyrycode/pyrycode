@@ -127,10 +127,31 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 	}
 }
 
-// observe feeds one fan-in envelope into the tracker. It is called only from the
-// drain goroutine, so it inherits that goroutine's single-writer invariant
-// (`exitFor`) — but the type is self-synchronised regardless,
-// since its readers run anywhere.
+// turnMark is one fan-in event's effect on this tracker's per-conversation mark.
+// It is the SOLE definition of that split, read by two callers with opposite
+// needs: observe, which applies the mark, and `sinkFor`, which refuses to drop a
+// closing-class envelope on a saturated fan-in (#1496).
+//
+// One classifier rather than two agreeing type switches, because the agreement is
+// load-bearing. A variant added to observe's closer arm but not to the sink's
+// never-drop set reintroduces #1496's wedge silently — a turn-closing event that
+// the fan-in is free to discard, leaving the mark open with nothing left that
+// could ever clear it. Sharing the switch makes that agreement structural instead
+// of a convention two files have to keep.
+type turnMark uint8
+
+const (
+	// turnMarkNone is an event with no turn-lifecycle meaning.
+	turnMarkNone turnMark = iota
+	// turnMarkOpen opens the conversation's mark.
+	turnMarkOpen
+	// turnMarkClose closes it, and is never dropped at the fan-in.
+	turnMarkClose
+)
+
+// turnMarkFor classifies one event. Pure: it switches on the Go variant type
+// only, never on a field value, so no content claude produced can steer the
+// answer.
 //
 // The opener set is a WHITELIST, not "anything that is not a TurnEnd". The
 // evidence was the producer's growth path rather than a stray event: streamsup's
@@ -149,6 +170,38 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 // ignoredLineTypes — which this comment once cited by line, at a number that had
 // drifted onto an unrelated declaration — is down to `system` alone.
 //
+// The whitelist direction is what makes the classifier safe for its SECOND caller
+// too. An unknown variant falls to turnMarkNone, so the sink treats it as
+// droppable: a future variant wrongly left out of the reserve costs capacity,
+// while the wedge only ever comes from a CLOSER misclassified as droppable — and
+// closers are the enumerated arm, not the fall-through.
+func turnMarkFor(ev turnevent.Event) turnMark {
+	switch ev.(type) {
+	case turnevent.ThoughtChunk, turnevent.TextChunk, turnevent.ToolStart, turnevent.ToolUpdate:
+		return turnMarkOpen
+	case turnevent.TurnEnd:
+		// Both stop reasons close the turn; resultTurnEndReason (`maxTaskRosterDescription`)
+		// only picks the reason field, so there is one code path upstream too.
+		return turnMarkClose
+	default:
+		// Stall / ApiRetry / Compacting — tui-driver status peers with no turn
+		// lifecycle meaning (the emitter's `Handle` treats them the same way) —
+		// plus Unrecognized, and any future variant.
+		//
+		// The opener set above is a whitelist, so Unrecognized needs no code
+		// change to land here, and landing here is the CORRECT answer rather than
+		// an omission: we do not know what the message is, so it must neither open
+		// nor close a turn. Opening one would wedge the conversation, since no turn
+		// end follows a message we could not understand.
+		return turnMarkNone
+	}
+}
+
+// observe feeds one fan-in envelope into the tracker. It is called only from the
+// drain goroutine, so it inherits that goroutine's single-writer invariant
+// (`exitFor`) — but the type is self-synchronised regardless,
+// since its readers run anywhere.
+//
 // A nil receiver is a no-op, so a caller with no tracker (the drain's own tests)
 // needs no construction. The drain's parameter is deliberately the concrete
 // *turnBusyTracker and not an interface: a typed-nil pointer in an interface is
@@ -160,23 +213,12 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 	}
 
 	var opens bool
-	switch ev.(type) {
-	case turnevent.ThoughtChunk, turnevent.TextChunk, turnevent.ToolStart, turnevent.ToolUpdate:
+	switch turnMarkFor(ev) {
+	case turnMarkOpen:
 		opens = true
-	case turnevent.TurnEnd:
-		// Both stop reasons close the turn; resultTurnEndReason (`maxTaskRosterDescription`)
-		// only picks the reason field, so there is one code path upstream too.
+	case turnMarkClose:
 		opens = false
 	default:
-		// Stall / ApiRetry / Compacting — tui-driver status peers with no turn
-		// lifecycle meaning (the emitter's `Handle` treats them the same way) —
-		// plus Unrecognized, and any future variant.
-		//
-		// The opener set above is a whitelist, so Unrecognized needs no code
-		// change to land here, and landing here is the CORRECT answer rather than
-		// an omission: we do not know what the message is, so it must neither open
-		// nor close a turn. Opening one would wedge the conversation, since no turn
-		// end follows a message we could not understand.
 		return
 	}
 

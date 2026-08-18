@@ -13,7 +13,44 @@ import (
 // burst without engaging the drop path under normal load. Past it the sink drops
 // the newest event rather than block — wedging claude's stdout forwarder is worse
 // than losing a delta the emitter is explicitly not obliged to queue.
+//
+// That drop is CLASS-AWARE since #1496: only the droppable class is refused at
+// the watermark streamTurnSinkCloseReserve leaves, so a turn-closing envelope
+// still finds room. A dropped delta costs one event of transcript fidelity; a
+// dropped closer wedges the conversation busy forever.
 const streamTurnSinkBuf = 256
+
+// streamTurnSinkCloseReserve is how many of streamTurnSinkBuf's slots the
+// droppable class may never take, so a turn-closing envelope — a
+// turnevent.TurnEnd, or the exit signal — is not crowded out by the very burst
+// that ends with it. ADR 025 § Backpressure already requires that control events
+// never drop; pushQueue.enqueue implements it downstream and, until #1496, the
+// fan-in did not.
+//
+// WHICH LEG OF THE TRILEMMA THIS YIELDS. bounded ∧ never-drop-control ∧
+// never-block-producer is unsatisfiable here exactly as it is for pushQueue, and
+// #911 established the saturated state is reachable rather than theoretical. The
+// two queues resolve it in OPPOSITE directions on purpose. pushQueue yields
+// strictly-bounded — it soft-overflows control past nominal cap — which it can
+// afford because #911's per-conn in-flight gate bounds the excursion to one
+// bundle's chunks. The fan-in has no analogue of that gate: its producer is
+// claude's stdout, an unrate-limited source, so soft overflow here would be an
+// unbounded-growth vector driven by a runaway or hostile child. So the fan-in
+// yields never-drop-control instead, past this reserve, and keeps its memory
+// bound absolute. The reserve PARTITIONS existing capacity; it adds none.
+//
+// Loss is therefore narrowed rather than made impossible, and every remaining
+// closing-class drop is logged at Warn (`sinkFor`, `exitFor`) where a droppable
+// drop stays Debug.
+//
+// SIZING. The reserve must cover, per live stream runner, at most two unprocessed
+// closing envelopes (its TurnEnd and its exit) plus at most one droppable slipped
+// in by the check-then-send race sinkFor documents. Both terms scale with the
+// number of live runners, so 32 covers ~10 concurrently-live runners under
+// maximally adversarial interleaving, against a realistic pool of 1–5. It is
+// argued rather than measured, and deliberately not config-driven: the Warn
+// record is the signal that it needs turning.
+const streamTurnSinkCloseReserve = 32
 
 // streamTurnEnvelope is one fan-in element: a neutral turnevent.Event tagged with
 // the pool session id of the runner that produced it. The tag is what the drain
@@ -57,13 +94,23 @@ type streamTurnEnvelope struct {
 // must be structurally impossible. The drain stops on ctx, not on close; any
 // post-shutdown send lands in the non-blocking drop path.
 type streamTurnSink struct {
-	ch     chan streamTurnEnvelope
-	logger *slog.Logger
+	ch chan streamTurnEnvelope
+	// droppableCap is the high-water mark the droppable class may not cross,
+	// leaving cap(ch) - droppableCap slots that only a closing-class envelope can
+	// take. Computed once at construction so the hot path is one integer compare.
+	droppableCap int
+	logger       *slog.Logger
 }
 
 // newStreamTurnSink constructs the fan-in. buf <= 0 falls back to
 // streamTurnSinkBuf; logger backs only the content-free drop diagnostic, nil
 // falling back to slog.Default.
+//
+// The reserve is clamped to buf/2 so a small test buffer stays workable: at
+// buf == 1 it degenerates to 0 and every slot is droppable again, which is what
+// keeps the buffer-of-1 drop fixtures (`TestStreamTurnSink_ExitDropWhenFull`)
+// meaningful. The clamp also keeps droppableCap >= ceil(buf/2) >= 1 for every
+// buf >= 1, so no buffer size can starve the droppable class outright.
 func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 	if buf <= 0 {
 		buf = streamTurnSinkBuf
@@ -72,30 +119,92 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 		logger = slog.Default()
 	}
 	return &streamTurnSink{
-		ch:     make(chan streamTurnEnvelope, buf),
-		logger: logger,
+		ch:           make(chan streamTurnEnvelope, buf),
+		droppableCap: buf - min(streamTurnSinkCloseReserve, buf/2),
+		logger:       logger,
 	}
 }
 
 // sinkFor returns the per-Parser sink closure the factory hands to
-// streamsup.NewParser for the runner constructed with sessionID. The closure does
-// a NON-BLOCKING send of {sessionID, ev}: the Parser runs on claude's stdout
-// forwarder goroutine, so a blocking send on a full channel would wedge the
-// child. On a full channel it drops the newest event — the channel IS the queue
-// and drops rather than blocks, mirroring the emitter's owns-no-queue principle.
-// It holds no lock (channel send only).
+// streamsup.NewParser for the runner constructed with sessionID. Every path out
+// of it is a NON-BLOCKING send or an early return: the Parser runs on claude's
+// stdout forwarder goroutine, so a blocking send on a full channel would wedge
+// the child. The channel IS the queue and drops rather than blocks, mirroring the
+// emitter's owns-no-queue principle. It holds no lock (channel send only).
+//
+// WHAT it drops is class-aware (#1496), split by what LOSING one costs rather
+// than by wire type. A droppable event is refused at the droppableCap watermark:
+// one event of transcript fidelity, self-healing on the next event. A
+// closing-class event — turnMarkClose, i.e. turnevent.TurnEnd — skips the
+// watermark and sends against the FULL capacity, because losing one leaves
+// turnBusyTracker's mark open with nothing that could ever clear it: no TurnStart
+// exists, so every later send_message parks until streamTurnHoldTimeout and
+// msgqueue gives up with a session_error.
+//
+// Reserving for closers ALONE is exactly sufficient, and that follows from the
+// tracker's asymmetry rather than from optimism: `setBusy` is idempotent, so
+// losing some openers changes nothing and losing all of them means the turn never
+// opens and the arriving TurnEnd is a no-op delete. Only open-without-close
+// wedges.
+//
+// The class split deliberately NARROWS ADR 025's wire-level never-drop set, which
+// counts tool_* as control. That set is classified on protocol.Envelope.Type at
+// the outbound pushQueue; here the fan-in carries turnevent.Event one layer
+// upstream, and applying the wire set literally would reserve for ToolStart /
+// ToolUpdate — leaving the droppable class empty exactly in the filed repro, a
+// tool-heavy burst. tool_* keeps its never-drop status downstream in pushQueue,
+// untouched; this reserve is additive protection at a second queue.
+//
+// The len(s.ch) read races other producers by construction, and the race is
+// BOUNDED rather than handled: each producer is a single goroutine (one
+// streamsup.Parser per live runner, on os/exec's stdout forwarder), so it has at
+// most one check-then-send in flight, and the send stays non-blocking. A slipped
+// droppable therefore takes at most one reserve slot per live runner — the term
+// streamTurnSinkCloseReserve is sized for — and can never block or admit
+// unboundedly.
 func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
-		select {
-		case s.ch <- streamTurnEnvelope{sessionID: sessionID, ev: ev}:
-		default:
-			// SECURITY: content-free — the discriminant and session id only, never
-			// the event's assistant / thought / tool content.
-			s.logger.Debug("relay: stream-turn drop; sink full",
-				"event", "stream_turn.sink_full",
-				"kind", eventKind(ev),
-				"session_id", sessionID)
+		if turnMarkFor(ev) == turnMarkClose {
+			select {
+			case s.ch <- streamTurnEnvelope{sessionID: sessionID, ev: ev}:
+			default:
+				// Past the reserve a closer can still be lost, so the residual must be
+				// VISIBLE: Warn, not Debug, because the daemon's default level is
+				// LevelInfo (see the level selection in `runSupervisor`) — the same
+				// argument exitFor's own drop makes.
+				//
+				// SECURITY: content-free, and this carries "kind" where exitFor's drop
+				// does not. That is the same discipline, not a departure from it —
+				// discriminant and session id only, never assistant / thought / tool
+				// content — applied to a record that HAS a discriminant to name, which
+				// an exit envelope does not. eventKind returns the variant name alone
+				// and never Unrecognized.Kind, so nothing claude authored reaches here.
+				s.logger.Warn("relay: stream-turn close drop; sink full",
+					"event", "stream_turn.close_sink_full",
+					"kind", eventKind(ev),
+					"session_id", sessionID)
+			}
+			return
 		}
+
+		if len(s.ch) < s.droppableCap {
+			select {
+			case s.ch <- streamTurnEnvelope{sessionID: sessionID, ev: ev}:
+				return
+			default:
+				// The watermark read was stale and the channel filled underneath it.
+				// Falls through to the same drop as crossing the watermark: the event is
+				// lost either way, and reporting one loss two ways would only invite a
+				// reader to think they differ.
+			}
+		}
+
+		// SECURITY: content-free — the discriminant and session id only, never
+		// the event's assistant / thought / tool content.
+		s.logger.Debug("relay: stream-turn drop; sink full",
+			"event", "stream_turn.sink_full",
+			"kind", eventKind(ev),
+			"session_id", sessionID)
 	}
 }
 
@@ -114,20 +223,32 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 // report wiring where there is none. That is also why no line number stands in
 // for it — the name is what must not appear, not the address.
 //
-// Same NON-BLOCKING send as sinkFor, for the same reason: it runs on the runner's
-// supervision goroutine and must not be wedged by a stalled drain, so a full
-// channel drops the newest.
+// NON-BLOCKING for sinkFor's reason: it runs on the runner's supervision
+// goroutine and must not be wedged by a stalled drain, so a full channel drops
+// the newest.
 //
-// The drop is logged at Warn where sinkFor's is Debug, and that asymmetry is the
-// whole diagnostic value of this branch. A dropped event is a lost delta; a
-// dropped exit is a conversation that stays busy forever once a producer is wired,
-// which is degraded operation and must be visible at the daemon's default
-// LevelInfo (Debug is not — see the level selection in `runSupervisor`).
+// It sends UNWATERMARKED, against the channel's full capacity, where sinkFor
+// gates the droppable class at droppableCap. That is not a divergence but the
+// same policy: an exit envelope is closing-class (#1496), being the signal that
+// clears the mark for a child that died mid-turn, so it takes the reserved tail
+// slots exactly as a TurnEnd does. No code change was needed here to get that —
+// this closure was already written the way the closing class now requires.
+//
+// The drop is logged at Warn where sinkFor's DROPPABLE branch is Debug, and that
+// asymmetry is the whole diagnostic value of this branch. A dropped event is a
+// lost delta; a dropped exit is a conversation that stays busy forever once a
+// producer is wired, which is degraded operation and must be visible at the
+// daemon's default LevelInfo (Debug is not — see the level selection in
+// `runSupervisor`). Since #1496 sinkFor's own closing-class branch reasons the
+// same way and is likewise Warn, so the split now runs along the CLASS rather
+// than along the two closures.
 //
 // The select is deliberately NOT factored into a helper shared with sinkFor: the
 // common part is one statement while the divergent part is the entire diagnostic
 // (level, message, field set), so parameterising the divergence would cost more
-// than it saves and would obscure exactly the asymmetry above.
+// than it saves and would obscure exactly the asymmetry above. #1496's closing
+// class does not change that — the two records still differ in message and field
+// set, this one omitting "kind" because there is no event to name.
 func (s *streamTurnSink) exitFor(sessionID string) func() {
 	return func() {
 		select {

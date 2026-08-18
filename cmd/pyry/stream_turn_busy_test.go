@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	goparser "go/parser"
 	"go/token"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -474,6 +477,137 @@ func TestTurnBusyTracker_ImportsStayMinimal(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// --- #1496: the shared classifier ---------------------------------------------
+
+// turnEventVariants is the complete set of turnevent.Event variant names, read
+// from the SEALING MECHANISM itself: the unexported isTurnEvent marker method is
+// what closes the sum type, so every declaration of it is a variant and nothing
+// else can be one. Reading the markers rather than a hand-kept list is what makes
+// the totality table below fail when a variant is ADDED — a list would simply
+// stay silent, which is the failure mode #1496 exists to close.
+//
+// The whole directory is walked rather than one file, so moving a variant to a
+// new file inside the package cannot make it invisible here. _test.go files are
+// skipped: a test-only variant is not part of the production set.
+func turnEventVariants(t *testing.T) []string {
+	t.Helper()
+
+	const dir = "../../internal/turnevent"
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+
+	fset := token.NewFileSet()
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := goparser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != "isTurnEvent" || fn.Recv == nil || len(fn.Recv.List) != 1 {
+				continue
+			}
+			// Value receivers throughout — the events are pure value types, which is
+			// the property the marker block asserts.
+			if id, ok := fn.Recv.List[0].Type.(*ast.Ident); ok {
+				names = append(names, id.Name)
+			}
+		}
+	}
+	if len(names) == 0 {
+		t.Fatalf("found no isTurnEvent markers in %s; the totality guard is asserting nothing", dir)
+	}
+	slices.Sort(names)
+	return names
+}
+
+func turnMarkName(m turnMark) string {
+	switch m {
+	case turnMarkNone:
+		return "turnMarkNone"
+	case turnMarkOpen:
+		return "turnMarkOpen"
+	case turnMarkClose:
+		return "turnMarkClose"
+	default:
+		return fmt.Sprintf("turnMark(%d)", uint8(m))
+	}
+}
+
+// #1496: turnMarkFor is TOTAL over the variant set, and the table is the sole
+// place the open/close/none split is stated. Two callers read it — observe, which
+// applies the mark, and sinkFor, which refuses to drop a closer on a saturated
+// fan-in — so a variant classified wrong here is wrong in both at once, which is
+// precisely the drift the extraction forecloses.
+//
+// The second assertion is the totality half: the covered set must equal the
+// package's isTurnEvent markers exactly, so adding a variant fails HERE rather
+// than silently inheriting the default arm somewhere downstream.
+//
+// The recently-added variants are the rows that matter most. RateLimited pins the
+// #1404 DISCHARGED note — the whitelist absorbed a genuinely new variant with no
+// change to this switch — and the three background-task variants plus
+// ThinkingProgress pin the same property for #1380 / #1382 / #1385: a task or a
+// thinking reading is orthogonal to turn lifecycle, so neither may move the mark.
+//
+// PermissionRequest is the row the marker-derived guard ADDED: it is a variant
+// this fan-in cannot currently see at all, produced only on the PTY modal path
+// (modalbridge's `PermissionRequestForClass`) and never by streamsup.Parser. Its
+// answer is turnMarkNone, unchanged from what observe's default arm already gave
+// it, and correct for the whitelist's own reason — a permission prompt is a
+// question about a tool call, not a turn boundary, and the ToolStart that gated it
+// already opened the turn.
+func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		ev   turnevent.Event
+		want turnMark
+	}{
+		{turnevent.TextChunk{MessageID: "m1", Text: "hello"}, turnMarkOpen},
+		{turnevent.ThoughtChunk{MessageID: "m1", Text: "thinking"}, turnMarkOpen},
+		{turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"}, turnMarkOpen},
+		{turnevent.ToolUpdate{ToolCallID: "tu-1"}, turnMarkOpen},
+		{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, turnMarkClose},
+		{turnevent.BackgroundTaskStarted{TaskID: "t-1"}, turnMarkNone},
+		{turnevent.BackgroundTaskUpdated{TaskID: "t-1"}, turnMarkNone},
+		{turnevent.BackgroundTaskRoster{}, turnMarkNone},
+		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkNone},
+		{turnevent.RateLimited{Status: "allowed", LimitType: "five_hour"}, turnMarkNone},
+		{turnevent.Stall{}, turnMarkNone},
+		{turnevent.ApiRetry{Active: true, Current: 1, Total: 3}, turnMarkNone},
+		{turnevent.Compacting{Active: true}, turnMarkNone},
+		{turnevent.Unrecognized{Site: turnevent.UnrecognizedLineType, Kind: "some_future_event"}, turnMarkNone},
+		{turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), turnMarkNone},
+	}
+
+	covered := make([]string, 0, len(tests))
+	for _, tc := range tests {
+		name := strings.TrimPrefix(fmt.Sprintf("%T", tc.ev), "turnevent.")
+		covered = append(covered, name)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := turnMarkFor(tc.ev); got != tc.want {
+				t.Errorf("turnMarkFor(%s) = %s, want %s", name, turnMarkName(got), turnMarkName(tc.want))
+			}
+		})
+	}
+
+	slices.Sort(covered)
+	if want := turnEventVariants(t); !slices.Equal(covered, want) {
+		t.Errorf("turnMarkFor table covers:\n got %v\nwant %v\n"+
+			"(every turnevent.Event variant needs a row; a closer left out of the table is a conversation wedged busy forever)",
+			covered, want)
+	}
 }
 
 // --- #1199: the delivery feed -------------------------------------------------
