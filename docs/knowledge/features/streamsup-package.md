@@ -511,14 +511,17 @@ restart), `Stopped` in a top-level `defer`.
 `Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv, swapped by
 `Restart`), `iterCancel` (the current spawn iteration's `context.CancelFunc`), and — since #1124 — the
 `sessionID`/`rotatePending` pair `RestartFresh` rotates (see "Fresh-restart under a new id" below).
-Since #1481 all three are read, and `iterCancel` published, by `beginSpawn` in a **single** section per
-iteration; `clearIterCancel` drops the cancel once the iteration ends. That teardown accessor takes no
+Since #1481 `args` and the `sessionID`/`rotatePending` pair are read, and `iterCancel` is published,
+by `beginSpawn` in a **single** section per iteration; `clearIterCancel` drops the cancel once the
+iteration ends. That teardown accessor takes no
 argument deliberately — publishing a non-`nil` cancel outside `beginSpawn`'s section is precisely the
 #1481 defect, so the API cannot express it, and a future re-split has to add the parameter back before
 it can reintroduce the window. `Restart(args []string)` swaps `args`,
 sends a non-blocking hint on a buffered(1) `restartCh` (coalesces rapid restarts to one relaunch with the
-newest args), and cancels the current `iterCancel` if a child is live — mirroring `supervisor.Restart`
-byte-for-byte in shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a
+newest args), and cancels the current `iterCancel` — since #1481 that cancel goes live as soon as an
+iteration's spawn setup runs, before its child necessarily exists, so a racing `Restart` can also catch
+a not-yet-launched iteration: the cancel fails that iteration's `cmd.Start`, and the immediate relaunch
+that follows observes the swapped `args` — mirroring `supervisor.Restart` byte-for-byte in shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a
 `Pool`/`Session` lock, so `Pool.UpdateSettings` can call it after releasing `Pool.mu` with no lock-order
 concern. Because `firstRun` is already `false` after the first successful spawn, a plain restart always
 respawns via `--resume <sessionID>` — the conversation resumes rather than forking; `RestartFresh` is the
