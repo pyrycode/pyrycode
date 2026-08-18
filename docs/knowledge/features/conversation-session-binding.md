@@ -101,7 +101,7 @@ type SessionRouter interface {
 }
 ```
 
-`Route` is **ctx-free** — a pure in-memory lookup (registry read + field check + pool lookup), non-blocking, no cancellation surface. Since #721 the handler **discards** the returned writer (it only validates the binding before enqueue); the blocking work (`Activate`, `WriteUserTurn`) happens on the `msgqueue` drain, which re-resolves the writer per attempt via `sessionRouter.resolve` — see [§ Enqueue-and-ack (#721)](#enqueue-and-ack-721).
+`Route` is **ctx-free** — a registry read + field check + pool lookup, non-blocking, no cancellation surface. Since #1487 a *missing* pool entry additionally takes the revive branch below, which adds filesystem syscalls (`EvalSymlinks`, possibly `MkdirAll`, the `trustMark` write, the registry persist) but still never waits on a child process, and runs at most once per session per daemon lifetime — after it succeeds `Lookup` hits and the steady-state path is byte-identical. Since #721 the handler **discards** the returned writer (it only validates the binding before enqueue); the blocking work (`Activate`, `WriteUserTurn`) happens on the `msgqueue` drain, which re-resolves the writer per attempt via `sessionRouter.resolve` — see [§ Enqueue-and-ack (#721)](#enqueue-and-ack-721).
 
 The implementation lives at `cmd/pyry` (the only package importing both `conversations` and `sessions`), beside `sessionMinter`:
 
@@ -123,10 +123,22 @@ func (r sessionRouter) resolve(conversationID string) (handlers.TurnWriter, erro
     }
     id := sessions.SessionID(conv.CurrentSessionID)
     sess, err := r.pool.Lookup(id)
+    if errors.Is(err, sessions.ErrSessionNotFound) {
+        sess, err = r.revive(id, conversationID, conv.Cwd)     // #1487 — daemon-restart revive
+    }
     if err != nil {
-        return nil, err                                        // ErrSessionNotFound → server.binary_offline
+        return nil, err                                        // → server.binary_offline
     }
     return boundSession{pool: r.pool, sess: sess, id: id}, nil
+}
+
+// revive re-materialises a dropped session; it does NOT spawn claude (#1487).
+func (r sessionRouter) revive(id sessions.SessionID, label, cwd string) (*sessions.Session, error) {
+    spawnDir, err := resolveSpawnDir(cwd)   // the SAME validator the mint path uses
+    if err != nil {
+        return nil, err                     // ErrSpawnDirRejected → server.binary_offline, nothing registered
+    }
+    return r.pool.Revive(id, label, spawnDir)
 }
 
 // Route layers the active-conversation cursor stamp (#687) onto resolve.
@@ -153,7 +165,10 @@ Since #721, `Route` is a thin wrapper that adds the `r.active.set` cursor stamp;
 |---|---|---|---|
 | Unknown `ConversationID` | `Route`: `Registry.Get` miss | `conversation.not_found` | no |
 | No bound session (`CurrentSessionID == ""`) | `Route`: empty-id guard | `server.binary_offline` | yes |
-| Bound id not in pool (`ErrSessionNotFound`) | `Route`: `Pool.Lookup` | `server.binary_offline` | yes |
+| Bound id not in pool, revive succeeds (#1487) | `Route`: `Pool.Lookup` miss → `sessionRouter.revive` | *(no reject — the turn is accepted)* | — |
+| Bound id not in pool, recorded `Cwd` escapes `$HOME` | `Route`: `resolveSpawnDir` (`ErrSpawnDirRejected`) | `server.binary_offline` | yes |
+| Bound id not in pool, id not canonical UUIDv4 | `Route`: `Pool.Revive`'s `ValidID` (`ErrInvalidSessionID`) | `server.binary_offline` | yes |
+| Bound id not in pool, pool not running | `Route`: `Pool.Revive` (`ErrPoolNotRunning`) | `server.binary_offline` | yes |
 
 All three are checked synchronously **before enqueue** (#721): the handler's only wire replies are these rejects + the ack. `errNoBoundSession` is an unexported sentinel with no wire surface. A conversation that becomes unbound/deleted *after* the ack (a TOCTOU window) no longer maps to a wire reply — the drain's `resolve`/`WriteUserTurn` error is **absorbed and retried** (the ack already promised delivery). There is no conversation-delete verb today, so a permanent post-ack unbind is currently unreachable; the daemon-restart boundary bounds it.
 
@@ -237,7 +252,10 @@ When the binding is unresolvable (race: the session was torn down before `Run` d
 - **Accepted residue — unbound session on a non-empty-id error.** `Pool.Create` can return a non-empty id *with* an error (e.g. the mint persisted, then `Activate` timed out; the lifecycle goroutine may still bring the session up against the pool ctx after the handler's timeout fires). The handler treats *any* error as a clean mint failure and does not bind it, so such a session is left registered in the Pool with no conversation pointing at it. This is benign — the same shape as a session that ran and idled out, recoverable by the Pool's own lifecycle — and the race is unobserved, so per evidence-based fix selection no cleanup logic was added.
 - **Process-exhaustion / spawn amplification (deferred).** Eager binding makes `create_conversation` a process-spawning operation; an authenticated phone spamming creates can exhaust host processes/memory. The existing in-architecture bound is `Pool.ActiveCap` (LRU-evicts a victim when the cap is hit) — but it **defaults to uncapped** (`-pyry-active-cap 0`). A dedicated per-operator create quota / rate-limit is new dispatch policy and is a named #672-family follow-up. Ops mitigation today: set `-pyry-active-cap` and/or `-pyry-idle-timeout`.
 - **`ActiveCap` churn.** When `ActiveCap` *is* set, each `create_conversation` activation can LRU-evict another conversation's live claude. Acceptable: eviction preserves the on-disk JSONL and the session re-activates on the next `send_message`. This cross-discussion cap eviction (and the no-bleed guarantee that only the deliberate LRU victim transitions) is pinned by [#680](../codebase/680.md)'s binary-boundary e2e — the slice that closes Phase 2.0 by proving per-conversation sessions are full citizens of the idle-evict / cap machinery.
-- **Restart scope.** Only the `CurrentSessionID` *field* round-trips on registry reload. Reviving / re-binding the live claude process across a daemon restart is the Pool's existing session-lifecycle / startup-reconciliation concern, out of scope here.
+- **Restart scope — closed by #1487.** `sessions.New` still materialises only the bootstrap from `sessions.json`, so every minted per-conversation session is dropped on a warm start. Since [#1487](../codebase/1487.md) that is no longer fatal to the thread: `sessionRouter.resolve` intercepts the resulting `ErrSessionNotFound` and lazily re-materialises the session via `Pool.Revive`, sourcing the spawn directory from the **conversations** registry (`conv.Cwd`) — the only place it is persisted — and re-running `resolveSpawnDir` so a `Cwd` that has become an escape since mint time is rejected rather than trusted. The revive is **lazy** (first touch, not startup, so a restart does not spawn one claude per conversation) and **non-spawning** (`Pool.Revive` registers at `stateEvicted`; the child comes up on the `boundSession.Activate` the drain already performs). Three residues, all accepted:
+  - **Phone-set `YOLO` does not survive.** A revived session carries zero `SessionSettings`, so a phone-granted `--dangerously-skip-permissions` is dropped — and the next persist drops it from disk too. Deliberate: a restart is a natural revocation point for a permission bypass, and re-granting is one `settings` verb away. `registryEntry`'s fail-closed rationale was written when only the bootstrap was materialised; #833's "persisted spawn settings must survive restart" argument was about *operator* intent on the bootstrap and does not transfer.
+  - **A deliberately-removed session can be resurrected.** The `sessions.remove` control verb drops a session from the pool and `sessions.json` but does not clear the owning conversation's `CurrentSessionID`, so the next `send_message` re-registers the id. Distinguishing "removed" from "dropped by restart" needs persisted registry membership. Unobserved; documented rather than defended against.
+  - **An *untouched* entry is still erased from disk.** A persist that happens before the conversation's first post-restart touch (e.g. a bootstrap idle-eviction) still rewrites `sessions.json` without the minted entries. Harmless, because the revive sources its id and cwd from the conversations registry rather than from `sessions.json`.
 
 ## Deferred to follow-ups (EPIC #672)
 

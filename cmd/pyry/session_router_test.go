@@ -121,14 +121,18 @@ func TestSessionRouter_Route(t *testing.T) {
 		}
 	})
 
-	t.Run("bound id absent from pool flows ErrSessionNotFound through", func(t *testing.T) {
+	t.Run("malformed binding is rejected by the revive branch's id check", func(t *testing.T) {
+		// A bound id absent from the pool no longer flows ErrSessionNotFound
+		// through — since #1487 it enters the revive branch. This binding is
+		// not a canonical UUIDv4, so Pool.Revive's ValidID gate rejects it
+		// before any state is touched and the conversation stays rejected.
 		r := newRouter()
 		w, err := r.Route("conv-dangling")
-		if !errors.Is(err, sessions.ErrSessionNotFound) {
-			t.Errorf("err = %v, want ErrSessionNotFound", err)
+		if !errors.Is(err, sessions.ErrInvalidSessionID) {
+			t.Errorf("err = %v, want ErrInvalidSessionID", err)
 		}
 		if w != nil {
-			t.Errorf("writer = %v, want nil on reject", w)
+			t.Errorf("writer = %v, want nil on reject — a malformed binding must never yield a writer", w)
 		}
 		// #687 AC#4: a dangling binding never stamps the cursor.
 		if got := r.active.CurrentConversation(); got != "" {
@@ -172,6 +176,54 @@ func TestSessionRouter_ResolveDoesNotStamp(t *testing.T) {
 		}
 		if got := r.active.CurrentConversation(); got != "conv-bound" {
 			t.Errorf("active cursor = %q, want conv-bound — Route must stamp", got)
+		}
+	})
+}
+
+// TestSessionRouter_ReviveObeysCursorSplit extends the #721 side-effect split to
+// the #1487 revive branch: a resolution that had to re-materialise the session
+// is still a resolution, so resolve must not stamp and Route must. A revive
+// wired anywhere but inside resolve — or one that stamped on its own — would
+// move the follow-active cursor at drain time rather than at phone-interaction
+// time.
+//
+// An empty Cwd keeps this parallel-safe: resolveSpawnDir("") short-circuits
+// before any $HOME lookup, so no t.Setenv is needed.
+func TestSessionRouter_ReviveObeysCursorSplit(t *testing.T) {
+	t.Parallel()
+	pool := newRouterTestPool(t)
+	runPoolReady(t, pool)
+
+	dropped, err := sessions.NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-dropped", CurrentSessionID: string(dropped), LastUsedAt: time.Now().UTC()})
+
+	t.Run("resolve revives without stamping", func(t *testing.T) {
+		r := sessionRouter{pool: pool, convReg: reg, active: &activeConversation{}}
+		w, err := r.resolve("conv-dropped")
+		if err != nil {
+			t.Fatalf("resolve: unexpected err %v", err)
+		}
+		if w == nil {
+			t.Fatalf("resolve returned a nil writer for a revivable conversation")
+		}
+		if got := r.active.CurrentConversation(); got != "" {
+			t.Errorf("active cursor = %q, want empty — a reviving resolve must NOT stamp", got)
+		}
+	})
+
+	t.Run("Route stamps on the revived binding", func(t *testing.T) {
+		// The session is in the pool by now (the subtest above revived it), so
+		// this exercises Route's stamp over the post-revive steady state.
+		r := sessionRouter{pool: pool, convReg: reg, active: &activeConversation{}}
+		if _, err := r.Route("conv-dropped"); err != nil {
+			t.Fatalf("Route: unexpected err %v", err)
+		}
+		if got := r.active.CurrentConversation(); got != "conv-dropped" {
+			t.Errorf("active cursor = %q, want conv-dropped — Route must stamp", got)
 		}
 	})
 }
