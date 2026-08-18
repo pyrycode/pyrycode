@@ -66,16 +66,22 @@ Mirrors `supervisor.Run`'s restart/backoff/resume shape, including the live-rest
 ```
 loop:
   if ctx.Err() != nil → return ctx.Err()               // graceful shutdown, not a crash
-  args := buildArgs(liveArgs(), firstRun, SessionID)    // liveArgs() picks up a Restart-swapped argv
-  iterCtx, cancel := context.WithCancel(ctx); setIterCancel(cancel)
-  started, waitErr := spawnAndWait(iterCtx, args)       // blocks until child exits or Restart cancels iterCtx
-  cancel(); setIterCancel(nil)
+  iterCtx, cancel, args, forceFirst := beginSpawn(ctx, firstRun)  // ONE restartMu section: reads the
+                                                        //   Restart-swapped argv AND the (possibly
+                                                        //   rotated) id, consumes rotatePending,
+                                                        //   builds the argv, publishes iterCancel
+  if forceFirst → firstRun = true                       // a RestartFresh was consumed: re-arm first-run form
+  log "spawning claude"                                 // AFTER the section: no log I/O under a leaf mutex
+  started, waitErr := spawnAndWait(iterCtx, args)       // blocks until child exits or a restart cancels iterCtx
+  cancel(); clearIterCancel()
   if ctx.Err() != nil → return ctx.Err()                // parent-ctx cancel = teardown, not a crash
   if started → firstRun = false                         // see the firstRun gate below
   if drainRestart() → continue                          // deliberate restart, not a crash: skip backoff
   delay := backoff.next(uptime)
   select { <-time.After(delay) | <-ctx.Done() → return ctx.Err() | <-restartCh → relaunch now }
 ```
+
+**The single `beginSpawn` acquisition is load-bearing (#1481), not tidiness.** Reading the spawn inputs and publishing `iterCancel` are one `restartMu` section, so a racing `Restart`/`RestartFresh` — which takes that mutex exactly once — is serialised either *wholly before* it (the spawn being set up observes the swapped argv / rotated id) or *wholly after* it (it finds the just-published cancel and tears that spawn down, and `drainRestart` relaunches immediately under the new state). There is no third position, so "a live child under a pre-rotation id **and** no live iteration cancel" is unreachable. Until #1481 this was two sections with a `buildArgs` allocation and a synchronous log write between them, and `iterCancel` was still `nil` from the previous iteration across that gap: a racer landing there wrote its rotation, cancelled **nothing**, and the spawn launched a child under the pre-rotation id for that child's whole lifetime — after which the still-set `rotatePending` made the next crash-respawn `--session-id <newID>`, a fresh transcript, silently discarding every turn since the rotation. `buildArgs` had to move inside the section because `restartMu` is not reentrant (the old `liveArgs()`/`nextSpawnID()` accessors each took it, so a fused section could not call them); both are deleted, and the publish side is narrowed to a no-argument `clearIterCancel` so nothing outside `beginSpawn` can express a publish at all.
 
 Shutdown is detected via **parent-ctx cancellation**, never via the child-exit error value — `spawnAndWait`'s `waitErr` only ever means "crashed" once `ctx.Err()` has been checked and is nil. An `iterCtx`-only cancel (from `Restart`) leaves the parent `ctx.Err()` nil, so the loop falls through and relaunches instead of returning. One goroutine total (the caller's `Run`); `cmd.Wait` blocks it, and os/exec runs its own internal ctx-watcher goroutine that invokes `cmd.Cancel` off-loop — on either a parent-ctx cancel (shutdown) or an `iterCtx` cancel (restart).
 
@@ -388,10 +394,15 @@ and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id
 seam above, but rotates the **session id**, not the argv: a new `restartMu`-guarded pair,
 `sessionID` (the mutable analogue of the construction-time, immutable `cfg.SessionID`; seeded from it in
 `New`) and `rotatePending` (a one-shot flag), sit alongside `args`/`iterCancel` in the same field group.
-`Run`'s spawn loop reads `nextSpawnID()` — a `restartMu`-guarded accessor that snapshots
-`(sessionID, rotatePending)` and clears `rotatePending` in one critical section — instead of
-`r.cfg.SessionID` directly; when `rotatePending` is true it re-arms the Run-goroutine-private `firstRun`
-local to `true` before calling `buildArgs` (itself untouched). The existing `started`-gated `firstRun`
+`Run`'s spawn loop reads them via `beginSpawn()` — the `restartMu`-guarded accessor that snapshots
+`(sessionID, rotatePending, args)`, clears `rotatePending`, builds the argv **and** publishes
+`iterCancel`, all in ONE acquisition — instead of `r.cfg.SessionID` directly; when `rotatePending` is
+true the returned `forceFirst` re-arms the Run-goroutine-private `firstRun` local to `true`, and the
+same section has already fed that into `buildArgs` (itself untouched). The one acquisition is the
+#1481 fix: splitting the id read from the `iterCancel` publish — as this loop did from #1124 until
+#1481 — leaves a gap where a racing `RestartFresh` sets `sessionID`/`rotatePending`, reads a `nil`
+cancel, cancels nothing, and the spawn launches under the pre-rotation id anyway (see the supervise
+loop above). The existing `started`-gated `firstRun`
 flip (see the gate above) then does the rest for free: a successful fresh spawn flips `firstRun` back to
 `false` so the next respawn `--resume`s the rotated id; a setup failure on the fresh spawn leaves
 `firstRun` `true` so the retry keeps trying `--session-id <newID>` rather than `--resume`-ing a session
@@ -498,9 +509,13 @@ restart), `Stopped` in a top-level `defer`.
 
 **Live-restart seam** (previously absent — the old `runner.go` doc explicitly called this out as a gap;
 `Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv, swapped by
-`Restart`, read via `liveArgs()`), `iterCancel` (the current spawn iteration's `context.CancelFunc`,
-published via `setIterCancel` each iteration), and — since #1124 — the `sessionID`/`rotatePending` pair
-`RestartFresh` rotates (see "Fresh-restart under a new id" below). `Restart(args []string)` swaps `args`,
+`Restart`), `iterCancel` (the current spawn iteration's `context.CancelFunc`), and — since #1124 — the
+`sessionID`/`rotatePending` pair `RestartFresh` rotates (see "Fresh-restart under a new id" below).
+Since #1481 all three are read, and `iterCancel` published, by `beginSpawn` in a **single** section per
+iteration; `clearIterCancel` drops the cancel once the iteration ends. That teardown accessor takes no
+argument deliberately — publishing a non-`nil` cancel outside `beginSpawn`'s section is precisely the
+#1481 defect, so the API cannot express it, and a future re-split has to add the parameter back before
+it can reintroduce the window. `Restart(args []string)` swaps `args`,
 sends a non-blocking hint on a buffered(1) `restartCh` (coalesces rapid restarts to one relaunch with the
 newest args), and cancels the current `iterCancel` if a child is live — mirroring `supervisor.Restart`
 byte-for-byte in shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a
@@ -1076,7 +1091,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1109.md`](../codebase/1109.md) — the `streamRunnerFactory`/`mapStreamsupConfig`/`stripSessionIDFlags` construction slice.
 - [`codebase/1098.md`](../codebase/1098.md) — the turnevent drain slice (`streamTurnSink`/`startStreamTurnDrainV2`).
 - [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
-- [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`nextSpawnID`).
+- [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`beginSpawn`).
 - [`codebase/1168.md`](../codebase/1168.md) — `withApprovalArgs`, wiring the #1106 permission-approval flags onto the live interactive spawn.
 - [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; shipped unwired, and closed off by #1202 (session teardown clear), #1206/#1209/#1210 (mid-turn respawn clear), and #1199 (the delivery-path consumer both readers were built for).
 - [`codebase/1202.md`](../codebase/1202.md) — `clearForSession`, the session-teardown half of the tracker's clear (`/clear` rotation + eviction), composed onto the pool's `TransitionObserver` slot.
