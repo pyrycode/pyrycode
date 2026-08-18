@@ -45,6 +45,18 @@ func TestShouldArchive(t *testing.T) {
 			},
 			want: true,
 		},
+		{
+			// IsPromoted must stay false: a promoted row would be absorbed by
+			// the IsPromoted short-circuit and prove nothing about the
+			// manual-archive exemption.
+			name: "archived, very idle",
+			c: Conversation{
+				IsPromoted: false,
+				IsArchived: true,
+				LastUsedAt: now.Add(-365 * 24 * time.Hour),
+			},
+			want: false,
+		},
 	}
 
 	for _, tc := range cases {
