@@ -123,7 +123,7 @@ Pin the established Go idiom for time-dependent rules: take `now time.Time` as a
 
 ### No zero-value guard on `LastUsedAt`
 
-Per #216, `LastUsedAt` is "always present" on a `Conversation` (it has no `omitempty` JSON tag and is bumped on every user activity by the future API layer). A zero-value `LastUsedAt` would make `ShouldArchive` return `true` (any unpromoted record older than 30 days archives, and `time.Time{}` is far older than any plausible `now`) — that is the correct fallback if the invariant ever breaks. Adding a guard would defend against a failure mode the type's invariants already rule out.
+Per #216, `LastUsedAt` is "always present" on a `Conversation` (it has no `omitempty` JSON tag and is bumped on every user activity by the future API layer). A zero-value `LastUsedAt` would make `ShouldArchive` return `true` (any unpromoted, non-archived record older than 30 days archives, and `time.Time{}` is far older than any plausible `now`) — that is the correct fallback if the invariant ever breaks. Adding a guard would defend against a failure mode the type's invariants already rule out.
 
 ### Manual archive is durable until the user unarchives (#1488)
 
