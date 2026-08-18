@@ -45,7 +45,12 @@ package sessions
 // Concurrency: safe for concurrent use. Two callers racing the same id both
 // receive the same *Session; exactly one registration happens.
 func (p *Pool) Revive(id SessionID, label, spawnDir string) (*Session, error) {
-	sess, _, err := p.materialise(id, label, spawnDir)
+	// Zero settings make a revive fail closed, so a phone-set
+	// --dangerously-skip-permissions never survives a daemon restart (#1487
+	// security review). Deliberately NOT mintSettings, which GetOrCreateIn
+	// passes: a revived session inherits neither its own dropped settings nor
+	// the bootstrap's — see the contract paragraph above.
+	sess, _, err := p.materialise(id, label, spawnDir, SessionSettings{})
 	if err != nil {
 		return nil, err
 	}

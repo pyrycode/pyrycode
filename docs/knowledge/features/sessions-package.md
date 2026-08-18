@@ -354,10 +354,36 @@ nothing and the argv is byte-identical to pre-#833 behaviour.
   `cfg.Bootstrap.ClaudeArgs` directly; appending to an alias would mutate the
   caller's slice.
 - `Pool.buildSession` (minted): gains a `settings SessionSettings` parameter,
-  appends after `--session-id`. `CreateIn` / `GetOrCreateIn` — the two callers
-  — both still pass `SessionSettings{}`; plumbing real values through the
-  *mint* path (as opposed to updating an already-minted session, which
-  `Pool.UpdateSettings` below covers) remains unaddressed.
+  appends after `--session-id`. Since #1575 the two public mint entry points —
+  `CreateIn` and `GetOrCreateIn` — both pass the unexported `Pool.mintSettings`
+  rather than `SessionSettings{}`, so a newly-minted session starts at the
+  operator's configured model and effort instead of claude's own defaults.
+  `Pool.Revive` is now the only caller that passes the zero value.
+
+  **`Pool.mintSettings` — inherit two fields, structurally.** It reads
+  `DefaultSettings` (the bootstrap's persisted triple) and rebuilds a
+  `SessionSettings` **field by field** from `Model` and `Effort` only. The
+  returned literal never mentions `YOLO`, so a phone-granted
+  `--dangerously-skip-permissions` cannot be inherited by construction rather
+  than by a clearing statement a later edit could drop — and a field added to
+  `SessionSettings` in future is likewise not inherited until someone opts it
+  in. The existence bool is discarded: `DefaultSettings` already returns the
+  zero value when there is no bootstrap, so the no-configuration argv falls out
+  of the zero value rather than out of a second return site. It **must** be
+  called off `Pool.mu` (`DefaultSettings` takes `RLock`, and Go's `RWMutex` is
+  not reentrant); both call sites already build the session before taking the
+  write lock, so the snapshot can be one concurrent `UpdateSettings` stale —
+  accepted, matching how `label` and `spawnDir` already behave on this path.
+
+  **Ripple:** `saveLocked` copies `s.settings` into the outgoing entry, so on a
+  daemon whose bootstrap carries a model or effort a minted session's on-disk
+  entry now carries them too, where `omitempty` previously dropped them. That
+  is wanted — `Pool.UpdateSettings`'s live restart recomposes argv from the
+  stored value, so a session that inherits at spawn must store what it
+  inherited. `yolo` stays absent (`false` + `omitempty`).
+
+  Setting the model/effort of an *already-minted* session is a different
+  concern, covered by `Pool.UpdateSettings` below.
 
 **Persistence.** `registryEntry` (`registry.go`) gains `Model string`,
 `Effort string`, `YOLO bool`, all `json:"...,omitempty"`, following the
@@ -1071,9 +1097,11 @@ func (p *Pool) Revive(id SessionID, label, spawnDir string) (*Session, error)
 
 **No `context.Context` — that absence is the API contract.** `Revive` registers the session and returns; it never spawns claude and never blocks. The returned `*Session` is at `stateEvicted` with an open `activeCh` and a closed `evictedCh`, which is byte-for-byte the shape an idle-evicted session has, so it respawns on the next `Pool.Activate` through the **existing** lazy-respawn path. Reviving introduces no new lifecycle path; the caller owns the `Activate`.
 
-**Shared core with `GetOrCreateIn`.** Both route through the unexported `materialise(id, label, spawnDir) (*Session, took bool, error)`, which holds the whole `ValidID` → build → register → `saveLocked` → skip-set → `runGroup` guard → `g.Go` sequence described under [§ Pool.GetOrCreate](#poolgetorcreate-13b) — including every rollback. The **only** difference between the two callers is what happens after: `GetOrCreateIn` calls `Activate` on the register path (and, per its long-standing contract, *not* on the take path), `Revive` calls it never. That take/register split became the `took` flag rather than an inline early return, so `TestPool_GetOrCreate_Take_DoesNotActivate` pins it — a `Revive`d session is the only fixture that can hold a registered-but-never-activated session to assert against.
+**Shared core with `GetOrCreateIn`.** Both route through the unexported `materialise(id, label, spawnDir string, settings SessionSettings) (*Session, took bool, error)`, which holds the whole `ValidID` → build → register → `saveLocked` → skip-set → `runGroup` guard → `g.Go` sequence described under [§ Pool.GetOrCreate](#poolgetorcreate-13b) — including every rollback. Exactly **two** things differ between the two callers. The first is what happens after: `GetOrCreateIn` calls `Activate` on the register path (and, per its long-standing contract, *not* on the take path), `Revive` calls it never. That take/register split became the `took` flag rather than an inline early return, so `TestPool_GetOrCreate_Take_DoesNotActivate` pins it — a `Revive`d session is the only fixture that can hold a registered-but-never-activated session to assert against. The second is the `settings` argument, below.
 
-**Zero settings — fail-closed by construction.** `materialise` passes `SessionSettings{}`, so a revived session's argv carries no `--dangerously-skip-permissions` even if the dropped entry persisted `yolo: true`. Deliberate, and free: a phone-set permission bypass does not survive a daemon restart. Restoring it would require reading the discarded `registryEntry`, i.e. the rehydrate-at-`New` design this ticket rejected.
+**Zero settings — fail-closed by construction.** `materialise` takes the settings as a parameter and forwards them verbatim to `buildSession`, making no policy decision of its own; `Revive` is the caller that passes `SessionSettings{}`, so a revived session's argv carries no `--dangerously-skip-permissions` even if the dropped entry persisted `yolo: true`. Deliberate, and free: a phone-set permission bypass does not survive a daemon restart. Restoring it would require reading the discarded `registryEntry`, i.e. the rehydrate-at-`New` design this ticket rejected.
+
+That parameter is also what keeps `Revive` off the mint path's inheritance (#1575): `GetOrCreateIn` passes `Pool.mintSettings`, `Revive` the zero value, so each caller states its choice where the contract justifying it already lives. Reading `mintSettings` *inside* `materialise` would be a one-line change that silently hands a revived session the bootstrap's model and effort — a third behaviour with its own security reasoning to redo. `TestPool_Revive_DoesNotInheritOperatorSettings` reddens under exactly that mutation (verified via `go test -overlay`), which is the regression nothing previously caught: the revive contract had no test pinning model, effort, or bypass at all.
 
 **`spawnDir` is opaque here too.** Same contract as `CreateIn` / `GetOrCreateIn`: used verbatim, never validated, canonicalised, or trust-checked pool-side; empty falls back to `tpl.WorkDir`. The caller supplies a pre-resolved `$HOME`-confined realpath. SECURITY: it is a phone-influenced workspace path, so `Revive` must not log it. The consumer — `sessionRouter.revive` in `cmd/pyry` — re-runs `resolveSpawnDir` at revive time rather than trusting the recorded value, because a path valid at mint time can become an escape before the restart; see [conversation-session-binding.md § Restart scope](conversation-session-binding.md#edge-cases--limitations).
 

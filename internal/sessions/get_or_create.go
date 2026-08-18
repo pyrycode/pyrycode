@@ -56,7 +56,11 @@ func (p *Pool) GetOrCreate(ctx context.Context, id SessionID, label string) (Ses
 // Otherwise identical to GetOrCreate: see its docstring for the full
 // take/create semantics, concurrency, and return shapes.
 func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir string) (SessionID, error) {
-	_, took, err := p.materialise(id, label, spawnDir)
+	// A minted session starts at the operator's configured model and effort
+	// (#1575). Read here rather than inside materialise, which Revive also
+	// calls: revive must keep inheriting nothing. mintSettings takes p.mu.RLock
+	// internally, so it must be evaluated before materialise takes p.mu.
+	_, took, err := p.materialise(id, label, spawnDir, p.mintSettings())
 	if err != nil {
 		return "", err
 	}
@@ -87,13 +91,21 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 // loser of a same-id race can never Activate before the winner's lifecycle
 // goroutine exists) lives here.
 //
+// settings is forwarded verbatim to buildSession and is the caller's decision,
+// not this function's — the second thing that separates the two callers.
+// GetOrCreateIn passes Pool.mintSettings, so a minted session starts at the
+// operator's configured model and effort; Revive passes the zero value, so a
+// revived one inherits nothing. Keeping it a parameter is what stops a change
+// to the mint path from silently re-pointing revive at the bootstrap's
+// settings; reading mintSettings here instead would do exactly that.
+//
 // Returns:
 //   - (sess, true, nil) — id was already registered; sess is the EXISTING entry
 //     and the caller's label + spawnDir are silently dropped
 //   - (sess, false, nil) — sess was registered, persisted, and scheduled
 //   - (nil, false, err) — nothing registered; ErrInvalidSessionID, a buildSession
 //     error, a saveLocked error, or ErrPoolNotRunning, each rolled back
-func (p *Pool) materialise(id SessionID, label, spawnDir string) (*Session, bool, error) {
+func (p *Pool) materialise(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, bool, error) {
 	if !ValidID(string(id)) {
 		return nil, false, ErrInvalidSessionID
 	}
@@ -103,11 +115,7 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string) (*Session, bool
 	// p.mu so the critical section stays small for concurrent same-id
 	// callers and so we can discard the loser's freshly-built session
 	// cheaply.
-	// Zero settings are deliberate on both paths: they keep the minted argv
-	// byte-identical (#826b plumbs real per-session settings through the mint
-	// path) AND make a revive fail closed, so a phone-set --dangerously-skip-
-	// permissions never survives a daemon restart (#1487 security review).
-	sess, err := p.buildSession(id, label, spawnDir, SessionSettings{})
+	sess, err := p.buildSession(id, label, spawnDir, settings)
 	if err != nil {
 		return nil, false, err
 	}

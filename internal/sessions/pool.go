@@ -1067,6 +1067,35 @@ func (p *Pool) DefaultSettings() (SessionSettings, bool) {
 	return sess.settings, true
 }
 
+// mintSettings returns the SessionSettings a freshly-minted session starts
+// with: the operator's configured model and effort level, sourced from the
+// bootstrap session's persisted settings so a new conversation does not fall
+// back to claude's own defaults.
+//
+// Built field by field rather than by copying DefaultSettings' return, so YOLO
+// is excluded structurally rather than by a clearing statement someone could
+// later delete: a phone-granted --dangerously-skip-permissions can never reach
+// a minted session's argv, and any field added to SessionSettings in future is
+// likewise not inherited until someone opts it in. That is the fail-closed
+// direction and it is the same reasoning Revive's docstring records (#1487).
+//
+// The existence bool is discarded deliberately. DefaultSettings already returns
+// the zero SessionSettings when there is no bootstrap, so an early return for
+// that case would be a second return site emitting byte-identical output — the
+// no-configuration argv falls out of the zero value, not out of a branch.
+//
+// Concurrency: MUST be called with p.mu unheld. DefaultSettings takes
+// p.mu.RLock() and Go's RWMutex is not reentrant, so a call from inside a
+// critical section self-deadlocks the pool. Both call sites (CreateIn,
+// GetOrCreateIn) build the session before taking p.mu.
+func (p *Pool) mintSettings() SessionSettings {
+	boot, _ := p.DefaultSettings()
+	return SessionSettings{
+		Model:  boot.Model,
+		Effort: boot.Effort,
+	}
+}
+
 // BootstrapID returns the pool's current bootstrap session id under p.mu
 // (RLock). It resolves p.bootstrap fresh on each call — mirroring
 // Default/DefaultSettings — so it stays correct across a /clear rotation:
@@ -1243,9 +1272,10 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 		return "", fmt.Errorf("sessions: create id: %w", err)
 	}
 
-	// This ticket passes zero settings (byte-identical minted argv); #826b
-	// plumbs real per-session settings through this mint path.
-	sess, err := p.buildSession(id, label, spawnDir, SessionSettings{})
+	// A minted session starts at the operator's configured model and effort
+	// (#1575). mintSettings must be read here, above p.mu.Lock — it takes
+	// p.mu.RLock internally and the mutex is not reentrant.
+	sess, err := p.buildSession(id, label, spawnDir, p.mintSettings())
 	if err != nil {
 		return "", err
 	}
@@ -1301,8 +1331,10 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 //
 // settings are the per-session model / effort / YOLO applied to the spawn argv
 // (#833) and stored on the returned Session. The zero value appends no flags,
-// so the argv is byte-identical to today (AC #5). CreateIn/GetOrCreateIn pass
-// the zero value in this ticket; #826b plumbs real values through the mint path.
+// so an unconfigured spawn's argv carries none. CreateIn and GetOrCreateIn pass
+// mintSettings — the operator's configured model and effort, never the bypass
+// (#1575). Pool.Revive is the one caller that still passes the zero value, so a
+// phone-granted bypass cannot survive a daemon restart (#1487).
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
 	// The per-session --settings file pre-approves the project's MCP servers so
