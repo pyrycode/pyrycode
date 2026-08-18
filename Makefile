@@ -52,9 +52,20 @@ test:
 e2e:
 	$(GO) test -tags e2e -race -count=1 ./internal/e2e/...
 
+# e2e-realclaude, e2e-liverelay, e2e-install and e2e-update each pass -count=1,
+# and it is load-bearing. Every one of them builds its binary under test with a
+# subprocess `go build` (ensurePyryBuilt in internal/e2e, internal/e2e/realclaude
+# and internal/e2e/liverelay; ensureRelayBuilt for the sibling relay; both build
+# sites in cmd/pyry's update e2e test). A child process's file reads never enter
+# the test binary's cache key, so `go test` cannot see the sources these suites
+# actually compile — an edit confined to cmd/pyry, internal/brokenpyry or the
+# sibling relay checkout leaves the key unchanged and replays the previous `ok`,
+# proving nothing. Do not drop the flag as redundant. `test` above keeps its
+# cache deliberately: it is untagged, reaches none of those build sites, and
+# runs on every `make check`.
 .PHONY: e2e-realclaude
 e2e-realclaude:
-	$(GO) test -tags e2e_realclaude ./internal/e2e/realclaude/...
+	$(GO) test -tags e2e_realclaude -count=1 ./internal/e2e/realclaude/...
 
 # e2e-liverelay proves the daemon ↔ real pyrycode-relay pairing with one
 # round-trip against a locally built relay binary. Offline-capable and
@@ -62,7 +73,7 @@ e2e-realclaude:
 # ../pyrycode-relay checkout. See docs/release-tooling.md § Live-relay smoke test.
 .PHONY: e2e-liverelay
 e2e-liverelay:
-	$(GO) test -tags e2e_liverelay ./internal/e2e/liverelay/...
+	$(GO) test -tags e2e_liverelay -count=1 ./internal/e2e/liverelay/...
 
 # e2e-install runs the real install round-trip (opt-in tag e2e_install). The
 # darwin/linux build tags mean only the host platform's install test compiles
@@ -72,7 +83,7 @@ e2e-liverelay:
 # untouched. See docs/release-tooling.md § Install & update e2e suites.
 .PHONY: e2e-install
 e2e-install:
-	$(GO) test -tags e2e_install ./internal/e2e/...
+	$(GO) test -tags e2e_install -count=1 ./internal/e2e/...
 
 # e2e-update runs the full `pyry update` flow (opt-in tag e2e_update): fetch →
 # verify → atomic binary replace → daemon restart, against an in-process fake
@@ -83,7 +94,7 @@ e2e-install:
 # internal/e2e. See docs/release-tooling.md § Install & update e2e suites.
 .PHONY: e2e-update
 e2e-update:
-	$(GO) test -tags e2e_update ./cmd/pyry/...
+	$(GO) test -tags e2e_update -count=1 ./cmd/pyry/...
 
 # preship is the pre-binary-swap gate: everything hermetic (via check, which
 # now runs the fake-daemon e2e suite) plus the live-claude suite and the
