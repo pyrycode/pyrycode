@@ -50,6 +50,11 @@ it lands.
 After this slice no reachable sequence leaves a conversation reported busy forever: `TurnEnd` closes the
 normal turn, the pool transition closes a rotated or evicted one, and the child exit closes a crashed one.
 
+**Correction (#1496, documentation pass):** this held for every clear-side feed named above but not for the
+fan-in delivering the `TurnEnd` to `observe` in the first place — `sinkFor`'s pre-#1496 drop-newest was
+class-blind and could discard a `TurnEnd` under saturation regardless of how correct these feeds were. See
+[`docs/knowledge/codebase/1496.md`](../../knowledge/codebase/1496.md).
+
 **Ships unwired for delivery.** No delivery path consults the signal; no v2 frame changes.
 
 ---
