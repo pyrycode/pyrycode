@@ -63,7 +63,7 @@ type Conversation struct {
 	SessionHistory []string `json:"session_history,omitempty"`
 
 	// IsPromoted distinguishes the two conversation modes:
-	//   false — discussion (ephemeral, eligible for auto-archive)
+	//   false — discussion (ephemeral, eligible for auto-archive unless IsArchived)
 	//   true  — channel    (long-lived, named, exempt from auto-archive)
 	// Always serialized; the field is meaningful in both states and the
 	// unpromoted default ("discussion") must be explicit on disk.
@@ -71,7 +71,9 @@ type Conversation struct {
 
 	// IsArchived is the durable manual-archive flag: true means the user
 	// archived this conversation, false means it is active. Flipped by
-	// Registry.SetArchived and consumed by the archive/unarchive verbs (#881).
+	// Registry.SetArchived and consumed by the archive/unarchive verbs (#881)
+	// and by ShouldArchive, which exempts archived rows from the idle sweep's
+	// hard delete (#1488).
 	//
 	// omitempty is deliberate and, unlike IsPromoted, correct here: the
 	// contract is "absent key decodes as active, with no migration step." A

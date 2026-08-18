@@ -2,6 +2,7 @@ package conversations
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -13,6 +14,14 @@ func TestSweep(t *testing.T) {
 	type seedSpec struct {
 		idleDays   int
 		isPromoted bool
+		isArchived bool
+	}
+
+	// survivorSpec identifies a row expected to outlive the sweep by the
+	// deterministic Cwd mk assigns, paired with its archive flag.
+	type survivorSpec struct {
+		cwd        string
+		isArchived bool
 	}
 
 	mk := func(specs []seedSpec) *Registry {
@@ -22,6 +31,7 @@ func TestSweep(t *testing.T) {
 				ID:         ConversationID(fmt.Sprintf("%08d-2222-4333-8444-555555555555", i)),
 				Cwd:        fmt.Sprintf("/seed-%d", i),
 				IsPromoted: s.isPromoted,
+				IsArchived: s.isArchived,
 				LastUsedAt: now.Add(-time.Duration(s.idleDays) * 24 * time.Hour),
 			})
 		}
@@ -32,6 +42,9 @@ func TestSweep(t *testing.T) {
 		name      string
 		seeds     []seedSpec
 		wantCount int
+		// wantSurvivors, when non-nil, pins which rows survive, not just how
+		// many. Rows whose scenario is fully described by wantCount leave it nil.
+		wantSurvivors []survivorSpec
 	}{
 		{
 			name:      "empty-registry",
@@ -82,6 +95,18 @@ func TestSweep(t *testing.T) {
 			},
 			wantCount: 1,
 		},
+		{
+			// The count alone does not pin this row: an inverted guard
+			// (exempting the non-archived row instead) also removes exactly
+			// one. wantSurvivors is what says the right row survived.
+			name: "archived-idle-row-survives",
+			seeds: []seedSpec{
+				{idleDays: 31, isPromoted: false, isArchived: true},
+				{idleDays: 31, isPromoted: false, isArchived: false},
+			},
+			wantCount:     1,
+			wantSurvivors: []survivorSpec{{cwd: "/seed-0", isArchived: true}},
+		},
 	}
 
 	for _, tc := range tests {
@@ -100,6 +125,15 @@ func TestSweep(t *testing.T) {
 			for _, c := range survivors {
 				if ShouldArchive(c, now) {
 					t.Errorf("survivor %q is archive-eligible: IsPromoted=%v LastUsedAt=%v", c.ID, c.IsPromoted, c.LastUsedAt)
+				}
+			}
+			if tc.wantSurvivors != nil {
+				got := make([]survivorSpec, 0, len(survivors))
+				for _, c := range survivors {
+					got = append(got, survivorSpec{cwd: c.Cwd, isArchived: c.IsArchived})
+				}
+				if !slices.Equal(got, tc.wantSurvivors) {
+					t.Errorf("survivors after Sweep = %+v, want %+v", got, tc.wantSurvivors)
 				}
 			}
 		})
