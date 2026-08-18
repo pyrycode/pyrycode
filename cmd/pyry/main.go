@@ -937,7 +937,20 @@ func runSupervisor(args []string) error {
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
 	}
-	defer relayCleanup()
+	// Cancel-then-join: relayCleanup joins producer drains whose Run loops
+	// return only on ctx.Done, so the daemon ctx must already be cancelled when
+	// it runs. Defers are LIFO, so the `defer cancelCause(nil)` registered at the
+	// top of runSupervisor runs AFTER this one — too late to unblock them. Cancel
+	// here instead, so an error return between startRelay and the end of
+	// runSupervisor (today: ctrl.Listen's ErrInstanceRunning) takes the same
+	// ordering the normal shutdown path already takes, rather than wedging with
+	// the unblocking cancel queued behind the block (#1492). Cause contexts are
+	// first-cause-wins, so a 4409 already recorded by startRelay's conn.Wait
+	// classifier survives this nil and fatalCause still reports it.
+	defer func() {
+		cancelCause(nil)
+		relayCleanup()
+	}()
 
 	// Pool satisfies control.Sessioner directly — Pool.Create returns
 	// sessions.SessionID and Pool.Remove returns plain error, matching
@@ -972,16 +985,24 @@ func runSupervisor(args []string) error {
 		"socket", socketPath,
 	)
 	runErr := pool.Run(ctx)
+	// Pool.Run can return with the daemon ctx still LIVE: any early non-ctx error
+	// out of its errgroup returns from a ctx DERIVED from ours, so cancelling that
+	// one does not cancel this one. Queue.Run blocks on ctx.Done before joining
+	// its drains, so the <-qDone join below would never complete (#1492). Cancel
+	// first — on the shutdown paths that reach here today (signal, `pyry stop`, a
+	// fatal 4409) ctx is already cancelled and this is a no-op that cannot
+	// displace the recorded cause.
+	cancelCause(nil)
 
 	// Stop the control server (already wired to ctx but Close is idempotent
 	// and ensures the socket file is gone before we return).
 	_ = ctrl.Close()
 	<-ctrlDone
 
-	// Join the inbound-queue lifecycle: pool.Run returned because ctx was
-	// cancelled, so queue.Run has observed ctx.Done and is winding down its
-	// drains. Waiting here keeps the daemon from exiting while a drain goroutine
-	// is still in flight.
+	// Join the inbound-queue lifecycle: ctx is cancelled by the time we get here
+	// (either before pool.Run returned or by the cancelCause above), so queue.Run
+	// has observed ctx.Done and is winding down its drains. Waiting here keeps the
+	// daemon from exiting while a drain goroutine is still in flight.
 	<-qDone
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
