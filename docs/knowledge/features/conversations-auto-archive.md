@@ -1,6 +1,6 @@
 # `internal/conversations` auto-archive
 
-Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels are exempt regardless of idle time. Four slices plus an e2e seam plus the e2e itself: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup, the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262) that lets out-of-process e2e tests drive the loop deterministically without waiting an hour, and the out-of-process e2e (#263, `internal/e2e/conv_sweep_test.go`) that pins the full daemon lifecycle — `cmd/pyry/main.go`'s `sessions.Config` construction + sweep tick on a real on-disk registry + clean SIGTERM shutdown — at the binary boundary.
+Phase 3 auto-archive policy: unpromoted conversations idle for ≥30 days are eligible for archival; promoted channels and manually archived conversations are exempt regardless of idle time. Four slices plus an e2e seam plus the e2e itself: a pure predicate (`ShouldArchive`, #219), a pure iterate-and-apply primitive (`Sweep`, #237), the long-running ticker wrapper (`RunSweepLoop` + `sweepOnce` + `SweepInterval`, #242) that owns the tick / Save / log contract, the daemon-side wiring (#243) that loads `conversations.json` at startup in `cmd/pyry/main.go` and registers the sweep loop as a sibling goroutine to the rotation watcher inside `Pool.Run`'s errgroup, the `-pyry-conv-sweep-interval` flag + `Config.SweepInterval` plumbing (#262) that lets out-of-process e2e tests drive the loop deterministically without waiting an hour, and the out-of-process e2e (#263, `internal/e2e/conv_sweep_test.go`) that pins the full daemon lifecycle — `cmd/pyry/main.go`'s `sessions.Config` construction + sweep tick on a real on-disk registry + clean SIGTERM shutdown — at the binary boundary.
 
 ## What it is
 
@@ -14,7 +14,7 @@ const SweepInterval = time.Hour
 func RunSweepLoop(ctx context.Context, reg *Registry, path string, interval time.Duration, log *slog.Logger) error
 ```
 
-`ShouldArchive` returns `true` iff `!c.IsPromoted && now.Sub(c.LastUsedAt) >= 30*24*time.Hour`. `Sweep` iterates `reg.List()`, applies the predicate, calls `reg.Delete` on each match, and returns the count archived. Neither does I/O.
+`ShouldArchive` returns `true` iff `!c.IsPromoted && !c.IsArchived && now.Sub(c.LastUsedAt) >= 30*24*time.Hour`. `Sweep` iterates `reg.List()`, applies the predicate, calls `reg.Delete` on each match, and returns the count archived. Neither does I/O.
 
 `RunSweepLoop` ticks every `interval` (production: `SweepInterval = time.Hour`); on each tick it calls `Sweep(reg, time.Now())` and, only when the count is non-zero, `reg.Save(path)`. Successful Save logs at INFO with the count; failed Save logs at ERROR and the loop continues. Returns nil on `ctx.Done()`. Does not perform a final on-shutdown sweep. Designed to run as a single goroutine inside an errgroup.
 
@@ -34,20 +34,27 @@ Stdlib only (`time`, `context`, `log/slog`). `Registry.Delete` (also #237) is th
 
 ## How it works
 
-Two-line body. Short-circuit on `IsPromoted`, then a single comparison:
+Two short-circuits — `IsPromoted`, then `IsArchived` — followed by a single comparison:
 
 ```go
 const archiveIdleThreshold = 30 * 24 * time.Hour
 
 func ShouldArchive(c Conversation, now time.Time) bool {
+    // Promoted channels are long-lived by definition.
     if c.IsPromoted {
+        return false
+    }
+    // Manual archive is recoverable; the destructive sweep must not undo it.
+    if c.IsArchived {
         return false
     }
     return now.Sub(c.LastUsedAt) >= archiveIdleThreshold
 }
 ```
 
-Pure value semantics. Safe to call from any goroutine. Cannot fail — reads two fields, returns a bool.
+The `IsArchived` guard (#1488) is what keeps the two archive mechanisms from contradicting each other: `Sweep` hard-deletes, manual archive (`Registry.SetArchived`, #880/#881) is recoverable, and without the guard a conversation the user archived to keep would be deleted 30 days after its last *activity* — `SetArchived` does not bump `LastUsedAt`, so archiving a row already idle 29 days bought it one more day, not thirty. Guard order carries no behaviour (both exemptions return `false` unconditionally); separate blocks keep one rationale per guard. See § Decisions → *Manual archive is durable until the user unarchives*.
+
+Pure value semantics. Safe to call from any goroutine. Cannot fail — reads three fields, returns a bool.
 
 `Sweep`'s body is a four-line composition:
 
@@ -118,9 +125,15 @@ Pin the established Go idiom for time-dependent rules: take `now time.Time` as a
 
 Per #216, `LastUsedAt` is "always present" on a `Conversation` (it has no `omitempty` JSON tag and is bumped on every user activity by the future API layer). A zero-value `LastUsedAt` would make `ShouldArchive` return `true` (any unpromoted record older than 30 days archives, and `time.Time{}` is far older than any plausible `now`) — that is the correct fallback if the invariant ever breaks. Adding a guard would defend against a failure mode the type's invariants already rule out.
 
+### Manual archive is durable until the user unarchives (#1488)
+
+Auto-archive's hard delete applies only to conversations the user has **not** manually archived. `ShouldArchive` reads `IsArchived` and exempts archived rows; the only remaining path that deletes a row the user archived is the explicit `delete_conversation` verb, which is intended user action. This is the lifecycle rule for the two mechanisms — before #1488 it was written down three times as deferred-and-undecided (`codebase/880.md`, `codebase/881.md`, and this doc's § Out of scope) while the destructive mechanism stayed blind to the recoverable one.
+
+Accepted consequence: **archived rows are retained indefinitely.** Recoverability outranks bounded registry growth here — a per-user conversation registry is small, and unbounded growth is a cheap problem next to silent unrecoverable loss. A retention policy for archived rows, if ever wanted, is a separate ticket.
+
 ### Predicate / sweep / wiring split
 
-Three slices: predicate (`ShouldArchive`, #219), sweep primitive (`Sweep`, #237), daemon wiring (ticker + load + save, future ticket). The first two are pure; the third does I/O. Each is testable in isolation — the rule is a four-row table-driven unit test with `time.Date(...)` literals; the sweep is a six-row table-driven test that seeds an in-memory `Registry` and asserts the count plus the survivors; the daemon wiring will be tested by exercising its I/O contract (load failure, save failure, tick interleave) without re-testing rule or sweep.
+Three slices: predicate (`ShouldArchive`, #219), sweep primitive (`Sweep`, #237), daemon wiring (ticker + load + save, future ticket). The first two are pure; the third does I/O. Each is testable in isolation — the rule is a five-row table-driven unit test with `time.Date(...)` literals; the sweep is a seven-row table-driven test that seeds an in-memory `Registry` and asserts the count plus the survivors; the daemon wiring will be tested by exercising its I/O contract (load failure, save failure, tick interleave) without re-testing rule or sweep.
 
 ### `Sweep` returns `int`, not `(int, error)`
 
@@ -174,22 +187,23 @@ No `if log == nil { log = slog.Default() }` guard. The package has no other code
 
 ### `TestShouldArchive` (`archive_test.go`)
 
-Table-driven, stdlib only. One test function `TestShouldArchive` with four rows, all anchored to a single deterministic `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` and expressing each row's `LastUsedAt` as `now.Add(-d)` for the relevant `d`:
+Table-driven, stdlib only. One test function `TestShouldArchive` with five rows, all anchored to a single deterministic `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` and expressing each row's `LastUsedAt` as `now.Add(-d)` for the relevant `d`:
 
-| Name | `IsPromoted` | `LastUsedAt` offset | Expected |
-|---|---|---|---|
-| promoted, very idle | true | `-365 days` | false |
-| unpromoted, exactly 30 days idle | false | `-30 days` | true |
-| unpromoted, 29d23h idle | false | `-(29d + 23h)` | false |
-| unpromoted, just over threshold | false | `-(30 days + 1s)` | true |
+| Name | `IsPromoted` | `IsArchived` | `LastUsedAt` offset | Expected |
+|---|---|---|---|---|
+| promoted, very idle | true | false | `-365 days` | false |
+| unpromoted, exactly 30 days idle | false | false | `-30 days` | true |
+| unpromoted, 29d23h idle | false | false | `-(29d + 23h)` | false |
+| unpromoted, just over threshold | false | false | `-(30 days + 1s)` | true |
+| archived, very idle (#1488) | false | true | `-365 days` | false |
 
-The first row pins the `IsPromoted` short-circuit (a promoted record with arbitrarily ancient `LastUsedAt` does not archive). Rows 2–4 pin the boundary direction. No "promoted with recent activity" row — it tests the same short-circuit as row 1 and adds no signal. Each `Conversation` literal is constructed inline; only `IsPromoted` and `LastUsedAt` matter — other fields stay at zero values.
+The first row pins the `IsPromoted` short-circuit (a promoted record with arbitrarily ancient `LastUsedAt` does not archive). Rows 2–4 pin the boundary direction. The last row pins the `IsArchived` short-circuit; its `IsPromoted: false` is load-bearing — a promoted fixture would be absorbed by the first guard and would stay green with the `IsArchived` guard deleted, proving nothing. No "promoted with recent activity" row — it tests the same short-circuit as row 1 and adds no signal. Each `Conversation` literal is constructed inline; only `IsPromoted`, `IsArchived` and `LastUsedAt` matter — other fields stay at zero values.
 
 Use `time.Date(...)` (no monotonic-clock component) so `time.Time` arithmetic is deterministic across machines. See `lessons.md` § "JSON roundtrip strips monotonic-clock state" for the parallel rule on the persistence side.
 
 ### `TestSweep` (`sweep_test.go`)
 
-Single primary table, one row per scenario. Each row seeds a `*Registry`, calls `Sweep(reg, now)`, asserts the returned count, the post-sweep `len(reg.List())`, and that every surviving entry passes `!ShouldArchive(c, now) || c.IsPromoted`. Anchored to the same `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` as the predicate test:
+Single primary table, one row per scenario. Each row seeds a `*Registry`, calls `Sweep(reg, now)`, asserts the returned count, the post-sweep `len(reg.List())`, and that no surviving entry passes `ShouldArchive(c, now)`. Anchored to the same `now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)` as the predicate test:
 
 | Row | Seed | Expected count |
 |---|---|---|
@@ -199,8 +213,11 @@ Single primary table, one row per scenario. Each row seeds a `*Registry`, calls 
 | none-archivable-promoted-but-idle | 2 promoted, `LastUsedAt = now-365d` | 0 |
 | mixed | 2 archivable + 2 fresh-unpromoted + 2 promoted-but-idle | 2 |
 | boundary-exactly-30-days | 1 unpromoted, `LastUsedAt = now-30d` | 1 |
+| archived-idle-row-survives (#1488) | 1 archived + 1 non-archived, both unpromoted at `now-31d` | 1 |
 
 The `boundary-exactly-30-days` row mirrors the predicate's "exactly 30 days idle" row at the sweep level — pins that the inclusive boundary survives the iterate-and-apply layer. The `none-archivable-promoted-but-idle` row pins that `Sweep` does not delete promoted records regardless of idle time. Promoted-entry name fields stay zero (`*string` nil) — `ShouldArchive` short-circuits on `IsPromoted` before touching `Name`.
+
+The `archived-idle-row-survives` row pins the manual-archive exemption at the sweep level, and **its survivor-identity assertion, not its count, is what catches an inverted guard.** The row seeds two rows that are identical but for `IsArchived`, so a guard inverted to `if !c.IsArchived { return false }` still removes exactly one and still leaves a survivor the shipped-predicate loop accepts — the count and `len(List)` assertions both stay green under that mutant. Only naming *which* row survived kills it. The test therefore carries an optional per-row `wantSurvivors []survivorSpec` field (`{cwd, isArchived}` pairs, identified by the deterministic `/seed-<i>` `Cwd` the `mk` helper assigns) that this row sets to `{{cwd: "/seed-0", isArchived: true}}`; rows fully described by their count leave it nil. The local `seedSpec` gained an `isArchived bool` alongside `idleDays` / `isPromoted`; existing rows use keyed literals and are unchanged by the addition. Both mutants — guard deleted, guard inverted — were verified red before the row was called done.
 
 Concurrent invocation is not tested here — `Sweep` runs on the caller's goroutine and `TestRegistry_ConcurrentReadWrite` already exercises `Registry`'s mutex discipline. Persistence is not tested either — `Sweep` does not call `Save`; the doc comment is the contract.
 
@@ -343,7 +360,7 @@ Seeds two 60-day-idle conversations (one promoted, one unpromoted) into `<home>/
 - Final on-shutdown sweep — AC explicit "does NOT perform any final on-shutdown sweep."
 - Metrics emission (counter of archive runs, histogram of archived counts) — no Phase 3 metrics surface exists yet; defer until one does.
 - `ConversationsRegistry`-shaped façade types or mockable interfaces — the function takes the concrete `*Registry`; the package owns both. An interface seam is premature.
-- Archive destination — `Sweep` still archives by removing the row (history retention is a separate concern). #880 added a *durable, recoverable* archive mechanism (`Conversation.IsArchived` + `Registry.SetArchived`) for **manual** archive/restore, but deliberately did not change `Sweep`/`ShouldArchive` to use it — reconciling auto-archive with the new soft-archive state is still out of scope. See [`features/conversations-registry.md`](conversations-registry.md) § `SetArchived` and [codebase/880.md](../codebase/880.md).
+- Archive destination — `Sweep` still archives by removing the row (history retention is a separate concern). The reconciliation with #880's *durable, recoverable* manual archive (`Conversation.IsArchived` + `Registry.SetArchived`) is **decided, not deferred**, as of #1488: archived rows are exempt from the idle sweep, and deletion applies only to non-archived idle discussions — see § Decisions → *Manual archive is durable until the user unarchives*, [`features/conversations-registry.md`](conversations-registry.md) § `SetArchived`, and [codebase/880.md](../codebase/880.md). Still out of scope is the **other** fix direction: making `Sweep` *set* `IsArchived` instead of deleting, paired with a separate longer retention policy. That changes what auto-archive means for every existing idle discussion and needs its own decision; #1488 deliberately scoped itself to the exemption.
 - Configurable threshold — exported knob deferred until a real ask.
 - Integration with `LastUsedAt` bumps — the future conversations API (rotate session, attach, send message) is what advances `LastUsedAt`; the predicate only reads it.
 - Clock interface / `Clock` type for injection — `now time.Time` is the injection point; tests pass deterministic literals, no fake clock needed.
@@ -351,7 +368,7 @@ Seeds two 60-day-idle conversations (one promoted, one unpromoted) into `<home>/
 
 ## Related
 
-- [`features/conversations-package.md`](conversations-package.md) — the `Conversation` type, specifically the `IsPromoted` and `LastUsedAt` fields the predicate reads.
+- [`features/conversations-package.md`](conversations-package.md) — the `Conversation` type, specifically the `IsPromoted`, `IsArchived` and `LastUsedAt` fields the predicate reads.
 - [`features/conversations-registry.md`](conversations-registry.md) — the on-disk registry the sweep iterates; `Registry.Delete` is the mutation primitive `Sweep` calls; `Registry.Save` is what `sweepOnce` calls.
 - [`features/rotation-watcher.md`](rotation-watcher.md) — `Watcher.Run`, the canonical project ticker-shaped goroutine `RunSweepLoop` mirrors (one delta: this loop returns nil on ctx cancellation; the watcher returns `ctx.Err()`).
 - [`docs/specs/architecture/219-auto-archive-predicate.md`](../../specs/architecture/219-auto-archive-predicate.md) — architect's spec for the predicate (#219).
