@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -603,5 +605,193 @@ func TestV2Session_AppFrame_QueueOverflow_ClosesConn(t *testing.T) {
 	}
 	if inner.InReplyTo == nil || *inner.InReplyTo != 7 {
 		t.Errorf("conn B reply InReplyTo = %v, want 7", inner.InReplyTo)
+	}
+}
+
+// --- app-reply transport-down gate tests (#1525) ---
+
+// dropLinesContaining returns every log line in buf holding substr.
+func dropLinesContaining(buf *syncLogBuffer, substr string) []string {
+	var out []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, substr) {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TestV2Session_AppReply_TransportDown_BurnsNoNonce is AC1/AC2/AC3. A handler
+// reply that returns to Run while the relay leg is down must consume no Noise
+// send-nonce: the guard probes transportDown() BEFORE s.send.Encrypt, because
+// the post-send Outbound error arrives after the nonce is already spent (#874,
+// #912).
+//
+// The nonce oracle is decryptAppFrame under sess.initRecv, as used by
+// TestV2Session_Push_ReconnectWhileDownDoesNotSeal (#874) and the #912
+// rekey-deferral test. Against the unguarded function the down-window reply
+// seals at nonce 0 and is then dropped by Outbound, the recovery reply seals at
+// nonce 1, and initRecv still expects 0 — so the final decrypt MAC-fails. A
+// clean decrypt proves zero seals happened while down. Run under -race.
+func TestV2Session_AppReply_TransportDown_BurnsNoNonce(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	gated := newGatedRecorder()
+	// attempts counts every Outbound call, up OR down. gatedRecorder.outbound
+	// records nothing while down, so "the recorder observed zero envelopes" is
+	// also true of a wrong implementation that skips the seal but still hands
+	// the raw unsealed reply.Frame to send — asserting on gated.rec alone would
+	// make AC2 vacuous. The counter sits outside the up/down branch and is what
+	// actually pins the #446 never-emit-unsealed rule.
+	var attempts atomic.Int64
+	outbound := func(env protocol.RoutingEnvelope) error {
+		attempts.Add(1)
+		return gated.outbound(env)
+	}
+
+	entered := make(chan uint64, 1)
+	release := make(chan struct{})
+	// Two distinct types so the recovery frame is served by a handler the first
+	// frame's release did not already unblock.
+	handlers := map[string]dispatch.Handler{
+		protocol.TypeSendMessage:       blockingHandler(entered, release),
+		protocol.TypeListConversations: prolificHandler(),
+	}
+
+	logger, logBuf := bufferLogger()
+	frames := make(chan protocol.RoutingEnvelope, 4)
+	// Handshake with the transport UP so the session reaches open and initRecv
+	// is live.
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   outbound,
+		Connected:  gated.connected,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+		Handlers:   handlers,
+	}, frames, gated.rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	baseline := attempts.Load()
+	if baseline != 1 {
+		t.Fatalf("post-handshake Outbound attempts = %d, want 1 (the noise_resp)", baseline)
+	}
+
+	// Frame 1 parks its handler on the per-conn worker; Run stays free.
+	sess.frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      1,
+		Type:    protocol.TypeSendMessage,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{}`),
+	})
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocking handler never entered")
+	}
+
+	// The leg drops mid-handler — the ticket's failure scenario in miniature —
+	// then the handler returns its reply into Run's m.appReply arm.
+	gated.up.Store(false)
+	close(release)
+
+	// The drop emits no envelope, so the log line is the only observable edge.
+	// AC3.
+	waitForLogContains(t, logBuf, "event=v2.app_reply.dropped_transport_down")
+	lines := dropLinesContaining(logBuf, "v2.app_reply.dropped_transport_down")
+	if len(lines) != 1 {
+		t.Fatalf("drop log lines = %d, want exactly 1:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[0], "conn_id="+v2TestConnID) {
+		t.Errorf("drop line missing conn_id=%s: %s", v2TestConnID, lines[0])
+	}
+	// Content-free: no payload, plaintext, ciphertext, or key bytes, matching
+	// the package's no-AEAD-bytes-in-logs discipline.
+	for _, forbidden := range []string{"in_reply_to", "payload", "frame=", "ciphertext", "type="} {
+		if strings.Contains(lines[0], forbidden) {
+			t.Errorf("drop line carries %q: %s", forbidden, lines[0])
+		}
+	}
+
+	// AC2: nothing was handed to Outbound on the down path.
+	if got := attempts.Load(); got != baseline {
+		t.Errorf("Outbound attempts = %d, want %d (nothing forwarded on the down path)", got, baseline)
+	}
+
+	// AC1: recover, then emit. The recovery reply is the FIRST seal, so it
+	// lands at the nonce initRecv still expects.
+	gated.up.Store(true)
+	sess.frames <- sealAppFrame(t, sess.initSend, protocol.Envelope{
+		ID:      2,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"count":1}`),
+	})
+
+	msgs := waitForConnNoiseMsg(t, sess.rec, v2TestConnID, 1)
+	inner := decryptAppFrame(t, msgs[0], sess.initRecv)
+	if inner.InReplyTo == nil || *inner.InReplyTo != 2 {
+		t.Errorf("recovery reply InReplyTo = %v, want 2", inner.InReplyTo)
+	}
+}
+
+// TestV2Session_AppReply_NotOpenPrecedesTransportDown is AC5: the pre-existing
+// V2StateOpen drop keeps precedence over the new transport-down check, so a
+// reply for a session torn down mid-handler is still dropped on the not-open
+// branch with its existing debug log, whether the leg is up or down.
+//
+// A direct call rather than a driven teardown, deliberately: driving it would
+// mean closing the session mid-handler, and forwardToRun's select has an s.done
+// arm alongside the m.appReply send — with s.done already closed Go picks among
+// ready cases at random, so the reply might never reach forwardAppReply at all.
+// The direct call has no concurrency and discriminates exactly which of the two
+// checks runs first. Run is never started, so no single-owner invariant is
+// touched; the function reads only s.state and s.connID on this branch, so the
+// hand-built session's nil s.send is never dereferenced.
+func TestV2Session_AppReply_NotOpenPrecedesTransportDown(t *testing.T) {
+	t.Parallel()
+
+	respPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	var attempts atomic.Int64
+	logger, logBuf := bufferLogger()
+	mgr, err := NewV2SessionManager(V2SessionConfig{
+		Frames: make(chan protocol.RoutingEnvelope),
+		Outbound: func(protocol.RoutingEnvelope) error {
+			attempts.Add(1)
+			return nil
+		},
+		Connected:  func() bool { return false },
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     logger,
+	})
+	if err != nil {
+		t.Fatalf("NewV2SessionManager: %v", err)
+	}
+
+	s := &V2Session{connID: v2TestConnID, state: V2StateClosed}
+	mgr.forwardAppReply(s, protocol.RoutingEnvelope{
+		ConnID: v2TestConnID,
+		Frame:  json.RawMessage(`{"reply":true}`),
+	})
+
+	out := logBuf.String()
+	if !strings.Contains(out, "relay: v2 app reply dropped; session not open") {
+		t.Errorf("missing the pre-existing not-open drop line; got:\n%s", out)
+	}
+	if strings.Contains(out, "v2.app_reply.dropped_transport_down") {
+		t.Errorf("transport-down branch ran ahead of the V2StateOpen gate; got:\n%s", out)
+	}
+	if got := attempts.Load(); got != 0 {
+		t.Errorf("Outbound attempts = %d, want 0", got)
 	}
 }

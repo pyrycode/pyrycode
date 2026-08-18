@@ -893,7 +893,8 @@ func (m *V2SessionManager) forwardToRun(ctx context.Context, s *V2Session, reply
 // wire. Reached from Run's m.appReply arm, where a per-conn worker posts
 // the not-yet-sealed reply. Drops the reply (WARN, no wire emission) on the
 // realistically-unreachable seal/marshal error, exactly as #446: never
-// emit an unsealed frame.
+// emit an unsealed frame. Also drops it unsealed when transportDown reports
+// the relay leg down (#1525, see the branch comment).
 func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingEnvelope) {
 	if s.state != V2StateOpen {
 		// The worker was mid-handler when closeWith tore this session down
@@ -902,6 +903,38 @@ func (m *V2SessionManager) forwardAppReply(s *V2Session, reply protocol.RoutingE
 		// forwardAppReply runs on Run, the sole writer of s.state. Mirrors
 		// forwardEnvelope's V2StateOpen gate.
 		m.cfg.Logger.Debug("relay: v2 app reply dropped; session not open",
+			"conn_id", s.connID)
+		return
+	}
+	if m.transportDown() {
+		// Transport-down DROP (#1525), the same shape drainOnce holds the push
+		// head with and handleWake defers the rekey emit with. Seal nothing:
+		// m.send swallows its Outbound error at Debug, so reacting to that error
+		// is structurally too late — the send-nonce is already spent. And a
+		// burned nonce is not a lost message: relay↔binary carries no per-conn
+		// disconnect frame, so the phone leaves its recv CipherState untouched,
+		// the next delivered frame fails AEAD, and the session dies at
+		// StatusProtocolMismatch without self-healing. #965 is why this seal
+		// needs the guard that #874 judged unnecessary: the reply now returns to
+		// Run up to a whole handler duration after its inbound frame, wide
+		// enough to hold an entire blip.
+		//
+		// Dropped, not parked. The reply is undeliverable either way today —
+		// m.send already discards it — so this only stops paying a nonce for
+		// that non-delivery. Post-recovery delivery would need a buffer, an
+		// eviction policy and an ordering rule against the push queue; out of
+		// scope. Nothing is held, so the down→up edge needs no flush.
+		//
+		// Debug and content-free (event slug + conn-id, no payload, plaintext,
+		// ciphertext or key bytes): transport-down is expected during reconnect,
+		// and a blip on a chatty conn emits one line per reply.
+		//
+		// The probe is a plain read of a construction-time func on the Run
+		// goroutine — no lock, no atomic. The single-frame TOCTOU at the up→down
+		// instant carries over from #874 and #912, documented on the Connected
+		// seam itself.
+		m.cfg.Logger.Debug("relay: v2 app reply dropped; transport down",
+			"event", "v2.app_reply.dropped_transport_down",
 			"conn_id", s.connID)
 		return
 	}
