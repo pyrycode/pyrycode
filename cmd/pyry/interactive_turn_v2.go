@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/eventring"
@@ -21,6 +22,31 @@ import (
 // § Phase 2, "per JSONL message or ~250 ms"). Tunable here; not exposed as
 // config in this slice (no AC asks for it).
 const coalesceWindow = 250 * time.Millisecond
+
+// maxDeltaTextBytes bounds the RAW assistant-text bytes carried by a single
+// assistant_delta, so the marshalled protocol.Envelope stays under the
+// 65519-byte v2 application-envelope cap (docs/protocol-mobile.md
+// § Application-envelope size cap: Noise's 65535-byte transport message minus
+// the 16-byte AEAD tag). It bounds the INPUT text, not the envelope — do not
+// "correct" it towards 65519.
+//
+// The arithmetic. encoding/json has SetEscapeHTML on by default, so '<', '>',
+// '&' and every control byte without a short escape each cost six bytes on the
+// wire; the cut here is a BYTE cut, which makes 6-bytes-out-per-input-byte the
+// true ceiling. Multi-byte runes are NOT the worst case — Go emits them raw, so
+// a 4-byte emoji stays 4 bytes. 10000 x 6 = 60000 B of escaped text, plus ~512 B
+// budgeted for everything outside `text`: the payload's other three keys and its
+// punctuation, a 36-byte conversation_id and a 36-byte turn_id, seq's digits,
+// and the envelope's own id/type/ts/payload/event_id frame. 60512 B, ~7.6% under
+// the cap; the measured worst case (the cap test's '<' fill) is 60220 B, 91.9%,
+// so the 512-byte budget is headroom over an observed ~220 B.
+//
+// The invariant is ENFORCED by
+// TestInteractiveTurnEmitterV2_OversizedDeltaFitsEnvelopeCap; if that ever
+// fails, LOWER this constant — never raise it. The conservative constant is the
+// belt; the deterministic per-frame cap test is the suspenders (different
+// fabric). Same shape as relay's bundleChunkBytes.
+const maxDeltaTextBytes = 10000
 
 // interactiveBroadcaster is the capability-aware fan-out surface the structured
 // emitter needs: the interactive-conn snapshot (#626) and the per-conn sealed
@@ -65,7 +91,10 @@ type cursorReader interface {
 // OnFlush, wired by startInteractiveTurnStreamV2). So the emitter still spawns
 // no goroutine and the coalescing fields stay unguarded-but-race-free. Go 1.26
 // timer semantics (no stale fire after Stop/Reset) make the single-goroutine
-// arm/reset correct without a manual channel drain.
+// arm/reset correct without a manual channel drain. A flush larger than
+// maxDeltaTextBytes splits across several assistant_deltas (#1495) so no
+// envelope exceeds the v2 application-envelope cap; the buffer is what
+// coalesces, the flush is what bounds the frame.
 //
 // SECURITY: application output — assistant text, thought text (never even
 // mapped), tool title/input/result summaries — is NEVER logged at any level.
@@ -364,26 +393,79 @@ func (e *interactiveTurnEmitterV2) endTurn() {
 	e.inTurn = false
 }
 
-// flushDelta emits the buffered assistant text as ONE coalesced assistant_delta
-// (current turnID + seq), advances seq exactly once, clears the buffer, and
-// stops the timer. It is a NO-OP on an empty buffer, which is what makes every
-// flush trigger — message boundary, interleaved non-text envelope, turn end, or
-// the timer firing on no pending text — harmless. Reached from Handle (inside
-// the producer's OnEvent) and from the producer's OnFlush, both on the single
-// Run goroutine; never concurrently (see the struct doc). seq advances once per
-// emitted coalesced delta, NEVER once per buffered TextChunk.
+// splitDeltaText splits s into consecutive chunks of at most max bytes each,
+// never cutting through a multi-byte rune. Every chunk is a substring of s — no
+// copy, no re-encoding — so concatenating the result in order reproduces s
+// byte-for-byte, which is what makes the phone's reassembly structural rather
+// than hoped-for. Returns nil for empty s, and never an empty chunk otherwise.
+//
+// Cut points back up from the stride boundary to the nearest rune start, which
+// for valid UTF-8 terminates within three steps. The degenerate guard covers
+// invalid UTF-8, where max consecutive continuation bytes would otherwise walk
+// the cut back to start, emit an empty chunk and loop forever on
+// claude-controlled input: cut at the unadjusted stride instead, which changes
+// WHERE the split lands but never WHAT is emitted. That input cannot arise today
+// — Text reaches here from encoding/json's string decoding, which substitutes
+// U+FFFD for invalid bytes — so the guard is defence in depth.
+func splitDeltaText(s string, max int) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for start := 0; start < len(s); {
+		end := start + max
+		if end >= len(s) {
+			out = append(out, s[start:])
+			break
+		}
+		for end > start && !utf8.RuneStart(s[end]) {
+			end--
+		}
+		if end == start {
+			end = start + max
+		}
+		out = append(out, s[start:end])
+		start = end
+	}
+	return out
+}
+
+// flushDelta emits the buffered assistant text as ONE OR MORE coalesced
+// assistant_deltas (current turnID + seq), each carrying at most
+// maxDeltaTextBytes so no envelope exceeds the v2 application-envelope cap. It
+// advances seq once per EMITTED envelope, clears the buffer, and stops the
+// timer. It is a NO-OP on an empty buffer, which is what makes every flush
+// trigger — message boundary, interleaved non-text envelope, turn end, or the
+// timer firing on no pending text — harmless. Reached from Handle (inside the
+// producer's OnEvent) and from the producer's OnFlush, both on the single Run
+// goroutine; never concurrently (see the struct doc). seq NEVER advances once
+// per buffered TextChunk: a buffer that fits emits exactly one delta with one
+// seq, unchanged from #609.
+//
+// The loop is deliberately unconditional — no ctx.Err() check between chunks.
+// Abandoning the remainder on teardown would turn a shutdown race into silently
+// truncated assistant text; emit already returns early inside its Push-error
+// branch, which bounds the wasted work to one conn snapshot per remaining chunk.
 func (e *interactiveTurnEmitterV2) flushDelta(ctx context.Context) {
 	if e.deltaBuf.Len() == 0 {
 		return
 	}
-	// Reconstruct a synthetic TextChunk and reuse emitMapped — no new payload
-	// path. MapEvent reads only Text for the assistant_delta; MessageID is the
-	// coalescing key, not a wire field.
-	e.emitMapped(ctx, e.deltaConvID, turnevent.TextChunk{
-		MessageID: e.deltaMsgID,
-		Text:      e.deltaBuf.String(),
-	})
-	e.seq++
+	// Capture before emitting: the reset below clears these fields, so the loop
+	// must read the values the flush started with, not live state.
+	text, convID, msgID := e.deltaBuf.String(), e.deltaConvID, e.deltaMsgID
+	// Reconstruct a synthetic TextChunk per chunk and reuse emitMapped — no new
+	// payload path. MapEvent reads only Text for the assistant_delta; MessageID
+	// is the coalescing key, not a wire field.
+	for _, chunk := range splitDeltaText(text, maxDeltaTextBytes) {
+		e.emitMapped(ctx, convID, turnevent.TextChunk{
+			MessageID: msgID,
+			Text:      chunk,
+		})
+		// Inside the loop, after the emit: emitMapped reads e.seq off the
+		// struct, so hoisting this either way gives every chunk the same seq or
+		// shifts the whole sequence by one.
+		e.seq++
+	}
 	e.deltaBuf.Reset()
 	e.deltaMsgID = ""
 	e.deltaConvID = ""
