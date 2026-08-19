@@ -66,37 +66,10 @@ func Stop(ctx context.Context, socketPath string) error {
 	return nil
 }
 
-// SendResize asks the daemon to apply a window-size update to the named
-// session. Empty sessionID selects the bootstrap session. cols/rows are
-// the client's local terminal dimensions; either being zero is treated by
-// the server as "no change". A successful return means the server received
-// and dispatched the request — the seam's own success is best-effort and
-// not visible to the client.
-//
-// Callers (e.g. a SIGWINCH handler) should not retry on transient failure;
-// the next SIGWINCH will re-emit a fresh resize.
-func SendResize(ctx context.Context, socketPath, sessionID string, cols, rows int) error {
-	resp, err := request(ctx, socketPath, Request{
-		Verb:   VerbResize,
-		Resize: &ResizePayload{SessionID: sessionID, Cols: cols, Rows: rows},
-	})
-	if err != nil {
-		return err
-	}
-	if resp.Error != "" {
-		return errors.New(resp.Error)
-	}
-	if !resp.OK {
-		return errors.New("control: resize response missing ok flag")
-	}
-	return nil
-}
-
 // SessionsNew asks the daemon to mint a new session with the given
 // (possibly empty) label and returns the new session's UUID. In-process Go
 // callers (the future cmd/pyry sessions new) consume this directly. Same
-// one-shot dial → encode → decode → close lifecycle as Status/Logs/Stop/
-// SendResize.
+// one-shot dial → encode → decode → close lifecycle as Status/Logs/Stop.
 //
 // Empty label sends {"verb":"sessions.new","sessions":{}}; the inner
 // SessionsPayload is non-nil so the field is present, but Label's
@@ -187,8 +160,8 @@ func SessionsRename(ctx context.Context, socketPath, id, newLabel string) error 
 // SessionsList asks the daemon for a snapshot of every session in the
 // pool and returns the result. In-process Go callers (the future
 // cmd/pyry sessions list) consume this directly. Same one-shot dial →
-// encode → decode → close lifecycle as Status/Logs/Stop/SendResize/
-// SessionsNew/SessionsRm/SessionsRename.
+// encode → decode → close lifecycle as Status/Logs/Stop/SessionsNew/
+// SessionsRm/SessionsRename.
 //
 // Snapshot ordering is whatever the server returned (Pool.List's
 // LastActiveAt desc, SessionID asc tiebreak); callers needing a
@@ -222,8 +195,8 @@ func SessionsList(ctx context.Context, socketPath string) ([]SessionInfo, error)
 //
 // In-process Go callers (the future 1.3c-2 foreground auto-attach
 // path) consume this directly. Same one-shot dial → encode → decode →
-// close lifecycle as Status/Logs/Stop/SendResize/SessionsNew/
-// SessionsRm/SessionsRename/SessionsList.
+// close lifecycle as Status/Logs/Stop/SessionsNew/SessionsRm/
+// SessionsRename/SessionsList.
 //
 // No typed-sentinel mapping. Server-side validation errors flow
 // through Response.Error verbatim.
