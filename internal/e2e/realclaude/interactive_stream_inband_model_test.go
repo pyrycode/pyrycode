@@ -364,7 +364,7 @@ func (h inbandSpawnHandler) WithGroup(string) slog.Handler      { return h }
 // inbandRunner adapts *streamsup.Runner to sessions.Runner. Go has no covariant
 // return on interface satisfaction and the concrete runner's State returns
 // streamsup.State, not sessions.State, so the one method has to be mapped;
-// the other four are promoted from the embedded runner. This is cmd/pyry's
+// the other six are promoted from the embedded runner. This is cmd/pyry's
 // streamRunner with the field-for-field State conversion and nothing else — no
 // turnevent Parser (the recorder owns that slot) and no withApprovalArgs (the
 // base argv is already YOLO, the arm on which it injects nothing).

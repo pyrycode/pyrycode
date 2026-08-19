@@ -36,11 +36,14 @@ const (
 // the manager's single Run dispatch goroutine — so the s.interactive read is
 // lock-free under the package's single-owner invariant. Unlike the fire-and-forget
 // verbs (interrupt / new_session / dequeue_message) the interactive path ALWAYS
-// replies. A RUNNING session picks the change up immediately, by one of two
-// mechanisms the seam picks on which fields the frame carried: a model/effort-only
-// change is written to the live child as a /model or /effort command (#1581), and
-// every other change live-restarts the session's supervisor (#842). Both install
-// the recomposed argv (#833's path), so the next spawn carries it too.
+// replies. A RUNNING session picks the change up immediately, by a mechanism the
+// seam picks on what the frame carried — a model/effort-only change, or a bypass
+// REVOCATION, is written to the live child as command text or a control request
+// (#1581, #1604); a bypass ENABLE or a model/effort cleared to default
+// live-restarts the session's supervisor instead (#842), because claude refuses
+// the escalation over the control channel and gates it on the launch argv
+// (#1595). Both mechanisms install the recomposed argv (#833's path), so the next
+// spawn carries it too.
 //
 // Order is load-bearing:
 //  1. Capability gate (the authz boundary): a non-interactive conn is fully inert
@@ -117,11 +120,13 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	}
 
 	// Success (AC #1/#2): the change is persisted atomically and reaches a running
-	// claude immediately — in-band as command text for a model/effort-only change
-	// (#1581), by live restart otherwise (#842). Build the reply inline, mirroring
-	// handleRequestSnapshot. Echoing p.SessionID is safe — on the nil-error path it
-	// matched a real session key exactly, so it is a confirmed-real, non-secret
-	// routing id in a typed struct field, not an error-string interpolation.
+	// claude immediately — in-band as command text or a control request for a
+	// model/effort change or a bypass revocation (#1581, #1604), by live restart
+	// for a bypass enable or a model/effort cleared to default (#842). Build the
+	// reply inline, mirroring handleRequestSnapshot. Echoing p.SessionID is safe —
+	// on the nil-error path it matched a real session key exactly, so it is a
+	// confirmed-real, non-secret routing id in a typed struct field, not an
+	// error-string interpolation.
 	updated, merr := json.Marshal(protocol.SessionSettingsUpdatedPayload{SessionID: p.SessionID})
 	if merr != nil {
 		// A closed struct of one string; marshal cannot fail in practice. Defensive

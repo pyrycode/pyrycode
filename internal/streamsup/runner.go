@@ -439,8 +439,11 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 // writing and without panicking — the safe no-op refusal.
 //
 // Interrupt is a concrete method on *Runner, deliberately NOT on sessions.Runner
-// (the interface stays un-widened, #1077): #1121's interrupt routing reaches it
-// via its own narrow interface or a type assertion. It mirrors how
+// (#1077's placement rule: its dispatch lives in cmd/pyry, which can assert —
+// unlike SetSpawnArgs (#1580) and RevokeBypass (#1604), whose consumer is inside
+// internal/sessions and which are ON the interface for exactly that reason):
+// #1121's interrupt routing reaches it via its own narrow interface or a type
+// assertion. It mirrors how
 // *supervisor.Supervisor encapsulates SendEsc (#726) without that method being on
 // the interface. Safe from any goroutine.
 func (r *Runner) Interrupt() error {
@@ -456,9 +459,13 @@ func (r *Runner) Interrupt() error {
 // When no child is live Stdin() is nil, so RevokeBypass returns the retryable
 // ErrNoLiveChild without writing and without panicking.
 //
-// Like Interrupt it is a concrete method on *Runner, deliberately NOT on
-// sessions.Runner (the interface stays un-widened, #1077): the session-layer
-// wiring (#1604) reaches it via a type assertion, as the interrupt routing does.
+// Unlike Interrupt it IS on sessions.Runner (#1604 widened the interface), and
+// the contrast is the rule rather than an exception: Interrupt's dispatch lives in
+// cmd/pyry, which can type-assert, whereas this method's consumer is
+// Pool.UpdateSettings inside internal/sessions, with no such dispatch site. A
+// structural assertion there would fail OPEN — its unmatched arm is a silent
+// no-op, leaving the posture un-revoked while the update reports success — so the
+// interface method makes a runner that cannot revoke a build failure instead.
 // Stdin() releases r.mu before returning, so the potentially-blocking write never
 // holds it. Safe from any goroutine.
 func (r *Runner) RevokeBypass() error {

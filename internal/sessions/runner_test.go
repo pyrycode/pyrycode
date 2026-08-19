@@ -34,6 +34,8 @@ func (fakeRunner) Restart(args []string) {}
 
 func (fakeRunner) SetSpawnArgs(args []string) {}
 
+func (fakeRunner) RevokeBypass() error { return nil }
+
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
 // Config.RunnerFactory is invoked in place of the default runner at BOTH construction
 // sites — the bootstrap (Pool.New) and the per-session create (Pool.buildSession,
@@ -149,6 +151,13 @@ type lifecycleRunner struct {
 	// the production runner, not the pool, that refuses a write when no child is
 	// bound, and the pool's contract is to attempt the write unconditionally.
 	writes [][]byte
+	// revokes counts every RevokeBypass call — the in-band bypass revocation
+	// #1604 routes through the same branch. A COUNT, not a bool: an assertion has
+	// to be able to tell "exactly one" from "two" and catch a double-send.
+	// Recorded on EVERY call including no-live-child, for the same reason writes
+	// is: the production runner, not the pool, is what refuses when no child is
+	// bound, and the pool's contract is to attempt the revocation unconditionally.
+	revokes int
 }
 
 func (r *lifecycleRunner) State() State {
@@ -234,11 +243,18 @@ func (r *lifecycleRunner) SetSpawnArgs(args []string) {
 	r.mu.Unlock()
 }
 
-// restartArgs, spawnArgSets and userTurns are the read side of the three records
-// above. Each takes r.mu and deep-copies, because the lifecycle goroutine writes
-// while the test goroutine reads and every assertion must stay -race clean.
-// userTurns converts to string on read so a delivery assertion reads as the
-// command text it is.
+func (r *lifecycleRunner) RevokeBypass() error {
+	r.mu.Lock()
+	r.revokes++
+	r.mu.Unlock()
+	return nil
+}
+
+// restartArgs, spawnArgSets, userTurns and revokeCount are the read side of the
+// four records above. Each takes r.mu and deep-copies, because the lifecycle
+// goroutine writes while the test goroutine reads and every assertion must stay
+// -race clean. userTurns converts to string on read so a delivery assertion reads
+// as the command text it is.
 func (r *lifecycleRunner) restartArgs() [][]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -259,6 +275,12 @@ func (r *lifecycleRunner) userTurns() []string {
 		out = append(out, string(w))
 	}
 	return out
+}
+
+func (r *lifecycleRunner) revokeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.revokes
 }
 
 func cloneArgvRecords(recs [][]string) [][]string {

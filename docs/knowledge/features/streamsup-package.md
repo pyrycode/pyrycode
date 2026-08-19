@@ -441,9 +441,14 @@ claude refuses it anyway on the launch argv (#1595). Re-granting bypass stays on
 `Restart(newArgs)` respawn path. `request_id` now comes from `nextControlID`, the renamed,
 **shared** counter (`interruptSeq` → `controlSeq`) — one sequence, not one per subtype, because
 `request_id` must be unique across all in-flight control requests on the stream, not merely within
-one subtype. `RevokeBypass` is a concrete method on `*Runner`, deliberately not on
-`sessions.Runner`, same discipline as `Interrupt`; the session-layer wiring (#1604) reaches it via
-a type assertion. No production caller exists yet — that is #1604's scope, not this ticket's. The
+one subtype. Unlike `Interrupt`, `RevokeBypass` **is** on `sessions.Runner` (#1604 widened the
+interface) — the contrast is the rule, not an exception: `Interrupt`'s dispatch lives in `cmd/pyry`,
+which can type-assert, whereas `RevokeBypass`'s consumer is `Pool.UpdateSettings` inside
+`internal/sessions`, with no such dispatch site. A structural assertion there would fail *open* —
+its unmatched arm is a silent no-op, leaving the posture un-revoked while the update reports
+success — so the interface method makes a runner that cannot revoke a build failure instead. No
+production caller existed at #1603; #1604 is that caller, routing a bypass *revoke* through the
+in-band branch (an *enable* still takes `Restart`). The
 `control_response` ack (no reader needed — see the event-catalog row above, #1500) is unaffected.
 See [codebase/1603.md](../codebase/1603.md) and
 [set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md).

@@ -35,10 +35,16 @@ func waitRunning(t *testing.T, runner *lifecycleRunner) {
 	}
 }
 
-// TestInBandDeliverable pins the partition itself (#1581): which updates reach
-// the live child as /model + /effort command text, and which keep #842's restart.
-// Total over the shapes the wire can produce, so the restart tests stay green on
-// purpose rather than by luck.
+// TestInBandDeliverable pins the partition itself (#1581, redrawn by #1604):
+// which updates reach the live child in-band — /model + /effort command text, and
+// a bypass revocation as a control request — and which keep #842's restart. Total
+// over the shapes the wire can produce, so the restart tests stay green on purpose
+// rather than by luck.
+//
+// The YOLO rows are the #1604 split and read as a pair: a revoke goes in-band
+// because claude accepts set_permission_mode default on a held-open stream, an
+// enable keeps the restart because claude refuses the escalation, gating it on the
+// launch argv (#1595).
 func TestInBandDeliverable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -53,10 +59,15 @@ func TestInBandDeliverable(t *testing.T) {
 		{"effort cleared to default", SettingsUpdate{Effort: ptr("")}, false},
 		{"one present field empty", SettingsUpdate{Model: ptr("opus"), Effort: ptr("")}, false},
 		{"model with yolo grant", SettingsUpdate{Model: ptr("opus"), YOLO: ptr(true)}, false},
-		// A present YOLO takes the restart even when it equals the stored value:
-		// the rule keys on presence, never on merged-vs-previous per field.
-		{"model with yolo revoke", SettingsUpdate{Model: ptr("opus"), YOLO: ptr(false)}, false},
-		{"yolo only", SettingsUpdate{YOLO: ptr(true)}, false},
+		// A present YOLO revoke goes in-band even when it equals the stored value:
+		// the rule keys on the frame's own value, never on merged-vs-previous.
+		{"model with yolo revoke", SettingsUpdate{Model: ptr("opus"), YOLO: ptr(false)}, true},
+		{"yolo revoke only", SettingsUpdate{YOLO: ptr(false)}, true},
+		{"yolo revoke with effort", SettingsUpdate{Effort: ptr("high"), YOLO: ptr(false)}, true},
+		// The empty-value reject wins over the revoke: the respawn recomposes argv
+		// from the merged settings, so it carries the revocation anyway.
+		{"yolo revoke with cleared model", SettingsUpdate{Model: ptr(""), YOLO: ptr(false)}, false},
+		{"yolo enable only", SettingsUpdate{YOLO: ptr(true)}, false},
 		{"nothing present", SettingsUpdate{}, false},
 	}
 	for _, tc := range cases {
@@ -66,6 +77,38 @@ func TestInBandDeliverable(t *testing.T) {
 				t.Errorf("inBandDeliverable(%+v) = %v, want %v", tc.update, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestPool_DeliverSettingsInBand_EnableWritesNothing (#1604, AC #3's second
+// half): deliverSettingsInBand refuses to write a permission-mode change for a
+// YOLO *enable*, and refuses it AT THE DELIVERY SITE rather than relying on
+// inBandDeliverable having rejected the frame first.
+//
+// It calls the unexported delivery directly with a shape the predicate never lets
+// through, which is the only way to reach the enable-direction fail-safe — and so
+// the only red available for a mutant that drops the `!*update.YOLO` conjunct.
+// That guard is what makes the delivery independently correct instead of dependent
+// on a caller-side invariant; without this test it would be untested defence.
+//
+// No runPoolInBackground: the delivery reads only p.log and the runner it is
+// handed, so a live child would add nothing to observe.
+func TestPool_DeliverSettingsInBand_EnableWritesNothing(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	regPath := filepath.Join(dir, "sessions.json")
+
+	pool := helperRestartPool(t, regPath, t.TempDir(), SessionSettings{})
+	id := pool.Default().ID()
+	runner := runnerDouble(t, pool, id)
+
+	pool.deliverSettingsInBand(id, runner, SettingsUpdate{YOLO: ptr(true)})
+
+	if got := runner.revokeCount(); got != 0 {
+		t.Errorf("a YOLO enable wrote %d permission-mode change(s) in-band, want 0", got)
+	}
+	if got := runner.userTurns(); len(got) != 0 {
+		t.Errorf("a YOLO-only update invented a command: %q", got)
 	}
 }
 

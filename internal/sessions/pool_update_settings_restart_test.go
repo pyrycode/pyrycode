@@ -133,6 +133,13 @@ func mintEvicted(t *testing.T, pool *Pool, spawnDir string, settings SessionSett
 // UpdateSettings on the running bootstrap both persists the change and restarts
 // its claude with the new argv, resuming via its deterministic --session-id
 // (#839 retired --continue for the bootstrap).
+//
+// #1604 extends it rather than adding a second test, because the YOLO false→true
+// this already flips IS the enable direction: claude gates the escalation on the
+// launch argv and refuses the control request (#1595), so only the respawn under
+// the recomposed argv can grant it. The restart-argv read below is one half of
+// that pin; revokeCount() == 0 is the other — no production path writes an ENABLE
+// over the control channel, under any update.
 func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -142,6 +149,7 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	pool := helperRestartPool(t, regPath, tplWorkDir, SessionSettings{Model: "sonnet"})
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
+	runner := runnerDouble(t, pool, id)
 
 	// First spawn: baseline settings. The deterministic id (#839) is a field on
 	// the handover since #1348, checked separately.
@@ -163,6 +171,10 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("restart argv = %v, want %v", got, want)
+	}
+	// #1604: the enable direction never travels over the control channel.
+	if got := runner.revokeCount(); got != 0 {
+		t.Errorf("a YOLO enable wrote %d permission-mode change(s) in-band, want 0", got)
 	}
 	// AC #3: the same call persisted the change.
 	if disk := diskSettings(t, regPath); disk != (SessionSettings{Model: "opus", Effort: "high", YOLO: true}) {
@@ -294,10 +306,25 @@ func TestPool_UpdateSettings_Evicted_SwapOnly(t *testing.T) {
 	}
 }
 
-// TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart (security): flipping
-// YOLO true→false terminates the running --dangerously-skip-permissions child
-// and relaunches it WITHOUT the bypass flag.
-func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
+// TestPool_UpdateSettings_YOLORevoke_DropsBypassInBand (security): flipping YOLO
+// true→false drops the running child's bypass posture WITHOUT killing it, and
+// installs a bypass-free argv for the next spawn.
+//
+// Renamed from _DropsBypassOnRestart, and retargeted with it (#1604): #1595
+// measured that claude accepts a set_permission_mode control request carrying
+// mode default on a held-open stream, so the revocation no longer needs a
+// respawn to take effect now. The live assertion is NOT weakened by the move —
+// it is the same "applies to the running child" property, read off the mechanism
+// that now carries it (RevokeBypass) instead of off a relaunch argv. The
+// next-spawn half is asserted alongside it, because it is what makes the
+// revocation survive a crash-relaunch, a rotation or an eviction.
+//
+// The template is the sibling _YOLOAbsent_NoBypassInBand: every fact is read off
+// the double's own records. waitArgv cannot be used past the first spawn here —
+// lifecycleRunner.Restart is what feeds recordArgv, so with no restart it would
+// return the stale construction argv or time out — and doneAppears is blind under
+// this double either way (see its own doc).
+func TestPool_UpdateSettings_YOLORevoke_DropsBypassInBand(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "sessions.json")
@@ -306,6 +333,8 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 	pool := helperRestartPool(t, regPath, tplWorkDir, SessionSettings{YOLO: true})
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
+	runner := runnerDouble(t, pool, id)
+	waitRunning(t, runner)
 
 	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--dangerously-skip-permissions"}) {
 		t.Fatalf("first spawn argv = %v, want the bypass flag present", got)
@@ -313,25 +342,36 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
 		t.Fatalf("first spawn session id = %q, want %q", gotID, string(id))
 	}
-	clearRecording(t, tplWorkDir)
 
 	if err := pool.UpdateSettings(id, SettingsUpdate{YOLO: ptr(false)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
-	got := waitArgv(t, tplWorkDir)
+	// The live half: exactly one revocation reached the running child. Exactly
+	// one, not at least one — a double-send would be a bug worth failing on.
+	if got := runner.revokeCount(); got != 1 {
+		t.Errorf("RevokeBypass called %d times, want exactly 1 (the live revocation)", got)
+	}
+	if restarts := runner.restartArgs(); len(restarts) != 0 {
+		t.Errorf("a revoke respawned the child: Restart%v", restarts)
+	}
+	// The durable half: the next spawn carries no bypass flag either.
+	installs := runner.spawnArgSets()
+	if len(installs) != 1 {
+		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
+	}
+	got := installedArgv(t, installs[0])
 	for _, a := range got {
 		if a == "--dangerously-skip-permissions" {
-			t.Fatalf("post-revoke argv still carries the bypass flag: %v", got)
+			t.Fatalf("post-revoke installed argv still carries the bypass flag: %v", got)
 		}
 	}
-	// Revoked YOLO leaves no settings flags at all. The deterministic id (#839)
-	// is checked on the handover below, not in argv.
+	// Revoked YOLO with no model or effort leaves no settings flags at all.
 	if len(got) != 0 {
-		t.Errorf("post-revoke argv = %v, want none", got)
+		t.Errorf("post-revoke installed argv = %v, want none", got)
 	}
-	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
-		t.Errorf("post-revoke session id = %q, want %q", gotID, string(id))
+	if turns := runner.userTurns(); len(turns) != 0 {
+		t.Errorf("a YOLO-only update invented a command: %q", turns)
 	}
 }
 
@@ -347,7 +387,13 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 // one step earlier. What is dropped is the old #839 pinned-id check: with no
 // respawn there is no second spawn for the id to survive into, so reading it back
 // would only re-report the construction record. That id is asserted across a real
-// restart by _LiveRestart_Bootstrap and _YOLORevoke_DropsBypassOnRestart.
+// restart by _LiveRestart_Bootstrap and _LiveRestart_Minted.
+//
+// #1604 must NOT drag this back to a respawn assertion: the model-only path it
+// covers is exactly the one #1581 moved off the restart, and the argv it reads is
+// the next-spawn install. The one thing #1604 adds is revokeCount() == 0 — an
+// omitted YOLO writes no permission-mode change at all, which is the direct red
+// for a delivery guard relaxed to send unconditionally.
 func TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -366,6 +412,9 @@ func TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand(t *testing.T) {
 
 	if restarts := runner.restartArgs(); len(restarts) != 0 {
 		t.Errorf("model-only update respawned the child: Restart%v", restarts)
+	}
+	if got := runner.revokeCount(); got != 0 {
+		t.Errorf("an omitted YOLO wrote %d permission-mode change(s) in-band, want 0", got)
 	}
 	if got, want := runner.userTurns(), []string{"/model opus"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("delivered turns = %q, want %q", got, want)

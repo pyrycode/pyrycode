@@ -697,23 +697,28 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // memory stays consistent with disk.
 //
 // After a successful persist of a real change the change is also LIVE-APPLIED to
-// the session's supervisor, by one of two mechanisms picked on which fields the
-// update carried (inBandDeliverable):
+// the session's supervisor, by one of two mechanisms picked on what the update
+// carried — which fields, and for YOLO its value too (inBandDeliverable):
 //
-//   - A model/effort-only change is delivered IN-BAND (#1581): the /model and
-//     /effort commands are written to the live child as ordinary user turns on
-//     the stream the daemon already holds open, so the child is neither
-//     terminated nor respawned and its transcript survives. That branch still
-//     installs the recomposed argv, via SetSpawnArgs — Restart's swap half —
-//     because skipping the install would let the operator's change silently
-//     revert on the next crash-respawn or evict → Activate. Delivery is
-//     fire-and-forget; see deliverSettingsInBand.
+//   - A change claude accepts on the stream the daemon already holds open is
+//     delivered IN-BAND (#1581, #1604): the /model and /effort commands as
+//     ordinary user turns, and a bypass REVOCATION as a set_permission_mode
+//     control request, so the child is neither terminated nor respawned and its
+//     transcript survives. That branch still installs the recomposed argv, via
+//     SetSpawnArgs — Restart's swap half — because skipping the install would let
+//     the operator's change silently revert on the next crash-respawn or evict →
+//     Activate. Delivery is fire-and-forget; see deliverSettingsInBand.
 //   - Every other change keeps the live restart (#842): the argv is recomposed
 //     from the persisted settings and, if a child is running, that child is
 //     killed so the supervisor relaunches it — resuming the conversation — with
-//     the new model / effort / YOLO. This is the path a bypass-posture change
-//     takes, and the path a model or effort cleared back to claude's own default
-//     takes, neither having a measured in-band form.
+//     the new model / effort / YOLO. This is the path a bypass ENABLE takes, and
+//     the path a model or effort cleared back to claude's own default takes.
+//
+// The bypass split is on DIRECTION, not presence, and it is measured rather than
+// assumed (#1595): claude accepts a revocation on a held-open stream but refuses
+// an escalation in words, gating it on the launch argv. So a revoke applies to the
+// running child with no respawn, and an enable can only be granted by relaunching
+// under the recomposed argv.
 //
 // For an evicted session neither mechanism finds a child; the argv install alone
 // applies on the next Activate, and the caller still sees success. Both branches
@@ -769,38 +774,60 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 		p.deliverSettingsInBand(id, sup, update)
 		return nil
 	}
+	// This is a LIVE PRODUCTION CALLER of Restart, and #1604 did not remove it.
+	// #1574 may NOT delete Restart: its premise — that once model, effort and the
+	// bypass posture have all moved off Restart(args) it has no production caller
+	// left — is false, because the bypass posture only half-moved. A revoke goes
+	// in-band above; an ENABLE reaches here, and only the kill-and-relaunch under
+	// the recomposed argv can grant it, since claude refuses the escalation over
+	// the control channel (#1595). Deleting this call would regress an enable from
+	// "applies now" to "applies at the next spawn", the same regression in the
+	// opposite direction to the one the revoke exists to prevent.
 	sup.Restart(newArgs)
 	return nil
 }
 
-// inBandDeliverable reports whether update's PRESENT fields are exactly a
-// non-empty Model and/or a non-empty Effort — the changes claude accepts as
-// /model and /effort commands on a stream it is already reading (#1581), and so
-// the changes Pool.UpdateSettings can live-apply without tearing the child down.
+// inBandDeliverable reports whether update's PRESENT fields are all changes
+// claude accepts on a stream it is already reading — a non-empty Model or Effort
+// as a /model or /effort command (#1581), and a bypass REVOCATION as a
+// set_permission_mode control request (#1604) — and so the changes
+// Pool.UpdateSettings can live-apply without tearing the child down.
 //
-// The rule keys on which fields the wire carried, never on merged-vs-previous
-// per field: SetSessionSettingsPayload's three fields are omitempty pointers
-// documented as a presence contract, so a client changing only the model sends
-// only the model. Two consequences are deliberate rather than incidental:
+// The rule keys on what the wire carried, never on merged-vs-previous per field:
+// SetSessionSettingsPayload's three fields are omitempty pointers documented as a
+// presence contract, so a client changing only the model sends only the model.
+// A present YOLO is now read for its VALUE as well as its presence, which is
+// still a property of the frame and NOT a diff against stored state — do not
+// quietly convert this predicate into a per-field differ. Three consequences are
+// deliberate rather than incidental:
 //
-//   - A present YOLO takes the restart, INCLUDING a YOLO equal to the stored
-//     value. No in-band form for a bypass-posture change has been measured, and
-//     that is the conservative side of the partition — the restart recomposes
-//     argv from the merged settings, so a frame mixing YOLO with a model or
-//     effort still carries the new model and effort through the respawn.
+//   - The split is on the DIRECTION of a bypass change, not its presence (#1595
+//     measured both directions live). A revoke goes in-band; an ENABLE takes the
+//     restart, because claude gates the escalation on the launch argv and refuses
+//     the control request in words, so only a respawn under the recomposed argv
+//     can grant it.
+//   - A revoke goes in-band INCLUDING when it equals the stored value, which
+//     sends a revocation to a child that was never in bypass. Harmless and
+//     deliberately not fixed: the delivery is fire-and-forget, the installed argv
+//     is the durable half and carries no bypass flag either way, and the child is
+//     not in bypass to begin with. It is the same redundancy this path already
+//     tolerates for an unchanged model re-sent alongside a new effort.
 //   - A present-but-empty Model or Effort takes the restart. Empty means "run at
 //     claude's own default", which claudeSettingsArgs expresses by OMITTING the
-//     flag; no /model invocation means "revert to default".
+//     flag; no /model invocation means "revert to default". That reject wins over
+//     a revoke in the same frame — and loses nothing, since the restart recomposes
+//     argv from the merged settings, so the respawn carries the revocation. No
+//     frame can lose a revocation by mixing.
 //
-// Total over any SettingsUpdate. The Model-or-Effort clause is redundant at the
+// Total over any SettingsUpdate. The nothing-present clause is redundant at the
 // one call site, since an all-nil update returns early as a no-op before the
 // live-apply, but keeping it makes the predicate independently testable instead
 // of dependent on a caller-side invariant.
 func inBandDeliverable(update SettingsUpdate) bool {
-	if update.YOLO != nil {
+	if update.YOLO != nil && *update.YOLO {
 		return false
 	}
-	if update.Model == nil && update.Effort == nil {
+	if update.Model == nil && update.Effort == nil && update.YOLO == nil {
 		return false
 	}
 	if update.Model != nil && *update.Model == "" {
@@ -812,20 +839,39 @@ func inBandDeliverable(update SettingsUpdate) bool {
 	return true
 }
 
-// deliverSettingsInBand writes the /model and /effort commands implied by update
-// onto id's live child stdin — one ordinary user turn each, model first — as the
-// non-restarting live-apply for a model/effort-only change (#1581). Caller must
-// have released p.mu and must have installed the recomposed argv already, so a
-// failed delivery still reaches the next spawn.
+// deliverSettingsInBand writes the settings changes implied by update onto id's
+// live child stdin as the non-restarting live-apply (#1581): the /model and
+// /effort commands as ordinary user turns, and a bypass REVOCATION as a
+// set_permission_mode control request via RevokeBypass (#1604). Caller must have
+// released p.mu and must have installed the recomposed argv already, so a failed
+// delivery still reaches the next spawn.
 //
-// One command per PRESENT field, not per changed field: a frame carrying an
+// One send per PRESENT field, not per changed field: a frame carrying an
 // unchanged model alongside a new effort re-sends the model, which claude answers
 // and discards. That costs one round trip in a case no frame has been observed to
 // produce, and per-field diffing is the refinement the presence contract rules
-// out. The two commands are two SEPARATE turns — a two-command message is
-// unmeasured — and model-then-effort is fixed for the same reason
-// claudeSettingsArgs fixes model → effort → bypass: determinism buys testability
-// at no cost.
+// out. The commands are SEPARATE turns — a two-command message is unmeasured —
+// and model → effort → bypass is fixed for the same reason claudeSettingsArgs
+// fixes that order: determinism buys testability at no cost.
+//
+// The bypass clause fires on a revoke and ONLY a revoke. The !*update.YOLO half
+// of its guard is unreachable under today's inBandDeliverable, which rejects an
+// enable outright; it is kept as the enable-direction fail-safe so this site is
+// independently correct rather than dependent on a caller-side invariant — the
+// same argument inBandDeliverable's own doc makes for its redundant
+// nothing-present clause. TestPool_DeliverSettingsInBand_EnableWritesNothing
+// asserts it directly rather than leaving it untested defence.
+//
+// Two ordering facts a reader will otherwise get wrong:
+//
+//   - The revocation is a control request, not a queued turn, so it does not pass
+//     the turncommit gate and may reach the child AHEAD of a /model turn queued in
+//     the same update. That affects arrival order, not the resulting posture: the
+//     two settings are independent.
+//   - It changes the child's permission mode, not work already dispatched. A tool
+//     call in flight when the request arrives is not torn down — the old restart
+//     killed the child and so ended it. `interrupt` remains the verb for ending a
+//     running turn; #1605 measures the in-flight window live.
 //
 // Fire-and-forget: every write error is logged and swallowed, which is the
 // contract Restart has had on this path since #842. The settings are already
@@ -845,12 +891,17 @@ func inBandDeliverable(update SettingsUpdate) bool {
 //
 // NEVER logged, at any level: the model or effort value, the payload bytes, the
 // conversation id. #833 keeps settings values out of the daemon log and this path
-// gets no exemption just because the value now travels as command text.
+// gets no exemption just because the value now travels as command text. The
+// bypass record satisfies that rule structurally rather than by discipline —
+// RevokeBypass takes no mode, so there is no value it could leak.
 func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUpdate) {
+	notDelivered := func(setting string, err error) {
+		p.log.Info("sessions: in-band settings command not delivered",
+			"session", id, "setting", setting, "err", err)
+	}
 	send := func(setting, command string) {
 		if err := sup.WriteUserTurn(context.Background(), "", []byte(command)); err != nil {
-			p.log.Info("sessions: in-band settings command not delivered",
-				"session", id, "setting", setting, "err", err)
+			notDelivered(setting, err)
 		}
 	}
 	if update.Model != nil {
@@ -858,6 +909,11 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 	}
 	if update.Effort != nil {
 		send("effort", "/effort "+*update.Effort)
+	}
+	if update.YOLO != nil && !*update.YOLO {
+		if err := sup.RevokeBypass(); err != nil {
+			notDelivered("bypass", err)
+		}
 	}
 }
 

@@ -16,7 +16,7 @@ import (
 // it), so *streamsup.Runner declares State() streamsup.State instead. Go has no
 // covariant return on interface satisfaction, so the concrete runner cannot
 // satisfy the interface directly. This adapter — living in cmd/pyry, which knows
-// both types — maps that one method and forwards the other four unchanged. The
+// both types — maps that one method and forwards the rest unchanged. The
 // precedent for this covariant-return seam is poolResolver in main.go.
 //
 // The factory that constructs a streamRunner from a supervisor.Config —
@@ -44,8 +44,17 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // doubles, all in this repo, so widening is compile-checked across the whole set —
 // whereas a type assertion at a future call site would fail silently at runtime and
 // fall back to Restart, which is the one outcome a swap-only caller exists to
-// avoid. Nothing dispatches it yet.
+// avoid. Dispatched from the in-band branch of Pool.UpdateSettings since #1581.
 func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
+
+// RevokeBypass forwards to (*streamsup.Runner).RevokeBypass (#1603), dropping the
+// live child's bypass posture via a set_permission_mode control request rather
+// than a respawn. Like SetSpawnArgs it is ON the sessions.Runner interface, for
+// exactly the fail-open reason stated above: its consumer is Pool.UpdateSettings
+// inside internal/sessions, and an assertion there whose unmatched arm silently
+// no-ops would leave the posture un-revoked while the update reports success —
+// the one outcome a live revocation exists to prevent. Dispatched by #1604.
+func (a streamRunner) RevokeBypass() error { return a.r.RevokeBypass() }
 
 // Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
 // turn via a control_request line. It is OFF the sessions.Runner interface (which
