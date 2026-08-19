@@ -249,7 +249,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// trailer here cannot race the passthrough.
 	if wd.hasFired() {
 		if !parser.hasSeenResult() {
-			if err := writeIdleStallResult(cfg.Stdout, idle, runStart); err != nil {
+			if err := writeIdleStallResult(cfg.Stdout, idle, runStart, parser.hasOpenLine()); err != nil {
 				logger.Warn("streamrunner: write idle_stall result failed", "err", err)
 			}
 		}

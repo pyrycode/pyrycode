@@ -70,6 +70,16 @@ if ctx.Err() != nil { return nil }   // operator teardown is success
 return waitErr                       // nil on exit 0; *exec.ExitError otherwise
 ```
 
+## Idle-stall watchdog: synthetic trailer newline guard (#1497)
+
+`watchdog.go`'s `streamParser` wraps `cfg.Stdout`: `Write` forwards every byte from claude verbatim *before* parsing, then feeds the forwarded slice to `feed`, which tracks `awaiting`/`lastEvent`/`sawResult` off complete newline-delimited lines. When the poll loop judges the stream wedged (silent past the idle threshold while `awaiting`), it fires `cancelChild` — the source of the "watchdog" leg of § ctx-cancel teardown above — and `Run` synthesises a `result` trailer via `writeIdleStallResult`. That trailer is the only signal this path produces: `Run` returns nil by contract, and the dispatcher retries `terminal_reason: idle_stall` as transient.
+
+If claude's stream ended mid-line, the unterminated bytes are already on `cfg.Stdout` by the time the trailer is composed, so the trailer needs a leading `'\n'` to start its own line rather than splicing onto the partial and becoming unparseable — and a stream that ended newline-terminated must *not* get one, or the dispatcher sees a stray blank line. `streamParser` decides this with a `lineOpen` field, set in `feed` from the last byte of the slice that actually reached `dst` (`b[:n]`, never the caller's full `b`), and read via a `hasSeenResult`-shaped accessor (`hasOpenLine`) threaded into `writeIdleStallResult` as its `leadNewline` argument. This is deliberately **not** `len(buf) > 0`: `feed` drops the partial-line accumulator to `nil` once it grows past `maxBuf`, *after* those bytes have already reached stdout — on an oversized partial, `buf` reports the line closed at exactly the moment it is still open. `lineOpen` and `buf` are different properties of the parser for this reason and must stay that way.
+
+Testing note: the guard's off-case (no partial in flight) is pinned at the parser level — a fresh `streamParser.hasOpenLine()` is `false` — not by any `Run`-level test. `TestRun_IdleStall_NoEvents` asserts with `strings.Contains` and would pass even with a stray leading newline; don't read it as covering that property.
+
+`internal/streamsup` lifted this watchdog's type-aware core in #1094 (see [streamsup-package.md](streamsup-package.md), § "Idle/stall watchdog") but that watchdog *emits* on idle rather than killing, so it was out of scope for this ticket's measurement; whether its own trailer path has an analogous splice hazard is unmeasured.
+
 ## Teardown reap: descendant process groups (`reap.go`, #924)
 
 claude isolates every Bash tool command into its own detached process group two levels below pyry
@@ -153,6 +163,8 @@ Same-package `_test.go` with a `TestStreamRunnerHelperProcess` fake claude (re-e
 
 Four test cases against the four observable behaviours: clean exit (stdout substring check), non-zero exit (`errors.As(&exitErr)` + `ExitCode() == 1`), ctx-cancel mid-run (`Run` returns nil, elapsed < 6s, `"got SIGTERM"` on stderr — sanity-checks SIGTERM not SIGKILL was the trigger), and stdin envelope round-trip with a deliberately tricky prompt (embedded `"`, `\n`, `\\`, `\x01`) → assert the helper's captured file unmarshalls into the expected `userTurn` shape with `Content[0].Text` byte-for-byte equal to the input. Plus (#924) `TestRun_CtxCancel_ReapsDescendantGroups`, cloning the ctx-cancel-mid-run `sleep`-mode harness with the `reapDescendantGroupsFn` seam swapped to a recorder — see [Teardown reap](#teardown-reap-descendant-process-groups-reapgo-924) above.
 
+`helper_test.go` additionally carries a family of `stall_*` modes exercising the idle-stall watchdog (§ above) in `watchdog_test.go`, including (#1497) a mode that writes one unterminated line and then blocks until SIGTERM, for the newline-guard tests.
+
 ## Consumers
 
 - [`pyry agent-run`](pyry-agent-run-command.md) (#391) — assembles the full claude argv (`--input-format stream-json --output-format stream-json --verbose --dangerously-skip-permissions --allowed-tools … --model … --effort … --max-turns … --append-system-prompt-file …`), passes the prompt bytes through `Config.PromptBytes`, threads the verb's stdout (forwarded byte-for-byte to the dispatcher) and `os.Stderr`, and maps the runner's return (`nil` / `context.Canceled` / `*exec.ExitError`) to the verb's exit-code contract. The PTY-drive sibling `agentrun.Drive` is no longer invoked from this verb's runtime path, but stays compiled because `cmd/pyry/agent_run_selfcheck.go` (#336) still depends on the surrounding `agentrun` package for `WriteSettings` / `MarkWorkdirTrusted`.
@@ -170,4 +182,4 @@ Four test cases against the four observable behaviours: clean exit (stdout subst
 - [streamjson-package.md](streamjson-package.md) — the pre-#391 event-stream emitter; no longer composed with this primitive (claude itself emits the canonical stream-json events on its own stdout under stream-json mode). Package stays in tree pending the cleanup ticket.
 - [ptyrunner-package.md](ptyrunner-package.md#teardown-reap-descendant-process-groups-reapgo-565-864-923) — the parity reference for the #924 teardown reap; same seam shape, same guards, same "reap before signal" ordering.
 - [`codebase/924.md`](../codebase/924.md) — this ticket: wiring the descendant-group reap into the streamrunner teardown.
-- Spec [`docs/specs/architecture/390-streamrunner-primitive.md`](../../specs/architecture/390-streamrunner-primitive.md) — the build-time architect spec for this package. Spec [`docs/specs/architecture/924-streamrunner-reap-descendant-groups.md`](../../specs/architecture/924-streamrunner-reap-descendant-groups.md) — the #924 reap wiring.
+- Spec [`docs/specs/architecture/390-streamrunner-primitive.md`](../../specs/architecture/390-streamrunner-primitive.md) — the build-time architect spec for this package. Spec [`docs/specs/architecture/924-streamrunner-reap-descendant-groups.md`](../../specs/architecture/924-streamrunner-reap-descendant-groups.md) — the #924 reap wiring. Spec [`docs/specs/architecture/1497-idle-stall-trailer-newline-guard.md`](../../specs/architecture/1497-idle-stall-trailer-newline-guard.md) — the #1497 newline-guard design.

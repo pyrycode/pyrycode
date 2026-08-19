@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+// partialLine is the unterminated blob the "stall_partial_line" helper mode
+// writes — a plausible mid-chunk truncation of an assistant event, with no
+// closing newline. Shared with the Run-level test so the assertion compares
+// against the exact bytes the helper wrote, not a re-typed copy.
+const partialLine = `{"type":"assistant","message":{"role":"assistant","content":[{"type":"te`
+
 // blockUntilSigterm waits for SIGTERM (exits 0) or a 30s safety timeout. Used
 // by the stall helper modes so a watchdog-driven kill terminates the fake
 // claude promptly instead of falling through to the SIGKILL grace window.
@@ -50,6 +56,14 @@ func blockUntilSigterm() {
 //                    → user(tool_result), then block until SIGTERM (exit 0) or
 //                    30s. Models a stall right after a tool result came back —
 //                    awaitingAssistant is true again, so the watchdog must fire.
+//   - "stall_partial_line": write partialLine to stdout with NO trailing
+//                    newline, then read stdin to EOF and block until SIGTERM
+//                    (exit 0) or 30s. Models a stream wedged mid-chunk —
+//                    nothing precedes the partial, so the parser stays in its
+//                    initial awaiting state and an unterminated write never
+//                    advances lastEvent, so the watchdog must fire. The
+//                    partial goes out BEFORE the stdin drain so the write
+//                    does not wait on the parent's envelope round-trip.
 //   - "slow_tool":  read stdin to EOF, emit system → assistant(tool_use), sleep
 //                    GO_STREAMRUNNER_HELPER_SLEEP_MS (default 600ms), then emit
 //                    user(tool_result) → assistant(text) → result and exit 0.
@@ -116,6 +130,10 @@ func TestStreamRunnerHelperProcess(t *testing.T) {
 		} {
 			fmt.Fprintln(os.Stdout, l)
 		}
+		blockUntilSigterm()
+	case "stall_partial_line":
+		fmt.Fprint(os.Stdout, partialLine)
+		_, _ = io.Copy(io.Discard, os.Stdin)
 		blockUntilSigterm()
 	case "slow_tool":
 		_, _ = io.Copy(io.Discard, os.Stdin)
