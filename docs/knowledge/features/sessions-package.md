@@ -531,8 +531,16 @@ forever on a widening backoff (observed 2026-08-18). The in-band path
 **avoids** that rather than fixing it — no resume, no lost transcript, no
 crash-loop. Live-applying a `YOLO` revoke is #1604 — the enable direction has
 no in-band form; claude refuses it. #1574 may **not** delete `Restart`: the
-enable direction keeps a live production caller. The live-claude proof is
-#1605. See [codebase/1581.md](../codebase/1581.md) and
+enable direction keeps a live production caller. **#1605 was split, not
+landed as such**: the live-claude proof that this composed path (`Pool` →
+`inBandDeliverable` → `deliverSettingsInBand` → `Runner.RevokeBypass`)
+reaches a real child without tearing it down is #1622, measured against
+claude 2.1.220 — see
+[`e2e-realclaude.md`](e2e-realclaude.md#interactive_stream_inband_bypass_revoke_test-go-1622).
+The question #1605 also implied but #1622 deliberately leaves open — whether
+the revoked posture is *behaviourally enforced*, not just echoed back — is a
+sibling ticket that consumes #1622's harness, not yet landed. See
+[codebase/1581.md](../codebase/1581.md) and
 [codebase/1604.md](../codebase/1604.md).
 
 `Supervisor.Restart(args []string)` (`internal/supervisor`) swaps the live
