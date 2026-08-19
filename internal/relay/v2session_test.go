@@ -2511,9 +2511,10 @@ func sleepUntil(t time.Time) {
 // --- unsolicited push surface tests (#571) ---
 
 // buildMessageEnvelope constructs a fully-formed binary→phone `message`
-// envelope (TypeMessage + protocol.MessagePayload) — the shape the #572
-// assistant-turn bridge will hand to Push. text identifies the frame so
-// the decrypting side can assert the payload round-tripped intact.
+// envelope (TypeMessage + protocol.MessagePayload) — the shape cmd/pyry's
+// fan-out emitters hand to Push after enumerating open conns with ActiveConns.
+// text identifies the frame so the decrypting side can assert the payload
+// round-tripped intact.
 func buildMessageEnvelope(t *testing.T, id uint64, text string) protocol.Envelope {
 	t.Helper()
 	payload, err := json.Marshal(protocol.MessagePayload{
@@ -3566,17 +3567,22 @@ func TestV2Session_Push_CtxCancelled_ReturnsCtxErr(t *testing.T) {
 	}
 }
 
-// --- open-session enumeration (ActiveConnIDs) tests (#588) ---
+// --- open-session enumeration (ActiveConns) tests (#588) ---
 
-// TestV2Session_ActiveConnIDs_OpenOnly pins both halves of AC#1: every
+// TestV2Session_ActiveConns_OpenOnly pins both halves of AC#1: every
 // V2StateOpen session is enumerated, and every non-open session (still
 // handshaking, or handshake-complete-but-token-unvalidated) is excluded — the
 // same V2StateOpen security gate Push enforces. White-box session injection
-// mirrors TestV2Session_Push_NotOpen: ActiveConnIDs reads s.state only (never
+// mirrors TestV2Session_Push_NotOpen: ActiveConns reads s.state only (never
 // s.send), so nil CipherStates are safe, and the snapshot channel-send is the
 // happens-before edge that publishes the map writes to Run (no frames fed, no
 // timers armed, so Run touches the map only when it services the snapshot).
-func TestV2Session_ActiveConnIDs_OpenOnly(t *testing.T) {
+//
+// The four-state injection map is load-bearing: this is the only test covering
+// the V2StateAwaitingInit arm of the gate. The sibling
+// TestV2Session_ActiveConns_MixedInteractive injects a handshake-complete
+// session but no awaiting-init one.
+func TestV2Session_ActiveConns_OpenOnly(t *testing.T) {
 	t.Parallel()
 
 	respPriv, _ := genV2Keypair(t)
@@ -3605,20 +3611,24 @@ func TestV2Session_ActiveConnIDs_OpenOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	got := mgr.ActiveConnIDs(ctx)
+	conns := mgr.ActiveConns(ctx)
+	got := make([]string, len(conns))
+	for i, c := range conns {
+		got[i] = c.ConnID
+	}
 	slices.Sort(got) // unordered set — sort before comparing positionally
 	want := []string{"c-open-a", "c-open-b"}
 	if !slices.Equal(got, want) {
-		t.Errorf("ActiveConnIDs() = %v, want %v (open sessions only)", got, want)
+		t.Errorf("ActiveConns() conn ids = %v, want %v (open sessions only)", got, want)
 	}
 }
 
-// TestV2Session_ActiveConnIDs_TornDownSessionAbsent pins AC#2: a session that
+// TestV2Session_ActiveConns_TornDownSessionAbsent pins AC#2: a session that
 // was opened then torn down (closeWith deletes it from the map) no longer
 // appears in the snapshot. Drives a real open, confirms its id is enumerated,
 // then drives an AEAD-failure 4421 teardown (the TestV2Session_Push_Closed
 // recipe) and re-enumerates.
-func TestV2Session_ActiveConnIDs_TornDownSessionAbsent(t *testing.T) {
+func TestV2Session_ActiveConns_TornDownSessionAbsent(t *testing.T) {
 	t.Parallel()
 
 	respPriv, respPub := genV2Keypair(t)
@@ -3640,9 +3650,13 @@ func TestV2Session_ActiveConnIDs_TornDownSessionAbsent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	enumerated := func(conns []ActiveConn) bool {
+		return slices.ContainsFunc(conns, func(c ActiveConn) bool { return c.ConnID == v2TestConnID })
+	}
+
 	// The freshly-opened session is enumerated.
-	if got := sess.mgr.ActiveConnIDs(ctx); !slices.Contains(got, v2TestConnID) {
-		t.Fatalf("ActiveConnIDs() = %v, want it to contain %q", got, v2TestConnID)
+	if got := sess.mgr.ActiveConns(ctx); !enumerated(got) {
+		t.Fatalf("ActiveConns() = %v, want it to contain %q", got, v2TestConnID)
 	}
 
 	// Drive an AEAD-failure 4421 teardown: flip a byte in a sealed frame's
@@ -3669,20 +3683,20 @@ func TestV2Session_ActiveConnIDs_TornDownSessionAbsent(t *testing.T) {
 		t.Fatalf("close_code = %d, want %d", closeEnvs[1].CloseCode, StatusProtocolMismatch)
 	}
 
-	if got := sess.mgr.ActiveConnIDs(ctx); slices.Contains(got, v2TestConnID) {
-		t.Errorf("ActiveConnIDs() = %v, want it to NOT contain torn-down %q", got, v2TestConnID)
+	if got := sess.mgr.ActiveConns(ctx); enumerated(got) {
+		t.Errorf("ActiveConns() = %v, want it to NOT contain torn-down %q", got, v2TestConnID)
 	}
 }
 
-// TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean pins AC#3 — the
-// -race proof. A separate goroutine hammers ActiveConnIDs in a tight loop
+// TestV2Session_ActiveConns_ConcurrentWithDispatch_RaceClean pins AC#3 — the
+// -race proof. A separate goroutine hammers ActiveConns in a tight loop
 // while inbound sealed request frames drive dispatchAppFrame replies on the
 // same open session, so the snapshot funnel and the reply path contend for the
 // single Run goroutine. Every snapshot is either {v2TestConnID} or empty —
 // never garbage; the solicited replies still decrypt in capture (= seal) order
 // afterwards, proving the concurrent reads never corrupted session state. Run
 // under -race.
-func TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean(t *testing.T) {
+func TestV2Session_ActiveConns_ConcurrentWithDispatch_RaceClean(t *testing.T) {
 	t.Parallel()
 
 	const mReq = 16
@@ -3741,9 +3755,9 @@ func TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean(t *testing.T) 
 				return
 			default:
 			}
-			for _, id := range sess.mgr.ActiveConnIDs(ctx) {
-				if id != v2TestConnID {
-					t.Errorf("snapshot contained unexpected id %q", id)
+			for _, c := range sess.mgr.ActiveConns(ctx) {
+				if c.ConnID != v2TestConnID {
+					t.Errorf("snapshot contained unexpected id %q", c.ConnID)
 				}
 			}
 		}
@@ -3767,9 +3781,9 @@ func TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean(t *testing.T) 
 	}
 }
 
-// TestV2Session_ActiveConnIDs_EmptyManager pins the empty case: a started
+// TestV2Session_ActiveConns_EmptyManager pins the empty case: a started
 // manager with zero sessions returns a len-0 slice without blocking.
-func TestV2Session_ActiveConnIDs_EmptyManager(t *testing.T) {
+func TestV2Session_ActiveConns_EmptyManager(t *testing.T) {
 	t.Parallel()
 
 	respPriv, _ := genV2Keypair(t)
@@ -3789,17 +3803,17 @@ func TestV2Session_ActiveConnIDs_EmptyManager(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if got := mgr.ActiveConnIDs(ctx); len(got) != 0 {
-		t.Errorf("ActiveConnIDs() on empty manager = %v, want len 0", got)
+	if got := mgr.ActiveConns(ctx); len(got) != 0 {
+		t.Errorf("ActiveConns() on empty manager = %v, want len 0", got)
 	}
 }
 
-// TestV2Session_ActiveConnIDs_CtxCancelled_ReturnsNil pins the
+// TestV2Session_ActiveConns_CtxCancelled_ReturnsNil pins the
 // ctx-cancellation arm: a call whose ctx is already cancelled returns nil
 // without blocking. With no Run goroutine draining m.snapshot, the send case
 // can never proceed, so the ctx.Done arm is the only ready case —
 // deterministic, no flakiness from select picking the send.
-func TestV2Session_ActiveConnIDs_CtxCancelled_ReturnsNil(t *testing.T) {
+func TestV2Session_ActiveConns_CtxCancelled_ReturnsNil(t *testing.T) {
 	t.Parallel()
 
 	respPriv, _ := genV2Keypair(t)
@@ -3819,8 +3833,8 @@ func TestV2Session_ActiveConnIDs_CtxCancelled_ReturnsNil(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if got := mgr.ActiveConnIDs(ctx); got != nil {
-		t.Errorf("ActiveConnIDs with cancelled ctx = %v, want nil", got)
+	if got := mgr.ActiveConns(ctx); got != nil {
+		t.Errorf("ActiveConns with cancelled ctx = %v, want nil", got)
 	}
 }
 
@@ -4429,8 +4443,7 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 // conn, and a flagged-but-still-handshaking conn. ActiveConns reports the
 // correct flag per open conn and excludes the non-open one (the V2StateOpen
 // gate wins over the interactive flag — belt-and-suspenders of different
-// fabric). ActiveConnIDs is an unchanged projection: every open conn-id, flag
-// dropped. White-box injection mirrors TestV2Session_ActiveConnIDs_OpenOnly;
+// fabric). White-box injection mirrors TestV2Session_ActiveConns_OpenOnly;
 // the snapshot channel-send is the happens-before edge publishing the writes
 // to Run.
 func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
@@ -4463,12 +4476,6 @@ func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
 	}
 	if len(got) != 2 || !got["c-int"] || got["c-plain"] {
 		t.Errorf("ActiveConns flags = %v, want {c-int:true, c-plain:false} (open only)", got)
-	}
-
-	ids := mgr.ActiveConnIDs(ctx)
-	slices.Sort(ids)
-	if want := []string{"c-int", "c-plain"}; !slices.Equal(ids, want) {
-		t.Errorf("ActiveConnIDs() = %v, want %v (projection: all open ids, flag dropped)", ids, want)
 	}
 }
 
@@ -4738,12 +4745,12 @@ func TestV2Session_IdleChurn_ReturnsToBaseline(t *testing.T) {
 		handshakeConnToOpen(t, frames, rec, connID, respPub, initPriv)
 		// Freshly handshaked and the ONLY open conn — every prior round was
 		// swept and deleted, so the count never climbs above one.
-		if ids := mgr.ActiveConnIDs(bg); len(ids) != 1 || ids[0] != connID {
-			t.Fatalf("after handshake %s: ActiveConnIDs = %v, want [%s] (stale sessions accumulated)", connID, ids, connID)
+		if conns := mgr.ActiveConns(bg); len(conns) != 1 || conns[0].ConnID != connID {
+			t.Fatalf("after handshake %s: ActiveConns = %v, want exactly one open conn %s (stale sessions accumulated)", connID, conns, connID)
 		}
 		waitForConnClose(t, rec, connID, uint16(StatusIdleTimeout))
-		if ids := mgr.ActiveConnIDs(bg); len(ids) != 0 {
-			t.Fatalf("after idle sweep of %s: ActiveConnIDs = %v, want [] (baseline)", connID, ids)
+		if conns := mgr.ActiveConns(bg); len(conns) != 0 {
+			t.Fatalf("after idle sweep of %s: ActiveConns = %v, want [] (baseline)", connID, conns)
 		}
 	}
 }
@@ -5545,9 +5552,9 @@ func TestV2Session_Push_ByteCeilingTearsDownSession(t *testing.T) {
 
 	// The session left V2StateOpen: closeWith deleted it, so the open-session
 	// enumeration no longer lists it.
-	for _, id := range sess.mgr.ActiveConnIDs(ctx) {
-		if id == v2TestConnID {
-			t.Fatalf("conn %q still enumerated as open after the ceiling teardown", id)
+	for _, c := range sess.mgr.ActiveConns(ctx) {
+		if c.ConnID == v2TestConnID {
+			t.Fatalf("conn %q still enumerated as open after the ceiling teardown", c.ConnID)
 		}
 	}
 

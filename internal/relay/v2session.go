@@ -133,8 +133,7 @@ type wakeSignal struct {
 // reply send is non-blocking even if the caller's ctx fires between enqueue
 // and reply. Mirrors manualRekeyReq minus the per-conn inputs — a snapshot
 // takes no addressed-conn argument. The reply carries the capability-aware
-// enumeration ([]ActiveConn); ActiveConnIDs is a thin projection over the
-// same reply.
+// enumeration ([]ActiveConn).
 type snapshotReq struct {
 	reply chan []ActiveConn
 }
@@ -442,10 +441,10 @@ type V2SessionManager struct {
 	// so concurrent multi-conn replays are covered by the single cap-1 channel.
 	replayCh chan struct{}
 
-	// snapshot funnels (*V2SessionManager).ActiveConns (and ActiveConnIDs,
-	// which projects over it) calls onto Run's dispatch goroutine so the read
-	// of m.sessions runs under the single-owner-goroutine invariant, serialised
-	// against every map write (lazy-create, delete, state transitions).
+	// snapshot funnels (*V2SessionManager).ActiveConns calls onto Run's dispatch
+	// goroutine so the read of m.sessions runs under the single-owner-goroutine
+	// invariant, serialised against every map write (lazy-create, delete, state
+	// transitions).
 	// Unbuffered: backpressure is correct — if Run is busy, the caller waits;
 	// the caller's ctx is the escape arm. Not closed by the manager on Run
 	// exit; in-flight callers unblock via ctx.Done.
@@ -1511,31 +1510,6 @@ func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
 	case <-ctx.Done():
 		return nil
 	}
-}
-
-// ActiveConnIDs returns a snapshot of the conn IDs of every session currently
-// in V2StateOpen — the authenticated, token-validated sessions to which Push
-// may deliver. It is a thin projection over ActiveConns (dropping the
-// interactive flag) preserved for the capability-agnostic #589 fan-out
-// consumer; its signature and observable contract (unordered set, nil on ctx
-// cancellation, non-nil-empty on an empty manager) are unchanged.
-//
-// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
-// server-initiated fan-out lands in a separate ticket (#572); until then this
-// method is reachable only from internal/relay tests.
-func (m *V2SessionManager) ActiveConnIDs(ctx context.Context) []string {
-	conns := m.ActiveConns(ctx)
-	if conns == nil {
-		// Preserve the nil-on-cancel contract: a cancelled snapshot is nil,
-		// distinct from a non-nil-empty snapshot of an open-session-less
-		// manager.
-		return nil
-	}
-	ids := make([]string, len(conns))
-	for i, c := range conns {
-		ids[i] = c.ConnID
-	}
-	return ids
 }
 
 // handleActiveConns runs on Run's dispatch goroutine — the only site that
