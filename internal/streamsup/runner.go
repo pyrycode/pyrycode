@@ -501,9 +501,16 @@ func (r *Runner) Restart(args []string) {
 // no iterCancel call. It exists for a caller that needs to change what the session
 // will run next without ending what it is running now; declining to call Restart
 // is not that path, since it loses the swap outright and the next spawn (a
-// crash-respawn, or an evict then Activate) silently re-execs the stale argv. With
-// no child live the effect is exactly Restart's no-child case. Non-blocking,
-// fire-and-forget, safe from any goroutine.
+// crash-respawn, or an evict then Activate) silently re-execs the stale argv.
+// Non-blocking, fire-and-forget, safe from any goroutine.
+//
+// The two do NOT converge when no child is live. Restart still sends its hint in
+// that case, and the token is observable twice over: it satisfies Run's restartCh
+// case in the backoff select, cutting an in-progress backoff wait short, and with
+// no wait in flight it persists in the buffered channel so the NEXT child exit
+// skips backoff entirely — RestartCount never increments and PhaseBackoff is never
+// set. SetSpawnArgs sends nothing, so a runner already backing off stays backing
+// off and the swap simply lands on the spawn that wait was going to make anyway.
 //
 // It takes restartMu exactly once and writes only args — never sessionID,
 // rotatePending or iterCancel — so it preserves the #1481 single-acquisition

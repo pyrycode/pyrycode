@@ -53,6 +53,9 @@ type Runner interface {
 // newStreamRunnerFactory, and the tests supply their own doubles.
 //
 // The factory is invoked at every construction site (bootstrap in Pool.New and
-// per-session in Pool.buildSession). A returned error propagates through the
-// existing "sessions: … supervisor: %w" wraps at both sites.
+// per-session in Pool.buildSession). A returned error propagates through each
+// site's own wrap — "sessions: bootstrap runner: %w" in New, "sessions: create
+// runner: %w" in buildSession. Neither says "supervisor": the shared
+// "sessions: … supervisor: %w" this doc used to quote went away with
+// internal/supervisor (#1348), same as the claims above.
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)

@@ -766,13 +766,30 @@ const swapMarkerArg = "swapmarker"
 // this test to a self-exiting mode (e.g. "crash") would silently turn the Kill
 // into a signal aimed at whatever now owns that pid.
 //
-// Unlike TestRunner_LiveRestart this must NOT assert RestartCount == 0. That test
-// holds because Restart sends the restartCh hint, so drainRestart reports true and
-// Run skips the backoff block that increments the counter. An externally-ended
-// child sends no hint, so Run takes the backoff path and the counter increments —
-// a difference that has nothing to do with the argv install.
+// Half (a)'s discriminator is the reap seam, NOT the settle window. A kill can
+// only reach the child by cancelling the iteration ctx, and os/exec invokes
+// cmd.Cancel on exactly that; reapDescendantGroupsFn fires first inside it,
+// synchronously, before the SIGTERM. So a stub at that seam observes an attempted
+// kill one goroutine wakeup after the offending call, whatever the child then does
+// about the signal. Swapping it is also what keeps the count and pid assertions
+// honest: the real reaper shells out to ps, which under -race stretched
+// kill→respawn to ~1.03s and let a killing install slip through a 250ms settle
+// with Phase still running and the pid unchanged (#1580 review). With the seam
+// stubbed that ps is off the path, a killed child respawns in milliseconds, and
+// the settle bounds a goroutine wakeup rather than a subprocess.
+//
+// The RestartCount assertion in (b) pins the OTHER forbidden kill-half effect, the
+// restartCh hint, which no other assertion here can see: an install that leaked a
+// token would kill nothing and still deliver the marker, so (a) and (b) both stay
+// green, but drainRestart would then report true and Run would skip the backoff
+// block — leaving the counter at 0 instead of 1 and silently suppressing the next
+// crash-respawn's backoff. Asserting it is also why this test must NOT copy
+// TestRunner_LiveRestart's RestartCount == 0: that holds because a Restart DOES
+// send the hint, whereas an externally-ended child sends none, so Run takes the
+// backoff path and the counter increments.
+//
+// Non-parallel: swapReapSeam mutates a package var.
 func TestRunner_SetSpawnArgs_InstallsWithoutKillingLiveChild(t *testing.T) {
-	t.Parallel()
 	out, stderr := &safeBuffer{}, &safeBuffer{}
 	cfg := helperRunCfg(t, "record_block", out, stderr)
 	cfg.BackoffInitial = time.Millisecond
@@ -786,6 +803,9 @@ func TestRunner_SetSpawnArgs_InstallsWithoutKillingLiveChild(t *testing.T) {
 		default:
 		}
 	}
+
+	reapRec := &reapRecorder{}
+	swapReapSeam(t, reapRec)
 
 	r, err := New(cfg)
 	if err != nil {
@@ -815,10 +835,16 @@ func TestRunner_SetSpawnArgs_InstallsWithoutKillingLiveChild(t *testing.T) {
 
 	r.SetSpawnArgs([]string{"--model", swapMarkerArg})
 
-	// Half (a). A negative assertion needs a window in which the forbidden thing
-	// could have happened: the backoff is 1ms here, so a respawn triggered by the
-	// install would be recorded many times over within this settle.
+	// Half (a). The window only has to cover the os/exec watcher goroutine waking
+	// on a cancelled iteration ctx and calling cmd.Cancel — microseconds — because
+	// the reap seam below is what an attempted kill trips. It is generous for the
+	// count and pid assertions too: with the seam stubbed, a killed child respawns
+	// at the 1ms backoff set above rather than behind the real reaper's ps.
 	time.Sleep(250 * time.Millisecond)
+	if calls := reapRec.calls(); len(calls) != 0 {
+		t.Fatalf("reap seam fired %v after SetSpawnArgs — the install cancelled the iteration ctx, i.e. it killed the child",
+			calls)
+	}
 	if got := rec.count(); got != 1 {
 		t.Fatalf("saw %d spawn attempt(s) after SetSpawnArgs, want 1 — the install relaunched the child:\n%v",
 			got, rec.all())
@@ -838,6 +864,13 @@ func TestRunner_SetSpawnArgs_InstallsWithoutKillingLiveChild(t *testing.T) {
 			t.Fatalf("saw only %d spawn(s) after the child was ended, want ≥2", rec.count())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	// No hint was sent, so Run took the backoff path on the way to spawn 2 and
+	// counted this as a crash-respawn. Reading it after the spawn is observed is
+	// ordered, not racy: the increment happens in the backoff block Run must pass
+	// through before beginSpawn.
+	if got := r.State().RestartCount; got < 1 {
+		t.Errorf("RestartCount = %d after the child was ended, want >=1 — SetSpawnArgs left a restartCh token, so the respawn skipped backoff", got)
 	}
 	if err := stop(); !errors.Is(err, context.Canceled) {
 		t.Errorf("Run returned %v, want context.Canceled after teardown", err)
