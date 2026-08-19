@@ -33,12 +33,13 @@ const approveToolName = "approve"
 // supported" rule) and fall back to this pinned value otherwise.
 const defaultMCPProtocolVersion = "2025-06-18"
 
-// mcpApproveClientMargin is added to mcpApprovalTimeout to form the client read
+// mcpApproveClientMargin is added to approvalTimeout() to form the client read
 // deadline, so the daemon's own approval timer fires first — its informative
 // "approval request timed out" deny passes through — rather than the client
 // read deadline (a generic transport error → our own "approval unavailable"
-// deny). Both are denies; the margin just prefers the daemon's message. Inert
-// until #1106 wires --permission-prompt-tool in production; tune then.
+// deny). Both are denies; the margin just prefers the daemon's message. Deriving
+// both ends of the socket from that one env-aware accessor is what keeps the
+// ordering at EVERY window rather than only at the default one (#1507).
 const mcpApproveClientMargin = 30 * time.Second
 
 // approveServer is the MCP stdio approve tool host. It is a pure forwarder: each
@@ -77,12 +78,28 @@ func runMCPApprove(args []string) error {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("mcp-approve: serving MCP approve tool over stdio")
 
-	s := &approveServer{
-		socketPath: socketPath,
-		timeout:    mcpApprovalTimeout + mcpApproveClientMargin,
-		log:        logger,
-	}
+	s := newMCPApproveServer(socketPath, logger)
 	return serveJSONRPCStdio(ctx, os.Stdin, os.Stdout, logger, s.register)
+}
+
+// newMCPApproveServer is the sole production construction site for approveServer.
+// The per-call client read deadline derives from approvalTimeout() — the same
+// env-aware accessor the daemon hands the pending-approval registry — so raising
+// PYRY_APPROVAL_TIMEOUT raises both ends of the control socket together instead
+// of freezing the client at the mcpApprovalTimeout constant plus the margin. The
+// env is read once per short-lived `pyry mcp-approve` process, mirroring the
+// daemon's single read when it installs the registry.
+//
+// The literal lives here rather than inline in runMCPApprove, which ends in the
+// blocking serveJSONRPCStdio: nothing could observe the derived deadline without
+// starting a server. Named newMCPApproveServer because newApproveServer is
+// already taken by a fixed-timeout test helper in this package.
+func newMCPApproveServer(socketPath string, log *slog.Logger) *approveServer {
+	return &approveServer{
+		socketPath: socketPath,
+		timeout:    approvalTimeout() + mcpApproveClientMargin,
+		log:        log,
+	}
 }
 
 // register binds the three MCP request handlers on the transport. Notifications
