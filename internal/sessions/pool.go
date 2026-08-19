@@ -1179,6 +1179,65 @@ func (p *Pool) DefaultSettings() (SessionSettings, bool) {
 	return sess.settings, true
 }
 
+// SettingsFor returns the named session's currently-persisted SessionSettings
+// (model, effort, YOLO), or ErrSessionNotFound if the pool holds no session
+// under that id. It is the read half matching UpdateSettings' per-session write:
+// before it, an outside caller could change any session's settings but could
+// read only the bootstrap's, via DefaultSettings.
+//
+// SessionSettings is a value type, so the return is a snapshot copy and not a
+// lease on pool state — no caller can mutate a session through it, and the copy
+// may be one concurrent UpdateSettings stale by the time it is read. That
+// staleness is inherent to any lock-releasing accessor and is the contract
+// DefaultSettings and mintSettings already carry.
+//
+// The empty id is deliberately NOT special-cased: it misses p.sessions like any
+// other unknown id and gets ErrSessionNotFound. That puts this method on
+// UpdateSettings' side of an in-package disagreement and declines Lookup's
+// convention, where "" resolves to the bootstrap. Read and write must agree, or
+// a caller passing "" reads the bootstrap's settings and writes nowhere. The
+// bootstrap is registered under a real UUID, so "" is never a key.
+//
+// No id validation: unlike writeMCPSettings, the id here names no file and never
+// leaves the map lookup, so a malformed id is a map miss — already the correct
+// answer. The error is returned bare rather than wrapped with the caller's id
+// (as UpdateSettings returns it, and unlike ambiguousError, which echoes only
+// ids already resident in the pool), so a hostile or malformed id cannot be
+// reflected into a log line or wire frame a consumer builds from the error.
+//
+// Read-modify-write warning for consumers: a caller that reads this triple and
+// then calls UpdateSettings must send only the fields it intends to change.
+// Echoing the whole snapshot back re-asserts a YOLO posture an operator may have
+// cleared in the interval — SettingsUpdate's pointer-per-field presence contract
+// makes sending one field the easy path, and this is the trap mintSettings
+// avoids by rebuilding its literal field by field.
+//
+// Concurrency: MUST be called with p.mu unheld — one RLock acquisition per call,
+// with no second lock and no delegation to DefaultSettings, whose own RLock
+// would double-acquire. Go's RWMutex is not reentrant, so either shape
+// self-deadlocks as soon as a writer queues between the two acquisitions; this
+// is the hazard mintSettings' docstring already records. Reads sess.settings
+// under p.mu (RLock) and deliberately NOT Session.lcMu — settings is a
+// p.mu-guarded field (writer UpdateSettings holds p.mu write; the other reader
+// saveLocked holds p.mu), so there is no torn read.
+//
+// DefaultSettings is not made redundant by this and must not be rewritten to
+// call it: SettingsFor(p.BootstrapID()) is TWO acquisitions with a rotation
+// window between them — RotateID can flip p.bootstrap under the write lock after
+// the first returns — so the composed form can read a session that is no longer
+// the bootstrap. DefaultSettings resolves p.bootstrap and reads settings under a
+// single acquisition and stays the atomic way to ask for the bootstrap's
+// settings.
+func (p *Pool) SettingsFor(id SessionID) (SessionSettings, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	sess, ok := p.sessions[id]
+	if !ok {
+		return SessionSettings{}, ErrSessionNotFound
+	}
+	return sess.settings, nil
+}
+
 // mintSettings returns the SessionSettings a freshly-minted session starts
 // with: the operator's configured model and effort level, sourced from the
 // bootstrap session's persisted settings so a new conversation does not fall
