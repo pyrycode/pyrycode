@@ -5,11 +5,21 @@ import (
 	"github.com/pyrycode/pyrycode/internal/transcript"
 )
 
-// snapshotUsageFor builds the relay's SnapshotUsage seam: it resolves the
-// bootstrap session's transcript BY ID and reports its context-window occupancy
-// (used tokens, window size). Returns nil when there is no sessions directory or
-// no id source to resolve from (foreground / unwired), which makes the handlers
-// report zeros — the pre-existing unwired contract, unchanged.
+// snapshotUsageFor builds the by-id context-window usage reader behind the
+// relay's SnapshotUsage seam: given a session id per CALL, it resolves that
+// session's transcript BY ID and reports its occupancy (used tokens, window
+// size). The id is an argument rather than a construction-time closure so one
+// reader over one sessions directory can answer for any resolved session, not
+// only the bootstrap's (#1608).
+//
+// Returns nil when there is no sessions directory to resolve against
+// (foreground / unwired). The guard belongs here rather than at the wiring
+// point because it protects the reader itself: with an empty dir, StatByID
+// would join a RELATIVE <id>.jsonl against the daemon's working directory, and
+// a stray file of that name there would be read and reported as a session's
+// occupancy. bootstrapSnapshotUsage collapses a nil reader into the nil seam
+// that makes the handlers report zeros — the pre-existing unwired contract,
+// unchanged.
 //
 // #1214: this replaces a resolver that asked the terminal child for its process
 // id and followed whichever transcript that process held open. Two things were
@@ -44,22 +54,47 @@ import (
 // an id that is empty or malformed, a transcript not yet written, and a file that
 // raced away between the stat and the open. A usage reader has no business
 // surfacing an error to a client, and it NEVER logs a path.
-func snapshotUsageFor(dir string, bootstrapID func() string) func() (usedTokens, windowTokens int) {
-	if dir == "" || bootstrapID == nil {
+func snapshotUsageFor(dir string) func(id string) (usedTokens, windowTokens int) {
+	if dir == "" {
 		return nil
 	}
-	return func() (int, int) {
+	return func(id string) (int, int) {
 		var path string
-		if res, err := transcript.StatByID(dir, bootstrapID()); err == nil {
+		if res, err := transcript.StatByID(dir, id); err == nil {
 			path = res.Path
 		}
 		u, err := contextwindow.Read(path)
 		if err != nil {
 			// A genuine open failure on a resolved path. Read("") never errors and
 			// yields the same fresh-session report, so this branch is deterministic
-			// and content-free.
+			// and content-free. It also discards the error rather than propagating
+			// it, which is what keeps the resolved path off every surface — the
+			// error contextwindow.Read returns wraps the full path.
 			u, _ = contextwindow.Read("")
 		}
 		return u.UsedTokens, u.WindowTokens
+	}
+}
+
+// bootstrapSnapshotUsage builds the seam startRelayV2 hands to the relay: the
+// by-id reader above, bound to the BOOTSTRAP session's id source, so every
+// consumer still reports the bootstrap session's figures and the wire stays
+// byte-identical to before #1608.
+//
+// Returns nil — the seam that makes the handlers report zeros — when either
+// half is unwired: no sessions directory (snapshotUsageFor's guard) or no id
+// source. bootstrapID is a func value whose zero is nil and which relayWiring
+// documents as legitimately nil, so the second half pins a documented
+// optional-field contract; relayWiring's single producer always sets it, so no
+// path reaches it today. Deciding it at BUILD time, before any closure exists,
+// is what makes "no path can invoke a nil id source" structural rather than a
+// promise.
+func bootstrapSnapshotUsage(dir string, bootstrapID func() string) func() (usedTokens, windowTokens int) {
+	read := snapshotUsageFor(dir)
+	if read == nil || bootstrapID == nil {
+		return nil
+	}
+	return func() (int, int) {
+		return read(bootstrapID())
 	}
 }

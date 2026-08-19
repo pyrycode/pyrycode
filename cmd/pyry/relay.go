@@ -482,7 +482,7 @@ func startRelayV2(
 	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply and, since #491, for the session_settings reply.
-	snapshotUsage := snapshotUsageFor(w.claudeSessionsDir, w.bootstrapIDFn)
+	snapshotUsage := bootstrapSnapshotUsage(w.claudeSessionsDir, w.bootstrapIDFn)
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
@@ -538,11 +538,13 @@ func startRelayV2(
 		// used_tokens / window_tokens on both the screen_snapshot and the
 		// session_settings replies from the bootstrap session's current occupancy,
 		// so a client can render an "N% used (X of Y)" gauge (desktop#182). The
-		// closure (snapshotUsageFor, built above over transcript.StatByID +
-		// contextwindow.Read) returns two primitives, so internal/relay imports
-		// neither internal/contextwindow nor internal/sessions. Read-only
-		// reflection — no secret, no authz. nil in foreground / unresolved sessions
-		// dir makes the handlers report zeros (used_tokens:0, window_tokens:0).
+		// closure (bootstrapSnapshotUsage, built above: the by-id reader
+		// snapshotUsageFor returns — transcript.StatByID + contextwindow.Read —
+		// bound to the bootstrap id source) returns two primitives, so
+		// internal/relay imports neither internal/contextwindow nor
+		// internal/sessions. Read-only reflection — no secret, no authz. nil in
+		// foreground / unresolved sessions dir / no id source makes the handlers
+		// report zeros (used_tokens:0, window_tokens:0).
 		SnapshotUsage: snapshotUsage,
 		// Run-configuration session id (#491): tells a client WHICH session the
 		// three seams above describe, so it can address a set_session_settings to
