@@ -1,3 +1,13 @@
+// Package turnbridge adapts the neutral internal turn-event model
+// (internal/turnevent, #606) OUT to the v2 interactive wire payloads (#607):
+// MapEvent shapes one turnevent.Event into a typed payload, and BuildTurnState
+// shapes the turn_state payload the lifecycle machine drives. It is a pure
+// value-to-value adapter — no I/O, no state, no envelope-ID minting, no clock
+// read, no sealing. Every one of those belongs to the consumer (the
+// turn-lifecycle integration slice); keeping them out is what makes this
+// table-testable and isolates it from the lifecycle state machine. See
+// cmd/pyry's interactiveTurnEmitterV2.emit for the consumer shape that wraps a
+// payload into an Envelope.
 package turnbridge
 
 import (
@@ -8,15 +18,6 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
-
-// outbound.go is the mirror of mapper.go: where mapEvent maps a tui-driver
-// Event INTO the neutral turnevent.Event model, MapEvent maps that model OUT to
-// the v2 interactive wire payloads (#607). It is a pure value-to-value adapter
-// — no I/O, no state, no envelope-ID minting, no clock read, no sealing. Every
-// one of those belongs to the consumer (the turn-lifecycle integration slice);
-// keeping them out is what makes this table-testable and isolates it from the
-// lifecycle state machine. See cmd/pyry/assistant_turn_v2.go for the consumer
-// shape that wraps a payload into an Envelope.
 
 // TurnContext is the per-event turn addressing the consumer supplies to
 // MapEvent. The adapter never derives these — which conversation / turn / seq
@@ -310,8 +311,7 @@ func BuildTurnState(conversationID string, state TurnState) (typ string, payload
 // JSON compacted to a single line (insignificant whitespace stripped), then
 // truncated to maxSummaryLen runes. Empty/nil input, or input that does not
 // compact as JSON, yields "" — RawInput is best-effort/opaque (#606), so a
-// malformed blob is a précis-less tool_use, not an error (mirrors rawInput's
-// posture in mapper.go).
+// malformed blob is a précis-less tool_use, not an error.
 func inputSummary(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
@@ -327,11 +327,11 @@ func inputSummary(raw json.RawMessage) string {
 // exhaustive over the sealed ToolContent sum type so a future producer variant
 // cannot silently vanish. nil (the legal status-only ToolUpdate) yields "".
 //
-// The current inbound producer (mapper.go) only ever emits TextContent or nil;
-// the Diff/Terminal renderings are unreachable today but handled (the type is
-// sealed) and kept deliberately minimal until a producer (e.g. the ACP adapter
-// #600) emits them, at which point the descriptor shape can be refined against a
-// real consumer.
+// The live inbound producer (internal/streamsup's toolResultContent) only ever
+// emits TextContent or nil; the Diff/Terminal renderings are unreachable today
+// but handled (the type is sealed) and kept deliberately minimal until a
+// producer (e.g. the ACP adapter #600) emits them, at which point the descriptor
+// shape can be refined against a real consumer.
 func resultSummary(c turnevent.ToolContent) string {
 	switch v := c.(type) {
 	case turnevent.TextContent:
