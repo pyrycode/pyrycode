@@ -502,10 +502,11 @@ func (s *Server) Close() error {
 
 // defaultHandshakeTimeout caps how long the server waits for a client to send
 // its JSON request after connecting. Applied per-conn as s.handshakeTimeout
-// (overridable in same-package tests). Cleared for streaming verbs
-// (VerbAttach) before the ack, since they hold the connection open
-// indefinitely; extended — not cleared — for the one-shot session verbs before
-// their long op, so a slow Create/Remove response still lands (see
+// (overridable in same-package tests). Two handlers move it once the request
+// has been read, and they move it differently: handleApprove clears it for the
+// length of a blocking approval wait, since the conn stays open for however
+// long the human decision takes; the one-shot session verbs extend — not clear
+// — it past their long op, so a slow Create/Remove response still lands (see
 // handleSessionsNew, #865).
 const defaultHandshakeTimeout = 5 * time.Second
 
@@ -520,10 +521,9 @@ const sessionOpTimeout = 30 * time.Second
 // write still has an upper bound.
 const sessionOpConnGrace = 5 * time.Second
 
-// handle dispatches a single client connection. One-shot verbs reply with one
-// JSON Response and close. Streaming verbs (currently just VerbAttach) hand
-// off connection ownership to a streaming handler; the deferred close in
-// handle is suppressed for them.
+// handle dispatches a single client connection. Every verb it dispatches
+// replies with one JSON Response and returns, so the deferred close runs for
+// all of them — no handler takes ownership of the conn.
 //
 // TODO: a misbehaving client could open a connection, write a partial JSON
 // payload, and hold it. The handshake deadline + per-conn goroutine model
@@ -577,9 +577,9 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleRekey(enc, req.Rekey)
 	case VerbMCPApprove:
 		// Blocking verb: handleApprove owns conn for the wait (it clears the
-		// handshake deadline and runs a disconnect/shutdown watcher) but,
-		// unlike VerbAttach, does not hand off ownership — handle's deferred
-		// conn.Close still runs on return and reaps the watcher's reader.
+		// handshake deadline and runs a disconnect/shutdown watcher) but does
+		// not hand off ownership — handle's deferred conn.Close still runs on
+		// return and reaps the watcher's reader.
 		s.handleApprove(conn, enc, req.Approve)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
