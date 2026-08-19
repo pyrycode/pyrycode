@@ -1938,6 +1938,37 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   the confine-reject-no-leak and not-found paths — not duplicated here.
   See [`codebase/1029.md`](../codebase/1029.md).
 
+- `interactive_stream_inband_model_test.go` (#1582) — **live proof of #1581, not
+  a new feature under test**: #1581 changed `Pool.UpdateSettings` to deliver a
+  model/effort-only change by writing `/model <value>` as an in-band user turn
+  instead of killing and respawning the child, and proved that hermetically —
+  observing that no respawn happened and that the write was issued, never that
+  claude itself changed model. This test supplies the second half. It drives an
+  **in-process `sessions.Pool`** (not a daemon subprocess — the only test in this
+  package that constructs one) through a turn, `Pool.UpdateSettings`, and a
+  further turn, and asserts from claude's own per-turn `system`/`init`
+  announcement — read via `inbandTapRecorder`, an `io.Writer` dropped into
+  `streamsup.Config.Stdout` **upstream of the parser**, the same seam
+  `dropcapRecorder` (#1260) taps — that the reported model changed to the
+  requested one and that one process (`ChildPID` unchanged, one `"spawning
+  claude"` log record) served every turn. The `init` line is asserted here
+  because it must never reach a client or daemon event: `emitSystemSubtype` has
+  no arm for `init`, by the #833 posture that keeps model/effort/YOLO values out
+  of the daemon log at every level. No `--model` in the base argv (a respawn's
+  recomposed argv would otherwise carry two); the starting model is read off
+  turn 1 rather than assumed, so the two-alias target table (`haiku`/`sonnet`)
+  always has a candidate that differs from whatever a given machine's default
+  is. Two assertion pairs, each the sole red for a distinct mutant, both proven
+  by measured evidence runs recorded in the file's header: A1/A2 (model changed)
+  red under a `-overlay` mutant dropping the in-band `/model` send, green
+  (vacuously) on the pre-#1581 tree since a respawn also changes the model;
+  A3/A4 (no teardown) red on the pre-#1581 tree (`b047b9e^`, 2 spawns), green
+  under the mutant. Zero production files touched. Code review: one round, PASS,
+  one non-blocking SHOULD FIX (the post-`UpdateSettings` settle wait's target
+  result count is hardcoded rather than captured relative to the count at that
+  moment — a low-probability false-red path on a >45s first turn, left as a
+  follow-up rather than fixed on this branch). See [`codebase/1582.md`](../codebase/1582.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
