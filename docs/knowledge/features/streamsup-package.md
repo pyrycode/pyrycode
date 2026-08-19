@@ -30,6 +30,7 @@ func (r *Runner) State() State
 func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error
 func (r *Runner) WaitForPTY(ctx context.Context) error
 func (r *Runner) Restart(args []string)
+func (r *Runner) SetSpawnArgs(args []string) // #1580 — Restart's swap half, no kill
 
 // concrete, off sessions.Runner (#1077) — see "Fresh-restart under a new id" below
 func (r *Runner) Interrupt() error
@@ -508,24 +509,43 @@ where `supervisor.Run` does: `Starting` at top (once), `Running` + `ChildPID` on
 restart), `Stopped` in a top-level `defer`.
 
 **Live-restart seam** (previously absent — the old `runner.go` doc explicitly called this out as a gap;
-`Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv, swapped by
-`Restart`), `iterCancel` (the current spawn iteration's `context.CancelFunc`), and — since #1124 — the
-`sessionID`/`rotatePending` pair `RestartFresh` rotates (see "Fresh-restart under a new id" below).
-Since #1481 `args` and the `sessionID`/`rotatePending` pair are read, and `iterCancel` is published,
-by `beginSpawn` in a **single** section per iteration; `clearIterCancel` drops the cancel once the
-iteration ends. That teardown accessor takes no
-argument deliberately — publishing a non-`nil` cancel outside `beginSpawn`'s section is precisely the
-#1481 defect, so the API cannot express it, and a future re-split has to add the parameter back before
-it can reintroduce the window. `Restart(args []string)` swaps `args`,
-sends a non-blocking hint on a buffered(1) `restartCh` (coalesces rapid restarts to one relaunch with the
-newest args), and cancels the current `iterCancel` — since #1481 that cancel goes live as soon as an
-iteration's spawn setup runs, before its child necessarily exists, so a racing `Restart` can also catch
-a not-yet-launched iteration: the cancel fails that iteration's `cmd.Start`, and the immediate relaunch
-that follows observes the swapped `args` — mirroring `supervisor.Restart` byte-for-byte in shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`, never a
-`Pool`/`Session` lock, so `Pool.UpdateSettings` can call it after releasing `Pool.mu` with no lock-order
-concern. Because `firstRun` is already `false` after the first successful spawn, a plain restart always
-respawns via `--resume <sessionID>` — the conversation resumes rather than forking; `RestartFresh` is the
-one path that re-arms `firstRun` to force a fresh `--session-id` spawn instead.
+`Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv — assigned in
+exactly one place, `setArgsLocked`, called by both `Restart` and `SetSpawnArgs`), `iterCancel` (the
+current spawn iteration's `context.CancelFunc`), and — since #1124 — the `sessionID`/`rotatePending` pair
+`RestartFresh` rotates (see "Fresh-restart under a new id" below). Since #1481 `args` and the
+`sessionID`/`rotatePending` pair are read, and `iterCancel` is published, by `beginSpawn` in a **single**
+section per iteration; `clearIterCancel` drops the cancel once the iteration ends. That teardown accessor
+takes no argument deliberately — publishing a non-`nil` cancel outside `beginSpawn`'s section is precisely
+the #1481 defect, so the API cannot express it, and a future re-split has to add the parameter back before
+it can reintroduce the window. `Restart(args []string)` installs through `setArgsLocked` inside its
+existing single `restartMu` section, sends a non-blocking hint on a buffered(1) `restartCh` (coalesces
+rapid restarts to one relaunch with the newest args), and cancels the current `iterCancel` — since #1481
+that cancel goes live as soon as an iteration's spawn setup runs, before its child necessarily exists, so
+a racing `Restart` can also catch a not-yet-launched iteration: the cancel fails that iteration's
+`cmd.Start`, and the immediate relaunch that follows observes the swapped `args` — mirroring
+`supervisor.Restart` byte-for-byte in shape. `Restart` touches only `restartMu`/`restartCh`/`iterCancel`,
+never a `Pool`/`Session` lock, so `Pool.UpdateSettings` can call it after releasing `Pool.mu` with no
+lock-order concern. Because `firstRun` is already `false` after the first successful spawn, a plain
+restart always respawns via `--resume <sessionID>` — the conversation resumes rather than forking;
+`RestartFresh` is the one path that re-arms `firstRun` to force a fresh `--session-id` spawn instead.
+
+**`SetSpawnArgs(args []string)` — the swap without the kill (#1580).** `Restart` fuses two operations:
+installing the next spawn's argv, and ending the live child so `Run` relaunches under it. `SetSpawnArgs`
+is the first half alone — it calls `setArgsLocked` under one `restartMu` acquisition and returns, sending
+no `restartCh` hint and never touching `iterCancel`, so a running child is left alone and the swap lands
+on whichever spawn comes next (a crash-respawn, or an evict → `Activate`). It is the third racer
+`beginSpawn`'s single-acquisition doc enumerates, and the weakest: one acquisition like the other two, and
+it writes `args` only, so it cannot reach the forbidden state (a live child under a pre-rotation id with
+no live iteration cancel) — that state is defined over `sessionID`/`rotatePending`/`iterCancel`, none of
+which it touches. Declining to call `Restart` is not a substitute for calling this: it loses the swap
+outright, and the next spawn silently re-execs the stale argv. The argv is installed **verbatim** — no
+validation, no shaping; that stays upstream in `Session.spawnArgs` (`claudeSettingsArgs` enforces the YOLO
+fail-safe there), and construction-time shaping (`stripSessionIDFlags`, `withApprovalArgs`, both
+construction-only) is **not** reapplied on this or any post-construction install path. It is on
+`sessions.Runner` (unlike `Interrupt`/`RestartFresh`/`BeginRotation`, which stay off it and are reached by
+capability type-assertion) because there is exactly one production implementation — `streamRunner` — plus
+five test doubles, all in this repo, so widening is compile-checked across the whole set. Nothing calls it
+outside tests yet. See [codebase/1580.md](../codebase/1580.md).
 
 **`WriteUserTurn`/`WaitForPTY`.** `WriteUserTurn(ctx, conversationID, payload)` is a one-line wrap of the
 already-reviewed `WriteTurn` free function (#1088/#1093) — no new envelope construction, and it inherits
