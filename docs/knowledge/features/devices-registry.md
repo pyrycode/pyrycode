@@ -272,6 +272,21 @@ state (self-heal). Both log `path` + a static reason only — **never** the wrap
 `token_hash`). See [`features/v2-session-manager.md`](v2-session-manager.md) for
 the wiring.
 
+**Correction (2026-08-19, #1530): this "guard" narrows only the daemon's own
+window, not the cross-process race.** Applying `Reload` at both the read and
+write sites closes the *within-daemon* ordering hole (#782's original bug),
+but it does nothing for `pyry pair`'s side of the race: `Reload` reconciles
+memory *from* disk, so once a `Save` has written a snapshot that omits a
+device `pyry pair` just added, that device is gone from disk permanently —
+no later reload brings it back. [ADR 029's correction](../decisions/029-devices-registry-reload-at-handshake.md#correction-2026-08-19-1530)
+has the full analysis, including the revoke-direction case (a revoked device
+can keep authenticating if a `register_push_token` interleaves between the
+revoke's write and the daemon's read of it). #1530 added
+`internal/devices.WithLock`, a cross-process `flock(2)` primitive sized to
+close this — see [`codebase/1530.md`](../codebase/1530.md) — but no writer
+here calls it yet. The two-writer clobber stays open until the `cmd/pyry` and
+daemon consumer slices wire it in.
+
 ### Tests
 
 `internal/devices/registry_test.go`, mirroring the existing table + race-probe
