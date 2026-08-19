@@ -79,8 +79,19 @@ type controlRequest struct {
 	Request   controlRequestInner `json:"request"`
 }
 
+// controlRequestInner carries the subtype and its subtype-specific fields. Field
+// order is the wire order (encoding/json marshals in declaration order), so
+// Subtype MUST stay first: the set_permission_mode line is pinned byte for byte
+// against the one #1595 measured live, subtype before mode.
+//
+// The omitempty on Mode is load-bearing rather than cosmetic. Mode belongs to
+// set_permission_mode only; without the tag every interrupt line would grow a
+// "mode":"" field it has no business carrying, and marshalInterruptEnvelope's
+// output would stop matching the line claude has been sent since #1120.
+// TestMarshalInterruptEnvelope's byte-exact want is what holds this.
 type controlRequestInner struct {
-	Subtype string `json:"subtype"` // "interrupt"
+	Subtype string `json:"subtype"`        // "interrupt" | "set_permission_mode"
+	Mode    string `json:"mode,omitempty"` // set_permission_mode only
 }
 
 // marshalInterruptEnvelope returns the single newline-terminated interrupt
@@ -119,6 +130,74 @@ func WriteInterrupt(w io.Writer, requestID string) error {
 	}
 	if _, err := w.Write(env); err != nil {
 		return fmt.Errorf("streamsup: write interrupt: %w", err)
+	}
+	return nil
+}
+
+// marshalBypassRevocationEnvelope returns the single newline-terminated
+// set_permission_mode control line that drops a running child's bypass posture.
+// #1595 measured this line live against claude 2.1.220: the child acked it with a
+// success control_response, its next init line reported permissionMode default,
+// and its behaviour on the following turn matched a default-launched control
+// child exactly — all without a respawn.
+//
+// Like marshalInterruptEnvelope, every field but the locally-minted request_id is
+// a fixed literal, so it has no injection surface of its own; the appended '\n' is
+// the sole raw newline, making the envelope one physical line by construction.
+//
+// The emitted mode is fixed at default and is deliberately NOT a parameter. The
+// opposite direction is a privilege escalation reachable over the daemon's own
+// stdin, so it is absent from this surface rather than one argument away — and
+// claude refuses it anyway: #1595 drove a request for the bypassPermissions mode
+// on a child launched without --dangerously-skip-permissions and got back a
+// refusal naming that missing flag. Re-granting bypass stays on the respawn path.
+func marshalBypassRevocationEnvelope(requestID string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request: controlRequestInner{
+			Subtype: "set_permission_mode",
+			Mode:    "default",
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteBypassRevocation writes one set_permission_mode control_request line onto
+// w, the child's held-open stdin (from Runner.Stdin), dropping the live child's
+// bypass posture without killing it. It mirrors WriteInterrupt exactly: nil-check
+// first, marshal, one Write, never close w.
+//
+// requestID must be a LOCALLY-MINTED id — Runner.nextControlID is the only source
+// that satisfies this, and (*Runner).RevokeBypass is the only in-repo caller. The
+// structured encoding makes a hostile id non-catastrophic rather than merely
+// unlikely (json.Marshal escapes every metacharacter, so no id can open a second
+// physical line or rewrite the fixed mode), but the contract is the primary
+// defence and the escaping the backstop.
+//
+// A nil w means no live child: WriteBypassRevocation returns ErrNoLiveChild and
+// writes nothing (checked first, so no panic and no partial write). A marshal
+// failure (not reachable with fixed literals, defensive) and a write failure (e.g.
+// EPIPE when the pipe closed mid-teardown) are returned wrapped.
+//
+// The control_response ack is not read here — nothing correlates the request_id,
+// and reading it would need a stdout tap this slice has no consumer for. The
+// parser already consumes the ack content-free (#1500), so the reply is handled
+// without being interpreted.
+func WriteBypassRevocation(w io.Writer, requestID string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalBypassRevocationEnvelope(requestID)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal bypass revocation: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write bypass revocation: %w", err)
 	}
 	return nil
 }

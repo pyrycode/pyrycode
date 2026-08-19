@@ -259,10 +259,14 @@ type Runner struct {
 	// the newest args is correct — see Restart.
 	restartCh chan struct{}
 
-	// interruptSeq mints locally-unique correlation ids for interrupt control
-	// lines (Interrupt). atomic.Uint64 because Interrupt may be called from a
-	// goroutine other than Run; the zero value is ready, so New adds nothing.
-	interruptSeq atomic.Uint64
+	// controlSeq mints locally-unique correlation ids for every control line the
+	// runner writes — Interrupt and RevokeBypass alike. ONE sequence, not one per
+	// subtype: request_id must be unique across all in-flight control requests on
+	// the stream, so two counters would both mint "1" and a future ack-correlator
+	// could not tell an interrupt ack from a revocation ack. atomic.Uint64 because
+	// either method may be called from a goroutine other than Run; the zero value
+	// is ready, so New adds nothing.
+	controlSeq atomic.Uint64
 }
 
 // New validates the required fields, applies defaults, resolves WorkDir, and
@@ -440,15 +444,34 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 // *supervisor.Supervisor encapsulates SendEsc (#726) without that method being on
 // the interface. Safe from any goroutine.
 func (r *Runner) Interrupt() error {
-	return WriteInterrupt(r.Stdin(), r.nextInterruptID())
+	return WriteInterrupt(r.Stdin(), r.nextControlID())
 }
 
-// nextInterruptID mints the next locally-unique interrupt correlation id. The
-// atomic counter is unique within the runner's lifetime, which is all a future
-// ack-correlator needs since each runner drives exactly one child stream; this
-// slice does not read the control_response ack, so the id is write-only here.
-func (r *Runner) nextInterruptID() string {
-	return strconv.FormatUint(r.interruptSeq.Add(1), 10)
+// RevokeBypass writes a single set_permission_mode control_request line to the
+// live child's stdin, dropping its bypass posture WITHOUT killing it (#1595
+// measured the drop live: success ack, next init reporting permissionMode
+// default, and matching behaviour on the following turn, no respawn). The
+// request_id is locally minted, and the mode is fixed in the writer — there is no
+// enable direction on this surface, deliberately (see WriteBypassRevocation).
+// When no child is live Stdin() is nil, so RevokeBypass returns the retryable
+// ErrNoLiveChild without writing and without panicking.
+//
+// Like Interrupt it is a concrete method on *Runner, deliberately NOT on
+// sessions.Runner (the interface stays un-widened, #1077): the session-layer
+// wiring (#1604) reaches it via a type assertion, as the interrupt routing does.
+// Stdin() releases r.mu before returning, so the potentially-blocking write never
+// holds it. Safe from any goroutine.
+func (r *Runner) RevokeBypass() error {
+	return WriteBypassRevocation(r.Stdin(), r.nextControlID())
+}
+
+// nextControlID mints the next locally-unique control-request correlation id,
+// shared by Interrupt and RevokeBypass. The atomic counter is unique within the
+// runner's lifetime, which is all a future ack-correlator needs since each runner
+// drives exactly one child stream; this slice does not read the control_response
+// ack, so the id is write-only here.
+func (r *Runner) nextControlID() string {
+	return strconv.FormatUint(r.controlSeq.Add(1), 10)
 }
 
 // WaitForPTY returns cleanly: the stream-json path has no PTY to await. The
