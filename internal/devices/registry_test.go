@@ -204,6 +204,85 @@ func TestRegistry_AllowRemotePermissionsPersists(t *testing.T) {
 	}
 }
 
+// TestRegistry_RedeemByPersists is the AC2 disk round-trip: a stamped
+// deadline survives Save -> Load, an unstamped record comes back zero, and a
+// hand-authored pre-field envelope decodes with a zero deadline, no error,
+// and every other field on that record intact.
+func TestRegistry_RedeemByPersists(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-05-09T12:34:56.789Z")
+	later := when.Add(time.Second)
+	deadline := when.Add(RedemptionWindow)
+
+	r := &Registry{}
+	r.Add(Device{
+		TokenHash:  HashToken("plain-stamped"),
+		Name:       "stamped",
+		PairedAt:   when,
+		LastSeenAt: when,
+		RedeemBy:   deadline,
+	})
+	r.Add(Device{
+		TokenHash:  HashToken("plain-unstamped"),
+		Name:       "unstamped",
+		PairedAt:   later,
+		LastSeenAt: later,
+	})
+
+	path := filepath.Join(t.TempDir(), "devices.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := back.List()
+	if len(got) != 2 {
+		t.Fatalf("len(List) = %d, want 2", len(got))
+	}
+	byName := map[string]Device{}
+	for _, d := range got {
+		byName[d.Name] = d
+	}
+	if !byName["stamped"].RedeemBy.Equal(deadline) {
+		t.Errorf("stamped RedeemBy = %v, want %v after reload", byName["stamped"].RedeemBy, deadline)
+	}
+	if !byName["unstamped"].RedeemBy.IsZero() {
+		t.Errorf("unstamped RedeemBy = %v, want the zero value after reload", byName["unstamped"].RedeemBy)
+	}
+
+	// A pre-field on-disk envelope (no redeem_by key) reloads with a zero
+	// deadline; the rest of the record is asserted field by field.
+	prefield := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(prefield, []byte(`{"devices":[{"token_hash":"deadbeef","name":"legacy","paired_at":"2026-01-01T00:00:00Z","last_seen_at":"2026-01-02T00:00:00Z"}]}`), 0o600); err != nil {
+		t.Fatalf("write pre-field file: %v", err)
+	}
+	legacyReg, err := Load(prefield)
+	if err != nil {
+		t.Fatalf("Load(pre-field): %v", err)
+	}
+	legacy := legacyReg.List()
+	if len(legacy) != 1 {
+		t.Fatalf("len(pre-field List) = %d, want 1", len(legacy))
+	}
+	if !legacy[0].RedeemBy.IsZero() {
+		t.Errorf("pre-field RedeemBy = %v, want the zero value", legacy[0].RedeemBy)
+	}
+	if legacy[0].TokenHash != "deadbeef" {
+		t.Errorf("pre-field TokenHash = %q, want %q", legacy[0].TokenHash, "deadbeef")
+	}
+	if legacy[0].Name != "legacy" {
+		t.Errorf("pre-field Name = %q, want %q", legacy[0].Name, "legacy")
+	}
+	if want := mustParseTime(t, "2026-01-01T00:00:00Z"); !legacy[0].PairedAt.Equal(want) {
+		t.Errorf("pre-field PairedAt = %v, want %v", legacy[0].PairedAt, want)
+	}
+	if want := mustParseTime(t, "2026-01-02T00:00:00Z"); !legacy[0].LastSeenAt.Equal(want) {
+		t.Errorf("pre-field LastSeenAt = %v, want %v", legacy[0].LastSeenAt, want)
+	}
+}
+
 func TestRegistry_RemovePresent(t *testing.T) {
 	t.Parallel()
 	r := &Registry{}

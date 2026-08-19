@@ -223,6 +223,68 @@ func TestDevice_OmitsAllowRemotePermissionsWhenFalse(t *testing.T) {
 	}
 }
 
+// TestDevice_RedeemByJSONShape pins the on-disk shape of RedeemBy in both
+// directions. The zero row is the tag pin: `omitempty` on a time.Time is a
+// silent no-op (encoding/json omits empty scalars/maps/slices, never a
+// struct), so that row is red under omitempty and green under omitzero,
+// which consults time.Time.IsZero.
+func TestDevice_RedeemByJSONShape(t *testing.T) {
+	t.Parallel()
+
+	deadline := time.Date(2026, 1, 1, 0, 15, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		redeemBy time.Time
+		wantKey  bool
+	}{
+		{name: "set deadline reaches disk", redeemBy: deadline, wantKey: true},
+		{name: "zero deadline stays off disk", wantKey: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := Device{
+				TokenHash:  HashToken("abc"),
+				Name:       "shape-device",
+				PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+				LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+				RedeemBy:   tc.redeemBy,
+			}
+			b, err := json.Marshal(in)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if got := bytes.Contains(b, []byte(`"redeem_by"`)); got != tc.wantKey {
+				t.Errorf("encoded form carries redeem_by key = %v, want %v: %s", got, tc.wantKey, b)
+			}
+			var out Device
+			if err := json.Unmarshal(b, &out); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if !out.RedeemBy.Equal(tc.redeemBy) {
+				t.Errorf("RedeemBy = %v, want %v", out.RedeemBy, tc.redeemBy)
+			}
+			if got, want := out.RedeemBy.IsZero(), tc.redeemBy.IsZero(); got != want {
+				t.Errorf("RedeemBy.IsZero() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestRedemptionWindow pins the mint-time window's value. The constant is the
+// only place the 15 minutes appears — the mint site and its test both derive
+// from it — so retuning it stays a deliberate act that updates this pin too.
+func TestRedemptionWindow(t *testing.T) {
+	t.Parallel()
+
+	if got, want := RedemptionWindow, 15*time.Minute; got != want {
+		t.Errorf("RedemptionWindow = %v, want %v", got, want)
+	}
+}
+
 // TestDevice_DecodeAllowRemotePermissionsAbsent is the AC4 "device paired
 // before this field existed reads OFF" proof: a pre-field on-disk record
 // decodes the new field to its zero value (false = denied).

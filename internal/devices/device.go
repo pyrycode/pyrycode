@@ -52,7 +52,40 @@ type Device struct {
 	// ungated. omitempty keeps the secure-default (false) off disk, matching
 	// the Platform/PushToken precedent.
 	AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
+
+	// RedeemBy is the instant at which an UNREDEEMED pairing record stops
+	// being acceptable. Stamped once at mint time by `pyry pair` as
+	// PairedAt + RedemptionWindow; never rewritten afterwards. The zero
+	// value means "no deadline" — what a record minted before this field
+	// existed decodes to. RedeemBy says nothing about a device that has
+	// already been redeemed: a redeemed device keeps authenticating past
+	// it, which is why the name is not ExpiresAt.
+	//
+	// Nothing reads this field yet — Validate and the v2 handshake are
+	// pure hash lookups, so an already-past deadline still authenticates.
+	// Recording the first redemption and enforcing the deadline are
+	// separate follow-on slices.
+	//
+	// omitzero, not omitempty: encoding/json omits empty scalars, maps and
+	// slices, never a struct, so omitempty on a time.Time is a silent
+	// no-op that would write "0001-01-01T00:00:00Z" into every legacy
+	// record on the next Save. omitzero consults time.Time's IsZero and
+	// keeps the zero off disk, matching what the three fields above do for
+	// their types.
+	//
+	// Downgrading to a binary predating this field re-Saves the record
+	// without redeem_by, so the token stops expiring — it fails OPEN, back
+	// to the pre-field behaviour. Deliberately not defended against in
+	// code: swapping the operator's own binary needs local write access,
+	// at which point this deadline is not the weakest link.
+	RedeemBy time.Time `json:"redeem_by,omitzero"`
 }
+
+// RedemptionWindow is how long a freshly minted pairing token stays
+// redeemable: `pyry pair` stamps Device.RedeemBy at mint time plus this
+// window. It is the only place the value appears — call sites and tests
+// derive from it rather than restating the number.
+const RedemptionWindow = 15 * time.Minute
 
 // HashToken returns the lowercase SHA-256 hex of plain. Output is
 // always 64 hex characters (sha256.Size * 2). The same input always
