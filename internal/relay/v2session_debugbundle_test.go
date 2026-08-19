@@ -772,3 +772,161 @@ func TestV2Session_DebugBundle_PerConnIsolation(t *testing.T) {
 		t.Fatalf("B queue depth = %d, want %d (an in-flight bundle on A must not disturb B)", got, wantFrames)
 	}
 }
+
+// --- #1505 byte-ceiling fixtures ---
+
+// bundleCeilingPoll is the deadline for the near-ceiling bundle waits below.
+// The 2-second sibling helpers are sized for the kilobyte fixtures every other
+// test in this file uses; these two move ~32 MiB of payload through
+// bundleEnvelopes, the push queue, and (in the under-ceiling case) a per-frame
+// AEAD seal + base64 wrap on the Run goroutine, which is minutes-safe but not
+// 2-seconds-safe under -race.
+const bundleCeilingPoll = 90 * time.Second
+
+// bundleChunksUnderCeiling returns the largest whole-chunk count whose
+// StreamBundle payload total (Σ len(env.Payload) — what pushQueue.bytes
+// measures) stays under pushQueueByteCeiling. Derived by measuring one REAL
+// full chunk rather than hardcoding a number that would silently drift if
+// bundleChunkBytes or the chunk payload shape moved; the 8 B allowance per
+// chunk covers the seq field widening from one digit to four across the stream
+// plus the trailing done marker.
+func bundleChunksUnderCeiling(t *testing.T) int {
+	t.Helper()
+	envs, err := bundleEnvelopes(patternBlob(bundleChunkBytes))
+	if err != nil {
+		t.Fatalf("size one bundle chunk: %v", err)
+	}
+	return pushQueueByteCeiling / (len(envs[0].Payload) + 8)
+}
+
+// waitQueueLenBy is waitQueueLen with a caller-chosen deadline.
+func waitQueueLenBy(t *testing.T, mgr *V2SessionManager, connID string, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("queue for %s did not reach depth %d within %v (got %d)", connID, want, within, queueLen(mgr, connID))
+}
+
+// waitQueueDrainsBy is assertQueueDrains with a caller-chosen deadline.
+func waitQueueDrainsBy(t *testing.T, mgr *V2SessionManager, connID string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("queue for %s did not drain to empty within %v (depth %d)", connID, within, queueLen(mgr, connID))
+}
+
+// waitNoiseMsgsBy is waitNoiseMsgs with a caller-chosen deadline.
+func waitNoiseMsgsBy(t *testing.T, rec *v2Recorder, connID string, n int, within time.Duration) []protocol.RoutingEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		msgs := noiseMsgsForConn(t, rec, connID)
+		if len(msgs) >= n {
+			return msgs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitNoiseMsgsBy(%s): got %d, want >= %d within %v", connID, len(noiseMsgsForConn(t, rec, connID)), n, within)
+	return nil
+}
+
+// TestV2Session_DebugBundle_JustUnderCeilingStreams pins the admitted side of
+// AC#5: an archive whose streamed frames land just under pushQueueByteCeiling
+// is enqueued whole while the drain is held — no teardown, no truncation — and
+// once the transport recovers it drains and round-trips to the source archive.
+// The ceiling bounds the bundle path; it does not break it. Run under -race.
+func TestV2Session_DebugBundle_JustUnderCeilingStreams(t *testing.T) {
+	t.Parallel()
+
+	archive := patternBlob(bundleChunksUnderCeiling(t) * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+	wantFrames := wantChunks(len(archive)) + 1 // N chunks + done
+
+	mgr, frames, rec, probeUp, reconnect, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connID = "c-bundle-under-ceiling"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	// Hold the drain down so the whole bundle piles up in the queue at once —
+	// the worst case the ceiling is there to bound.
+	probeUp.Store(false)
+	requestBundle(t, frames, send, connID, 101)
+	waitQueueLenBy(t, mgr, connID, wantFrames, bundleCeilingPoll)
+
+	// Non-vacuity: the fixture really is NEAR the ceiling, not trivially under
+	// it. A fixture that drifted small would pass every assertion below while
+	// proving nothing about the boundary.
+	retained := queueBytes(mgr, connID)
+	if retained <= pushQueueByteCeiling*9/10 {
+		t.Fatalf("retained %d B is only %d%% of the ceiling %d; the fixture drifted away from the boundary",
+			retained, 100*retained/pushQueueByteCeiling, pushQueueByteCeiling)
+	}
+	if retained > pushQueueByteCeiling {
+		t.Fatalf("retained %d B exceeds the ceiling %d; the fixture is on the wrong side of the boundary", retained, pushQueueByteCeiling)
+	}
+
+	// No teardown: the conn is still open and its queue is still present.
+	waitConnOpen(t, mgr, connID)
+
+	// Recover the transport and fire the reconnect edge: the held bundle drains
+	// FIFO and reassembles to the exact source archive.
+	probeUp.Store(true)
+	reconnect <- struct{}{}
+	waitQueueDrainsBy(t, mgr, connID, bundleCeilingPoll)
+
+	msgs := waitNoiseMsgsBy(t, rec, connID, wantFrames, bundleCeilingPoll)
+	got, err := ReassembleBundle(decryptFrames(t, msgs, recv))
+	if err != nil {
+		t.Fatalf("reassemble under-ceiling bundle: %v", err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("under-ceiling bundle did not round-trip (got %d bytes, want %d)", len(got), len(archive))
+	}
+}
+
+// TestV2Session_DebugBundle_PastCeilingTearsDownConn pins the rejected side of
+// AC#5, and makes the outcome a chosen-and-tested one rather than something a
+// future operator discovers: debugbundle.Assemble caps nothing, so a large
+// enough archive turns into more never-droppable control envelopes than
+// pushQueueByteCeiling admits. The conn is torn down at StatusQueueOverflow and
+// its queue freed, instead of retaining the whole archive until the idle sweep.
+//
+// Nothing is asserted about StreamBundle's return value: it returns the FIRST
+// Push error, and which push first observes the teardown depends on Run's
+// scheduling. Run under -race.
+func TestV2Session_DebugBundle_PastCeilingTearsDownConn(t *testing.T) {
+	t.Parallel()
+
+	// Two whole chunks past the largest admissible bundle: comfortably over the
+	// boundary while staying as cheap as possible to build.
+	archive := patternBlob((bundleChunksUnderCeiling(t) + 2) * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+
+	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connID = "c-bundle-past-ceiling"
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	probeUp.Store(false)
+	requestBundle(t, frames, send, connID, 202)
+
+	// The ceiling's outcome: a 4413 close with a nil frame (nothing sealed onto
+	// a transport that is down), and the queue deleted rather than retained.
+	closeEnv := waitForConnCloseBy(t, rec, connID, uint16(StatusQueueOverflow), bundleCeilingPoll)
+	if closeEnv.Frame != nil {
+		t.Errorf("close frame = %d bytes, want nil (the ceiling teardown seals nothing)", len(closeEnv.Frame))
+	}
+	if got := queueLen(mgr, connID); got != -1 {
+		t.Fatalf("queue depth for %s = %d after the teardown, want -1 (deleted, every retained byte freed)", connID, got)
+	}
+}
