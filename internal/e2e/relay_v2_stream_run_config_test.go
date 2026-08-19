@@ -43,10 +43,12 @@ import (
 //     so this is the genuine fresh-session report, and it proves the reader
 //     resolved and degraded rather than never having been built.
 //
-// No conversation is seeded and no turn is driven: the request frame is bare and
-// the reply is daemon-wide, so the verb answers on a freshly started daemon. That
-// is itself part of the contract — the sheet must work on a conversation the user
-// has never sent a message in, which is exactly the case that was broken.
+// No conversation is seeded and no turn is driven: the frame this test sends
+// names no conversation and the reported values are daemon-wide either way, so
+// the verb answers on a freshly started daemon. That is itself part of the
+// contract — the sheet must work on a conversation the user has never sent a
+// message in, which is exactly the case that was broken, and it is why an absent
+// conversation_id cannot be failed closed (#1586).
 func TestRelayV2_StreamRequestSessionSettings(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"

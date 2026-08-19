@@ -104,10 +104,11 @@ func TestSessionSettingsUpdatedPayload_RoundTrip(t *testing.T) {
 
 // TestRequestSessionSettingsPayload_RoundTrip pins the READ request's shape:
 // it carries the conversation_id the client is asking about (#1586), and
-// round-trips byte-for-byte. The byte-equal round trip is what pins the
-// no-omitempty decision — add omitempty and the empty-id case below loses its
-// key, making "no conversation named" indistinguishable from a client that
-// never learned the field exists.
+// round-trips byte-for-byte. It does NOT pin the no-omitempty decision, despite
+// being byte-equal: this fixture's id is non-empty, so the key survives omission
+// and this test stays green with the tag added (measured under go test
+// -overlay). TestRequestSessionSettingsPayload_EmptyConversationID below is the
+// sole pin — do not prune it as redundant with this one.
 func TestRequestSessionSettingsPayload_RoundTrip(t *testing.T) {
 	t.Parallel()
 	raw := readFixture(t, "request_session_settings.json")
@@ -132,8 +133,11 @@ func TestRequestSessionSettingsPayload_RoundTrip(t *testing.T) {
 }
 
 // TestRequestSessionSettingsPayload_EmptyConversationID pins the empty-id
-// boundary: with no omitempty the key stays explicitly on the wire and
-// round-trips back to the empty string. Empty and absent are the same case here
+// boundary and is the SOLE pin on the no-omitempty decision: with no omitempty
+// the key stays explicitly on the wire and round-trips back to the empty string,
+// and adding the tag reddens this test and only this test (measured under go
+// test -overlay; the byte-equal round trip above stays green because its fixture
+// id is non-empty). Empty and absent are the same case here
 // — "no conversation named", which the daemon answers exactly as it always has
 // — so this pins the shape, not a presence contract. Mirrors
 // TestSnapshotPayloads_EmptyConversationID.
