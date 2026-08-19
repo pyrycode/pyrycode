@@ -131,7 +131,8 @@ func TestInteractiveStreamInterruptStopsRunningTurn(t *testing.T) {
 // CipherState in sync — and returns once it observes the FIRST turn_end for convID,
 // asserting its StopReason is "cancelled". It skips non-noise_msg inner frames WITHOUT
 // decrypting (they do not advance the nonce) and decrypts-and-skips every other envelope
-// type (ack, turn_state, assistant_delta, …) in order. Same in-order decrypt discipline
+// type (ack, turn_state, assistant_delta, …) in order — with ONE exception since #1500:
+// an unrecognized_message is fatal, see the arm below. Same in-order decrypt discipline
 // as drainForResponding, retargeted from turn_state{responding} to turn_end.
 //
 // The StopReason check is the vacuous-pass guard (mirrors the fakeclaude analog
@@ -177,6 +178,50 @@ func drainForCancelledTurnEnd(t *testing.T, phone *fakephone.Client, cs *noise.C
 		var env protocol.Envelope
 		if err := json.Unmarshal(plain, &env); err != nil {
 			t.Fatalf("decode envelope: %v", err)
+		}
+		if env.Type == protocol.TypeUnrecognizedMessage {
+			// THE STANDING ALARM ON THE INTERRUPT WINDOW (#1500), in the shape
+			// drainForCompletedTurn's own has. Until this arm existed the window had
+			// none: the `continue` below decrypts-and-skips every non-turn_end
+			// envelope, and the zero-unrecognized alarm lives in drainForCompletedTurn,
+			// which this spec only reaches on the HEALTH TURN afterwards — by which
+			// point an interrupt-window frame is long gone. So this is the only place a
+			// REAL claude's interrupt ack is observed, and it was red before #1500.
+			//
+			// No conversation filter, matching both existing alarms: a parser gap is a
+			// property of the daemon, not of one conversation.
+			//
+			// Going red has TWO readings, and MessageType is the discriminator:
+			//
+			//  1. THE DAEMON BUG. An ack the daemon SOLICITED is reaching the phone.
+			//     Interrupt here is a stdin control_request, and claude answers ~40ms
+			//     later with a control_response on the same stdout the parser reads;
+			//     streamsup.consumeLine's control_response arm consumes it content-free.
+			//     A type of "control_response" means that arm regressed or never landed,
+			//     and every interrupt is now firing a false parser-gap alarm at a phone.
+			//
+			//  2. A CLAUDE RELEASE EMITTING A GENUINELY NEW TYPE MID-INTERRUPT. Not a
+			//     bug — this is the alarm working, and it is what the frame is FOR. Read
+			//     the payload and decide whether the type deserves a mapping or a place
+			//     on streamsup.ignoredLineTypes. Do NOT answer it by widening this drain
+			//     back to a bare continue; that only restores the blind spot.
+			//
+			// What a GREEN run here does not prove: cmd/pyry's turnMarkFor classifies
+			// Unrecognized as turnMarkNone, i.e. droppable at the fan-in, so green means
+			// no ack frame ARRIVED, which under capacity pressure is weaker than no ack
+			// frame was produced. Fine for a fail-loud sentinel; it is why the hermetic
+			// tier pins the ack on the emitted line rather than on a downstream absence.
+			var p protocol.UnrecognizedMessagePayload
+			if err := json.Unmarshal(env.Payload, &p); err != nil {
+				t.Fatalf("decode unrecognized_message payload: %v", err)
+			}
+			t.Fatalf("an unrecognized_message reached the phone while draining the interrupt window: "+
+				"site=%q type=%q truncated=%v\nraw: %s\n\n"+
+				"Either the daemon is surfacing the interrupt ack it solicited for itself (type "+
+				"control_response — streamsup.consumeLine's arm regressed), or claude started emitting a "+
+				"genuinely new message type mid-interrupt, which is this frame working and wants a mapping "+
+				"decision, not a wider drain. The type above is what tells those apart.",
+				p.Site, p.MessageType, p.Truncated, p.Raw)
 		}
 		if env.Type != protocol.TypeTurnEnd {
 			continue // ack, turn_state, assistant_delta, tool_use, … — keep draining in order

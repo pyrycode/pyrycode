@@ -129,6 +129,17 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 	// inner frames in capture order so the receive nonce stays in sequence. One recvA is
 	// used for the whole test (the single reader, same as the send / new_session specs).
 	// ok=false on deadline.
+	//
+	// It also carries #1500's zero-unrecognized_message assertion, and it sits HERE
+	// rather than in one drain loop because that is one site covering all four windows:
+	// the bogus rider is off in this test, so every window must be clean, and the union
+	// strictly contains the one AC3(a) requires (up to and including the cancelled
+	// turn_end). The zero is NOT vacuous: fakeclaude writes the control_response ack
+	// BEFORE the interrupted result, on the same writer, so the turn_end this test
+	// already blocks on cannot arrive unless the ack has already been through the
+	// parser. Its arrival is pinned separately, on the emitted bytes, by the fake's own
+	// TestRunStreamJSON_InterruptAckRider — a zero-assertion cannot prove its own input
+	// arrived.
 	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
 		t.Helper()
 		for {
@@ -150,7 +161,23 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 			if inner.Type != protocol.TypeNoiseMsg {
 				continue
 			}
-			return decryptInnerEnvelope(t, inner, recvA), true
+			env := decryptInnerEnvelope(t, inner, recvA)
+			if env.Type == protocol.TypeUnrecognizedMessage {
+				var p protocol.UnrecognizedMessagePayload
+				if err := json.Unmarshal(env.Payload, &p); err != nil {
+					t.Fatalf("phone A decode unrecognized_message payload: %v", err)
+				}
+				t.Fatalf("an unrecognized_message reached the phone during the interrupt: site=%q type=%q truncated=%v\n"+
+					"raw: %s\n\n"+
+					"The interrupt ack is the expected culprit (#1500): the daemon writes an interrupt "+
+					"control_request to the child's stdin and the child answers on the SAME stdout the parser "+
+					"reads, so a missing control_response arm in streamsup.consumeLine turns every interrupt into "+
+					"this frame — the one frame whose whole value is meaning \"claude started emitting something "+
+					"NEW\". Read the type above: if it is control_response the arm regressed; anything else means "+
+					"the fake grew a shape the parser has no mapping for.",
+					p.Site, p.MessageType, p.Truncated, p.Raw)
+			}
+			return env, true
 		}
 	}
 

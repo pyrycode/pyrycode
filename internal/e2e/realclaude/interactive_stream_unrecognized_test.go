@@ -19,6 +19,13 @@ package realclaude
 // still reaches no client as an unrecognized_message, which is what this test
 // asserts and why the correction does not weaken it.
 //
+// CORRECTED 2026-08-19 (#1500): control_response is the SECOND type in that
+// consumed-by-its-own-arm category, so the "anything else" below now has two
+// exceptions rather than one. It is the ack the daemon solicits for itself on an
+// interrupt, and it cannot occur on this test's tool turn — but a reader deciding
+// whether a new type should surface needs the category to be complete, not the
+// one member #1404 happened to add.
+//
 // Anything else surfaces to the client as an unrecognized_message frame,
 // so a claude version that moves something meaningful into a new message type
 // becomes visible the moment it arrives instead of vanishing into a debug log

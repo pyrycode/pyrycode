@@ -1406,11 +1406,16 @@ type inUserTurn struct {
 }
 
 // inControlRequest is the minimal decode of one inbound control_request line — only
-// the fields the interrupt mode reads (the top-level type and the request subtype).
-// It mirrors streamsup.controlRequest (envelope.go), which is unexported there.
+// the fields the interrupt mode reads (the top-level type and request subtype, plus
+// the correlation id the ack echoes since #1500). It mirrors streamsup.controlRequest
+// (envelope.go), which is unexported there.
+//
+// RequestID is TOP-LEVEL here, matching marshalInterruptEnvelope's request side. The
+// response side inverts that — see writeInterruptAck.
 type inControlRequest struct {
-	Type    string `json:"type"`
-	Request struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Request   struct {
 		Subtype string `json:"subtype"`
 	} `json:"request"`
 }
@@ -1468,11 +1473,12 @@ func (w syncWriter) Write(p []byte) (int, error) {
 //
 // honorInterrupt selects the interrupt mode (#1136, default-off): a user turn emits
 // the assistant echo line ONLY (the result is withheld, so the turn stays in flight),
-// and an interrupt control_request emits a result{error_during_execution} — which the
-// daemon's parser maps to TurnEnd{cancelled}, ending the in-flight turn interrupted.
-// With honorInterrupt false the control_request is ignored (the default the send /
-// new_session / queue riders depend on staying byte-identical). The mode is stateless:
-// it emits an interrupted result on each interrupt control_request.
+// and an interrupt control_request emits a control_response ack echoing the request's
+// id (#1500) followed by a result{error_during_execution} — which the daemon's parser
+// consumes content-free and maps to TurnEnd{cancelled} respectively, ending the
+// in-flight turn interrupted. With honorInterrupt false the control_request is ignored
+// (the default the send / new_session / queue riders depend on staying byte-identical).
+// The mode is stateless: it emits that pair on each interrupt control_request.
 //
 // rateLimitStatus selects the rate-limit rider (#1411, default-off): non-empty
 // prepends one top-level rate_limit_event line carrying that string as its
@@ -1520,11 +1526,22 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				if werr != nil {
 					return
 				}
-			} else if honorInterrupt && interruptControlRequest(b) {
-				// The daemon routed a phone interrupt to this child as a control_request:
-				// end the in-flight turn with result{error_during_execution}.
-				if werr := writeInterruptedResult(w); werr != nil {
-					return
+			} else if honorInterrupt {
+				if reqID, ok := interruptControlRequest(b); ok {
+					// The daemon routed a phone interrupt to this child as a control_request:
+					// ack it, then end the in-flight turn with result{error_during_execution}.
+					//
+					// The ack goes FIRST, matching real claude's order (~40ms ack, then the
+					// result) and buying the e2e its causality on the rate-limit rider's terms
+					// above: a turn_end reaching a client implies the ack has already been
+					// through the parser, so the zero-unrecognized_message assertion needs no
+					// sleep, no poll and no ordering race to tune (#1500).
+					if werr := writeInterruptAck(w, reqID); werr != nil {
+						return
+					}
+					if werr := writeInterruptedResult(w); werr != nil {
+						return
+					}
 				}
 			}
 		}
@@ -1557,16 +1574,20 @@ func userTurnText(line []byte) (string, bool) {
 // interruptControlRequest reports whether line is the interrupt control_request the
 // daemon writes to the child's stdin on a phone interrupt
 // (streamsup.marshalInterruptEnvelope:
-// {"type":"control_request",…"request":{"subtype":"interrupt"}}). It mirrors
-// userTurnText's decode discipline: a minimal struct, and a line that fails to
-// decode or is not an interrupt control_request returns false — the caller ignores
-// it, preserving the parser's per-line resilience.
-func interruptControlRequest(line []byte) bool {
+// {"type":"control_request",…"request":{"subtype":"interrupt"}}), returning its
+// correlation id for the ack to echo (#1500). It mirrors userTurnText's decode
+// discipline: a minimal struct, and a line that fails to decode or is not an
+// interrupt control_request returns ("", false) — the caller ignores it, preserving
+// the parser's per-line resilience.
+func interruptControlRequest(line []byte) (string, bool) {
 	var in inControlRequest
 	if err := json.Unmarshal(line, &in); err != nil {
-		return false
+		return "", false
 	}
-	return in.Type == "control_request" && in.Request.Subtype == "interrupt"
+	if in.Type != "control_request" || in.Request.Subtype != "interrupt" {
+		return "", false
+	}
+	return in.RequestID, true
 }
 
 // writeStreamResponse writes fakeclaude's canned reply to one user turn: one
@@ -1684,6 +1705,35 @@ const (
 	rateLimitLimitType = "five_hour"
 	rateLimitUUID      = "44444444-4444-4444-8444-444444444444"
 )
+
+// writeInterruptAck writes the control_response ack real claude answers an interrupt
+// control_request with (#1500) — the line the daemon solicits for itself and, before
+// this ticket, surfaced to the phone as an unrecognized_message.
+//
+// The envelope is transcribed from the committed capture
+// (internal/e2e/realclaude/testdata/set_permission_mode_v2.1.220_revoke.json, claude
+// 2.1.220, transcribed verbatim in docs/knowledge/features/set-permission-mode-inband-probe.md).
+// Note what it inverts: `subtype` and `request_id` are nested UNDER `response`, NOT
+// top-level, which is the opposite of the request side inControlRequest decodes.
+//
+// Two honest limits on the provenance, because a fixture that overclaims is what
+// this ticket is cleaning up after. The capture is a set_permission_mode ack, not an
+// interrupt one — what it establishes is the control channel's ENVELOPE, which is
+// all the daemon's arm reads. And the inner `response` payload ({"mode":"default"}
+// there) is request-specific and UNMEASURED for interrupt, so this invents none.
+//
+// A map[string]any like writeRateLimitEvent: keys marshal sorted, so the line is
+// deterministic without declaring a struct for a shape nothing else reads. Returns
+// the first marshal/write error.
+func writeInterruptAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+		},
+	})
+}
 
 // writeInterruptedResult writes a single result{subtype:"error_during_execution"}
 // line — the stream-json shape claude emits for an interrupt-terminated turn.
