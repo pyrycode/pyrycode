@@ -174,9 +174,19 @@ func resolveDefaultCwd(workdir string) string {
 }
 
 // sanitizeName keeps a-z, A-Z, 0-9, _, ., - and replaces anything else with
-// _. Empty input becomes "_". Defends the on-disk socket filename against
-// path-traversal and other filesystem-unsafe input (e.g. PYRY_NAME from a
-// careless shell setup).
+// _. Empty input becomes "_", and a result of "." or ".." gains a trailing _
+// ("._", ".._") — the same shape the transform already gives "./x" and
+// "../x", where the separator becomes _. Defends the on-disk socket filename
+// and the per-instance state directory against path-traversal and other
+// filesystem-unsafe input (e.g. PYRY_NAME from a careless shell setup).
+//
+// Postcondition: the result is non-empty, holds no path separator, and is
+// never "." or "..", so filepath.Join(dir, sanitizeName(name), file) always
+// yields dir/<one-component>/file. Pinned by TestSanitizeName and by
+// assertInsideInstanceDir's callers. A "." or ".." reaching filepath.Join as
+// a live component put per-instance state in ~/.pyry or in $HOME itself; the
+// keystore's own validator rejects both rather than transforming them, and
+// deliberately stays separate — see internal/keys.validDaemonName.
 func sanitizeName(s string) string {
 	var b strings.Builder
 	for _, r := range s {
@@ -193,7 +203,14 @@ func sanitizeName(s string) string {
 	if b.Len() == 0 {
 		return "_"
 	}
-	return b.String()
+	// Checked on the built result rather than the input, so the
+	// postcondition keeps holding if the allowlist above ever changes.
+	switch out := b.String(); out {
+	case ".", "..":
+		return out + "_"
+	default:
+		return out
+	}
 }
 
 func main() {
