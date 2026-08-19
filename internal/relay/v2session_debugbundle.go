@@ -16,6 +16,11 @@ import (
 // DebugBundler seam field on V2SessionConfig stay in v2session.go; StreamBundle
 // lives in v2bundlestream.go. This is the 5th #964 slice, after #1021
 // (handshake), #1022 (rekey), #1023 (modal+queue), and #1024 (settings).
+//
+// #1491 added the off-Run assembly to this file (assembleBundle,
+// handleBundleReady, bundleResult); the same carve-out puts its two struct
+// members over in v2session.go — V2Session.bundleAssembling and
+// V2SessionManager.bundleReady, plus the Run arm that feeds handleBundleReady.
 
 // msgDebugBundleUnavailable is the static message on every request_debug_bundle
 // error reply. Deliberately generic: the wire reply NEVER echoes the assembly
@@ -25,14 +30,51 @@ import (
 // needed.
 const msgDebugBundleUnavailable = "debug bundle unavailable"
 
-// handleDebugBundleRequest assembles the current session's debug bundle via the
-// injected DebugBundler and streams it back to s as debug_bundle_chunk* +
-// debug_bundle_done (#812), or sends a single deterministic error reply.
-// Intercepted in dispatchAppFrame before dispatch.Route — like handleInterrupt /
-// handleRequestSnapshot — and runs on the manager's single Run dispatch
-// goroutine. Every branch either enqueues one bundle stream or sends exactly one
-// error reply, then returns: it never panics, hangs, or silently drops the
-// request.
+// bundleResult carries one finished assembly from its off-Run goroutine
+// (assembleBundle) back to Run's m.bundleReady arm, where handleBundleReady
+// streams it or replies with the deterministic error (#1491). The channel FIELD
+// lives on V2SessionManager in v2session.go — the #1025 carve-out keeps the
+// verb's machinery in this file but the struct definitions there.
+type bundleResult struct {
+	// s pins which session this result belongs to. Carried as a pointer but
+	// NEVER dereferenced off Run — the same contract as wakeSignal.s. Only
+	// handleBundleReady, on Run, reads its fields.
+	s *V2Session
+
+	// inReplyTo is the accepted request's envelope id, so the failure branch
+	// correlates its reply exactly as the on-Run reject branches do.
+	inReplyTo uint64
+
+	// archive is the assembled bundle: plaintext recording + logs, the
+	// highest-value secret surface in the system. It travels only into
+	// StreamBundle (→ the AEAD-sealed push path) and is never logged.
+	archive []byte
+
+	// err selects the reply branch ONLY. It MUST NEVER be logged or sent — an
+	// assembly error can quote a recording path or filename, and every reply
+	// this verb emits carries the static msgDebugBundleUnavailable instead.
+	// handleBundleReady logs the failure EVENT alone; the deterministic
+	// backstop is TestV2Session_DebugBundle_ErrorReplies, which greps the
+	// captured log buffer for the error text.
+	err error
+}
+
+// handleDebugBundleRequest accepts a request_debug_bundle, hands the assembly to
+// an off-Run goroutine, and lets handleBundleReady stream the result back as
+// debug_bundle_chunk* + debug_bundle_done (#812) — or sends a single
+// deterministic error reply here and now. Intercepted in dispatchAppFrame before
+// dispatch.Route — like handleInterrupt / handleRequestSnapshot — and runs on the
+// manager's single Run dispatch goroutine. Every branch either accepts exactly
+// one assembly or sends exactly one error reply, then returns: it never panics,
+// hangs, or silently drops the request.
+//
+// The DebugBundler seam is the one control-verb step that is NOT fast: in
+// production it reads the newest recording in full and gzips the archive in
+// memory, both uncapped. Running it inline parked Run inside a single select arm
+// for that whole duration, stalling every other conn's frames, the push drain and
+// the timers (#1491). Only the seam call moves; StreamBundle, the error reply and
+// both log lines still run on Run, in handleBundleReady, so no s.send.Encrypt
+// ever leaves the single-owner goroutine.
 //
 // The request frame is bare (no payload): the bundle is daemon-global (the whole
 // log ring plus the newest recording across all sessions, per #811), so there is
@@ -55,40 +97,118 @@ func (m *V2SessionManager) handleDebugBundleRequest(ctx context.Context, s *V2Se
 		return
 	}
 
-	// #911: bound this conn to one in-flight bundle. If a prior bundle's chunks
-	// are still queued (a slow/stalled transport has not drained them), a retry
-	// must not stack a second bundle's never-droppable control frames onto the
-	// queue — that is unbounded per-retry memory growth (~4/3 × archive per
-	// stacked bundle). Reply with the same deterministic retryable "unavailable"
-	// error as the branches below, so the phone retries later; once the prior
-	// bundle drains the gate clears and the retry is served (AC #4). Placed BEFORE
-	// DebugBundler() so the on-disk assembly is skipped, not merely the enqueue
-	// (AC #1: "no second bundle is assembled or enqueued").
-	if m.bundleInFlight(s.connID) {
+	// #911: bound this conn to one in-flight bundle. If a prior bundle is still
+	// assembling, or its chunks are still queued (a slow/stalled transport has not
+	// drained them), a retry must not stack a second bundle's never-droppable
+	// control frames onto the queue — that is unbounded per-retry memory growth
+	// (~4/3 × archive per stacked bundle) — nor start a second concurrent
+	// full-size assembly. Reply with the same deterministic retryable
+	// "unavailable" error as the branches below, so the phone retries later; once
+	// the prior bundle drains the gate clears and the retry is served (AC #4).
+	// Placed BEFORE the hand-off so the on-disk assembly is skipped, not merely
+	// the enqueue (AC #1: "no second bundle is assembled or enqueued").
+	//
+	// The two halves compose GAPLESSLY because they overlap rather than abut
+	// (#1491). s.bundleAssembling covers [accept → StreamBundle's enqueue
+	// complete]; bundleInFlight reads true from the first Push onward. Both the
+	// set below and the clear in handleBundleReady are on Run, and that clear runs
+	// AFTER StreamBundle returns within the same Run pass, so there is no instant
+	// at which both halves read false while a bundle is live — and no Run arm can
+	// interleave between them to observe one.
+	if s.bundleAssembling || m.bundleInFlight(s.connID) {
 		m.debugBundleReplyError(ctx, s, env.ID)
 		return
 	}
 
+	// Accepted. Mark the conn assembling (the accept-side gate half), then run the
+	// seam off Run. assembleBundle touches nothing Run owns; its result comes back
+	// through m.bundleReady, where handleBundleReady does every remaining step.
+	s.bundleAssembling = true
+	go m.assembleBundle(ctx, s, env.ID)
+}
+
+// assembleBundle runs the DebugBundler seam OFF the Run goroutine and funnels the
+// result back to Run via m.bundleReady (#1491). One goroutine per ACCEPTED
+// request, and at most one per conn at a time — that is exactly what the
+// s.bundleAssembling marker enforces, so concurrent full-size archives in memory
+// are bounded by a guard rather than by hope.
+//
+// It reads exactly two things, neither Run-owned: m.cfg.DebugBundler (immutable
+// after NewV2SessionManager, like the m.cfg.Logger that Push already reads
+// off-Run) and s.done (created on Run at open, closed once by closeWith, never
+// reassigned — the same field appFrameWorker reads off-Run). It dereferences NO
+// Run-owned session field: not s.send, s.recv, s.state, s.bundleAssembling, nor
+// m.sessions. It performs no cryptographic operation, so no s.send.Encrypt can
+// run concurrently with Run's and reuse a nonce.
+//
+// The hand-off BLOCKS with ctx/s.done escapes rather than dropping like the
+// drainCh idiom: a dropped result would leave s.bundleAssembling set forever and
+// lock the conn out of its own debug bundle permanently. This is armIdleTimer's
+// reasoning, not Push's — the goroutine exists only to carry one result, so
+// parking it costs nothing that matters, and both escapes fire on teardown.
+func (m *V2SessionManager) assembleBundle(ctx context.Context, s *V2Session, inReplyTo uint64) {
 	archive, err := m.cfg.DebugBundler()
-	if err != nil {
+	select {
+	case m.bundleReady <- bundleResult{s: s, inReplyTo: inReplyTo, archive: archive, err: err}:
+	case <-s.done:
+		// This conn tore down mid-assembly. The marker dies with the session and
+		// a reconnecting conn_id gets a fresh V2Session, so dropping here cannot
+		// lock anyone out.
+	case <-ctx.Done():
+		// Run is exiting; the manager is dead and the marker is irrelevant.
+	}
+}
+
+// handleBundleReady completes one accepted request_debug_bundle on the Run
+// goroutine, from the result its off-Run assembleBundle produced (#1491). Reached
+// only from Run's m.bundleReady arm. Every step here — StreamBundle, the error
+// reply, both log lines — is the code that used to run inline in
+// handleDebugBundleRequest, running in the same place it always did: on Run,
+// where s.send is single-owned.
+//
+// The marker clear is DEFERRED so every exit path takes it, including the failure
+// and stale-session returns. A branch-local clear is one edit away from the
+// permanent per-conn lockout AC #2 forbids; the defer makes that structural.
+// Clearing after StreamBundle returns (not before) is what makes the gate's two
+// halves overlap — see the gate comment in handleDebugBundleRequest.
+//
+// SECURITY: res.err never reaches a log or the wire. The failure branch logs the
+// EVENT only, and its reply carries the static msgDebugBundleUnavailable, exactly
+// like the on-Run reject branches (AC #3).
+func (m *V2SessionManager) handleBundleReady(ctx context.Context, res bundleResult) {
+	defer func() { res.s.bundleAssembling = false }()
+
+	if res.s.state != V2StateOpen {
+		// closeWith ran between the accept and this result. Drop it: sealing under
+		// a dead session would burn a send-nonce for a frame no live peer awaits.
+		// Mirrors handleWake's state guard and forwardAppReply's V2StateOpen gate.
+		// A reconnected same-conn_id session is a DIFFERENT pointer whose marker is
+		// false, so consulting m.sessions here would buy nothing.
+		m.cfg.Logger.Debug("relay: v2 debug bundle dropped; session not open",
+			"event", "v2.bundle.stale",
+			"conn_id", res.s.connID)
+		return
+	}
+
+	if res.err != nil {
 		// #811 read-failure honesty: a recording that exists but fails to read
 		// surfaces as an error, not a false-absent. Log the failure EVENT only —
-		// NEVER the wrapped err (it could quote a recording path/filename) — and
-		// send a deterministic error reply.
+		// NEVER res.err (it could quote a recording path/filename) — and send a
+		// deterministic error reply.
 		m.cfg.Logger.Warn("relay: v2 debug bundle assemble failed",
 			"event", "v2.bundle.assemble_err",
-			"conn_id", s.connID)
-		m.debugBundleReplyError(ctx, s, env.ID)
+			"conn_id", res.s.connID)
+		m.debugBundleReplyError(ctx, res.s, res.inReplyTo)
 		return
 	}
 
-	if err := m.StreamBundle(ctx, s.connID, archive); err != nil {
-		// Unreachable in practice: s is V2StateOpen on the dispatch goroutine, so
-		// its push queue exists. Logged at debug and dropped — the package's
-		// outbound-drop posture; NEVER echo the archive.
+	if err := m.StreamBundle(ctx, res.s.connID, res.archive); err != nil {
+		// Unreachable in practice: the V2StateOpen check above means the push queue
+		// exists. Logged at debug and dropped — the package's outbound-drop
+		// posture; NEVER echo the archive.
 		m.cfg.Logger.Debug("relay: v2 debug bundle stream dropped",
 			"event", "v2.bundle.stream_err",
-			"conn_id", s.connID,
+			"conn_id", res.s.connID,
 			"err", err)
 		return
 	}
@@ -97,8 +217,8 @@ func (m *V2SessionManager) handleDebugBundleRequest(ctx context.Context, s *V2Se
 	// any member (AC #4).
 	m.cfg.Logger.Info("relay: v2 debug bundle served",
 		"event", "v2.bundle.served",
-		"conn_id", s.connID,
-		"bytes", len(archive))
+		"conn_id", res.s.connID,
+		"bytes", len(res.archive))
 }
 
 // debugBundleReplyError sends a single deterministic TypeError reply to s,
@@ -137,12 +257,14 @@ func (m *V2SessionManager) debugBundleReplyError(ctx context.Context, s *V2Sessi
 
 // bundleInFlight reports whether connID's push queue still holds any
 // debug_bundle_chunk or debug_bundle_done envelope from a prior bundle — i.e.
-// a StreamBundle's frames enqueued by an earlier handleDebugBundleRequest have
-// not all drained yet. It is the per-conn in-flight gate for #911: while it is
-// true, a repeated request_debug_bundle on the same conn is rejected before any
-// assembly or enqueue, so a client retry loop against a slow/stalled transport
-// cannot stack a second bundle's never-droppable control frames (unbounded
-// per-retry memory).
+// a StreamBundle's frames enqueued by an earlier handleBundleReady have not all
+// drained yet. It is the queue-derived half of the per-conn in-flight gate for
+// #911: while it is true, a repeated request_debug_bundle on the same conn is
+// rejected before any assembly or enqueue, so a client retry loop against a
+// slow/stalled transport cannot stack a second bundle's never-droppable control
+// frames (unbounded per-retry memory). The accept-side half — covering the
+// assembly window, before which nothing is queued to scan — is
+// V2Session.bundleAssembling (#1491).
 //
 // Both types are scanned because StreamBundle enqueues all N chunks PLUS the
 // trailing debug_bundle_done in one handler invocation and drainOnce pops one

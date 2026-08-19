@@ -331,6 +331,28 @@ type V2Session struct {
 	// later off-Run processing aliases nothing.
 	appFrames chan []byte
 
+	// bundleAssembling is the accept-side half of the per-conn debug-bundle
+	// in-flight gate (#1491), covering the window [request accepted →
+	// StreamBundle's enqueue complete] that the queue-derived bundleInFlight scan
+	// cannot see: the assembly now runs off Run, so between the accept and the
+	// first Push this conn's push queue holds no bundle frame to find. Set in
+	// handleDebugBundleRequest at accept, cleared in handleBundleReady after
+	// StreamBundle returns — both on Run, and the clear runs in the same Run pass
+	// as the enqueue, so the two halves overlap and no second request can slip
+	// between them.
+	//
+	// Run-owned single-writer, exactly like state/replayThrough — no lock, no
+	// atomic, and pushMu is NOT involved, so pushMu's "taken alone, never held
+	// across an Encrypt, m.send, or any channel op" invariant is untouched by
+	// construction rather than by discipline. The off-Run assembleBundle goroutine
+	// never reads or writes it.
+	//
+	// Living on the session rather than in a manager-level map is what makes a
+	// permanent lockout impossible: closeWith deletes the session, so a
+	// reconnecting conn_id gets a fresh V2Session whose marker is the zero value,
+	// and there is no entry to leak or forget to delete.
+	bundleAssembling bool
+
 	// done is closed by closeWith to stop this session's worker goroutine
 	// without waiting for Run exit (no per-session goroutine leak under conn
 	// churn). Follows the timer-cleanup pattern: created alongside appFrames
@@ -459,6 +481,23 @@ type V2SessionManager struct {
 	// which is the pre-#1505 bound and strictly no worse.
 	pushOverflow chan string
 
+	// bundleReady carries one finished debug-bundle assembly from its off-Run
+	// goroutine (assembleBundle) back to Run, which streams it or sends the
+	// deterministic error reply in handleBundleReady (#1491). Mirrors appReply's
+	// "off-Run producer, Run consumes-and-seals" shape: the archive is built off
+	// Run, but every s.send.Encrypt — StreamBundle → drainOnce → forwardEnvelope
+	// for the stream, debugBundleReplyError → forwardEnvelope for the failure —
+	// stays on the single-owner Run goroutine. The payload type is bundleResult,
+	// defined beside the rest of the verb's machinery in v2session_debugbundle.go
+	// (the #1025 carve-out).
+	//
+	// Buffered (wakeBufferSize) like wake / modalTimeout / pushOverflow; it is
+	// only pressured by more conns finishing assembly at once than the buffer
+	// holds while Run is busy, and assembleBundle's send BLOCKS rather than drops,
+	// so that case is correct rather than lossy. Not closed by the manager on Run
+	// exit; an in-flight producer unblocks via runCtx / s.done.
+	bundleReady chan bundleResult
+
 	// modalTimeout carries a surfaced modal's id from its time.AfterFunc
 	// callback goroutine (armed off-Run by ArmModalTimeout) to the Run goroutine
 	// for the deny-on-timeout safe-deny (#725). Daemon-global (a modal is not
@@ -517,6 +556,7 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		appReply:     make(chan appReplyMsg),
 		modalTimeout: make(chan string, wakeBufferSize),
 		pushOverflow: make(chan string, wakeBufferSize),
+		bundleReady:  make(chan bundleResult, wakeBufferSize),
 	}, nil
 }
 
@@ -547,6 +587,13 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleModalTimeout(runCtx, modalID)
 		case connID := <-m.pushOverflow:
 			m.handlePushOverflow(runCtx, connID)
+		case res := <-m.bundleReady:
+			// A debug bundle finished assembling off Run (#1491). Stream it —
+			// or reply with the deterministic error — here, so every
+			// s.send.Encrypt stays on the single-owner Run goroutine. The
+			// assembly goroutine performed no crypto and touched nothing Run
+			// owns.
+			m.handleBundleReady(runCtx, res)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:
@@ -727,8 +774,10 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 // dispatchAppFrame runs on the Run goroutine. It splits an open-state
 // plaintext two ways: a v2 control envelope (rekey/modal/interrupt/
 // new_session/dequeue/snapshot/debug_bundle/settings) is handled inline on
-// Run — those handlers touch s.send / session state / timers and are fast;
-// an application frame is handed OFF Run to this conn's worker goroutine
+// Run — those handlers touch s.send / session state / timers and are fast,
+// with one exception: handleDebugBundleRequest is fast only because #1491 moved
+// its uncapped read+gzip off Run, leaving the accept, the gate and the seals
+// here; an application frame is handed OFF Run to this conn's worker goroutine
 // (appFrameWorker) via a non-blocking enqueue onto s.appFrames, then
 // dispatchAppFrame returns so the Run loop keeps servicing every other arm
 // (other conns' frames, m.wake, m.modalTimeout, m.manualRekey) while the
