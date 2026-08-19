@@ -50,10 +50,8 @@ const maxDeltaTextBytes = 10000
 
 // interactiveBroadcaster is the capability-aware fan-out surface the structured
 // emitter needs: the interactive-conn snapshot (#626) and the per-conn sealed
-// push (#571). Distinct from #589's v2Broadcaster, which uses the
-// capability-agnostic ActiveConnIDs. *relay.V2SessionManager satisfies it.
-// Declared at the consumer (CODING-STYLE) so the emitter unit-tests drive it
-// without a real manager.
+// push (#571). *relay.V2SessionManager satisfies it. Declared at the consumer
+// (CODING-STYLE) so the emitter unit-tests drive it without a real manager.
 type interactiveBroadcaster interface {
 	ActiveConns(ctx context.Context) []relay.ActiveConn
 	Push(ctx context.Context, connID string, env protocol.Envelope) error
