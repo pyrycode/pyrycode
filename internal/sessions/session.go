@@ -108,8 +108,10 @@ func claudeSettingsArgs(s SessionSettings) []string {
 
 // spawnArgs composes the full claude spawn argv for the given settings: the
 // settings-free base (spawnBase) plus claudeSettingsArgs(settings). It is the
-// only argv-recompose path outside session construction — the live restart in
-// Pool.UpdateSettings (#842) — and, like construction, routes the settings
+// only argv-recompose path outside session construction — the live-apply in
+// Pool.UpdateSettings, whether it installs the result with the kill (#842's
+// Restart) or without one (#1581's in-band branch) — and, like construction,
+// routes the settings
 // suffix through claudeSettingsArgs, so the YOLO fail-safe is enforced in
 // exactly one place. Returns a fresh slice that aliases neither spawnBase nor
 // the caller's state; a zero-value settings appends nothing (byte-identical to
@@ -149,8 +151,9 @@ type Session struct {
 	// spawnBase is the settings-free claude spawn argv: the template args plus
 	// any construction-time resume suffix (--session-id <id> for a minted
 	// session), but WITHOUT the claudeSettingsArgs suffix. spawnArgs recomposes
-	// the full argv from this base plus the live settings when a settings change
-	// triggers a live restart (#842). Immutable post-construction, so it is read
+	// the full argv from this base plus the live settings on every settings-change
+	// live-apply (#842's restart, #1581's in-band install). Immutable
+	// post-construction, so it is read
 	// without a lock. It never contains a YOLO-derived flag — the bypass flag has
 	// exactly one origin, claudeSettingsArgs — so no persisted-false state can
 	// recompose into a --dangerously-skip-permissions child.

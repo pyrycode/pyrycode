@@ -36,8 +36,11 @@ const (
 // the manager's single Run dispatch goroutine — so the s.interactive read is
 // lock-free under the package's single-owner invariant. Unlike the fire-and-forget
 // verbs (interrupt / new_session / dequeue_message) the interactive path ALWAYS
-// replies. The change takes effect on the session's NEXT spawn (#833's argv path);
-// making a running session pick it up is the sibling live-restart ticket #842.
+// replies. A RUNNING session picks the change up immediately, by one of two
+// mechanisms the seam picks on which fields the frame carried: a model/effort-only
+// change is written to the live child as a /model or /effort command (#1581), and
+// every other change live-restarts the session's supervisor (#842). Both install
+// the recomposed argv (#833's path), so the next spawn carries it too.
 //
 // Order is load-bearing:
 //  1. Capability gate (the authz boundary): a non-interactive conn is fully inert
@@ -113,8 +116,9 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 		return
 	}
 
-	// Success (AC #1/#2): the change is persisted atomically and reaches claude on
-	// the session's next spawn. Build the reply inline, mirroring
+	// Success (AC #1/#2): the change is persisted atomically and reaches a running
+	// claude immediately — in-band as command text for a model/effort-only change
+	// (#1581), by live restart otherwise (#842). Build the reply inline, mirroring
 	// handleRequestSnapshot. Echoing p.SessionID is safe — on the nil-error path it
 	// matched a real session key exactly, so it is a confirmed-real, non-secret
 	// routing id in a typed struct field, not an error-string interpolation.

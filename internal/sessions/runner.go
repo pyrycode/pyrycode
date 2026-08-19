@@ -38,8 +38,10 @@ type Runner interface {
 	// terminating a running child — Restart's swap half on its own (#1580), for a
 	// caller that needs to change what the session runs next without ending what it
 	// is running now. Declining to call Restart is not that path: it loses the swap
-	// outright, so the next spawn re-execs the stale argv. Nothing in this package
-	// calls it yet. See (*streamsup.Runner).SetSpawnArgs for the full contract —
+	// outright, so the next spawn re-execs the stale argv. Pool.UpdateSettings is
+	// its one caller: the in-band branch (#1581) installs through it and delivers
+	// the change as a /model or /effort command instead of a respawn.
+	// See (*streamsup.Runner).SetSpawnArgs for the full contract —
 	// notably that the argv is installed verbatim, with validation staying upstream
 	// in Session.spawnArgs.
 	SetSpawnArgs(args []string)

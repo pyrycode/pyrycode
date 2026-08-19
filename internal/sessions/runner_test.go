@@ -138,10 +138,17 @@ type lifecycleRunner struct {
 	// SEPARATE from restarts because the two are different events: an install
 	// changes what the next spawn will run, a restart also ends the child running
 	// now. It deliberately does not route through recordArgv either — that is the
-	// restart-observability channel the spawn-argv tests read back. Nothing reaches
-	// SetSpawnArgs through the pool yet (#1580); recording rather than dropping is
-	// what keeps this double honest for the first caller that does.
+	// restart-observability channel the spawn-argv tests read back, so an assertion
+	// on an install must read setArgs (via spawnArgSets) and never waitArgv, which
+	// would return the stale construction argv instead of timing out. #1580 left
+	// this recording here for its first caller; #1581's in-band branch is it.
 	setArgs [][]string
+	// writes records the payload of every WriteUserTurn call, in order — the
+	// in-band delivery channel #1581 introduced, whose commands are otherwise
+	// invisible to a test. Recorded on EVERY path including no-live-child: it is
+	// the production runner, not the pool, that refuses a write when no child is
+	// bound, and the pool's contract is to attempt the write unconditionally.
+	writes [][]byte
 }
 
 func (r *lifecycleRunner) State() State {
@@ -154,6 +161,9 @@ func (r *lifecycleRunner) State() State {
 }
 
 func (r *lifecycleRunner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
+	r.mu.Lock()
+	r.writes = append(r.writes, append([]byte(nil), payload...))
+	r.mu.Unlock()
 	return nil
 }
 
@@ -222,4 +232,56 @@ func (r *lifecycleRunner) SetSpawnArgs(args []string) {
 	r.mu.Lock()
 	r.setArgs = append(r.setArgs, append([]string(nil), args...))
 	r.mu.Unlock()
+}
+
+// restartArgs, spawnArgSets and userTurns are the read side of the three records
+// above. Each takes r.mu and deep-copies, because the lifecycle goroutine writes
+// while the test goroutine reads and every assertion must stay -race clean.
+// userTurns converts to string on read so a delivery assertion reads as the
+// command text it is.
+func (r *lifecycleRunner) restartArgs() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return cloneArgvRecords(r.restarts)
+}
+
+func (r *lifecycleRunner) spawnArgSets() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return cloneArgvRecords(r.setArgs)
+}
+
+func (r *lifecycleRunner) userTurns() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, 0, len(r.writes))
+	for _, w := range r.writes {
+		out = append(out, string(w))
+	}
+	return out
+}
+
+func cloneArgvRecords(recs [][]string) [][]string {
+	out := make([][]string, 0, len(recs))
+	for _, rec := range recs {
+		out = append(out, append([]string(nil), rec...))
+	}
+	return out
+}
+
+// runnerDouble returns the lifecycleRunner backing session id, so a test can read
+// what the pool actually called on the supervisor. Prefer it over the `done`
+// sentinel for "did a respawn happen?": doneAppears cannot observe one under this
+// double (see its own doc), whereas restartArgs records every Restart call.
+func runnerDouble(t *testing.T, pool *Pool, id SessionID) *lifecycleRunner {
+	t.Helper()
+	sess, err := pool.Lookup(id)
+	if err != nil {
+		t.Fatalf("Lookup(%s): %v", id, err)
+	}
+	r, ok := sess.Runner().(*lifecycleRunner)
+	if !ok {
+		t.Fatalf("session %s is backed by %T, want *lifecycleRunner", id, sess.Runner())
+	}
+	return r
 }
