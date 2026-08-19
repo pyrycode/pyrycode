@@ -194,6 +194,60 @@ func driveMCP(t *testing.T, s *approveServer, frame string) (jsonrpcReply, []byt
 	return r, line
 }
 
+// --- construction -----------------------------------------------------------
+
+// TestMCPApproveServer_ClientDeadline pins the per-call client read deadline
+// newMCPApproveServer derives: approvalTimeout() + mcpApproveClientMargin, the
+// same env-aware source the daemon hands the pending-approval registry. Raising
+// PYRY_APPROVAL_TIMEOUT must raise both ends of the socket together instead of
+// truncating the client at the constant's 2m30s (#1507). The first two rows are
+// the production-unchanged pins: absent and unparseable both keep 2m30s.
+//
+// Serial by construction — t.Setenv forbids t.Parallel, the same constraint
+// TestApprovalTimeout carries. It coexists with this file's parallel tests
+// because those are released only after the package's serial phase.
+func TestMCPApproveServer_ClientDeadline(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   string
+		unset bool
+		want  time.Duration
+	}{
+		{name: "unset falls back to the default window", unset: true, want: 2*time.Minute + 30*time.Second},
+		{name: "unparseable falls back to the default window", env: "not-a-duration", want: 2*time.Minute + 30*time.Second},
+		{name: "short override 2s", env: "2s", want: 32 * time.Second},
+		{name: "generous override 10m", env: "10m", want: 10*time.Minute + 30*time.Second},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// t.Setenv captures the prior value for restore-at-cleanup at call time,
+			// so the Unsetenv below yields a genuine unset row (testing has no
+			// t.Unsetenv) and an operator's real PYRY_APPROVAL_TIMEOUT still cannot
+			// leak into it.
+			t.Setenv(envApprovalTimeout, tc.env)
+			if tc.unset {
+				if err := os.Unsetenv(envApprovalTimeout); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+
+			// Construction does no I/O — this socket is never dialled.
+			s := newMCPApproveServer("/nonexistent/p.sock", testLogger(io.Discard))
+			if s.timeout != tc.want {
+				t.Errorf("client read deadline = %v, want %v", s.timeout, tc.want)
+			}
+			// The ordering invariant the margin exists for: the client deadline sits
+			// exactly one margin PAST the daemon's window, so the daemon's informative
+			// "approval request timed out" deny keeps winning the race against our
+			// generic "approval unavailable". A negative delta here is the truncation
+			// this ticket fixes, stated as a number.
+			if got := s.timeout - approvalTimeout(); got != mcpApproveClientMargin {
+				t.Errorf("client read deadline - approvalTimeout() = %v, want exactly %v (mcpApproveClientMargin)", got, mcpApproveClientMargin)
+			}
+		})
+	}
+}
+
 // --- handshake --------------------------------------------------------------
 
 // TestMCPApprove_Initialize pins AC-1's handshake: initialize echoes the
