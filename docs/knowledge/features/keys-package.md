@@ -69,7 +69,7 @@ Reject behaviour: returns `fmt.Errorf("keys: invalid daemon name %q: %w", daemon
 
 ### Deliberately NOT shared with `cmd/pyry/main.go:sanitizeName`
 
-`sanitizeName` is a transformer that replaces bad chars with `_` and permits `.` and uppercase. The keystore validator rejects on the same inputs and is stricter on charset. Reusing `sanitizeName` for the keystore path would silently defeat the path-traversal defence (`sanitizeName("..") == ".."`). The two surfaces solve different problems and stay separate.
+`sanitizeName` is a transformer that replaces bad chars with `_` and permits `.` and uppercase. The keystore validator rejects on the same inputs and is stricter on charset — `sanitizeName("MyBox") == "MyBox"` and `sanitizeName("../etc") == ".._etc"`, both of which `validDaemonName` refuses. The difference that matters is posture, not charset: a transformer always returns *some* usable name, so it can never satisfy this package's contract of rejecting with `ErrInvalidDaemonName` and performing zero filesystem operations (pinned by `TestLoadOrCreate_InvalidDaemonName`). The two surfaces solve different problems and stay separate.
 
 ### JSON schema
 
