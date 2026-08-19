@@ -9,7 +9,7 @@ Landed in #255. Per-type payload structs (the catalog the 16 type discriminators
 ```
 internal/protocol/
 ├── envelope.go                  Envelope, RoutingEnvelope, ErrUnknownType / ErrUnsupported, IsKnownAppType, inboundAppTypeSet
-├── codes.go                     13 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-status-peer Type* (api_retry / compacting, #1074) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701) + v2-queue Type* (queue_state / dequeue_message, #720) + v2-interrupt Type* (TypeInterrupt, #707, payload-less inbound control) + v2-debug-bundle Type* (debug_bundle_chunk / debug_bundle_done / request_debug_bundle, #812/#813) + v2-new_session Type* (TypeNewSession, #831, payload-less inbound control) + v2-session-settings Type* (set_session_settings / session_settings_updated, #844) + v2-session-error Type* (TypeSessionError, #1007, unwired vocabulary only) + v2-background-task Type* (background_task_started / _updated / _roster, #1393 shape, #1394 bridge) + v2-thinking-progress Type* (thinking_progress, #1386, own const block, vocabulary + mapping shipped together) + v2-rate-limited Type* (rate_limited, #1405, own const block; the turnbridge mapping + cmd/pyry handler case are #1410) + Session errors group (CodeSessionNotFound, #844; CodeSessionBlocked, #1007)
+├── codes.go                     13 Code* string constants + 16 v1 Type* + v2-control Type* (TypeRekeyRequest, #454) + v2-interactive Type* (turn_state … turn_end, #607; + stall, #638) + v2-status-peer Type* (api_retry / compacting, #1074) + v2-snapshot Type* (request_snapshot / screen_snapshot, #617) + v2-resync Type* (TypeResync, #647) + v2-session-boundary Type* (TypeSessionTransition, #656) + v2-modal Type* (modal_shown / modal_answer / modal_cancel / modal_dismissed, #701) + v2-queue Type* (queue_state / dequeue_message, #720) + v2-interrupt Type* (TypeInterrupt, #707, payload-less inbound control) + v2-debug-bundle Type* (debug_bundle_chunk / debug_bundle_done / request_debug_bundle, #812/#813) + v2-new_session Type* (TypeNewSession, #831, payload-less inbound control) + v2-session-settings Type* (set_session_settings / session_settings_updated, #844) + v2-session-settings-read Type* (request_session_settings / session_settings, #491/#1214, conversation_id gate #1586) + v2-session-error Type* (TypeSessionError, #1007, unwired vocabulary only) + v2-background-task Type* (background_task_started / _updated / _roster, #1393 shape, #1394 bridge) + v2-thinking-progress Type* (thinking_progress, #1386, own const block, vocabulary + mapping shipped together) + v2-rate-limited Type* (rate_limited, #1405, own const block; the turnbridge mapping + cmd/pyry handler case are #1410) + Session errors group (CodeSessionNotFound, #844; CodeSessionBlocked, #1007)
 ├── push.go                      RegisterPushTokenPayload (#275) — register_push_token body
 ├── messaging.go                 SendMessagePayload, MessagePayload (#272); SessionTransitionPayload (#656, v2 session-boundary marker body); ModalOption + ModalShownPayload / ModalAnswerPayload / ModalCancelPayload / ModalDismissedPayload (#701, v2 modal vocabulary bodies); QueuedItem + QueueStatePayload / DequeueMessagePayload (#720, v2 queue vocabulary); DebugBundleChunkPayload / DebugBundleDonePayload (#812, v2 debug-bundle streaming bodies); SessionErrorPayload (#1007, v2 unsolicited conversation-scoped terminal give-up body — unwired, producer is sibling #1008)
 ├── conversations_read.go        ListConversationsPayload, ConversationsPayload, ConversationSummary (#273)
@@ -17,7 +17,7 @@ internal/protocol/
 ├── handshake.go                 HelloServerPayload, HelloClientPayload, HelloAckPayload, ErrorPayload, AckPayload (#271); Capabilities []string on the two phone-facing hello payloads + CapabilityInteractive const (#607); LastEventID *uint64 on HelloClientPayload (#647, inbound reconnect-replay cursor)
 ├── interactive.go               TurnStatePayload, AssistantDeltaPayload, ToolUsePayload, ToolResultPayload, TurnEndPayload (#607), StallPayload (#638), ApiRetryPayload / CompactingPayload (#1074), BackgroundTaskStartedPayload / BackgroundTaskUpdatedPayload / BackgroundTaskRosterPayload / BackgroundTask (#1393 shape, #1394 bridge), ThinkingProgressPayload (#1386, wired same ticket), RateLimitedPayload (#1405 shape, #1410 bridge) — v2 interactive binary→phone event bodies
 ├── snapshot.go                  RequestSnapshotPayload, ScreenSnapshotPayload (#617) — v2 screen-snapshot request (phone→binary) / response (binary→phone) bodies
-├── settings.go                  SetSessionSettingsPayload, SessionSettingsUpdatedPayload (#844) — v2 set-session-settings request (phone→binary) / reply (binary→phone) bodies; wire vocabulary only, handler is #845
+├── settings.go                  SetSessionSettingsPayload, SessionSettingsUpdatedPayload (#844) — v2 set-session-settings request (phone→binary) / reply (binary→phone) bodies; wire vocabulary only, handler is #845; RequestSessionSettingsPayload, SessionSettingsPayload (#491/#1214, ConversationID field added #1586) — the READ half: request (phone→binary) / reply (binary→phone) bodies
 ├── envelope_test.go             golden round-trip for Envelope (full + minimal) and RoutingEnvelope
 ├── compat_test.go               truth-table for IsKnownAppType + drift detectors
 ├── push_test.go                 golden round-trip for RegisterPushTokenPayload via Envelope.Payload
@@ -27,7 +27,7 @@ internal/protocol/
 ├── handshake_test.go            per-type round-trip for handshake/control payloads (#271) + capabilities round-trips (#607)
 ├── interactive_test.go          golden round-trip for each of the five #607 interactive payloads + the #638 stall payload + the #1074 api_retry / compacting payloads + the four #1393 background-task payloads + the #1386 thinking_progress payload + the #1405 rate_limited payload (populated + zero-value fixtures) via Envelope.Payload, + TestBackgroundTaskRosterPayload_NilTasksNormalises (direct marshal, no fixture) + TestBackgroundTaskPayloads_FitV2EnvelopeCap (AC #4, table-driven, `<`-filled at producer caps) + TestThinkingProgressType_IsNotClaudesSubtype (anti-drift substring check on the constant) + TestRateLimitedType_IsNotClaudesVocabulary (anti-drift substring check + regression pins against claude's key names and the excluded identity fields)
 ├── snapshot_test.go             golden round-trip for the two #617 snapshot payloads + empty-conversation_id boundary
-├── settings_test.go             golden round-trip for the request payload (present-at-zero vs omitted, table-driven) + the reply payload (#844)
+├── settings_test.go             golden round-trip for the SetSessionSettingsPayload request (present-at-zero vs omitted, table-driven) + the SessionSettingsUpdatedPayload reply (#844); golden round-trip + empty-conversation_id boundary for RequestSessionSettingsPayload + golden round-trip for SessionSettingsPayload (#491, extended #1586)
 └── testdata/                    envelope_full.json, envelope_minimal.json, routing_envelope.json,
                                  register_push_token.json, send_message.json, message.json,
                                  list_conversations.json, conversations.json,
@@ -41,6 +41,7 @@ internal/protocol/
                                  request_snapshot.json, screen_snapshot.json,
                                  modal_shown.json, modal_answer.json, modal_cancel.json, modal_dismissed.json,
                                  set_session_settings_full.json, set_session_settings_omitted.json, session_settings_updated.json,
+                                 request_session_settings.json, session_settings.json,
                                  session_error.json,
                                  background_task_started.json, background_task_updated.json,
                                  background_task_roster.json, background_task_roster_empty.json,
@@ -396,6 +397,69 @@ vs `set_session_settings_omitted.json` (only `session_id`), asserting pointer
 nil-ness then a byte-equal re-marshal — the regression guard for the
 `omitempty` decision — plus a `session_settings_updated.json` round-trip for
 the reply.
+
+### Session settings read payloads (#491/#1214, `ConversationID` field #1586)
+
+The READ half the #844 cluster shipped without: `set_session_settings`
+changes the values and `session_settings_updated` only echoes the id back, so
+a client had no way to ask what the current run configuration *is*, nor which
+session id to address a change to. Before this pair the only sources were
+`screen_snapshot`'s side-load (values) and the unsolicited
+`session_transition` marker (id, fired only on clear/idle-eviction — never on
+session creation). Handler is [`handleRequestSessionSettings`, documented in
+v2-session-manager.md](v2-session-manager.md#inbound-request_session_settings-4911214-extended-1586--the-read-half-of-the-844-cluster).
+
+```go
+type RequestSessionSettingsPayload struct {
+    ConversationID string `json:"conversation_id"`
+}
+
+type SessionSettingsPayload struct {
+    SessionID    string `json:"session_id"`
+    Model        string `json:"model"`
+    Effort       string `json:"effort"`
+    YOLO         bool   `json:"yolo"`
+    UsedTokens   int    `json:"used_tokens"`
+    WindowTokens int    `json:"window_tokens"`
+}
+```
+
+- **`ConversationID` was added by #1586; the frame was genuinely bare before
+  it.** It names the conversation the client is asking about. Untrusted
+  network input, used for exactly one thing — a membership lookup through the
+  handler's `KnownConversation` seam — and it reaches no log line, no error
+  string, no filesystem path, and not the reply.
+- **No `omitempty` on either struct**, matching `RequestSnapshotPayload` /
+  `ScreenSnapshotPayload` and deliberately unlike the sibling
+  `SetSessionSettingsPayload` above, whose per-field pointers encode a
+  presence contract. There is no presence contract on the request: an absent
+  and an empty `conversation_id` are the **same** case — "no conversation
+  named" — so nothing needs to tell them apart, and keeping the field always
+  on the wire lets a fixture pin the full shape. On the reply, every field is
+  always a real answer, not an absence: `SessionID ""` means "nothing to
+  address", `Model`/`Effort` `""` mean "inherited default, no per-session
+  override", `YOLO false` means permissions are enforced, and `WindowTokens 0`
+  means the usage seam is unwired (`UsedTokens 0` against a non-zero
+  `WindowTokens` is a genuine fresh session).
+- **The field gates *whether* the reply is populated, not *which* session it
+  describes.** A `conversation_id` naming a conversation the daemon hosts, or
+  naming none, is answered with the **bootstrap** session's values — the same
+  scope `screen_snapshot` and #844 already had. A `conversation_id` naming a
+  conversation the daemon does **not** host is answered with a zero-valued
+  `SessionSettingsPayload`, never an error frame: `session_id: ""` is already
+  the defined "no session to address" answer, so the reply shape stays
+  constant. Making the reported values follow the named conversation is
+  #1587, and the reported id and the reported values must move together then
+  (see `BootstrapSessionID`'s seam doc, `internal/relay/v2session_seams.go`)
+  or a client would read one session and write to another.
+
+Golden round-trips in `settings_test.go`: `TestRequestSessionSettingsPayload_RoundTrip`
+against `testdata/request_session_settings.json` (non-empty fixture id — this
+one does **not** pin the no-`omitempty` decision, since the key survives
+omission when non-empty) plus `TestRequestSessionSettingsPayload_EmptyConversationID`,
+the sole pin on that decision (asserts the empty key stays on the wire rather
+than being dropped); and `TestSessionSettingsPayload_RoundTrip` against
+`testdata/session_settings.json` for the reply.
 
 ### Conversations-read payloads (#273)
 
@@ -1155,6 +1219,22 @@ The two queue types share **one** const block with **one** rationale comment —
 | Session settings | `TypeSetSessionSettings`, `TypeSessionSettingsUpdated` |
 
 The two share **one** const block with **one** rationale comment — the same **mixed inbound+outbound** cluster precedent as the modal and queue blocks. `TypeSetSessionSettings` is an inbound phone → binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no `dispatch.Route` handler**); `TypeSessionSettingsUpdated` is an outbound binary → phone reply confirming the change, correlated via `Envelope.InReplyTo`. Both carry real named payload structs in the new `settings.go` (`SetSessionSettingsPayload` / `SessionSettingsUpdatedPayload` — see [Session settings payloads](#session-settings-payloads-844)). Both stay out of `inboundAppTypeSet` (two `{"set_session_settings-rejected"/"session_settings_updated-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). The producer is handler sibling #845 (shipped — decodes into `sessions.Pool.UpdateSettings` (#840), see [Inbound set_session_settings](v2-session-manager.md#inbound-set_session_settings-845--settingsupdater-seam-validate-persist-reply)); this slice is wire vocabulary only — **not** `security-sensitive` (per the wire-vocab → handler split precedent, this leaf defines shape only, no nonce/token/capability primitive; the YOLO fail-safe lives in `sessions.SettingsUpdate` (#840) and the capability gate in #845). See [codebase/844.md](../codebase/844.md).
+
+**v2 request-session-settings vocabulary** (#491/#1214, `conversation_id` added #1586; spec `docs/protocol-mobile.md` § Session settings):
+
+| Group | Constants |
+|-------|-----------|
+| Session settings (read) | `TypeRequestSessionSettings`, `TypeSessionSettings` |
+
+Own const block, separate from #844's — the READ half of the same settings
+cluster, shipped later. `TypeRequestSessionSettings` is an inbound phone →
+binary **control** envelope intercepted at `v2session.go`'s `dispatchAppFrame`
+**before** `dispatch.Route` (the `TypeSetSessionSettings` / `TypeRequestSnapshot`
+precedent — **no `dispatch.Route` handler**); `TypeSessionSettings` is an
+outbound binary → phone reply, correlated via `Envelope.InReplyTo`. Both carry
+real named payload structs in `settings.go` (`RequestSessionSettingsPayload` /
+`SessionSettingsPayload` — see [Session settings read payloads](#session-settings-read-payloads-4911214-conversationid-field-1586)).
+Both stay out of `inboundAppTypeSet` (two `{"request_session_settings-rejected"/…, …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). **#1586 is the second ticket to touch this block**: #491/#1214 shipped it payload-less on the request side; #1586 added `RequestSessionSettingsPayload.ConversationID` and the `KnownConversation` gate, with no change to `TypeSessionSettings`'s reply shape. The handler is documented in [v2-session-manager.md § Inbound request_session_settings](v2-session-manager.md#inbound-request_session_settings-4911214-extended-1586--the-read-half-of-the-844-cluster). See [codebase/1586.md](../codebase/1586.md).
 
 **v2 session-error vocabulary** (#1007, split from #1001; spec `docs/protocol-mobile.md` § Error codes):
 
