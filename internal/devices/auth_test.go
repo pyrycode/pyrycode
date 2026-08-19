@@ -51,6 +51,40 @@ func TestRegistry_Validate_Hit(t *testing.T) {
 	}
 }
 
+// TestRegistry_Validate_IgnoresExpiredRedeemBy pins the inertness of the
+// redemption deadline at the auth predicate: Validate is a pure hash lookup
+// this slice, so a record whose RedeemBy is already an hour in the past still
+// authenticates. The fixture's own precondition is asserted too — a silently
+// zero RedeemBy would pass this test and any future enforcement check alike,
+// making the pin vacuous.
+func TestRegistry_Validate_IgnoresExpiredRedeemBy(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2020-01-01T00:00:00Z")
+	expired := time.Now().Add(-time.Hour)
+	r := &Registry{}
+	r.Add(Device{
+		TokenHash:  HashToken("plain-expired"),
+		Name:       "stale",
+		PairedAt:   when,
+		LastSeenAt: when,
+		RedeemBy:   expired,
+	})
+
+	got, ok := r.Validate("plain-expired")
+	if !ok {
+		t.Fatalf("ok = false, want true (RedeemBy is inert this slice)")
+	}
+	if got.Name != "stale" {
+		t.Errorf("Name = %q, want %q", got.Name, "stale")
+	}
+	if got.RedeemBy.IsZero() {
+		t.Fatalf("fixture RedeemBy is the zero value; the pin would hold vacuously")
+	}
+	if !got.RedeemBy.Before(time.Now()) {
+		t.Errorf("fixture RedeemBy = %v, want a deadline already in the past", got.RedeemBy)
+	}
+}
+
 func TestRegistry_Validate_Miss(t *testing.T) {
 	t.Parallel()
 	when := mustParseTime(t, "2020-01-01T00:00:00Z")

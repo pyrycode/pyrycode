@@ -205,10 +205,15 @@ func runPairDefault(args []string) error {
 		deviceName = "device-" + hash[:8]
 	}
 
+	// One clock read feeds both stamps, so RedeemBy - PairedAt is exactly
+	// devices.RedemptionWindow rather than that window plus whatever
+	// scheduling delay fell between two time.Now() calls.
+	mintedAt := time.Now().UTC()
 	registry.Add(devices.Device{
 		TokenHash:              hash,
 		Name:                   deviceName,
-		PairedAt:               time.Now().UTC(),
+		PairedAt:               mintedAt,
+		RedeemBy:               mintedAt.Add(devices.RedemptionWindow),
 		AllowRemotePermissions: parsed.allowRemotePermissions,
 	})
 	if err := registry.Save(devicesPath); err != nil {

@@ -208,6 +208,34 @@ func TestRenderPairList_NeverSeen(t *testing.T) {
 	}
 }
 
+// TestRenderPairList_RedeemByInvisible is the CLI-surface pin for the
+// redemption deadline, written as a differential rather than a golden: the
+// same device rendered with and without a deadline must produce byte-identical
+// output, so the field surfaces in none of the four columns. A differential
+// cannot be made to pass by updating an expected string, and it is immune to
+// tabwriter padding drift.
+func TestRenderPairList_RedeemByInvisible(t *testing.T) {
+	base := devices.Device{
+		Name:       "alpha",
+		PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		TokenHash:  "aaaaaaaa11111111111111111111111111111111111111111111111111111111",
+	}
+	stamped := base
+	stamped.RedeemBy = base.PairedAt.Add(devices.RedemptionWindow)
+
+	var without, with bytes.Buffer
+	if err := renderPairList([]devices.Device{base}, &without); err != nil {
+		t.Fatalf("renderPairList(no deadline): %v", err)
+	}
+	if err := renderPairList([]devices.Device{stamped}, &with); err != nil {
+		t.Fatalf("renderPairList(stamped deadline): %v", err)
+	}
+	if !bytes.Equal(without.Bytes(), with.Bytes()) {
+		t.Errorf("RedeemBy changed the listing\nwithout:\n%s\nwith:\n%s", without.Bytes(), with.Bytes())
+	}
+}
+
 // TestRenderPairList_Empty asserts the empty-registry output is
 // exactly the contract string — no header, no trailing whitespace.
 func TestRenderPairList_Empty(t *testing.T) {
@@ -398,6 +426,70 @@ func TestRunPairRevoke_RemovesEntry(t *testing.T) {
 	got := list[0]
 	if got.Name != bravo.Name {
 		t.Errorf("survivor.Name=%q want %q", got.Name, bravo.Name)
+	}
+	if got.TokenHash != bravo.TokenHash {
+		t.Errorf("survivor.TokenHash=%q want %q", got.TokenHash, bravo.TokenHash)
+	}
+	if !got.PairedAt.Equal(bravo.PairedAt) {
+		t.Errorf("survivor.PairedAt=%v want %v", got.PairedAt, bravo.PairedAt)
+	}
+	if !got.LastSeenAt.Equal(bravo.LastSeenAt) {
+		t.Errorf("survivor.LastSeenAt=%v want %v", got.LastSeenAt, bravo.LastSeenAt)
+	}
+}
+
+// TestRunPairRevoke_PreservesRedeemByOnSurvivors is the revoke leg of the
+// CLI-surface criterion: revoking a record that carries a deadline removes it
+// and re-encodes the survivor from its loaded struct with every field — the
+// deadline included — intact.
+func TestRunPairRevoke_PreservesRedeemByOnSurvivors(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	path := resolveDevicesPath(defaultName())
+	registry, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("devices.Load: %v", err)
+	}
+	alpha := devices.Device{
+		Name:       "alpha",
+		TokenHash:  "aaaaaaaa11111111111111111111111111111111111111111111111111111111",
+		PairedAt:   time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+		RedeemBy:   time.Date(2026, 1, 1, 0, 15, 0, 0, time.UTC),
+	}
+	bravo := devices.Device{
+		Name:       "bravo",
+		TokenHash:  "bbbbbbbb22222222222222222222222222222222222222222222222222222222",
+		PairedAt:   time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC),
+		LastSeenAt: time.Date(2026, 1, 4, 0, 0, 0, 0, time.UTC),
+		RedeemBy:   time.Date(2026, 1, 3, 0, 30, 0, 0, time.UTC),
+	}
+	registry.Add(alpha)
+	registry.Add(bravo)
+	if err := registry.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if err := runPairRevoke([]string{"alpha"}); err != nil {
+		t.Fatalf("runPairRevoke: %v", err)
+	}
+
+	reloaded, err := devices.Load(path)
+	if err != nil {
+		t.Fatalf("devices.Load after revoke: %v", err)
+	}
+	list := reloaded.List()
+	if len(list) != 1 {
+		t.Fatalf("registry has %d entries after revoke, want 1", len(list))
+	}
+	got := list[0]
+	if got.Name != bravo.Name {
+		t.Fatalf("survivor.Name=%q want %q", got.Name, bravo.Name)
+	}
+	if !got.RedeemBy.Equal(bravo.RedeemBy) {
+		t.Errorf("survivor.RedeemBy=%v want %v", got.RedeemBy, bravo.RedeemBy)
 	}
 	if got.TokenHash != bravo.TokenHash {
 		t.Errorf("survivor.TokenHash=%q want %q", got.TokenHash, bravo.TokenHash)
@@ -702,6 +794,40 @@ func TestRunPairDefault_AllowRemotePermissionsPersists(t *testing.T) {
 	}
 	if allowed != 1 || denied != 1 {
 		t.Errorf("after bare pair: allowed=%d denied=%d, want 1 and 1", allowed, denied)
+	}
+}
+
+// TestRunPairDefault_StampsRedeemBy runs `pyry pair` end-to-end against an
+// isolated HOME and asserts the minted record reaches disk carrying a
+// redemption deadline of PairedAt + devices.RedemptionWindow. The equality is
+// exact — no tolerance window — because runPairDefault derives both stamps
+// from a single clock read.
+func TestRunPairDefault_StampsRedeemBy(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pyry is linux+macOS only")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PYRY_NAME", "")
+
+	if _, err := captureStdout(t, func() error { return runPairDefault(nil) }); err != nil {
+		t.Fatalf("runPairDefault(nil): %v", err)
+	}
+
+	reg, err := devices.Load(resolveDevicesPath(defaultName()))
+	if err != nil {
+		t.Fatalf("devices.Load: %v", err)
+	}
+	list := reg.List()
+	if len(list) != 1 {
+		t.Fatalf("len(List) = %d, want 1", len(list))
+	}
+	got := list[0]
+	if got.RedeemBy.IsZero() {
+		t.Fatalf("minted device RedeemBy is the zero value, want a stamped deadline")
+	}
+	if d := got.RedeemBy.Sub(got.PairedAt); d != devices.RedemptionWindow {
+		t.Errorf("RedeemBy - PairedAt = %v, want %v", d, devices.RedemptionWindow)
 	}
 }
 
