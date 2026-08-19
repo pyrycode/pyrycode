@@ -1951,10 +1951,19 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `streamsup.Config.Stdout` **upstream of the parser**, the same seam
   `dropcapRecorder` (#1260) taps — that the reported model changed to the
   requested one and that one process (`ChildPID` unchanged, one `"spawning
-  claude"` log record) served every turn. The `init` line is asserted here
-  because it must never reach a client or daemon event: `emitSystemSubtype` has
-  no arm for `init`, by the #833 posture that keeps model/effort/YOLO values out
-  of the daemon log at every level. No `--model` in the base argv (a respawn's
+  claude"` log record) served every turn. The `init` line is asserted here from
+  the tap upstream of the parser, independent of whatever the parser does with
+  it downstream. CORRECTED 2026-08-19 (#1600): this used to say the line "must
+  never reach a client or daemon event" because `emitSystemSubtype` had no arm
+  for `init` — false now, `init` maps to `turnevent.ModelAnnounced` and reaches
+  a daemon *event*. The reasoning was already wrong, not just the fact: the
+  arm's absence was never entailed by the #833 posture, which is scoped to
+  *logs*, and an event is not a log. What #833 still guarantees, unaffected by
+  #1600, is that the value reaches no daemon *log* at any level — #1600's own
+  arm logs the subtype keyword on its undecodable path and nothing else, ever.
+  It still reaches no *client*: `turnbridge.MapEvent`'s `default` drops the
+  variant, so no wire frame exists for it yet. No `--model` in the base argv
+  (a respawn's
   recomposed argv would otherwise carry two); the starting model is read off
   turn 1 rather than assumed, so the two-alias target table (`haiku`/`sonnet`)
   always has a candidate that differs from whatever a given machine's default
