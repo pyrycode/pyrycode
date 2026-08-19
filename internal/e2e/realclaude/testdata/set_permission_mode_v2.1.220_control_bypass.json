@@ -1,0 +1,946 @@
+{
+  "claude_version_raw": "2.1.220 (Claude Code)",
+  "claude_version": "2.1.220",
+  "arm": "control_bypass",
+  "launch_yolo_flag": true,
+  "argv": [
+    "/Users/juhanailmoniemi/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-haiku-4-5",
+    "--max-turns",
+    "8",
+    "--dangerously-skip-permissions"
+  ],
+  "prompts": [
+    "Use the Bash tool to run `ls -la /` and report the first line of output.",
+    "Use the Bash tool to run `ls -la /tmp` and report the first line of output."
+  ],
+  "requested_mode": "",
+  "control_request_id": "",
+  "control_request_sent": null,
+  "control_responses": null,
+  "control_response_request_id_matched": false,
+  "init_permission_modes": [
+    "bypassPermissions",
+    "bypassPermissions"
+  ],
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_SetPermissionMode_InBandProbe3798572545/001/set-permission-mode-work",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "tools": [
+        "Task",
+        "Artifact",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "pending"
+        },
+        {
+          "name": "codegraph",
+          "status": "pending"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "bypassPermissions",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "review",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "team-onboarding"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.220",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "28bf7f04-ad06-47c5-a7bd-a79f93406e28",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_SetPermissionMode_InBandProbe3798572545/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-SetPermissionMode-InBandProbe3798572545-001-set-permission-mode-work/memory/"
+      },
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "uuid": "97f783ed-d77d-49a5-8d90-66c548f4d8ef",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "rate_limit_event",
+      "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1787122800,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false
+      },
+      "uuid": "7f937f7a-ba49-4b8b-8422-d8d19812a5f8",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 35,
+      "estimated_tokens_delta": 34,
+      "uuid": "3c5cf184-f40c-420d-8735-dcc93327fc1e",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 46,
+      "estimated_tokens_delta": 11,
+      "uuid": "8f3b0497-99ca-42f1-93c1-05c0beca7376",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 114,
+      "estimated_tokens_delta": 68,
+      "uuid": "e3bc7ce6-37ab-4a0c-92d7-561f730b7941",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CeBfx25dZWNBP9ZMhhzSS",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user wants me to run `ls -la /` and report the first line of output. This is a straightforward command to run in the Bash tool.\n\nLet me call the Bash tool to run this command.",
+            "signature": "Er8DCqgBCBAYAipAOk/IKriTvZ8cVzetyvUaiQ61FSTZGsr/zdld3OMYLnT+uK66GI08bV0x8N7VITpMyldtv3QHOrNNa6Ew8XJr7TIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chCxSqaJBC1BKVVXX6vWYLa4iAEBEgx1uGu5QpFq8is6IpQaDPs25OATk0R/cJPTxyIwKyrvx//d3gfZCr41Ad4AVWvTduxhn2euIP1wnIVt7Xk+pX1IfLfkPCMUhBp9OX4qKsMBiuNpf5LxRNjmj0NB4uZKbnGiRTXZxbC3zcp89pFmoK8n0EYIkPdXo1D/oOdNFQu5vx4Y/pKsAx0m3ye/2LUOqkA0UamsxFEI/kyg0rHyzG3Ul4fq8TpQHUkj24HX1mi7Ftr+qhTWQOioDxzPs9UsrW0KcCG2NK0IUXhQJhuc4SNZ1R7hNEuGd38v5H+6qFqBAI6g67BlE9xLA1QvW5nL6saMEDrPmtrITU7FKH9iswT/cbDOd7JwI+E1JczIxADg7SOVGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7448,
+          "cache_read_input_tokens": 20584,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 7448
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "2187bf84-ac4c-4ea9-ad09-921eb8e81c83",
+      "timestamp": "2026-08-19T06:57:40.940Z",
+      "request_id": "req_011CeBfx1QhZWw5XFpL3Akao"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CeBfx25dZWNBP9ZMhhzSS",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01YB5TqMT3AzGnMQWMuqe96X",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /",
+              "description": "List the root directory with long format"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 7448,
+          "cache_read_input_tokens": 20584,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 7448
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "59c51867-5abb-4974-9913-6be1366f0fc8",
+      "timestamp": "2026-08-19T06:57:41.308Z",
+      "request_id": "req_011CeBfx1QhZWw5XFpL3Akao"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_01YB5TqMT3AzGnMQWMuqe96X",
+            "type": "tool_result",
+            "content": "total 10\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 .\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 ..\nlrwxr-xr-x   1 root  admin    36 May 21 11:57 .VolumeIcon.icns -\u003e System/Volumes/Data/.VolumeIcon.icns\n----------   1 root  admin     0 May 21 11:57 .file\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .nofollow\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .resolve\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .vol\ndrwxrwxr-x  33 root  admin  1056 Aug 18 07:40 Applications\ndrwxr-xr-x  68 root  wheel  2176 Jun 26 17:56 Library\ndrwxr-xr-x@ 10 root  wheel   320 May 21 11:57 System\ndrwxr-xr-x   5 root  admin   160 Jun 26 17:56 Users\ndrwxr-xr-x  17 root  wheel   544 Aug 16 11:35 Volumes\ndrwxr-xr-x@ 39 root  wheel  1248 May 21 11:57 bin\ndrwxrwxr-t   2 root  admin    64 Nov 22  2025 cores\ndr-xr-xr-x   4 root  wheel  4873 Jun 26 17:55 dev\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 etc -\u003e private/etc\nlrwxr-xr-x   1 root  wheel    25 Jun 26 17:56 home -\u003e /System/Volumes/Data/home\ndrwxr-xr-x   3 root  wheel    96 Mar 11 08:40 opt\ndrwxr-xr-x   6 root  wheel   192 Jun 26 17:56 private\ndrwxr-xr-x@ 76 root  wheel  2432 May 21 11:57 sbin\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 tmp -\u003e private/tmp\ndrwxr-xr-x@ 11 root  wheel   352 May 21 11:57 usr\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 var -\u003e private/var",
+            "is_error": false
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "8e482ce7-257e-4126-b2b0-b4c4090aa6e8",
+      "timestamp": "2026-08-19T06:57:41.373Z",
+      "tool_use_result": {
+        "stdout": "total 10\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 .\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 ..\nlrwxr-xr-x   1 root  admin    36 May 21 11:57 .VolumeIcon.icns -\u003e System/Volumes/Data/.VolumeIcon.icns\n----------   1 root  admin     0 May 21 11:57 .file\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .nofollow\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .resolve\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .vol\ndrwxrwxr-x  33 root  admin  1056 Aug 18 07:40 Applications\ndrwxr-xr-x  68 root  wheel  2176 Jun 26 17:56 Library\ndrwxr-xr-x@ 10 root  wheel   320 May 21 11:57 System\ndrwxr-xr-x   5 root  admin   160 Jun 26 17:56 Users\ndrwxr-xr-x  17 root  wheel   544 Aug 16 11:35 Volumes\ndrwxr-xr-x@ 39 root  wheel  1248 May 21 11:57 bin\ndrwxrwxr-t   2 root  admin    64 Nov 22  2025 cores\ndr-xr-xr-x   4 root  wheel  4873 Jun 26 17:55 dev\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 etc -\u003e private/etc\nlrwxr-xr-x   1 root  wheel    25 Jun 26 17:56 home -\u003e /System/Volumes/Data/home\ndrwxr-xr-x   3 root  wheel    96 Mar 11 08:40 opt\ndrwxr-xr-x   6 root  wheel   192 Jun 26 17:56 private\ndrwxr-xr-x@ 76 root  wheel  2432 May 21 11:57 sbin\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 tmp -\u003e private/tmp\ndrwxr-xr-x@ 11 root  wheel   352 May 21 11:57 usr\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 var -\u003e private/var",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CeBfxAPCfpYvzNqP6teKY",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first line of output is `total 10`."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 3527,
+          "cache_read_input_tokens": 25129,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3527
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": {
+          "cache_miss_reason": {
+            "type": "messages_changed",
+            "cache_missed_input_tokens": 2916
+          }
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "793c0fe8-fa80-422f-8516-df92008c9196",
+      "timestamp": "2026-08-19T06:57:42.363Z",
+      "request_id": "req_011CeBfx9U8yb5RcdC2absh7"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 3802,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "total_cost_usd": 0.027879300000000003,
+      "usage": {
+        "input_tokens": 16,
+        "cache_creation_input_tokens": 10975,
+        "cache_read_input_tokens": 45713,
+        "output_tokens": 147,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 10975,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 6,
+            "output_tokens": 14,
+            "cache_read_input_tokens": 25129,
+            "cache_creation_input_tokens": 3527,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 3527
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 537,
+          "outputTokens": 14,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000607,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 16,
+          "outputTokens": 147,
+          "cacheReadInputTokens": 45713,
+          "cacheCreationInputTokens": 10975,
+          "webSearchRequests": 0,
+          "costUSD": 0.0272723,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The first line of output is `total 10`.",
+      "ttft_ms": 1730,
+      "ttft_stream_ms": 1046,
+      "time_to_request_ms": 220,
+      "type": "result",
+      "duration_ms": 3171,
+      "uuid": "f26a9991-67dc-4466-9fae-b83b2c6f0754"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_SetPermissionMode_InBandProbe3798572545/001/set-permission-mode-work",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "tools": [
+        "Task",
+        "Artifact",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__blender__execute_blender_code",
+        "mcp__blender__execute_blender_code_for_cli",
+        "mcp__blender__get_blendfile_summary_datablocks",
+        "mcp__blender__get_blendfile_summary_datablocks_for_cli",
+        "mcp__blender__get_blendfile_summary_missing_files",
+        "mcp__blender__get_blendfile_summary_missing_files_for_cli",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli",
+        "mcp__blender__get_blendfile_summary_path_info",
+        "mcp__blender__get_blendfile_summary_path_info_for_cli",
+        "mcp__blender__get_blendfile_summary_usage_guess",
+        "mcp__blender__get_blendfile_summary_usage_guess_for_cli",
+        "mcp__blender__get_object_detail_summary",
+        "mcp__blender__get_objects_summary",
+        "mcp__blender__get_python_api_docs",
+        "mcp__blender__get_screenshot_of_area_as_image",
+        "mcp__blender__get_screenshot_of_window_as_image",
+        "mcp__blender__get_screenshot_of_window_as_json",
+        "mcp__blender__jump_to_tab_by_name",
+        "mcp__blender__jump_to_tab_by_space_type",
+        "mcp__blender__jump_to_view3d_object_by_name",
+        "mcp__blender__jump_to_view3d_object_data_by_name",
+        "mcp__blender__render_thumbnail_to_path",
+        "mcp__blender__render_viewport_to_path",
+        "mcp__blender__search_api_docs",
+        "mcp__blender__search_manual_docs",
+        "mcp__codegraph__codegraph_callees",
+        "mcp__codegraph__codegraph_callers",
+        "mcp__codegraph__codegraph_context",
+        "mcp__codegraph__codegraph_files",
+        "mcp__codegraph__codegraph_impact",
+        "mcp__codegraph__codegraph_node",
+        "mcp__codegraph__codegraph_search",
+        "mcp__codegraph__codegraph_status"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "connected"
+        },
+        {
+          "name": "codegraph",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "bypassPermissions",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "review",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "team-onboarding"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.220",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "a1acf2eb-98a2-49bb-8e27-5c93ac75679f",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_SetPermissionMode_InBandProbe3798572545/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-SetPermissionMode-InBandProbe3798572545-001-set-permission-mode-work/memory/"
+      },
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 5,
+      "uuid": "5fe42878-3d00-448c-9e37-6b64d318a4a6",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 8,
+      "estimated_tokens_delta": 3,
+      "uuid": "81091865-ead9-480a-90e7-f031de66d88c",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 40,
+      "estimated_tokens_delta": 32,
+      "uuid": "42d56f81-3047-4f44-b3c8-4f7c284add08",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 47,
+      "estimated_tokens_delta": 7,
+      "uuid": "4683a41b-bd75-4d1f-84f6-f8cc1f0e5402",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 115,
+      "estimated_tokens_delta": 68,
+      "uuid": "1bac590c-ec05-4e91-8885-6826ae955c12",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CeBfxEpMEBCMrbFJP6uSA",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run `ls -la /tmp` and report the first line of output. This is similar to the previous request but for the /tmp directory instead of /.\n\nLet me run this command.",
+            "signature": "EsYDCqgBCBAYAipAh8HqvaLYEdZojKwWVY+CIeCmKy81L6gkrEcyC6oRUeHxrMgYS++u3BiaeF4iuZhr3vl1q93CzZzBY6vaz2969TIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chCxSqaJBC1BKVVXX6vWYLa4iAEBEgzqE+tVy660YwB6QyAaDDQR+R0p2dxYm9FawyIwQjPX3FK6EfD3BIlCfJ+rMAyu3sXXGXxsZShFV+9QZ+429W32714g2+pXyaBrtFXsKsoBluuC/50e91jluEdTlRKwPhoPomY9u0b6L4xaVcw8ir5OuzPlno2CRsdcy+mwYLrf3N32t2ZrWOqaS+P45dUxeQ+GQvTwhuTdBfbrlgUkP3JcYm9jzA20zJ4RfrRioJO6Mp5iO/a1QD+MWlpzf+oamGpM8+XLT8G5Zvsz9r2DyBfRLwlo/5A6i6usMBJ4vrKGbYL8izvs/DZs3/6NIkFcYjJGFYPIzKnpVxiVDiQ5eTBq7j6QeptV5fYjNXMNAmeJXMlaIyPnFCMyMBgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 2027,
+          "cache_read_input_tokens": 28032,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2027
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": {
+          "cache_miss_reason": {
+            "type": "messages_changed",
+            "cache_missed_input_tokens": 3157
+          }
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "afc85b76-a82a-468c-ab2d-ca00506faded",
+      "timestamp": "2026-08-19T06:57:44.016Z",
+      "request_id": "req_011CeBfxEBet7wsVKJW9t9Bo"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CeBfxEpMEBCMrbFJP6uSA",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01UcDfKwJ3aoVtXUpkT54voq",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /tmp",
+              "description": "List the /tmp directory with long format"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 2027,
+          "cache_read_input_tokens": 28032,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2027
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": {
+          "cache_miss_reason": {
+            "type": "messages_changed",
+            "cache_missed_input_tokens": 3157
+          }
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "9d8ff3e1-cfa1-4f59-bddb-9ea8bb62a4df",
+      "timestamp": "2026-08-19T06:57:44.346Z",
+      "request_id": "req_011CeBfxEBet7wsVKJW9t9Bo"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_01UcDfKwJ3aoVtXUpkT54voq",
+            "type": "tool_result",
+            "content": "lrwxr-xr-x@ 1 root  wheel  11 May 21 11:57 /tmp -\u003e private/tmp",
+            "is_error": false
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "f45df102-58de-47ef-8092-286196ad2900",
+      "timestamp": "2026-08-19T06:57:44.383Z",
+      "tool_use_result": {
+        "stdout": "lrwxr-xr-x@ 1 root  wheel  11 May 21 11:57 /tmp -\u003e private/tmp",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CeBfxQpNGhHX1L351AZQX",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first line of output is `lrwxr-xr-x@ 1 root  wheel  11 May 21 11:57 /tmp -\u003e private/tmp` (showing that `/tmp` is a symlink to `private/tmp`)."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 1356,
+          "cache_read_input_tokens": 28656,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1356
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": {
+          "cache_miss_reason": {
+            "type": "messages_changed",
+            "cache_missed_input_tokens": 4305
+          }
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "uuid": "1c5e6923-f4dd-43fd-8da2-9e7de3d20ed9",
+      "timestamp": "2026-08-19T06:57:46.217Z",
+      "request_id": "req_011CeBfxNWxBNdseqhUfLHa5"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 7552,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "e6b3bf77-6da9-411f-aa23-1a2449fefe81",
+      "total_cost_usd": 0.0413101,
+      "usage": {
+        "input_tokens": 16,
+        "cache_creation_input_tokens": 3383,
+        "cache_read_input_tokens": 56688,
+        "output_tokens": 196,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 3383,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 6,
+            "output_tokens": 62,
+            "cache_read_input_tokens": 28656,
+            "cache_creation_input_tokens": 1356,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 1356
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 537,
+          "outputTokens": 14,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000607,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 32,
+          "outputTokens": 343,
+          "cacheReadInputTokens": 102401,
+          "cacheCreationInputTokens": 14358,
+          "webSearchRequests": 0,
+          "costUSD": 0.0407031,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The first line of output is `lrwxr-xr-x@ 1 root  wheel  11 May 21 11:57 /tmp -\u003e private/tmp` (showing that `/tmp` is a symlink to `private/tmp`).",
+      "ttft_ms": 1569,
+      "ttft_stream_ms": 780,
+      "time_to_request_ms": 15,
+      "type": "result",
+      "duration_ms": 3796,
+      "uuid": "42f1ed00-1598-446f-8ebb-8a2f0846d1ed"
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    10,
+    21
+  ],
+  "probe_outcomes": [
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": false,
+      "permission_denials": 0,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": false,
+      "permission_denials": 0,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    }
+  ],
+  "stdin_write_errors": null,
+  "stderr_capture": "",
+  "exit_code": 0,
+  "wait_error": "",
+  "context_deadline_tripped": false,
+  "duration_ms": 8082,
+  "scanner_error": ""
+}

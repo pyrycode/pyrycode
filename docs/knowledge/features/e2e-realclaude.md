@@ -1969,6 +1969,34 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   moment — a low-probability false-red path on a >45s first turn, left as a
   follow-up rather than fixed on this branch). See [`codebase/1582.md`](../codebase/1582.md).
 
+- `set_permission_mode_probe_test.go` (#1595) — **does the bypass posture have
+  an in-band form, the way #1581/#1582 proved the model does?** Four direct
+  `exec.CommandContext("claude", …)` children (not a `sessions.Pool`, mirroring
+  `permission_protocol_spike_test.go`'s shape, not #1582's), each driven through
+  an identical two-turn Bash probe: `revoke` and `enable` write a
+  `{"type":"control_request",…,"subtype":"set_permission_mode"}` line on the
+  held-open stdin between the two turns (the same control-channel
+  `(*Runner).Interrupt` already writes to, but whose `control_response` it never
+  reads — this test does); `control_default` and `control_bypass` run the
+  identical sequence with no control request, as the behavioural baseline each
+  measurement arm is judged against at turn 2. Verdict is computed from turn-2
+  behaviour, never the echoed `control_response` alone, per the ticket's AC:
+  an echoed `success` that still behaves like the bypass control would be
+  recorded as a FAILED revocation. Measured 2026-08-19 against claude 2.1.220:
+  **revoke succeeds in-band (`bypassPermissions → default`, no respawn, all
+  three reads — response, `init` echo, behaviour — agree); enable is refused**,
+  with a third error string not previously read out of the binary (`Cannot set
+  permission mode to bypassPermissions because the session was not launched
+  with --dangerously-skip-permissions`). Four fixtures under `testdata/`
+  (`set_permission_mode_v2.1.220_<arm>.json`), named to fall outside both
+  `permission_protocol_regression_test.go`'s `fixtureGlob` and
+  `dropped_line_capture_test.go`'s `dropcapFixtureGlob` — a live-free sibling
+  test (`TestRealClaude_SetPermissionMode_FixtureNamesAvoidRegressionGlobs`)
+  pins that deterministically, no subprocess or credentials required. Zero
+  production files touched; no writer for the subtype is added — #1596 decides
+  that. See [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md)
+  for the full measurement writeup and [`codebase/1595.md`](../codebase/1595.md).
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
