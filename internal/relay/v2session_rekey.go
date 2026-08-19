@@ -265,11 +265,31 @@ func (m *V2SessionManager) handleRekeyRequest(_ context.Context, s *V2Session, e
 // AEAD round-trip under the new keys is the implicit ack).
 //
 // AEAD-seal failure is realistically unreachable under correct
-// flynn/noise (same posture as sealError). On seal or marshal failure
-// the frame is dropped and a WARN line emitted; the conn is NOT
-// closed — the session remains in V2StateOpen. On the scheduled path
-// the next 1-hour cadence will attempt another emit; on the manual
-// path the operator can re-run pyry rekey to retry.
+// flynn/noise (same posture as sealError): the only trigger
+// s.send.Encrypt can reach from here is ErrMaxNonce — send-nonce
+// exhaustion — and the three marshal branches encode closed structs.
+// On seal or marshal failure the frame is dropped and a WARN line
+// emitted; the conn is NOT closed, and the session remains in
+// V2StateOpen. But none of the four failure branches arms anything, so
+// the scheduled cadence ends there:
+//
+//   - Scheduled: no further scheduled emit is armed. s.rekeyTimer still
+//     holds the one-shot that delivered this wake — non-nil, but fired
+//     and inert, so a re-arm guarded on s.rekeyTimer == nil would never
+//     fire on this path.
+//   - Manual: handleManualRekey stopped and nil'd s.rekeyTimer before
+//     calling in, so a failed manual emit likewise leaves no cadence.
+//     Re-running pyry rekey is the operator's recovery step, not a
+//     fallback the cadence provides.
+//
+// Recovery either way is a phone-initiated re-key (handleRekeyInit →
+// rekeyComplete), which re-arms the 1-hour cadence
+// (docs/protocol-mobile.md § Re-key). The idle sweep is untouched, but
+// idleTimer re-arms on every inbound frame: it reaps a session that
+// goes quiet, not the key lifetime of one that stays busy. The
+// awaitingRekeyReply skip below is not one of these paths — it returns
+// with a rekeyReplyTimer in flight, which either closes the conn or is
+// cleared by rekeyComplete.
 func (m *V2SessionManager) emitRekeyRequest(ctx context.Context, s *V2Session, reason string) {
 	// Defensive: a wakeRekeyEmit arriving while already awaiting a
 	// reply would re-emit. Skip — the in-flight emit's reply window is
@@ -396,7 +416,8 @@ func (m *V2SessionManager) armRekeyRetryTimer(ctx context.Context, s *V2Session)
 // the relay transport is currently down (#912), ctx.Err() on caller
 // cancellation, or any transport-layer error surfaced by the emit path (no
 // such error is returned today — seal failures are logged and dropped per
-// emitRekeyRequest's documented posture).
+// emitRekeyRequest's documented posture, which leaves a nil return alongside
+// a session with no scheduled cadence until a phone-initiated re-key).
 //
 // Production wire-up of *V2SessionManager into the cmd/pyry daemon
 // lands in a separate ticket; until then this method is reachable
