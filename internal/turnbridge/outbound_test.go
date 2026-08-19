@@ -16,6 +16,13 @@ func TestMapEventOutbound(t *testing.T) {
 
 	tc := TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7}
 
+	// The model-announced sentinels. Mixed case is deliberate — see the verbatim
+	// row below — and neither contains a character encoding/json escapes, matching
+	// the discipline the rate-limited fixtures state. overCapModel is kept out of
+	// the short row so that row's failure output stays legible.
+	const modelSentinel = "QQ-Model-Sentinel-ZZ"
+	overCapModel := "QQ-OverCap-Model-" + strings.Repeat("M", 300)
+
 	tests := []struct {
 		name        string
 		ev          turnevent.Event
@@ -438,6 +445,79 @@ func TestMapEventOutbound(t *testing.T) {
 			tc:      tc,
 			wantTyp: protocol.TypeRateLimited,
 			wantPayload: protocol.RateLimitedPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
+		{
+			// The sentinel is MIXED CASE on purpose, and that is the load-bearing
+			// choice rather than a stylistic one: "no lowercasing" is a named property
+			// of this value, and an all-lowercase sentinel (the shape the rate-limited
+			// rows above use, correctly, for their own hazards) survives a mapper that
+			// ran strings.ToLower. tc.ConversationID is already distinct from it, so a
+			// mapping that swapped the two fields in either direction goes red here
+			// without a second sentinel.
+			name: "ModelAnnounced -> model_announced, every field verbatim",
+			ev: turnevent.ModelAnnounced{
+				Model:     modelSentinel,
+				Truncated: true,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelAnnounced,
+			wantPayload: protocol.ModelAnnouncedPayload{
+				ConversationID: "c1",
+				Model:          modelSentinel,
+				Truncated:      true,
+			},
+			wantOK: true,
+		},
+		{
+			// The re-cap mutant's row. overCapModel is longer than BOTH bounds a
+			// developer could reach for — the producer's maxModelField (256, where the
+			// value was already bounded at construction) and this package's own
+			// maxSummaryLen (200, which is the tool-précis cap and NOT applicable
+			// here) — so a re-cap at either goes red rather than shipping. A short
+			// sentinel survives both, which is why the verbatim row above cannot
+			// double as this one.
+			name: "ModelAnnounced over-cap model crosses uncut",
+			ev: turnevent.ModelAnnounced{
+				Model:     overCapModel,
+				Truncated: true,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelAnnounced,
+			wantPayload: protocol.ModelAnnouncedPayload{
+				ConversationID: "c1",
+				Model:          overCapModel,
+				Truncated:      true,
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under TEST: tc carries a conspicuous TurnID
+			// and a non-zero Seq, and the expected payload has no field either could
+			// land in. Mirrors the RateLimited and ThinkingProgress rows above.
+			name:    "ModelAnnounced ignores turn addressing (not turn-scoped)",
+			ev:      turnevent.ModelAnnounced{Model: modelSentinel},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeModelAnnounced,
+			wantPayload: protocol.ModelAnnouncedPayload{
+				ConversationID: "c1",
+				Model:          modelSentinel,
+			},
+			wantOK: true,
+		},
+		{
+			// Zero value maps rather than dropping — the absence of an empty-model
+			// suppression branch, under test. The gate that decides whether the event
+			// exists at all is the producer's (it does not emit on an empty model);
+			// a second, differently-shaped filter here would silently diverge from it.
+			// Also supplies the Truncated: false polarity the rows above do not.
+			name:    "ModelAnnounced zero value maps rather than dropping",
+			ev:      turnevent.ModelAnnounced{},
+			tc:      tc,
+			wantTyp: protocol.TypeModelAnnounced,
+			wantPayload: protocol.ModelAnnouncedPayload{
 				ConversationID: "c1",
 			},
 			wantOK: true,

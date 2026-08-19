@@ -430,6 +430,16 @@ func TestInteractiveTurnEmitterV2_PushErrorDoesNotAbortTurn(t *testing.T) {
 // AC#5: application output (thought text, assistant text, tool title/input,
 // tool result) is NEVER logged at any level, and thought text is never
 // forwarded on the wire.
+//
+// #1638 AC#3 extends this with claude's announced model, which is the same #833
+// posture one value over ("model / effort / YOLO values are NEVER logged at any
+// level", restated in internal/relay's v2session_settings.go and
+// internal/sessions' pool.go). It is driven THROUGH the new Handle arm, which is
+// what this rig — a live cursor plus a conn whose Push always fails — puts under
+// test. The two model assertions at the bottom are a PAIR and the pairing is the
+// point: log-absence alone is passed by a Handle arm that silently drops the
+// event, so the payload-presence half is what discriminates. #1600 deferred this
+// on the grounds that no Handle arm was being added; that deferral expires here.
 func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	t.Parallel()
 	const (
@@ -438,6 +448,7 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 		secretToolTitle = "SECRETTOOLTITLEZZZ"
 		secretToolInput = "SECRETINPUTZZZ"
 		secretToolReslt = "SECRETRESULTZZZ"
+		secretModel     = "SecretModelZZZ"
 	)
 
 	var buf bytes.Buffer // synchronous single-goroutine capture: bytes.Buffer is safe here
@@ -455,6 +466,12 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
 
 	for _, ev := range []turnevent.Event{
+		// First on purpose: nothing is buffered yet, so the arm's flushDelta is a
+		// no-op and the five events below behave exactly as they did before #1638.
+		// It also exercises the no-turn-open path for free. Safe against the fake —
+		// ActiveConns clamps to the last snapshot in steady state rather than
+		// running out of them.
+		turnevent.ModelAnnounced{Model: secretModel, Truncated: true},
 		turnevent.ThoughtChunk{Text: secretThought},
 		turnevent.TextChunk{Text: secretAssistant},
 		turnevent.ToolStart{ToolCallID: "t1", Title: secretToolTitle, RawInput: json.RawMessage(`{"query":"` + secretToolInput + `"}`)},
@@ -468,7 +485,7 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	if logs == "" {
 		t.Fatal("expected DEBUG push-error logs; got none (test would not prove the no-leak property)")
 	}
-	for _, secret := range []string{secretThought, secretAssistant, secretToolTitle, secretToolInput, secretToolReslt} {
+	for _, secret := range []string{secretThought, secretAssistant, secretToolTitle, secretToolInput, secretToolReslt, secretModel} {
 		if strings.Contains(logs, secret) {
 			t.Fatalf("application output %q leaked into logs:\n%s", secret, logs)
 		}
@@ -479,6 +496,39 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 		if bytes.Contains(p.env.Payload, []byte(secretThought)) {
 			t.Fatalf("thought text leaked into a %q envelope payload", p.env.Type)
 		}
+	}
+
+	// MIND THE POLARITY: the loop directly above requires its sentinel to be
+	// ABSENT from every payload; this one requires the model to be PRESENT. The
+	// log half above is passed by a Handle arm that silently drops the event, so
+	// without this the pair does not discriminate. fakeInteractiveBcast.Push
+	// records the attempt BEFORE returning its error, so the envelope is here even
+	// though this conn's push failed.
+	//
+	// Deliberately NOT asserted: that kind=model_announced appears in the log. It
+	// is unsatisfiable on this path — push_err carries no kind field, and the only
+	// records that log eventKind are the no-cursor drop (which returns before the
+	// type switch), Handle's default and emitMapped's unmapped branch, the last two
+	// of which the new arm makes unreachable for this variant. The positive control
+	// proving the event traversed the log-heavy path is the `logs == ""` Fatal
+	// above, which the push_err branch keeps firing.
+	var announced *protocol.ModelAnnouncedPayload
+	for _, p := range bcast.pushes {
+		if p.env.Type != protocol.TypeModelAnnounced {
+			continue
+		}
+		var pl protocol.ModelAnnouncedPayload
+		if err := json.Unmarshal(p.env.Payload, &pl); err != nil {
+			t.Fatalf("decode model_announced payload: %v", err)
+		}
+		announced = &pl
+		break
+	}
+	if announced == nil {
+		t.Fatalf("no %s envelope reached the wire; the Handle arm dropped the event", protocol.TypeModelAnnounced)
+	}
+	if announced.Model != secretModel {
+		t.Fatalf("announced model on the wire: got %q, want %q", announced.Model, secretModel)
 	}
 }
 
@@ -2215,12 +2265,16 @@ const modelAnnouncedFixture = "ZZMODELSENTINELZZ"
 // "model_announced:" + Model leaves strings.Contains(logs, "kind=model_announced")
 // TRUE, and only the per-value check catches it.
 //
-// The arm exists for eventKind's call sites, not for a Handle case: this variant
-// deliberately has NO Handle arm (no wire mapping exists yet — turnbridge.MapEvent
-// drops it), so it lands in Handle's default, and acp_turn_stream.go,
-// stream_turn_busy.go and stream_turn_drain.go log the kind too. Without the arm
-// every one of them reads kind=unknown for a variant the daemon does recognize.
-// The empty-cursor drop is the reachable eventKind call site on this lane.
+// The arm exists for eventKind's call sites rather than for this lane's Handle
+// case: the variant now HAS a Handle arm (#1638), and this test reaches eventKind
+// only because its cursor is empty, so Handle returns at the no-cursor guard
+// before the type switch. acp_turn_stream.go, stream_turn_busy.go and
+// stream_turn_drain.go log the kind too. Without the arm every one of them reads
+// kind=unknown for a variant the daemon does recognize. The empty-cursor drop is
+// the reachable eventKind call site on this lane — more precisely so since #1638,
+// because with a LIVE cursor the event is claimed by the Handle arm and reaches no
+// eventKind site at all. Hence the empty cursor below is load-bearing, not
+// incidental: it is what keeps this test's assertion reachable.
 func TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant(t *testing.T) {
 	t.Parallel()
 
@@ -2256,5 +2310,124 @@ func TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant(t *test
 	}
 	if strings.Contains(logs, modelAnnouncedFixture) {
 		t.Fatalf("claude's announced model leaked into the kind log:\n%s", logs)
+	}
+}
+
+// #1638 AC#2: a model-announced frame opens and closes no turn. It is handled
+// bare before any turn and emits exactly one frame — no turn_state, no turn_end —
+// and the tracker's inTurn/turnID/currentState are asserted directly, then a
+// following content event is driven through to prove a fresh turn still opens.
+//
+// The lifecycle answer matters more here than it does for its rate-limited
+// template: this frame arrives once per turn in EVERY conversation, so a
+// startTurnIfNeeded in the arm would wedge all of them rather than an unlucky one.
+//
+// modelAnnouncedFixture is reused rather than redeclared — it is already this
+// file's conspicuous sentinel for the variant, and reading it here changes nothing
+// about the eventKind test that owns it.
+func TestInteractiveTurnEmitterV2_ModelAnnouncedNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ModelAnnounced{
+		Model:     modelAnnouncedFixture,
+		Truncated: true,
+	})
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so the exact single-frame sequence is the assertion — and
+	// it is also AC#2's "an event arriving with no turn open still emits exactly
+	// one frame".
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeModelAnnounced}) {
+		t.Fatalf("bare model_announced envelopes: got %v, want [%s]", got, protocol.TypeModelAnnounced)
+	}
+	if e.inTurn {
+		t.Error("model_announced opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("model_announced minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("model_announced set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeModelAnnounced,
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-model_announced envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after model_announced: got %v, want [responding]", got)
+	}
+}
+
+// #1638 AC#2: mid-turn, buffered assistant text keeps its wire position AHEAD of
+// the frame, and the open turn survives the interleave untouched.
+//
+// The load-bearing part is the event driven PAST the frame. A frame-local check
+// passes even if the handler called endTurn, because an endTurn on an already-open
+// turn only shows its damage on the NEXT event, when a fresh turn gets minted. So
+// the second delta's turn_id and seq are what actually bite here.
+func TestInteractiveTurnEmitterV2_ModelAnnouncedMidTurnDoesNotDisturbOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
+	beforeTurnID, beforeState := e.turnID, e.currentState
+	if !e.inTurn {
+		t.Fatal("precondition: a turn must be open before the interleave")
+	}
+
+	e.Handle(context.Background(), turnevent.ModelAnnounced{
+		Model:     modelAnnouncedFixture,
+		Truncated: true,
+	})
+
+	if !e.inTurn {
+		t.Error("model_announced closed the open turn; inTurn must stay true")
+	}
+	if e.turnID != beforeTurnID {
+		t.Errorf("model_announced changed turnID: got %q, want %q", e.turnID, beforeTurnID)
+	}
+	if e.currentState != beforeState {
+		t.Errorf("model_announced changed currentState: got %q, want %q", e.currentState, beforeState)
+	}
+
+	// Drive one event past the frame: this is what catches an endTurn.
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "a2"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // a1, flushed AHEAD of the frame
+		protocol.TypeModelAnnounced, // no surrounding turn_state
+		protocol.TypeAssistantDelta, // a2, flushed by turn_end
+		protocol.TypeTurnEnd,        //
+		protocol.TypeTurnState,      // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn model_announced envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+	}
+	if deltas[0].TurnID != beforeTurnID || deltas[1].TurnID != beforeTurnID {
+		t.Fatalf("model_announced split the turn: %q, %q want both %q", deltas[0].TurnID, deltas[1].TurnID, beforeTurnID)
+	}
+	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("model_announced disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
 	}
 }
