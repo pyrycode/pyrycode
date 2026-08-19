@@ -215,6 +215,74 @@ func TestRunStreamJSON_InterruptMode_InFlightThenInterrupt(t *testing.T) {
 	}
 }
 
+// TestRunStreamJSON_InterruptAckRider is the ARRIVAL CONTROL for #1500's e2e zero
+// (AC3b), and it deliberately asserts on the EMITTED BYTES rather than through
+// parseEmitted or on any downstream absence. A zero-assertion cannot prove its own
+// input arrived: the e2e's "no unrecognized_message frame" would pass just as
+// happily against a fake that writes no ack at all. Deleting writeInterruptAck's
+// call reddens THIS test while the e2e stays green, and that asymmetry is why both
+// exist.
+//
+// The line ORDER is part of the assertion, not incidental. The e2e's causality
+// argument — turn_end reaching the phone proves the ack already went through the
+// parser — rests entirely on the ack preceding the result, so it is pinned where it
+// is made. It also matches real claude's order (~40ms ack, then the result).
+//
+// The envelope checked here is the capture's, per writeInterruptAck's doc: subtype
+// and request_id UNDER response, not top-level. Written as a literal decode target
+// rather than reusing the writer's map, for the same reason the rate-limit rows use
+// literals — a target built from the producer would follow a nesting bug green.
+func TestRunStreamJSON_InterruptAckRider(t *testing.T) {
+	t.Parallel()
+
+	// A distinctive id, so the echo assertion cannot pass on a value the fake could
+	// have minted itself.
+	const reqID = "e2e-1500-interrupt-req"
+	var buf bytes.Buffer
+	runStreamJSON(strings.NewReader(interruptControlRequestLine(reqID)+"\n"), &buf, true, false, "")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("line count: got %d, want 2 (control_response ack, then the interrupted result)\n%s",
+			len(lines), buf.String())
+	}
+
+	var ack struct {
+		Type     string `json:"type"`
+		Subtype  string `json:"subtype"`
+		Response struct {
+			Subtype   string `json:"subtype"`
+			RequestID string `json:"request_id"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &ack); err != nil {
+		t.Fatalf("unmarshal control_response line: %v\n%s", err, lines[0])
+	}
+	if ack.Type != "control_response" {
+		t.Errorf("line 0 type: got %q, want %q — the ack must come FIRST", ack.Type, "control_response")
+	}
+	if ack.Response.Subtype != "success" {
+		t.Errorf("response.subtype: got %q, want %q", ack.Response.Subtype, "success")
+	}
+	// The echo. A fake that dropped the id would still satisfy every other row here,
+	// and would then be lying about the one field the capture shows claude echoing.
+	if ack.Response.RequestID != reqID {
+		t.Errorf("response.request_id: got %q, want %q (the daemon's own id, echoed)", ack.Response.RequestID, reqID)
+	}
+	// The nesting itself, asserted in the negative: the capture puts NEITHER field at
+	// the top level, and a top-level subtype is exactly what would make streamsup's
+	// streamLine.Subtype decode non-empty and send the daemon down an
+	// emitSystemSubtype-shaped path that does not exist for this type.
+	if ack.Subtype != "" {
+		t.Errorf("top-level subtype: got %q, want empty — the capture nests subtype under response", ack.Subtype)
+	}
+
+	// The interrupted result must survive the rider, and must come SECOND.
+	if !strings.Contains(lines[1], `"type":"result"`) || !strings.Contains(lines[1], `"subtype":"error_during_execution"`) {
+		t.Errorf("line 1: got %s, want the result{error_during_execution}", lines[1])
+	}
+}
+
 // TestWriteStreamResponse_Shape is a cheap direct check (no parser) that the two
 // emitted lines carry the exact byte shape the daemon side asserts against
 // (stream_turn_drain_test.go's assistantTextLine / resultLine): an assistant

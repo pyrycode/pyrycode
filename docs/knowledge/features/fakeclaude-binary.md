@@ -640,21 +640,39 @@ immediately, so there is no window to interrupt.
 | Inbound line | `honorInterrupt == false` (default) | `honorInterrupt == true` |
 |---|---|---|
 | `{"type":"user",…}` | `writeAssistantEcho` + `result{success}` (unchanged) | `writeAssistantEcho` **only** — the result is withheld, so the turn stays in flight |
-| `{"type":"control_request",…"subtype":"interrupt"}` | ignored | `writeInterruptedResult` — `result{subtype:"error_during_execution"}` |
+| `{"type":"control_request",…"subtype":"interrupt"}` | ignored | `writeInterruptAck` — `control_response{response:{subtype:"success",request_id:<echoed>}}` (#1500), **then** `writeInterruptedResult` — `result{subtype:"error_during_execution"}` |
 
 `writeStreamResponse` was split so the assistant-echo half is independently
 reusable: `writeAssistantEcho(w, msgID, text)` writes just the assistant line;
 `writeStreamResponse` is now `writeAssistantEcho` + the `result{success}` line,
-byte-identical to its pre-#1136 output. `interruptControlRequest(line []byte) bool`
-decodes a minimal `{type, request.subtype}` mirror of
+byte-identical to its pre-#1136 output. `interruptControlRequest(line []byte) (string, bool)`
+decodes a minimal `{type, request_id, request.subtype}` mirror of
 `streamsup.controlRequest`/`marshalInterruptEnvelope` (`internal/streamsup/envelope.go`)
 — the exact shape the daemon writes to the child's stdin on a phone interrupt — and
-returns `false` (line ignored) on anything that isn't
+returns `("", false)` (line ignored) on anything that isn't
 `type=="control_request" && request.subtype=="interrupt"`, preserving the same
-per-line decode resilience as `userTurnText`.
+per-line decode resilience as `userTurnText`. The returned id is what the ack echoes;
+it widened from a bare `bool` in #1500.
 
-The mode is **stateless**: it emits `result{error_during_execution}` on *every*
-interrupt `control_request` it sees, with no in-flight-turn tracking. A caller that
+**The ack goes FIRST (#1500).** `writeInterruptAck` writes the `control_response`
+real claude answers an interrupt with, before the interrupted `result` and on the same
+writer — matching claude's own order (~40 ms ack, then the result) and, more usefully,
+buying the e2e its causality on the rate-limit rider's terms: a `turn_end` reaching a
+client implies the ack has already been through the parser, so
+`TestRelayV2_StreamInterruptStopsRunningTurn`'s zero-`unrecognized_message` assertion
+needs no sleep, no poll and no ordering race to tune. The envelope is transcribed from
+the committed capture (`internal/e2e/realclaude/testdata/set_permission_mode_v2.1.220_revoke.json`,
+verbatim in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim)),
+which nests `subtype` and `request_id` **under `response`** — the inverse of the
+request side. Two honest limits: the capture is a `set_permission_mode` ack rather than
+an interrupt one, so what it establishes is the control channel's *envelope*; and the
+inner `response` payload is request-specific and unmeasured for `interrupt`, so the fake
+invents none. `TestRunStreamJSON_InterruptAckRider` pins the two emitted lines and their
+order — it is the arrival control for the e2e's zero, which cannot prove its own input
+arrived.
+
+The mode is **stateless**: it emits the ack + `result{error_during_execution}` pair on
+*every* interrupt `control_request` it sees, with no in-flight-turn tracking. A caller that
 drives exactly one interrupt per in-flight turn (the only shape #1136's e2e needs)
 gets the right behaviour for free; nothing polices "interrupt with no turn open".
 

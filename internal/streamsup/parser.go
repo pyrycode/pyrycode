@@ -752,6 +752,40 @@ func (p *Parser) consumeLine(line []byte) {
 		// emitSystemSubtype family, because matching this case IS consuming the line
 		// and there is no "did you handle it?" to report back.
 		p.emitRateLimit(line)
+	case "control_response":
+		// The ack the DAEMON ITSELF solicited, consumed content-free (#1500).
+		// Interrupt on this path is a stdin control_request, and claude answers it
+		// ~40ms later on the same stdout the parser reads — see Runner.Interrupt and
+		// marshalInterruptEnvelope for the request side. Without this arm every
+		// interrupt put an unrecognized_message row on the phone, which is the one
+		// frame whose whole value is meaning "claude started emitting something NEW";
+		// firing it on a routine user action spends that meaning. So consuming this is
+		// not tolerating a stranger's line, it is the daemon not alarming about its own.
+		//
+		// Its own arm rather than an ignoredLineTypes member, for #1404's reasons
+		// verbatim: that list is documented as top-level types only and as MEASURED
+		// (the 2026-07-27 census, which never interrupted and so never saw this type),
+		// and emitUnrecognized stays unreachable here BY MATCHING rather than by list
+		// membership — the stronger of the two guarantees.
+		//
+		// Shape authority is the verbatim capture in
+		// docs/knowledge/features/set-permission-mode-inband-probe.md, and it inverts
+		// the request side: `subtype` and `request_id` are nested UNDER `response`, not
+		// top-level, so streamLine.Subtype decodes empty and there is nothing for an
+		// emitSystemSubtype-shaped dispatch to match on. Nothing below the top-level
+		// `type` is read at all, which is also why an ack carrying an inner payload and
+		// one carrying none are handled identically.
+		//
+		// Consequence, decided and not stumbled into: a subtype:"error" NAK — whose
+		// real shape that same capture records — is consumed indistinguishably from a
+		// success, and this record does not discriminate them. Only `success` has ever
+		// been observed for an interrupt and no failure of that shape exists, so no
+		// branch is built for one; making it visible would cost a decode target for the
+		// nested object, which IS building the branch.
+		//
+		// Type only in the record, never the line and never the request_id: the same
+		// content-free discipline the ignored branch below and emitRateLimit hold.
+		p.log.Debug("streamsup: consuming solicited control_response", "type", sl.Type)
 	default:
 		if ignoredLineTypes[sl.Type] {
 			// The subtype match lives INSIDE this branch, which is what keeps
