@@ -319,13 +319,10 @@ func TestResolveConversationsRegistryPath(t *testing.T) {
 		t.Errorf("resolveConversationsRegistryPath(%q)=%q want %q", "test", got, want)
 	}
 
-	traversed := resolveConversationsRegistryPath("../etc")
-	rel, err := filepath.Rel(filepath.Join(home, ".pyry"), traversed)
-	if err != nil {
-		t.Fatalf("filepath.Rel: %v", err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		t.Errorf("resolveConversationsRegistryPath(%q)=%q escapes ~/.pyry (rel=%q)", "../etc", traversed, rel)
+	for _, name := range traversalNames {
+		t.Run(name, func(t *testing.T) {
+			assertInsideInstanceDir(t, home, resolveConversationsRegistryPath(name), "conversations.json")
+		})
 	}
 }
 
@@ -344,6 +341,12 @@ func TestSanitizeName(t *testing.T) {
 		{"", "_"},
 		{"/", "_"},
 		{"../etc/passwd", ".._etc_passwd"},
+		// "." and ".." are path components, not names: joined as a
+		// directory they collapse the instance directory away or escape
+		// ~/.pyry entirely. The trailing "_" mirrors what the transform
+		// already does to "./x" and "../x", where the separator becomes "_".
+		{".", "._"},
+		{"..", ".._"},
 	}
 
 	for _, tt := range tests {
@@ -352,6 +355,82 @@ func TestSanitizeName(t *testing.T) {
 			got := sanitizeName(tt.in)
 			if got != tt.want {
 				t.Errorf("sanitizeName(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// assertInsideInstanceDir asserts that got is a file sitting directly inside
+// a per-instance directory under <home>/.pyry — exactly two components below
+// it, the first a real directory name rather than a traversal element.
+//
+// Both clauses are load-bearing, and each is the sole detector of one hostile
+// name: an instance name of ".." escapes ~/.pyry and is caught only by the
+// first-component check, while "." collapses the instance directory away
+// (landing beside config.json in the ~/.pyry root) and is caught only by the
+// component count. A plain "does not escape ~/.pyry" check passes on ".".
+// Shared by the four registry-style resolver tests; see sanitizeName.
+func assertInsideInstanceDir(t *testing.T, home, got, wantFile string) {
+	t.Helper()
+
+	base := filepath.Join(home, ".pyry")
+	rel, err := filepath.Rel(base, got)
+	if err != nil {
+		t.Fatalf("filepath.Rel(%q, %q): %v", base, got, err)
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 2 {
+		t.Fatalf("path %q is %d component(s) below %q (rel=%q), want exactly 2 (<instance-dir>/%s)",
+			got, len(parts), base, rel, wantFile)
+	}
+	if parts[0] == "." || parts[0] == ".." {
+		t.Errorf("path %q has instance directory %q (rel=%q), want a real directory name", got, parts[0], rel)
+	}
+	if parts[1] != wantFile {
+		t.Errorf("path %q has filename %q (rel=%q), want %q", got, parts[1], rel, wantFile)
+	}
+}
+
+// traversalNames are the instance names every registry-style resolver test
+// runs through assertInsideInstanceDir.
+var traversalNames = []string{".", "..", "../etc"}
+
+// TestResolveRegistryPath confirms the per-instance layout
+// (~/.pyry/<sanitized-name>/sessions.json) and that no instance name can
+// move sessions.json out of an instance directory under ~/.pyry.
+func TestResolveRegistryPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got := resolveRegistryPath("test")
+	want := filepath.Join(home, ".pyry", "test", "sessions.json")
+	if got != want {
+		t.Errorf("resolveRegistryPath(%q)=%q want %q", "test", got, want)
+	}
+
+	for _, name := range traversalNames {
+		t.Run(name, func(t *testing.T) {
+			assertInsideInstanceDir(t, home, resolveRegistryPath(name), "sessions.json")
+		})
+	}
+}
+
+// TestResolveSocketPath_DotNamesStayInPyryDir pins the one resolver that was
+// never vulnerable to "." / "..": it concatenates a .sock suffix instead of
+// joining the name as a directory component, so the socket lands directly in
+// ~/.pyry whatever the name. A non-parallel sibling of TestResolveSocketPath
+// rather than a subtest of it — t.Setenv panics in a parallel test, and that
+// test and all of its subtests are parallel.
+func TestResolveSocketPath_DotNamesStayInPyryDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	want := filepath.Join(home, ".pyry")
+	for _, name := range []string{".", ".."} {
+		t.Run(name, func(t *testing.T) {
+			got := resolveSocketPath("", name)
+			if dir := filepath.Dir(got); dir != want {
+				t.Errorf("resolveSocketPath(%q, %q)=%q, directory %q want %q", "", name, got, dir, want)
 			}
 		})
 	}

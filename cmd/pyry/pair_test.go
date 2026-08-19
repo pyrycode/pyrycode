@@ -106,16 +106,13 @@ func TestResolveDevicesPath(t *testing.T) {
 		t.Errorf("resolveDevicesPath(%q)=%q want %q", "test", got, want)
 	}
 
-	// Path-traversal input must be neutralized: the instance segment
-	// must not contain a path separator that would let it escape
-	// ~/.pyry/<name>/.
-	traversed := resolveDevicesPath("../etc")
-	rel, err := filepath.Rel(filepath.Join(home, ".pyry"), traversed)
-	if err != nil {
-		t.Fatalf("filepath.Rel: %v", err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		t.Errorf("resolveDevicesPath(%q)=%q escapes ~/.pyry (rel=%q) — sanitizeName not applied", "../etc", traversed, rel)
+	// Path-traversal input must be neutralized: the instance segment must
+	// neither carry a path separator that escapes ~/.pyry/<name>/ nor be a
+	// "." / ".." that filepath.Join resolves away.
+	for _, name := range traversalNames {
+		t.Run(name, func(t *testing.T) {
+			assertInsideInstanceDir(t, home, resolveDevicesPath(name), "devices.json")
+		})
 	}
 }
 
@@ -130,13 +127,10 @@ func TestResolveServerIDPath(t *testing.T) {
 		t.Errorf("resolveServerIDPath(%q)=%q want %q", "test", got, want)
 	}
 
-	traversed := resolveServerIDPath("../etc")
-	rel, err := filepath.Rel(filepath.Join(home, ".pyry"), traversed)
-	if err != nil {
-		t.Fatalf("filepath.Rel: %v", err)
-	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		t.Errorf("resolveServerIDPath(%q)=%q escapes ~/.pyry (rel=%q)", "../etc", traversed, rel)
+	for _, name := range traversalNames {
+		t.Run(name, func(t *testing.T) {
+			assertInsideInstanceDir(t, home, resolveServerIDPath(name), "server-id")
+		})
 	}
 }
 
