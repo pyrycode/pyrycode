@@ -2,6 +2,7 @@ package streamsup
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -9,13 +10,26 @@ import (
 // fakeClock is a controllable time source for the tracker's `now` seam. Mirrors
 // streamrunner's watchdog_test fakeClock — the streamsup parser is turn-stateless
 // and needed no clock seam, so this is the first clock double in the package.
+//
+// It locks because it is also used at the Watchdog level (see
+// TestWatchdog_UserTurnSentRestartsIdleClock), where the poll goroutine reads it
+// via WatchdogConfig.now while the test advances it.
 type fakeClock struct {
-	t time.Time
+	mu sync.Mutex
+	t  time.Time
 }
 
-func (c *fakeClock) now() time.Time { return c.t }
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
 
-func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 // recvStall waits up to timeout for one OnStall signal. It returns the emitted
 // pendingPermission value and whether a signal arrived.
@@ -36,10 +50,10 @@ func TestStallTracker_AwaitingTransitions(t *testing.T) {
 	clk := &fakeClock{t: time.Unix(1_000, 0)}
 	tr := newStallTracker(clk.now, discardLogger())
 
-	// Starts awaiting the first assistant turn (the caller has written the
-	// opening user envelope; claude owes a turn).
-	if a, _ := tr.snapshot(); !a {
-		t.Fatal("tracker should start in the awaiting state")
+	// Starts NOT awaiting: the interactive child spawns before any user turn
+	// exists, so nothing is owed until a turn is delivered (#1504).
+	if a, _ := tr.snapshot(); a {
+		t.Fatal("tracker should start in the not-awaiting state")
 	}
 
 	writeLine := func(s string) {
@@ -47,6 +61,13 @@ func TestStallTracker_AwaitingTransitions(t *testing.T) {
 		if _, err := tr.Write([]byte(s + "\n")); err != nil {
 			t.Fatalf("Write(%q): %v", s, err)
 		}
+	}
+
+	// Arm from the send side, so the system-leaves-it-true row below and the
+	// assistant→false row after it both still discriminate.
+	tr.turnSent()
+	if a, _ := tr.snapshot(); !a {
+		t.Fatal("turnSent should set awaiting=true")
 	}
 
 	// system init: activity only, still awaiting.
@@ -83,6 +104,36 @@ func TestStallTracker_AwaitingTransitions(t *testing.T) {
 	writeLine(`{"type":"result","subtype":"success"}`)
 	if a, _ := tr.snapshot(); a {
 		t.Error("result line should set awaiting=false")
+	}
+}
+
+// The two lifecycle signals (#1504) are the third and fourth writers of
+// awaiting, alongside consumeLine's arms. Each sets the flag AND stamps
+// lastEvent — the stamp is what makes the idle threshold count from the signal
+// rather than from the child's last output, which on an idle session is stale.
+func TestStallTracker_LifecycleSignals(t *testing.T) {
+	t.Parallel()
+	clk := &fakeClock{t: time.Unix(1_000, 0)}
+	tr := newStallTracker(clk.now, discardLogger())
+
+	clk.advance(90 * time.Second)
+	tr.turnSent()
+	a, last := tr.snapshot()
+	if !a {
+		t.Error("turnSent should set awaiting=true")
+	}
+	if want := time.Unix(1_090, 0); !last.Equal(want) {
+		t.Errorf("turnSent: lastEvent = %v, want %v (the idle clock restarts at the send)", last, want)
+	}
+
+	clk.advance(30 * time.Second)
+	tr.childExited()
+	a, last = tr.snapshot()
+	if a {
+		t.Error("childExited should set awaiting=false — the departed child's owed turn is void")
+	}
+	if want := time.Unix(1_120, 0); !last.Equal(want) {
+		t.Errorf("childExited: lastEvent = %v, want %v", last, want)
 	}
 }
 
@@ -123,6 +174,9 @@ func TestStallTracker_LineBuffering(t *testing.T) {
 	t.Run("partial line does not transition until completed", func(t *testing.T) {
 		t.Parallel()
 		tr := newStallTracker(nil, discardLogger())
+		// Arm first: against a not-awaiting start both assertions below would
+		// read false and prove nothing.
+		tr.turnSent()
 		// First half of an assistant line, no newline → no state change.
 		if _, err := tr.Write([]byte(`{"type":"assi`)); err != nil {
 			t.Fatalf("Write part 1: %v", err)
@@ -169,7 +223,9 @@ func TestStallTracker_LineBuffering(t *testing.T) {
 			t.Errorf("oversized newline-less remainder not dropped: buf len = %d", bufLen)
 		}
 
-		// Parsing still works after a drop.
+		// Parsing still works after a drop. Arm first, or the closing assertion
+		// is vacuous against a not-awaiting start.
+		tr.turnSent()
 		if _, err := tr.Write([]byte(`{"type":"assistant"}` + "\n")); err != nil {
 			t.Fatalf("Write after drop: %v", err)
 		}
@@ -239,8 +295,58 @@ func TestShouldFire(t *testing.T) {
 
 // --- poll goroutine integration tests (real short Idle, real clock) ---
 
-// AC1: on genuine idle (claude owes an assistant turn and the stream sits silent
-// past the threshold) the watchdog fires once, with pendingPermission=false.
+// AC1 (#1504): a watchdog told of no turn never fires, however far past the idle
+// threshold the stream sits silent — the false stall an interactive session
+// suffered when the tracker assumed an owed turn at construction. Both halves of
+// the criterion: a child that has emitted nothing at all, and one that has
+// emitted only the system/init it opens with.
+func TestWatchdog_NoTurnSent_NoFire(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		lines []string
+	}{
+		// The freshly spawned child, before it has said anything.
+		{name: "child emitted nothing", lines: nil},
+		// The ticket's literal failure scenario: /clear at night → RestartFresh
+		// spawns, claude emits system/init, no message is sent for hours.
+		{name: "child emitted system/init only", lines: []string{`{"type":"system","subtype":"init"}`}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			stalls := make(chan bool, 8)
+			wd := NewWatchdog(WatchdogConfig{
+				Idle:    60 * time.Millisecond,
+				OnStall: func(pending bool) { stalls <- pending },
+				Logger:  discardLogger(),
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			for _, line := range c.lines {
+				if _, err := wd.Writer().Write([]byte(line + "\n")); err != nil {
+					t.Fatalf("Write(%q): %v", line, err)
+				}
+			}
+			wd.Start(ctx)
+
+			// Several idle windows: nothing is owed, so nothing may be emitted.
+			if pending, fired := recvStall(t, stalls, 400*time.Millisecond); fired {
+				t.Errorf("watchdog fired against an idle child that owes no turn (pending=%v)", pending)
+			}
+			cancel()
+			wd.Wait()
+		})
+	}
+}
+
+// AC2 (#1504): once told a user turn reached the child's stdin, the watchdog
+// fires on genuine idle — once, with pendingPermission=false. This is the
+// false-negative guard: a "fix" that only flips the initial value, leaving
+// UserTurnSent a no-op, leaves the wedge this component exists to catch
+// undetectable, and reddens here.
 func TestWatchdog_GenuineIdleFires(t *testing.T) {
 	t.Parallel()
 	stalls := make(chan bool, 8)
@@ -252,18 +358,101 @@ func TestWatchdog_GenuineIdleFires(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// system line: activity, still awaiting the first assistant turn.
-	if _, err := wd.Writer().Write([]byte(`{"type":"system","subtype":"init"}` + "\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
 	wd.Start(ctx)
+	// The send side reports a delivered turn: claude now owes an assistant turn,
+	// and the silence that follows is a wedge.
+	wd.UserTurnSent()
 
 	pending, fired := recvStall(t, stalls, 2*time.Second)
 	if !fired {
-		t.Fatal("watchdog did not fire on genuine idle")
+		t.Fatal("watchdog did not fire on genuine idle after a delivered user turn")
 	}
 	if pending {
 		t.Errorf("OnStall pendingPermission = true, want false (no permission pending)")
+	}
+	cancel()
+	wd.Wait()
+}
+
+// AC2 (the stamp half): UserTurnSent restarts the idle clock as well as arming.
+// An idle child emits nothing, so lastEvent can be hours stale by the time a turn
+// is finally sent; an arm that did not restamp would satisfy the threshold on the
+// very next tick and fire against the turn the user just asked for — a false
+// positive strictly worse than the one #1504 removes.
+//
+// Runs on the fake clock: the ticker still fires on real time, only the elapsed
+// comparison reads the fake, which is what lets "advance, then wait real ticks"
+// distinguish the two implementations.
+func TestWatchdog_UserTurnSentRestartsIdleClock(t *testing.T) {
+	t.Parallel()
+	clk := &fakeClock{t: time.Unix(1_000, 0)}
+	stalls := make(chan bool, 8)
+	wd := NewWatchdog(WatchdogConfig{
+		Idle:    60 * time.Millisecond,
+		OnStall: func(pending bool) { stalls <- pending },
+		Logger:  discardLogger(),
+		now:     clk.now,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wd.Start(ctx)
+
+	// Sit idle far past the threshold with nothing owed: no fire (AC1 again, now
+	// on the fake clock).
+	clk.advance(10 * 60 * time.Millisecond)
+	if _, fired := recvStall(t, stalls, 200*time.Millisecond); fired {
+		t.Fatal("watchdog fired while idle with no turn owed")
+	}
+
+	// The turn lands against that stale lastEvent. A non-stamping arm fires on
+	// the next tick (7.5ms); the stamping one leaves zero elapsed.
+	wd.UserTurnSent()
+	if _, fired := recvStall(t, stalls, 200*time.Millisecond); fired {
+		t.Error("watchdog fired immediately after a delivered turn — UserTurnSent armed without restarting the idle clock")
+	}
+
+	// Now let the threshold genuinely elapse since the send.
+	clk.advance(2 * 60 * time.Millisecond)
+	if _, fired := recvStall(t, stalls, 2*time.Second); !fired {
+		t.Error("watchdog did not fire once the threshold elapsed since the delivered turn")
+	}
+	cancel()
+	wd.Wait()
+}
+
+// AC3 (#1504): after the child exits, the turn it owed is void — the respawned
+// child's silence past the threshold does not fire until a new turn is signalled.
+// Reddens against a childExited that is a no-op, and against one that stamps
+// lastEvent while leaving awaiting true.
+func TestWatchdog_ChildExitedVoidsOwedTurn(t *testing.T) {
+	t.Parallel()
+	stalls := make(chan bool, 8)
+	wd := NewWatchdog(WatchdogConfig{
+		Idle:    60 * time.Millisecond,
+		OnStall: func(pending bool) { stalls <- pending },
+		Logger:  discardLogger(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wd.Start(ctx)
+	wd.UserTurnSent() // a turn is in flight...
+	wd.ChildExited()  // ...and the child dies mid-turn, owing nothing further.
+
+	// The respawn opens with system/init, then sits idle — the healthy overnight
+	// session the crash-mid-turn respawn used to slander.
+	if _, err := wd.Writer().Write([]byte(`{"type":"system","subtype":"init"}` + "\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if pending, fired := recvStall(t, stalls, 400*time.Millisecond); fired {
+		t.Errorf("watchdog fired for a turn the exited child owed (pending=%v)", pending)
+	}
+
+	// The reset must clear the owed turn without disabling the watchdog.
+	wd.UserTurnSent()
+	if _, fired := recvStall(t, stalls, 2*time.Second); !fired {
+		t.Error("watchdog did not fire for a turn delivered to the respawned child — ChildExited disabled it")
 	}
 	cancel()
 	wd.Wait()
@@ -314,12 +503,10 @@ func TestWatchdog_PendingPermission_EmitNotKill(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// system line: awaiting stays true (claude owes the turn it is blocked on
-	// pending approval).
-	if _, err := wd.Writer().Write([]byte(`{"type":"system"}` + "\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
 	wd.Start(ctx)
+	// A delivered turn: claude owes the assistant turn it is blocked on pending
+	// approval.
+	wd.UserTurnSent()
 
 	pending, fired := recvStall(t, stalls, 2*time.Second)
 	if !fired {
@@ -355,15 +542,14 @@ func TestWatchdog_LatchReArms(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if _, err := wd.Writer().Write([]byte(`{"type":"system"}` + "\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
 	wd.Start(ctx)
+	wd.UserTurnSent()
 
 	if _, fired := recvStall(t, stalls, 2*time.Second); !fired {
 		t.Fatal("first stall did not fire")
 	}
 	// Activity advances lastEvent → the next non-firing tick clears the latch.
+	// awaiting stays true across this system line, so the next window re-fires.
 	if _, err := wd.Writer().Write([]byte(`{"type":"system"}` + "\n")); err != nil {
 		t.Fatalf("Write (reset activity): %v", err)
 	}
