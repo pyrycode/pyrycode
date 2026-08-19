@@ -238,6 +238,52 @@ func findEchoedLine(t *testing.T, output string) string {
 
 // --- Live Restart: AC3 -------------------------------------------------------
 
+// waitArgvLines polls the argv capture file until it holds at least n complete
+// (newline-terminated) records, and returns those records.
+//
+// onSpawn fires immediately after cmd.Start returns, so it proves only that the
+// fork/exec succeeded — the child may not have executed a single line of Go yet.
+// Every teardown here SIGTERMs the live child (Restart cancels the iteration
+// ctx; so does cancelling Run's ctx), and a child still in runtime startup dies
+// on the default SIGTERM disposition, before record_block writes its argv.
+// Waiting on the record itself — the only artifact the assertions consume — is
+// the happens-before edge onSpawn cannot supply.
+//
+// The deadline is a FAILURE BOUND, not a calibration: the write is the child's
+// first act, so a healthy run reaches it in milliseconds and only a child that
+// never records waits it out.
+func waitArgvLines(t *testing.T, path string, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var data []byte
+	var recs []string
+	for {
+		b, err := os.ReadFile(path)
+		switch {
+		case err == nil:
+			// Count only complete records: whatever follows the final newline is
+			// a torn write, not a recorded argv line.
+			data = b
+			recs = strings.Split(string(b), "\n")
+			recs = recs[:len(recs)-1]
+			if len(recs) >= n {
+				return recs
+			}
+		case errors.Is(err, os.ErrNotExist):
+			// record_block creates the file with O_CREATE on its first write, so
+			// a missing file is the normal pre-write state: zero records so far.
+			data, recs = nil, nil
+		default:
+			t.Fatalf("read argv capture %s: %v", path, err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("timed out waiting for the child's argv record: want ≥%d complete line(s) in %s, have %d:\n%s",
+				n, path, len(recs), data)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestRunner_LiveRestart drives a deliberate Restart against a live child and
 // asserts (a) the child is respawned with the swapped args and --resume (not
 // --session-id), (b) Run's ctx is NOT cancelled by the restart (Run keeps
@@ -270,6 +316,9 @@ func TestRunner_LiveRestart(t *testing.T) {
 		t.Fatal("first child never spawned")
 	}
 
+	// Restart kills this child; its argv must be on disk before that happens.
+	waitArgvLines(t, argvFile, 1)
+
 	r.Restart([]string{"--model", "restart-marker"})
 
 	// The restart must force a relaunch with the swapped args.
@@ -278,6 +327,10 @@ func TestRunner_LiveRestart(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Restart did not respawn the child")
 	}
+
+	// Same window on spawn 2: the cancel() below kills it, so wait out its record
+	// too. Both argv lines are in hand from here on.
+	lines := waitArgvLines(t, argvFile, 2)
 
 	// Run is still looping (Restart did not cancel it): cancelling now returns a
 	// context error, proving Run outlived the restart.
@@ -291,14 +344,6 @@ func TestRunner_LiveRestart(t *testing.T) {
 		t.Errorf("RestartCount = %d after a deliberate restart, want 0 (not a crash)", got)
 	}
 
-	data, err := os.ReadFile(argvFile)
-	if err != nil {
-		t.Fatalf("read argv capture: %v", err)
-	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(lines) < 2 {
-		t.Fatalf("want ≥2 captured argv lines, got %d:\n%s", len(lines), data)
-	}
 	first, second := lines[0], lines[1]
 
 	// Spawn 1 establishes the id with --session-id and carries no restart arg.
