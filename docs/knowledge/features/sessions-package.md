@@ -461,11 +461,11 @@ job — it operates on operator-trusted input; the wire handler (#845, a
 charset/length shape check for `Model`, a closed enum for `Effort`) owns the
 untrusted → trusted crossing. See [codebase/840.md](../codebase/840.md).
 
-**Live-restart on a real change (#842).** After a successful persist of a
+**Live-apply on a real change (#842, #1581).** After a successful persist of a
 real change (not a no-op, not a failed save), `UpdateSettings` recomposes the
-session's full spawn argv and triggers a live restart of its supervisor —
-so a single client message both persists **and** takes effect on the
-currently-running child, without waiting for the session's next spawn.
+session's full spawn argv and live-applies the change — so a single client
+message both persists **and** takes effect on the currently-running child,
+without waiting for the session's next spawn.
 `Session.spawnBase []string` holds the settings-free argv (template/bootstrap
 args + any construction-time resume suffix), set alongside the full
 `ClaudeArgs` at both construction sites (`Pool.New`, `Pool.buildSession`).
@@ -473,9 +473,52 @@ args + any construction-time resume suffix), set alongside the full
 `append(slices.Clone(s.spawnBase), claudeSettingsArgs(settings)...)` — is the
 **single** argv-recompose path outside construction, reusing `claudeSettingsArgs`
 verbatim so the YOLO fail-safe has exactly one origin. `UpdateSettings` captures
-`newArgs := sess.spawnArgs(merged)` and `sup := sess.sup` under `Pool.mu`,
-releases the lock, then calls `sup.Restart(newArgs)` — the restart runs
-**outside** `Pool.mu` and never touches `Session.lcMu`.
+`newArgs := sess.spawnArgs(merged)` and `sup := sess.sup` under `Pool.mu`, then
+releases the lock before either live-apply branch runs — **outside** `Pool.mu`,
+never touching `Session.lcMu`.
+
+**Which branch, and why (#1581).** `inBandDeliverable(update)` partitions on
+which fields the update carried, never on merged-vs-previous per field —
+`SetSessionSettingsPayload`'s three `omitempty` pointers are a presence
+contract, so a client changing one setting sends one field:
+
+- **Model/effort-only** (no `YOLO` present, no present field cleared to `""`)
+  → `sup.SetSpawnArgs(newArgs)` then `deliverSettingsInBand`, which writes
+  `/model <v>` and `/effort <v>` as ordinary user turns via
+  `sup.WriteUserTurn(context.Background(), "", …)` — model first, one command
+  per **present** field, two separate turns. Claude accepts these on the stream
+  the daemon already holds open and applies them to the running session, so
+  **nothing is killed and the transcript survives**. This is the common case.
+  The `SetSpawnArgs` call is not optional: it is `Restart`'s swap half (#1580),
+  and skipping it would let the operator's change silently revert on the next
+  crash-respawn or evict → `Activate`. Swap **before** write — the install is
+  the durable half. Delivery is fire-and-forget: every write error is logged at
+  `Info` (`"sessions: in-band settings command not delivered"`, fields
+  `session` / a fixed `setting` literal / `err` — **never** the value, the
+  payload bytes, or the conversation id) and swallowed, so the client sees
+  success. They cannot be classified anyway: `internal/sessions` must not
+  import `internal/streamsup`, and the reachable set (`ErrNoLiveChild`,
+  `turncommit.ErrDropped`, a wrapped pipe failure) all warrants the same
+  response, with the dominant case — an evicted session — not a degradation.
+- **Everything else** → `sup.Restart(newArgs)`, unchanged. That is a
+  bypass-posture (`YOLO`) change, for which no in-band form has been measured,
+  and clearing model or effort to `""` ("run at claude's own default", which
+  `claudeSettingsArgs` expresses by *omitting* the flag, and for which no
+  `/model` invocation means "revert"). A present `YOLO` takes this branch even
+  when it equals the stored value — the conservative side of the partition. It
+  costs nothing: the restart recomposes argv from the **merged** settings, so a
+  frame mixing `YOLO` with a model still carries the new model through the
+  respawn. Clean partition — never both mechanisms for one change, no case left
+  unserved.
+
+The mechanism swap was a bug fix, not an optimisation. The respawn re-execs
+with `--resume` on a session that has never run a turn; claude answers
+`No conversation found with session ID` and exits 1, and the daemon retries
+forever on a widening backoff (observed 2026-08-18). The in-band path
+**avoids** that rather than fixing it — no resume, no lost transcript, no
+crash-loop. Live-applying a `YOLO` change is #1573; deleting the restart once
+it has no callers is #1574; the live-claude proof is #1582. See
+[codebase/1581.md](../codebase/1581.md).
 
 `Supervisor.Restart(args []string)` (`internal/supervisor`) swaps the live
 spawn args under a leaf `restartMu` and, if a child is currently running,

@@ -610,7 +610,10 @@ func startRelayV2(
 		// Inbound set_session_settings seam (#845): a paired interactive
 		// `set_session_settings` frame validates the untrusted model/effort and
 		// persists the per-session change via *sessions.Pool.UpdateSettings (#840),
-		// applied on the session's next spawn (#833). settingsUpdaterAdapter (built
+		// then live-applies it to a running session — in-band as a /model or /effort
+		// command for a model/effort-only change (#1581), by live restart otherwise
+		// (#842) — and installs the recomposed argv for the next spawn (#833).
+		// settingsUpdaterAdapter (built
 		// at main.go over the pool) maps sessions.ErrSessionNotFound → the relay
 		// sentinel, so internal/relay imports neither internal/sessions nor cmd/pyry.
 		// nil in foreground / v1 makes the verb reply "unavailable" deterministically.

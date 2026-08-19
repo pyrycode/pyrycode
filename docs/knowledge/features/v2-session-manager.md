@@ -1522,10 +1522,15 @@ vocabulary](protocol-package.md#session-settings-payloads-844)
 client's per-session `model` / `effort` / `yolo` — the untrusted-value
 validation #833 explicitly deferred to this wire-owning ticket.
 **`security-sensitive`**: the first inbound control verb that both persists a
-mutation from untrusted input AND owes the caller a reply. Change takes effect
-on the session's **next spawn** (#833's `claudeSettingsArgs` argv path);
-making a *running* session pick it up immediately is sibling #842. See
-[`codebase/845.md`](../codebase/845.md).
+mutation from untrusted input AND owes the caller a reply. A *running* session
+picks the change up **immediately**: `Pool.UpdateSettings` partitions on which
+fields the frame carried, writing a model/effort-only change to the live child
+as a `/model` or `/effort` command on the stream the daemon already holds open
+(#1581, no respawn, transcript preserved) and live-restarting the supervisor for
+everything else (#842). Both install the recomposed argv (#833's
+`claudeSettingsArgs` path), so the next spawn carries it too — see
+[`sessions-package.md`](sessions-package.md) § "Live-apply on a real change".
+See [`codebase/845.md`](../codebase/845.md).
 
 Unlike the fire-and-forget verbs (`interrupt` / `new_session` /
 `dequeue_message`), this verb **always replies** on the interactive path —

@@ -544,8 +544,10 @@ fail-safe there), and construction-time shaping (`stripSessionIDFlags`, `withApp
 construction-only) is **not** reapplied on this or any post-construction install path. It is on
 `sessions.Runner` (unlike `Interrupt`/`RestartFresh`/`BeginRotation`, which stay off it and are reached by
 capability type-assertion) because there is exactly one production implementation — `streamRunner` — plus
-five test doubles, all in this repo, so widening is compile-checked across the whole set. Nothing calls it
-outside tests yet. See [codebase/1580.md](../codebase/1580.md).
+five test doubles, all in this repo, so widening is compile-checked across the whole set. Its one
+production caller is `Pool.UpdateSettings`' in-band branch (#1581), which installs the recomposed argv
+through it and then delivers the change as a `/model` / `/effort` command instead of respawning. See
+[codebase/1580.md](../codebase/1580.md).
 
 **`WriteUserTurn`/`WaitForPTY`.** `WriteUserTurn(ctx, conversationID, payload)` is a one-line wrap of the
 already-reviewed `WriteTurn` free function (#1088/#1093) — no new envelope construction, and it inherits
