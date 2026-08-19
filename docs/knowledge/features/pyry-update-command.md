@@ -72,15 +72,18 @@ Seven field-level seams the integration tests need: (a) `Fetcher.BaseURL` for th
 3. If `--version <tag>` is set, use that. Otherwise call `Fetcher.FetchLatestRelease(ctx, "pyrycode/pyrycode")` → `update.ParseLatestRelease(body)` to extract `tag_name`. Print `==> Latest version:  <v>`.
 4. `update.CompareVersions(current, target)` — branches: `ErrInvalidVersion` (dev build) → "skipping update", return nil; `Same` → "already at latest", return nil; else continue.
 5. If `--check`, return nil here.
-6. `update.AssetName(target, runtime.GOOS, runtime.GOARCH)` produces the GoReleaser tarball filename. URLs are templated against `releaseBaseURL`: `<base>/<tag>/<asset>` and `<base>/<tag>/checksums.txt`.
-7. `Fetcher.FetchAsset` for the tarball, then for `checksums.txt`.
-8. **Signature gate (#776).** `Fetcher.FetchAsset` for `checksums.txt.sig` (the checksums URL + `.sig`), then `update.VerifySignature(sumsBytes, sig, o.signingPubKey)` over the **raw** checksums bytes. Prints `==> Verifying signature... ok`/`FAIL`. A missing `.sig` (404) aborts here with `update: download signature: …` — the fail-closed point, structurally identical to a missing tarball, with **no unsigned fallback**. A non-verifying signature aborts with `update: verify signature: …`. Both abort *before* any digest is parsed or the binary extracted/replaced. See [ADR 028](../decisions/028-ed25519-checksums-signature.md).
-9. `update.ParseChecksumsFile(body, asset)` plucks the SHA-256 hex (only reached once the signature has vouched for the checksums bytes).
-10. `update.VerifySHA256(tgz, digest)`. On mismatch, print `FAIL` and return wrapped `ErrChecksumMismatch`.
-11. `update.ExtractBinary(tgz, "pyry")` returns the new binary's bytes.
-12. `update.AtomicReplace(target, bin, 0o755)` swaps the on-disk binary.
-13. **Daemon restart (#190).** Unless `--no-restart` is set, call `o.probeRestart()` to stat the canonical launchd plist (`~/Library/LaunchAgents/dev.pyrycode.pyry.plist`) and systemd user-unit (`~/.config/systemd/user/pyry.service`) paths. Pass the resulting `RestartProbe` to `update.DetectRestartCommand`. If non-nil argv is returned, print `==> Restarting daemon (<manager>: <last-argv-element>)...` and call `o.runRestart(ctx, argv)`. If the probe returns no managed unit (both stats fail), the step is silently skipped.
-14. Print `==> Updated to <v>.` — last in the happy path so it terminates the output.
+6. **Refuse a non-pinned downgrade (#1498).** If `o.pinVersion == ""` and `cmp == update.Newer` (the running binary is newer than the advertised latest — a yanked release or a compromised publishing token re-marking an old genuine release as latest), return `update: refuse downgrade: …` naming both versions and the sanctioned `--version <tag>` route. No fetch has happened yet. An explicit `--version <older-tag>` pin skips this guard entirely and proceeds as the intentional downgrade route.
+7. `update.AssetName(target, runtime.GOOS, runtime.GOARCH)` produces the GoReleaser tarball filename. URLs are templated against `releaseBaseURL`: `<base>/<tag>/<asset>` and `<base>/<tag>/checksums.txt`.
+8. `Fetcher.FetchAsset` for the tarball, then for `checksums.txt`.
+9. **Signature gate (#776).** `Fetcher.FetchAsset` for `checksums.txt.sig` (the checksums URL + `.sig`), then `update.VerifySignature(sumsBytes, sig, o.signingPubKey)` over the **raw** checksums bytes. Prints `==> Verifying signature... ok`/`FAIL`. A missing `.sig` (404) aborts here with `update: download signature: …` — the fail-closed point, structurally identical to a missing tarball, with **no unsigned fallback**. A non-verifying signature aborts with `update: verify signature: …`. Both abort *before* any digest is parsed or the binary extracted/replaced. See [ADR 028](../decisions/028-ed25519-checksums-signature.md).
+10. `update.ParseChecksumsFile(body, asset)` plucks the SHA-256 hex (only reached once the signature has vouched for the checksums bytes).
+11. `update.VerifySHA256(tgz, digest)`. On mismatch, print `FAIL` and return wrapped `ErrChecksumMismatch`.
+12. `update.ExtractBinary(tgz, "pyry")` returns the new binary's bytes.
+13. `update.AtomicReplace(target, bin, 0o755)` swaps the on-disk binary.
+14. **Daemon restart (#190).** Unless `--no-restart` is set, call `o.probeRestart()` to stat the canonical launchd plist (`~/Library/LaunchAgents/dev.pyrycode.pyry.plist`) and systemd user-unit (`~/.config/systemd/user/pyry.service`) paths. Pass the resulting `RestartProbe` to `update.DetectRestartCommand`. If non-nil argv is returned, print `==> Restarting daemon (<manager>: <last-argv-element>)...` and call `o.runRestart(ctx, argv)`. If the probe returns no managed unit (both stats fail), the step is silently skipped.
+15. Print `==> Updated to <v>.` — last in the happy path so it terminates the output.
+
+**Why the guard sits below `--check` (#1498).** Placing it above (e.g. as a fourth compare-switch arm) would make `pyry update --check` exit non-zero against a rolled-back latest, breaking the documented exit-0 contract that `docs/release-tooling.md`'s release checklist depends on. Placing it below `AssetName` would let a refused downgrade still issue fetches. The guard's position is an observable ordering constraint, pinned by `TestUpdate_CheckOnlyOlderLatest` (fails if the guard drifts above the `checkOnly` return) and `TestUpdate_UnpinnedDowngradeRefused`'s request-recording assertion (fails if the guard drifts below `AssetName`).
 
 ### Signature gate (#776)
 
@@ -147,6 +150,7 @@ All errors propagate up through `main()`'s wrapper at `cmd/pyry/main.go:141-144`
 | `errors.Is` predicate | Behaviour |
 |-----------------------|-----------|
 | `update.ErrInvalidVersion` (from `CompareVersions` with `currentVersion == "dev"`) | Print "running a development build" and return nil (exit 0). The only case where a primitive's error is converted to a non-error path. |
+| Non-pinned downgrade (#1498: `o.pinVersion == "" && cmp == update.Newer`) | No sentinel — a plain `update: refuse downgrade: …` string naming both versions and `pyry update --version <tag>` as the sanctioned route. Refuses before any fetch (no tarball, `checksums.txt`, or `checksums.txt.sig` request). `--check` is unaffected — the guard sits below the `checkOnly` early return. `--version <older-tag>` bypasses the guard entirely; it remains the sole unguarded downgrade route. |
 | `update.ErrUnsupportedPlatform` (from `AssetName` on e.g. `freebsd/amd64`) | Propagates as `pyry: update: asset name for freebsd/amd64: unsupported os/arch`. The four supported `linux/darwin × amd64/arm64` combos cover the project's published targets. |
 | Missing signature asset (`checksums.txt.sig` 404s, or any fetch failure) | `==> Verifying signature... FAIL` followed by `pyry: update: download signature: …`. **Fail-closed (#776, AC-2):** aborts before the digest is parsed, structurally identical to a missing tarball — there is **no** fall-through to the old unsigned behaviour. An attacker who deletes the signature cannot downgrade the check. |
 | `update.ErrInvalidSignature` / `update.ErrInvalidPublicKey` (from `VerifySignature`) | `==> Verifying signature... FAIL` followed by `pyry: update: verify signature: …`. A tampered/mis-signed `checksums.txt`, a wrong-length `.sig`, or a malformed baked-in key all abort **before** extract/replace (#776, AC-3). `ErrInvalidPublicKey` only fires on a corrupt `releaseSigningPublicKeyHex` — caught earlier by `TestReleaseSigningKey_Decodes`. |
@@ -166,7 +170,9 @@ No partial-failure cleanup: `AtomicReplace` is the only filesystem-mutating step
 | `TestUpdate_Success` | AC #2: fetch + verify + extract + replace. On-disk binary swapped; all progress lines print verbatim. `runRestart` is a `t.Fatalf` sentinel since the probe returns zero-value `RestartProbe{}`. |
 | `TestUpdate_AlreadyAtLatest` | AC #2 short-circuit: when current == latest, `AtomicReplace` is not called and the "already at latest" line prints. |
 | `TestUpdate_CheckOnly` | AC #3: `--check` prints current + latest and exits without downloading. |
-| `TestUpdate_PinVersion` | AC #3: `--version <v>` skips the latest-release API call (the fake handler 500s if hit) and downloads from the pinned URL. |
+| `TestUpdate_PinVersion` | AC #3: `--version <v>` skips the latest-release API call (the fake handler 500s if hit) and downloads from the pinned URL. Doubles as the scope regression guard for #1498's refusal guard: current `0.9.1`, pin `v0.9.0` is itself a downgrade, and must stay green unmodified. |
+| `TestUpdate_UnpinnedDowngradeRefused` (#1498) | AC #1/#2: no `--version` pin, served latest older than current → `doUpdate` returns an error containing `update:`, `--version`, and both version strings; a request-recording fake server proves zero asset/checksums/signature requests were made; `replace`/`runRestart` are `t.Fatalf` sentinels; the `==> Updated to` success line is absent. |
+| `TestUpdate_CheckOnlyOlderLatest` (#1498) | AC #4: `--check` against the same older-than-current latest still prints both version lines and returns nil — pins the guard's placement below the `checkOnly` early return. |
 | `TestUpdate_DevBuildSkips` | The `currentVersion == "dev"` branch: `CompareVersions` returns `ErrInvalidVersion`, the wiring prints "skipping update" and exits 0 without `AtomicReplace`. |
 | `TestUpdate_RestartLaunchd` | #190 happy path on darwin shape: probe returns `{LaunchdPlistExists: true, UID: "501"}`, `runRestart` records argv. Asserts argv == `[launchctl, kickstart, -k, gui/501/dev.pyrycode.pyry]` and the `(launchd: gui/501/dev.pyrycode.pyry)` progress line. |
 | `TestUpdate_RestartSystemd` | #190 happy path on linux shape: probe returns `{SystemdUnitExists: true}`, argv == `[systemctl, --user, restart, pyry]`, progress line says `systemd:`. |
@@ -257,8 +263,8 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 
 ## Files
 
-- `cmd/pyry/update.go` (~270 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`, plus the `releaseSigningPublicKeyHex` baked-in constant (#776).
-- `cmd/pyry/update_test.go` (~600 LOC) — integration tests + httptest fixtures + the auto-signing server + signature tests (#776).
+- `cmd/pyry/update.go` (~285 LOC) — `runUpdate`, `resolveExecutable`, `updateOptions`, `defaultProbeRestart`, `defaultRunRestart`, `doUpdate`, plus the `releaseSigningPublicKeyHex` baked-in constant (#776) and the non-pinned-downgrade refusal guard (#1498).
+- `cmd/pyry/update_test.go` (~730 LOC) — integration tests + httptest fixtures + the auto-signing server + signature tests (#776) + the downgrade-refusal tests and `newDowngradeReleaseServer` (#1498).
 - `cmd/pyry/main.go` — `case "update":` dispatch + `printHelp` entry.
 - `internal/update/signature.go` (#776) — `VerifySignature` + `ErrInvalidSignature` / `ErrInvalidPublicKey`; see [`update-package.md`](update-package.md).
 - `internal/update/restart.go` — `RestartProbe` + `DetectRestartCommand` (#181, consumed unchanged).
@@ -274,6 +280,7 @@ Same file (`cmd/pyry/update_e2e_test.go`), same build tag, three new sibling tes
 - [`update-package.md`](update-package.md) — the `internal/update` primitives this command composes.
 - [ADR 028](../decisions/028-ed25519-checksums-signature.md) — the raw-Ed25519 checksums-signature scheme the gate implements (#776).
 - [`codebase/776.md`](../codebase/776.md) — the per-ticket implementation summary + lessons for the signature gate.
+- [`codebase/1498.md`](../codebase/1498.md) — the per-ticket implementation summary + lessons for the non-pinned-downgrade refusal guard.
 - [`docs/release-tooling.md`](../../release-tooling.md) — the operator procedure for the signing keypair.
 - [ADR 015](../decisions/015-update-restart-probe-inline.md) — daemon-restart probe placement and executor seam.
 - [`docs/specs/architecture/189-update-subcommand-wiring.md`](../../specs/architecture/189-update-subcommand-wiring.md) — #189 build-time spec.
