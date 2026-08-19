@@ -2012,6 +2012,53 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   that. See [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md)
   for the full measurement writeup and [`codebase/1595.md`](../codebase/1595.md).
 
+- `interactive_stream_inband_bypass_revoke_test.go` (#1622) — **live proof of the
+  composed path #1604 built, not of the wire format #1595 already proved.** #1595
+  hand-wrote the `set_permission_mode` control line onto four
+  `exec.CommandContext` children it owned directly; #1604 proved `Pool.UpdateSettings
+  → inBandDeliverable → deliverSettingsInBand → Runner.RevokeBypass` only through a
+  fake runner. Neither proved pyry's own `Pool`, holding a real `streamsup.Runner`
+  over a real claude child, actually emits those bytes. This test drives that: an
+  in-process `sessions.Pool` (#1582's shape, re-pointed) whose bootstrap child gets
+  its bypass posture from a **seeded registry entry** (`yolo:true`) rather than the
+  base argv — `revokeBaseArgs` is declared empty on purpose, because either shortcut
+  (a stored posture already matching the update, or a bypass flag baked into the
+  base argv) yields a run that measures a child nobody revoked. Two guards cover
+  that seam: a pre-spawn check on `Pool.DefaultSettings()` and a post-turn-1 check
+  that the first `init.permissionMode` is `bypassPermissions`, so a seed failure
+  reads as itself rather than as a delivery failure. The stdout tap
+  (`revokeTap`) bridges #1582's line-splitting `io.Writer` shape with #1595's
+  `setModeRecorder` field capture (`control_response`, `permissionMode`, results)
+  by embedding rather than re-deriving the classifier — the one type in the package
+  that reads `control_response` off a `Pool`-spawned child's raw stdout. A sibling
+  log recorder retains `deliverSettingsInBand`'s fire-and-forget "not delivered"
+  `Info` record verbatim, since that record is otherwise swallowed and nothing else
+  in the daemon's ordinary logs distinguishes a working revocation from a dropped
+  one. Measured 2026-08-19 against claude 2.1.220, all three runs `-race`, mutants
+  applied via `-overlay` (no mutated source ever written to the worktree): green run
+  — one `control_response`, `init.permissionMode` `[bypassPermissions default]`, one
+  spawn, pid unchanged, 5.85s; **M1** (drop the revoke-detection clause from
+  `deliverSettingsInBand`) — no `control_response`, `init.permissionMode` stays
+  `[bypassPermissions bypassPermissions]`, one spawn, pid unchanged, 50.03s — proves
+  nothing was written and nothing was torn down; **M2** (`inBandDeliverable` returns
+  false for a revoke, the pre-#1604 shape, falling through to `sup.Restart`) — no
+  `control_response`, `init.permissionMode` still flips to `[bypassPermissions
+  default]`, but two spawns and pid changes, 50.57s — the row that earns the
+  four-assertion set, since the permission-mode echo alone cannot tell a delivered
+  revocation from a respawn under a recomposed bypass-free argv. Both mutant runs
+  take ~50s against the green run's 5.85s because no `control_response` ever
+  arrives, so the tolerated wait burns its full budget — working as intended, not a
+  hang. **Scope boundary, deliberate**: asserts the revocation reached the child and
+  nothing was torn down, not that the posture is behaviourally enforced — an echoed
+  permission mode is claude's own report, not proof of enforcement; that
+  measurement is a sibling ticket that consumes this harness. One signature
+  widening in `interactive_stream_inband_model_test.go`: `inbandSendTurn`'s
+  parameter is now the `inbandResultCounter` interface (`resultCount() int`)
+  instead of the concrete `*inbandTapRecorder`, so both this file's `revokeTap` and
+  #1582's recorder satisfy it with zero call-site edits. Zero production files
+  touched. See `docs/specs/architecture/1622-live-pool-bypass-revocation.md` for
+  the full design and the assertion-to-mutant mapping.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
