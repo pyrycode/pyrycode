@@ -40,7 +40,7 @@ Steps, each failure terminating in a deny result:
 1. Unmarshal `params` into `{name, arguments}`. Failure → `deny("malformed approval request")`. Deliberately a deny result, not a JSON-RPC error — an error on the permission path risks hanging or confusing claude's turn.
 2. `name != "approve"` → `deny("unknown tool")`.
 3. Unmarshal `arguments` into `control.ApprovePayload{tool_name, input, tool_use_id}`; `input` stays `json.RawMessage`. Failure → `deny("malformed approval request")`.
-4. `cctx, cancel := context.WithTimeout(ctx, mcpApprovalTimeout + mcpApproveClientMargin)`; `control.Approve(cctx, socketPath, payload)`.
+4. `cctx, cancel := context.WithTimeout(ctx, s.timeout)`; `control.Approve(cctx, socketPath, payload)`. `s.timeout` is set once at construction by `newMCPApproveServer` to `approvalTimeout() + mcpApproveClientMargin` — the same env-aware accessor (`PYRY_APPROVAL_TIMEOUT`) the daemon hands its pending-approval registry, so raising the operator's window raises both ends of the socket together (#1507).
 5. Map the outcome:
    - error (socket unreachable, daemon `Response.Error`, client read-deadline) → `deny("approval unavailable")`
    - `res == nil` (belt-and-suspenders; `control.Approve` already errors on this) → `deny("no verdict")`
@@ -48,7 +48,11 @@ Steps, each failure terminating in a deny result:
 6. Wrap as `{content:[{type:"text", text:<verdict>}], isError:false}`.
 7. Log `tool_use_id` + `behavior` only — never `input`, `tool_name`, or the raw `params`/`arguments` bytes, on any branch including the early parse-failure denies. Logger writes to **stderr only**; stdout is exclusively the JSON-RPC frame stream.
 
-`mcpApproveClientMargin = 30s` — added to `mcpApprovalTimeout` (2 min, #1104) so the daemon's own approval timer fires first (its informative timeout-deny message passes through) rather than the client's generic read-deadline error. Both outcomes are denies; the margin only changes which message reaches claude. `--permission-prompt-tool` argv/config generation landed in [#1106](../codebase/1106.md); the live `streamsup` interactive-spawn wiring landed in [#1168](../codebase/1168.md) — `newStreamRunnerFactory`'s closure injects `permissionArgs(false, mcpApprovePath)` on every non-yolo spawn, so this server now has a live production caller beyond `pyry agent-run`.
+`mcpApproveClientMargin = 30s` — added to `approvalTimeout()` (env-aware: reads `PYRY_APPROVAL_TIMEOUT`, falls back to the 2m constant on unset/unparseable) so the daemon's own approval timer fires first (its informative timeout-deny message passes through) rather than the client's generic read-deadline error, at every configured window, not just the default (#1507). Both outcomes are denies; the margin only changes which message reaches claude.
+
+The whole `approveServer{...}` literal is built exactly once, at construction, by `newMCPApproveServer(socketPath, log)` — the sole production construction site (`grep -n 'approveServer{' cmd/pyry/mcp_approve.go` returns exactly one hit, inside that function). This is the seam that makes the deadline assertable, and its shape matters: a bare `approveClientTimeout() time.Duration` helper would have made the value observable while leaving the composite literal inline in `runMCPApprove` — a test pinning the helper's output would stay green even if the literal itself regressed to the stale `mcpApprovalTimeout` constant. Moving the whole literal into the constructor puts that regression where a test can see it. The pre-existing test helper `newApproveServer` (`mcp_approve_test.go`, fixed 5s timeout) is deliberately *not* routed through `newMCPApproveServer` — this file has eleven `t.Parallel()` tests, and delegating would make all of them read the ambient `PYRY_APPROVAL_TIMEOUT`, so a developer with a stray negative value exported would see red round-trip tests nobody else can reproduce.
+
+`--permission-prompt-tool` argv/config generation landed in [#1106](../codebase/1106.md); the live `streamsup` interactive-spawn wiring landed in [#1168](../codebase/1168.md) — `newStreamRunnerFactory`'s closure injects `permissionArgs(false, mcpApprovePath)` on every non-yolo spawn, so this server now has a live production caller beyond `pyry agent-run`.
 
 ## `internal/control.Approve` client helper
 
@@ -77,7 +81,7 @@ The verdict JSON is embedded as a *string* inside `content[].text`, and the whol
 
 ## Tests
 
-`cmd/pyry/mcp_approve_test.go` — a fake control-socket peer (`net.Listen("unix", ...)`) drives: MCP handshake (protocolVersion echo + fallback, `tools/list` shape), allow round-trip (byte-exact golden JSON), deny round-trip (byte-exact golden JSON), socket-unreachable default-deny (fast-fail, well under the timeout), daemon-error default-deny, malformed/unknown-tool deny (no crash), a no-byte-leak logging assertion, and an undeadlined-ctx no-hang property test for `control.Approve`. All stdlib `testing`, table-driven, `-race`-clean.
+`cmd/pyry/mcp_approve_test.go` — a fake control-socket peer (`net.Listen("unix", ...)`) drives: MCP handshake (protocolVersion echo + fallback, `tools/list` shape), allow round-trip (byte-exact golden JSON), deny round-trip (byte-exact golden JSON), socket-unreachable default-deny (fast-fail, well under the timeout), daemon-error default-deny, malformed/unknown-tool deny (no crash), a no-byte-leak logging assertion, and an undeadlined-ctx no-hang property test for `control.Approve`. `TestMCPApproveServer_ClientDeadline` (#1507) pins `newMCPApproveServer`'s derived deadline across four `PYRY_APPROVAL_TIMEOUT` values (unset, unparseable, `2s`, `10m`) plus the ordering invariant that the client deadline exceeds `approvalTimeout()` by exactly `mcpApproveClientMargin` on every row; it runs serially (`t.Setenv` forbids a parallel ancestor) alongside the eleven `t.Parallel()` tests in the same file. All stdlib `testing`, table-driven, `-race`-clean.
 
 ## Out of scope (deferred)
 
