@@ -223,6 +223,16 @@ type relayWiring struct {
 	// snapshotSettings reports the bootstrap session's persisted model/effort/YOLO
 	// for the screen_snapshot reply (#848). nil reports defaults.
 	snapshotSettings func() (model, effort string, yolo bool)
+	// runSettings is the settings half of the conversation-keyed run-configuration
+	// seam (#1609): it resolves a NAMED conversation to its bound session id plus
+	// that session's model/effort/YOLO, under one pool acquisition
+	// (resolveBoundRunSettings). Built at main.go over the conversations registry
+	// and *sessions.Pool.SettingsFor so the internal/sessions dependency stays at
+	// the composition root. runConfigFor below composes it with the by-id
+	// context-window reader into the primitive-typed seam that crosses into
+	// internal/relay; this cmd/pyry-typed value never does. nil in foreground/v1 ⇒
+	// no seam is built at all.
+	runSettings func(convID string) (boundRunSettings, bool)
 	// approvals is the daemon-singleton pending-approval registry (#1103). The
 	// stream-approval bridge (#1080) constructed in startRelayV2 Lookups/Resolves
 	// parked completers against this SAME instance the control server parks into,
@@ -417,6 +427,58 @@ func boundSessionIDForActive(active *activeConversation, convReg *conversations.
 	return conv.CurrentSessionID, true
 }
 
+// runConfigFor composes the two halves of the conversation-keyed
+// run-configuration seam (#1609) into the primitive-typed value that crosses into
+// internal/relay as V2SessionConfig.RunConfigFor: the settings half (resolve —
+// main.go's resolveBoundRunSettings: registry → bound session id → that session's
+// model/effort/YOLO) and the context-window half (usage — the by-id reader
+// snapshotUsageFor returns). Same shape as boundSessionIDForActive and
+// bootstrapSnapshotUsage: a named, unit-testable resolver pulled out of otherwise
+// untestable wiring.
+//
+// The order is the security property, not a convenience. usage is consulted ONLY
+// after resolve says yes, and only with the session id resolve returned — never
+// with the caller's conversation id and never with "". So the id that reaches
+// transcript.StatByID is always one the pool holds, taken from the daemon's own
+// registry record, never a string a caller supplied.
+//
+// resolve == nil ⇒ nil, decided at BUILD time before any closure exists, so "no
+// path can invoke a nil resolver" is structural rather than a promise (the
+// bootstrapSnapshotUsage pattern). Foreground / v1.
+//
+// usage == nil is deliberately NOT the same, and this is the spot the neighbouring
+// shape is close enough to be pattern-matched wrong: bootstrapSnapshotUsage
+// collapses to nil when EITHER half is unwired, because both are required to
+// report anything at all, whereas here a nil usage half yields a WORKING seam
+// whose resolved answers carry UsedTokens/WindowTokens at zero. A daemon with no
+// sessions directory still hosts conversations bound to real sessions with real
+// settings; an unwired usage half degrades two integers and must not make a
+// resolved conversation unresolvable.
+func runConfigFor(
+	resolve func(convID string) (boundRunSettings, bool),
+	usage func(sessionID string) (usedTokens, windowTokens int),
+) func(convID string) (relay.RunConfig, bool) {
+	if resolve == nil {
+		return nil
+	}
+	return func(convID string) (relay.RunConfig, bool) {
+		b, ok := resolve(convID)
+		if !ok {
+			return relay.RunConfig{}, false
+		}
+		cfg := relay.RunConfig{
+			SessionID: b.sessionID,
+			Model:     b.model,
+			Effort:    b.effort,
+			YOLO:      b.yolo,
+		}
+		if usage != nil {
+			cfg.UsedTokens, cfg.WindowTokens = usage(b.sessionID)
+		}
+		return cfg, true
+	}
+}
+
 // startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it
 // loads the binary's persistent static keypair, builds a V2SessionManager
 // against conn.Frames() registering the conversation / messaging / workspace /
@@ -483,6 +545,17 @@ func startRelayV2(
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply and, since #491, for the session_settings reply.
 	snapshotUsage := bootstrapSnapshotUsage(w.claudeSessionsDir, w.bootstrapIDFn)
+
+	// Conversation-keyed run-configuration seam (#1609): composes the settings half
+	// (main.go's resolveBoundRunSettings, over the conversations registry and the
+	// pool) with the by-id context-window reader, so ONE call reports a named
+	// conversation's own session id, model/effort/YOLO and occupancy together.
+	// snapshotUsageFor is called a second time over the same directory rather than
+	// reusing the binding above: bootstrapSnapshotUsage supplies the BOOTSTRAP id,
+	// so a seam composed through it would report the bootstrap's occupancy for
+	// every conversation. The closure it builds is stateless, so a second one costs
+	// nothing and leaves the three existing seams byte-identical.
+	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.claudeSessionsDir))
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
@@ -556,6 +629,16 @@ func startRelayV2(
 		// the run-configuration UI stayed inert forever (desktop#491). A routing
 		// key, not a secret; it already crosses the wire in both directions.
 		BootstrapSessionID: w.bootstrapIDFn,
+		// Conversation-keyed run configuration (#1609): one seam reporting a NAMED
+		// conversation's own bound session id, model / effort / YOLO and
+		// context-window figures together — the replacement for the three
+		// bootstrap-scoped seams above, composed at runConfigFor. Nothing consults it
+		// in this ticket by design, so every session_settings / screen_snapshot reply
+		// stays byte-identical; #1610 makes handleRequestSessionSettings read it and
+		// retires BootstrapSessionID. An unresolvable conversation gets ok=false and
+		// addresses nothing — never the bootstrap. nil in foreground/v1 (no settings
+		// resolver wired).
+		RunConfigFor: runConfig,
 		// Connect-time modal reconcile source (#877): enumerates the outstanding-
 		// modal registry as marshal-ready modal_shown payloads so a phone that
 		// connects/reconnects while a permission prompt is pending is unicast the
