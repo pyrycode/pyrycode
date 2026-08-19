@@ -58,9 +58,44 @@ type SessionSettingsUpdatedPayload struct {
 	SessionID string `json:"session_id"`
 }
 
+// RequestSessionSettingsPayload is the body of an Envelope whose Type ==
+// TypeRequestSessionSettings (docs/protocol-mobile.md § Session settings).
+// Phone → binary direction; a client asking what the current run configuration
+// is and which session to address a change to.
+//
+// This is an inbound v2 *control* envelope, structurally like
+// RequestSnapshotPayload (snapshot.go): the v2 session manager intercepts it at
+// the dispatch boundary before dispatch.Route is called, so there is NO
+// dispatch.Route handler for it.
+//
+// ConversationID names the conversation the client is asking about (#1586).
+// Before it the frame was genuinely bare, so a client had no way to say which
+// conversation it meant. It is untrusted network input used for exactly one
+// thing — an in-memory membership lookup through the handler's
+// KnownConversation seam — and never reaches a log line, an error string, a
+// filesystem path, or the reply.
+//
+// NO omitempty, matching RequestSnapshotPayload and deliberately UNLIKE the
+// sibling SetSessionSettingsPayload above, whose per-field pointers encode a
+// presence contract. There is no presence contract here: absent and empty are
+// the SAME case — "no conversation named" — which the daemon answers exactly as
+// it always has, so nothing needs to tell them apart. Keeping the field always
+// on the wire lets a fixture pin the full shape.
+//
+// Scope: naming a conversation the daemon does not host is answered with a
+// zero-valued SessionSettingsPayload, never an error frame. Naming one it does
+// host — or naming none — reports the BOOTSTRAP session's values, the same
+// values the verb has always reported: this field gates WHETHER the answer is
+// populated, not WHICH session it describes. Making the values follow the named
+// conversation is #1587, the deferred follow-up noted on SessionSettingsPayload
+// below.
+type RequestSessionSettingsPayload struct {
+	ConversationID string `json:"conversation_id"`
+}
+
 // SessionSettingsPayload is the body of an Envelope whose Type ==
 // TypeSessionSettings (docs/protocol-mobile.md § Session settings). Binary →
-// phone direction; the daemon's answer to a bare request_session_settings.
+// phone direction; the daemon's answer to a request_session_settings.
 //
 // It is the READ half the #844 cluster never had. A client needs two things to
 // drive the run-configuration UI: the current values, and the SessionID to
@@ -89,9 +124,12 @@ type SessionSettingsUpdatedPayload struct {
 // Scope: the values are the BOOTSTRAP session's, not the requesting
 // conversation's, per #848's explicit "do not pre-carve a conversation-keyed
 // settings seam". SessionID reports that same bootstrap session, so a client
-// reads and writes the same place. Keying the whole set by conversation is a
-// deferred follow-up; when it lands, both the values and SessionID move together
-// or the read and the write would address different sessions.
+// reads and writes the same place. The request now names a conversation
+// (RequestSessionSettingsPayload above, #1586), but that name currently gates
+// only whether this payload is populated or all-zero — it does not yet choose
+// which session is described. Keying the whole set by conversation is #1587;
+// when it lands, both the values and SessionID move together or the read and the
+// write would address different sessions.
 type SessionSettingsPayload struct {
 	SessionID    string `json:"session_id"`
 	Model        string `json:"model"`

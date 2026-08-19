@@ -102,6 +102,63 @@ func TestSessionSettingsUpdatedPayload_RoundTrip(t *testing.T) {
 	roundTripEnvelope(t, env, payload, raw)
 }
 
+// TestRequestSessionSettingsPayload_RoundTrip pins the READ request's shape:
+// it carries the conversation_id the client is asking about (#1586), and
+// round-trips byte-for-byte. It does NOT pin the no-omitempty decision, despite
+// being byte-equal: this fixture's id is non-empty, so the key survives omission
+// and this test stays green with the tag added (measured under go test
+// -overlay). TestRequestSessionSettingsPayload_EmptyConversationID below is the
+// sole pin — do not prune it as redundant with this one.
+func TestRequestSessionSettingsPayload_RoundTrip(t *testing.T) {
+	t.Parallel()
+	raw := readFixture(t, "request_session_settings.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRequestSessionSettings {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRequestSessionSettings)
+	}
+
+	var payload RequestSessionSettingsPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestRequestSessionSettingsPayload_EmptyConversationID pins the empty-id
+// boundary and is the SOLE pin on the no-omitempty decision: with no omitempty
+// the key stays explicitly on the wire and round-trips back to the empty string,
+// and adding the tag reddens this test and only this test (measured under go
+// test -overlay; the byte-equal round trip above stays green because its fixture
+// id is non-empty). Empty and absent are the same case here
+// — "no conversation named", which the daemon answers exactly as it always has
+// — so this pins the shape, not a presence contract. Mirrors
+// TestSnapshotPayloads_EmptyConversationID.
+func TestRequestSessionSettingsPayload_EmptyConversationID(t *testing.T) {
+	t.Parallel()
+	out, err := json.Marshal(RequestSessionSettingsPayload{ConversationID: ""})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(out), `"conversation_id":""`) {
+		t.Errorf("empty conversation_id should stay on the wire; got %s", out)
+	}
+	var back RequestSessionSettingsPayload
+	if err := json.Unmarshal(out, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.ConversationID != "" {
+		t.Errorf("ConversationID round-trip: got %q, want empty", back.ConversationID)
+	}
+}
+
 // TestSessionSettingsPayload_RoundTrip pins the READ reply's shape: it carries
 // the addressing id plus all four reported values plus the two usage integers,
 // and round-trips byte-for-byte. This is the payload that replaces the

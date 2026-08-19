@@ -273,9 +273,15 @@ type V2SessionConfig struct {
 
 	// KnownConversation reports whether conversationID names a conversation
 	// this daemon hosts. request_snapshot rejects an unknown/foreign id with
-	// conversation.not_found before any render (AC #4). Optional: when nil,
-	// every request_snapshot is rejected as not-found. Production wires it to
-	// a conversations.Registry membership check.
+	// conversation.not_found before any render (AC #4).
+	// request_session_settings consults it too (#1586), but degrades rather than
+	// erroring: an unresolvable id yields the zero-valued reply the wire contract
+	// already defines as a real answer. Optional: when nil, every
+	// request_snapshot is rejected as not-found and every request_session_settings
+	// that NAMES a conversation degrades — one that names none is unaffected,
+	// because it never reaches this seam. Production wires it to a
+	// conversations.Registry membership check, which takes that registry's mutex
+	// and linear-scans its slice; it is not a map lookup.
 	KnownConversation func(conversationID string) bool
 
 	// SnapshotSettings reports the current model / effort / YOLO for the session

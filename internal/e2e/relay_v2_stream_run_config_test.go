@@ -43,10 +43,12 @@ import (
 //     so this is the genuine fresh-session report, and it proves the reader
 //     resolved and degraded rather than never having been built.
 //
-// No conversation is seeded and no turn is driven: the request frame is bare and
-// the reply is daemon-wide, so the verb answers on a freshly started daemon. That
-// is itself part of the contract — the sheet must work on a conversation the user
-// has never sent a message in, which is exactly the case that was broken.
+// No conversation is seeded and no turn is driven: the frame this test sends
+// names no conversation and the reported values are daemon-wide either way, so
+// the verb answers on a freshly started daemon. That is itself part of the
+// contract — the sheet must work on a conversation the user has never sent a
+// message in, which is exactly the case that was broken, and it is why an absent
+// conversation_id cannot be failed closed (#1586).
 func TestRelayV2_StreamRequestSessionSettings(t *testing.T) {
 	const (
 		initialUUID = "11111111-1111-4111-8111-111111111111"
@@ -85,8 +87,11 @@ func TestRelayV2_StreamRequestSessionSettings(t *testing.T) {
 	// Interactive — the capability the read verb gates on, mirroring the write verb.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
-	// A BARE frame: no payload at all. The reply is daemon-wide, so there is no
-	// field a client could use to select another session's data.
+	// A BARE frame: no payload at all. The frame carries an optional
+	// conversation_id since #1586, and this test deliberately sends none —
+	// exercising the absent-field path, which is the fresh-daemon case where no
+	// conversation id exists to send. That path is answered exactly as it always
+	// was, which is what keeps un-updated clients working.
 	reqEnv, err := json.Marshal(protocol.Envelope{
 		ID:   reqID,
 		Type: protocol.TypeRequestSessionSettings,

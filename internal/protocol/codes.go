@@ -604,13 +604,24 @@ const (
 // seams, so it answers on BOTH runners. screen_snapshot is deliberately left
 // untouched: its side-loaded copies stay for the shipped mobile client.
 //
-// The request frame is BARE (no payload), exactly like TypeRequestDebugBundle
-// and for the same reason: the reported values are daemon-wide (the bootstrap
-// session's, per #848's "do not pre-carve a conversation-keyed settings seam"),
-// so there is no attacker-controlled field — no conversation_id, no id — that
-// could select another session's data. Should the values later become
-// conversation-scoped, the request gains a conversation_id then and the gate
-// comes with it.
+// The request frame carries a RequestSessionSettingsPayload naming the
+// conversation the client is asking about (#1586). It WAS bare until then —
+// like TypeRequestDebugBundle, which stays bare because its bundle is
+// daemon-global and has no per-session key to name — but this reply is what
+// hands a client the session_id every subsequent set_session_settings must
+// address, so a client needed a way to say which conversation it meant.
+// conversation_id is untrusted network input used for exactly one thing: a
+// membership lookup into the in-memory conversations registry, through
+// handleRequestSessionSettings' KnownConversation seam. It reaches no log line,
+// no error string, no filesystem path, and not the reply.
+//
+// It gates WHETHER the answer is populated, NOT which session it describes: the
+// reported values are still the bootstrap session's (per #848's "do not
+// pre-carve a conversation-keyed settings seam"), a conversation the daemon does
+// not host is answered with a zero-valued session_settings rather than an error,
+// and an absent or empty id is answered exactly as the verb always has. #1587
+// makes the values follow the named conversation, at which point the reported id
+// and the reported values move in one step.
 //
 // Two natures in one cluster, mirroring #844. request_session_settings is an
 // inbound phone → binary *control* envelope the v2 session manager intercepts at
@@ -625,7 +636,7 @@ const (
 // detector in internal/protocol/compat_test.go partitions Type* constants
 // between inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
 const (
-	TypeRequestSessionSettings = "request_session_settings" // phone → binary, inbound v2 control, bare frame (intercepted pre-dispatch.Route)
+	TypeRequestSessionSettings = "request_session_settings" // phone → binary, inbound v2 control carrying RequestSessionSettingsPayload (intercepted pre-dispatch.Route)
 	TypeSessionSettings        = "session_settings"         // binary → phone, outbound v2 reply carrying the current run configuration
 )
 
