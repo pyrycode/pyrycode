@@ -18,7 +18,12 @@ type Device struct {
 
     // #702 — authorizes THIS device to ANSWER a remote permission modal.
     AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
+
+    // #1527 — deadline for an UNREDEEMED pairing record; inert until #1529.
+    RedeemBy time.Time `json:"redeem_by,omitzero"`
 }
+
+const RedemptionWindow = 15 * time.Minute // #1527 — mint-time RedeemBy offset
 
 func HashToken(plain string) string
 func VerifyToken(plain, hash string) bool
@@ -32,6 +37,8 @@ type RemotePermissionOutcome int // OutcomeNoAnswer (zero) | OutcomeAllow | Outc
 The crypto primitives (`HashToken` / `VerifyToken`) export no errors, no sentinels — `VerifyToken` returns bool by design. Auth-decision-as-error is the caller's concern, not the crypto primitive's.
 
 JSON tags use snake_case. The four identity / lifecycle fields have no `omitempty` — required fields round-trip at their zero value. The optional fields (`Platform`, `PushToken`, added by #282; `AllowRemotePermissions`, added by #702) DO carry `omitempty` so a pre-existing `devices.json` round-trips through load → save without sprouting `"platform": ""` / `"push_token": ""` / `"allow_remote_permissions": false` entries; zero-migration change. Mirrors the `registryEntry` pattern in `internal/sessions/registry.go:17-29`, so the sibling registry CRUD marshals `Device` with stdlib `encoding/json` unchanged.
+
+`RedeemBy` (#1527) is a `time.Time`, so its optional-field tag is `omitzero`, not `omitempty` — `encoding/json`'s `omitempty` only omits empty scalars/maps/slices, never a struct, so it would be a silent no-op on a timestamp and would start writing `"redeem_by":"0001-01-01T00:00:00Z"` into every legacy record on the next `Save`. `omitzero` (Go 1.26.2+) consults `time.Time.IsZero` and keeps the zero off disk, doing for a struct field what `omitempty` does for the three fields above. See [`codebase/1527.md`](../codebase/1527.md) for the full design and why the field is named `RedeemBy` rather than `ExpiresAt`.
 
 `Platform`'s doc comment mirrors `protocol.RegisterPushTokenPayload.Platform` verbatim (`"fcm"` Android, `"apns"` iOS) so the on-disk and wire contracts stay aligned. `PushToken` is the opaque platform-supplied wake token; written by the future `register_push_token` handler (#250), never marshalled across the wire (the wire form is `protocol.RegisterPushTokenPayload` from #275).
 
@@ -140,6 +147,7 @@ No fuzz target — the input space is fully covered by the table. No `-race` tes
 - **Auth wiring.** Phase 3: the WS-handshake auth predicate `(*Registry).Validate(plain) (Device, bool)` is delivered by #210 — see [`features/devices-registry.md`](devices-registry.md). The WS handler that calls it (returning `auth.invalid_token` per `protocol-mobile.md:97-98` on a miss, advancing `LastSeenAt` durability via scheduled `Save` on a hit) is a follow-up Phase-3 ticket. `VerifyToken` is intentionally NOT used by `Validate` — see the registry doc and #210's "Why not iterate `VerifyToken` over all devices?" for the reasoning.
 - **`pyry pair revoke <name>`.** Per-device revocation falls out of removing the row; structurally supported (each row is independent).
 - **`Device.TokenHashPrefix() string` for `pair list` UI.** The display rule lives in `protocol-mobile.md:663`; defer to whichever ticket builds the UI.
+- **Redemption-deadline enforcement.** #1527 adds `RedeemBy` and stamps it at mint; nothing reads it. #1528 records the first redemption on disk; #1529 rejects an unredeemed record past its deadline at `Validate` and the v2 handshake. See [`codebase/1527.md`](../codebase/1527.md).
 
 ## Related
 
