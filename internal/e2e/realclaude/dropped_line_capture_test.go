@@ -1508,7 +1508,12 @@ func TestDropcapClassification(t *testing.T) {
 		{
 			name: "system/init", line: `{"type":"system","subtype":"init","session_id":"s"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
-			why: "system/init's subtype is not one streamsup.emitSystemSubtype maps, so the line is dropped — NOT because `system` is ignored wholesale, which it no longer is (#1380/#1381)",
+			why: "CORRECTED (#1600): the subtype IS one streamsup.emitSystemSubtype maps now — it " +
+				"becomes a turnevent.ModelAnnounced. The verdict is unchanged and is derived rather " +
+				"than declared: THIS line carries no `model`, which is emitModelAnnounced's empty " +
+				"gate, so the shipped parser emits nothing for it and dropcapClassify's default arm " +
+				"still reads it as a drop. Adding a model to this fixture flips it, which is what " +
+				"makes the row a pin on the gate rather than on the subtype",
 		},
 		{
 			name: "system/thinking_tokens", line: `{"type":"system","subtype":"thinking_tokens"}`,

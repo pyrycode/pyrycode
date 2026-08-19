@@ -449,6 +449,80 @@ type RateLimited struct {
 	TruncatedFields []string
 }
 
+// ModelAnnounced reports the model claude says it is running. It maps claude's
+// system/init line (#1600) — the sixth claude line the parser translates rather
+// than drops, and the fourth `system` subtype.
+//
+// It exists because it is the only thing that answers WHAT IS RUNNING. The daemon
+// already carries a model on protocol.ScreenSnapshotPayload and
+// protocol.SessionSettingsPayload, but both mean the PER-SESSION OVERRIDE — ""
+// there means "inherited default, no per-session override" — so in the ordinary
+// case the daemon publishes an empty string while claude has named a concrete
+// model on every turn. The daemon knows what it ASKED FOR; only claude knows what
+// it GOT.
+//
+// PER LINE, NOT PER SESSION, and that is the consumer hazard worth stating first.
+// claude emits init once per TURN, so one session produces several of these and
+// they need not agree: #1582 measured three in one session —
+// [claude-sonnet-5, claude-sonnet-5, claude-haiku-4-5-20251001] — because the
+// /model turn emits its OWN init and THAT one still reports the OLD model. A
+// consumer that latches the first announcement shows a stale value; one that
+// renders the latest has no problem to solve. The producer does not dedup: that
+// would need turn state the parser deliberately does not hold. Documented here
+// rather than mechanised, in the manner of ThinkingProgress's accumulator-residue
+// hazard.
+//
+// It opens and closes no turn, exactly as the background-task variants do not: a
+// per-turn announcement is not a turn boundary.
+//
+// The captured init line carries 22 keys and this variant carries the substance of
+// ONE. Two of the omissions are why that matters: cwd is the operator's local
+// filesystem path, and session_id is claude's session identity, NOT the daemon's
+// conversation identity (#1380). Neither is even declared on the producer's decode
+// target (streamsup's systemInitLine) — absent from the DECODE TARGET is a
+// stronger guarantee than a reflection sweep, because a field that is never
+// declared cannot leak.
+//
+// The string field is claude-derived and bounded by the producer AT CONSTRUCTION
+// (streamsup's maxModelField), following Unrecognized's precedent, so an oversized
+// value never enters the event stream, a queue, or a log. Like every variant here
+// it carries no conversation identity — the bridge injects that.
+type ModelAnnounced struct {
+	// Model is claude's announced identifier, VERBATIM: no lowercasing, no alias
+	// expansion, no date-stamping, no family mapping, and no lookup against any
+	// published model list. Never empty — the producer's gate does not emit on an
+	// empty model.
+	//
+	// What claude announces is MEASURED, and the measurement is weaker than the
+	// obvious guess. The rule the data supports is that claude echoes an identifier
+	// AT LEAST AS SPECIFIC as the one it was given: it dates a bare family alias
+	// (`haiku` → claude-haiku-4-5-20251001, the committed capture) and passes
+	// through anything already fully formed (claude-haiku-4-5 in the
+	// permission_protocol captures; claude-sonnet-5 for a machine default, #1582's
+	// recorded run). So the value is NOT reliably dated, and it need not appear in
+	// any published model list — claude-haiku-4-5 does not. That is an argument for
+	// carrying the value untouched, not for repairing it here.
+	//
+	// BOUNDED AND UTF-8-VALID IS ALL IT IS. streamsup's truncateField scrubs
+	// invalid UTF-8 (its cut can land mid-rune), but nothing on this path strips
+	// control characters or terminal escape sequences, and the value's provenance is
+	// only partly validated: a phone-supplied override passes internal/relay's
+	// validModel charset check, but a --model flag or a config default never does.
+	// No consumer renders it today — turnbridge.MapEvent's default drops the variant
+	// — so the client-facing slice owes the sanitization at its own render boundary.
+	// Said here because that is where a future consumer reads.
+	Model string
+	// Truncated reports whether Model was cut to fit the producer's cap.
+	//
+	// A bool rather than the siblings' TruncatedFields []string, following
+	// Unrecognized: the payload is a single string, so a named-field list would be
+	// permanently either nil or ["model"] — a variable-length container carrying one
+	// bit, plus a name the reader has to check against the only field there is. The
+	// siblings use the slice because they bound TWO TO FOUR fields and the report
+	// has to say which.
+	Truncated bool
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -555,6 +629,7 @@ func (BackgroundTaskUpdated) isTurnEvent() {}
 func (BackgroundTaskRoster) isTurnEvent()  {}
 func (ThinkingProgress) isTurnEvent()      {}
 func (RateLimited) isTurnEvent()           {}
+func (ModelAnnounced) isTurnEvent()        {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
@@ -571,6 +646,7 @@ var (
 	_ Event = BackgroundTaskRoster{}
 	_ Event = ThinkingProgress{}
 	_ Event = RateLimited{}
+	_ Event = ModelAnnounced{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}

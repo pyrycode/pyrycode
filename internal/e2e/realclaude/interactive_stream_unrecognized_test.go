@@ -8,8 +8,10 @@ package realclaude
 // The stream parser splits claude's output two ways. What we knowingly ignore
 // stays silent: every `system` subtype the parser does not map — which since
 // #1380/#1381 is every subtype but the handful streamsup.emitSystemSubtype carves
-// out into background-task events (that switch is the one enumeration site;
-// restating the set here would only go stale).
+// out (that switch is the one enumeration site; restating the set here would only
+// go stale, and the "into background-task events" characterisation this sentence
+// used to carry went stale twice over — #1385's thinking_tokens and #1600's init
+// are neither).
 //
 // CORRECTED 2026-08-09 (#1404): rate_limit_event is no longer part of that
 // knowingly-ignored half. It is MAPPED, from its own arm in

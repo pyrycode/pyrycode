@@ -294,6 +294,49 @@ const (
 	rateLimitDropNoInfo      = "no_rate_limit_info"
 )
 
+// maxModelField caps turnevent.ModelAnnounced's Model — claude's announced model
+// identifier, off the system/init line. Applied at CONSTRUCTION, exactly as the
+// caps above are, so an oversized value never enters the event stream, the push
+// queue, or any log.
+//
+// MEASURED, not chosen. Three observations across two claude versions and three
+// spawn shapes: claude-haiku-4-5-20251001 (25 bytes, the committed capture, where
+// claude DATED the bare `haiku` alias it was spawned with),
+// claude-haiku-4-5 (16 bytes, the permission_protocol_* captures, echoed
+// unchanged), claude-sonnet-5 (15 bytes, #1582's recorded run, the machine default
+// echoed unchanged). 256 is roughly 10x the observed maximum — near maxTaskFieldID's
+// 9x over its 29-byte observation, and for the same reason: room for a naming
+// scheme claude has not shipped yet, and still a hard cut on anything that has
+// stopped being an identifier.
+//
+// A separate constant even though it currently equals maxTaskFieldID and
+// maxRateLimitField: maxRateLimitField's paragraph applies verbatim — they bound
+// different fields for different reasons, and folding them into one would make a
+// future change to the task-id budget silently move this one.
+//
+// Deliberately NOT validModel's 64 (internal/relay/v2session_settings.go), and the
+// distinction is the point rather than an oversight. That validator bounds a
+// phone-supplied OVERRIDE the daemon accepts, and it enforces a charset besides.
+// This cap bounds what claude ANNOUNCES, which the daemon neither controls nor may
+// reject: unifying them would make a claude that echoes a longer identifier look
+// like a malformed client request.
+//
+// The envelope arithmetic, in maxUnrecognizedRaw's style: worst case one
+// ModelAnnounced carries 256 bytes of claude-derived text, 0.4% of the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap) — half RateLimited's 0.8% and the smallest
+// contribution in the family. Escaping is mild for maxUnrecognizedRaw's reason.
+// Amplification from input to retained bytes is near zero: systemInitLine holds one
+// scalar and no array, so a 4 MiB line (defaultMaxParseBuf) yields at most 256
+// retained bytes plus one bool.
+//
+// No RATE bound, and none is owed: init fires once per TURN, below the ~1-2 per
+// turn minThinkingTokensPerEvent's gate already accepts for ThinkingProgress. The
+// event is not a droppable delta (the droppable set is assistant_delta only, #610),
+// so it holds a queue slot under the same existing backpressure the five sibling
+// variants do. Revisit on an OBSERVED rate, as #1385 did.
+const maxModelField = 256
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -661,6 +704,34 @@ type rateLimitInfo struct {
 	ResetsAt  int64  `json:"resetsAt"`
 }
 
+// systemInitLine is the decoded payload of one system/init line. Kept separate
+// from streamLine for systemTaskStartedLine's reason, and separate from every
+// other subtype target because it shares no key with any of them.
+//
+// ONE FIELD, and the OMISSIONS are the point. The captured line carries 22 keys —
+// type, subtype, cwd, session_id, tools, mcp_servers, model, permissionMode,
+// slash_commands, apiKeySource, claude_code_version, output_style, agents, skills,
+// plugins, capabilities, analytics_disabled, product_feedback_disabled, uuid,
+// memory_paths, fast_mode_state, fast_mode_disabled_reason — and twenty-one are
+// deliberately absent from this target. Two of them are why that matters: cwd is
+// the operator's local filesystem path, and session_id is claude's session identity
+// and NOT the daemon's conversation identity (#1380). See turnevent.ModelAnnounced's
+// doc. Absent from the DECODE TARGET is a stronger guarantee than the test's
+// reflection sweep, because a field that is never declared cannot leak.
+//
+// A plain string, which is why truncateField's json.RawMessage exception does not
+// reach this shape: encoding/json has already U+FFFD-replaced invalid input on
+// decode, so our own cut is the only mid-rune hazard.
+//
+// A non-string model fails the whole decode and takes emitModelAnnounced's
+// undecodable arm, exactly as systemTaskUpdatedLine.TaskID does for a numeric task
+// id — and that is the ONLY reachable undecodable case here, which is what tells a
+// test how to build the fixture: consumeLine has already decoded this line into
+// streamLine, so malformed JSON never reaches this function at all.
+type systemInitLine struct {
+	Model string `json:"model"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -803,26 +874,31 @@ func (p *Parser) consumeLine(line []byte) {
 			if sl.Type == "system" && p.emitSystemSubtype(sl.Subtype, line) {
 				return
 			}
-			// system (init / status / any subtype emitSystemSubtype does not map):
-			// tolerated and dropped, silently. CORRECTED 2026-08-07 (#1380) — it is no
-			// longer "exactly as before": the subtypes emitSystemSubtype maps become
-			// events above.
+			// system (status / any subtype emitSystemSubtype does not map): tolerated
+			// and dropped, silently. CORRECTED 2026-08-07 (#1380) — it is no longer
+			// "exactly as before": the subtypes emitSystemSubtype maps become events
+			// above.
 			//
 			// CORRECTED 2026-08-09 (#1385): thinking_tokens is no longer among the
 			// examples here — it is MAPPED now (→ turnevent.ThinkingProgress), so
 			// naming it as dropped became false the moment that arm landed. The list
 			// above is illustrative and the authority is emitSystemSubtype's case
-			// arms; init and status are named because both are measured and neither is
-			// mapped.
+			// arms.
+			//
+			// CORRECTED 2026-08-19 (#1600): init has left the examples for the same
+			// reason — it maps to turnevent.ModelAnnounced now, so a model-carrying init
+			// no longer reaches this Debug at all and a model-less one is consumed
+			// silently by that arm. status is the one measured-and-dropped subtype left
+			// standing.
 			//
 			// system/init is a per-turn marker (spike § 1), not a session-open event,
-			// and dropping it is still correct — but not for the reason this comment
-			// used to give. The parser is no longer wholly turn-stateless: it holds one
-			// accumulator (#1385), whose boundary is the `result` arm above, NOT init.
-			// Resetting on init as well would give one piece of state two boundaries to
-			// keep agreeing, which is the cost having a single boundary avoids. See
-			// ignoredLineTypes for the full statement and the measurement behind the
-			// list.
+			// and it is still NOT the accumulator's boundary. The parser is no longer
+			// wholly turn-stateless: it holds one accumulator (#1385), whose boundary is
+			// the `result` arm above. Resetting on init as well would give one piece of
+			// state two boundaries to keep agreeing, which is the cost having a single
+			// boundary avoids — and mapping the line changed what is SENT, not where
+			// that boundary is. See ignoredLineTypes for the full statement and the
+			// measurement behind the list.
 			p.log.Debug("streamsup: dropping stdout line", "type", sl.Type)
 			return
 		}
@@ -857,6 +933,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitBackgroundTaskRoster(line)
 	case "thinking_tokens":
 		return p.emitThinkingProgress(line)
+	case "init":
+		return p.emitModelAnnounced(line)
 	default:
 		return false
 	}
@@ -1301,6 +1379,86 @@ func (p *Parser) emitRateLimit(line []byte) {
 		// nil when nothing was cut: append never ran.
 		TruncatedFields: cut,
 	})
+}
+
+// emitModelAnnounced decodes a system/init line and emits AT MOST ONE
+// turnevent.ModelAnnounced, reporting that it CONSUMED the line either way. Field
+// mapping comes from the committed capture
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), never from a
+// hand-built payload.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
+// streamLine's doc states the property it preserves: control shapes are read from
+// the top level only and nested content is never re-scanned, which is what stops a
+// tool result whose text is literally `{"type":"result"}` from forging a turn
+// boundary. Decoding this payload from anywhere else would let claude's own tool
+// output announce a model the daemon never ran.
+//
+// AN EMPTY model SUPPRESSES the event, and that DIVERGES from the task handlers,
+// which treat a missing field as claude's choice and emit with the field empty.
+// Here the model IS the whole payload: an event carrying an empty one would assert
+// "claude announced a model" while naming none, which is a claim the line did not
+// make. emitRateLimit's `case ""` rung is the precedent, and its formulation
+// carries over — absence, a present-but-empty value, and a line carrying no such
+// key all land here and are answered identically, which is what makes a plain
+// string decode target sufficient.
+//
+// THAT DROP IS SILENT, unlike emitRateLimit's rungs, which each log a
+// daemon-authored reason keyword. emitRateLimit fires once per RUN and has three
+// distinguishable rungs; init fires once per TURN and has one non-undecodable drop
+// reason, so a Debug there would put a record in the daemon log on every turn —
+// reinstating in the log the per-turn noise row
+// TestParser_IgnoredLineTypesStaySilent's doc exists to prevent in the event
+// stream. emitThinkingProgress's `delta <= 0` arm is the precedent: consumed,
+// silent, no log. The observable consequence is worth naming rather than
+// discovering: before this arm every init produced one "streamsup: dropping stdout
+// line" record per turn from the branch above, and after it a model-carrying init
+// produces no record at all and a model-less one produces none either. That is one
+// FEWER Debug per turn.
+//
+// Nothing is surfaced as an Unrecognized on any path, because keeping `system`
+// whole on ignoredLineTypes is what makes "no system line reaches the unrecognized
+// lane" structural, and that guarantee is worth more than surfacing a malformed
+// line of a subtype we already know.
+func (p *Parser) emitModelAnnounced(line []byte) bool {
+	var il systemInitLine
+	if err := json.Unmarshal(line, &il); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content, and the message is byte-identical to the task siblings' arms.
+		//
+		// The err is deliberately NOT logged, and this is the sharpest instance of
+		// that rule in the package: encoding/json QUOTES the offending input bytes
+		// into its error text, so `"err", err` on a line whose model is long or
+		// revealing would put that value in the daemon log through a channel no
+		// per-path attribute check can see. It is precisely the value #833's posture
+		// — restated across internal/relay's v2session_settings.go and
+		// internal/sessions' pool.go as "model / effort / YOLO values are NEVER logged
+		// at any level" — exists to keep out. The house idiom points the other way
+		// (CLAUDE.md: wrap errors with context), which is why it is stated here rather
+		// than assumed; cmd/pyry's emit marshal-error path says it outright, and both
+		// task siblings' arms already follow it.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "init")
+		return true
+	}
+	// Absent, present-but-empty, and a line carrying no such key all land here and
+	// are answered identically.
+	if il.Model == "" {
+		return true
+	}
+	// No `bound` closure and no sequential-statements rule: one field means there is
+	// no TruncatedFields ORDER for a composite literal to decide, which is the only
+	// thing that rule protects.
+	model, truncated := truncateField(il.Model, maxModelField)
+	p.emit(turnevent.ModelAnnounced{
+		// claude's value VERBATIM: no lowercasing, no alias expansion, no
+		// date-stamping, no family mapping, no lookup against any published model
+		// list. The cap is the only judgement made about it here — see the field's
+		// doc for why repairing it would be inventing rather than reporting.
+		Model:     model,
+		Truncated: truncated,
+	})
+	return true
 }
 
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors

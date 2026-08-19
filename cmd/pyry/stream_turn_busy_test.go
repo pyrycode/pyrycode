@@ -559,6 +559,14 @@ func turnMarkName(m turnMark) string {
 // ThinkingProgress pin the same property for #1380 / #1382 / #1385: a task or a
 // thinking reading is orthogonal to turn lifecycle, so neither may move the mark.
 //
+// ModelAnnounced (#1600) discharges the same note a SECOND time, and its row is
+// the totality half doing its job rather than a policy question: the production
+// switch again needed no change, and the row exists because this test — not the
+// switch — is where a new variant is required to declare itself. turnMarkNone is
+// correct for the whitelist's own reason: claude announcing which model it is
+// running says nothing about whether a turn is open, and it arrives once per turn
+// in every conversation, so opening a mark on it would wedge every one of them.
+//
 // PermissionRequest is the row the marker-derived guard ADDED: it is a variant
 // this fan-in cannot currently see at all, produced only on the PTY modal path
 // (modalbridge's `PermissionRequestForClass`) and never by streamsup.Parser. Its
@@ -583,6 +591,7 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		{turnevent.BackgroundTaskRoster{}, turnMarkNone},
 		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkNone},
 		{turnevent.RateLimited{Status: "allowed", LimitType: "five_hour"}, turnMarkNone},
+		{turnevent.ModelAnnounced{Model: "claude-haiku-4-5-20251001"}, turnMarkNone},
 		{turnevent.Stall{}, turnMarkNone},
 		{turnevent.ApiRetry{Active: true, Current: 1, Total: 3}, turnMarkNone},
 		{turnevent.Compacting{Active: true}, turnMarkNone},
