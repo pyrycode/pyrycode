@@ -368,8 +368,8 @@ func drainForResumedTurnText(t *testing.T, phone *fakephone.Client, cs *noise.Ci
 // bootstrapUUID and stays stable across --resume (buildArgs never forks), so
 // s.currentID() — the WARN's session_id — is exactly bootstrapUUID; pinning the
 // value proves it was OUR session that evicted. Mirrors the #396 reference's
-// substring poll (respawn_after_eviction_test.go); containsAll lives in package
-// e2e (disjoint build tag), so the all-substrings check is inlined here.
+// substring poll; containsAll lives in package e2e (disjoint build tag), so the
+// all-substrings check is inlined here.
 func waitForIdleEvictionWARN(t *testing.T, d *bootstrapDaemon, bootstrapUUID string, timeout time.Duration) {
 	t.Helper()
 	want := []string{
