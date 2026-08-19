@@ -78,6 +78,10 @@ func watchdogTickFor(idle time.Duration) time.Duration {
 //     `result` line (the run is done).
 //   - sawResult:  true once claude emitted its own `result` trailer, so Run
 //     won't synthesise a duplicate.
+//   - lineOpen:   true when the last byte forwarded to dst was not a newline,
+//     i.e. an unterminated partial line is already on stdout. A property of
+//     the passthrough, not of the parse — deliberately independent of buf,
+//     which feed drops past maxBuf after those bytes have been forwarded.
 type streamParser struct {
 	dst    io.Writer
 	now    func() time.Time
@@ -88,6 +92,7 @@ type streamParser struct {
 	lastEvent time.Time
 	awaiting  bool
 	sawResult bool
+	lineOpen  bool
 }
 
 // newStreamParser returns a parser wrapping dst. now is a clock seam for
@@ -124,6 +129,13 @@ func (p *streamParser) Write(b []byte) (int, error) {
 func (p *streamParser) feed(b []byte) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Derived from the bytes that actually reached dst (Write passes b[:n]), so
+	// it stays correct across a short write and across the maxBuf drop below.
+	// An empty feed leaves the flag unchanged rather than clearing it.
+	if len(b) > 0 {
+		p.lineOpen = b[len(b)-1] != '\n'
+	}
 
 	p.buf = append(p.buf, b...)
 	rest := p.buf
@@ -187,6 +199,14 @@ func (p *streamParser) hasSeenResult() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.sawResult
+}
+
+// hasOpenLine reports whether the last byte forwarded to stdout was not a
+// newline — i.e. an unterminated partial line is already on stdout.
+func (p *streamParser) hasOpenLine() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lineOpen
 }
 
 // watchdog owns the idle-stall poll goroutine.
@@ -264,7 +284,14 @@ type idleStallUsage struct {
 // `subtype`/`terminal_reason`/`is_error` triple is distinct and retryable: the
 // dispatcher classifies `idle_stall` as a transient runner-side error and
 // auto-retries (vs `max_turns`/`timeout`, which it deliberately never retries).
-func writeIdleStallResult(w io.Writer, idle time.Duration, runStart time.Time) error {
+//
+// leadNewline prefixes the trailer with a newline so it starts a line of its
+// own when claude's stream ended mid-line — spliced onto a forwarded partial
+// the trailer parses as nothing and the retry signal is lost. It is suppressed
+// otherwise so a newline-terminated stream gains no blank line. The decision
+// rides here rather than in the caller so no separator can escape onto the
+// path where no trailer is written at all.
+func writeIdleStallResult(w io.Writer, idle time.Duration, runStart time.Time, leadNewline bool) error {
 	secs := int(idle.Seconds())
 	tr := idleStallResult{
 		Type:           "result",
@@ -282,6 +309,9 @@ func writeIdleStallResult(w io.Writer, idle time.Duration, runStart time.Time) e
 	buf, err := json.Marshal(&tr)
 	if err != nil {
 		return err
+	}
+	if leadNewline {
+		buf = append([]byte{'\n'}, buf...)
 	}
 	buf = append(buf, '\n')
 	_, err = w.Write(buf)
