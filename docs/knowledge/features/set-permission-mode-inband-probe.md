@@ -88,7 +88,12 @@ mid-session.
 2. YOLO **false → true** cannot. It must keep the `sup.Restart(newArgs)` path.
 3. Splitting `inBandDeliverable` on the *direction* of the change is supported here;
    routing both directions in-band is not.
-4. No production writer for the subtype exists yet — #1595 deliberately added none.
+4. **Superseded by #1603:** the production writer now exists —
+   `(*Runner).RevokeBypass`/`WriteBypassRevocation`/`marshalBypassRevocationEnvelope`
+   (`internal/streamsup`), revoke direction only, mode fixed in code rather than taken as a
+   parameter. It has no production *caller* yet — that is #1604's scope. See
+   [`codebase/1603.md`](../codebase/1603.md) and
+   [`streamsup-package.md`](streamsup-package.md).
 
 ## How to reproduce
 

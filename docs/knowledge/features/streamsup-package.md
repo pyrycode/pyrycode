@@ -378,8 +378,9 @@ turn with a `result` whose `subtype` is `error_during_execution`, which the rece
 to `TurnEndReasonCancelled` — spike T1, #1075, verified live 2026-07-19). `WriteInterrupt(w io.Writer,
 requestID string) error` (`envelope.go`) is the free-function marshal+write half, mirroring `WriteTurn`
 minus the turncommit gate — an interrupt is not a queued turn, so there is nothing to claim or drop.
-`request_id` is locally minted by a per-`Runner` `atomic.Uint64` (`nextInterruptID`, stringified,
-monotonic from 1), never caller-supplied; this ticket writes the id but never reads the
+`request_id` is locally minted by a per-`Runner` `atomic.Uint64` (`nextControlID`, stringified,
+monotonic from 1; renamed from `nextInterruptID`/`interruptSeq` by #1603 — see below), never
+caller-supplied; this ticket writes the id but never reads the
 `control_response` ack, so uniqueness-within-the-runner's-lifetime is sufficient — no `crypto/rand`/UUID
 dependency. `w == nil` (no live child) is checked first and returns `ErrNoLiveChild` with zero bytes
 written — the same safe-no-op contract `WriteTurn` holds — so `Interrupt()` can't panic or partial-write
@@ -389,6 +390,32 @@ discipline, not a new one. `Interrupt` is a **concrete method on `*Runner`, deli
 `sessions.Runner`** (kept un-widened per #1077) — mirrors how `*supervisor.Supervisor` encapsulates
 `SendEsc` (#726) off the interface; the interrupt *routing* sibling (#1121) reaches it via its own
 narrow interface or a type assertion. See [codebase/1120.md](../codebase/1120.md).
+
+**Bypass revocation send primitive (#1603).** `(*Runner).RevokeBypass() error` writes a single
+structured `control_request` line —
+`{"type":"control_request","request_id":"<id>","request":{"subtype":"set_permission_mode","mode":"default"}}`
+— onto the live child's held-open stdin, dropping a running child's bypass posture with **no
+respawn** (#1595 measured this live against claude 2.1.220: `success` ack, next `init` reporting
+`permissionMode: default`, and turn-2 behaviour matching a `default`-launched control child
+exactly). `WriteBypassRevocation(w io.Writer, requestID string) error` (`envelope.go`) is the
+free-function marshal+write half, mirroring `WriteInterrupt` field-for-field.
+`controlRequestInner` — previously carrying only `Subtype` — gained a second field, `Mode`
+(tagged `mode,omitempty`), declared **after** `Subtype` so the wire order matches the measured
+line; `omitempty` keeps every interrupt line byte-identical to before (`TestMarshalInterruptEnvelope`'s
+`want` is unmodified and is the sole detector if that tag is ever dropped). **Neither
+`WriteBypassRevocation` nor `RevokeBypass` takes a mode** — no parameter, field, or option
+anywhere on the surface selects one. This is deliberate: the opposite direction (granting bypass
+over this channel) would be a privilege escalation reachable over the daemon's own stdin, and
+claude refuses it anyway on the launch argv (#1595). Re-granting bypass stays on the
+`Restart(newArgs)` respawn path. `request_id` now comes from `nextControlID`, the renamed,
+**shared** counter (`interruptSeq` → `controlSeq`) — one sequence, not one per subtype, because
+`request_id` must be unique across all in-flight control requests on the stream, not merely within
+one subtype. `RevokeBypass` is a concrete method on `*Runner`, deliberately not on
+`sessions.Runner`, same discipline as `Interrupt`; the session-layer wiring (#1604) reaches it via
+a type assertion. No production caller exists yet — that is #1604's scope, not this ticket's. The
+`control_response` ack (no reader needed — see the event-catalog row above, #1500) is unaffected.
+See [codebase/1603.md](../codebase/1603.md) and
+[set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md).
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
