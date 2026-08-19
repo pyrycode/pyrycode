@@ -156,18 +156,18 @@ func TestRunner_Interrupt_NoLiveChild(t *testing.T) {
 	}
 }
 
-// TestRunner_NextInterruptID_Monotonic: correlation ids are locally minted (not
+// TestRunner_NextControlID_Monotonic: correlation ids are locally minted (not
 // caller-supplied) and strictly increasing within the runner's lifetime, so a
-// future ack-correlator can distinguish successive interrupts.
-func TestRunner_NextInterruptID_Monotonic(t *testing.T) {
+// future ack-correlator can distinguish successive control requests.
+func TestRunner_NextControlID_Monotonic(t *testing.T) {
 	t.Parallel()
 	r := &Runner{}
-	first, second := r.nextInterruptID(), r.nextInterruptID()
+	first, second := r.nextControlID(), r.nextControlID()
 	if first == second {
-		t.Fatalf("nextInterruptID returned the same id twice: %q", first)
+		t.Fatalf("nextControlID returned the same id twice: %q", first)
 	}
 	if first != "1" || second != "2" {
-		t.Fatalf("nextInterruptID minted %q, %q, want 1, 2 (monotonic from zero value)", first, second)
+		t.Fatalf("nextControlID minted %q, %q, want 1, 2 (monotonic from zero value)", first, second)
 	}
 }
 
@@ -223,17 +223,122 @@ func TestRunner_Interrupt_LiveChildDelivers(t *testing.T) {
 	}
 }
 
+// findEchoedLines returns every ECHO:-prefixed line's payload from the child's
+// captured stdout, in the order the child echoed them (stdin is a FIFO pipe, so
+// that is the order the runner wrote them).
+func findEchoedLines(output string) []string {
+	var echoed []string
+	for _, line := range strings.Split(output, "\n") {
+		if after, ok := strings.CutPrefix(line, "ECHO:"); ok {
+			echoed = append(echoed, after)
+		}
+	}
+	return echoed
+}
+
 // findEchoedLine returns the first ECHO:-prefixed line's payload from the child's
 // captured stdout, failing the test if none is present.
 func findEchoedLine(t *testing.T, output string) string {
 	t.Helper()
-	for _, line := range strings.Split(output, "\n") {
-		if after, ok := strings.CutPrefix(line, "ECHO:"); ok {
-			return after
-		}
+	if echoed := findEchoedLines(output); len(echoed) > 0 {
+		return echoed[0]
 	}
 	t.Fatalf("no ECHO: line in child output:\n%s", output)
 	return ""
+}
+
+// --- RevokeBypass: AC4 + the shared control sequence -------------------------
+
+// TestRunner_RevokeBypass_NoLiveChild: with no child spawned, Stdin() is nil and
+// RevokeBypass returns ErrNoLiveChild without writing and without panicking — the
+// same safe no-op refusal Interrupt gives, at the runner level (AC4).
+func TestRunner_RevokeBypass_NoLiveChild(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.RevokeBypass(); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("RevokeBypass with no live child = %v, want ErrNoLiveChild", err)
+	}
+}
+
+// TestRunner_RevokeBypass_LiveChildDelivers: on a live child RevokeBypass writes a
+// single set_permission_mode control_request line onto the held-open stdin; the
+// echo_lines fake child echoes it back as ECHO:<line>, proving the exact envelope
+// reached the child — type control_request, request.subtype set_permission_mode,
+// request.mode default, and a non-empty locally-minted request_id.
+//
+// An Interrupt follows in the same test to pin the shared-sequence invariant: both
+// control subtypes mint from one counter, so their request_ids must differ. Two
+// per-subtype counters would both start at "1" and a future ack-correlator keyed
+// on request_id could not tell the two acks apart. The interrupt echo doubles as
+// the FIFO barrier — stdin is a pipe, so once the second line comes back the first
+// already has.
+func TestRunner_RevokeBypass_LiveChildDelivers(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	if err := r.RevokeBypass(); err != nil {
+		t.Fatalf("RevokeBypass on a live child: %v", err)
+	}
+	if err := r.Interrupt(); err != nil {
+		t.Fatalf("Interrupt on a live child: %v", err)
+	}
+	waitForContains(t, out, `"subtype":"interrupt"`, 3*time.Second)
+
+	bySubtype := map[string]decodedControlRequest{}
+	for _, line := range findEchoedLines(out.String()) {
+		var cr decodedControlRequest
+		if err := json.Unmarshal([]byte(line), &cr); err != nil {
+			t.Fatalf("echoed control line did not decode: %v (%q)", err, line)
+		}
+		bySubtype[cr.Request.Subtype] = cr
+	}
+
+	revocation, ok := bySubtype["set_permission_mode"]
+	if !ok {
+		t.Fatalf("no set_permission_mode line reached the child:\n%s", out.String())
+	}
+	if revocation.Type != "control_request" {
+		t.Errorf("echoed revocation type = %q, want control_request", revocation.Type)
+	}
+	if revocation.Request.Mode != "default" {
+		t.Errorf("echoed revocation request.mode = %q, want default", revocation.Request.Mode)
+	}
+	if revocation.RequestID == "" {
+		t.Error("echoed revocation request_id is empty, want a locally-minted id")
+	}
+
+	interrupt, ok := bySubtype["interrupt"]
+	if !ok {
+		t.Fatalf("no interrupt line reached the child:\n%s", out.String())
+	}
+	if revocation.RequestID == interrupt.RequestID {
+		t.Errorf("revocation and interrupt share request_id %q; both subtypes must mint from one control sequence", revocation.RequestID)
+	}
 }
 
 // --- Live Restart: AC3 -------------------------------------------------------
