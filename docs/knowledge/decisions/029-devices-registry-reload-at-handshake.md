@@ -84,9 +84,12 @@ error and leaves memory **unchanged** (fail closed); callers proceed to
 
 - **The cross-process TOCTOU window is narrowed, not closed.** No shared lock
   spans `pyry pair` and the daemon (no file-lock mechanism — out of scope). A
-  `Save` can still race a `pyry pair` add; the *next* reload reconciles it. Same
-  last-writer-wins baseline as before #782 — no new vulnerability, materially
-  smaller window.
+  `Save` can still race a `pyry pair` add. ~~The *next* reload reconciles
+  it.~~ **Wrong — see [Correction (2026-08-19, #1530)](#correction-2026-08-19-1530) below: `Reload`
+  reconciles memory into disk, with disk authoritative for membership, so a
+  `Save` that races out a `pyry pair` write erases it from disk permanently.
+  Nothing resurrects it.** Same last-writer-wins baseline as before #782 — no
+  new vulnerability, but the window is not self-healing.
 
 - **One bounded JSON read per handshake.** On the single manager Run goroutine,
   gated on `DevicesPath != ""`, only on the post-IK path (the peer already
@@ -125,6 +128,50 @@ error and leaves memory **unchanged** (fail closed); callers proceed to
 - **A file lock (flock) shared by `pyry pair` and the daemon.** Rejected — a new
   cross-process mechanism / schema concern for a window the reconcile already
   narrows to negligible; out of scope for an S-sized fix (Simplicity First).
+  ~~Rejected.~~ **Revisited and adopted — see [Correction](#correction-2026-08-19-1530) below.**
+  The premise (the reconcile narrows the window to negligible) does not hold:
+  it narrows only the daemon's own read-then-write gap, not `pyry pair`'s much
+  wider window, and the loss it leaves open is terminal, not negligible.
+
+## Correction (2026-08-19, #1530)
+
+Two claims in this ADR were wrong, both stemming from conflating what `Reload`
+reconciles. `Reload` reconciles **memory into disk** — disk is authoritative
+for membership (see § Decision above: disk-only devices are adopted,
+memory-only devices are dropped). It does not reconcile disk *from* memory.
+
+1. **"A `Save` can still race a `pyry pair` add; the next reload reconciles
+   it"** (§ Consequences) is false. Once a daemon `Save` writes a snapshot
+   that omits a device `pyry pair` just added, that device is gone **from
+   disk**. Every subsequent `Reload` reads the file that no longer contains
+   it — reconciling memory to an already-lossy disk state reconciles nothing
+   back. The loss is silent and terminal, not self-healing.
+2. **The flock rejection's premise** — that the reconcile already narrows the
+   cross-process window to negligible — was wrong for the same reason, and
+   understated the asymmetry: the daemon's own window is narrow (the
+   microseconds between `Reload` and `Save` in `register_push_token`), but
+   nothing narrows `pyry pair`'s side, whose window spans
+   `identity.LoadOrCreate`, `keys.LoadOrCreate` (keypair mint + persist on
+   cold start), and a CSPRNG read — bounded by file I/O and key generation,
+   not microseconds. The race also costs more than a lost *add*: ordering
+   entirely within the daemon's own narrow window can lose a **revoke**
+   (`Reload` reads `[X]` → `pyry pair revoke` writes `[]` → `Save` writes
+   `[X]` back, and the daemon's in-memory set never dropped X), which is the
+   security-relevant direction.
+
+#1530 shipped the primitive this ADR rejected: `internal/devices.WithLock`, a
+sibling-file `flock(2)` critical section (`docs/knowledge/architecture` cite —
+see [`codebase/1530.md`](../codebase/1530.md)). That slice ships the
+primitive only; no caller here is rewired yet, so the race this correction
+describes stays open until the `cmd/pyry` and daemon consumer slices land and
+call `WithLock` around their existing `Load`/`Reload` → mutate → `Save`
+sequences. This ADR's core decision — reload-at-handshake to fix the
+pair-then-restart bug (#782) — is unaffected and still correct; only the
+"self-healing window" framing around it was wrong.
+
+See also the same correction applied to
+[`features/devices-registry.md`](../features/devices-registry.md) §
+*Two-writer clobber guard*.
 
 ## Related
 
