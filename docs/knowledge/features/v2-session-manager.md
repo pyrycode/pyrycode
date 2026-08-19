@@ -1456,31 +1456,63 @@ session's data.
   old recordings persist and stay readable after capture is off, and `Assemble`
   marks the recording absent when the dir is empty.
 - **`handleDebugBundleRequest(ctx, s, env)`** — the structural twin of
-  `handleRequestSnapshot`. Runs on the manager's **single Run dispatch goroutine**;
-  `StreamBundle` → `Push` enqueues under the `pushMu` leaf lock without touching
-  `s.send`, so calling it inline is safe (this is exactly the "callable from a
-  future #813 handler on the `Run` goroutine" the #812 docstring green-lit). Every
-  branch either enqueues one bundle stream or sends exactly one error reply, then
-  returns — it never panics, hangs, or silently drops:
+  `handleRequestSnapshot`, though since [#1491](../../specs/architecture/1491-assemble-debug-bundle-off-run.md)
+  it only **accepts** the request on the manager's single `Run` dispatch
+  goroutine; the seam call that used to run inline here now runs off it (below).
+  Every branch either accepts exactly one assembly or sends exactly one error
+  reply, then returns — it never panics, hangs, or silently drops:
   1. **`m.cfg.DebugBundler == nil`** → deterministic error reply (feature
      unavailable / foreground / v1 / unwired), return.
-  2. **`archive, err := m.cfg.DebugBundler()`; `err != nil`** → log the failure
-     **event only** (`v2.bundle.assemble_err`, `conn_id` — **never** the wrapped
-     err, which could quote a recording path/filename) at warn, error reply, return.
-     Honours #811's read-failure honesty: a recording that exists but fails to read
+  2. **Gate busy** (either half — see below) → the same deterministic error
+     reply, return. The seam is never invoked for a rejected retry.
+  3. **Accept** → `s.bundleAssembling = true`, then `go m.assembleBundle(ctx, s,
+     env.ID)` and return, freeing `Run` for its next select pass.
+- **`assembleBundle(ctx, s, inReplyTo)`** — the off-`Run` goroutine, one per
+  accepted request (bounded to one per conn by the gate). Calls
+  `m.cfg.DebugBundler()` — in production the uncapped `io.CopyN` read of the
+  newest recording plus the in-memory gzip that used to park `Run` for the whole
+  duration — then funnels `(archive, err)` back via a **blocking** send on
+  `m.bundleReady`, with `<-s.done` and `<-ctx.Done()` as the only escapes. The
+  send blocks rather than drops (unlike the `drainCh` idiom): a dropped result
+  would leave `s.bundleAssembling` set forever and lock the conn out of its own
+  bundle permanently — this goroutine exists to carry exactly one result, so
+  parking it costs nothing. It touches nothing `Run` owns: only
+  `m.cfg.DebugBundler` (immutable after construction, like the `m.cfg.Logger`
+  `Push` already reads off-`Run`) and `s.done` (created on `Run`, closed once by
+  `closeWith`, the same field `appFrameWorker` already reads off-`Run`) — never
+  `s.send`, `s.recv`, `s.state`, or `m.sessions`, so no cryptographic operation
+  can run concurrently with `Run`'s and reuse a nonce.
+- **`handleBundleReady(ctx, res)`** — the `Run` arm fed by `m.bundleReady`.
+  Every step that used to run inline in `handleDebugBundleRequest` runs here
+  instead, in the same place it always ran — on `Run`, where `s.send` is
+  single-owned — so moving the seam call off `Run` moved nothing else:
+  1. `defer func() { res.s.bundleAssembling = false }()` — deferred so every
+     exit path below releases the gate; a branch-local clear would be one
+     missed early-return away from the permanent lockout AC #2 forbids.
+  2. **`res.s.state != V2StateOpen`** → the conn tore down between accept and
+     result (`closeWith` ran); drop (debug log), no reply — sealing under a
+     dead session would burn a send-nonce nobody awaits. A reconnected
+     same-`conn_id` session is a *different* pointer with a false marker, so
+     there is nothing to consult in `m.sessions` here.
+  3. **`res.err != nil`** → log the failure **event only**
+     (`v2.bundle.assemble_err`, `conn_id` — **never** the wrapped err, which
+     could quote a recording path/filename) at warn, then error reply. Honours
+     #811's read-failure honesty: a recording that exists but fails to read
      surfaces as an error, not a false-absent.
-  3. **`m.StreamBundle(ctx, s.connID, archive)`** → enqueue the chunk stream. An
-     `ErrConnNotFound` (unreachable for an open `s` on the Run goroutine) is
+  4. **`m.StreamBundle(ctx, res.s.connID, res.archive)`** → enqueue the chunk
+     stream. An `ErrConnNotFound` (unreachable given the state check above) is
      debug-logged and dropped (the package's outbound-drop posture); never the
      archive.
-  4. **On success**, one content-free info log (`v2.bundle.served`, `conn_id` +
+  5. **On success**, one content-free info log (`v2.bundle.served`, `conn_id` +
      `len(archive)` — a **byte count**, never the archive or any member) — AC #4.
-- **`debugBundleReplyError(ctx, s, inReplyTo)`** — sends one `TypeError` reply via
-  the same `m.forwardEnvelope` seal-and-forward path (never `c.Send`), with a
-  **fixed** `CodeServerBinaryOffline` + `retryable: true` + the static
-  `msgDebugBundleUnavailable = "debug bundle unavailable"` message. The only failure
-  this verb reports is "unavailable", so **no** attacker-influenced or assembly-error
-  text ever reaches the wire.
+- **`debugBundleReplyError(ctx, s, inReplyTo)`** — unchanged by #1491: sends one
+  `TypeError` reply via the same `m.forwardEnvelope` seal-and-forward path
+  (never `c.Send`), with a **fixed** `CodeServerBinaryOffline` +
+  `retryable: true` + the static `msgDebugBundleUnavailable = "debug bundle
+  unavailable"` message. Reached from three call sites now (nil seam, gate busy,
+  assembly error) instead of the original two, and byte-identical from all of
+  them, so **no** attacker-influenced or assembly-error text ever reaches the
+  wire and the phone cannot distinguish "busy" from "offline"/"assemble-failed".
 
 **Per-conn in-flight gate (#911, `security-sensitive`) — bounds repeated requests
 to one bundle's chunks per conn.** A reliability review found that every bundle
@@ -1493,11 +1525,30 @@ fix is a request-time check, inserted into `handleDebugBundleRequest` **before**
 enqueue:
 
 ```go
-if m.bundleInFlight(s.connID) {
+if s.bundleAssembling || m.bundleInFlight(s.connID) {
     m.debugBundleReplyError(ctx, s, env.ID)
     return
 }
 ```
+
+**Accept-side half (`s.bundleAssembling`, #1491) — closes the window the
+queue-derived scan can't see.** Once [assembly moved off `Run`](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle),
+a gap opened between accept and `StreamBundle`'s first enqueue during which
+`bundleInFlight` reads `false` — nothing is queued yet — even though an
+assembly is already running. A second `request_debug_bundle` landing in that
+gap would pass the gate and start a concurrent full-size assembly, reopening
+exactly the unbounded per-retry growth this gate exists to prevent.
+`V2Session.bundleAssembling` is the accept-side half: set on `Run` at accept,
+cleared on `Run` via `defer` in `handleBundleReady` once `StreamBundle` has
+returned — in the **same** `Run` pass as the enqueue, so the two halves
+overlap rather than merely abut, and no other `Run` arm can interleave between
+them to observe both `false` at once. It is `Run`-owned single-writer, the
+same regime as `state`/`replayThrough` — no lock, no atomic, and `pushMu`
+gains no new acquisition site. Living on the session, not a manager-level map,
+is what makes the permanent lockout AC #2 forbids structurally impossible:
+`closeWith` deletes the session, so a reconnecting `conn_id` gets a fresh
+`V2Session` whose marker is the zero value — nothing to leak, nothing to
+forget to clear.
 
 `bundleInFlight(connID string) bool` locks `pushMu` alone, scans `m.queues[connID].items`
 for any envelope whose `Type` is `protocol.TypeDebugBundleChunk` **or**
@@ -1789,7 +1840,7 @@ The #450 timer plumbing introduces transient `time.AfterFunc`-spawned goroutines
 
 `V2Session` carries no lock. The package contract is "one goroutine per `conn_id` mutates the session"; today that goroutine is `Run` itself. flynn/noise's `CipherState` carries a mutable 64-bit nonce counter; concurrent access would be UB — the serialisation point IS the lock.
 
-As of [#965](../codebase/965.md), each open session also owns a long-lived per-conn worker goroutine (`appFrameWorker`) plus at most one short-lived `Route` goroutine at a time (spawned by `routeAppFrame`, one per application frame — [#909](../codebase/909.md)'s concurrent-drain shape, unchanged), so this is now structurally similar to [`internal/dispatch.Dispatcher`](dispatch-package.md)'s one-goroutine-per-conn model, but narrower in scope: only handler execution (`Route` → handler → `c.Send`, a marshal + channel push, no AEAD) moves off `Run`. `dispatchAppFrame`'s control-envelope arms (rekey/modal/interrupt/new_session/dequeue/snapshot/debug_bundle/settings) stay on `Run` — fast, and they touch `s.send`/session state/timers directly. An application frame is instead enqueued non-blocking onto a new per-conn `V2Session.appFrames` FIFO (capacity `appFrameQueueDepth = 16`; overflow tears the conn down at 4421 rather than block `Run`, which would reintroduce the stall), and `dispatchAppFrame` returns immediately — freeing `Run` to service every other select arm (other conns' frames, `m.wake`, `m.modalTimeout`, `m.manualRekey`) while the worker executes the handler. The worker drains `s.appFrames` in strict FIFO order — one frame fully routed (its `Route` call returned and every reply forwarded) before the next is dequeued — so no two handlers for the same conn ever run concurrently, and each reply crosses back to `Run` via a new unbuffered `V2SessionManager.appReply` channel (`chan appReplyMsg`), where `forwardAppReply` (now gated on `s.state == V2StateOpen`, dropping replies for a session torn down mid-handler) seals it under `s.send`. Every Noise cipher operation — `s.send.Encrypt`, `s.recv.Decrypt` — and every mutation of `s.state`/timers/`m.sessions`/`m.queues` keys stays exclusively on `Run`; the worker only ever touches its own conn's `s.appFrames`/`s.done` (safe unsynchronized channel ops), never `s.send`/`s.recv`/`s.state` directly, so `V2Session` still carries no lock. This closes the reply-*latency* head-of-line stall #909 explicitly deferred (#909 fixed the reply-*count* deadlock — a handler emitting more than `handlerOutboundBuf` replies — not this one). (Since #721 `send_message` is no longer the worst case for this reason alone: it now enqueues non-blocking and acks, so its `Activate`/`WriteUserTurn` blocking moved off the dispatch goroutine onto the daemon's `msgqueue` drain — see [features/msgqueue-package.md](msgqueue-package.md). `create_conversation`'s 30s `Activate` wait remains the concrete slow-handler case #965 targets.)
+As of [#965](../codebase/965.md), each open session also owns a long-lived per-conn worker goroutine (`appFrameWorker`) plus at most one short-lived `Route` goroutine at a time (spawned by `routeAppFrame`, one per application frame — [#909](../codebase/909.md)'s concurrent-drain shape, unchanged), so this is now structurally similar to [`internal/dispatch.Dispatcher`](dispatch-package.md)'s one-goroutine-per-conn model, but narrower in scope: only handler execution (`Route` → handler → `c.Send`, a marshal + channel push, no AEAD) moves off `Run`. `dispatchAppFrame`'s control-envelope arms (rekey/modal/interrupt/new_session/dequeue/snapshot/settings) stay on `Run` — fast, and they touch `s.send`/session state/timers directly. `debug_bundle` is the one exception: `handleDebugBundleRequest` itself is still fast and stays on `Run`, but only because [#1491](../../specs/architecture/1491-assemble-debug-bundle-off-run.md) pulled the one control-arm step that *isn't* fast — the `DebugBundler` seam's uncapped recording read + in-memory gzip — onto a short-lived per-request goroutine, funnelled back to `Run` via `m.bundleReady`/`handleBundleReady` for the stream and every seal (see [§ Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle)). An application frame is instead enqueued non-blocking onto a new per-conn `V2Session.appFrames` FIFO (capacity `appFrameQueueDepth = 16`; overflow tears the conn down at 4421 rather than block `Run`, which would reintroduce the stall), and `dispatchAppFrame` returns immediately — freeing `Run` to service every other select arm (other conns' frames, `m.wake`, `m.modalTimeout`, `m.manualRekey`) while the worker executes the handler. The worker drains `s.appFrames` in strict FIFO order — one frame fully routed (its `Route` call returned and every reply forwarded) before the next is dequeued — so no two handlers for the same conn ever run concurrently, and each reply crosses back to `Run` via a new unbuffered `V2SessionManager.appReply` channel (`chan appReplyMsg`), where `forwardAppReply` (now gated on `s.state == V2StateOpen`, dropping replies for a session torn down mid-handler) seals it under `s.send`. Every Noise cipher operation — `s.send.Encrypt`, `s.recv.Decrypt` — and every mutation of `s.state`/timers/`m.sessions`/`m.queues` keys stays exclusively on `Run`; the worker only ever touches its own conn's `s.appFrames`/`s.done` (safe unsynchronized channel ops), never `s.send`/`s.recv`/`s.state` directly, so `V2Session` still carries no lock. This closes the reply-*latency* head-of-line stall #909 explicitly deferred (#909 fixed the reply-*count* deadlock — a handler emitting more than `handlerOutboundBuf` replies — not this one). (Since #721 `send_message` is no longer the worst case for this reason alone: it now enqueues non-blocking and acks, so its `Activate`/`WriteUserTurn` blocking moved off the dispatch goroutine onto the daemon's `msgqueue` drain — see [features/msgqueue-package.md](msgqueue-package.md). `create_conversation`'s 30s `Activate` wait remains the concrete slow-handler case #965 targets.)
 
 `V2Session.State()` is a plain field read. Safe today because no cross-goroutine reads exist. Both the push surface (#571, rewritten #610) and the #588 enumeration surface deliberately keep it that way: the #610 `Push` reads only `m.queues` under `pushMu` (never `s.state`), while `forwardEnvelope` reads `s.state` **on the `Run` goroutine** during the drain, and `handleActiveConns` reads `s.state` (and `s.interactive`, #626) **on the `Run` goroutine** (funneled through `m.snapshot`) — neither via a cross-goroutine `State()` call. So the broadcast/enumeration layer that this comment once anticipated (the [#589](../codebase/589.md) assistant-turn fan-out, built on #571's `Push` + #588's `ActiveConnIDs`) introduces **no** new reader of `s.state` off the owner goroutine, and `State()` still needs no `atomic.Int32`/mutex. Should a future slice read `s.state` directly from a producer goroutine *outside* the funnel, that accessor will need the atomic/mutex then — not pre-emptively refactored.
 
@@ -1897,6 +1948,10 @@ Deny-on-timeout (#725) — same `v2session_modal_test.go` (`fakeModalResolver` e
 
 Handler execution offload (#965) — extends `v2session_appframe_test.go`, reusing the #909 harness (`prolificHandler`, `driveToOpen`, `v2Recorder`, `sealAppFrame`, `waitForOutboundCount`, `decryptAppFrame`): `TestV2Session_SlowHandler_DoesNotStallOtherConn` (**AC-1(a)**) drives two open conns on one manager by reusing the #727 `openModalConn` conn-aware handshake helper (no new harness variant needed — the spec's speculative `driveToOpenConn` wasn't required), blocks conn A's handler on a test-controlled channel, and asserts conn B's `list_conversations` reply is sealed + emitted promptly with no dependence on releasing A; `TestV2Session_SlowHandler_ModalTimeoutStillFires` (**AC-1(b)**) blocks an app handler on conn A and asserts the `v2session_modal_test.go` deny-on-timeout still fires on schedule; `TestV2Session_SlowHandler_RekeyStillEmits` (**AC-1**, rekey witness) blocks an app handler and asserts a scheduled/manual rekey still emits; `TestV2Session_AppFrame_PerConnSerialization` (**AC-2**) sends two app frames on one conn and asserts (a) no two handlers for that conn run concurrently and (b) the two sealed replies decrypt via `initRecv` — which decrypts strictly in send-counter order, so a reorder surfaces as an AEAD auth failure — with `in_reply_to` in arrival order; `TestV2Session_AppFrame_QueueOverflow_ClosesConn` fills one conn's `s.appFrames` past `appFrameQueueDepth` behind a permanently-blocked handler and asserts that conn closes at 4421 while an unrelated conn is unaffected; `TestV2Session_OpenState_ProlificHandler_NoDeadlock` / `…_EmissionOrder` (both pre-existing #909 tests) pass unchanged, pinning that `routeAppFrame` preserves the concurrent-Route-drain shape verbatim. AC-3 (every seal stays on `Run`) is pinned by `-race` across all of the above, not a separate fixture — an off-`Run` seal or concurrent CipherState touch fires the race detector and breaks the ordered-decrypt assertions. See [codebase/965.md](../codebase/965.md).
 
+Off-`Run` debug-bundle assembly ([#1491](../../specs/architecture/1491-assemble-debug-bundle-off-run.md)) — extends `v2session_debugbundle_test.go`, reusing `bundleManagerFor` / `requestBundle` / `assertBusyReject` / `queueLen` / `waitCallCount` plus a new `blockingBundler` double (mirrors `blockingHandler`: signals on `entered`, blocks on `release`, then returns an injectable `(archive, err)`). `TestV2Session_DebugBundle_AssemblyDoesNotStallRun` is the load-bearing proof for AC #1, built on the `TestV2Session_SlowHandler_*` (#965) template: with one conn's assembly parked mid-flight, asserts a second conn's application frame still gets a sealed reply (the `Frames` arm), a queued `Push` to a third conn still drains (the `drainCh` arm), and a fourth conn's armed modal-timeout still fires on schedule (the `modalTimeout` arm) — none of them waiting on the release; on the pre-#1491 tree, with the seam inline, all three time out instead. `TestV2Session_DebugBundle_RejectsSecondWhileAssembling` pins the accept-side gate half specifically: a second request arriving while the bundler is blocked and the queue is still empty (asserted via `queueLen == 0` and `!mgr.bundleInFlight(connID)`) is rejected with the bundler call count staying at 1 — non-vacuous proof that `s.bundleAssembling`, not the queue-derived scan, did the rejecting. `TestV2Session_DebugBundle_ServedAfterFailedAssembly` pins the deferred clear: an assembly error yields exactly one deterministic reply with the error text absent from both wire and log, then a fresh request on the same conn is served with a new assembly — failing if the marker clear is missed on the error branch. `TestV2Session_DebugBundle_ErrorReplies` was **amended**, not left stay-green: its assembly-error subtest now polls for the reply instead of taking a bare snapshot, because the reply lands one `Run` pass later than the old inline-synchronous assumption. `TestV2Session_DebugBundle_RejectsSecondWhileQueued`, `…_ServedAfterDrain`, `…_PerConnIsolation`, and `…_NeverLogsContentEncryptedOnly` pass unchanged — all already synchronise by polling, so the extra `Run` hop is invisible to them.
+
+Two fixture traps surfaced building the above, worth knowing before touching this file again. `blockingBundler.release` must be closed from a `t.Cleanup` **registered after** the manager's `stop` cleanup — `t.Cleanup` runs LIFO, and release-before-stop unparks the seam before `stop` waits for `Run` to exit; registered the other way round, a pre-fix tree *hangs* in cleanup instead of failing, turning the RED proof AC #1 demands into a timeout with no diagnostic. And a pre-fix failure and a mutation-kill can redden the same test for unrelated reasons: `…_RejectsSecondWhileAssembling` also fails pre-fix, but only because `Run` is parked and never reaches the second request at all — that says nothing about the marker specifically. Only a mutant that drops `s.bundleAssembling` from the gate while leaving assembly off `Run` isolates the accept-side half, and it reddens as a missing-reply count rather than an obviously-wrong value — the absent reply *is* the two-concurrent-assemblies bug, read backwards.
+
 ### E2E (`internal/e2e/relay_v2_handshake_test.go`, build tag `e2e`)
 
 Spins up `fakerelay` (now with both `/v1/server` and `/v2/server`), wires `relay.Connect` + `V2SessionManager` **inline** (no daemon — this is the manager-in-isolation harness; the daemon-level wiring is covered separately by `relay_v2_daemon_test.go`, [#549](../codebase/549.md)), dials a `fakephone` against `/v1/client` (unchanged routing wire under v2), and drives a Noise_IK handshake from the phone side.
@@ -1952,6 +2007,7 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`docs/specs/architecture/877-reconcile-modal-truth-on-connect.md`](../../specs/architecture/877-reconcile-modal-truth-on-connect.md) — the connect-time modal reconcile spec (`OutstandingModals` seam design, `reconcileModals` concurrency model, full adversarial security review). `security-sensitive`.
 - [`docs/specs/architecture/878-reconcile-queue-truth-on-connect.md`](../../specs/architecture/878-reconcile-queue-truth-on-connect.md) — the connect-time queue reconcile spec (`OutstandingQueues` seam design, `reconcileQueues` concurrency model, full adversarial security review). `security-sensitive`.
 - [`docs/specs/architecture/1525-appreply-transport-down-gate.md`](../../specs/architecture/1525-appreply-transport-down-gate.md) — the `forwardAppReply` transport-down gate spec (placement rationale vs. #912, concurrency model, full adversarial security review). `security-sensitive`.
+- [`docs/specs/architecture/1491-assemble-debug-bundle-off-run.md`](../../specs/architecture/1491-assemble-debug-bundle-off-run.md) — moves the `DebugBundler` seam call off `Run` onto a short-lived per-request goroutine (`assembleBundle`), funnelled back via `m.bundleReady` to `handleBundleReady` on `Run` (concurrency model, the two-halves gate design, full adversarial security review). `security-sensitive`.
 - [codebase/845.md](../codebase/845.md) — the #845 implementation note.
 - [`codebase/433.md`](../codebase/433.md) — `internal/noise` wrapper; the responder API this manager consumes.
 - [`codebase/445.md`](../codebase/445.md) / [`codebase/446.md`](../codebase/446.md) — per-ticket implementation notes for the handshake and open-state slices.
@@ -1977,8 +2033,8 @@ The gating-invariant test and the post-AEAD-failure fresh-handshake test are uni
 - [`codebase/707.md`](../codebase/707.md) — the inbound `interrupt` → Esc routing (`security-sensitive`); the consumer-declared `Interrupter` seam (reusing the #726 `SendEsc` surface), the optional `V2SessionConfig.Interrupter` field, the `dispatchAppFrame` interrupt arm, and `handleInterrupt` (the **first** inbound frame gated on the `interactive` capability itself — a one-line `if !s.interactive`, not an abstraction). Maps to the neutral `turnevent.Cancel` (declared in #707, routed via the seam not constructed — the `modal_cancel` precedent).
 - [`codebase/831.md`](../codebase/831.md) — the inbound `new_session` → `/clear` routing (`security-sensitive`, split from #824); the consumer-declared `SessionStarter` seam (reusing the #830 `StartNewSession` surface), the optional `V2SessionConfig.SessionStarter` field, the `dispatchAppFrame` new_session arm, and `handleNewSession` (a line-for-line `handleInterrupt` mirror; reuses the `interactive`-capability-is-the-authorization posture #707 established). Unlike `interrupt` it maps to no neutral `turnevent` command — it drives the seam directly. Consumes the #830 sealed keystroke surface; the client observes the break via the pre-existing #656/#657 `session_transition` marker (no new emitter, no ack path).
 - [`codebase/812.md`](../codebase/812.md) — the debug-bundle streaming primitive (`security-sensitive`); `StreamBundle` (loops `Push`, never the synchronous handler-reply channel), the pure `bundleEnvelopes` chunker, the exported `ReassembleBundle` receiver-contract oracle, and `bundleChunkBytes` (conservative const + `TestStreamBundle_EveryFrameWithinCap` cap enforcement). Rides the [#571/#610 push path](#concurrency-safe-unsolicited-push-571--push-method--push-funnel) unchanged — bundle chunks are control-class, never dropped. Shipped unwired; wired by #813. Streams the [#811 assembler](debugbundle-package.md)'s output.
-- [`codebase/813.md`](../codebase/813.md) — the inbound `request_debug_bundle` verb (`security-sensitive`); the capstone wiring #811 (producer) + #812 (transport). The `DebugBundler` optional seam, the `dispatchAppFrame` interception arm, `handleDebugBundleRequest` (structural twin of `handleRequestSnapshot`, streams via `StreamBundle`, content-free logging), and `debugBundleReplyError` (static `msgDebugBundleUnavailable` — never the assembly error text). Pairing is the only gate (inherited at the Noise handshake); **not** capability-gated, unlike `interrupt`/`dequeue_message`. Capture-off withholds the recording structurally (no `recording.cast` member), not by a flag.
-- [`codebase/911.md`](../codebase/911.md) — per-conn in-flight gate on `request_debug_bundle` (`security-sensitive`); `bundleInFlight` (new, `pushMu`-guarded scan of `q.items` for `TypeDebugBundleChunk`/`TypeDebugBundleDone`), the `handleDebugBundleRequest` gate call placed before `DebugBundler()`, and the corrected `pushQueue.enqueue`/`pushQueueCap` soft-overflow comments (the "unreachable in practice" premise #812's control-class bundle chunks falsified). See [Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle).
+- [`codebase/813.md`](../codebase/813.md) — the inbound `request_debug_bundle` verb (`security-sensitive`); the capstone wiring #811 (producer) + #812 (transport). The `DebugBundler` optional seam, the `dispatchAppFrame` interception arm, `handleDebugBundleRequest` (structural twin of `handleRequestSnapshot`, streams via `StreamBundle`, content-free logging), and `debugBundleReplyError` (static `msgDebugBundleUnavailable` — never the assembly error text). Pairing is the only gate (inherited at the Noise handshake); **not** capability-gated, unlike `interrupt`/`dequeue_message`. Capture-off withholds the recording structurally (no `recording.cast` member), not by a flag. Historical: at the time this shipped, `handleDebugBundleRequest` ran the `DebugBundler` seam inline on `Run`; [#1491](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle) moved that call off it.
+- [`codebase/911.md`](../codebase/911.md) — per-conn in-flight gate on `request_debug_bundle` (`security-sensitive`); `bundleInFlight` (new, `pushMu`-guarded scan of `q.items` for `TypeDebugBundleChunk`/`TypeDebugBundleDone`), the `handleDebugBundleRequest` gate call placed before `DebugBundler()`, and the corrected `pushQueue.enqueue`/`pushQueueCap` soft-overflow comments (the "unreachable in practice" premise #812's control-class bundle chunks falsified). See [Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle). Historical: `bundleInFlight`'s queue-derived scan was the gate's only half until [#1491](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle) added the accept-side `s.bundleAssembling` half once assembly moved off `Run`.
 - [`codebase/1006.md`](../codebase/1006.md) — fake-daemon e2e capstone proving `request_debug_bundle` end-to-end over the encrypted v2 wire (`security-sensitive`; split from #962); happy-path stream/decode of a known archive (non-maskable arrival-order reassembly) and the load-bearing no-leak error path (sentinel absent from both wire and daemon logs, gated non-vacuous by a positive log-event poll). Introduces one small env-gated production seam, `cmd/pyry/debug_bundle_fake.go`'s `fakeDebugBundler`, inert unless `PYRY_ALLOW_INSECURE_RELAY=1` — the real `DebugBundler` closure is non-byte-predictable out-of-process (`logRing.Snapshot` tees every daemon log line), so no config surface could inject exact bytes. AC-3 (#911's in-flight gate) deferred to that ticket's deterministic in-package coverage.
 - [`codebase/723.md`](../codebase/723.md) — the inbound `dequeue_message` → `msgqueue.Remove` handler (`security-sensitive`); the consumer-declared `QueueRemover` seam, the optional `V2SessionConfig.QueueRemover` field, the `dispatchAppFrame` dequeue arm, and `handleDequeueMessage` (the **second** inbound capability-gated frame, mirroring `handleInterrupt`'s shape; AC-4 convergence via the automatic #722 `OnChange` path, never a direct re-emit; the deliberate no-`KnownConversation`-gate security decision).
 - [`codebase/647.md`](../codebase/647.md) — the inbound mid-turn reconnect-replay consumer (`security-sensitive`); `SetReplaySource` (late-bound ring), `replayMissed`/`emitResync`, the `handleNoiseInit` hook, the `replayThrough` watermark + `forwardEnvelope` guard, and `HelloClientPayload.LastEventID` / `TypeResync`. Shipped with a caught-up-watermark MUST FIX outstanding, resolved by [`codebase/663.md`](../codebase/663.md) (clamp to `min(afterID, NewestID(convID))`). Consumes the [`codebase/646.md`](../codebase/646.md) ring + [`codebase/649.md`](../codebase/649.md) outbound `event_id`.
