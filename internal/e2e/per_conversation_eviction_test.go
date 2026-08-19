@@ -6,8 +6,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"os"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,21 +29,24 @@ import (
 // already participates in.
 //
 // The two tests below pin the four acceptance criteria at the binary boundary
-// using the v1 fakephone/fakerelay harness and fakeclaude in TUI mode:
+// using the v1 fakephone/fakerelay harness, an INTERACTIVE phone, and a
+// stream-json fakeclaude child under the production interactive_runner toggle
+// (#1512 — the daemon's only interactive runner is stream-json, so a TUI child
+// was one-sided fiction):
 //
 //	Test A (idle):  AC#1 per-discussion idle eviction, AC#2 reactivate-on-send,
 //	                AC#4 no cross-bleed when one discussion churns.
 //	Test B (cap):   AC#3 cap evicts the LRU active peer (incl. a cross-discussion
 //	                victim), AC#4 only the deliberate victim transitions.
 //
-// What the harness can observe is lifecycle/routing scoping (which session's
-// registry entry transitions, which reactivates) — NOT per-file JSONL content,
-// because fakeclaude derives its JSONL stem from PYRY_FAKE_CLAUDE_INITIAL_UUID
-// (env), not the --session-id argv, so every supervised child shares one file.
-// The content-recall half of AC#2/#4 ("prior conversation intact", "turns land
-// in its own JSONL" as content) is realclaude's domain and is already covered
-// by the existing #677/#678 realclaude round-trip e2e; #680 does not add a
-// realclaude test (the two-phone realclaude harness does not exist — #603).
+// What this tier asserts is lifecycle/routing scoping (which session's registry
+// entry transitions, which reactivates) PLUS wire-observable turn delivery: a
+// reactivated discussion's turn comes back as an assistant_delta scoped to that
+// conversation. Transcript CONTENT recall ("the prior conversation is intact")
+// stays realclaude's domain — stream-mode fakeclaude opens no <uuid>.jsonl at
+// all (it short-circuits above its sessions-dir binding), so there is no
+// transcript here to read. TestInteractiveStreamResumeAfterEviction covers that
+// half.
 
 // TestE2E_PerConversation_IdleEvictsAndReactivates exercises a per-discussion
 // session through its full active→evicted→active arc:
@@ -51,11 +55,18 @@ import (
 //	       each idle-evicts (lifecycle_state=="evicted", claude exited) once its
 //	       idle window elapses with no attach.
 //	AC#2 — a send_message to one evicted discussion reactivates it (respawn
-//	       claude --session-id <its own uuid>) and delivers the turn, acked on
-//	       the wire.
+//	       claude --resume <its own uuid>) and DELIVERS the turn: the phone
+//	       observes the reply, not merely the write-side ack.
 //	AC#4 — reactivating one discussion's session leaves the other discussion's
 //	       evicted session untouched: churn in one does not disturb another.
 func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
+	const (
+		initialUUID        = "66666666-6666-4666-8666-666666666666"
+		reqID       uint64 = 4
+		wakeText           = "e2e-1512-wake:reactivate\n"
+		wakeNeedle         = "e2e-1512-wake:reactivate"
+	)
+
 	home := shortHome(t)
 
 	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
@@ -69,26 +80,27 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	// Align the sessions dir to the daemon's COMPUTED path (no env override —
-	// always <HOME>/.claude/projects/encode(workdir), HOME=home and
-	// -pyry-workdir=home) and pre-create <initialUUID>.jsonl so the bootstrap
-	// reconciliation has a stable stem. Per-conversation sessions take the
-	// nil-resolver delivery path and never read this file. rotation_test pattern.
-	sessionsDir := claudeSessionsDir(home)
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		t.Fatalf("mkdir sessions dir: %v", err)
-	}
-	initialUUID := "66666666-6666-4666-8666-666666666666"
-	if err := os.WriteFile(filepath.Join(sessionsDir, initialUUID+".jsonl"), []byte("{}\n"), 0o600); err != nil {
-		t.Fatalf("pre-create initial jsonl: %v", err)
-	}
-
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	// idle=2s, uncapped: the only transitions are idle-driven, so a previously
-	// active per-conversation session evicts ~2s after its last activation.
-	startPerConvHarness(t, home, sessionsDir, initialUUID, fr.URL()+"/v2/server", "-pyry-idle-timeout=2s")
+	// idle=8s, uncapped: the only transitions are idle-driven, so a previously
+	// active per-conversation session evicts ~8s after its last activation.
+	//
+	// 8s, not 2s, and the number is load-bearing. Session.runActive arms the idle
+	// timer ONCE on entering active and resets it only while attached > 0 — turn
+	// activity does not touch it. So a reactivated session has exactly idleTimeout
+	// from Activate to re-eviction, whatever the turn is doing. The stream path's
+	// delivery chain spends most of that: streamRunner.WriteUserTurn returns the
+	// retryable ErrNoLiveChild while the respawned child is between spawn and
+	// stdin-ready, and the msgqueue drain retries every
+	// msgqueue.defaultRetryInterval (1s). Worst case ≈ spawn + 3 retries + echo /
+	// parse / drain / seal ≈ 4s. At 2s the child is SIGKILLed before the turn
+	// lands and the drain below hangs to its deadline — a flake, not a red.
+	//
+	// CONSTRAINT for future edits: this window must stay ≥ 3 ×
+	// msgqueue.defaultRetryInterval plus spawn. If either number moves, so does
+	// this one.
+	h := startPerConvHarness(t, home, initialUUID, fr.URL()+"/v2/server", "-pyry-idle-timeout=8s")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
@@ -107,15 +119,16 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 
 	// AC#1: each per-discussion session idle-evicts. lifecycle_state=="evicted"
 	// is written only after the supervisor stops the child, so it faithfully
-	// witnesses "claude process exited, RAM freed".
-	waitForSessionState(t, regPath, boundA, "evicted", 5*time.Second)
-	waitForSessionState(t, regPath, boundB, "evicted", 5*time.Second)
+	// witnesses "claude process exited, RAM freed". The wait must exceed the 8s
+	// window above.
+	waitForSessionState(t, regPath, boundA, "evicted", 15*time.Second)
+	waitForSessionState(t, regPath, boundB, "evicted", 15*time.Second)
 
 	// AC#2: a send_message to evicted convA reactivates its bound session and
-	// delivers the turn. The ack is gated on Activate (respawn --session-id
-	// boundA, same uuid ⇒ resumed from its own JSONL) + WaitReady + DeliverPrompt
-	// even on the nil-resolver path, so a TypeAck proves end-to-end reactivation.
-	const reqID uint64 = 4
+	// delivers the turn. Two PRECONDITIONS first — the sealed ack and the
+	// evicted→active registry flip — neither of which is the proof: the send
+	// handler acks on accept-into-backlog, well before the respawned child is
+	// stdin-ready. The proof is M1/M2 below.
 	send := protocol.Envelope{
 		ID:   reqID,
 		Type: protocol.TypeSendMessage,
@@ -123,7 +136,7 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 		Payload: mustJSON(t, protocol.SendMessagePayload{
 			ConversationID: convA,
 			MessageID:      "m-1",
-			Text:           "e2e-680-marker:wake up\n",
+			Text:           wakeText,
 		}),
 	}
 	sendRaw, err := json.Marshal(send)
@@ -135,22 +148,99 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 		t.Fatalf("seal send_message envelope: %v", err)
 	}
 	sendNoiseMsg(t, phone, ct)
-	// Non-interactive v2: the ack is the first and only sealed frame; no drain.
-	ack := decryptInnerEnvelope(t, readInnerFrame(t, phone, 15*time.Second), initRecv)
-	if ack.Type != protocol.TypeAck {
-		t.Fatalf("ack Type: got %q, want %q (payload=%s)", ack.Type, protocol.TypeAck, string(ack.Payload))
-	}
-	if ack.InReplyTo == nil || *ack.InReplyTo != reqID {
-		t.Fatalf("ack InReplyTo: got %v, want pointer to %d", ack.InReplyTo, reqID)
-	}
+	drainForReply(t, phone, initRecv, protocol.TypeAck, reqID, 15*time.Second)
 	waitForSessionState(t, regPath, boundA, "active", 3*time.Second)
 
-	// AC#4 (no cross-bleed): convA's reactivation did NOT touch convB. With no
-	// cap there is no LRU eviction, and an evicted session has no reason to wake
-	// without its own send/attach — so the assertion window is well under the 2s
-	// idle re-arm. This pins "churn in one discussion leaves another's session
-	// untouched" and "convA's turn landed in convA's session, not convB's".
-	assertEvicted(t, regPath, boundB)
+	// Drain the reactivated turn: two ordered milestones, mirroring
+	// TestRelayV2_StreamSendMessageDrainsTurn. A leading turn_state{responding}
+	// arrives BEFORE the delta; ignore turn_states until sawDelta is set. The
+	// phone conn is read serially on the test goroutine (the single reader — two
+	// readers would race the Noise receive nonce).
+	sawDelta := false
+	drainDeadline := time.Now().Add(20 * time.Second)
+	for {
+		remaining := time.Until(drainDeadline)
+		if remaining <= 0 {
+			if !sawDelta {
+				t.Fatalf("M1: phone never observed an assistant_delta for the reactivated conversation %s. "+
+					"Either delivery never reached the respawned child (stale sink binding on the new runner, "+
+					"or a drain-gate tag mismatch) or the session re-evicted before the turn landed. The "+
+					"stream_turn.not_active Debug record discriminates them — daemon stderr tail:\n%s",
+					convA, stderrTail(h, 4000))
+			}
+			t.Fatal("M2: phone observed the assistant_delta but never a terminal " +
+				"turn_state{idle}; the turn opened but never closed")
+		}
+		raw, err := phone.ReceiveBytes(remaining)
+		if err != nil {
+			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				continue // deadline reached — re-loop into the milestone-specific t.Fatal above
+			}
+			t.Fatalf("phone receive (drain): %v", err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			t.Fatalf("phone decode inner frame (drain): %v", err)
+		}
+		// Skip on the INNER type only, never on a decrypted envelope: the receive
+		// CipherState must open sealed frames in arrival order, so dropping a
+		// noise_msg undecrypted desynchronises the nonce and every later open fails.
+		if inner.Type != protocol.TypeNoiseMsg {
+			continue
+		}
+		env := decryptInnerEnvelope(t, inner, initRecv)
+
+		switch env.Type {
+		case protocol.TypeAssistantDelta:
+			if sawDelta {
+				continue
+			}
+			var d protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &d); err != nil {
+				t.Fatalf("phone decode assistant_delta payload: %v", err)
+			}
+			// BOTH halves are required, and a wrong-conversation delta is a hard
+			// fail rather than a loop-continue. Marker alone would be satisfied by
+			// convA's text delivered on convB — which IS the cross-bleed defect
+			// AC#4 exists to catch. Conversation alone would be satisfied by any
+			// delta on convA, including a stale pre-eviction one.
+			if d.ConversationID != convA {
+				t.Fatalf("M1: assistant_delta scoped to the WRONG conversation: got %q, want %q "+
+					"(cross-discussion bleed — convA's turn surfaced on another discussion)",
+					d.ConversationID, convA)
+			}
+			if !strings.Contains(d.Text, wakeNeedle) {
+				t.Fatalf("M1: assistant_delta did not carry this turn's marker; got Text=%q, want it to "+
+					"contain %q (stream-mode fakeclaude echoes the sent prompt, so the marker is the "+
+					"round-trip proof that THIS turn reached the respawned child)", d.Text, wakeNeedle)
+			}
+			sawDelta = true
+			t.Logf("M1: phone observed assistant_delta on the reactivated conversation carrying this turn's marker")
+		case protocol.TypeTurnState:
+			if !sawDelta {
+				continue // the leading responding state precedes the delta
+			}
+			var st protocol.TurnStatePayload
+			if err := json.Unmarshal(env.Payload, &st); err != nil {
+				t.Fatalf("phone decode turn_state payload: %v", err)
+			}
+			if st.State != "idle" {
+				continue
+			}
+			if st.ConversationID != convA {
+				t.Errorf("turn_state ConversationID: got %q, want %q", st.ConversationID, convA)
+			}
+			t.Logf("M2: phone observed terminal turn_state{idle} — the reactivated turn closed")
+
+			// AC#4 (no cross-bleed): convA's reactivation did NOT touch convB. With
+			// no cap there is no LRU eviction, and an evicted session has no reason
+			// to wake without its own send/attach. Checked AFTER M2 so the claim is
+			// "convB stayed evicted across a COMPLETED turn in convA", not merely
+			// across an ack; the 8s window leaves ample room before convA re-arms.
+			assertEvicted(t, regPath, boundB)
+			return
+		}
+	}
 }
 
 // TestE2E_PerConversation_CapEvictsCrossDiscussion drives the active cap purely
@@ -166,8 +256,11 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 //	       active and each discussion keeps its own distinct bound session.
 //
 // cap=2, no idle timeout: the only transitions are cap-driven, so the victim
-// sequence is deterministic.
+// sequence is deterministic (and no idle timer is armed, so the 8s window the
+// idle test needs is irrelevant here).
 func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
+	const initialUUID = "77777777-7777-4777-8777-777777777777"
+
 	home := shortHome(t)
 
 	r := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
@@ -181,19 +274,10 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 		t.Fatalf("decode server static pubkey: %v", err)
 	}
 
-	sessionsDir := claudeSessionsDir(home)
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		t.Fatalf("mkdir sessions dir: %v", err)
-	}
-	initialUUID := "77777777-7777-4777-8777-777777777777"
-	if err := os.WriteFile(filepath.Join(sessionsDir, initialUUID+".jsonl"), []byte("{}\n"), 0o600); err != nil {
-		t.Fatalf("pre-create initial jsonl: %v", err)
-	}
-
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	startPerConvHarness(t, home, sessionsDir, initialUUID, fr.URL()+"/v2/server", "-pyry-active-cap=2")
+	startPerConvHarness(t, home, initialUUID, fr.URL()+"/v2/server", "-pyry-active-cap=2")
 
 	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
 	convPath := filepath.Join(home, ".pyry", "test", "conversations.json")
@@ -249,24 +333,39 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 	}
 }
 
-// startPerConvHarness spawns pyry with fakeclaude-TUI as the supervised child
-// and relay wiring, threading arbitrary -pyry-* flags so one caller can pass
-// -pyry-idle-timeout and another -pyry-active-cap. A generalization of
-// respawn_after_eviction_test.go's startEvictionHarness (which hardcodes the
-// idle flag); kept local to this file. The fakeclaude trigger path is never
-// created, so the child never rotates — the steady state for these tests.
-func startPerConvHarness(t *testing.T, home, sessionsDir, initialUUID, relayURL string, extraFlags ...string) {
+// startPerConvHarness spawns pyry with a stream-json fakeclaude child and relay
+// wiring, threading arbitrary -pyry-* FLAGS so one caller can pass
+// -pyry-idle-timeout and another -pyry-active-cap. That is the whole reason it
+// exists: the shared StartStreamInteractiveWithRelay takes extra ENV only, and
+// teaching it flags is a signature change across every call site.
+//
+// The daemon is opted into the stream runner explicitly via
+// writeStreamInteractiveConfig — the same production config toggle the shared
+// harness writes — rather than leaning on selectInteractiveRunner's empty-string
+// default. An implicit default is a test that stops asserting its own path the
+// day the default moves.
+//
+// Child env is exactly the stream set. Stream-mode fakeclaude short-circuits
+// above its mustEnv calls, so it binds no sessions dir and opens no transcript:
+// SESSIONS_DIR / INITIAL_UUID / TRIGGER / STDIN_LOG are not merely unnecessary,
+// they are dead. Harness.ClaudeSessionsDir is left unset for the same reason.
+// -pyry-verbose raises the stderr handler to slog.LevelDebug and nothing else,
+// which is what makes the drain gate's stream_turn.not_active drop record
+// visible — the single highest-value line when a delivery assertion times out.
+//
+// initialUUID is a DAEMON-side seed (seedBootstrapRegistry pins the bootstrap
+// pool id the cap test's waitForBootstrap reads), unrelated to the child env of
+// the same name that stream mode drops.
+func startPerConvHarness(t *testing.T, home, initialUUID, relayURL string, extraFlags ...string) *Harness {
 	t.Helper()
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		t.Fatalf("mkdir sessions dir: %v", err)
-	}
 	fakeBin := ensureFakeClaudeBuilt(t)
+	writeStreamInteractiveConfig(t, home)
 	seedBootstrapRegistry(t, home, initialUUID)
-	tmp := t.TempDir()
 
 	flags := append([]string{
 		"-pyry-workdir=" + home,
 		"-pyry-relay=" + relayURL,
+		"-pyry-verbose",
 	}, extraFlags...)
 
 	socket, cmd, stdout, stderr, doneCh := spawnWith(t, home, spawnOpts{
@@ -276,37 +375,48 @@ func startPerConvHarness(t *testing.T, home, sessionsDir, initialUUID, relayURL 
 		extraEnv: []string{
 			"PYRY_ALLOW_INSECURE_RELAY=1",
 			"PYRY_MOBILE_V2=1",
-			"PYRY_FAKE_CLAUDE_SESSIONS_DIR=" + sessionsDir,
-			"PYRY_FAKE_CLAUDE_INITIAL_UUID=" + initialUUID,
-			"PYRY_FAKE_CLAUDE_TRIGGER=" + filepath.Join(tmp, "rotate.trigger.never-created"),
-			"PYRY_FAKE_CLAUDE_STDIN_LOG=" + filepath.Join(tmp, "fakeclaude-stdin.log"),
-			"PYRY_FAKE_CLAUDE_TUI=1",
+			"PYRY_FAKE_CLAUDE_STREAM_JSON=1",
 		},
 	})
 
 	h := &Harness{
-		SocketPath:        socket,
-		HomeDir:           home,
-		ClaudeSessionsDir: sessionsDir,
-		PID:               cmd.Process.Pid,
-		Stdout:            stdout,
-		Stderr:            stderr,
-		cmd:               cmd,
-		doneCh:            doneCh,
+		SocketPath: socket,
+		HomeDir:    home,
+		PID:        cmd.Process.Pid,
+		Stdout:     stdout,
+		Stderr:     stderr,
+		cmd:        cmd,
+		doneCh:     doneCh,
 	}
 	t.Cleanup(func() { h.teardown(t) })
 
 	if err := h.waitForReady(); err != nil {
 		t.Fatalf("e2e: %v", err)
 	}
+	return h
+}
+
+// stderrTail returns the last n bytes of the daemon's captured stderr, for
+// attaching to a delivery-assertion failure. Content-free by construction at
+// the records that matter: the drain gate's drop line carries a discriminant
+// and a session id, never turn text.
+func stderrTail(h *Harness, n int) string {
+	s := h.Stderr.String()
+	if len(s) > n {
+		return s[len(s)-n:]
+	}
+	return s
 }
 
 // dialHelloPhone dials a fakephone through fr and completes the v2 Noise_IK
-// handshake (non-interactive; the hello is embedded in the init frame). Returns
-// the ready client plus the initiator CipherStates (initSend seals phone→daemon,
-// initRecv opens daemon→phone). The daemon must already be running (its binary
-// leg registered with the relay) and paired (pairToken + pubKey from a prior
-// `pyry pair`). Close is registered for cleanup.
+// handshake, requesting the INTERACTIVE capability — the grant the structured
+// stream requires, and the grant that authorises the daemon to push unsolicited
+// frames onto this conn. That is why every read downstream of here is a drain
+// loop and not a single-frame read. Returns the ready client plus the initiator
+// CipherStates (initSend seals phone→daemon, initRecv opens daemon→phone). The
+// daemon must already be running (its binary leg registered with the relay) and
+// paired (pairToken + pubKey from a prior `pyry pair`). Close is registered for
+// cleanup.
 func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pubKey []byte, pairToken string) (*fakephone.Client, *noise.CipherState, *noise.CipherState) {
 	t.Helper()
 	serverID := readPersistedServerID(t, home)
@@ -325,16 +435,16 @@ func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pubKey []by
 	}
 	t.Cleanup(func() { _ = phone.Close() })
 
-	initSend, initRecv := driveHandshakeToOpenDaemon(t, phone, pubKey, pairToken)
+	initSend, initRecv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, pairToken)
 	return phone, initSend, initRecv
 }
 
 // createConversationViaPhone sends an all-null create_conversation (server
-// defaults) with envelope id reqID, drains any racing message/spinner envelopes
-// to the conversation_created reply, and returns the server-minted conversation
-// id. Returns only after the daemon has minted + bound + eagerly persisted the
-// dedicated session (the reply is sent after the handler's reg.Save). The 15s
-// budget covers the mint+activate spawn (Pool.Activate waits on claude's PTY).
+// defaults) with envelope id reqID, drains to the matching conversation_created
+// reply, and returns the server-minted conversation id. Returns only after the
+// daemon has minted + bound + eagerly persisted the dedicated session (the reply
+// is sent after the handler's reg.Save). The 15s budget covers the mint+activate
+// spawn.
 func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState, reqID uint64) string {
 	t.Helper()
 	req := protocol.Envelope{
@@ -352,16 +462,7 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend,
 		t.Fatalf("seal create_conversation (id=%d): %v", reqID, err)
 	}
 	sendNoiseMsg(t, phone, ct)
-	// Non-interactive v2 path: exactly one sealed reply per request, so no
-	// spinner/message drain is needed. The 15s budget covers the mint+activate
-	// spawn (Pool.Activate waits on claude's PTY).
-	env := decryptInnerEnvelope(t, readInnerFrame(t, phone, 15*time.Second), initRecv)
-	if env.Type != protocol.TypeConversationCreated {
-		t.Fatalf("reply Type: got %q, want %q (payload=%s)", env.Type, protocol.TypeConversationCreated, string(env.Payload))
-	}
-	if env.InReplyTo == nil || *env.InReplyTo != reqID {
-		t.Fatalf("conversation_created InReplyTo: got %v, want pointer to %d", env.InReplyTo, reqID)
-	}
+	env := drainForReply(t, phone, initRecv, protocol.TypeConversationCreated, reqID, 15*time.Second)
 	var p protocol.ConversationCreatedPayload
 	if err := json.Unmarshal(env.Payload, &p); err != nil {
 		t.Fatalf("unmarshal conversation_created payload: %v", err)
@@ -370,6 +471,56 @@ func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend,
 		t.Fatalf("conversation_created payload has empty id")
 	}
 	return p.ID
+}
+
+// drainForReply reads sealed frames in arrival order until one decrypts to an
+// envelope of type want whose InReplyTo is reqID, and returns it. Every other
+// envelope type is ignored: an interactive conn may carry unsolicited structured
+// pushes, so a request's reply is not guaranteed to be the next frame on the
+// wire.
+//
+// Non-noise_msg inner frames are skipped WITHOUT decrypting (they do not advance
+// the receive nonce); every noise_msg is decrypted, in order, because the receive
+// CipherState is a lockstep counter — skipping one sealed frame desynchronises it
+// and every later open fails. Same discipline as
+// TestRelayV2_StreamSendMessageDrainsTurn's drain.
+//
+// On deadline it fails naming the envelope types it did see, so a wrong-reply
+// failure is distinguishable from a nothing-arrived one.
+func drainForReply(t *testing.T, phone *fakephone.Client, recv *noise.CipherState, want string, reqID uint64, timeout time.Duration) protocol.Envelope {
+	t.Helper()
+	var seen []string
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			t.Fatalf("no %s with in_reply_to=%d within %s; envelope types observed: %v",
+				want, reqID, timeout, seen)
+		}
+		raw, err := phone.ReceiveBytes(remaining)
+		if err != nil {
+			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				continue // deadline reached — re-loop into the t.Fatalf above
+			}
+			t.Fatalf("phone receive (awaiting %s id=%d): %v", want, reqID, err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			t.Fatalf("decode inner frame (awaiting %s id=%d): %v", want, reqID, err)
+		}
+		if inner.Type != protocol.TypeNoiseMsg {
+			continue
+		}
+		env := decryptInnerEnvelope(t, inner, recv)
+		seen = append(seen, env.Type)
+		if env.Type != want {
+			continue
+		}
+		if env.InReplyTo == nil || *env.InReplyTo != reqID {
+			t.Fatalf("%s InReplyTo: got %v, want pointer to %d", want, env.InReplyTo, reqID)
+		}
+		return env
+	}
 }
 
 // boundSessionID reads conversations.json and returns the current_session_id
