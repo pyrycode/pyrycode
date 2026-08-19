@@ -84,6 +84,16 @@ func clearRecording(t *testing.T, dir string) {
 
 // doneAppears reports whether the recorder's done sentinel shows up in dir
 // within timeout — i.e. whether a (re)spawn occurred.
+//
+// It cannot actually observe one under the runner double, and a NEW test must not
+// reach for it. helperRestartPool passes restartRecorderScript as ClaudeBin, but
+// recordingRunnerFactory ignores cfg.ClaudeBin and returns a lifecycleRunner whose
+// Run execs /bin/sleep — nothing ever writes the sentinel, so this always returns
+// false. Measured 2026-08-19: deleting UpdateSettings' no-op early return, so that
+// a no-op update does call Restart, leaves TestPool_UpdateSettings_NoOp_NoRestart
+// green while reddening TestPool_UpdateSettings_NoOpWritesNothing — the mutant is
+// live and the assertion is simply blind. Read "no respawn" off the double's own
+// Restart record instead, via runnerDouble (#1581).
 func doneAppears(t *testing.T, dir string, timeout time.Duration) bool {
 	t.Helper()
 	return pollUntil(t, timeout, func() bool {
@@ -325,10 +335,20 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassOnRestart(t *testing.T) {
 	}
 }
 
-// TestPool_UpdateSettings_YOLOAbsent_NoBypassOnRestart (security): an update that
+// TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand (security): an update that
 // changes only Model (YOLO omitted, stored false) can never recompose into a
-// bypass child across the restart — the fail-safe survives the live-apply.
-func TestPool_UpdateSettings_YOLOAbsent_NoBypassOnRestart(t *testing.T) {
+// bypass child — the fail-safe survives the live-apply.
+//
+// Renamed from _NoBypassOnRestart, and rewritten with it: a model-only update is
+// exactly the shape #1581 delivers in-band, so this asserts no respawn happened
+// and reads the fail-safe off the argv the NEXT spawn will use rather than off the
+// argv a respawn did use. The assertion is not weakened by that — it is the same
+// argv, produced by the same Session.spawnArgs → claudeSettingsArgs path, checked
+// one step earlier. What is dropped is the old #839 pinned-id check: with no
+// respawn there is no second spawn for the id to survive into, so reading it back
+// would only re-report the construction record. That id is asserted across a real
+// restart by _LiveRestart_Bootstrap and _YOLORevoke_DropsBypassOnRestart.
+func TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "sessions.json")
@@ -337,25 +357,30 @@ func TestPool_UpdateSettings_YOLOAbsent_NoBypassOnRestart(t *testing.T) {
 	pool := helperRestartPool(t, regPath, tplWorkDir, SessionSettings{Model: "sonnet", YOLO: false})
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
-
-	waitArgv(t, tplWorkDir)
-	clearRecording(t, tplWorkDir)
+	runner := runnerDouble(t, pool, id)
+	waitRunning(t, runner)
 
 	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus")}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
-	got := waitArgv(t, tplWorkDir)
+
+	if restarts := runner.restartArgs(); len(restarts) != 0 {
+		t.Errorf("model-only update respawned the child: Restart%v", restarts)
+	}
+	if got, want := runner.userTurns(), []string{"/model opus"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("delivered turns = %q, want %q", got, want)
+	}
+	installs := runner.spawnArgSets()
+	if len(installs) != 1 {
+		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
+	}
+	got := installedArgv(t, installs[0])
 	for _, a := range got {
 		if a == "--dangerously-skip-permissions" {
-			t.Fatalf("absent YOLO yielded a bypass child across restart: %v", got)
+			t.Fatalf("absent YOLO installed a bypass argv for the next spawn: %v", got)
 		}
 	}
 	if want := []string{"--model", "opus"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("restart argv = %v, want %v", got, want)
-	}
-	// #839's pinned id survives the restart; since #1348 it travels as a field on
-	// the handover rather than a trailing argv flag.
-	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
-		t.Errorf("restart session id = %q, want %q", gotID, string(id))
+		t.Errorf("installed argv = %v, want %v", got, want)
 	}
 }

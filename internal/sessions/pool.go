@@ -696,17 +696,33 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // stable. On a saveLocked failure the in-memory settings are rolled back so
 // memory stays consistent with disk.
 //
-// After a successful persist of a real change, the session's supervisor is
-// live-restarted (#842): its spawn argv is recomposed from the persisted
-// settings and, if a child is running, that child is killed so the supervisor
-// relaunches it — resuming the conversation — with the new model / effort /
-// YOLO. For an evicted session the argv swap alone applies on the next Activate.
-// The restart runs OUTSIDE p.mu (Restart is non-blocking and drives only
+// After a successful persist of a real change the change is also LIVE-APPLIED to
+// the session's supervisor, by one of two mechanisms picked on which fields the
+// update carried (inBandDeliverable):
+//
+//   - A model/effort-only change is delivered IN-BAND (#1581): the /model and
+//     /effort commands are written to the live child as ordinary user turns on
+//     the stream the daemon already holds open, so the child is neither
+//     terminated nor respawned and its transcript survives. That branch still
+//     installs the recomposed argv, via SetSpawnArgs — Restart's swap half —
+//     because skipping the install would let the operator's change silently
+//     revert on the next crash-respawn or evict → Activate. Delivery is
+//     fire-and-forget; see deliverSettingsInBand.
+//   - Every other change keeps the live restart (#842): the argv is recomposed
+//     from the persisted settings and, if a child is running, that child is
+//     killed so the supervisor relaunches it — resuming the conversation — with
+//     the new model / effort / YOLO. This is the path a bypass-posture change
+//     takes, and the path a model or effort cleared back to claude's own default
+//     takes, neither having a measured in-band form.
+//
+// For an evicted session neither mechanism finds a child; the argv install alone
+// applies on the next Activate, and the caller still sees success. Both branches
+// run OUTSIDE p.mu (every installer is non-blocking and drives only
 // supervisor-internal state, so the Pool.mu → Session.lcMu order is untouched)
 // and only on a real change: an unknown id, a no-op update, and a persist
-// failure all skip it, so a still-correct running child is never disturbed.
+// failure all skip them, so a still-correct running child is never disturbed.
 //
-// Lock order: p.mu (write), released before Restart. Does not take Session.lcMu
+// Lock order: p.mu (write), released before the live-apply. Does not take Session.lcMu
 // — Session.settings is guarded by p.mu (the only other reader is saveLocked,
 // under p.mu); spawnBase and sup are immutable post-construction.
 func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
@@ -739,14 +755,110 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	}
 	// Recompose argv + capture the supervisor while under p.mu (both reads are of
 	// state that is either immutable — spawnBase, sup — or the merged value we
-	// just persisted). Release p.mu BEFORE Restart so no blocking work and no
-	// supervisor-internal lock is taken under it.
+	// just persisted). Release p.mu BEFORE the live-apply so no blocking work and
+	// no supervisor-internal lock is taken under it.
 	newArgs := sess.spawnArgs(merged)
 	sup := sess.sup
 	p.mu.Unlock()
 
+	// Both branches install newArgs; only one kills. Swap BEFORE the write: the
+	// install is the durable half and is non-blocking, so if the delivery fails
+	// the next spawn still carries the change.
+	if inBandDeliverable(update) {
+		sup.SetSpawnArgs(newArgs)
+		p.deliverSettingsInBand(id, sup, update)
+		return nil
+	}
 	sup.Restart(newArgs)
 	return nil
+}
+
+// inBandDeliverable reports whether update's PRESENT fields are exactly a
+// non-empty Model and/or a non-empty Effort — the changes claude accepts as
+// /model and /effort commands on a stream it is already reading (#1581), and so
+// the changes Pool.UpdateSettings can live-apply without tearing the child down.
+//
+// The rule keys on which fields the wire carried, never on merged-vs-previous
+// per field: SetSessionSettingsPayload's three fields are omitempty pointers
+// documented as a presence contract, so a client changing only the model sends
+// only the model. Two consequences are deliberate rather than incidental:
+//
+//   - A present YOLO takes the restart, INCLUDING a YOLO equal to the stored
+//     value. No in-band form for a bypass-posture change has been measured, and
+//     that is the conservative side of the partition — the restart recomposes
+//     argv from the merged settings, so a frame mixing YOLO with a model or
+//     effort still carries the new model and effort through the respawn.
+//   - A present-but-empty Model or Effort takes the restart. Empty means "run at
+//     claude's own default", which claudeSettingsArgs expresses by OMITTING the
+//     flag; no /model invocation means "revert to default".
+//
+// Total over any SettingsUpdate. The Model-or-Effort clause is redundant at the
+// one call site, since an all-nil update returns early as a no-op before the
+// live-apply, but keeping it makes the predicate independently testable instead
+// of dependent on a caller-side invariant.
+func inBandDeliverable(update SettingsUpdate) bool {
+	if update.YOLO != nil {
+		return false
+	}
+	if update.Model == nil && update.Effort == nil {
+		return false
+	}
+	if update.Model != nil && *update.Model == "" {
+		return false
+	}
+	if update.Effort != nil && *update.Effort == "" {
+		return false
+	}
+	return true
+}
+
+// deliverSettingsInBand writes the /model and /effort commands implied by update
+// onto id's live child stdin — one ordinary user turn each, model first — as the
+// non-restarting live-apply for a model/effort-only change (#1581). Caller must
+// have released p.mu and must have installed the recomposed argv already, so a
+// failed delivery still reaches the next spawn.
+//
+// One command per PRESENT field, not per changed field: a frame carrying an
+// unchanged model alongside a new effort re-sends the model, which claude answers
+// and discards. That costs one round trip in a case no frame has been observed to
+// produce, and per-field diffing is the refinement the presence contract rules
+// out. The two commands are two SEPARATE turns — a two-command message is
+// unmeasured — and model-then-effort is fixed for the same reason
+// claudeSettingsArgs fixes model → effort → bypass: determinism buys testability
+// at no cost.
+//
+// Fire-and-forget: every write error is logged and swallowed, which is the
+// contract Restart has had on this path since #842. The settings are already
+// persisted and the argv already installed, so a failed write loses nothing and
+// the caller still sees success. The errors also cannot be classified here —
+// internal/sessions must not import internal/streamsup, which would invert the
+// Runner seam — and do not need to be: the reachable set (no live child, a
+// dropped turn, a wrapped pipe failure) all warrants the same response. The
+// dominant case is an evicted session or one between spawns, where nothing is
+// degraded, which is why the record is Info and not Warn.
+//
+// context.Background() is correct here rather than a shortcut: WriteTurn consults
+// ctx only for the turncommit gate, and its own doc names the nil-gate case as
+// the direct single-turn send this is. Plumbing a ctx would change the
+// relay.SettingsUpdater seam signature for no observable gain. conversationID is
+// "" — accepted for Runner conformance and unused by the stream runner.
+//
+// NEVER logged, at any level: the model or effort value, the payload bytes, the
+// conversation id. #833 keeps settings values out of the daemon log and this path
+// gets no exemption just because the value now travels as command text.
+func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUpdate) {
+	send := func(setting, command string) {
+		if err := sup.WriteUserTurn(context.Background(), "", []byte(command)); err != nil {
+			p.log.Info("sessions: in-band settings command not delivered",
+				"session", id, "setting", setting, "err", err)
+		}
+	}
+	if update.Model != nil {
+		send("model", "/model "+*update.Model)
+	}
+	if update.Effort != nil {
+		send("effort", "/effort "+*update.Effort)
+	}
 }
 
 // JSONLPolicy controls how Pool.Remove handles a session's on-disk JSONL
