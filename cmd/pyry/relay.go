@@ -613,8 +613,9 @@ func startRelayV2(
 		// `set_session_settings` frame validates the untrusted model/effort and
 		// persists the per-session change via *sessions.Pool.UpdateSettings (#840),
 		// then live-applies it to a running session — in-band as a /model or /effort
-		// command for a model/effort-only change (#1581), by live restart otherwise
-		// (#842) — and installs the recomposed argv for the next spawn (#833).
+		// command, or a bypass-revocation control request (#1581, #1604), by live
+		// restart for a bypass enable or a model/effort cleared to default (#842) —
+		// and installs the recomposed argv for the next spawn (#833).
 		// settingsUpdaterAdapter (built
 		// at main.go over the pool) maps sessions.ErrSessionNotFound → the relay
 		// sentinel, so internal/relay imports neither internal/sessions nor cmd/pyry.

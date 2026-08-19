@@ -439,8 +439,11 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 // writing and without panicking — the safe no-op refusal.
 //
 // Interrupt is a concrete method on *Runner, deliberately NOT on sessions.Runner
-// (the interface stays un-widened, #1077): #1121's interrupt routing reaches it
-// via its own narrow interface or a type assertion. It mirrors how
+// (#1077's placement rule: its dispatch lives in cmd/pyry, which can assert —
+// unlike SetSpawnArgs (#1580) and RevokeBypass (#1604), whose consumer is inside
+// internal/sessions and which are ON the interface for exactly that reason):
+// #1121's interrupt routing reaches it via its own narrow interface or a type
+// assertion. It mirrors how
 // *supervisor.Supervisor encapsulates SendEsc (#726) without that method being on
 // the interface. Safe from any goroutine.
 func (r *Runner) Interrupt() error {

@@ -44,7 +44,7 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // doubles, all in this repo, so widening is compile-checked across the whole set —
 // whereas a type assertion at a future call site would fail silently at runtime and
 // fall back to Restart, which is the one outcome a swap-only caller exists to
-// avoid. Nothing dispatches it yet.
+// avoid. Dispatched from the in-band branch of Pool.UpdateSettings since #1581.
 func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
 
 // RevokeBypass forwards to (*streamsup.Runner).RevokeBypass (#1603), dropping the

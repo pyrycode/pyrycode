@@ -209,6 +209,7 @@ type Runner interface {
     Run(ctx context.Context) error
     Restart(args []string)
     SetSpawnArgs(args []string) // #1580 — installs the NEXT spawn's argv, no kill
+    RevokeBypass() error        // #1604 — drops bypass on the LIVE child, no kill
 }
 
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)
@@ -241,10 +242,14 @@ interface, e.g. `interface{ Interrupt() error }` (`interruptRunner`),
 a literal `.(*streamsup.Runner)` assertion would be `ok == false` always and fall through silently to an
 inert default — the same class of hazard AC 5's #1580 review round caught in this file's own first-draft
 correction. `Interrupt`/`RestartFresh`/`BeginRotation` stay off `sessions.Runner` deliberately (adding them
-would be speculative surface); `SetSpawnArgs` is on it instead, because — per its own doc — widening is
-compile-checked across the whole one-production/five-double set, whereas a type assertion at a future call
-site would fail silently at runtime and fall back to `Restart`, the exact outcome a swap-only caller exists
-to avoid. See [codebase/1580.md](../codebase/1580.md) for the swap-only installer itself.
+would be speculative surface); `SetSpawnArgs` and `RevokeBypass` are on it instead, because — per their own
+docs — widening is compile-checked across the whole one-production/five-double set, whereas a type
+assertion at a future call site would fail silently (open, for `RevokeBypass`) at runtime and either fall
+back to `Restart` or leave a posture un-revoked while the caller reports success — the exact outcomes these
+two swap/revoke-only methods exist to avoid. Both share the same placement rule: their consumer,
+`Pool.UpdateSettings`, is inside `internal/sessions`, so there is no `cmd/pyry` dispatch site to
+type-assert at. See [codebase/1580.md](../codebase/1580.md) for the swap-only installer and
+[codebase/1604.md](../codebase/1604.md) for the in-band revocation.
 
 **Typed-nil-in-interface trap for downstream consumers (#1101).** A call site that assigns `w.sup` (the `*supervisor.Supervisor` returned by `Supervisor()`) straight into a consumer-declared interface field inherits a footgun on the stream-json path: a nil `*supervisor.Supervisor` wrapped in an interface value is a **non-nil interface holding a nil pointer**, so the consumer's `== nil` guard silently fails and any method call on it panics on the nil receiver. `cmd/pyry/relay.go`'s `Snapshotter: w.sup` wiring hit exactly this and was fixed by a `screenSnapshotterOrNil` helper that returns a genuine nil when `sup == nil` — see [codebase/1101.md](../codebase/1101.md). Two sibling wiring sites carry the same unfixed trap as of #1101: `SessionStarter: w.sup` and the modal resolver's `w.sup` argument (both `cmd/pyry/relay.go`) — flagged out of scope there, not yet guarded.
 
@@ -477,48 +482,58 @@ verbatim so the YOLO fail-safe has exactly one origin. `UpdateSettings` captures
 releases the lock before either live-apply branch runs — **outside** `Pool.mu`,
 never touching `Session.lcMu`.
 
-**Which branch, and why (#1581).** `inBandDeliverable(update)` partitions on
-which fields the update carried, never on merged-vs-previous per field —
-`SetSessionSettingsPayload`'s three `omitempty` pointers are a presence
-contract, so a client changing one setting sends one field:
+**Which branch, and why (#1581, redrawn by #1604).** `inBandDeliverable(update)`
+partitions on what the update carried — which fields, and for `YOLO` its
+*value* too — never on merged-vs-previous per field. `SetSessionSettingsPayload`'s
+three `omitempty` pointers are a presence contract, so a client changing one
+setting sends one field, and a present `YOLO` is read for its direction rather
+than diffed against stored state:
 
-- **Model/effort-only** (no `YOLO` present, no present field cleared to `""`)
-  → `sup.SetSpawnArgs(newArgs)` then `deliverSettingsInBand`, which writes
+- **A change claude accepts on the already-open stream** — a non-empty
+  `Model`/`Effort`, and/or a `YOLO` **revoke** (`true → false`) — →
+  `sup.SetSpawnArgs(newArgs)` then `deliverSettingsInBand`, which writes
   `/model <v>` and `/effort <v>` as ordinary user turns via
-  `sup.WriteUserTurn(context.Background(), "", …)` — model first, one command
-  per **present** field, two separate turns. Claude accepts these on the stream
-  the daemon already holds open and applies them to the running session, so
-  **nothing is killed and the transcript survives**. This is the common case.
-  The `SetSpawnArgs` call is not optional: it is `Restart`'s swap half (#1580),
-  and skipping it would let the operator's change silently revert on the next
-  crash-respawn or evict → `Activate`. Swap **before** write — the install is
-  the durable half. Delivery is fire-and-forget: every write error is logged at
-  `Info` (`"sessions: in-band settings command not delivered"`, fields
-  `session` / a fixed `setting` literal / `err` — **never** the value, the
-  payload bytes, or the conversation id) and swallowed, so the client sees
-  success. They cannot be classified anyway: `internal/sessions` must not
-  import `internal/streamsup`, and the reachable set (`ErrNoLiveChild`,
+  `sup.WriteUserTurn(context.Background(), "", …)`, and a bypass revoke as a
+  `set_permission_mode` control request via `sup.RevokeBypass()` (#1604) —
+  model, then effort, then bypass, one send per **present** field. Claude
+  accepts all three on the stream the daemon already holds open and applies
+  them to the running session, so **nothing is killed and the transcript
+  survives**. The `SetSpawnArgs` call is not optional: it is `Restart`'s swap
+  half (#1580), and skipping it would let the operator's change silently
+  revert on the next crash-respawn or evict → `Activate` — this is what makes
+  a revocation survive those too, with no new mechanism. Swap **before**
+  write — the install is the durable half. Delivery is fire-and-forget: every
+  write error is logged at `Info`
+  (`"sessions: in-band settings command not delivered"`, fields `session` / a
+  fixed `setting` literal / `err` — **never** the value, the payload bytes, or
+  the conversation id) and swallowed, so the client sees success. They cannot
+  be classified anyway: `internal/sessions` must not import
+  `internal/streamsup`, and the reachable set (`ErrNoLiveChild`,
   `turncommit.ErrDropped`, a wrapped pipe failure) all warrants the same
   response, with the dominant case — an evicted session — not a degradation.
-- **Everything else** → `sup.Restart(newArgs)`, unchanged. That is a
-  bypass-posture (`YOLO`) change, for which no in-band form has been measured,
+- **Everything else** → `sup.Restart(newArgs)`, unchanged. That is a `YOLO`
+  **enable** (`false → true`) — claude gates the escalation on the launch argv
+  and refuses the control request in words (#1595 measured this live against
+  claude 2.1.220), so only a respawn under the recomposed argv can grant it —
   and clearing model or effort to `""` ("run at claude's own default", which
   `claudeSettingsArgs` expresses by *omitting* the flag, and for which no
-  `/model` invocation means "revert"). A present `YOLO` takes this branch even
-  when it equals the stored value — the conservative side of the partition. It
-  costs nothing: the restart recomposes argv from the **merged** settings, so a
-  frame mixing `YOLO` with a model still carries the new model through the
-  respawn. Clean partition — never both mechanisms for one change, no case left
-  unserved.
+  `/model` invocation means "revert"). A `YOLO` revoke takes this branch too
+  when a present-but-empty `Model`/`Effort` is mixed into the same frame — the
+  empty-value reject wins, but costs nothing: the restart recomposes argv from
+  the **merged** settings, so the respawn still carries the revocation. No
+  frame can lose a revocation by mixing. Clean partition — never both
+  mechanisms for one change, no case left unserved.
 
 The mechanism swap was a bug fix, not an optimisation. The respawn re-execs
 with `--resume` on a session that has never run a turn; claude answers
 `No conversation found with session ID` and exits 1, and the daemon retries
 forever on a widening backoff (observed 2026-08-18). The in-band path
 **avoids** that rather than fixing it — no resume, no lost transcript, no
-crash-loop. Live-applying a `YOLO` change is #1573; deleting the restart once
-it has no callers is #1574; the live-claude proof is #1582. See
-[codebase/1581.md](../codebase/1581.md).
+crash-loop. Live-applying a `YOLO` revoke is #1604 — the enable direction has
+no in-band form; claude refuses it. #1574 may **not** delete `Restart`: the
+enable direction keeps a live production caller. The live-claude proof is
+#1605. See [codebase/1581.md](../codebase/1581.md) and
+[codebase/1604.md](../codebase/1604.md).
 
 `Supervisor.Restart(args []string)` (`internal/supervisor`) swaps the live
 spawn args under a leaf `restartMu` and, if a child is currently running,
