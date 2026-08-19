@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -736,6 +737,160 @@ func TestRunner_RestartFresh_RotatesThenResumesNewID(t *testing.T) {
 		if i >= 1 && slices.Contains(args, testSessionID) {
 			t.Errorf("spawn %d references the pre-rotation id %q after the rotation:\n%v", i+1, testSessionID, args)
 		}
+	}
+}
+
+// swapMarkerArg is the distinctive value SetSpawnArgs installs, so a spawn's argv
+// says on its face which install it came from.
+const swapMarkerArg = "swapmarker"
+
+// TestRunner_SetSpawnArgs_InstallsWithoutKillingLiveChild proves both halves of
+// the swap-only install against ONE live child (#1580):
+//
+//	(a) the install disturbs nothing — no further spawn is even attempted, and the
+//	    child running before the call is the one still running after it;
+//	(b) once that child ends, the next spawn re-execs with the newly installed argv.
+//
+// The two assertions in (a) are both load-bearing: the spawn count alone permits
+// "no new spawn AND the old child died", and the pid alone permits a spawn attempt
+// that failed setup. rec.count() records at the "spawning claude" log site, which
+// fires BEFORE cmd.Start, so it observes attempts and not merely launches.
+//
+// The child in (b) is ended by signalling its pid directly rather than by calling
+// anything on the Runner, which is what makes the new argv attributable to
+// SetSpawnArgs alone: no other install path was invoked, so the marker can have
+// come from nowhere else. (Restart is disqualified as the ending mechanism for
+// exactly that reason — it installs argv itself.) Signalling a captured pid is
+// sound only because record_block NEVER self-exits, so the pid cannot have been
+// reaped and recycled onto an unrelated process before the signal lands; switching
+// this test to a self-exiting mode (e.g. "crash") would silently turn the Kill
+// into a signal aimed at whatever now owns that pid.
+//
+// Half (a)'s discriminator is the reap seam, NOT the settle window. A kill can
+// only reach the child by cancelling the iteration ctx, and os/exec invokes
+// cmd.Cancel on exactly that; reapDescendantGroupsFn fires first inside it,
+// synchronously, before the SIGTERM. So a stub at that seam observes an attempted
+// kill one goroutine wakeup after the offending call, whatever the child then does
+// about the signal. Swapping it is also what keeps the count and pid assertions
+// honest: the real reaper shells out to ps, which under -race stretched
+// kill→respawn to ~1.03s and let a killing install slip through a 250ms settle
+// with Phase still running and the pid unchanged (#1580 review). With the seam
+// stubbed that ps is off the path, a killed child respawns in milliseconds, and
+// the settle bounds a goroutine wakeup rather than a subprocess.
+//
+// The RestartCount assertion in (b) pins the OTHER forbidden kill-half effect, the
+// restartCh hint, which no other assertion here can see: an install that leaked a
+// token would kill nothing and still deliver the marker, so (a) and (b) both stay
+// green, but drainRestart would then report true and Run would skip the backoff
+// block — leaving the counter at 0 instead of 1 and silently suppressing the next
+// crash-respawn's backoff. Asserting it is also why this test must NOT copy
+// TestRunner_LiveRestart's RestartCount == 0: that holds because a Restart DOES
+// send the hint, whereas an externally-ended child sends none, so Run takes the
+// backoff path and the counter increments.
+//
+// Non-parallel: swapReapSeam mutates a package var.
+func TestRunner_SetSpawnArgs_InstallsWithoutKillingLiveChild(t *testing.T) {
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "record_block", out, stderr)
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	rec := &spawnArgsRecorder{}
+	cfg.Logger = slog.New(rec)
+	pids := make(chan int, 8)
+	cfg.onSpawn = func(pid int) {
+		select {
+		case pids <- pid:
+		default:
+		}
+	}
+
+	reapRec := &reapRecorder{}
+	swapReapSeam(t, reapRec)
+
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	// stop is idempotent so the deferred teardown (which covers every t.Fatalf
+	// below) and the explicit one that inspects Run's error cannot both join —
+	// the second join would block until runInBackground's own 10s deadline.
+	stopped := false
+	stop := func() error {
+		if stopped {
+			return nil
+		}
+		stopped = true
+		cancel()
+		return join()
+	}
+	defer func() { _ = stop() }()
+
+	var pid int
+	select {
+	case pid = <-pids:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first child never spawned")
+	}
+
+	r.SetSpawnArgs([]string{"--model", swapMarkerArg})
+
+	// Half (a). The window only has to cover the os/exec watcher goroutine waking
+	// on a cancelled iteration ctx and calling cmd.Cancel — microseconds — because
+	// the reap seam below is what an attempted kill trips. It is generous for the
+	// count and pid assertions too: with the seam stubbed, a killed child respawns
+	// at the 1ms backoff set above rather than behind the real reaper's ps.
+	time.Sleep(250 * time.Millisecond)
+	if calls := reapRec.calls(); len(calls) != 0 {
+		t.Fatalf("reap seam fired %v after SetSpawnArgs — the install cancelled the iteration ctx, i.e. it killed the child",
+			calls)
+	}
+	if got := rec.count(); got != 1 {
+		t.Fatalf("saw %d spawn attempt(s) after SetSpawnArgs, want 1 — the install relaunched the child:\n%v",
+			got, rec.all())
+	}
+	if got := r.State().ChildPID; got != pid {
+		t.Fatalf("ChildPID = %d after SetSpawnArgs, want the pre-call child %d — the install did not leave it running",
+			got, pid)
+	}
+
+	// Half (b). Nothing on the Runner is called from here to the next spawn.
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("SIGTERM child %d: %v", pid, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("saw only %d spawn(s) after the child was ended, want ≥2", rec.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// No hint was sent, so Run took the backoff path on the way to spawn 2 and
+	// counted this as a crash-respawn. Reading it after the spawn is observed is
+	// ordered, not racy: the increment happens in the backoff block Run must pass
+	// through before beginSpawn.
+	if got := r.State().RestartCount; got < 1 {
+		t.Errorf("RestartCount = %d after the child was ended, want >=1 — SetSpawnArgs left a restartCh token, so the respawn skipped backoff", got)
+	}
+	if err := stop(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled after teardown", err)
+	}
+
+	spawns := rec.all()
+	if slices.Contains(spawns[0], swapMarkerArg) {
+		t.Errorf("spawn 1 already carries the swap marker — it predates SetSpawnArgs:\n%v", spawns[0])
+	}
+	if !slices.Contains(spawns[1], swapMarkerArg) {
+		t.Errorf("spawn 2 missing the installed --model %s — the swap did not reach the next spawn:\n%v",
+			swapMarkerArg, spawns[1])
+	}
+	// The swap must not perturb the id form: this is an ordinary continuation of
+	// the same session, so spawn 2 resumes rather than re-establishing.
+	if got := idFlagValue(spawns[1], "--resume"); got != testSessionID {
+		t.Errorf("spawn 2 --resume = %q, want %q:\n%v", got, testSessionID, spawns[1])
+	}
+	if slices.Contains(spawns[1], "--session-id") {
+		t.Errorf("spawn 2 unexpectedly carries --session-id:\n%v", spawns[1])
 	}
 }
 

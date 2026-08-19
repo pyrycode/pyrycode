@@ -23,6 +23,7 @@ func (stubRunner) WriteUserTurn(ctx context.Context, conversationID string, payl
 func (stubRunner) WaitForPTY(ctx context.Context) error { return nil }
 func (stubRunner) Run(ctx context.Context) error        { <-ctx.Done(); return ctx.Err() }
 func (stubRunner) Restart(args []string)                {}
+func (stubRunner) SetSpawnArgs(args []string)           {}
 
 // newRouterTestPool builds a real *sessions.Pool. sessions.New constructs the
 // bootstrap session entry without spawning claude, so Pool.Lookup works against

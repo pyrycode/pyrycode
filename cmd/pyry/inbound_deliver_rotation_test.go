@@ -91,6 +91,7 @@ func (baseRunner) WriteUserTurn(ctx context.Context, conversationID string, payl
 func (baseRunner) WaitForPTY(ctx context.Context) error { return nil }
 func (baseRunner) Run(ctx context.Context) error        { return nil }
 func (baseRunner) Restart(args []string)                {}
+func (baseRunner) SetSpawnArgs(args []string)           {}
 
 func (c childSnapshot) String() string {
 	return fmt.Sprintf("{session=%s dead=%t stdin=%q}", c.sessionID, c.dead, c.stdin)

@@ -219,21 +219,22 @@ type Runner struct {
 	// restartMu is a leaf mutex guarding the live-restart seam: args, iterCancel,
 	// and the RestartFresh id-rotation pair (sessionID + rotatePending). The
 	// streamsup analogue of supervisor's restartMu. args is the live spawn base
-	// argv, swapped by Restart; iterCancel is the current spawn's cancel, so
-	// Restart/RestartFresh can force the child to exit. Kept separate from mu
-	// and stateMu — Restart/RestartFresh touch only this mutex + restartCh (never a
-	// Pool lock), so the sessions layer can call them after releasing Pool.mu with
-	// no lock-order concern.
+	// argv, swapped by Restart (with the kill) or SetSpawnArgs (without it), and
+	// assigned in exactly one place — setArgsLocked; iterCancel is the current
+	// spawn's cancel, so Restart/RestartFresh can force the child to exit. Kept
+	// separate from mu and stateMu — the three swap/rotate entry points touch only
+	// this mutex + restartCh (never a Pool lock), so the sessions layer can call
+	// them after releasing Pool.mu with no lock-order concern.
 	//
 	// The charter is ONE ACQUISITION PER SPAWN SETUP (#1481): beginSpawn both reads
 	// the spawn inputs (args + the id pair) and publishes iterCancel in a single
-	// section, so a racing Restart/RestartFresh is serialised either fully before it
-	// (the spawn observes the swap) or fully after it (it finds a live cancel and
-	// tears that spawn down). Splitting the read from the publish — which is what
-	// this loop did until #1481 — leaves a gap where iterCancel is still nil from
-	// the previous iteration: the racer writes its rotation, cancels NOTHING, and
-	// the spawn launches a live child under the pre-rotation id, for that child's
-	// whole lifetime. Do not re-split it as a "simplification".
+	// section, so a racing Restart/RestartFresh/SetSpawnArgs is serialised either
+	// fully before it (the spawn observes the swap) or fully after it (it finds a
+	// live cancel and tears that spawn down). Splitting the read from the publish
+	// — which is what this loop did until #1481 — leaves a gap where iterCancel is
+	// still nil from the previous iteration: the racer writes its rotation, cancels
+	// NOTHING, and the spawn launches a live child under the pre-rotation id, for
+	// that child's whole lifetime. Do not re-split it as a "simplification".
 	restartMu  sync.Mutex
 	args       []string
 	iterCancel context.CancelFunc
@@ -473,9 +474,14 @@ func (r *Runner) WaitForPTY(ctx context.Context) error { return nil }
 // to cancel) breaks the backoff wait. Coalescing is correct — two rapid restarts
 // overwrite args with the newest value and collapse to the single buffered token,
 // forcing one relaunch with the latest args.
+//
+// The argv install runs through setArgsLocked INSIDE this one section, not by
+// calling SetSpawnArgs: the exported swap-only method takes restartMu itself, so
+// calling it here would split Restart into two acquisitions and reopen the #1481
+// window beginSpawn's doc closes. See SetSpawnArgs for the swap without the kill.
 func (r *Runner) Restart(args []string) {
 	r.restartMu.Lock()
-	r.args = slices.Clone(args)
+	r.setArgsLocked(args)
 	cancel := r.iterCancel
 	r.restartMu.Unlock()
 
@@ -488,6 +494,75 @@ func (r *Runner) Restart(args []string) {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// SetSpawnArgs installs the base argv the NEXT spawn will use and leaves any live
+// child running — it is Restart's swap half without the kill: no restartCh hint,
+// no iterCancel call. It exists for a caller that needs to change what the session
+// will run next without ending what it is running now; declining to call Restart
+// is not that path, since it loses the swap outright and the next spawn (a
+// crash-respawn, or an evict then Activate) silently re-execs the stale argv.
+// Non-blocking, fire-and-forget, safe from any goroutine.
+//
+// The two do NOT converge when no child is live. Restart still sends its hint in
+// that case, and the token is observable twice over: it satisfies Run's restartCh
+// case in the backoff select, cutting an in-progress backoff wait short, and with
+// no wait in flight it persists in the buffered channel so the NEXT child exit
+// skips backoff entirely — RestartCount never increments and PhaseBackoff is never
+// set. SetSpawnArgs sends nothing, so a runner already backing off stays backing
+// off and the swap simply lands on the spawn that wait was going to make anyway.
+//
+// It takes restartMu exactly once and writes only args — never sessionID,
+// rotatePending or iterCancel — so it preserves the #1481 single-acquisition
+// property by construction, and cannot reach the forbidden state beginSpawn's doc
+// names (that state is defined over the three fields it does not touch). Against a
+// racing beginSpawn it serialises wholly before (that spawn observes the swap) or
+// wholly after (that spawn keeps the old argv and the next one takes the new).
+// Both are correct: the contract is the NEXT spawn, and it promises nothing about
+// a spawn already in flight. Like Restart it drives only Runner-internal state and
+// touches neither Pool.mu nor Session.lcMu, so the sessions layer can call it
+// after releasing Pool.mu with no lock-order concern.
+//
+// The argv is installed VERBATIM — no validation, no shaping. That boundary is
+// deliberate: composition and validation live upstream in the sessions layer
+// (Session.spawnArgs, where claudeSettingsArgs enforces the yolo fail-safe in one
+// place), and duplicating them here would give two places to keep in sync. Two
+// consequences the caller owns, both inherited from Restart rather than introduced
+// here: cmd/pyry's construction-time argv shaping is NOT reapplied on any
+// post-construction install path (stripSessionIDFlags runs in mapStreamsupConfig
+// and withApprovalArgs in newStreamRunnerFactory, both construction-only), and Run
+// logs the composed argv at Info ("spawning claude"), so anything installed here
+// reaches the daemon log.
+//
+// Must never be called with restartMu already held — the mutex is not reentrant.
+// A caller already inside a section installs through setArgsLocked instead.
+func (r *Runner) SetSpawnArgs(args []string) {
+	r.restartMu.Lock()
+	r.setArgsLocked(args)
+	r.restartMu.Unlock()
+}
+
+// setArgsLocked installs the next spawn's base argv. Caller MUST hold restartMu.
+// It is THE sole assignment to r.args after construction: Restart and SetSpawnArgs
+// both install through it, which is what lets Restart keep its single restartMu
+// acquisition (#1481) while there stays exactly one writer. Re-fusing the
+// assignment back into a caller reintroduces the second writer this exists to
+// prevent.
+//
+// The clone is load-bearing, not hygiene. Without it the caller keeps a live
+// handle on the runner's spawn argv and can mutate it AFTER installation — a data
+// race against beginSpawn's read, and a mutation that lands in the exec argv after
+// whatever validation the caller performed. beginSpawn's "buildArgs is pure and
+// copies base into a fresh slice, so passing r.args needs no clone" is about
+// handing r.args OUT of the section; it does not license dropping the clone on the
+// way IN.
+//
+// It makes no call-out. restartMu is a leaf: nothing under it may take another
+// lock or do synchronous I/O, which is why Run logs "spawning claude" below
+// beginSpawn's section rather than inside it. A diagnostic belongs in SetSpawnArgs
+// after the unlock.
+func (r *Runner) setArgsLocked(args []string) {
+	r.args = slices.Clone(args)
 }
 
 // RestartFresh rotates the runner's persistent session id to newID and forces the
@@ -538,6 +613,11 @@ func (r *Runner) RestartFresh(newID string) {
 // (it finds the just-published cancel and tears this spawn down). There is no
 // third position, so the forbidden outcome — a live child under a pre-rotation id
 // with no live iteration cancel — is unreachable rather than merely narrowed.
+//
+// SetSpawnArgs is the third racer on restartMu (#1580) and the weakest: one
+// acquisition like the other two, and it writes args only — never sessionID,
+// rotatePending or iterCancel — so whichever side of this section it lands on, the
+// worst it can do is leave the swap for the following spawn.
 //
 // It reads the fields directly instead of calling accessors: restartMu is not
 // reentrant, so any helper that takes it (as the now-deleted liveArgs and
