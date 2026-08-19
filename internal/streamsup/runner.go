@@ -456,9 +456,13 @@ func (r *Runner) Interrupt() error {
 // When no child is live Stdin() is nil, so RevokeBypass returns the retryable
 // ErrNoLiveChild without writing and without panicking.
 //
-// Like Interrupt it is a concrete method on *Runner, deliberately NOT on
-// sessions.Runner (the interface stays un-widened, #1077): the session-layer
-// wiring (#1604) reaches it via a type assertion, as the interrupt routing does.
+// Unlike Interrupt it IS on sessions.Runner (#1604 widened the interface), and
+// the contrast is the rule rather than an exception: Interrupt's dispatch lives in
+// cmd/pyry, which can type-assert, whereas this method's consumer is
+// Pool.UpdateSettings inside internal/sessions, with no such dispatch site. A
+// structural assertion there would fail OPEN — its unmatched arm is a silent
+// no-op, leaving the posture un-revoked while the update reports success — so the
+// interface method makes a runner that cannot revoke a build failure instead.
 // Stdin() releases r.mu before returning, so the potentially-blocking write never
 // holds it. Safe from any goroutine.
 func (r *Runner) RevokeBypass() error {

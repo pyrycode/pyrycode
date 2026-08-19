@@ -45,6 +45,28 @@ type Runner interface {
 	// notably that the argv is installed verbatim, with validation staying upstream
 	// in Session.spawnArgs.
 	SetSpawnArgs(args []string)
+	// RevokeBypass drops the LIVE child's bypass-permissions posture without
+	// killing it, by writing one set_permission_mode control request carrying
+	// mode "default" on the stream the daemon already holds open (#1603 built the
+	// writer; #1595 measured the drop live). Pool.UpdateSettings is its one
+	// caller, on the in-band branch, and it is the revoke direction ONLY: claude
+	// gates the escalation on the launch argv and refuses the request in words, so
+	// a YOLO enable keeps the restart. There is no mode parameter here or on
+	// (*streamsup.Runner).RevokeBypass — the enable direction does not exist on
+	// this surface.
+	//
+	// It is ON this interface, unlike Interrupt / RestartFresh / BeginRotation,
+	// for the reason SetSpawnArgs is: its consumer is inside internal/sessions, so
+	// there is no cmd/pyry dispatch site to type-assert at. A structural assertion
+	// here would fail OPEN — its unmatched arm is a silent no-op, leaving the
+	// posture un-revoked while UpdateSettings reports success — which is the exact
+	// regression the in-band revocation exists to prevent. The interface method
+	// makes a runner that cannot revoke a build failure instead.
+	//
+	// Returns the runner's retryable no-live-child error when nothing is bound;
+	// the caller logs and swallows it, because the argv install is the durable
+	// half. Safe from any goroutine.
+	RevokeBypass() error
 }
 
 // RunnerFactory constructs a Runner from a RunnerConfig. It is the injection seam
