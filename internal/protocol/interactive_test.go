@@ -725,6 +725,136 @@ func TestRateLimitedType_IsNotClaudesVocabulary(t *testing.T) {
 	}
 }
 
+func TestModelAnnouncedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_announced.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelAnnounced {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelAnnounced)
+	}
+
+	var payload ModelAnnouncedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	// A MEASURED identifier, not an invented one: claude echoed exactly this for a
+	// bare `haiku` alias, in the committed capture
+	// internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json. A fixture is
+	// something a client author copies as if it were observed, so it has to be.
+	// (Contrast rate_limited.json's deliberately unmeasurable "<unmeasured>", which
+	// exists because no capture of its field's non-benign value set exists at all.)
+	if payload.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("Model: got %q, want %q", payload.Model, "claude-haiku-4-5-20251001")
+	}
+	// true here and false in the zero fixture on purpose: with both false a struct
+	// wiring "truncated" to the wrong field, or dropping it, would still pass. The
+	// PAIRING is not a capture — a 25-byte identifier is nowhere near the producer's
+	// 256-byte cap, so no real frame carries this model with this bool. The model
+	// value is measured; the bool is chosen to discriminate.
+	if !payload.Truncated {
+		t.Errorf("Truncated: got %v, want true", payload.Truncated)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestModelAnnouncedPayload_ZeroValue_RoundTrip pins the encoding of every
+// field's zero value, which is what this stream's no-omitempty rule
+// (docs/protocol-mobile.md § Interactive events) actually asserts: adding
+// omitempty to any one of the three fields turns this round trip red, and no
+// realistic fixture can make that claim for all three.
+//
+// The frame itself is one the bridge will never emit — Model is never empty (the
+// producer's gate does not emit on an empty model) and the bridge always supplies
+// a conversation id. It exists for the encoding, not for the scenario.
+func TestModelAnnouncedPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_announced_zero.json")
+
+	// Both guards are load-bearing rather than decoration: they are what makes
+	// "explicit zero, not elided" checkable at all. Without them an omitempty on
+	// either field would elide the key from BOTH the fixture and the re-marshalled
+	// bytes, and the round trip alone would go on passing.
+	if !bytes.Contains(canonical(t, raw), []byte(`"model":""`)) {
+		t.Errorf("fixture must carry the announced model explicitly as the empty string, got: %s", raw)
+	}
+	if !bytes.Contains(canonical(t, raw), []byte(`"truncated":false`)) {
+		t.Errorf("fixture must carry the truncation report explicitly as false, got: %s", raw)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelAnnounced {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelAnnounced)
+	}
+
+	var payload ModelAnnouncedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "")
+	}
+	if payload.Model != "" {
+		t.Errorf("Model: got %q, want %q", payload.Model, "")
+	}
+	if payload.Truncated {
+		t.Errorf("Truncated: got %v, want false", payload.Truncated)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestModelAnnouncedType_IsNotClaudesSubtype pins the translation layer this
+// frame exists to preserve, as its thinking_progress and rate_limited siblings
+// above do. The daemon is the ONE place a claude rename lands; naming the wire
+// type after claude's own `init` subtype would undo that.
+//
+// Neither sibling's exact form transfers. claude's KEY for the value is `model`,
+// so a strings.Contains(TypeModelAnnounced, "model") check would be red against
+// the correct name — `model` here is the subject noun and the daemon's own field
+// name. The discriminating word is claude's subtype `init`, which names claude's
+// LINE where ours names what the daemon reports.
+func TestModelAnnouncedType_IsNotClaudesSubtype(t *testing.T) {
+	if TypeModelAnnounced == "init" {
+		t.Errorf("wire type is claude's subtype %q; it must be the daemon's own name", TypeModelAnnounced)
+	}
+	if strings.Contains(TypeModelAnnounced, "init") {
+		t.Errorf("wire type %q is derived from claude's subtype (contains %q)", TypeModelAnnounced, "init")
+	}
+	// The exact pin, matching internal/turnevent's variant name (ModelAnnounced)
+	// in snake_case rather than anything of claude's.
+	if TypeModelAnnounced != "model_announced" {
+		t.Errorf("wire type: got %q, want %q", TypeModelAnnounced, "model_announced")
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own
+	// id/ts and would dilute the check. These are regression pins: non-discriminating
+	// today by construction, their job is to go red the day someone "helpfully"
+	// adds claude's init-line keys back. The captured init line carries 22 keys and
+	// this payload carries the substance of one.
+	body, err := json.Marshal(ModelAnnouncedPayload{
+		ConversationID: "c1",
+		Model:          "claude-haiku-4-5-20251001",
+		Truncated:      true,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{"cwd", "session_id", "tools", "mcp_servers", "permissionMode", "slash_commands"} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's excluded init-line key %q: %s", key, body)
+		}
+	}
+}
+
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
 // purpose: nothing in internal/protocol enforces the cap — the transport does —

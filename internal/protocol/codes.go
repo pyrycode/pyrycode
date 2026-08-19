@@ -325,6 +325,52 @@ const (
 	TypeRateLimited = "rate_limited" // binary → phone, outbound v2 usage-limit report
 )
 
+// Mobile Protocol v2 announced-model report. claude names the model it resolved
+// for the turn on its system/init line, and until now that value stopped at the
+// daemon boundary: internal/streamsup's parser has translated the line into
+// turnevent.ModelAnnounced since #1600, but turnbridge.MapEvent's default drops
+// the variant, so no client could see what claude actually ran
+// (docs/protocol-mobile.md § model_announced).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state with
+// two edges, not turn-independent work, not a periodic reading, and not a
+// condition report about a window. It is an IDENTITY report — what claude says it
+// is, for the turn it says it about.
+//
+// The NAME is the daemon's, not claude's, for the reason the three blocks above
+// give: the wire follows internal/turnevent's VARIANT (turnevent.ModelAnnounced),
+// so a claude rename lands in one place instead of breaking every client at once.
+// claude's subtype is init; the discriminating word is "init" — claude's, naming
+// its LINE — where ours names what the daemon reports. The sibling blocks' form
+// does not transfer to a test on "model": claude's KEY for the value is model, and
+// so is turnevent.ModelAnnounced's field name, so that word is the subject noun
+// rather than a vocabulary import.
+//
+// The wire field keeps the name model even though three v2 payloads already carry
+// one (ScreenSnapshotPayload, SessionSettingsPayload, SetSessionSettingsPayload).
+// Those three mean the per-session OVERRIDE, where "" is "inherited default"; this
+// means what claude ANNOUNCED, and in the ordinary case the two disagree loudly.
+// The field name is turnevent's in snake_case per the house convention, every
+// field on this wire is scoped by its envelope type, and a rename would not reach
+// a client author reading only screen_snapshot's row — the doc cross-references do
+// (docs/protocol-mobile.md § model_announced, § Screen snapshot, § Session
+// settings).
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone event an old phone never receives, and a leak
+// into that set would let a phone send a model_announced frame into
+// dispatch.Route. The drift detector in internal/protocol/compat_test.go
+// partitions Type* constants between inboundAppTypeSet and v2OnlyTypes; this
+// lives in the latter.
+//
+// This ticket (#1616) is wire vocabulary only — nothing emits the frame.
+// turnbridge.MapEvent still drops turnevent.ModelAnnounced; the producer that
+// adds the case is sibling #1617. Same declare-then-emit sequencing as
+// #1405→#1410 and #1393→#1394.
+const (
+	TypeModelAnnounced = "model_announced" // binary → phone, outbound v2 announced-model report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the

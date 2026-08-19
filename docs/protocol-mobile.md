@@ -446,6 +446,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted since #1410. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`model_announced`** | binary → phone | no | **New in v2** (interactive, capability-gated). The model claude named for the current turn on its `system/init` line (#1616). **Not** the per-session override the three `model` fields elsewhere in this document carry. Shape declared by #1616; **nothing emits it yet** — the producer is #1617. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -520,7 +521,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These fourteen envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These fifteen envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
 **Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable, per-conversation id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in emit order per conversation. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -644,18 +645,22 @@ So the parser has **two tiers**, and the split is the whole design:
   claude's catch-all namespace and its highest-rate emitter (`system/init`
   fires once per turn, `system/thinking_tokens` roughly ten times), so treating
   every subtype as surfacing-worthy by default would put a row on every turn
-  and make the frame worthless noise. As of #1380–#1385 the daemon parser maps
-  four `system` subtypes internally (`task_started`, `task_updated`,
-  `background_tasks_changed`, `thinking_tokens`) to daemon-owned `turnevent`
-  types — see [streamsup-package.md](knowledge/features/streamsup-package.md).
-  All four now reach this wire under their own daemon-owned names, and all
-  four are documented below: `background_task_started`,
-  `background_task_updated` and `background_task_roster` (#1394), and
-  `thinking_tokens` as `thinking_progress` (#1386). As of #1404 the parser also
-  maps `rate_limit_event` — a **top-level line type, not a `system` subtype**, so
-  the count of four above is unaffected — to `turnevent.RateLimited`, which
-  reaches this wire as [`rate_limited`](#rate_limited) (#1405), documented below.
-  Every other `system`
+  and make the frame worthless noise. As of #1380–#1385 and #1600 the daemon
+  parser maps **five** `system` subtypes internally (`task_started`,
+  `task_updated`, `background_tasks_changed`, `thinking_tokens`, `init`) to
+  daemon-owned `turnevent` types — see
+  [streamsup-package.md](knowledge/features/streamsup-package.md). **Four of the
+  five reach this wire** under their own daemon-owned names, and those four are
+  documented below: `background_task_started`, `background_task_updated` and
+  `background_task_roster` (#1394), and `thinking_tokens` as
+  `thinking_progress` (#1386). The fifth, `init`, is documented below as
+  [`model_announced`](#model_announced) but does **not** reach the wire yet —
+  its shape is declared ahead of its producer (#1616 declares, #1617 emits), so
+  a client receives nothing for it until #1617 lands. As of #1404 the parser
+  also maps `rate_limit_event` — a **top-level line type, not a `system`
+  subtype**, so the count of five above is unaffected — to
+  `turnevent.RateLimited`, which reaches this wire as
+  [`rate_limited`](#rate_limited) (#1405), documented below. Every other `system`
   subtype is still silently dropped exactly as before, and none of this changes what
   surfaces as `unrecognized_message` — a subtype the parser doesn't recognize
   at all still falls through to the silent-drop tier, not this frame.
@@ -975,9 +980,80 @@ keys a behaviour on it (no backoff, throttle, retry, turn suspension or reconnec
 delay), and a client should hold the same line. That is what keeps a wrong — or
 hostile — status value costing at most one misleading row.
 
+#### `model_announced`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose turn carried the announcement. |
+| `model` | string | The model identifier **claude announced for this turn**, verbatim. **Never the empty string.** Not the per-session override — see below. |
+| `truncated` | bool | Whether the daemon cut `model` to fit its cap. |
+
+Like every frame in this section it is **binary → phone only**, reaches only a
+phone whose `interactive` capability was echoed in `hello_ack`, and carries an
+envelope-level `event_id` for replay.
+
+**Declared, not emitted.** The shape is declared by #1616 so a client can be
+written against it; **nothing emits this frame** — `internal/turnbridge`'s
+`MapEvent` has no case for `turnevent.ModelAnnounced`, so it stops at the daemon
+boundary — until #1617 wires the producer. Until then a client receives nothing
+for it, no matter what claude announces. This is the same sequencing `rate_limited`
+used (#1405 declared, #1410 emitted).
+
+`model_announced` exists because the daemon knows what it **asked for** and only
+claude knows what it **got**. The per-session override is often unset, in which
+case the daemon publishes an empty string while claude has named a concrete model
+on every turn.
+
+**This is not the `model` field you already know.** Three payloads in this
+document carry a wire field named `model` —
+[`screen_snapshot.model`](#screen_snapshot),
+[`session_settings.model`](#session_settings) and
+[`set_session_settings.model`](#set_session_settings) — and **all three mean the
+per-session override**, where `""` means "inherited daemon default, no override".
+The third is simply a client's write of the value the first two report. **This one
+means what claude announced for the turn**, which is a different thing, and in the
+ordinary case the two **disagree**: the override is `""` while claude has named a
+concrete model. A client that merges them into one value shows the wrong one.
+
+**A lookup miss is ordinary, not an error.** claude echoes an identifier **at
+least as specific as the one it was given**: it dates a bare family alias
+(`haiku` → `claude-haiku-4-5-20251001`) and passes through anything already fully
+formed (`claude-haiku-4-5`; `claude-sonnet-5` for a machine default). So the value
+is **not reliably dated**, and it **need not appear in any published model list** —
+`claude-haiku-4-5` does not. Treat a miss against any list as normal, render the
+string as given, and do not repair it: the daemon does not, deliberately.
+
+**Once per turn, not once per session.** claude emits `system/init` on every turn,
+so one session produces several of these and they need not agree — a `/model` turn
+emits its own `init` and that one still reports the **old** model. A client that
+**latches the first** announcement shows a stale value; one that renders the
+**latest** has no problem to solve. The daemon does not dedup.
+
+It is **conversation-scoped**: there is no `turn_id`, and receiving one **neither
+opens nor closes a turn**. A per-turn announcement is not a turn boundary.
+
+`truncated` is load-bearing, not decoration. A client that ignores it presents
+claude's cut text as complete. The value was bounded by the daemon **at
+construction**, so an oversized identifier never reaches this wire; the flag is how
+a client knows this one lost characters.
+
+**SECURITY.** `model` is a claude-authored string that crossed the subprocess trust
+boundary. It is safe to **render as inert text** and never to feed to an HTML sink,
+an attribute, or a URL. The daemon **bounds it but does not sanitize it** — nothing
+on this path strips control characters or terminal escape sequences — so it stays
+untrusted, model-influenced text all the way to the client, and **the render
+boundary that owes the sanitization is the client's, not the daemon's**. Nor is the
+value charset-checked: only a **phone-supplied override** is (a deliberately
+different rule, since applying it here would reject identifiers claude legitimately
+announces), and a `--model` flag or a config default never is. This frame is a
+**report, never a control input**: nothing in the daemon keys a behaviour on it, and
+a client should hold the same line — in particular it must not be used to select
+code paths, endpoints, or pricing without validating it against a list the client
+itself owns.
+
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the fourteen turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the fifteen turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1039,7 +1115,7 @@ Direction **binary → phone**. The one-shot text picture answering a `request_s
 | `conversation_id` | string | Conversation this snapshot belongs to. |
 | `text` | string | The current screen rendered to **plain text only — never raw terminal control codes** (preserves ADR 025's no-raw-bytes invariant). Multi-line. |
 | `ts` | RFC3339 | When the snapshot was rendered. |
-| `model` | string | Bootstrap session's per-session model override; **empty string = inherited daemon default** (no override). |
+| `model` | string | Bootstrap session's per-session model override; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
 | `effort` | string | Bootstrap session's per-session reasoning-effort override; **empty string = inherited daemon default** (no override). |
 | `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
 | `used_tokens` | int | Bootstrap session's context-window tokens consumed by the latest turn (#857). Was shipped in the binary but missing from this table. |
@@ -1244,7 +1320,7 @@ The three settings fields are **optional** and encode a *presence contract*: a f
 | Field | Type | Meaning |
 |---|---|---|
 | `session_id` | string | The session to change. Always present. |
-| `model` | string (optional) | New model; absent = leave unchanged. |
+| `model` | string (optional) | New model; absent = leave unchanged. This writes the per-session **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
 | `effort` | string (optional) | New reasoning effort; absent = leave unchanged. |
 | `yolo` | boolean (optional) | New bypass-permissions (YOLO) state; absent = leave unchanged. An absent `yolo` never enables bypass. |
 
@@ -1308,7 +1384,7 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 | Field | Type | Meaning |
 |---|---|---|
 | `session_id` | string | The session to address a `set_session_settings` to. **Empty string = the daemon has no session to address**; a client must treat the settings as read-only rather than sending an empty id, which would be rejected. |
-| `model` | string | Model override in force; **empty string = inherited daemon default** (no override). |
+| `model` | string | Model override in force; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
 | `effort` | string | Reasoning-effort override in force; **empty string = inherited daemon default** (no override). |
 | `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
 | `used_tokens` | int | Context-window tokens consumed by the latest turn. `0` against a non-zero `window_tokens` is a genuine fresh session. |
@@ -1651,6 +1727,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-08-19`: Added `model_announced` (binary → phone, interactive-capability-gated, #1616). The daemon has parsed claude's `system/init` line into a `turnevent` variant since #1600, but that variant is internal — `turnbridge.MapEvent`'s `default` drops it — so no client could see which model claude actually ran. The shape is declared **ahead of its producer**: nothing emits this frame until #1617, the same sequencing #1405 used ahead of #1410 and #1393 ahead of #1394. It is conversation-scoped, carries no `turn_id` and drives no turn lifecycle. The hazard the section spends most of its words on is the **name collision**: three payloads already carry a wire field called `model` (`screen_snapshot`, `session_settings`, `set_session_settings`) and all three mean the per-session **override**, where `""` is "inherited default"; this one means **what claude announced for the turn**, and in the ordinary case they disagree because the override is `""` while claude has named a concrete model. Each of those three rows now points here, so reading any one of the four is enough to learn the other meaning exists. Three further properties are stated because a client gets each wrong by default: claude echoes an identifier **at least as specific** as the one it was given, so the value is **not reliably dated** and **need not appear in any published model list** (`claude-haiku-4-5` does not) — a lookup miss is **ordinary**, not an error; the announcement is **once per turn, not once per session**, so latching the first one shows a stale value; and `truncated` is load-bearing, since a client ignoring it presents claude's cut text as complete. The value is **never the empty string**, and the daemon does not repair it. It is bounded but **not sanitized** — no control-character or terminal-escape stripping on this path — so the render boundary owing the sanitization is the **client's**, and the frame is a **report, never a control input**. Also **corrected three stale counts**: § Interactive events and `session_transition` both said "fourteen" turn-stream events; both now read fifteen. And § `unrecognized_message` said the parser maps **four** `system` subtypes internally, which had been **wrong since #1600** — that ticket added the `init` arm and never touched this file, so `init` was neither counted nor listed while the surrounding prose still read as though it were silently dropped. That count now reads **five** and attributes #1600. The sentence about how many reach the wire deliberately **stays four**: `init` is declared here and emitted in #1617, so it is documented below without reaching the wire yet. The #1404 clause's back-reference is re-anchored to five; `rate_limit_event` remains a top-level line type rather than a `system` subtype, so the claim itself is unchanged.
 - `2026-08-19`: `request_session_settings` gained a `conversation_id` (#1586). The frame used to be bare, and this document said so in as many words, justifying it with "the reported values are daemon-wide, so there is no field a client could use to select another session's data". Both halves are now gone: the field exists, and the daemon reads it. It matters because this verb's reply carries the `session_id` a client must put on every `set_session_settings`, so the read verb decides which session each client write lands on and a client had no way to say which conversation it meant. **The change is additive on the wire and no reported value moved with it.** A named conversation the daemon hosts is answered exactly as before; one it does not host is answered with an all-zero `session_settings` rather than an error, because `session_id: ""` is already the defined "no session to address" answer and a verb documented as always answering should not grow a failure branch; and an **empty or absent** field is answered as it always was, which is what keeps un-updated clients working and what keeps the sheet alive on a freshly started daemon, where the registry seeds nothing and there is no conversation id in existence to send. The field therefore gates **whether** the answer is populated, not **which** session it describes — the reported values stay bootstrap-scoped, and making them follow the named conversation is #1587, where the values and `session_id` must move in one step.
 - `2026-08-09`: Added `rate_limited` (binary → phone, interactive-capability-gated, #1405). The daemon has translated claude's top-level `rate_limit_event` line into a `turnevent` variant since #1404, but that variant is internal, so a turn that stops making progress because of a usage limit still had nothing on the wire saying why. The shape is declared **ahead of its producer**: `turnbridge.MapEvent` has no case for the variant, so nothing emits this frame until #1406 — the same sequencing #1393 used ahead of #1394. It is conversation-scoped, carries no `turn_id` and drives no turn lifecycle. Three things a client gets wrong by default are stated in the section: `status` is an **open string with a mostly unmeasured value set** (no capture of a limit actually in force exists, so it must be rendered as an opaque label and never branched on for security-relevant behaviour); `resets_at` is **claude's number, unvalidated in both directions**, so formatting it as a date without a range check is the realistic bug, and `0` means "not reported", not the epoch; and `truncated_fields` is load-bearing, since a client ignoring it presents claude's cut text as complete. The frame is a **report, never a control input** — nothing in the daemon keys a behaviour on it. Also **corrected two stale counts**: § Interactive events and `session_transition` both said "thirteen" turn-stream events; both now read fourteen. The `system`-subtype count of four is deliberately unchanged — `rate_limit_event` is a top-level line type, not a `system` subtype.
 - `2026-08-09`: Added `thinking_progress` (binary → phone, interactive-capability-gated, #1386). The daemon had translated claude's `system/thinking_tokens` line into a `turnevent` variant since #1385, but `turnbridge.MapEvent` had no case for it, so it stopped at the daemon boundary and a client showing "thinking" for three minutes still could not separate a slow answer from a wedged session. It is conversation-scoped, carries no `turn_id`, drives no turn lifecycle, and carries **no reasoning text** — only two of claude's integer readings. Four consumer hazards are stated in the section because a client gets each wrong by default: the frames are **rate-bounded** (one per 64 tokens of accumulated delta — 33 lines became 8 frames on the committed capture) and do not enumerate claude's lines; `estimated_tokens` is **not monotonic** (four restarts in the capture's single turn), so two readings must never be subtracted; the deltas received **do not sum** to the turn's total (674 arrived as 243) and no field reports the residue; and **absence proves nothing** for two separate reasons — the PTY surface emits none at all, and on the emitting surface a gap may only mean the bound has not been crossed. Also **corrected two stale counts**: § Interactive events and `session_transition` both said "twelve" turn-stream events; both now read thirteen.

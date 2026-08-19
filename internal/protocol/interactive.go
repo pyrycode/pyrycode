@@ -395,3 +395,72 @@ type RateLimitedPayload struct {
 	ResetsAt        int64    `json:"resets_at"`
 	TruncatedFields []string `json:"truncated_fields"`
 }
+
+// ModelAnnouncedPayload is the body of an Envelope whose Type ==
+// TypeModelAnnounced (docs/protocol-mobile.md § model_announced, #1616). Binary →
+// phone direction; the wire form of turnevent.ModelAnnounced, which reports the
+// model claude named for the current turn on its system/init line.
+//
+// Nothing emits it yet: turnbridge.MapEvent has no case for the variant, so the
+// shape is declared here so a client can be written against it and #1617 wires the
+// producer — the sequencing #1405 used ahead of #1410.
+//
+// Like RateLimitedPayload it is conversation-scoped rather than turn-scoped, so
+// there is no turn_id, and receiving one neither opens nor closes a turn: a
+// per-turn announcement is not a turn boundary (turnevent.ModelAnnounced's own
+// doc). The bridge (#1617) supplies ConversationID because the internal event
+// carries none. claude's session_id and cwd are deliberately absent for
+// BackgroundTaskStartedPayload's reason plus #1380's — one is claude's session
+// identity and the other the operator's local filesystem path, neither is the
+// daemon's conversation identity, and neither is even declared on the producer's
+// decode target (streamsup's systemInitLine), so this payload cannot carry them
+// even by accident.
+//
+// The value's semantics are NOT restated here: turnevent.ModelAnnounced's field
+// comments are their single source of truth, in the manner ThinkingProgressPayload
+// delegates its two consumer hazards. Named and delegated: Model is claude's
+// identifier VERBATIM and never empty; claude echoes an identifier at least as
+// specific as the one it was given, so the value is not reliably dated and need
+// not appear in any published model list, which makes a lookup miss ORDINARY
+// rather than an error; and bounded-and-UTF-8-valid is all it is. A
+// consumer-facing statement of each is in docs/protocol-mobile.md
+// § model_announced.
+//
+// Truncated is a bool rather than the siblings' TruncatedFields []string,
+// following UnrecognizedMessagePayload: this payload bounds a SINGLE string, so a
+// name list would be permanently either nil or ["model"] — a variable-length
+// container carrying one bit, plus a name the reader must check against the only
+// field there is. The slice exists on the background-task and rate-limit payloads
+// because they bound two to four fields and the report has to say which. It is
+// load-bearing either way — a payload that dropped it would present claude's cut
+// text to a phone as complete.
+//
+// Three v2 payloads already carry a wire field named model — ScreenSnapshotPayload,
+// SessionSettingsPayload and SetSessionSettingsPayload — and all three mean the
+// per-session OVERRIDE, where "" means "inherited default, no override". This one
+// means what claude ANNOUNCED for the turn, and in the ordinary case the two
+// disagree: the override is "" while claude has named a concrete model. The name
+// is kept (turnevent's field name in snake_case, per the convention
+// RateLimitedPayload states) and the distinction is drawn by cross-reference in
+// docs/protocol-mobile.md, which is what reaches a client author reading only one
+// of the existing rows.
+//
+// SECURITY: Model is a claude-authored string that crossed the subprocess trust
+// boundary. It is safe to RENDER as inert text and must never be fed to an HTML
+// sink, an attribute, or a URL; the daemon bounds it but does not sanitize it — no
+// control-character or terminal-escape stripping happens on this path — so it stays
+// untrusted, model-influenced text all the way to the client, and the render
+// boundary owing the sanitization is the CLIENT's. Its bound is the producer's,
+// decided at construction (internal/streamsup/parser.go's maxModelField), so this
+// struct re-decides no maximum: a second cap here would be a second place the limit
+// is decided, and the two could disagree silently. Nor is there a charset check —
+// internal/relay's validModel bounds a PHONE-supplied override and is deliberately
+// a different rule; applying it here would reject identifiers claude legitimately
+// announces. The constraint on turnevent.ModelAnnounced follows the data onto the
+// wire: it is a REPORT, never a control input, so a client MUST NOT branch
+// security-relevant behaviour on Model.
+type ModelAnnouncedPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Model          string `json:"model"`
+	Truncated      bool   `json:"truncated"`
+}
