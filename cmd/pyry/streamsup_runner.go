@@ -37,6 +37,16 @@ func (a streamRunner) Run(ctx context.Context) error { return a.r.Run(ctx) }
 
 func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 
+// SetSpawnArgs forwards to (*streamsup.Runner).SetSpawnArgs (#1580), installing
+// the next spawn's argv without terminating the running child. Unlike Interrupt /
+// RestartFresh / BeginRotation below, it is ON the sessions.Runner interface: that
+// interface has exactly one production implementation (this adapter) and five test
+// doubles, all in this repo, so widening is compile-checked across the whole set —
+// whereas a type assertion at a future call site would fail silently at runtime and
+// fall back to Restart, which is the one outcome a swap-only caller exists to
+// avoid. Nothing dispatches it yet.
+func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
+
 // Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
 // turn via a control_request line. It is OFF the sessions.Runner interface (which
 // stays un-widened, #1077) — a concrete method the #1121 interrupt dispatch
@@ -224,6 +234,9 @@ func stripSessionIDFlags(args []string) []string {
 }
 
 // Assert at compile time that streamRunner satisfies sessions.Runner (AC1). The
-// build fails if a method is missing or mis-typed. Mirrors
-// var _ Runner = (*supervisor.Supervisor)(nil) in internal/sessions/runner.go.
+// build fails if a method is missing or mis-typed. This is the ONLY conformance
+// assertion for the interface, not a mirror of one in internal/sessions: the
+// var _ Runner = (*supervisor.Supervisor)(nil) this comment used to point at never
+// existed after #1348 deleted internal/supervisor, and that package declares no
+// assertion of its own because the sole production implementation lives here.
 var _ sessions.Runner = streamRunner{}

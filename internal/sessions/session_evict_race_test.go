@@ -54,6 +54,8 @@ func (r *raceRunner) Run(ctx context.Context) error {
 
 func (r *raceRunner) Restart(args []string) {}
 
+func (r *raceRunner) SetSpawnArgs(args []string) {}
+
 // TestSession_IdleEviction_ActivateRacingTeardownRespawns is the hermetic,
 // fake-tier sibling to internal/e2e's TestE2E_IdleEviction_RespawnsOnSendMessage
 // (#396): it pins the drain-respawn-after-eviction contract on the same lifecycle

@@ -32,6 +32,8 @@ func (fakeRunner) Run(ctx context.Context) error { <-ctx.Done(); return ctx.Err(
 
 func (fakeRunner) Restart(args []string) {}
 
+func (fakeRunner) SetSpawnArgs(args []string) {}
+
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
 // Config.RunnerFactory is invoked in place of the default runner at BOTH construction
 // sites — the bootstrap (Pool.New) and the per-session create (Pool.buildSession,
@@ -132,6 +134,14 @@ type lifecycleRunner struct {
 	// old arrangement where a real child wrote its own argv to a file and the test
 	// read it back — the same assertion, one process fewer.
 	restarts [][]string
+	// setArgs records the argv of every SetSpawnArgs call, in order, and is kept
+	// SEPARATE from restarts because the two are different events: an install
+	// changes what the next spawn will run, a restart also ends the child running
+	// now. It deliberately does not route through recordArgv either — that is the
+	// restart-observability channel the spawn-argv tests read back. Nothing reaches
+	// SetSpawnArgs through the pool yet (#1580); recording rather than dropping is
+	// what keeps this double honest for the first caller that does.
+	setArgs [][]string
 }
 
 func (r *lifecycleRunner) State() State {
@@ -206,4 +216,10 @@ func (r *lifecycleRunner) Restart(args []string) {
 	wd := r.workDir
 	r.mu.Unlock()
 	recordArgv(wd, args)
+}
+
+func (r *lifecycleRunner) SetSpawnArgs(args []string) {
+	r.mu.Lock()
+	r.setArgs = append(r.setArgs, append([]string(nil), args...))
+	r.mu.Unlock()
 }
