@@ -141,13 +141,16 @@ func (c *convRing) evictOldest() {
 // convID, in ascending id order, never returning another conversation's events.
 // The (events, gap) pair distinguishes three outcomes for the #647 consumer:
 //
-//   - Caught up — afterID >= the latest id assigned: (nil, false). Nothing to
+//   - Caught up — afterID == the latest id assigned: (nil, false). Nothing to
 //     replay.
 //   - Gap — the consumer's next-expected event (afterID+1) fell off the back of
 //     the ring (the oldest retained id is newer than it): (nil, true). The
-//     consumer missed some events and must resync. An unknown conversation
-//     queried with afterID > 0 is also a gap — the consumer references events
-//     this daemon never had (e.g. after a daemon restart wiped the ring).
+//     consumer missed some events and must resync. An afterID beyond the latest
+//     id assigned is a gap too, on the same reasoning: it names an id this
+//     daemon never issued, whether the conversation is unknown (queried with
+//     afterID > 0) or known but younger than the cursor — the shape a daemon
+//     restart leaves behind, wiping the ring so per-conversation ids restart
+//     at 1 while the consumer still holds a high cursor (#1494).
 //   - Replay — otherwise: (events with id > afterID, false).
 //
 // A missing middle delta (evicted while older events are still retained) is NOT
@@ -166,8 +169,11 @@ func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool) {
 	}
 
 	latestID := c.nextID - 1
-	if afterID >= latestID {
-		return nil, false // caught up
+	if afterID > latestID {
+		return nil, true // an id this daemon never issued → gap
+	}
+	if afterID == latestID {
+		return nil, false // caught up: exactly at the latest id
 	}
 	if c.events[0].ID > afterID+1 {
 		return nil, true // next-expected event fell off the back → gap
@@ -183,18 +189,21 @@ func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool) {
 }
 
 // NewestID returns the newest durable event id retained for convID — the id the
-// most recent Append assigned (c.nextID-1, the same boundary After uses for its
-// caught-up decision) — or 0 if the conversation is unknown / has had no events.
+// most recent Append assigned (c.nextID-1, the same latestID boundary After
+// classifies against) — or 0 if the conversation is unknown / has had no events.
 // Because the newest event is never evicted (eviction takes the oldest first)
 // and nextID advances on every Append independent of retention, this equals the
 // highest retained event's id.
 //
 // It is the #647-MUST-FIX (#663) caught-up-watermark clamp source: replayMissed
-// bounds the per-conn dedup watermark to min(afterID, NewestID), so an untrusted
-// remote last_event_id beyond this conversation's id space can never set the
-// watermark above a real id and silently mute the live stream. Locked by the
-// ring's existing mutex — same safe-off-the-emitter-goroutine guarantee as
-// After.
+// bounds the per-conn dedup watermark to min(afterID, NewestID). Since #1494 an
+// untrusted remote last_event_id beyond this conversation's id space classifies
+// as a gap and returns before that clamp, so what the clamp still defends is the
+// window between this read and the After call: an Append landing in it can leave
+// this value one or more ids behind the latestID After then classifies against,
+// and min keeps the watermark at the stale-but-real id so the concurrently
+// appended event still reaches the wire. Locked by the ring's existing mutex —
+// same safe-off-the-emitter-goroutine guarantee as After.
 func (r *Ring) NewestID(convID string) uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()

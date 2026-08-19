@@ -178,11 +178,36 @@ func TestV2Session_Reconnect_ReplaysMissedTail(t *testing.T) {
 	}
 }
 
-// TestV2Session_Reconnect_CaughtUp_NoReplay is AC-3 + AC-5: a last_event_id at
-// or beyond the newest event — including a hostile-large value — produces no
-// replay frames and no panic. Replay is idempotent: re-advertising the same
-// position never re-sends.
+// TestV2Session_Reconnect_CaughtUp_NoReplay is AC-3: a last_event_id exactly at
+// the newest event produces no replay frames and no panic. Replay is
+// idempotent: re-advertising the same position never re-sends. Only the
+// at-newest position is caught-up — a last_event_id *beyond* the newest names
+// an id the daemon never issued and earns a resync instead (#1494, pinned by
+// TestV2Session_Reconnect_BeyondNewest_EmitsResync).
 func TestV2Session_Reconnect_CaughtUp_NoReplay(t *testing.T) {
+	t.Parallel()
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, 5)
+	cursor := func() string { return v2TestConvID }
+
+	last := uint64(5) // exactly the newest retained id
+	forwarded := reconnectScenario(t, respPriv, respPub, initPriv, ring, cursor, &last, 1)
+	if len(forwarded) != 0 {
+		t.Errorf("caught-up last_event_id=5: got %d replay frames, want 0", len(forwarded))
+	}
+}
+
+// TestV2Session_Reconnect_BeyondNewest_EmitsResync is #1494: a last_event_id
+// past the conversation's newest retained id — the post-daemon-restart shape,
+// where the ring is wiped and per-conversation ids restart at 1 while the phone
+// still holds a high cursor — earns exactly one resync marker for the
+// conversation. It previously produced ZERO frames: the daemon classified it
+// caught-up, and the phone, dedup'ing durably on event_id, silently dropped
+// every live event until the ids climbed back past its cursor.
+func TestV2Session_Reconnect_BeyondNewest_EmitsResync(t *testing.T) {
 	t.Parallel()
 	cursor := func() string { return v2TestConvID }
 
@@ -190,7 +215,6 @@ func TestV2Session_Reconnect_CaughtUp_NoReplay(t *testing.T) {
 		name string
 		last uint64
 	}{
-		{"at-newest", 5},
 		{"beyond-newest", 99},
 		{"hostile-max-uint64", math.MaxUint64},
 	}
@@ -201,12 +225,30 @@ func TestV2Session_Reconnect_CaughtUp_NoReplay(t *testing.T) {
 			respPriv, respPub := genV2Keypair(t)
 			initPriv, _ := genV2Keypair(t)
 			ring := eventring.New(eventring.MaxEventsPerConversation)
-			appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, 5)
+			appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, 5) // newest id 5
 
 			last := tc.last
-			forwarded := reconnectScenario(t, respPriv, respPub, initPriv, ring, cursor, &last, 1)
-			if len(forwarded) != 0 {
-				t.Errorf("caught-up last_event_id=%d: got %d replay frames, want 0", tc.last, len(forwarded))
+			// noise_resp + one resync == 2 envelopes.
+			forwarded := reconnectScenario(t, respPriv, respPub, initPriv, ring, cursor, &last, 2)
+
+			if len(forwarded) != 1 {
+				t.Fatalf("last_event_id=%d: got %d frames, want 1 (a single resync)", tc.last, len(forwarded))
+			}
+			marker := forwarded[0]
+			if marker.Type != protocol.TypeResync {
+				t.Errorf("marker type = %q, want %q (beyond the id space must resync, not stay silent)", marker.Type, protocol.TypeResync)
+			}
+			if marker.EventID != nil {
+				t.Errorf("resync marker carried EventID = %v, want nil (not a structured event)", marker.EventID)
+			}
+			var p struct {
+				ConversationID string `json:"conversation_id"`
+			}
+			if err := json.Unmarshal(marker.Payload, &p); err != nil {
+				t.Fatalf("decode resync payload: %v", err)
+			}
+			if p.ConversationID != v2TestConvID {
+				t.Errorf("resync conversation_id = %q, want %q", p.ConversationID, v2TestConvID)
 			}
 		})
 	}
@@ -453,12 +495,16 @@ func reconnectOpenLive(t *testing.T, ring *eventring.Ring, cursor func() string,
 
 // TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered is AC-2 +
 // AC-5: a last_event_id beyond the conversation's newest retained id — including
-// a hostile math.MaxUint64 — is caught-up (no replay) AND must NOT suppress the
-// subsequent live stream. Under the #663 bug replayMissed set replayThrough from
-// the raw afterID, so the forwardEnvelope guard dropped every later live frame
-// (id <= afterID) permanently; the clamp to min(afterID, NewestID) makes the
-// watermark 5, so the next live event (id 6) flows. This is the precise gap the
-// green #647 suite missed: it asserted "no replay frames", never live delivery.
+// a hostile math.MaxUint64 — must NOT suppress the subsequent live stream. Under
+// the #663 bug replayMissed set replayThrough from the raw afterID, so the
+// forwardEnvelope guard dropped every later live frame (id <= afterID)
+// permanently. Since #1494 this input class classifies as a gap, so replayMissed
+// emits a resync and returns *before* the watermark clamp: replayThrough stays 0
+// and the guard is inert for the conn, which is what now delivers the next live
+// event (id 6). The property under test is unchanged — the mechanism behind it
+// is the untouched watermark rather than the clamped one. This is the precise
+// gap the green #647 suite missed: it asserted "no replay frames", never live
+// delivery.
 func TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -477,10 +523,11 @@ func TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered(t *testin
 			cursor := func() string { return v2TestConvID }
 
 			last := tc.last
-			mgr, rec, initRecv := reconnectOpenLive(t, ring, cursor, &last, 1)
+			// noise_resp + the #1494 resync == 2 handshake frames.
+			mgr, rec, initRecv := reconnectOpenLive(t, ring, cursor, &last, 2)
 
 			// The conversation's next live event (id 6 > newest 5). The bug drops
-			// it (6 <= afterID); the clamp delivers it (6 > 5).
+			// it (6 <= afterID); the untouched watermark delivers it (6 > 0).
 			id6 := uint64(6)
 			live := protocol.Envelope{
 				ID:      6,
@@ -492,8 +539,8 @@ func TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered(t *testin
 			if err := mgr.Push(context.Background(), v2TestConnID, live); err != nil {
 				t.Fatalf("Push live frame: %v", err)
 			}
-			envs := waitForEnvelopes(t, rec, 2) // noise_resp + the live frame
-			got := decryptAppFrame(t, envs[1], initRecv)
+			envs := waitForEnvelopes(t, rec, 3) // noise_resp + resync + the live frame
+			got := decryptAppFrame(t, envs[2], initRecv)
 			if got.EventID == nil || *got.EventID != 6 {
 				t.Fatalf("live frame EventID = %v, want pointer to 6 (frame suppressed by the watermark)", got.EventID)
 			}
@@ -508,15 +555,17 @@ func TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered(t *testin
 // /clear rotates the active conversation to B (whose ring counter restarts low),
 // a phone reconnecting with a stale higher last_event_id carried over from A
 // must still receive B's live events (ids restarting at 1). cursor resolves to
-// B; After(B, 100) is caught-up because B already holds events 1..3 (latest 3 <
-// 100). Under the bug replayThrough = 100 dropped every B live frame <= 100;
-// the clamp makes it 3, so B's next events (4, 5) flow.
+// B, which already holds events 1..3; After(B, 100) sees 100 past B's latest id
+// 3. Under the #663 bug replayThrough = 100 dropped every B live frame <= 100.
+// Since #1494 that input classifies as a gap — B is real but 100 is an id this
+// daemon never issued for it — so the phone gets a resync and replayThrough is
+// never written, leaving the guard inert; B's next events (4, 5) flow.
 //
-// Critical: conv-B must be NON-EMPTY at reconnect. An empty conv-B would make
-// After(B, 100) a gap (afterID > 0 on an unknown conversation), emitting a
-// resync and leaving replayThrough == 0 — a path that already delivers live
-// events even with the bug present, reproducing the green suite's false
-// confidence. The caught-up branch is only reachable with a retained event.
+// conv-B is deliberately NON-EMPTY: an empty conv-B reaches the gap branch by
+// the unknown-conversation route instead, which the pre-existing
+// ScopedToCursorConversation test already covers. Keeping B populated pins the
+// stale-cross-conversation-id shape specifically — the one that used to land in
+// the caught-up branch.
 func TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered(t *testing.T) {
 	t.Parallel()
 	const convB = "conv-B"
@@ -525,7 +574,8 @@ func TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered(t *testing.T) {
 	cursor := func() string { return convB }
 
 	last := uint64(100) // stale id from the rotated-away conversation A
-	mgr, rec, initRecv := reconnectOpenLive(t, ring, cursor, &last, 1)
+	// noise_resp + the #1494 resync == 2 handshake frames.
+	mgr, rec, initRecv := reconnectOpenLive(t, ring, cursor, &last, 2)
 
 	for _, id := range []uint64{4, 5} {
 		eid := id
@@ -540,9 +590,9 @@ func TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered(t *testing.T) {
 			t.Fatalf("Push live frame %d: %v", id, err)
 		}
 	}
-	envs := waitForEnvelopes(t, rec, 3) // noise_resp + 2 live frames
+	envs := waitForEnvelopes(t, rec, 4) // noise_resp + resync + 2 live frames
 	for i, wantID := range []uint64{4, 5} {
-		got := decryptAppFrame(t, envs[i+1], initRecv)
+		got := decryptAppFrame(t, envs[i+2], initRecv)
 		if got.EventID == nil || *got.EventID != wantID {
 			t.Fatalf("live frame %d EventID = %v, want pointer to %d (B's live stream suppressed by stale watermark)", i, got.EventID, wantID)
 		}

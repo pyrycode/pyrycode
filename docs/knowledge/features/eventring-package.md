@@ -73,12 +73,15 @@ func (r *Ring) NewestID(convID string) uint64                           // nextI
 
 `NewestID` ([#663]) returns `nextID - 1` (the highest id ever assigned) for a known
 conversation, `0` for an unknown one — mutex-guarded like `After`. It surfaces
-`After`'s internal `latestID` caught-up boundary so the #647 reconnect consumer can
-**clamp** its per-conn dedup watermark to `min(afterID, NewestID(convID))`, ruling
-out an untrusted `last_event_id` beyond the conversation's id space silently muting
-the live stream (see [codebase/663.md](../codebase/663.md)). Sound because the
-newest event is never evicted (below) and `nextID` advances independent of
-retention, so `nextID - 1` is always the highest *retained* id.
+`After`'s internal `latestID` classification boundary so the #647 reconnect consumer
+can **clamp** its per-conn dedup watermark to `min(afterID, NewestID(convID))` (see
+[codebase/663.md](../codebase/663.md)). Since #1494 an untrusted `last_event_id`
+beyond the conversation's id space classifies as a **gap** and returns before that
+clamp, so ruling out the silent mute is now the gap branch's job, not the clamp's;
+what the clamp still covers is the window *between* the consumer's `NewestID` and
+`After` calls, where a concurrent `Append` can leave the read one or more ids stale.
+Sound because the newest event is never evicted (below) and `nextID` advances
+independent of retention, so `nextID - 1` is always the highest *retained* id.
 
 `Ring` deliberately does **not** store `protocol.Envelope`: the envelope's `ID`
 is the per-conn `nextID`, meaningless for replay across connections. It stores the
@@ -141,13 +144,16 @@ fabricate a gap — see below.
 
 | Outcome | Condition | Return | Consumer action |
 |---|---|---|---|
-| **Caught up** | `afterID >= latestID` | `(nil, false)` | nothing to send |
-| **Gap** | next-expected `afterID+1` fell off the back: `oldestRetainedID > afterID+1` | `(nil, true)` | resync (full backfill) |
+| **Gap** (beyond the id space) | `afterID > latestID` (#1494) | `(nil, true)` | resync (full backfill) |
+| **Caught up** | `afterID == latestID` | `(nil, false)` | nothing to send |
+| **Gap** (aged out) | next-expected `afterID+1` fell off the back: `oldestRetainedID > afterID+1` | `(nil, true)` | resync (full backfill) |
 | **Replay** | otherwise | `(events with ID > afterID, ascending; false)` | replay these |
 
-`latestID` is `convRing.nextID - 1` (the highest id ever assigned). Caught-up is
-checked first. The AC-5 distinction "you missed some" vs "you're caught up" is
-exactly **`gap=true` vs `(gap=false, empty events)`**.
+`latestID` is `convRing.nextID - 1` (the highest id ever assigned). The two
+`latestID` comparisons are checked first, in the order shown — beyond-the-id-space
+before caught-up — and both precede the aged-out check. The AC-5 distinction "you
+missed some" vs "you're caught up" is exactly **`gap=true` vs `(gap=false, empty
+events)`**.
 
 - **A missing *middle* delta is not a gap.** Gap is signalled only by the oldest
   *retained* id passing the consumer's cursor (falling off the *back*), never by a
@@ -156,6 +162,13 @@ exactly **`gap=true` vs `(gap=false, empty events)`**.
   consumer); `afterID > 0` → gap `(nil, true)` (references events this daemon never
   had — e.g. after a daemon restart wiped the ring). This makes the AC-5 signal
   usable by #647 across the daemon-restart boundary #646 scopes out.
+- **Beyond the id space is a gap for a *known* conversation too (#1494).** Same
+  reasoning as the bullet above — `afterID > latestID` names an id this daemon
+  never issued — and the same restart shape: the ring is wiped, per-conversation
+  ids restart at 1, and another conn drives a turn before the phone reconnects, so
+  the conversation is populated again and the empty-ring branch no longer catches
+  it. Classifying that caught-up muted the phone, which dedups durably on
+  `event_id` and would drop every live event until the ids climbed past its cursor.
 - **Isolation is structural** — `After` only reads `convs[convID]`, so it can never
   return another conversation's events.
 
