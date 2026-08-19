@@ -625,7 +625,7 @@ const (
 // detector in internal/protocol/compat_test.go partitions Type* constants
 // between inboundAppTypeSet and v2OnlyTypes; these two live in the latter.
 const (
-	TypeRequestSessionSettings = "request_session_settings" // phone → binary, inbound v2 control, bare frame (intercepted pre-dispatch.Route)
+	TypeRequestSessionSettings = "request_session_settings" // phone → binary, inbound v2 control carrying RequestSessionSettingsPayload (intercepted pre-dispatch.Route)
 	TypeSessionSettings        = "session_settings"         // binary → phone, outbound v2 reply carrying the current run configuration
 )
 

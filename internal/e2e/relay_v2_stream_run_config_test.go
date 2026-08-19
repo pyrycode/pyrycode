@@ -85,8 +85,11 @@ func TestRelayV2_StreamRequestSessionSettings(t *testing.T) {
 	// Interactive — the capability the read verb gates on, mirroring the write verb.
 	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
 
-	// A BARE frame: no payload at all. The reply is daemon-wide, so there is no
-	// field a client could use to select another session's data.
+	// A BARE frame: no payload at all. The frame carries an optional
+	// conversation_id since #1586, and this test deliberately sends none —
+	// exercising the absent-field path, which is the fresh-daemon case where no
+	// conversation id exists to send. That path is answered exactly as it always
+	// was, which is what keeps un-updated clients working.
 	reqEnv, err := json.Marshal(protocol.Envelope{
 		ID:   reqID,
 		Type: protocol.TypeRequestSessionSettings,
