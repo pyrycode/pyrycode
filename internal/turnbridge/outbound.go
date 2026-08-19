@@ -250,6 +250,44 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			ResetsAt:        e.ResetsAt,
 			TruncatedFields: e.TruncatedFields,
 		}, true
+	case turnevent.ModelAnnounced:
+		// Conversation identity only, like the status peers above: tc.TurnID and
+		// tc.Seq are ignored and the payload has no field for either. An announced
+		// model is a property of the turn's CONFIGURATION, not a turn boundary —
+		// claude emits its init line once per TURN, so the announcement rides along
+		// with every turn rather than delimiting one, and cmd/pyry's
+		// TestTurnMarkFor_TotalOverEveryVariant already pins the lifecycle answer as
+		// turnMarkNone.
+		//
+		// Model crosses BYTE-FOR-BYTE: no lowercasing, no alias expansion, no
+		// date-stamping, no family mapping, and no lookup against any published model
+		// list. What claude actually announces is MEASURED, and why that argues for
+		// carrying the value untouched rather than repairing it — including why a
+		// lookup miss is ORDINARY rather than an error — is turnevent.ModelAnnounced's
+		// Model doc, its single source of truth, not restated here. Specifically:
+		//
+		//   - It is NOT re-capped. The producer bounded it at construction (streamsup's
+		//     maxModelField), following Unrecognized's precedent, so a second cap here
+		//     would be a second place the limit is decided and the two could disagree
+		//     silently. maxSummaryLen lives in THIS file and is not the applicable
+		//     bound — it is the tool-précis cap, and reaching for it here is the
+		//     specific mistake to avoid.
+		//   - There is no charset check. internal/relay's validModel bounds a
+		//     PHONE-supplied override and is deliberately a different rule; applying it
+		//     here would reject identifiers claude legitimately announces.
+		//   - Truncated crosses too, and is load-bearing: a payload that dropped it
+		//     would present claude's cut text to a phone as complete.
+		//
+		// No suppression branch, not even on an empty Model. The gate that decides
+		// whether an event exists at all is the producer's (it does not emit on an
+		// empty model), so a second, differently-shaped filter here would silently
+		// diverge from it — the hazard the ThinkingProgress and RateLimited arms above
+		// both name.
+		return protocol.TypeModelAnnounced, protocol.ModelAnnouncedPayload{
+			ConversationID: tc.ConversationID,
+			Model:          e.Model,
+			Truncated:      e.Truncated,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

@@ -332,6 +332,7 @@ idiom. Every field is carried verbatim from `tc` + the event:
 | `BackgroundTaskRoster` (#1394) | `TypeBackgroundTaskRoster` | `BackgroundTaskRosterPayload{tc.ConversationID, tasks, ev.DroppedTasks}` — `ev.Tasks` looped into `[]protocol.BackgroundTask`, nil left nil (the payload's own `MarshalJSON` owns nil→`[]`) | true |
 | `ThinkingProgress` (#1386) | `TypeThinkingProgress` | `ThinkingProgressPayload{tc.ConversationID, ev.EstimatedTokens, ev.EstimatedTokensDelta}` (`tc.TurnID`/`tc.Seq` ignored — a periodic reading of an inference request in flight, not a turn-scoped fact) | true |
 | `RateLimited` (#1410) | `TypeRateLimited` | `RateLimitedPayload{tc.ConversationID, ev.Status, ev.LimitType, ev.ResetsAt, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored — a usage-limit window is a condition of the account, orthogonal to whichever turn observed it). Nil `TruncatedFields` left nil, and here that nil is what reaches the wire as `null`: unlike `BackgroundTaskRosterPayload` two rows up, `RateLimitedPayload` deliberately has **no** `MarshalJSON`, because nothing-was-cut is an absence. `ResetsAt` crosses unclamped and unvalidated in both directions; neither string is re-capped (the producer bounded both at construction) | true |
+| `ModelAnnounced` (#1638) | `TypeModelAnnounced` | `ModelAnnouncedPayload{tc.ConversationID, ev.Model, ev.Truncated}` (`tc.TurnID`/`tc.Seq` ignored — an announced model is a property of the turn's configuration, not a turn boundary: claude emits its `init` line once per turn, and `TestTurnMarkFor_TotalOverEveryVariant` pins the lifecycle answer as `turnMarkNone`). `Model` crosses byte-for-byte — no lowercasing, no re-cap, no charset check: the producer already bounds it at `streamsup`'s `maxModelField`, and `internal/relay`'s `validModel` is a deliberately different rule (it bounds a phone-supplied override, not a claude-supplied report). No suppression branch — a zero-value `ModelAnnounced` maps rather than dropping, the same posture `ThinkingProgress` and `RateLimited` both state. `ModelAnnouncedPayload` has no slice field and, unlike `RateLimitedPayload` one row up, no `MarshalJSON`, so the nil-vs-`[]` hazard does not arise here | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
@@ -354,6 +355,20 @@ idiom. Every field is carried verbatim from `tc` + the event:
   deciding "a ThoughtChunk means we are thinking" is a lifecycle decision, kept out of
   the pure mapper. The mapper supplies the *builder*; the consumer owns the *decision
   to call it*.
+- **A new row's sentinel has to falsify what the row claims, not just differ from
+  `tc`.** `RateLimited`'s rows use short, all-lowercase sentinels — fine for its own
+  hazards, but silent on "no lowercasing": an all-lowercase `Model` sentinel survives a
+  `strings.ToLower` mapper. `ModelAnnounced`'s rows (#1638) needed a mixed-case
+  sentinel to kill that mutant, and a >256-rune one to beat both the producer's
+  `maxModelField` (256) and this file's own `maxSummaryLen` (200) for a re-cap mutant
+  at either bound to go red.
+- **A "value never reaches a log" test needs a positive control that the value
+  traversed the path at all**, or a consumer `Handle` arm that silently drops the
+  event passes the test for the wrong reason. `ModelAnnounced`'s extension (#1638) to
+  `cmd/pyry`'s `TestInteractiveTurnEmitterV2_NoAppOutputLogLeak` pairs log-absence
+  with a decoded-payload presence assertion on the recorded push; the payload half is
+  what actually caught the arm dropping the event silently — the log-absence half
+  alone stayed green throughout.
 
 ### `BuildTurnState` — the lifecycle payload builder
 
