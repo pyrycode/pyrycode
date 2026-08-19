@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/update"
@@ -298,6 +299,136 @@ func TestUpdate_PinVersion(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "==> Updated to v0.9.0.") {
 		t.Errorf("missing pinned-version success line; output:\n%s", out.String())
+	}
+}
+
+// downgradeReleaseServer advertises a latest tag and records the path of every
+// other request it receives. The recorded list is what proves the refusal
+// happened *before* any asset fetch: a guard accidentally placed after
+// AssetName would still return an error, but the list would not be empty.
+type downgradeReleaseServer struct {
+	*httptest.Server
+	mu       sync.Mutex
+	assetReq []string
+}
+
+// assetRequests returns the paths requested beyond the latest-release call.
+// Safe to call only after doUpdate has returned.
+func (s *downgradeReleaseServer) assetRequests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.assetReq)
+}
+
+// newDowngradeReleaseServer hosts only the latest-release endpoint, serving a
+// tag the caller picks (older than the running version, for the rollback
+// cases). A parallel constructor rather than a knob on newFakeReleaseServer,
+// whose four happy-path callers stay unchanged.
+func newDowngradeReleaseServer(t *testing.T, latest string) *downgradeReleaseServer {
+	t.Helper()
+	s := &downgradeReleaseServer{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/pyrycode/pyrycode/releases/latest", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"tag_name":%q}`, latest)
+	})
+	// Record and 500 rather than t.Fatalf: this handler runs on an httptest
+	// goroutine, where Fatalf's runtime.Goexit kills the handler and the test
+	// fails as a misleading transport error instead of naming the real
+	// problem. The t.Fatalf sentinel idiom stays correct for the replace and
+	// runRestart seams, which are called on the test goroutine.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.assetReq = append(s.assetReq, r.URL.Path)
+		s.mu.Unlock()
+		http.Error(w, "no asset may be fetched on the refusal path", http.StatusInternalServerError)
+	})
+	s.Server = httptest.NewServer(mux)
+	t.Cleanup(s.Close)
+	return s
+}
+
+// TestUpdate_UnpinnedDowngradeRefused pins the guard: with no --version pin, a
+// /releases/latest advertising a version older than the running binary is
+// refused before anything is fetched, replaced or restarted, and the message
+// names --version as the sanctioned downgrade route.
+func TestUpdate_UnpinnedDowngradeRefused(t *testing.T) {
+	srv := newDowngradeReleaseServer(t, "v0.9.0")
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.9.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return "/dev/null/never-touched" },
+		replace: func(string, []byte, os.FileMode) error {
+			t.Fatalf("AtomicReplace must not run on the refused-downgrade path")
+			return nil
+		},
+		signingPubKey: testSigningPub,
+		out:           &out,
+		runRestart: func(context.Context, []string) error {
+			t.Fatalf("runRestart must not be called on the refused-downgrade path")
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatalf("doUpdate: expected error, got nil; output:\n%s", out.String())
+	}
+	msg := err.Error()
+	for _, want := range []string{"update:", "--version", "v0.9.0", "0.9.1"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal message missing %q: %v", want, err)
+		}
+	}
+	if got := srv.assetRequests(); len(got) != 0 {
+		t.Errorf("refusal must not fetch any asset; requested %v", got)
+	}
+	if strings.Contains(out.String(), "==> Updated to") {
+		t.Errorf("success line must NOT print on a refused downgrade; output:\n%s", out.String())
+	}
+}
+
+// TestUpdate_CheckOnlyOlderLatest pins the guard's placement below the
+// --check early return: --check against an older-than-current latest still
+// prints both version lines and exits 0. This is the test that reddens if the
+// guard drifts up into the compare switch.
+func TestUpdate_CheckOnlyOlderLatest(t *testing.T) {
+	srv := newDowngradeReleaseServer(t, "v0.9.0")
+
+	var out bytes.Buffer
+	err := doUpdate(t.Context(), updateOptions{
+		currentVersion: "0.9.1",
+		goos:           runtime.GOOS,
+		goarch:         runtime.GOARCH,
+		repo:           "pyrycode/pyrycode",
+		releaseBaseURL: srv.URL + "/releases/download",
+		fetcher:        &update.Fetcher{BaseURL: srv.URL, UserAgent: "pyry/test"},
+		executablePath: func() string { return "/dev/null/never-touched" },
+		replace: func(string, []byte, os.FileMode) error {
+			t.Fatalf("AtomicReplace must not run on --check path")
+			return nil
+		},
+		out:       &out,
+		checkOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("doUpdate: %v\n--- output ---\n%s", err, out.String())
+	}
+	output := out.String()
+	if !strings.Contains(output, "==> Current version: 0.9.1") {
+		t.Errorf("missing current-version line; output:\n%s", output)
+	}
+	if !strings.Contains(output, "==> Latest version:  v0.9.0") {
+		t.Errorf("missing latest-version line; output:\n%s", output)
+	}
+	if strings.Contains(output, "Downloading") {
+		t.Errorf("--check must not download; output:\n%s", output)
+	}
+	if got := srv.assetRequests(); len(got) != 0 {
+		t.Errorf("--check must not fetch any asset; requested %v", got)
 	}
 }
 
