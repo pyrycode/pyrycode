@@ -175,6 +175,7 @@ forge a turn boundary:
 | `system/task_updated` | one `BackgroundTaskUpdated` (#1382, below) |
 | `system/background_tasks_changed` | one `BackgroundTaskRoster` (#1381, below) — the family's one **aggregate** variant |
 | `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
+| `system/init` | one `ModelAnnounced` **unless** `model` is absent, empty, or undecodable (#1600, below) — the family's only variant naming what claude is actually running, once per **turn** |
 | `rate_limit_event` | one `turnevent.RateLimited` **unless** `rate_limit_info.status` is the one measured-benign value or the line carries no decodable `rate_limit_info` (#1404, below) — the family's **first non-`system` mapping**, and the one whose gate suppresses the common case rather than the rare one |
 | `control_response` | nothing — consumed **content-free** from its own arm, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500). This is the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. A `subtype:"error"` NAK is consumed indistinguishably; deliberate, no such failure has been observed |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
@@ -229,20 +230,24 @@ unrecognized frame, so every stream spec is a sentinel: it goes red the day clau
 in the pre-ship gate rather than in front of a user.
 
 **`system` maps per-subtype since 2026-08-07 (#1380) — the wholesale-drop design's first crack.** `status`
-and any never-seen subtype stay silent exactly as before. Four subtypes are now mapped:
+and any never-seen subtype stay silent exactly as before. Five subtypes are now mapped:
 `system/task_started` → `turnevent.BackgroundTaskStarted` (`TaskID`, `ToolCallID` — claude's
 `tool_use_id`, renamed to match `ToolStart`/`ToolUpdate`'s field name for the same identifier —
 `Description`, `TaskType`, `TruncatedFields`); `system/task_updated` → `turnevent.BackgroundTaskUpdated`
 (`TaskID`, `Patch`, `TruncatedFields`); `system/background_tasks_changed` → `turnevent.
 BackgroundTaskRoster` (`Tasks []BackgroundTask`, `DroppedTasks`) — the aggregate variant, snapshotting
-every task claude is tracking at that moment rather than reporting what happened to one; and
+every task claude is tracking at that moment rather than reporting what happened to one;
 `system/thinking_tokens` → `turnevent.ThinkingProgress` (`EstimatedTokens`, `EstimatedTokensDelta`,
-**no** `TruncatedFields` — two `int`s cannot grow) — the one **rate-bounded** variant, described below.
-The first three mappings fix #1240's symptom: previously a backgrounded command's lifecycle was
+**no** `TruncatedFields` — two `int`s cannot grow) — the one **rate-bounded** variant, described below;
+and `system/init` → `turnevent.ModelAnnounced` (`Model`, `Truncated`) — the one variant naming what
+claude is actually running rather than something about a turn or a task, described below (#1600). The
+first three mappings fix #1240's symptom: previously a backgrounded command's lifecycle was
 indistinguishable from a genuine turn end (`turn_end`/`end_turn`, state `idle`) because the whole
 `system` family was dropped regardless of subtype. `thinking_tokens` fixes a different gap: it is
 claude's only mid-turn proof of life on this surface, so mapping it gives a client watching a long turn
-something to distinguish "slow" from "wedged."
+something to distinguish "slow" from "wedged." `init` fixes a third: the daemon's own `model` fields mean
+the per-session override and read empty in the ordinary case, so nothing previously said what claude was
+actually running.
 
 The match (`emitSystemSubtype`) sits **inside** `consumeLine`'s existing `ignoredLineTypes` branch rather
 than beside it — `system` stays on the list unchanged, so `emitUnrecognized` (the surfaced tier) stays
@@ -299,6 +304,32 @@ deliberately untouched (#1262) and a usage-limit report opens no turn. `turnbrid
 drops it: the wire type landed in #1405 and the mapping arm in #1410, so the variant now reaches an
 interactive v2 mobile client instead of falling to `default:`. See [codebase/1404.md](../codebase/1404.md),
 [codebase/1405.md](../codebase/1405.md), [codebase/1410.md](../codebase/1410.md).
+
+**`system/init` → `turnevent.ModelAnnounced` is the sixth mapping, a fifth `system` subtype, and the
+first that reports what the daemon itself ASKED FOR versus what claude actually RAN (#1600).** The
+daemon's two existing `model` payloads (`protocol.ScreenSnapshotPayload`, `protocol.SessionSettingsPayload`)
+both mean the per-session override — `""` means "inherited default, no override" — so in the ordinary
+case the daemon publishes an empty string while claude has named a concrete model on every turn.
+`init` fires once per **turn**, not once per session (#1582 measured three in one session, because a
+`/model` turn emits its own `init` and that one still reports the OLD model — a consumer that latches
+the first announcement shows a stale value; documented as a hazard on the variant, not mechanised).
+`systemInitLine{ Model string }` decodes exactly one of the captured line's 22 keys — `cwd` (the
+operator's filesystem path) and `session_id` (claude's session identity, not the daemon's conversation
+identity) are the two omissions named specifically, absent from the decode target itself rather than
+merely unlogged. `Model` is claude's identifier **verbatim** — no lowercasing, alias expansion,
+date-stamping, family mapping, or list lookup — bounded at construction by `maxModelField` (256, ~10×
+the observed maximum across three spawn shapes: claude dates a bare family alias it's given but passes
+an already-specific one through unchanged, so the value is not reliably dated and need not appear in any
+published model list). An absent, empty, or undecodable `model` is consumed with no event and (absent/empty)
+no log at all — the empty case diverges from the task handlers' emit-with-empty-field rule, following
+`emitRateLimit`'s `case ""` suppress-on-empty precedent instead, because the model *is* the whole payload
+here. Only the undecodable path logs, and only the subtype keyword — never `err`, since `encoding/json`
+quotes offending input into its error text and would otherwise leak the value through a channel no
+per-path log check can see. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a sixth mapped arm
+(`ModelAnnounced → "model_announced"`, name only); no `Handle` arm yet, so it lands in `Handle`'s
+`default` (content-free) until a later ticket adds the protocol type and the `turnbridge.MapEvent` case
+together — `turnbridge.MapEvent`'s `default` still drops the variant today. See
+[codebase/1600.md](../codebase/1600.md).
 
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share

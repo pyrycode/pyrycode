@@ -608,6 +608,21 @@ func eventKind(ev turnevent.Event) string {
 		// would otherwise log "unknown" for a variant the daemon does recognize —
 		// exactly the ThinkingProgress arm's reason.
 		return "rate_limited"
+	case turnevent.ModelAnnounced:
+		// The variant NAME only, for the arms above's reason — and Model is precisely
+		// the field #833's posture, restated across internal/relay's
+		// v2session_settings.go and internal/sessions' pool.go as "model / effort /
+		// YOLO values are NEVER logged at any level", exists to keep out of a log. It
+		// is not returned here.
+		//
+		// Unlike the two arms above, this variant has no Handle case at all — no wire
+		// mapping exists yet (turnbridge.MapEvent's default drops it), so it lands in
+		// Handle's own default and this file's `interactive_turn.unknown` Debug is a
+		// live call site rather than only the ACP surface's. Without the arm every
+		// eventKind site — here, acp_turn_stream.go, stream_turn_busy.go,
+		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
+		// recognize.
+		return "model_announced"
 	default:
 		return "unknown"
 	}

@@ -2197,3 +2197,64 @@ func TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant(t *testing
 		}
 	}
 }
+
+// modelAnnouncedFixture is the claude-authored model value the eventKind test
+// below drives. A conspicuous sentinel rather than a realistic identifier, for
+// rateLimitedStatusFixture's reason: the negative is a strings.Contains over the
+// WHOLE captured log, which carries the literal kind=model_announced, so a natural
+// value like "model" or "announced" would be a substring of the log's own text and
+// the negative would be RED against a correct implementation.
+const modelAnnouncedFixture = "ZZMODELSENTINELZZ"
+
+// #1600 AC4: eventKind's model-announced arm is live code and content-free.
+//
+// Model is precisely the field the #833 posture — restated across
+// internal/relay's v2session_settings.go and internal/sessions' pool.go as "model
+// / effort / YOLO values are NEVER logged at any level" — exists to keep out of
+// logs, so the negative is the half that discriminates: an arm returning
+// "model_announced:" + Model leaves strings.Contains(logs, "kind=model_announced")
+// TRUE, and only the per-value check catches it.
+//
+// The arm exists for eventKind's call sites, not for a Handle case: this variant
+// deliberately has NO Handle arm (no wire mapping exists yet — turnbridge.MapEvent
+// drops it), so it lands in Handle's default, and acp_turn_stream.go,
+// stream_turn_busy.go and stream_turn_drain.go log the kind too. Without the arm
+// every one of them reads kind=unknown for a variant the daemon does recognize.
+// The empty-cursor drop is the reachable eventKind call site on this lane.
+func TestInteractiveTurnEmitterV2_ModelAnnouncedEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr, for the rate-limited test's measured reason: a
+		// whole-log strings.Contains has a host-dependent source of digits to collide
+		// with otherwise.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.ModelAnnounced{Model: modelAnnouncedFixture, Truncated: true})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=model_announced") {
+		t.Fatalf("log does not name the variant (want kind=model_announced):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for model_announced:\n%s", logs)
+	}
+	if strings.Contains(logs, modelAnnouncedFixture) {
+		t.Fatalf("claude's announced model leaked into the kind log:\n%s", logs)
+	}
+}

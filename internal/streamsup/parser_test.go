@@ -501,9 +501,23 @@ func TestParser_UnrecognizedTruncation(t *testing.T) {
 }
 
 // TestParser_IgnoredLineTypesStaySilent is the noise guard, and it is the
-// assertion that decides whether this feature is useful or annoying. system/init
-// fires once per TURN, so if it surfaced as an Unrecognized every conversation
-// would grow a row per turn and the signal would be worthless.
+// assertion that decides whether this feature is useful or annoying. `system` is
+// claude's catch-all namespace and its highest-rate emitter, so a subtype the
+// parser does not map must stay silent: system/status is the measured one, and the
+// never-seen-subtype row is the same claim about a subtype claude has not shipped
+// yet. If either surfaced as an Unrecognized, the next chatty subtype a claude
+// release adds would grow a row per turn in every conversation and the signal would
+// be worthless.
+//
+// CORRECTED 2026-08-19 (#1600): the opener above used to make that argument FROM
+// system/init, and the init row is now GONE from this table because the subtype is
+// no longer dropped — it maps to turnevent.ModelAnnounced. This is #1385's move one
+// subtype further along, and the same accounting applies: init never reached an
+// Unrecognized, so the "a row per turn" argument is spent for it, and what replaced
+// the drop is a BOUNDED, PER-LINE event rather than a noise row. The row's line
+// moved verbatim into TestParser_ModelAnnouncedCarriesTheValueVerbatim, where the
+// same line now asserts the opposite verdict. What the table still asserts is
+// unchanged and is now carried entirely by the rows that remain.
 //
 // CORRECTED 2026-08-09 (#1385) on two counts, both about thinking_tokens:
 //
@@ -539,7 +553,6 @@ func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 		name string
 		line string
 	}{
-		{"system/init", `{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5"}`},
 		{"system/status", `{"type":"system","subtype":"status","status":"ok"}`},
 		// CORRECTED 2026-08-07 (#1380): `system` maps PER-SUBTYPE now, not
 		// wholesale — emitSystemSubtype enumerates the mapped set. Every subtype it
@@ -3030,6 +3043,498 @@ func TestParser_RateLimitDropsSessionAndUUID(t *testing.T) {
 	const wantSwept = 4
 	if swept < wantSwept {
 		t.Errorf("the drop sweep visited %d string fields, want at least %d", swept, wantSwept)
+	}
+}
+
+// modelFieldCapFixture records maxModelField as a LITERAL, deliberately not as
+// the production constant. Same rule as taskStartedCapCheat: a fixture built from
+// the constant it validates asserts nothing about the number — halve the constant
+// and every row below would follow it green. This literal is what makes such an
+// edit go RED.
+//
+// A FOURTH byte-cap fixture even though it equals taskFieldIDCapFixture and
+// rateLimitFieldCapFixture, mirroring the production split: the three bound
+// different fields for different reasons, and sharing a fixture would let a change
+// to one silently retarget another's proof.
+const modelFieldCapFixture = 256
+
+// undecodableSystemLineMsgFixture is the Debug message the system-subtype
+// emitters' shared decode-failure arm emits, as a LITERAL for harnessNudgeFixture's
+// reason. Named here rather than re-typed inline (which #1382's and #1381's drop
+// tests each do) because #1600's rows assert the record's attrs EXACTLY, so the
+// message selects the record the exactness applies to.
+const undecodableSystemLineMsgFixture = "streamsup: dropping undecodable system line"
+
+// genericDropMsgFixture is consumeLine's tolerate-and-drop Debug — the record a
+// system/init line produced on every turn BEFORE #1600 mapped the subtype. It is a
+// fixture here so the #1600 rows can assert its ABSENCE: emitModelAnnounced
+// consumes the line on every path, so this record must never fire for an init line
+// again, on the emit path or either drop path.
+const genericDropMsgFixture = "streamsup: dropping stdout line"
+
+// modelInitLineFixture builds a system/init line from the ONE mapped key. It
+// invents NO field structure — `model` is the capture's own key — and exists only
+// to vary the VALUE, which is what the cap proof needs and what the capture cannot
+// supply: the captured value is 25 bytes and reaches no defensible cap.
+//
+// A model of "" emits `"model":""`. The ABSENT case is a different input and is
+// written as a raw line at its call site rather than bent into this helper, for
+// backgroundTaskRosterLineFixture's reason: both are asserted, so neither may be
+// expressible only as the other.
+func modelInitLineFixture(t *testing.T, model string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"type":    "system",
+		"subtype": "init",
+		"model":   model,
+	})
+	if err != nil {
+		t.Fatalf("marshalling system/init fixture: %v", err)
+	}
+	return string(b)
+}
+
+// modelAnnouncedEvent drives one line through the shipped parser and returns the
+// single ModelAnnounced it must emit.
+func modelAnnouncedEvent(t *testing.T, line string) turnevent.ModelAnnounced {
+	t.Helper()
+	got := collectEvents(line)
+	if len(got) != 1 {
+		t.Fatalf("event count: got %d, want 1 (%#v)", len(got), got)
+	}
+	ev, ok := got[0].(turnevent.ModelAnnounced)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.ModelAnnounced", got[0])
+	}
+	return ev
+}
+
+// TestParser_ModelAnnouncedMapsFromCapture is #1600's central assertion: the
+// CAPTURED system/init line becomes one turnevent.ModelAnnounced carrying the
+// model the capture shows, and NOTHING ELSE from the line.
+//
+// The Model assertion is DERIVED from the capture's own payload rather than
+// pinned, which is this family's rule. The canary below is the one pinned literal,
+// and unlike its siblings' canaries it pins a REAL value: the dropcap redactor
+// rewrites session_id, cwd and the FIFO path, and it does not touch `model`.
+//
+// The whole-event reflect.DeepEqual is what carries "and nothing else from the
+// line", and it is deliberately used INSTEAD of the family's per-key reflection
+// sweep over string fields. The sweep exists so a field added to the variant later
+// is covered without anyone extending a list; DeepEqual against a struct literal
+// covers that strictly better — a later field that started carrying cwd, session_id
+// or any of the other nineteen dropped keys is non-zero, and a literal leaving it
+// zero fails. It also pins Truncated, which no string sweep would visit.
+func TestParser_ModelAnnouncedMapsFromCapture(t *testing.T) {
+	t.Parallel()
+	line := capturedSystemLine(t, "init")
+
+	var payload map[string]any
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	want, _ := payload["model"].(string)
+	if want == "" {
+		t.Fatalf("the capture carries no string \"model\", so the routing of Model cannot be proven against it")
+	}
+	// The two keys whose absence matters most (see turnevent.ModelAnnounced's doc),
+	// checked to be PRESENT on the line so the DeepEqual below is a real statement
+	// about dropping them rather than a statement about a line that never carried
+	// them.
+	for _, key := range []string{"cwd", "session_id"} {
+		if v, _ := payload[key].(string); v == "" {
+			t.Fatalf("the capture carries no string %q, so the drop assertion would be vacuous", key)
+		}
+	}
+
+	ev := modelAnnouncedEvent(t, string(line))
+
+	if wantEv := (turnevent.ModelAnnounced{Model: want}); !reflect.DeepEqual(ev, wantEv) {
+		t.Errorf("event: got %#v, want %#v — the model verbatim and nothing else from the line", ev, wantEv)
+	}
+
+	// The canary: proves the reader selected the init record rather than some other
+	// system line that happens to decode into the same shape. It is also the
+	// measurement turnevent.ModelAnnounced's doc rests on — claude DATED the bare
+	// `haiku` alias this run was spawned with.
+	if ev.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("Model: got %q, want the capture's one observed value %q", ev.Model, "claude-haiku-4-5-20251001")
+	}
+}
+
+// TestParser_ModelAnnouncedCarriesTheValueVerbatim is the half of AC1 the capture
+// CANNOT prove. Its model reads claude-haiku-4-5-20251001 — already lowercase,
+// already dated, already fully formed — so a mapping that lowercased, expanded an
+// alias, date-stamped, or rewrote against a model list would map it to itself and
+// TestParser_ModelAnnouncedMapsFromCapture would stay green. These rows are
+// synthesized for exactly that reason, and they invent no field structure: the only
+// key is the capture's own `model`.
+//
+// The rule they pin is the MEASURED one (see the variant's doc): claude echoes an
+// identifier at least as specific as the one it was given, so what arrives here is
+// not reliably dated and need not appear in any published list. The daemon's job is
+// to carry it, not to repair it.
+func TestParser_ModelAnnouncedCarriesTheValueVerbatim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		model string
+		why   string
+	}{
+		{
+			name: "a bare family alias is NOT expanded", model: "haiku",
+			why: "claude dates the alias on its own side; a daemon that expanded it would be inventing " +
+				"the dated identifier rather than reporting one",
+		},
+		{
+			name: "a value in no published model list survives", model: "claude-haiku-4-5",
+			why: "MEASURED — the permission_protocol captures echo exactly this, and it appears in no " +
+				"published list, so a lookup-and-replace mapping would drop a real announcement",
+		},
+		{
+			name: "mixed case is NOT folded", model: "Claude-Sonnet-5-PREVIEW",
+			why: "the one transform the capture's already-lowercase value could hide",
+		},
+		{
+			name: "an unfamiliar naming scheme survives", model: "some-model-claude-has-not-shipped-yet",
+			why: "the cap is the only judgement this mapping makes about the value's shape",
+		},
+		{
+			// Re-homed VERBATIM from TestParser_IgnoredLineTypesStaySilent, where it
+			// asserted the opposite. #1380 put it there deliberately, and it stayed
+			// correct through four sibling tickets because the subtype was genuinely
+			// still dropped; #1600 is what spends it.
+			name:  "the row that used to assert this line was silent",
+			model: "claude-opus-5",
+			why:   "same line, opposite verdict — this is the change",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ev := modelAnnouncedEvent(t, modelInitLineFixture(t, tt.model))
+			if ev.Model != tt.model {
+				t.Errorf("Model: got %q, want claude's value %q verbatim (%s)", ev.Model, tt.model, tt.why)
+			}
+			if ev.Truncated {
+				t.Errorf("Truncated: got true, want false — every value here is far under the cap")
+			}
+		})
+	}
+
+	t.Run("the re-homed row's whole line, unedited", func(t *testing.T) {
+		t.Parallel()
+		// The row as TestParser_IgnoredLineTypesStaySilent carried it, session_id and
+		// all: the fixture above rebuilds the line from one key, and this asserts the
+		// verdict flipped for the LINE rather than for a reduced version of it.
+		ev := modelAnnouncedEvent(t, `{"type":"system","subtype":"init","session_id":"s1","model":"claude-opus-5"}`)
+		if wantEv := (turnevent.ModelAnnounced{Model: "claude-opus-5"}); !reflect.DeepEqual(ev, wantEv) {
+			t.Errorf("event: got %#v, want %#v", ev, wantEv)
+		}
+	})
+}
+
+// TestParser_ModelAnnouncedIsPerLine pins AC1's "per LINE". claude emits init once
+// per TURN and the announcements within one session need not agree: #1582 measured
+// three in one session — [claude-sonnet-5, claude-sonnet-5,
+// claude-haiku-4-5-20251001] — because the /model turn emits its own init and that
+// one still reports the OLD model.
+//
+// The three lines go through ONE parser, in order, because the failure this
+// catches is a producer that latches or dedups: a first-wins implementation emits
+// one event, a change-only one emits two, and only a per-line one emits three.
+func TestParser_ModelAnnouncedIsPerLine(t *testing.T) {
+	t.Parallel()
+	// #1582's recorded sequence, verbatim — the repeat is the point, not an
+	// oversight, and a dedup would swallow exactly it.
+	models := []string{"claude-sonnet-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"}
+
+	var got []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { got = append(got, ev) }, discardLogger())
+	for _, m := range models {
+		if _, err := p.Write([]byte(modelInitLineFixture(t, m) + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+	}
+
+	if len(got) != len(models) {
+		t.Fatalf("event count: got %d, want %d (one per line) — %#v", len(got), len(models), got)
+	}
+	for i, ev := range got {
+		ma, ok := ev.(turnevent.ModelAnnounced)
+		if !ok {
+			t.Fatalf("event %d: got %T, want turnevent.ModelAnnounced", i, ev)
+		}
+		if ma.Model != models[i] {
+			t.Errorf("event %d Model: got %q, want %q — the events must follow the lines in order", i, ma.Model, models[i])
+		}
+	}
+}
+
+// TestParser_ModelAnnouncedFieldCap pins the construction-time bound. It is
+// applied before the event reaches the sink, so an oversized value never enters
+// the event stream, a queue, or a log — the same ordering maxUnrecognizedRaw's cap
+// has, and the only thing that makes the bound real rather than cosmetic.
+//
+// The capture proves the mapping and CANNOT prove the bound: its model is 25
+// bytes, and so is every other model on record (16 and 15 bytes), so no observed
+// value reaches any defensible cap. These lines are therefore necessarily
+// synthesized, and they invent no field structure — the key is the capture's, only
+// the value is oversized.
+//
+// The exact-cut length is asserted on ASCII fixtures only. The scrub uses an empty
+// replacement (truncateRaw's precedent), so a mid-rune cut DELETES the partial rune
+// and a multi-byte result is legitimately 1-3 bytes short of the cap; that row
+// asserts validity and the ceiling instead.
+func TestParser_ModelAnnouncedFieldCap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		model         string
+		wantLen       int
+		wantTruncated bool
+		why           string
+	}{
+		{
+			name: "a realistic value is untouched", model: "claude-haiku-4-5-20251001",
+			wantLen: len("claude-haiku-4-5-20251001"), wantTruncated: false,
+			why: "the observed maximum, ~10x under the cap",
+		},
+		{
+			name: "exactly at the cap is NOT truncated", model: strings.Repeat("m", modelFieldCapFixture),
+			wantLen: modelFieldCapFixture, wantTruncated: false,
+			why: "truncateField's boundary is <=, and a boundary asserted nowhere is a boundary that drifts",
+		},
+		{
+			name: "one byte over the cap is cut and reported", model: strings.Repeat("m", modelFieldCapFixture+1),
+			wantLen: modelFieldCapFixture, wantTruncated: true,
+			why: "the smallest input that must cut",
+		},
+		{
+			name: "far over the cap is cut to the same length", model: strings.Repeat("m", modelFieldCapFixture*4),
+			wantLen: modelFieldCapFixture, wantTruncated: true,
+			why: "the cut is to the cap, not proportional to the input",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ev := modelAnnouncedEvent(t, modelInitLineFixture(t, tt.model))
+			if len(ev.Model) != tt.wantLen {
+				t.Errorf("len(Model): got %d, want %d (%s)", len(ev.Model), tt.wantLen, tt.why)
+			}
+			if ev.Truncated != tt.wantTruncated {
+				t.Errorf("Truncated: got %v, want %v (%s)", ev.Truncated, tt.wantTruncated, tt.why)
+			}
+		})
+	}
+
+	t.Run("a cut landing mid-rune leaves valid UTF-8", func(t *testing.T) {
+		t.Parallel()
+		// 255 ASCII bytes then one 3-byte rune: the cut at the cap lands INSIDE the
+		// rune, and the empty replacement deletes the partial rune rather than
+		// replacing it.
+		ev := modelAnnouncedEvent(t, modelInitLineFixture(t, strings.Repeat("m", modelFieldCapFixture-1)+"€"))
+		if !ev.Truncated {
+			t.Fatalf("Truncated: got false, want true")
+		}
+		if !utf8.ValidString(ev.Model) {
+			t.Errorf("Model is not valid UTF-8 after a mid-rune cut: %q", ev.Model)
+		}
+		// Short of the cap, not at it — and not more than a rune short.
+		if len(ev.Model) > modelFieldCapFixture || len(ev.Model) < modelFieldCapFixture-3 {
+			t.Errorf("len(Model): got %d, want within 3 bytes below %d", len(ev.Model), modelFieldCapFixture)
+		}
+	})
+}
+
+// TestParser_ModelAnnouncedDropsAreConsumedAndSilent is AC3. Three inputs produce
+// no event, and the DIFFERENCE between them is what this pins: the undecodable one
+// logs exactly one content-free record, and the two model-less ones log NOTHING AT
+// ALL.
+//
+// The silence is a decision, not an omission. emitRateLimit logs a reason keyword
+// on each of its rungs because it fires once per RUN and has three distinguishable
+// ones; init fires once per TURN and has a single non-undecodable drop reason, so a
+// Debug there would put a record in the daemon log on every turn — reinstating in
+// the log exactly the per-turn noise row TestParser_IgnoredLineTypesStaySilent's
+// doc exists to prevent in the event stream. emitThinkingProgress's delta <= 0 arm
+// is the precedent.
+//
+// The undecodable row's attrs are asserted EXACTLY rather than swept for the value,
+// and that is the load-bearing difference. encoding/json QUOTES the offending input
+// into its error text rather than reproducing it verbatim, so "err", err can leak a
+// value a strings.Contains sweep does not recognise; only "these attrs and no
+// others" catches it. The row's model is a long digit run so the sweep below has
+// something distinctive to look for either way.
+func TestParser_ModelAnnouncedDropsAreConsumedAndSilent(t *testing.T) {
+	t.Parallel()
+	const undecodableDigits = "160016001600160016001600"
+	tests := []struct {
+		name      string
+		line      string
+		wantAttrs map[string]string
+		why       string
+	}{
+		{
+			name: "model absent", line: `{"type":"system","subtype":"init","session_id":"s"}`,
+			wantAttrs: nil,
+			why: "absence is claude's to choose, and an event carrying an empty model would assert " +
+				"`claude announced a model` while naming none — a claim the line did not make",
+		},
+		{
+			name: "model present but empty", line: modelInitLineFixture(t, ""),
+			wantAttrs: nil,
+			why:       "answered identically to absence, which is what makes a plain-string decode target sufficient",
+		},
+		{
+			name: "model is not a string", line: `{"type":"system","subtype":"init","model":` + undecodableDigits + `}`,
+			wantAttrs: map[string]string{"subtype": "init"},
+			why: "a non-string model fails the WHOLE decode; the subtype is a message-name keyword, " +
+				"not payload, and it is the only thing this record may carry",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &logRecorder{}
+			var events []turnevent.Event
+			p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+			if _, err := p.Write([]byte(tt.line + "\n")); err != nil {
+				t.Fatalf("Write err = %v, want nil", err)
+			}
+
+			if len(events) != 0 {
+				// An Unrecognized here would be its own failure: keeping `system` whole on
+				// ignoredLineTypes is what makes "no system line reaches the unrecognized
+				// lane" structural, and that outranks surfacing a malformed line of a
+				// subtype we already know.
+				t.Errorf("event count: got %d, want 0 (%s) — %#v", len(events), tt.why, events)
+			}
+			// The line is CONSUMED on every path: emitModelAnnounced returns true, so it
+			// never falls through to consumeLine's generic drop.
+			if generic := rec.withMessage(genericDropMsgFixture); len(generic) != 0 {
+				t.Errorf("the line reached consumeLine's generic drop (%d record(s)): %+v", len(generic), generic)
+			}
+
+			all := rec.all()
+			if tt.wantAttrs == nil {
+				if len(all) != 0 {
+					t.Errorf("records: got %d, want 0 — this drop is silent by design, and a per-turn "+
+						"Debug is the noise this arm exists to avoid: %+v", len(all), all)
+				}
+				return
+			}
+			drops := rec.withMessage(undecodableSystemLineMsgFixture)
+			if len(drops) != 1 {
+				t.Fatalf("records with message %q: got %d, want 1 (all records: %+v)",
+					undecodableSystemLineMsgFixture, len(drops), all)
+			}
+			if !reflect.DeepEqual(drops[0].attrs, tt.wantAttrs) {
+				t.Errorf("drop attrs: got %v, want exactly %v (%s) — an `err` attr here would carry "+
+					"encoding/json's quoted copy of the input", drops[0].attrs, tt.wantAttrs, tt.why)
+			}
+			for _, r := range all {
+				if strings.Contains(r.msg, undecodableDigits) {
+					t.Errorf("record message carries the offending value: %q", r.msg)
+				}
+				for k, v := range r.attrs {
+					if strings.Contains(v, undecodableDigits) {
+						t.Errorf("record %q attr %q carries the offending value", r.msg, k)
+					}
+				}
+			}
+		})
+	}
+
+	// The control: without a line that must NOT be silent, every assertion above
+	// passes against an arm that does nothing at all.
+	t.Run("control_a_model_carrying_line_emits", func(t *testing.T) {
+		t.Parallel()
+		if got := collectEvents(modelInitLineFixture(t, "claude-haiku-4-5")); len(got) != 1 {
+			t.Fatalf("control: a model-carrying init emitted %d events, want 1 — the silence above proves nothing", len(got))
+		}
+	})
+}
+
+// TestParser_ModelAnnouncedIsLoggedContentFree is the assertion the per-path attr
+// checks do NOT cover: an implementation that gets every attr right AND also logs
+// "model", il.Model on the emit path passes every one of them.
+//
+// It sweeps every record's message and every attribute value on the EMIT path as
+// well as both drop paths, which is the half a per-path check cannot see — the emit
+// path must log NOTHING, and there is no expected record there to assert against.
+// Mirrors TestParser_RateLimitIsLoggedContentFree.
+//
+// The sweep covers the capture's cwd and session_id as well as the model. Those two
+// are not fields on the decode target at all, so the sweep proves the omission
+// holds END TO END rather than only at the struct — and cwd is the operator's local
+// filesystem path, which is the most revealing thing this line carries.
+//
+// The constraint is #833's posture, restated across internal/relay's
+// v2session_settings.go and internal/sessions' pool.go as "model / effort / YOLO
+// values are NEVER logged at any level". It is scoped to LOGS and says nothing
+// about the event stream, which is why an emitSystemSubtype arm does not violate
+// it.
+func TestParser_ModelAnnouncedIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+	const (
+		emitModel        = "model-sentinel-160021"
+		undecodableModel = "160023160023160023"
+	)
+	captured := capturedSystemLine(t, "init")
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	capturedModel, _ := payload["model"].(string)
+	capturedCwd, _ := payload["cwd"].(string)
+	capturedSession, _ := payload["session_id"].(string)
+	if capturedModel == "" || capturedCwd == "" || capturedSession == "" {
+		t.Fatalf("the capture carries no string model/cwd/session_id, so this sweep would be vacuous")
+	}
+
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	lines := []string{
+		// The emit path, first and twice: the synthesized sentinel, then the real
+		// captured line with its cwd and session_id intact.
+		modelInitLineFixture(t, emitModel),
+		string(captured),
+		// Both drop paths.
+		`{"type":"system","subtype":"init","session_id":"s"}`,
+		`{"type":"system","subtype":"init","model":` + undecodableModel + `}`,
+	}
+	for _, line := range lines {
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("event count: got %d, want 2 (the two model-carrying lines) — %#v", len(events), events)
+	}
+	// ONE record and not two, three or four: the emit path logs nothing, the
+	// model-less line logs nothing, and only the undecodable line speaks. That count
+	// is the half of this test the per-path assertions cannot see.
+	if all := rec.all(); len(all) != 1 {
+		t.Errorf("records: got %d, want 1 (the undecodable line only): %+v", len(all), all)
+	}
+
+	leaks := []string{emitModel, undecodableModel, capturedModel, capturedCwd, capturedSession}
+	for _, r := range rec.all() {
+		for _, leak := range leaks {
+			if strings.Contains(r.msg, leak) {
+				t.Errorf("record message carries claude-derived content (%q): %q", leak, r.msg)
+			}
+			for k, v := range r.attrs {
+				if strings.Contains(v, leak) {
+					t.Errorf("record %q attr %q carries claude-derived content (%q); this path logs a "+
+						"daemon-authored subtype keyword only", r.msg, k, leak)
+				}
+			}
+		}
 	}
 }
 

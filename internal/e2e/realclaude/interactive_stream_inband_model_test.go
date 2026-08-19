@@ -16,14 +16,24 @@ package realclaude
 //
 // # Where it taps, and why that is structural
 //
-// claude announces the model on a system/init line once per turn. That line
-// reaches no client and no daemon event, and must not be made to: streamsup's
-// emitSystemSubtype has arms for task_started, task_updated,
-// background_tasks_changed and thinking_tokens only, so every other system
-// subtype — init among them — falls through to the ignoredLineTypes["system"]
-// branch and is dropped in silence. Adding an arm, or a log line carrying the
-// value, is barred: the #833 posture restated on handleRequestSessionSettings
-// keeps model / effort / YOLO values out of the daemon log at every level.
+// claude announces the model on a system/init line once per turn.
+//
+// CORRECTED 2026-08-19 (#1600): this paragraph used to say the line "reaches no
+// client and no daemon event, and must not be made to", because
+// streamsup.emitSystemSubtype had arms for task_started, task_updated,
+// background_tasks_changed and thinking_tokens only and init fell through to the
+// ignoredLineTypes["system"] drop. init has an arm now — it becomes a
+// turnevent.ModelAnnounced — so the "no daemon event" half is false, and the bar on
+// adding an arm was never entailed by the log posture in the first place: an event
+// is not a log. What survives, and is the half that matters here, is the LOG half:
+// the value reaches a daemon EVENT and still reaches no daemon LOG at any level,
+// which is the #833 posture restated on handleRequestSessionSettings. It still
+// reaches no CLIENT either — turnbridge.MapEvent's default drops the variant, so no
+// wire frame exists for it yet.
+//
+// This test's own assertions are unaffected in either direction: it taps
+// streamsup.Config.Stdout, upstream of the parser, so what the parser does with the
+// line downstream changes nothing it observes.
 //
 // The line is reachable without touching production because streamsup.Config's
 // Stdout is an io.Writer that receives the child's stdout UPSTREAM of the parser.
