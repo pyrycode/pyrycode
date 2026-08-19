@@ -67,6 +67,11 @@ func TestIsKnownAppType(t *testing.T) {
 		// what keeps the type off the inbound path — a phone must never be able to
 		// send a rate_limited frame into dispatch.Route.
 		{"rate_limited-rejected", TypeRateLimited, false, ErrUnknownType},
+		// the v2-only announced-model report: an outbound binary → phone event an
+		// old phone never receives, so IsKnownAppType must reject it. Rejection is
+		// also what keeps the type off the inbound path — a phone must never be
+		// able to send a model_announced frame into dispatch.Route.
+		{"model_announced-rejected", TypeModelAnnounced, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -208,6 +213,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeThinkingProgress: true,
 	// v2 usage-limit report.
 	TypeRateLimited: true,
+	// v2 announced-model report.
+	TypeModelAnnounced: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -271,6 +278,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeThinkingProgress,
 		// v2 usage-limit report.
 		TypeRateLimited,
+		// v2 announced-model report.
+		TypeModelAnnounced,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

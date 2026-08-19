@@ -28,8 +28,15 @@ package realclaude
 // is not a log. What survives, and is the half that matters here, is the LOG half:
 // the value reaches a daemon EVENT and still reaches no daemon LOG at any level,
 // which is the #833 posture restated on handleRequestSessionSettings. It still
-// reaches no CLIENT either — turnbridge.MapEvent's default drops the variant, so no
-// wire frame exists for it yet.
+// reaches no CLIENT either — turnbridge.MapEvent's default drops the variant.
+//
+// CORRECTED 2026-08-19 (#1616): the clause above used to close "so no wire frame
+// exists for it yet". A wire frame now EXISTS — protocol.TypeModelAnnounced /
+// protocol.ModelAnnouncedPayload, declared by #1616 so a client can be written
+// against the shape — and this repo draws the declared/emitted line sharply
+// (docs/protocol-mobile.md § rate_limited). What survives is the half above:
+// MapEvent still has no case for the variant, so nothing EMITS the frame until
+// #1617 and no client receives one.
 //
 // This test's own assertions are unaffected in either direction: it taps
 // streamsup.Config.Stdout, upstream of the parser, so what the parser does with the

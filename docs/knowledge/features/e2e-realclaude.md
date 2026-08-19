@@ -1962,7 +1962,13 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   #1600, is that the value reaches no daemon *log* at any level — #1600's own
   arm logs the subtype keyword on its undecodable path and nothing else, ever.
   It still reaches no *client*: `turnbridge.MapEvent`'s `default` drops the
-  variant, so no wire frame exists for it yet. No `--model` in the base argv
+  variant. CORRECTED 2026-08-19 (#1616): this used to close "so no wire frame
+  exists for it yet" — false now. `protocol.TypeModelAnnounced` /
+  `protocol.ModelAnnouncedPayload` exist, declared by #1616 so a client can be
+  written against the shape, the same declared-ahead-of-producer sequencing
+  `rate_limited` used (#1405 ahead of #1410). What survives is `MapEvent` having
+  no case for the variant: nothing emits the frame until #1617, so a client
+  still receives nothing. No `--model` in the base argv
   (a respawn's
   recomposed argv would otherwise carry two); the starting model is read off
   turn 1 rather than assumed, so the two-alias target table (`haiku`/`sonnet`)
