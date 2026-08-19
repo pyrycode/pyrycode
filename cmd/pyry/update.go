@@ -183,6 +183,21 @@ func doUpdate(ctx context.Context, o updateOptions) error {
 		return nil
 	}
 
+	// A latest release *older* than the running binary is a rollback: either a
+	// yanked release, or a publisher whose token was stolen re-marking an old
+	// genuine release as latest. The signature gate cannot catch that — the old
+	// release was validly signed when it shipped — so refuse the install and
+	// point at the sanctioned route. Both halves of the condition are
+	// load-bearing: update.Newer means *current* is newer than latest (the
+	// rollback direction), and an explicit --version pin is the documented
+	// downgrade route, which must keep working. This guard sits below the
+	// checkOnly return on purpose: `pyry update --check` still prints both
+	// versions and exits 0.
+	if o.pinVersion == "" && cmp == update.Newer {
+		return fmt.Errorf("update: refuse downgrade: latest release %s is older than the running version %s; "+
+			"run 'pyry update --version %s' to downgrade intentionally", targetVer, o.currentVersion, targetVer)
+	}
+
 	asset, err := update.AssetName(targetVer, o.goos, o.goarch)
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
