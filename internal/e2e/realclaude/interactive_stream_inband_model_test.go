@@ -611,10 +611,16 @@ func inbandWaitResults(rec *inbandTapRecorder, want int, budget time.Duration) b
 	}
 }
 
+// inbandResultCounter is the one thing inbandSendTurn reads off a recorder: the
+// running count of turn boundaries. Both this file's inbandTapRecorder and
+// #1622's revokeTap expose it, so the drive helper is shared rather than copied.
+type inbandResultCounter interface{ resultCount() int }
+
 // inbandSendTurn writes prompt through the sessions.Runner seam — the same method
 // deliverSettingsInBand uses, so the test's own turns and the daemon's in-band
 // command travel one path — and waits for the child to close the turn with a
-// result line.
+// result line. rec is taken as inbandResultCounter rather than the concrete
+// recorder because the count is all it reads.
 //
 // It re-sends while no new result has landed. That is for evidence run A, not for
 // the shipped green path where the first attempt lands: a tree that respawns
@@ -624,7 +630,7 @@ func inbandWaitResults(rec *inbandTapRecorder, want int, budget time.Duration) b
 // ErrNoLiveChild mirrors what msgqueue does in production. A duplicate send is
 // harmless to the verdict: the assertions read the FIRST and LAST init model, so
 // an extra turn costs tokens, not truth.
-func inbandSendTurn(t *testing.T, sup sessions.Runner, rec *inbandTapRecorder, prompt string) {
+func inbandSendTurn(t *testing.T, sup sessions.Runner, rec inbandResultCounter, prompt string) {
 	t.Helper()
 	baseline := rec.resultCount()
 	deadline := time.Now().Add(inbandTurnBudget)
