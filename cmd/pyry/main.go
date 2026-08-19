@@ -947,9 +947,12 @@ func runSupervisor(args []string) error {
 		debugBundler:      debugBundler,
 		settings:          settingsUpdaterAdapter{pool},
 		snapshotSettings:  snapshotSettings,
-		approvals:         approvals,
-		streamSink:        streamSink,
-		busy:              turnBusy,
+		runSettings: func(convID string) (boundRunSettings, bool) {
+			return resolveBoundRunSettings(convReg, pool, convID)
+		},
+		approvals:  approvals,
+		streamSink: streamSink,
+		busy:       turnBusy,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
@@ -1402,6 +1405,92 @@ func resolveBoundSession(convReg *conversations.Registry, pool *sessions.Pool, c
 		return nil, "", false
 	}
 	return sess, sessions.SessionID(conv.CurrentSessionID), true
+}
+
+// boundRunSettings is the settings half of one conversation's run configuration:
+// the pool session it is bound to, plus that session's persisted model / effort /
+// YOLO, decoded into primitives HERE so the value crossing into relay.go carries
+// no internal/sessions type — the same composition-root discipline
+// snapshotSettings, settingsUpdaterAdapter and debugBundler keep.
+//
+// A struct rather than a four-value return: three adjacent same-typed strings in
+// a return list transpose silently, while a named-field construction makes the
+// swap a visible edit. That is the reasoning relayWiring's own doc records for
+// named-field wiring (#917).
+type boundRunSettings struct {
+	sessionID string
+	model     string
+	effort    string
+	yolo      bool
+}
+
+// sessionSettingsReader is the single pool method resolveBoundRunSettings needs,
+// declared at the consumer per CODING-STYLE; *sessions.Pool satisfies it with no
+// adapter. It exists for a stated testing need rather than pre-emptively: "no
+// pool session lookup is performed for an unresolvable conversation" is a claim
+// about CALLS, and the returned values cannot carry it — a conversation bound to
+// an all-defaults session reports exactly the zeros a refusal reports — so the
+// double has to be able to count. Do not widen it past SettingsFor.
+type sessionSettingsReader interface {
+	SettingsFor(id sessions.SessionID) (sessions.SessionSettings, error)
+}
+
+// resolveBoundRunSettings is the run-configuration twin of resolveBoundSession:
+// it resolves a named conversation to its bound session id AND that session's
+// persisted settings, for the conversation-keyed run-configuration seam (#1609,
+// composed with the context-window half at runConfigFor).
+//
+// The refusal is inherited verbatim rather than re-derived: an unknown
+// conversation or an empty CurrentSessionID returns (zero, false) BEFORE the pool
+// is touched. That second guard is the #678 isolation enforcement point
+// resolveBoundSession documents — Pool.Lookup("") returns the BOOTSTRAP session,
+// so an unbound conversation that reached a lookup would read the shared
+// bootstrap child's run configuration. An empty convID lands in the first guard:
+// no conversation carries an empty id, so the pool is never touched for it.
+//
+// Pool.SettingsFor, not Lookup-then-read, for two reasons load-bearing enough to
+// state so a later reader does not "simplify" them away:
+//
+//   - ONE acquisition. SettingsFor answers both questions asked here — does the
+//     pool still hold this id, and what are its settings — under a single RLock. A
+//     Lookup-then-SettingsFor shape opens a window (idle eviction is live, see
+//     Pool.IdleTimeout) in which the reported id names a session the reported
+//     settings no longer describe. Reporting the values together is the whole
+//     point of the seam, so the single acquisition is the design, not a
+//     micro-optimisation.
+//   - No ""-is-bootstrap convention. SettingsFor deliberately does not
+//     special-case the empty id (its doc says why: read and write must agree), so
+//     "" is an ordinary map miss here. Building on it means fall-through-to-
+//     bootstrap has no expression in this code path at all — a second, structural
+//     guarantee stacked on the guard above, never a replacement for it.
+//
+// Pool.DefaultSettings is untouched and must stay so: its doc forbids rewriting
+// it as SettingsFor(BootstrapID()), which is two acquisitions with a rotation
+// window between them. This adds a caller of SettingsFor and changes nothing
+// about how the bootstrap's own settings are read.
+//
+// SECURITY: convID is untrusted network input and never leaves this function — it
+// is a lookup key into the daemon's own registry and nothing else. SettingsFor's
+// error is discarded rather than wrapped: it is returned bare precisely so a
+// hostile or malformed id cannot be reflected into a log line or wire frame a
+// caller builds from it. This resolver takes no logger and must not grow one —
+// there is no operational event here to record, and the only thing a "why did it
+// not resolve" line could add is the caller's id.
+func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettingsReader, convID string) (boundRunSettings, bool) {
+	conv, ok := convReg.Get(conversations.ConversationID(convID))
+	if !ok || conv.CurrentSessionID == "" {
+		return boundRunSettings{}, false
+	}
+	s, err := pool.SettingsFor(sessions.SessionID(conv.CurrentSessionID))
+	if err != nil {
+		return boundRunSettings{}, false
+	}
+	return boundRunSettings{
+		sessionID: conv.CurrentSessionID,
+		model:     s.Model,
+		effort:    s.Effort,
+		yolo:      s.YOLO,
+	}, true
 }
 
 // startFreshRunner is the new_session twin of interruptRunner: it dispatches a

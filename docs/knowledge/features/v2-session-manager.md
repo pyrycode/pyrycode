@@ -118,6 +118,7 @@ type V2SessionConfig struct {
     KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found
     SnapshotSettings  func() (model, effort string, yolo bool) // optional (#848); nil ⇒ screen_snapshot reports defaults (empty model/effort, yolo:false)
     SnapshotUsage     func() (usedTokens, windowTokens int) // optional (#857); nil ⇒ screen_snapshot reports used_tokens:0, window_tokens:0
+    RunConfigFor      func(conversationID string) (RunConfig, bool) // optional (#1609); nil ⇒ no consumer can resolve any conversation. Conversation-keyed replacement for the three seams above — comma-ok, false means not addressable and every RunConfig field is zero. Unconsulted until #1610.
     ModalResolver     ModalResolver                    // optional (#727/#725); nil ⇒ modal_answer/modal_cancel + deny-on-timeout inert no-ops
     OutstandingModals func() []protocol.ModalShownPayload // optional (#877); nil ⇒ no connect-time modal reconcile — byte-identical to pre-#877. Production wires modalbridge.Registry.Snapshot.
     OutstandingQueues func() []protocol.QueueStatePayload // optional (#878); nil ⇒ no connect-time queue reconcile — byte-identical to pre-#878. Production wires the cmd/pyry outstandingQueues adapter over *msgqueue.Queue.SnapshotAll.
@@ -1685,6 +1686,19 @@ never fails a request outright; every branch produces the same reply shape:
   `cmd/pyry/relay.go`. Read only when `addressable`; each nil seam leaves its
   fields at zero, same "never configured" contract `screen_snapshot` already
   established.
+- **`RunConfigFor func(conversationID string) (RunConfig, bool)` — built, not yet
+  read (#1609).** The conversation-keyed replacement for the three seams above:
+  one call resolves a *named* conversation to its own bound session id, model /
+  effort / YOLO and context-window figures together, with a comma-ok in place of
+  the three-seam agreement this handler's `BootstrapSessionID` reference used to
+  ask a reader to hold in their head. `cmd/pyry` wires it (`runConfigFor`,
+  composing `resolveBoundRunSettings` over the conversations registry and
+  `Pool.SettingsFor` with the by-id `snapshotUsageFor` context-window reader),
+  but this handler does not call it yet — every branch below still reads the
+  three bootstrap-scoped seams, so no reply changes. See
+  [`internal/relay/v2session_seams.go`](../../../internal/relay/v2session_seams.go)'s
+  `RunConfig`/`RunConfigFor` doc comments and [codebase/1609.md](../codebase/1609.md).
+  #1610 makes this handler consult it and retires `BootstrapSessionID`.
 - **The handler.** `handleRequestSessionSettings(ctx, s, env)` runs on the
   single `Run` dispatch goroutine, like every other intercepted verb. Every
   branch produces exactly one `session_settings` reply — never a `TypeError`:
@@ -1705,10 +1719,12 @@ never fails a request outright; every branch produces the same reply shape:
 **Scope — no reported value moves in #1586.** The values are the bootstrap
 session's whether or not the request named a conversation: the field gates
 *whether* the answer is populated, not *which* session it describes. Making
-the values follow the named conversation is #1587, and the reported id and
-the reported values must move together then — see `BootstrapSessionID`'s doc
-in `v2session_seams.go` — or a client would read one session and write to
-another via `set_session_settings`.
+the values follow the named conversation is #1587's remaining slice, #1610:
+the reported id and the reported values must move together, which is now a
+property of the `RunConfig` type `RunConfigFor` returns (#1609) rather than a
+warning spread across three fields — see `RunConfig`'s doc in
+`v2session_seams.go`, or a client would read one session and write to another
+via `set_session_settings`.
 
 **Security / log discipline.** `conversation_id` is untrusted network input
 consumed only as the sole argument to `KnownConversation`; it reaches no log
