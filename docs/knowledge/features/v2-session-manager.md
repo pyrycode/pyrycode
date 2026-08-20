@@ -1,6 +1,6 @@
 # `internal/relay` V2 session manager — Noise_IK handshake + open-state dispatch
 
-The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), arms a per-session idle timer that tears an open session down at WS 4408 when no inbound frame arrives within a bounded idle window — the in-repo idle sweep that bounds the lifetime of a dropped/backgrounded phone's two Noise `CipherState`s and armed rekey timer under connect/disconnect churn rather than letting them linger up to the 1-hour rekey interval (#774), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a `StreamBundle(ctx, connID, blob)` method that moves an arbitrarily-large `[]byte` to one open conn as ordered, cap-respecting `debug_bundle_chunk` frames ending in a `debug_bundle_done` marker by looping `Push` — the streaming primitive for a bundle too large for a single AEAD frame or the 8-slot synchronous handler-reply buffer, driven by the #813 request verb (#812, `security-sensitive`), exposes a capability-aware `ActiveConns(ctx)` enumeration that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626; the test-only `ActiveConnIDs(ctx) []string` projection retired in #1542 once #572's wire-up closed not-planned), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; an out-of-range / hostile `last_event_id` — one beyond the conversation's id space, the shape a daemon restart leaves behind — classifies as a gap and earns a `resync` rather than silence, so it cannot suppress the live stream — #1494, narrowing the #663 caught-up-watermark clamp to the concurrent-`Append` read window; and the missed tail is forwarded one event per `Run` pass — via a Run-owned `replayQueue` drained by `drainReplayOnce`, with a `drainOnce` gate holding the conn's live events until the tail empties — so a large replay no longer monopolises the dispatch goroutine and stalls other connections' delivery, while replay ids still precede live ids on the wire and every seal stays single-writer — #777, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` resolves **only from a per-device-gated device** — `option_id` validated against the surfaced modal, the safe-answer keystroke routed, the terminal decision audited — and, when **no** device answers within a bounded window, arms a daemon-global deny-on-timeout that safe-denies the modal (ESC), fans the same `modal_dismissed{timeout}` broadcast, and audits `denied_timeout` (#727 seam + #717 gated answer arm + #725 deny-on-timeout, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727717--deny-on-timeout-725--modalresolver-seam--modal_dismissed-broadcast)), intercepts the inbound `interrupt` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — routes a single Esc to the supervised claude via a consumer-declared `Interrupter` seam (the remote equivalent of pressing Esc locally; `security-sensitive`, the first inbound frame whose authorization *is* the capability — see [Inbound interrupt](#inbound-interrupt-707--interrupter-seam--esc-routing), #707), intercepts the inbound `new_session` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — routes a `/clear` to the supervised claude via a consumer-declared `SessionStarter` seam (the remote equivalent of typing `/clear` locally; `security-sensitive`, reuses the `interactive`-capability-is-the-authorization posture `interrupt` established; the client observes the resulting break through the pre-existing `session_transition` marker, no new emitter or ack path — see [Inbound new_session](#inbound-new_session-831--sessionstarter-seam--clear-routing), #831, split from #824), intercepts the inbound `dequeue_message` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — removes a not-yet-drained queued message by id from the live `msgqueue` backlog via a consumer-declared `QueueRemover` seam, letting a phone cancel a queued `send_message` before it drains (the automatic `OnChange` → #722 producer path then refreshes `queue_state`; `security-sensitive`, the second inbound capability-gated frame — see [Inbound dequeue_message](#inbound-dequeue_message-723--queueremover-seam--msgqueueremove), #723), intercepts the inbound bare `request_debug_bundle` control envelope at the dispatch boundary and — for any paired conn (pairing is the authorization; **not** capability-gated) — assembles the daemon-global debug bundle via an injected `DebugBundler` closure (over [#811's `debugbundle.Assemble`](debugbundle-package.md)) and streams it back with `StreamBundle`, the capstone wiring #811 (producer) + #812 (transport) into one paired-client request/response flow (#813, `security-sensitive`, the first wire-reachable path emitting the recording to a remote client — see [Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle)), bounds repeated `request_debug_bundle` requests on a stalled/slow transport to one in-flight bundle's chunks per conn via a `pushMu`-guarded `bundleInFlight` scan checked before assembly, closing a retry-driven unbounded-memory amplification the control-class bundle chunks opened (#911, `security-sensitive`, see [Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle)), intercepts the inbound `set_session_settings` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — validates the untrusted `model` / `effort` fields at the wire boundary, persists any combination of `model` / `effort` / `yolo` via a consumer-declared `SettingsUpdater` seam (`*sessions.Pool.UpdateSettings`, #840) applied atomically, and **always replies** on the interactive path with a deterministic `session_settings_updated` success or a fixed-string `error` failure — unlike the fire-and-forget control verbs above, this is the first inbound control verb that owes the caller a reply (#845, `security-sensitive`, the untrusted remote write path for per-session model/effort/YOLO and the argv-injection defense #833 deferred — see [Inbound set_session_settings](#inbound-set_session_settings-845--settingsupdater-seam-validate-persist-reply)), intercepts the inbound `request_session_settings` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — answers with a `session_settings` reply carrying the session id to address a change to, the model/effort/YOLO in force, and context-window occupancy, reading three primitive value seams instead of `screen_snapshot`'s terminal-gated side-load so it answers identically on both runners (#491/#1214, the read half of the #844 cluster); the request additionally names the conversation it is asking about via a `conversation_id` validated through the same `KnownConversation` seam `request_snapshot` uses, gating *whether* the reply is populated (an unknown conversation, or any named id while the seam is unwired, degrades to the zero-valued reply — never an error frame) without changing *which* session's values are reported, and an absent/empty id is answered exactly as before so an un-updated client and a freshly started daemon both keep working (#1586, `security-sensitive`, see [Inbound request_session_settings](#inbound-request_session_settings-4911214-extended-1586--the-read-half-of-the-844-cluster)), extends the push queue's `queuedEnv` unsealed-hold invariant from the enqueue side to the drain side via an optional pre-seal `Connected func() bool` transport probe — a control envelope queued while the relay leg is down is held un-popped and unsealed rather than sealed-and-dropped, so no Noise send-nonce is burned for a frame that cannot reach the phone (`security-sensitive`, layer 1 of the reconnect-reliability design, umbrella #829; the immediate flush-on-reconnect trigger — landed in #875, see [Immediate flush-on-reconnect](#immediate-flush-on-reconnect-875--reconnect-signal--connectionreconnected-fan-out) — re-signals the drain the instant the transport reconnects, with no intervening `Push` required), unicasts the still-outstanding `modal_shown` set to a freshly interactive-open conn via an optional `OutstandingModals` closure seam, bringing a phone that connects or reconnects while a permission prompt is pending to current modal truth instead of letting it silently ride the daemon's deny-on-timeout window unseen (#877, `security-sensitive`, the modal half of the reconcile-on-connect mechanism, umbrella #829, see [Connect-time modal reconcile](#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals)), unicasts the current per-conversation `queue_state` for every non-empty backlog to a freshly interactive-open conn via a sibling optional `OutstandingQueues` closure seam, bringing a phone that connects or reconnects between backlog changes to current queue truth instead of the stale/empty view #722's push-on-change leaves (#878, `security-sensitive`, the queue half of the reconcile-on-connect mechanism, umbrella #829, see [Connect-time queue reconcile](#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
+The fourth surface of `internal/relay` (alongside the v1 outbound dial in `connection.go`, the v1 first-frame auth gate in `auth.go`, and the per-envelope-type handlers under `handlers/`). Adds the binary-side per-`conn_id` state machine that completes a [Mobile Protocol v2](../../protocol-mobile.md) Noise_IK handshake, validates the device-token piggybacked in IK message 1 early-data, negotiates the phone's advertised `interactive` capability against the daemon's authoritative supported set — echoing the intersection in `hello_ack` and recording the per-conn `interactive` flag (#626), dispatches `noise_msg` frames in the `open` state through the existing handler chain (#446), intercepts v2 control envelopes (`rekey_request`, #454) at the dispatch boundary, runs the responder side of a phone-initiated re-key with peer-static continuity and atomic CipherState swap (#453), arms a per-session 1-hour timer that emits an AEAD-sealed `rekey_request` envelope and tears the conn down at WS 4426 if the phone does not reply with a fresh `noise_init` within 30 s (#450), arms a per-session idle timer that tears an open session down at WS 4408 when no inbound frame arrives within a bounded idle window — the in-repo idle sweep that bounds the lifetime of a dropped/backgrounded phone's two Noise `CipherState`s and armed rekey timer under connect/disconnect churn rather than letting them linger up to the 1-hour rekey interval (#774), exposes a `Rekey(ctx, connID)` method that funnels operator-driven manual re-keys onto the same emit machinery with `payload.reason = "manual"` (#462), exposes a `Push(ctx, connID, env)` method for concurrency-safe **server-initiated** delivery of an unsolicited `noise_msg` to an addressed open session — non-blocking under relay backpressure via a per-session bounded buffer + droppable-delta drop policy (#571, made non-blocking #610), exposes a `StreamBundle(ctx, connID, blob)` method that moves an arbitrarily-large `[]byte` to one open conn as ordered, cap-respecting `debug_bundle_chunk` frames ending in a `debug_bundle_done` marker by looping `Push` — the streaming primitive for a bundle too large for a single AEAD frame or the 8-slot synchronous handler-reply buffer, driven by the #813 request verb (#812, `security-sensitive`), exposes a capability-aware `ActiveConns(ctx)` enumeration that returns a concurrency-safe snapshot of every currently-open session paired with its negotiated `interactive` flag — the enumeration half of the fan-out primitive (#588, made capability-aware in #626; the test-only `ActiveConnIDs(ctx) []string` projection retired in #1542 once #572's wire-up closed not-planned), intercepts the inbound `request_snapshot` control envelope at the dispatch boundary and pushes a `screen_snapshot` carrying the current claude screen rendered to plain text back to the requester (#618, `security-sensitive`), serves mid-turn-reconnect replay from a late-bound event ring — a phone advertising `hello.last_event_id` is replayed the conversation's missed tail (or sent a `resync` marker) before the live stream resumes (#647, `security-sensitive`; an out-of-range / hostile `last_event_id` — one beyond the conversation's id space, the shape a daemon restart leaves behind — classifies as a gap and earns a `resync` rather than silence, so it cannot suppress the live stream — #1494, narrowing the #663 caught-up-watermark clamp to the concurrent-`Append` read window; and the missed tail is forwarded one event per `Run` pass — via a Run-owned `replayQueue` drained by `drainReplayOnce`, with a `drainOnce` gate holding the conn's live events until the tail empties — so a large replay no longer monopolises the dispatch goroutine and stalls other connections' delivery, while replay ids still precede live ids on the wire and every seal stays single-writer — #777, see [Reconnect replay](#reconnect-replay-647--hellolast_event_id--ring-replay--resync)), intercepts the inbound `modal_answer` / `modal_cancel` control envelopes at the dispatch boundary and — via a consumer-declared `ModalResolver` seam — resolves a `modal_cancel` (consume the outstanding modal, route the fail-safe ESC, audit) then fans a `modal_dismissed` broadcast to every interactive-capable conn, while `modal_answer` resolves **only from a per-device-gated device** — `option_id` validated against the surfaced modal, the safe-answer keystroke routed, the terminal decision audited — and, when **no** device answers within a bounded window, arms a daemon-global deny-on-timeout that safe-denies the modal (ESC), fans the same `modal_dismissed{timeout}` broadcast, and audits `denied_timeout` (#727 seam + #717 gated answer arm + #725 deny-on-timeout, `security-sensitive`, see [Inbound modal control](#inbound-modal-control-727717--deny-on-timeout-725--modalresolver-seam--modal_dismissed-broadcast)), intercepts the inbound `interrupt` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — routes a single Esc to the supervised claude via a consumer-declared `Interrupter` seam (the remote equivalent of pressing Esc locally; `security-sensitive`, the first inbound frame whose authorization *is* the capability — see [Inbound interrupt](#inbound-interrupt-707--interrupter-seam--esc-routing), #707), intercepts the inbound `new_session` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — routes a `/clear` to the supervised claude via a consumer-declared `SessionStarter` seam (the remote equivalent of typing `/clear` locally; `security-sensitive`, reuses the `interactive`-capability-is-the-authorization posture `interrupt` established; the client observes the resulting break through the pre-existing `session_transition` marker, no new emitter or ack path — see [Inbound new_session](#inbound-new_session-831--sessionstarter-seam--clear-routing), #831, split from #824), intercepts the inbound `dequeue_message` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — removes a not-yet-drained queued message by id from the live `msgqueue` backlog via a consumer-declared `QueueRemover` seam, letting a phone cancel a queued `send_message` before it drains (the automatic `OnChange` → #722 producer path then refreshes `queue_state`; `security-sensitive`, the second inbound capability-gated frame — see [Inbound dequeue_message](#inbound-dequeue_message-723--queueremover-seam--msgqueueremove), #723), intercepts the inbound bare `request_debug_bundle` control envelope at the dispatch boundary and — for any paired conn (pairing is the authorization; **not** capability-gated) — assembles the daemon-global debug bundle via an injected `DebugBundler` closure (over [#811's `debugbundle.Assemble`](debugbundle-package.md)) and streams it back with `StreamBundle`, the capstone wiring #811 (producer) + #812 (transport) into one paired-client request/response flow (#813, `security-sensitive`, the first wire-reachable path emitting the recording to a remote client — see [Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle)), bounds repeated `request_debug_bundle` requests on a stalled/slow transport to one in-flight bundle's chunks per conn via a `pushMu`-guarded `bundleInFlight` scan checked before assembly, closing a retry-driven unbounded-memory amplification the control-class bundle chunks opened (#911, `security-sensitive`, see [Inbound debug-bundle request](#inbound-debug-bundle-request-813--request_debug_bundle--debugbundler--streambundle)), intercepts the inbound `set_session_settings` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — validates the untrusted `model` / `effort` fields at the wire boundary, persists any combination of `model` / `effort` / `yolo` via a consumer-declared `SettingsUpdater` seam (`*sessions.Pool.UpdateSettings`, #840) applied atomically, and **always replies** on the interactive path with a deterministic `session_settings_updated` success or a fixed-string `error` failure — unlike the fire-and-forget control verbs above, this is the first inbound control verb that owes the caller a reply (#845, `security-sensitive`, the untrusted remote write path for per-session model/effort/YOLO and the argv-injection defense #833 deferred — see [Inbound set_session_settings](#inbound-set_session_settings-845--settingsupdater-seam-validate-persist-reply)), intercepts the inbound `request_session_settings` control envelope at the dispatch boundary and — gated on the conn's negotiated `interactive` capability — resolves the request's `conversation_id` through a single conversation-keyed `RunConfigFor` seam and answers with a `session_settings` reply whose session id, model/effort/YOLO and context-window occupancy always describe that **same** named conversation's own bound session, reading identically on both runners since neither seam nor reply touches `screen_snapshot`'s terminal-gated side-load (#491/#1214, extended #1586, made conversation-keyed #1610, the read half of the #844 cluster); an absent/empty `conversation_id`, one naming a conversation this daemon does not host, or one with no live bound session all degrade to the same zero-valued reply — never an error frame, and never the shared bootstrap session's values, closing the #678 AC#4 hazard where a client reading one session's sheet could silently write its model/effort/bypass-permissions choice into another (`security-sensitive`, see [Inbound request_session_settings](#inbound-request_session_settings-4911214-extended-1586-conversation-keyed-1610--the-read-half-of-the-844-cluster)), extends the push queue's `queuedEnv` unsealed-hold invariant from the enqueue side to the drain side via an optional pre-seal `Connected func() bool` transport probe — a control envelope queued while the relay leg is down is held un-popped and unsealed rather than sealed-and-dropped, so no Noise send-nonce is burned for a frame that cannot reach the phone (`security-sensitive`, layer 1 of the reconnect-reliability design, umbrella #829; the immediate flush-on-reconnect trigger — landed in #875, see [Immediate flush-on-reconnect](#immediate-flush-on-reconnect-875--reconnect-signal--connectionreconnected-fan-out) — re-signals the drain the instant the transport reconnects, with no intervening `Push` required), unicasts the still-outstanding `modal_shown` set to a freshly interactive-open conn via an optional `OutstandingModals` closure seam, bringing a phone that connects or reconnects while a permission prompt is pending to current modal truth instead of letting it silently ride the daemon's deny-on-timeout window unseen (#877, `security-sensitive`, the modal half of the reconcile-on-connect mechanism, umbrella #829, see [Connect-time modal reconcile](#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals)), unicasts the current per-conversation `queue_state` for every non-empty backlog to a freshly interactive-open conn via a sibling optional `OutstandingQueues` closure seam, bringing a phone that connects or reconnects between backlog changes to current queue truth instead of the stale/empty view #722's push-on-change leaves (#878, `security-sensitive`, the queue half of the reconcile-on-connect mechanism, umbrella #829, see [Connect-time queue reconcile](#connect-time-queue-reconcile-878--outstandingqueues-seam--reconcilequeues)), and refuses every out-of-state inner frame or tampered AEAD payload at the WS-close layer.
 
 **Wire role:** the responder half of [`internal/noise`](noise-package.md)'s `Responder` / `WriteResp` API, parameterised with the binary's static X25519 private key, the device registry, an outbound `RoutingEnvelope` forwarder, and an optional `dispatch.Handler` table for open-state application dispatch.
 
@@ -118,7 +118,7 @@ type V2SessionConfig struct {
     KnownConversation func(conversationID string) bool // optional (#618); nil ⇒ request_snapshot → conversation.not_found
     SnapshotSettings  func() (model, effort string, yolo bool) // optional (#848); nil ⇒ screen_snapshot reports defaults (empty model/effort, yolo:false)
     SnapshotUsage     func() (usedTokens, windowTokens int) // optional (#857); nil ⇒ screen_snapshot reports used_tokens:0, window_tokens:0
-    RunConfigFor      func(conversationID string) (RunConfig, bool) // optional (#1609); nil ⇒ no consumer can resolve any conversation. Conversation-keyed replacement for the three seams above — comma-ok, false means not addressable and every RunConfig field is zero. Unconsulted until #1610.
+    RunConfigFor      func(conversationID string) (RunConfig, bool) // optional (#1609); nil ⇒ request_session_settings answers the zero reply. Conversation-keyed replacement for BootstrapSessionID/SnapshotSettings/SnapshotUsage (deleted from this struct, #1610) — comma-ok, false means not addressable and every RunConfig field is zero. Consulted by request_session_settings (#1610).
     ModalResolver     ModalResolver                    // optional (#727/#725); nil ⇒ modal_answer/modal_cancel + deny-on-timeout inert no-ops
     OutstandingModals func() []protocol.ModalShownPayload // optional (#877); nil ⇒ no connect-time modal reconcile — byte-identical to pre-#877. Production wires modalbridge.Registry.Snapshot.
     OutstandingQueues func() []protocol.QueueStatePayload // optional (#878); nil ⇒ no connect-time queue reconcile — byte-identical to pre-#878. Production wires the cmd/pyry outstandingQueues adapter over *msgqueue.Queue.SnapshotAll.
@@ -1680,22 +1680,25 @@ apply is one atomic `saveLocked` (#840) — no partial-parse path can reach
 is pointer-nil semantics (code) and the corruption guard is `json.Unmarshal`
 strictness (code), not a second stochastic check.
 
-### Inbound `request_session_settings` (#491/#1214, extended #1586) — the read half of the #844 cluster
+### Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
 `dispatch.Route` — same boundary as `set_session_settings` / `request_snapshot`
 / `request_debug_bundle`, no `dispatch.Route` handler. It consumes
-[the read-side wire vocabulary](protocol-package.md#session-settings-read-payloads-4911214-conversationid-field-1586)
+[the read-side wire vocabulary](protocol-package.md#session-settings-read-payloads-4911214-conversationid-field-1586-conversation-keyed-reply-1610)
 (`RequestSessionSettingsPayload` / `SessionSettingsPayload`) and answers with
 the current run configuration: the session id a client must address a
 `set_session_settings` to, the model / effort / YOLO in force, and the
-context-window occupancy. It is the **daemon-side read path** the #844 cluster
-shipped without — before it, a client had to infer these values from
-`screen_snapshot`'s side-load and the unsolicited `session_transition` marker,
-neither of which is available before the user's first turn. See
-[codebase/1586.md](../codebase/1586.md) for the implementation note (#491's own
-predecessor ticket has no per-ticket file — it landed before that convention).
+context-window occupancy — **all six fields describing the one session bound
+to the conversation the client named** (#1610). Before #1610 the reported id
+and the reported values could describe different sessions: the id followed
+whichever conversation the request named, but the values were always the
+shared **bootstrap** session's, so a client changing model/effort/YOLO for
+conversation A silently reconfigured a background session it was not looking
+at. See [codebase/1586.md](../codebase/1586.md) for the #1586 field addition
+(#491's own predecessor ticket has no per-ticket file — it landed before that
+convention).
 
 **It deliberately reads none of the same seams `handleRequestSnapshot` uses to
 render a screen.** A client used to get these values off `screen_snapshot`'s
@@ -1703,75 +1706,90 @@ side-load, but that reply is gated on a live terminal: on the stream-json
 runner `Snapshotter` is nil by construction (#1077/#1101), so
 `handleRequestSnapshot` short-circuits to `server.binary_offline` and drags the
 settings — which have nothing to do with a terminal — down with it. This
-handler reads only three primitive value seams, so it answers identically on
+handler consults one conversation-keyed seam, so it answers identically on
 both runners.
 
-Control flow, in load-bearing order — unlike `set_session_settings` this verb
-never fails a request outright; every branch produces the same reply shape:
+Control flow, in load-bearing order — this verb never fails a request
+outright; every branch produces the same reply shape:
 
 1. **Capability gate.** `if !s.interactive { return }` — a non-interactive
-   conn is fully inert: no decode, no registry lookup, no seam call, no reply.
-   It must precede **both** steps below, so such a conn cannot learn whether a
-   conversation exists, let alone a session (`_NonInteractiveMakesNoLookup`
-   is the test that pins the ordering, not just the no-reply half
-   `_ReportsRunConfig` already covered).
-2. **Decode + conversation gate (#1586).** `json.Unmarshal(env.Payload, &protocol.RequestSessionSettingsPayload{})`,
+   conn is fully inert: no decode, no resolution, no seam call, no reply.
+   It must precede the steps below, so such a conn cannot learn whether a
+   conversation or a session exists (`_NonInteractiveMakesNoLookup` is the
+   test that pins the ordering, not just the no-reply half `_ReportsRunConfig`
+   already covered — see § Test design below).
+2. **Decode, tolerated.** `json.Unmarshal(env.Payload, &protocol.RequestSessionSettingsPayload{})`,
    tolerated on failure — a bare frame from an un-updated client carries a nil
-   `Payload`, which `Unmarshal` rejects while leaving the id at `""`; that is
-   the entire backward-compatibility guarantee, so there is no emptiness
-   guard, no error check, and no malformed-payload reply branch. The decode
-   error is never echoed or logged. The gate itself is one boolean:
+   `Payload`, which `Unmarshal` rejects while leaving the id at `""`. There is
+   no emptiness guard beyond what step 3 already needs, no error check on the
+   `Unmarshal` return, and no malformed-payload reply branch; the decode error
+   is never echoed or logged.
+3. **Resolve, or don't.** One conversation-keyed read replaces the pre-#1610
+   `addressable` boolean and the three bootstrap-scoped seam reads:
 
    ```go
-   addressable := p.ConversationID == "" ||
-       (m.cfg.KnownConversation != nil && m.cfg.KnownConversation(p.ConversationID))
+   var cfg RunConfig
+   if p.ConversationID != "" && m.cfg.RunConfigFor != nil {
+       if got, ok := m.cfg.RunConfigFor(p.ConversationID); ok {
+           cfg = got
+       }
+   }
    ```
 
-   Short-circuit order is load-bearing twice over. The empty-id check first
-   means an unnamed request **never reaches the registry** — the fresh-daemon
-   case, where `conversations.Load` has seeded nothing and there is no
-   conversation id in existence to send, so failing it closed would leave the
-   run-configuration sheet inert before the user's first message (the
-   `pyrycode-desktop#491` defect this verb exists to fix). The nil-seam check
-   second means a *named* id fails closed when the registry is unwired —
-   matching `handleRequestSnapshot`'s own nil-seam posture.
-3. **Seam reads, gated on `addressable`.** Each of the three value seams below
-   degrades to its zero value when unset, same as before #1586; the new part
-   is that an unaddressable request consults **none** of them and falls
-   through with every value already at zero, reusing the wire contract's
-   existing "zero is a real answer" shape rather than adding a failure
-   branch.
+   Three properties, each deliberate:
 
-- **`KnownConversation` — reused, not new plumbing.** The same
-  `func(conversationID string) bool` seam `handleRequestSnapshot` already
-  validates against (production: one `conversations.Registry.Get` — a
-  mutex-guarded linear scan, **not** a map lookup). `handleRequestSnapshot`
-  treats a miss as `conversation.not_found`; this handler treats it as
-  *not addressable*, degrading to the zero reply instead of an error — the
-  one place the two verbs' postures diverge, and it is documented on
-  `V2SessionConfig.KnownConversation` itself
-  (`internal/relay/v2session_seams.go`) precisely so the divergence is not
-  lost between the two call sites.
-- **`BootstrapSessionID func() string`, `SnapshotSettings func() (model, effort string, yolo bool)`, `SnapshotUsage func() (usedTokens, windowTokens int)`.**
-  Three independent nil-guarded primitive closures — the same shape as
-  `screen_snapshot`'s `SnapshotSettings` (#848) / `SnapshotUsage` (#857)
-  seams, reused here rather than duplicated. Production wires all three in
-  `cmd/pyry/relay.go`. Read only when `addressable`; each nil seam leaves its
-  fields at zero, same "never configured" contract `screen_snapshot` already
-  established.
-- **`RunConfigFor func(conversationID string) (RunConfig, bool)` — built, not yet
-  read (#1609).** The conversation-keyed replacement for the three seams above:
-  one call resolves a *named* conversation to its own bound session id, model /
-  effort / YOLO and context-window figures together, with a comma-ok in place of
-  the three-seam agreement this handler's `BootstrapSessionID` reference used to
-  ask a reader to hold in their head. `cmd/pyry` wires it (`runConfigFor`,
-  composing `resolveBoundRunSettings` over the conversations registry and
-  `Pool.SettingsFor` with the by-id `snapshotUsageFor` context-window reader),
-  but this handler does not call it yet — every branch below still reads the
-  three bootstrap-scoped seams, so no reply changes. See
-  [`internal/relay/v2session_seams.go`](../../../internal/relay/v2session_seams.go)'s
+   - **The empty-id guard stays, and now means the opposite of what it meant
+     before #1610.** It used to short-circuit *to* the bootstrap answer; now
+     it short-circuits *to* the zero answer — a request naming no conversation
+     names no session, so there is nothing for it to describe. Keeping the
+     guard in `internal/relay` (rather than letting the seam refuse `""`)
+     makes "an empty `conversation_id` addresses nothing" a property of this
+     package alone, provable against any `RunConfigFor` double, and is the
+     relay-side half of the #678 `Pool.Lookup("") == bootstrap` hazard the
+     `cmd/pyry` producer separately guards.
+   - **The nil-seam guard stays.** Foreground / v1 wire no `RunConfigFor`. Nil
+     ⇒ nothing resolves ⇒ the zero reply — the same nil-seam fail-closed
+     posture `handleRequestSnapshot` already has.
+   - **The comma-ok is honoured, not discarded.** `cfg` is assigned only on
+     `ok == true`. Writing `cfg, _ = m.cfg.RunConfigFor(...)` would happen to
+     work today because the `cmd/pyry` producer zeroes its refusal return, but
+     `RunConfigFor`'s doc forbids reading the fields on `ok == false`.
+     Honouring it makes the relay fail closed on its own contract rather than
+     on the producer's good behaviour — pinned by a **poisoned** refusal
+     double in the unit tests (§ Test design).
+4. **Marshal + reply.** Unchanged shape, sourcing all six fields from `cfg`.
+   No new log call on any reject branch — this verb fires on every sheet
+   open, so a per-reject line would log more than the write path, and the
+   only thing it could add is the caller's untrusted conversation id.
+
+- **`RunConfigFor func(conversationID string) (RunConfig, bool)` — the sole
+  seam this handler consults (#1609 built it, #1610 wires it in).** One call
+  resolves a *named* conversation to its own bound session id, model / effort
+  / YOLO and context-window figures together, with a comma-ok for "not
+  addressable". `cmd/pyry` composes it (`runConfigFor`, layering
+  `resolveBoundRunSettings` over the conversations registry and
+  `Pool.SettingsFor` with the by-id `snapshotUsageFor` context-window reader)
+  and confirms the pool still holds the resolved id under one `SettingsFor`
+  acquisition before reporting anything, so no reported field can describe a
+  session another field does not — even against a concurrent idle eviction.
+  This handler inherits that refusal rather than re-deriving a weaker one.
+  See [`internal/relay/v2session_seams.go`](../../../internal/relay/v2session_seams.go)'s
   `RunConfig`/`RunConfigFor` doc comments and [codebase/1609.md](../codebase/1609.md).
-  #1610 makes this handler consult it and retires `BootstrapSessionID`.
+- **`KnownConversation` and `BootstrapSessionID` are no longer read here.**
+  `KnownConversation` (`func(conversationID string) bool`) is now consulted
+  **only** by `handleRequestSnapshot` — this handler stopped calling it
+  because a known-but-**unbound** conversation reads as addressable through a
+  pure membership check, which would have leaked the bootstrap's values for
+  exactly the case this ticket closes. `BootstrapSessionID func() string` —
+  along with the two seams it used to accompany here,
+  `SnapshotSettings func() (model, effort string, yolo bool)` and
+  `SnapshotUsage func() (usedTokens, windowTokens int)` — is **deleted from
+  `V2SessionConfig` entirely** rather than left wired and unread, closing the
+  one remaining live route to a value AC #2 of #1610 forbids. `SnapshotSettings`
+  / `SnapshotUsage` themselves stay on `V2SessionConfig`, bootstrap-scoped,
+  unchanged — `handleRequestSnapshot`'s `screen_snapshot` side-load is still
+  their only reader, and that path is unreachable in production today
+  (`Snapshotter` is hardcoded `nil`).
 - **The handler.** `handleRequestSessionSettings(ctx, s, env)` runs on the
   single `Run` dispatch goroutine, like every other intercepted verb. Every
   branch produces exactly one `session_settings` reply — never a `TypeError`:
@@ -1779,56 +1797,73 @@ never fails a request outright; every branch produces the same reply shape:
   | Condition | Reply |
   |---|---|
   | Non-interactive conn | *(none — inert)* |
-  | Decode failure / no payload / empty `conversation_id` | Full run configuration (answered as always) |
-  | Named `conversation_id`, `KnownConversation` nil (unwired seam) | Zero-valued `session_settings` |
-  | Named `conversation_id`, unknown to the registry | Zero-valued `session_settings` |
-  | Named `conversation_id`, known to the registry | Full run configuration |
+  | Decode failure / no payload / empty `conversation_id` | Zero-valued `session_settings` |
+  | `RunConfigFor` nil (foreground / v1 / unwired) | Zero-valued `session_settings` |
+  | Named `conversation_id`, `RunConfigFor` returns `ok == false` (unhosted or unbound) | Zero-valued `session_settings` |
+  | Named `conversation_id`, `RunConfigFor` returns `ok == true` | That conversation's own run configuration |
 
   `session_id: ""` is already the wire contract's defined "no session to
-  address" answer, so the unaddressable rows above are a real answer, not an
-  error dressed up as one — the reply shape stays constant and a client
-  parses one thing rather than branching on two.
+  address" answer, so the zero rows above are a real answer, not an error
+  dressed up as one — the reply shape stays constant and a client parses one
+  thing rather than branching on two. An unknown conversation and a
+  known-but-unbound one now produce the **identical** zero reply, which is a
+  strict disclosure improvement over the pre-#1610 `KnownConversation` check:
+  that pure membership test distinguished the two *and* reported bootstrap
+  values for the unbound case.
 
-**Scope — no reported value moves in #1586.** The values are the bootstrap
-session's whether or not the request named a conversation: the field gates
-*whether* the answer is populated, not *which* session it describes. Making
-the values follow the named conversation is #1587's remaining slice, #1610:
-the reported id and the reported values must move together, which is now a
-property of the `RunConfig` type `RunConfigFor` returns (#1609) rather than a
-warning spread across three fields — see `RunConfig`'s doc in
-`v2session_seams.go`, or a client would read one session and write to another
-via `set_session_settings`.
+**Scope, after #1610.** The reported id and the reported values always
+describe the same session, because both come from the one `RunConfig`
+`RunConfigFor` returns — a client can never read one session's values and
+write to another via `set_session_settings`. There is no bootstrap-scoped
+fallback on this verb for any unresolvable request; that route (the field
+gating *whether* the answer is populated rather than *which* session it
+describes) was the defect #1610 closed. `handleRequestSnapshot`'s
+`screen_snapshot` side-load is the one place in the manager that still
+reports bootstrap-scoped settings/usage, and it is out of scope by design
+(see the seam bullet above).
 
-**Security / log discipline.** `conversation_id` is untrusted network input
-consumed only as the sole argument to `KnownConversation`; it reaches no log
-line, no error string, and not the reply. The handler's only logging is the
-pre-existing `Debug` (`conn_id` only) and the defensive marshal-error `Warn`
-(`conn_id` only) — no reject-branch log was added, matching the verb's
-existing "logs less than the write path" posture for something that fires on
-every sheet open. `TestV2Session_RequestSessionSettings_IgnoresAnyPayload`
+**Security / log discipline.** `conversation_id` is untrusted network input,
+a lookup key only: it crosses to trusted only through `RunConfigFor`, whose
+`cmd/pyry` producer resolves it against the daemon's own registry and
+confirms the pool still holds the bound id before reporting anything.
+Nothing downstream of the seam ever holds the caller's string — it reaches no
+log line, no error string, no filesystem path, and not the reply. The
+handler's only logging is the pre-existing `Debug` (`conn_id` only) and the
+defensive marshal-error `Warn` (`conn_id` only) — no reject-branch log was
+added, matching the verb's existing "logs less than the write path" posture
+for something that fires on every sheet open. `TestV2Session_RequestSessionSettings_IgnoresAnyPayload`
 probes with a `"../../etc/passwd"`-shaped value under an unrelated key to pin
-that a non-`conversation_id` field can never select another session's data;
-`conversations.Registry.Get` performs no filesystem access on the id's path
-regardless.
+that a non-`conversation_id` field can never select another session's data.
 
-**Test design — counting seams, not just reply shape.** A zero-valued reply
-is unfalsifiable against the pre-#1586 fixture harness (`allReadSeams`),
-because an unwired daemon answers with the same zeros. `countingReadSeams`
-(`internal/relay/v2session_settings_read_test.go`) wires the three
-run-configuration seams to **non-zero** fixture values and an
-`atomic.Int64`-counted `KnownConversation`, so "the reply is zero" and "the
-reply is zero because nothing was consulted" become separable claims —
-confirmed by mutation: forcing `addressable := true` reddens both the payload
-assertion and the run-config-read counter on the unknown-conversation and
-nil-seam rows. `TestV2Session_RequestSessionSettings_NonInteractiveMakesNoLookup`
-is the test that would catch a capability-gate reorder that a pure no-reply
-assertion cannot see (a reordered gate still produces no reply either way).
+**Test design — counting the seam the handler actually consults, and
+poisoning its refusal.** `countingReadSeams`
+(`internal/relay/v2session_settings_read_test.go`) wires `RunConfigFor` to
+non-zero, conversation-keyed fixture values for a known bound conversation
+and, for **every other** id, to a **poisoned** refusal — a distinct marker
+session id and non-default model/effort/YOLO alongside `ok == false`, not the
+zero value. Without the poison, a handler that discarded the comma-ok would
+still pass every row, because the `cmd/pyry` producer happens to zero its
+refusal return; the poison makes "fail closed on `ok == false`" a tested
+property of `internal/relay` itself. `readCounts.runConfigCalls` (`resolves`)
+replaces the pre-#1610 `KnownConversation` counter (`wantLookups`), which
+would read zero unconditionally once this handler stopped calling it — the
+exact vacuous-counter trap `TestV2Session_RequestSessionSettings_NonInteractiveMakesNoLookup`
+exists to close, now re-pointed at `RunConfigFor`. A second counter,
+`bootstrapReads` (the retired `settings` + `usage` fixture calls, kept in the
+harness purely as leak detectors), stays wanted **0 on every row** and is red
+under exactly one mutation class: a re-introduced bootstrap-scoped read.
+`_ConversationGate`'s five-row table is the mutation-coverage matrix for this
+seam: dropping the empty-id guard reddens the unnamed rows on `resolves`;
+dropping the nil-seam guard panics the nil-seam row; discarding the comma-ok
+reddens the unhosted row's payload via the poison; a re-added bootstrap read
+reddens every addressable-adjacent row on both counters and the payload.
 
 **Concurrency.** No new goroutine, channel, or lock — runs only on `Run`,
-same as `handleRequestSnapshot`. `KnownConversation` takes
-`conversations.Registry`'s mutex, already acquired from this same goroutine
-via `request_snapshot`, so no new lock, no new acquisition order, no new
-contention class.
+same as `handleRequestSnapshot`. The seam call replaced three synchronous
+closure calls (`KnownConversation` + `SnapshotSettings` + `SnapshotUsage`)
+with one (`RunConfigFor`); the `cmd/pyry` producer takes the conversations
+registry mutex and one `Pool.SettingsFor` RLock, both already taken by the
+seams it replaces, so net lock acquisitions went down, not up.
 
 ## Concurrency
 

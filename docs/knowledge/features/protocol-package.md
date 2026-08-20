@@ -398,7 +398,7 @@ nil-ness then a byte-equal re-marshal — the regression guard for the
 `omitempty` decision — plus a `session_settings_updated.json` round-trip for
 the reply.
 
-### Session settings read payloads (#491/#1214, `ConversationID` field #1586)
+### Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610)
 
 The READ half the #844 cluster shipped without: `set_session_settings`
 changes the values and `session_settings_updated` only echoes the id back, so
@@ -407,7 +407,7 @@ session id to address a change to. Before this pair the only sources were
 `screen_snapshot`'s side-load (values) and the unsolicited
 `session_transition` marker (id, fired only on clear/idle-eviction — never on
 session creation). Handler is [`handleRequestSessionSettings`, documented in
-v2-session-manager.md](v2-session-manager.md#inbound-request_session_settings-4911214-extended-1586--the-read-half-of-the-844-cluster).
+v2-session-manager.md](v2-session-manager.md#inbound-request_session_settings-4911214-extended-1586-conversation-keyed-1610--the-read-half-of-the-844-cluster).
 
 ```go
 type RequestSessionSettingsPayload struct {
@@ -426,9 +426,11 @@ type SessionSettingsPayload struct {
 
 - **`ConversationID` was added by #1586; the frame was genuinely bare before
   it.** It names the conversation the client is asking about. Untrusted
-  network input, used for exactly one thing — a membership lookup through the
-  handler's `KnownConversation` seam — and it reaches no log line, no error
-  string, no filesystem path, and not the reply.
+  network input, resolved through the handler's conversation-keyed
+  `RunConfigFor` seam (#1610) rather than a membership check — the seam
+  resolves-and-refuses in one call, so an unknown or unbound conversation
+  never distinguishes itself from any other unaddressable case. It reaches no
+  log line, no error string, no filesystem path, and not the reply.
 - **No `omitempty` on either struct**, matching `RequestSnapshotPayload` /
   `ScreenSnapshotPayload` and deliberately unlike the sibling
   `SetSessionSettingsPayload` above, whose per-field pointers encode a
@@ -441,17 +443,18 @@ type SessionSettingsPayload struct {
   override", `YOLO false` means permissions are enforced, and `WindowTokens 0`
   means the usage seam is unwired (`UsedTokens 0` against a non-zero
   `WindowTokens` is a genuine fresh session).
-- **The field gates *whether* the reply is populated, not *which* session it
-  describes.** A `conversation_id` naming a conversation the daemon hosts, or
-  naming none, is answered with the **bootstrap** session's values — the same
-  scope `screen_snapshot` and #844 already had. A `conversation_id` naming a
-  conversation the daemon does **not** host is answered with a zero-valued
-  `SessionSettingsPayload`, never an error frame: `session_id: ""` is already
-  the defined "no session to address" answer, so the reply shape stays
-  constant. Making the reported values follow the named conversation is
-  #1587, and the reported id and the reported values must move together then
-  (see `BootstrapSessionID`'s seam doc, `internal/relay/v2session_seams.go`)
-  or a client would read one session and write to another.
+- **The field gates *which* session the reply describes (#1610).** A
+  `conversation_id` naming a conversation this daemon hosts, with a live
+  bound session, is answered with **that conversation's own** values — never
+  the shared bootstrap session's. An absent/empty `conversation_id`, one
+  naming a conversation this daemon does not host, or one with no live bound
+  session is answered with a zero-valued `SessionSettingsPayload`, never an
+  error frame: `session_id: ""` is already the defined "no session to
+  address" answer, so the reply shape stays constant. The reported id and the
+  reported values always move together, because both come from the single
+  `RunConfig` `RunConfigFor` returns — a client can never read one session's
+  values and write to another. There is no bootstrap-scoped fallback for this
+  verb; that route was retired with `BootstrapSessionID` (#678 AC#4).
 
 Golden round-trips in `settings_test.go`: `TestRequestSessionSettingsPayload_RoundTrip`
 against `testdata/request_session_settings.json` (non-empty fixture id — this
