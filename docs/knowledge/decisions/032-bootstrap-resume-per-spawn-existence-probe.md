@@ -127,3 +127,4 @@ itself fails).
 - `docs/specs/architecture/1164-bootstrap-resume-existing-transcript.md` — build-time spec (resume-vs-rotate comparison table, full design).
 - `docs/lessons.md:54` — `--resume <uuid>` (with id) is a real, safe, used spawn form; bare `--resume` is not.
 - Sibling: #1165 — independent generic N-fast-crash rotate safety net, different fabric, not implemented by this ticket.
+- [features/session-transcript-and-resume-probe.md](../features/session-transcript-and-resume-probe.md) — #1655's live measurement (claude 2.1.220) that this decision's missing premise **HOLDS**: a `--session-id <id>` launch that runs no turn leaves no `<id>.jsonl` on disk. Feeds #1630, which carries this ADR's by-id-existence rule into `internal/streamsup`.
