@@ -545,7 +545,8 @@ func startRelayV2(
 
 	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
 	// session's current occupancy (used tokens + window size) for the
-	// screen_snapshot reply and, since #491, for the session_settings reply.
+	// screen_snapshot reply. session_settings read it too between #491 and #1610,
+	// and now sources all six of its fields from the conversation-keyed seam below.
 	snapshotUsage := bootstrapSnapshotUsage(w.claudeSessionsDir, w.bootstrapIDFn)
 
 	// Conversation-keyed run-configuration seam (#1609): composes the settings half
@@ -610,9 +611,9 @@ func startRelayV2(
 		// handler report defaults (empty model/effort, yolo:false).
 		SnapshotSettings: w.snapshotSettings,
 		// Context-window usage reader (#857, rebuilt by #1214): populates the
-		// used_tokens / window_tokens on both the screen_snapshot and the
-		// session_settings replies from the bootstrap session's current occupancy,
-		// so a client can render an "N% used (X of Y)" gauge (desktop#182). The
+		// used_tokens / window_tokens on the screen_snapshot reply from the
+		// bootstrap session's current occupancy, so a client can render an
+		// "N% used (X of Y)" gauge (desktop#182). The
 		// closure (bootstrapSnapshotUsage, built above: the by-id reader
 		// snapshotUsageFor returns — transcript.StatByID + contextwindow.Read —
 		// bound to the bootstrap id source) returns two primitives, so
@@ -621,25 +622,16 @@ func startRelayV2(
 		// foreground / unresolved sessions dir / no id source makes the handlers
 		// report zeros (used_tokens:0, window_tokens:0).
 		SnapshotUsage: snapshotUsage,
-		// Run-configuration session id (#491): tells a client WHICH session the
-		// three seams above describe, so it can address a set_session_settings to
-		// it. Same bootstrap id source as the pinned turn-stream resolver (#839),
-		// so the id a client writes to is the session whose values it just read.
-		// Before this, a client's only source was the unsolicited
-		// session_transition marker, which fires on a clear or an idle eviction and
-		// never on session creation — so a fresh conversation never yielded one and
-		// the run-configuration UI stayed inert forever (desktop#491). A routing
-		// key, not a secret; it already crosses the wire in both directions.
-		BootstrapSessionID: w.bootstrapIDFn,
-		// Conversation-keyed run configuration (#1609): one seam reporting a NAMED
-		// conversation's own bound session id, model / effort / YOLO and
-		// context-window figures together — the replacement for the three
-		// bootstrap-scoped seams above, composed at runConfigFor. Nothing consults it
-		// in this ticket by design, so every session_settings / screen_snapshot reply
-		// stays byte-identical; #1610 makes handleRequestSessionSettings read it and
-		// retires BootstrapSessionID. An unresolvable conversation gets ok=false and
-		// addresses nothing — never the bootstrap. nil in foreground/v1 (no settings
-		// resolver wired).
+		// Conversation-keyed run configuration (#1609, consulted since #1610): one
+		// seam reporting a NAMED conversation's own bound session id, model / effort
+		// / YOLO and context-window figures together, composed at runConfigFor. It
+		// is handleRequestSessionSettings' only run-configuration source, so the
+		// session id a client is handed — and writes its set_session_settings back
+		// to — is the one bound to the conversation it named, never the shared
+		// bootstrap session. It replaced a bootstrap-scoped session-id seam that
+		// named the session the two seams above describe. An unresolvable
+		// conversation gets ok=false and addresses nothing. nil in foreground/v1 (no
+		// settings resolver wired).
 		RunConfigFor: runConfig,
 		// Connect-time modal reconcile source (#877): enumerates the outstanding-
 		// modal registry as marshal-ready modal_shown payloads so a phone that
