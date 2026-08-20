@@ -2227,6 +2227,48 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched.
 
+- `resume_absent_transcript_probe_test.go` (#1656) — measures the other half of
+  #1655's premise: how claude answers `--resume <id>` when `<id>.jsonl` is
+  absent, the half the suspected `streamsup` crash-loop actually turns on.
+  `TestRealClaude_ResumeAbsentTranscript` establishes a real transcript
+  `<A>` through one turn, pre- and post-reads a reserved absent id `<C>`
+  through the same by-id instrument, then runs both a `--resume <C>` arm and
+  a `--resume <A>` control arm — same builder (`resumeProbeArgs`), same
+  workdir, same 45 s deadline — through `classifyResumeAbsent`, which reads
+  the control **first**: a control that itself rejects a resume of an
+  *existing* transcript short-circuits to INCONCLUSIVE regardless of what
+  the absent arm did. **Measured HOLDS** (claude 2.1.220): the absent arm
+  exited 1 (`No conversation found with session ID: …`, carried on both
+  stdout and stderr) while the control sat on stdin past its deadline. Full
+  record and reproduce steps in
+  [`session-transcript-and-resume-probe.md`](session-transcript-and-resume-probe.md).
+  Credential-free companions `TestResumeAbsentVerdict` (all nine
+  `{exit 0, exit non-zero, did-not-exit}²` cells) and
+  `TestResumeProbeArgsIsRespawnShape` (the respawn argv differs from the
+  first-spawn argv only in the trailing id-flag pair) run with no claude at
+  all.
+
+  **Two lessons that outlive this ticket, both about classifying a
+  terminated child's exit code:**
+  - **A did-not-exit outcome needs a liveness guard, not just a code
+    comparison.** `snapshotExit` (from #1655) returns `-1` for a child that
+    has not exited, and `-1 != 0` — a "was it rejected?" predicate written
+    as `ExitCode != 0` alone reads a child still sitting on stdin as a
+    rejection. The predicate here is `Exited && ExitCode != 0`, and the
+    offline table's did-not-exit rows deliberately use `ExitCode: -1`
+    (mirroring `snapshotExit`'s real sentinel) rather than a conveniently
+    zeroed field, so a dropped guard shows up as four reds, not zero.
+  - **Terminating an arm before snapshotting it manufactures the verdict.**
+    `SIGTERM` leaves exit 143 behind, indistinguishable from a rejection at
+    read time. The fix is ordering, not a special case: snapshot the
+    pre-termination exit code first, call `endTurnlessChild` only on the
+    did-not-exit path, and route the post-signal code into a cleanup field
+    the classifier never reads. The same hazard applies to any future probe
+    in this package that classifies a child's exit code after it may have
+    been signalled.
+
+  Zero production files touched.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
