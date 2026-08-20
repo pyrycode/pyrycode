@@ -326,11 +326,11 @@ const (
 )
 
 // Mobile Protocol v2 announced-model report. claude names the model it resolved
-// for the turn on its system/init line, and until now that value stopped at the
-// daemon boundary: internal/streamsup's parser has translated the line into
-// turnevent.ModelAnnounced since #1600, but turnbridge.MapEvent's default drops
-// the variant, so no client could see what claude actually ran
-// (docs/protocol-mobile.md § model_announced).
+// for the turn on its system/init line, and that value used to stop at the daemon
+// boundary: internal/streamsup's parser has translated the line into
+// turnevent.ModelAnnounced since #1600, but turnbridge.MapEvent's default dropped
+// the variant, so no client could see what claude actually ran. #1638 added the
+// case, so a client sees it now (docs/protocol-mobile.md § model_announced).
 //
 // Grouped alone rather than with any block above: it is not a turn sub-state with
 // two edges, not turn-independent work, not a periodic reading, and not a
@@ -363,10 +363,10 @@ const (
 // partitions Type* constants between inboundAppTypeSet and v2OnlyTypes; this
 // lives in the latter.
 //
-// This ticket (#1616) is wire vocabulary only — nothing emits the frame.
-// turnbridge.MapEvent still drops turnevent.ModelAnnounced; the producer that
-// adds the case is sibling #1617. Same declare-then-emit sequencing as
-// #1405→#1410 and #1393→#1394.
+// The declaring ticket (#1616) was wire vocabulary only; #1638 added
+// internal/turnbridge's MapEvent case for turnevent.ModelAnnounced and cmd/pyry's
+// handler case, so this frame now reaches an interactive v2 mobile client. Same
+// declare-then-emit sequencing as #1405→#1410 and #1393→#1394.
 const (
 	TypeModelAnnounced = "model_announced" // binary → phone, outbound v2 announced-model report
 )

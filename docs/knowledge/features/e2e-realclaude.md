@@ -1968,7 +1968,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   written against the shape, the same declared-ahead-of-producer sequencing
   `rate_limited` used (#1405 ahead of #1410). What survives is `MapEvent` having
   no case for the variant: nothing emits the frame until #1617, so a client
-  still receives nothing. No `--model` in the base argv
+  still receives nothing. CORRECTED 2026-08-20 (#1639): that surviving half is
+  gone too, and so is the "still reaches no *client*" sentence above it. #1638
+  added `MapEvent`'s `turnevent.ModelAnnounced` case and `cmd/pyry`'s matching
+  `Handle` case, so the frame is emitted and an interactive v2 client does
+  receive one — #1617 was the split parent and never shipped the mapping. The
+  *log* half is the one that has never expired: the value still reaches no
+  daemon log at any level. An event is not a log, and a wire frame is not a log
+  either. No `--model` in the base argv
   (a respawn's
   recomposed argv would otherwise carry two); the starting model is read off
   turn 1 rather than assumed, so the two-alias target table (`haiku`/`sonnet`)
