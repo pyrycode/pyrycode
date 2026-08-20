@@ -2118,6 +2118,38 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `docs/specs/architecture/1651-bypass-seed-posture-and-arm-table.md` for the
   full design, and #1622's entry above for the seam this ticket parameterizes.
 
+- `inband_bypass_revoke_names_test.go` (#1661) — **locks #1643's fixture-name
+  family out of #1595's committed one before the live run that could collide
+  exists.** #1643's three arm names (`revoke`/`control_default`/`control_bypass`)
+  are the same strings #1595 already uses, and #1595's `setModeFixtureName` is
+  package-level and reachable — reusing it on the same claude version would
+  silently overwrite three of #1595's four committed fixtures while every test
+  stayed green. `poolRevokeFixtureName` is a pure two-string namer whose
+  `pool_revoke_` prefix is a literal neither input can reach, with **both**
+  inputs (not just the version, unlike the #1595 precedent) run through
+  `versionSlug` so a hostile arm like `a/b` can't escape containment either —
+  an unslugged-but-equally-pure counterfactual namer escapes containment on 40
+  of 110 measured pairs, so that property is load-bearing, not green by
+  construction. **The property this file exists to prove is a negative claim,
+  and a negative claim needs its control anchored the same way it's checked**:
+  `fixtureGlob`/`dropcapFixtureGlob` are matched with a `testdata/` prefix,
+  #1595's family glob is matched bare, and getting either direction wrong makes
+  the "no minted name matches" loop pass unconditionally with nothing checked.
+  `anchorFixtureName` is the single function both the negative loop and each
+  row's control call, so the two can't drift apart — proven by mutation:
+  flipping the family row to `underTestdata: true` produced **zero** reds from
+  the negative loop and reddened only its control, i.e. the control was the
+  sole detector for a mis-anchored pattern going silently vacuous. Code review
+  flagged one residual, left for #1662 rather than fixed here: the file's
+  header claims it can't reach any `os` read or write, but its
+  `finOfflineExecBans` entry enumerates four verbs
+  (`os.ReadFile`/`WriteFile`/`Create`/`ReadDir`), so `os.OpenFile` and a
+  `writeFixture`-shaped third `packageDir` wrapper sit outside the ban table's
+  actual coverage — true of this file today (it imports no `os`) but a gap for
+  whatever #1662 adds next to this package. Zero production files touched. See
+  `docs/specs/architecture/1661-pool-revoke-fixture-name-family.md` for the
+  full design and the anchoring table.
+
 - `interactive_stream_model_announced_test.go` (#1634) — the live proof that a
   real claude's announced model reaches the daemon's **own emitted frame**,
   not just claude's stdout. #1582's `interactive_stream_inband_model_test.go`
