@@ -2140,15 +2140,59 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   flipping the family row to `underTestdata: true` produced **zero** reds from
   the negative loop and reddened only its control, i.e. the control was the
   sole detector for a mis-anchored pattern going silently vacuous. Code review
-  flagged one residual, left for #1662 rather than fixed here: the file's
-  header claims it can't reach any `os` read or write, but its
-  `finOfflineExecBans` entry enumerates four verbs
+  flagged one residual, left for #1662 rather than fixed here (closed there —
+  see below): the file's header claims it can't reach any `os` read or write,
+  but its `finOfflineExecBans` entry enumerates four verbs
   (`os.ReadFile`/`WriteFile`/`Create`/`ReadDir`), so `os.OpenFile` and a
   `writeFixture`-shaped third `packageDir` wrapper sit outside the ban table's
   actual coverage — true of this file today (it imports no `os`) but a gap for
   whatever #1662 adds next to this package. Zero production files touched. See
   `docs/specs/architecture/1661-pool-revoke-fixture-name-family.md` for the
   full design and the anchoring table.
+
+- `inband_bypass_revoke_fixture_test.go` (#1662) — **the write half of #1643's
+  three-arm substrate: the fixture record one arm commits, and a writer whose
+  target directory is a parameter.** `poolRevokeFixtureRecord` carries exactly
+  the eighteen fields #1643 can fill — no `env` field, inherited from
+  `setModeFixtureRecord`'s constraint, since the credential reaches the child
+  through the environment while the argv carries none — and
+  `writePoolRevokeFixture` mints its target filename by passing the record's
+  slugged version token and arm **unmodified** into #1661's
+  `poolRevokeFixtureName`, never formatting its own name. `capFixtureCapture`
+  reuses #1595's `stderrFixtureCap`/`truncateString` and adds a rune-boundary
+  trim: `encoding/json` substitutes U+FFFD per invalid byte rather than
+  erroring on bad UTF-8, so a plain byte cap over a capture cut mid-rune reads
+  back over the stated cap — measured, a five-byte cut string round-trips at
+  seven bytes. Two lessons surfaced during mutation testing, both reported
+  candidly against the design's own predictions rather than silently
+  absorbed: **a reused helper's own guard can make the new wrapper's guard
+  unpinnable** — `capFixtureCapture`'s `len(s) <= cap` early return is
+  measurably dead for the value path, because `truncateString` already
+  carries the identical guard and its trim loop breaks immediately on a valid
+  tail, so dropping the wrapper's own early return reddens nothing; the
+  function's doc comment says so rather than claiming coverage it doesn't
+  have. And **`json.MarshalIndent` reflows an embedded `json.RawMessage`**, so
+  a `control_response` envelope written and read back is not byte-equal until
+  both sides are compacted first — which blinds only that whitespace and
+  still catches a dropped field, a `json:"-"` tag, or a wrong-tag decode. The
+  round-trip fixture's arm (`"revoke arm/2"`) is deliberately not
+  slug-clean: every real arm name and slugged version token already passes
+  `versionSlug` unchanged, so a writer that formats its own name instead of
+  minting through `poolRevokeFixtureName` would produce the identical name
+  and AC 2's name-equals-namer assertion would be vacuous — this is the one
+  literal choice that keeps that assertion coupled to the write path.
+  `finOfflineExecBans`' entry for the file carries a fourth wrapper beyond the
+  `packageDir`/`setModeFixturePath`/`writeSetModeFixture` trio —
+  `writeFixture`, the spike's own third `packageDir` wrapper — closing the
+  residual #1661 flagged and left open (above). Code review also flagged,
+  non-blocking, that "a field decoded from the wrong tag" — carried verbatim
+  from the design into the file's header as something non-zero, distinct
+  values catch — overstates it for a symmetric struct round trip: only a
+  **colliding** tag is caught (`encoding/json` drops both); a unique wrong tag
+  round-trips green. Worth remembering for any future file in this family
+  that reuses that phrasing. Zero production files touched. See
+  `docs/specs/architecture/1662-pool-revoke-fixture-record-and-capped-writer.md`
+  for the full design and the mutation-to-assertion table.
 
 - `interactive_stream_model_announced_test.go` (#1634) — the live proof that a
   real claude's announced model reaches the daemon's **own emitted frame**,
