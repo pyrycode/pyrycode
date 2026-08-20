@@ -2066,6 +2066,52 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   touched. See `docs/specs/architecture/1622-live-pool-bypass-revocation.md` for
   the full design and the assertion-to-mutant mapping.
 
+- `interactive_stream_model_announced_test.go` (#1634) — the live proof that a
+  real claude's announced model reaches the daemon's **own emitted frame**,
+  not just claude's stdout. #1582's `interactive_stream_inband_model_test.go`
+  taps `streamsup.Config.Stdout` upstream of the parser, so it stayed green
+  through the whole period `turnbridge.MapEvent` had no
+  `turnevent.ModelAnnounced` case and would stay green if #1638's two arms
+  were reverted; `TestInteractiveStreamModelAnnouncedFrame` instead drains the
+  sealed `protocol.TypeModelAnnounced` frame at a connected fakephone and reds
+  against a tree missing either arm. Reuses #1582's `inbandModelTargets` table
+  as the equality comparand (never a fresh literal) paired with an inequality
+  against the spawn alias — the discriminator that tells a future stale-row
+  failure (inequality green) apart from claude regressing to announcing the
+  bare alias (inequality red). Carries `spawnBootstrapDaemonVerbose`, a
+  `spawnBootstrapDaemonWithIdle`-style near-copy of the shared spawner whose
+  sole delta is `-pyry-verbose`: both plausible leak sites for the value
+  (`streamsup`'s undecodable-line drop, `Handle`'s unknown-event default) log
+  at Debug, so at the shared spawner's default `LevelInfo` the no-leak
+  assertion would pass vacuously. Drain returns at the turn's
+  `turn_state{idle}` close rather than at the frame's arrival — under either
+  mutant no frame is ever emitted, so a frame-first drain would burn its full
+  budget on every red run; closing on turn-end keeps a mutation proof in this
+  package cheap (~5s red vs. the 120s timeout).
+
+  **Two lessons that outlive this ticket:**
+  - **`go test -overlay` cannot mutate this package's daemon-side targets.**
+    AC-3's mutants live in `turnbridge.MapEvent` and `cmd/pyry`'s
+    `interactiveTurnEmitterV2.Handle`, but this test asserts against a
+    *separately built* daemon binary — `ensurePyryBuilt` shells out to a
+    plain `go build` with no overlay forwarding, and the `cmd/pyry` mutant is
+    never compiled into the test binary at all. An `-overlay` passed to
+    `go test` reaches neither mutant and both mutant runs come back green — a
+    false pass, not a weak one. The route that works: `go build
+    -overlay=<abs path json> -o <tmp bin> ./cmd/pyry`, then
+    `PYRY_E2E_BIN=<tmp bin>`, which `ensurePyryBuilt` returns unbuilt without
+    rebuilding. Any future mutation proof of daemon-side (as opposed to
+    test-process-side) code in this package needs this route, not the house
+    `-overlay`-into-`go test` shortcut used elsewhere in the suite.
+  - **A no-leak haystack can contain the value it's guarding against for an
+    unrelated reason.** The daemon's `spawning claude` record logs the argv
+    verbatim, `--model haiku` included — an absence assertion searched
+    against the spawn alias rather than the drained frame's resolved `Model`
+    value fails on every healthy daemon. Search for the value that actually
+    crossed the wire, never the value that was asked for.
+
+  Zero production files touched.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
