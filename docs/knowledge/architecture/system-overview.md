@@ -119,63 +119,84 @@ The agent pipeline is likewise headless since 2026-07-25, and `pyry agent-run` h
 
 ### Restart Cycle
 
+The interactive supervise loop lives in `internal/streamsup` — `Runner.Run`.
+
 ```
-supervisor.Run()
+Runner.Run  (internal/streamsup)
     │
-    ├── runOnce(iterCtx) ──> spawn claude in PTY, bridge I/O
-    │                        wait for child exit
+    ├── spawnAndWait(iterCtx, args) ──> spawn claude on the held-open stdin seam,
+    │                                   wait for child exit
     │
     ├── ctx (parent) cancelled? ──> graceful shutdown, return ctx.Err()
     │
-    ├── deliberate Restart pending? ──> skip backoff, respawn immediately
-    │                                   with the swapped args
+    ├── deliberate restart pending (drainRestart)? ──> skip backoff, respawn
+    │                                                  immediately with the
+    │                                                  swapped args
     │
-    └── child exited (crash)? ──> apply backoff delay
-                                   if uptime > resetAfter: reset backoff to initial
-                                   respawn with --continue (after first run, when ResumeLast is
-                                   true) — OR, when Config.ResolveSessionID is set (#839, the
-                                   daemon's bootstrap session), respawn with a resolved
-                                   --session-id (transcript absent) or --resume (transcript
-                                   already exists, #1164) instead, every spawn including the first
+    └── child exited (crash)? ──> apply backoff delay (below), then respawn
 ```
 
-Each iteration runs on `iterCtx`, a ctx derived from the parent `ctx` (#842).
-Shutdown is detected from the **parent** ctx (`ctx.Err() != nil`), not from
-`runOnce`'s return error — so a `Supervisor.Restart` kill (which cancels only
+Each iteration runs on `iterCtx`, a ctx derived from the parent `ctx`. Shutdown
+is detected from the **parent** ctx (`ctx.Err() != nil`), not from
+`spawnAndWait`'s return error — so a `Runner.Restart` kill (which cancels only
 `iterCtx`) falls through to relaunch instead of being mistaken for shutdown.
-See `Supervisor.Restart` below.
+
+Which id flag a spawn carries (`--session-id` vs `--resume`) is **not** a
+property of this loop and is not decided by a first-run latch: since #1630/#1631
+`buildArgs` takes its `create` argument from `useCreateForm`, a per-spawn by-id
+transcript-existence probe armed on every production path. See
+[features/streamsup-package.md](../features/streamsup-package.md) §
+"Supervise loop (`Run`)" for the loop pseudocode and the `beginSpawn`
+single-acquisition rule, and § "`buildArgs` — the id-flag inversion that keeps
+the on-disk session stable" (with its `useCreateForm` subsection) for the flag
+decision.
 
 ### Backoff Strategy
+
+The ladder is `backoffTimer` in `internal/streamsup/backoff.go` — a verbatim copy
+of the deleted `internal/supervisor/backoff.go`, duplicated rather than shared so
+streamsup keeps no dependency on the PTY supervisor (its file header records
+why).
 
 - Initial delay: 500ms
 - Doubles on each restart: 500ms → 1s → 2s → 4s → ... → 30s (max)
 - Resets to initial if the child stayed up longer than 60s (stability indicator)
-- Context cancellation (SIGINT/SIGTERM) breaks out of the backoff wait
+- The backoff wait has **three** exits: the delay elapsing, context cancellation
+  (SIGINT/SIGTERM), and a restart arriving on `restartCh` while the child is
+  already down — the last cuts the wait short and relaunches immediately
 
-### Fast-crash self-heal (#1165)
+The three durations are `streamsup.Config`'s `BackoffInitial` / `BackoffMax` /
+`BackoffReset`, which `streamsup.New` fills from `defaultBackoffInitial` /
+`defaultBackoffMax` / `defaultBackoffReset` when the caller leaves them zero.
 
-Backoff alone retries forever, which is correct for a *transient* outage but
-never recovers from a *deterministic* fast-crash (e.g. #1163's "session id
-already in use" collision — root-fixed for that trigger by #1164, but any
-future deterministic-crash cause would wedge the daemon the same way). The
-`Run` loop tracks a goroutine-local `fastCrashes` streak, incremented (after
-the parent-ctx/`drainRestart` guards, so a deliberate `Restart` is never
-miscounted) whenever a non-zero exit's `uptime < Config.FastCrashWindow`
-(default 2s), and reset to 0 on any healthy or clean exit. At
-`Config.FastCrashThreshold` (default 4) consecutive fast crashes,
-`Config.SelfHeal()` — if non-nil — fires once and the streak resets either
-way. `SelfHeal` is the same pull-not-push shape as `ResolveSessionID`: the
-supervisor never learns `SessionID`; it only signals the owner to rotate, and
-the very next spawn's pre-existing `ResolveSessionID` pull picks up the
-rotated id automatically. `SelfHeal == nil` (every non-bootstrap `Config`)
-leaves the path entirely inert — retry-forever, byte-identical to
-pre-#1165. Orthogonal to `backoffTimer` (untouched): the fresh id spawns
-after the current backoff delay, not on a reset timer. Production wiring
-sets `SelfHeal` only on the daemon's bootstrap `Config`, via
-`Pool.RotateBootstrapForSelfHeal` (see [features/sessions-package.md](../features/sessions-package.md)
-§ `Pool.RotateBootstrapForSelfHeal`) — a dedicated rotation primitive, not
-`RotateForNewSession`; see [ADR 033](../decisions/033-supervisor-self-heal-dedicated-rotation-no-skip-set.md)
-for why. See [codebase/1165.md](../codebase/1165.md).
+### Fast-crash self-heal (#1165) — no stream-path equivalent
+
+**The stream path has no fast-crash self-heal.** A deterministic crash-loop (e.g.
+#1163's "session id already in use" collision — root-fixed for that trigger by
+#1164, but any future deterministic-crash cause behaves the same way) is retried
+forever under the backoff above, with no escape.
+
+#1165 built one for `internal/supervisor`: a fast-crash streak counted in that
+package's own loop fired a self-heal hook that rotated the daemon's pinned
+session id. #1348 deleted the package and took the mechanism with it — the
+`fastCrashes` counter and its `FastCrashWindow` / `FastCrashThreshold` knobs
+return zero hits repo-wide, and no self-heal closure is installed anywhere.
+`internal/sessions/runnerstate.go`'s `RunnerConfig` doc comment is the
+authoritative record of what #1348 moved versus dropped: `SelfHeal` is one of the
+two dropped behaviours listed there rather than quietly lost, and re-adding it is
+a feature on the stream runner, not a config field to restore.
+
+Two surviving symbols rotate a session id, which makes each easy to misread as
+evidence self-heal lives on. Neither is reachable from a crash streak:
+
+- `Pool.RotateBootstrapForSelfHeal` (`internal/sessions/pool.go`) is an uncalled
+  primitive — its only caller is `selfheal_test.go`.
+- `Runner.RestartFresh` (`internal/streamsup`) is the `new_session` rotation
+  seam, driven by an explicit rotation request, never by a crash count.
+
+Historical record only, not current behaviour:
+[ADR 033](../decisions/033-supervisor-self-heal-dedicated-rotation-no-skip-set.md),
+[codebase/1165.md](../codebase/1165.md).
 
 ## Key Types
 
