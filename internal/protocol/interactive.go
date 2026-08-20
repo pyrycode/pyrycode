@@ -401,14 +401,14 @@ type RateLimitedPayload struct {
 // phone direction; the wire form of turnevent.ModelAnnounced, which reports the
 // model claude named for the current turn on its system/init line.
 //
-// Nothing emits it yet: turnbridge.MapEvent has no case for the variant, so the
-// shape is declared here so a client can be written against it and #1617 wires the
-// producer — the sequencing #1405 used ahead of #1410.
+// Emitted since #1638: the shape was declared here (#1616) so a client could be
+// written against it, and #1638 added turnbridge.MapEvent's case for the variant —
+// the sequencing #1405 used ahead of #1410.
 //
 // Like RateLimitedPayload it is conversation-scoped rather than turn-scoped, so
 // there is no turn_id, and receiving one neither opens nor closes a turn: a
 // per-turn announcement is not a turn boundary (turnevent.ModelAnnounced's own
-// doc). The bridge (#1617) supplies ConversationID because the internal event
+// doc). The bridge (#1638) supplies ConversationID because the internal event
 // carries none. claude's session_id and cwd are deliberately absent for
 // BackgroundTaskStartedPayload's reason plus #1380's — one is claude's session
 // identity and the other the operator's local filesystem path, neither is the

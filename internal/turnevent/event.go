@@ -508,9 +508,10 @@ type ModelAnnounced struct {
 	// control characters or terminal escape sequences, and the value's provenance is
 	// only partly validated: a phone-supplied override passes internal/relay's
 	// validModel charset check, but a --model flag or a config default never does.
-	// No consumer renders it today — turnbridge.MapEvent's default drops the variant
-	// — so the client-facing slice owes the sanitization at its own render boundary.
-	// Said here because that is where a future consumer reads.
+	// A client renders it today — turnbridge.MapEvent maps the variant onto
+	// protocol.ModelAnnouncedPayload (#1638) — so the client-facing slice owes the
+	// sanitization at its own render boundary. Said here because that is where the
+	// consumer reads.
 	Model string
 	// Truncated reports whether Model was cut to fit the producer's cap.
 	//

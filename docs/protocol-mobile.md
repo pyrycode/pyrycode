@@ -446,7 +446,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted since #1410. See [Interactive events](#interactive-events-v2-capability-gated). |
-| **`model_announced`** | binary → phone | no | **New in v2** (interactive, capability-gated). The model claude named for the current turn on its `system/init` line (#1616). **Not** the per-session override the three `model` fields elsewhere in this document carry. Shape declared by #1616; **nothing emits it yet** — the producer is #1617. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`model_announced`** | binary → phone | no | **New in v2** (interactive, capability-gated). The model claude named for the current turn on its `system/init` line (#1616). **Not** the per-session override the three `model` fields elsewhere in this document carry. Shape declared by #1616, emitted since #1638. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`request_snapshot`** | phone → binary | no | **New in v2.** On-demand screen-snapshot request. See [Screen snapshot](#screen-snapshot-v2). |
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -649,16 +649,15 @@ So the parser has **two tiers**, and the split is the whole design:
   parser maps **five** `system` subtypes internally (`task_started`,
   `task_updated`, `background_tasks_changed`, `thinking_tokens`, `init`) to
   daemon-owned `turnevent` types — see
-  [streamsup-package.md](knowledge/features/streamsup-package.md). **Four of the
-  five reach this wire** under their own daemon-owned names, and those four are
+  [streamsup-package.md](knowledge/features/streamsup-package.md). **All five
+  reach this wire** under their own daemon-owned names, and all five are
   documented below: `background_task_started`, `background_task_updated` and
-  `background_task_roster` (#1394), and `thinking_tokens` as
-  `thinking_progress` (#1386). The fifth, `init`, is documented below as
-  [`model_announced`](#model_announced) but does **not** reach the wire yet —
-  its shape is declared ahead of its producer (#1616 declares, #1617 emits), so
-  a client receives nothing for it until #1617 lands. As of #1404 the parser
-  also maps `rate_limit_event` — a **top-level line type, not a `system`
-  subtype**, so the count of five above is unaffected — to
+  `background_task_roster` (#1394), `thinking_tokens` as
+  `thinking_progress` (#1386), and `init` as
+  [`model_announced`](#model_announced) — the last of the five to get there, its
+  shape declared ahead of its producer (#1616 declares, #1638 emits). As of
+  #1404 the parser also maps `rate_limit_event` — a **top-level line type, not
+  a `system` subtype**, so the count of five above is unaffected — to
   `turnevent.RateLimited`, which reaches this wire as
   [`rate_limited`](#rate_limited) (#1405), documented below. Every other `system`
   subtype is still silently dropped exactly as before, and none of this changes what
@@ -992,12 +991,11 @@ Like every frame in this section it is **binary → phone only**, reaches only a
 phone whose `interactive` capability was echoed in `hello_ack`, and carries an
 envelope-level `event_id` for replay.
 
-**Declared, not emitted.** The shape is declared by #1616 so a client can be
-written against it; **nothing emits this frame** — `internal/turnbridge`'s
-`MapEvent` has no case for `turnevent.ModelAnnounced`, so it stops at the daemon
-boundary — until #1617 wires the producer. Until then a client receives nothing
-for it, no matter what claude announces. This is the same sequencing `rate_limited`
-used (#1405 declared, #1410 emitted).
+**Emitted since #1638.** The shape was declared by #1616 so a client could be
+written against it; #1638 wired the producer — `internal/turnbridge`'s `MapEvent`
+maps `turnevent.ModelAnnounced` outbound and `cmd/pyry`'s interactive turn emitter
+pushes the frame, so live traffic carries it. This is the same sequencing
+`rate_limited` used (#1405 declared, #1410 emitted).
 
 `model_announced` exists because the daemon knows what it **asked for** and only
 claude knows what it **got**. The per-session override is often unset, in which

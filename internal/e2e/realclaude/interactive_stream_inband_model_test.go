@@ -38,6 +38,15 @@ package realclaude
 // MapEvent still has no case for the variant, so nothing EMITS the frame until
 // #1617 and no client receives one.
 //
+// CORRECTED 2026-08-20 (#1639): that surviving half is gone too, and so is the
+// "reaches no CLIENT" clause two paragraphs up. #1638 added MapEvent's
+// turnevent.ModelAnnounced case and cmd/pyry's matching Handle case, so the frame
+// IS emitted and an interactive v2 client does receive one. #1617 was the split
+// parent and never shipped the mapping; #1638 did. The LOG half is the one that
+// has never expired: the value still reaches no daemon log at any level, which is
+// what the #833 posture actually says. An event is not a log, and a wire frame is
+// not a log either.
+//
 // This test's own assertions are unaffected in either direction: it taps
 // streamsup.Config.Stdout, upstream of the parser, so what the parser does with the
 // line downstream changes nothing it observes.

@@ -326,12 +326,13 @@ no log at all — the empty case diverges from the task handlers' emit-with-empt
 here. Only the undecodable path logs, and only the subtype keyword — never `err`, since `encoding/json`
 quotes offending input into its error text and would otherwise leak the value through a channel no
 per-path log check can see. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a sixth mapped arm
-(`ModelAnnounced → "model_announced"`, name only); no `Handle` arm yet, so it lands in `Handle`'s
-`default` (content-free). CORRECTED 2026-08-19 (#1616): this used to say the protocol type and the
+(`ModelAnnounced → "model_announced"`, name only), and #1638 gave it a `Handle` arm so it no longer lands
+in `Handle`'s `default`. CORRECTED 2026-08-19 (#1616): this used to say the protocol type and the
 `turnbridge.MapEvent` case would land together "in a later ticket" — they didn't. #1616 declared
 `protocol.TypeModelAnnounced` / `protocol.ModelAnnouncedPayload` alone, the same declare-then-emit split
-`rate_limited` used (#1405 ahead of #1410); `turnbridge.MapEvent`'s `default` still drops the variant, and
-the mapping arm is sibling #1617. See [codebase/1600.md](../codebase/1600.md).
+`rate_limited` used (#1405 ahead of #1410); `turnbridge.MapEvent` no longer drops the variant, because the
+mapping arm landed in sibling #1638, so it now reaches an interactive v2 mobile client instead of falling
+to `default:`. See [codebase/1600.md](../codebase/1600.md).
 
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
