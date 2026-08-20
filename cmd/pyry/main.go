@@ -1233,43 +1233,36 @@ func (b boundSession) WriteUserTurn(ctx context.Context, conversationID string, 
 }
 
 // interruptArm names which actuation interruptRunner dispatched to. The constant
-// VALUES are operator-facing: SendEsc logs them verbatim as a record's arm field
-// (#1193), so they are part of the record contract, not an internal detail.
+// VALUES are operator-facing: activeInterrupter.SendEsc logs them verbatim as a
+// record's arm field (#1193), so they are part of the record contract, not an
+// internal detail.
 type interruptArm string
 
 const (
 	armInterrupt interruptArm = "interrupt" // streamRunner.Interrupt()
-	armSendEsc   interruptArm = "send_esc"  // *supervisor.Supervisor.SendEsc()
-	armNone      interruptArm = "none"      // neither method — inert
+	armNone      interruptArm = "none"      // no interrupt method — inert
 )
 
-// interruptRunner actuates a runner's interrupt through whichever concrete method
-// its runner type exposes — the SendEsc-vs-Interrupt dispatch #1121 places in
-// cmd/pyry, the only package that sees both concrete runner types (the streamRunner
-// adapter lives here, so internal/sessions cannot reach it). The two arms are
-// mutually exclusive: *supervisor.Supervisor has SendEsc but no Interrupt, and
-// streamRunner has Interrupt but no SendEsc, so the switch is unambiguous. Interrupt
-// is matched first so any future runner that grows both prefers the stream-json
-// control_request over a PTY Esc. An unknown runner is inert (nil) — no actuation
-// beats wrong actuation.
+// interruptRunner actuates a runner's interrupt through the one concrete method a
+// runner can expose. The dispatch lives in cmd/pyry (#1121) because Interrupt is
+// OFF the sessions.Runner interface (un-widened, #1077) and the streamRunner
+// adapter carrying it lives here, so internal/sessions cannot reach the method at
+// all. It is an OPTIONAL capability, asserted for: a runner without Interrupt is
+// inert (nil) — no actuation beats wrong actuation.
 //
 // It returns the arm it dispatched to alongside the chosen method's error, so the
 // caller — the only scope holding the conversation id — can record which arm ran
 // (#1193); armNone always pairs with a nil error. The dispatcher itself stays pure:
 // no logger, no ambient state. The arm is an OBSERVABILITY value and nothing may
 // branch on it beyond selecting a record — in particular armNone must NOT trigger a
-// fallback actuation, since the only other runner to try is the bootstrap
-// supervisor, the #678 cross-conversation isolation break resolveBoundRunner's
+// fallback actuation, since the only other runner to try is the bootstrap session's
+// runner, the #678 cross-conversation isolation break resolveBoundRunner's
 // guard exists to prevent.
 func interruptRunner(r sessions.Runner) (interruptArm, error) {
-	switch v := r.(type) {
-	case interface{ Interrupt() error }:
+	if v, ok := r.(interface{ Interrupt() error }); ok {
 		return armInterrupt, v.Interrupt()
-	case interface{ SendEsc() error }:
-		return armSendEsc, v.SendEsc()
-	default:
-		return armNone, nil
 	}
+	return armNone, nil
 }
 
 // resolveBoundRunner resolves the active conversation's bound runner, mirroring
@@ -1494,15 +1487,13 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 }
 
 // startFreshRunner is the new_session twin of interruptRunner: it dispatches a
-// fresh-session start to the active conversation's bound runner by concrete type.
-// The streamRunner arm (*streamsup.Runner, exposing RestartFresh) is the DIRECT
-// path — rotate the pool-side id then RestartFresh so the next spawn uses
-// --session-id <newID>, with NO /clear keystroke. The *supervisor.Supervisor arm
-// keeps today's PTY behavior: type /clear and let the fsnotify watcher drive the
-// pool-side rotation (we do NOT pre-mint an id there — /clear makes claude pick
-// its own, so a pre-minted id would mismatch). RestartFresh is matched first so
-// any future runner that grows both prefers the direct stream-json path; an
-// unknown runner is inert (nil) — no actuation beats wrong actuation (#1121).
+// fresh-session start to the active conversation's bound runner through the one
+// concrete method a runner can expose. The streamRunner path (*streamsup.Runner,
+// exposing RestartFresh) is DIRECT — rotate the pool-side id then RestartFresh so
+// the next spawn uses --session-id <newID>, with NO /clear keystroke. Like
+// Interrupt it is an OPTIONAL capability, asserted for: a runner without
+// RestartFresh is inert (nil) and rotates nothing — no actuation beats wrong
+// actuation (#1121).
 //
 // Ordering is load-bearing: rotate() completes — including the allocated-skip-set
 // register published under Pool.mu — BEFORE RestartFresh spawns <newID>.jsonl, so
@@ -1520,28 +1511,30 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 // until the fresh child binds.
 func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
 	rotate func(sessions.SessionID) (sessions.SessionID, error)) error {
-	switch v := r.(type) {
-	case interface{ RestartFresh(string) }:
-		abort := beginRotationOrNoop(r)
-		newID, err := rotate(oldID)
-		if err != nil {
-			// The rotation never happened, so the gate must not outlive it: left
-			// armed it would refuse every turn on this conversation until the next
-			// respawn — a wedge the failed rotation never earned. Losing a race with
-			// a concurrent new_session frame is the ORDINARY way to land here
-			// (RotateForNewSession's ErrSessionNotFound), which is exactly why the
-			// disarm is generation-stamped runner-side: it must not clear the winner's
-			// arm.
-			abort()
-			return err
-		}
-		v.RestartFresh(string(newID))
-		return nil
-	case interface{ StartNewSession() error }:
-		return v.StartNewSession()
-	default:
+	v, ok := r.(interface{ RestartFresh(string) })
+	if !ok {
 		return nil
 	}
+	// The arming stays BELOW the inert return, not hoisted to the top of the
+	// function: an unrecognised runner rotates nothing, and its return skips the
+	// abort() disarm below, so a gate armed for it would outlive the rotation that
+	// never happened — every subsequent WriteUserTurn on the conversation failing
+	// with ErrNoLiveChild until the next respawn, from a remotely-driven frame.
+	abort := beginRotationOrNoop(r)
+	newID, err := rotate(oldID)
+	if err != nil {
+		// The rotation never happened, so the gate must not outlive it: left
+		// armed it would refuse every turn on this conversation until the next
+		// respawn — a wedge the failed rotation never earned. Losing a race with
+		// a concurrent new_session frame is the ORDINARY way to land here
+		// (RotateForNewSession's ErrSessionNotFound), which is exactly why the
+		// disarm is generation-stamped runner-side: it must not clear the winner's
+		// arm.
+		abort()
+		return err
+	}
+	v.RestartFresh(string(newID))
+	return nil
 }
 
 // beginRotationOrNoop arms r's rotation gate when the runner has one (#1330) and
@@ -1549,13 +1542,18 @@ func startFreshRunner(r sessions.Runner, oldID sessions.SessionID,
 // the dispatch shape unchanged.
 //
 // An OPTIONAL assertion, deliberately, rather than widening startFreshRunner's
-// case to interface{ RestartFresh(string); BeginRotation() func() }. Widening it
-// would silently re-route restartFreshStub and bothMethodsStub
-// (new_session_routing_test.go) to the inert default arm, turning existing
-// subtests from assertions into vacuities without a single failure, and would
-// change the documented "RestartFresh is matched first" dispatch contract. Treating
-// the gate as a CAPABILITY is also how Interrupt and RestartFresh are already
-// treated one layer up.
+// assertion to interface{ RestartFresh(string); BeginRotation() func() }. Widening
+// it would send a runner that exposes RestartFresh without a gate to the inert
+// path, where it would rotate NOTHING — where today it rotates, just ungated. That
+// is the contract streamRunner.BeginRotation's doc already states. Treating the
+// gate as a CAPABILITY is also how Interrupt and RestartFresh are already treated
+// one layer up.
+//
+// rotatingRunner is what makes the optionality load-bearing to the existing
+// coverage rather than academic: it offers the gate unconditionally and leaves the
+// ARMING to the real startFreshRunner, which is what keeps
+// TestInboundDeliver_RotationInProductionOrder_DeliversToFreshChild a question
+// about the dispatch instead of one true by construction.
 func beginRotationOrNoop(r sessions.Runner) (abort func()) {
 	if g, ok := r.(interface{ BeginRotation() func() }); ok {
 		return g.BeginRotation()

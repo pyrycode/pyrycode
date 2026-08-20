@@ -59,16 +59,14 @@ func (a streamRunner) RevokeBypass() error { return a.r.RevokeBypass() }
 // Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
 // turn via a control_request line. It is OFF the sessions.Runner interface (which
 // stays un-widened, #1077) — a concrete method the #1121 interrupt dispatch
-// (interruptRunner in main.go) reaches by type assertion, exactly as
-// (*supervisor.Supervisor).SendEsc is reached for the PTY runner.
+// (interruptRunner in main.go) reaches by type assertion.
 func (a streamRunner) Interrupt() error { return a.r.Interrupt() }
 
 // RestartFresh forwards to (*streamsup.Runner).RestartFresh (#1124), rotating the
 // runner's persistent id to newID so the next spawn uses --session-id <newID> (a
 // fresh transcript, no fork). Like Interrupt it is OFF the sessions.Runner
 // interface (un-widened, #1077) — a concrete method the #1125 new_session dispatch
-// (startFreshRunner in main.go) reaches by type assertion, mirroring how the PTY
-// runner's (*supervisor.Supervisor).StartNewSession is reached for /clear.
+// (startFreshRunner in main.go) reaches by type assertion.
 func (a streamRunner) RestartFresh(newID string) { a.r.RestartFresh(newID) }
 
 // BeginRotation forwards to (*streamsup.Runner).BeginRotation (#1330), arming the
@@ -244,8 +242,7 @@ func stripSessionIDFlags(args []string) []string {
 
 // Assert at compile time that streamRunner satisfies sessions.Runner (AC1). The
 // build fails if a method is missing or mis-typed. This is the ONLY conformance
-// assertion for the interface, not a mirror of one in internal/sessions: the
-// var _ Runner = (*supervisor.Supervisor)(nil) this comment used to point at never
-// existed after #1348 deleted internal/supervisor, and that package declares no
-// assertion of its own because the sole production implementation lives here.
+// assertion for the interface, not a mirror of one in internal/sessions: that
+// package declares no assertion of its own because the sole production
+// implementation lives here.
 var _ sessions.Runner = streamRunner{}

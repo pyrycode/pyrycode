@@ -669,17 +669,17 @@ func startRelayV2(
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
 		// supervisor. The activeInterrupter adapter (main.go) resolves active →
-		// CurrentSessionID → Pool.Lookup → runner, then dispatches SendEsc (PTY) or
-		// Interrupt (stream-json, #1120) by runner type; it satisfies Interrupter
-		// via SendEsc, the seam's abstract "claude's own interrupt" name.
+		// CurrentSessionID → Pool.Lookup → runner, then actuates Interrupt
+		// (stream-json, #1120) when the runner exposes it and stays inert when it
+		// does not; it satisfies Interrupter via activeInterrupter.SendEsc, the
+		// seam's abstract "claude's own interrupt" name.
 		Interrupter: w.activeInterrupter,
 		// Inbound new_session seam (#831): an interactive `new_session` frame
 		// routes to the runner bound to the ACTIVE conversation (#1125) — not the
 		// bootstrap supervisor. The activeSessionStarter adapter (main.go) resolves
 		// active → CurrentSessionID → Pool.Lookup → runner, then for a
 		// *streamsup.Runner rotates the pool-side id (Pool.RotateForNewSession) and
-		// RestartFreshes into --session-id <newID> with NO /clear, while a
-		// *supervisor.Supervisor keeps the /clear path the watcher rotates (#830).
+		// RestartFreshes into --session-id <newID> with NO /clear.
 		SessionStarter: w.activeSessionStarter,
 		// Inbound dequeue_message seam (#723): an interactive `dequeue_message`
 		// frame removes a not-yet-drained queued message by id from the live
