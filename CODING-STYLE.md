@@ -10,7 +10,7 @@ internal/<pkg>/       Private packages (not importable by other modules)
 ```
 
 - Flat packages preferred. Don't nest until you have a reason.
-- One package per concern. `internal/supervisor` owns process lifecycle, `internal/control` (future) will own the Unix socket.
+- One package per concern. `internal/streamsup` owns the claude process lifecycle, `internal/control` owns the Unix control socket.
 - Avoid `pkg/`, `util/`, `common/`, `helpers/`. If code doesn't have a clear home, the package boundaries are wrong.
 
 ## Naming
