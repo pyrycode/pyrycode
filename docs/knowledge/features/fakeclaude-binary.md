@@ -160,6 +160,14 @@ PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR  directory watched in parallel with
                                     SESSION_ID_FROM_ARGV resolves, so the two are
                                     typically set together, but neither requires
                                     the other.
+PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME  directory; when set, a stream-mode spawn
+                                    whose winning id flag is --resume against an
+                                    id with no <dir>/<id>.jsonl is refused like
+                                    real claude (stderr + exit 1) instead of
+                                    served (#1631; see § Reject-absent-resume
+                                    mode). Stream mode only — checked inside the
+                                    STREAM_JSON branch. Default off; unset is
+                                    byte-identical.
 ```
 
 env is the entire configuration surface, matching how the harness consumer
@@ -839,6 +847,36 @@ So fakeclaude calls `control.Approve` directly rather than spawning its own
 verdict) without depending on that still-open wiring gap. See
 [codebase/1139.md](../codebase/1139.md) for the live e2e this feeds and the
 production follow-up this gap is tracked under.
+
+## Reject-absent-resume mode (#1631)
+
+`PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME` (a directory, default off) makes stream-json
+mode observe the one claude behaviour the never-established-session crash-loop
+depends on: real claude refuses `--resume <id>` when `<id>.jsonl` doesn't exist,
+exiting 1 with `No conversation found with session ID: <id>` on both streams
+(measured live — see [session-transcript-and-resume-probe.md](session-transcript-and-resume-probe.md)
+§ #1656). Before this knob the fake always served a turn regardless of which id
+flag won, so the fake-daemon tier had no way to observe the loop
+`internal/streamsup`'s `useCreateForm` exists to close (see
+[streamsup-package.md](streamsup-package.md) § `useCreateForm`).
+
+Checked first thing inside the `envStreamJSON` branch — above the stdin tee and the
+startup hold — so a refused spawn consumes no stdin and never reaches the trigger
+machinery other modes rely on; a child that got that far would be in a state real
+claude never reaches.
+
+The predicate needs "was the *winning* id flag `--resume`?", which the existing
+`argvSessionID(args) (string, bool)` can't answer — it drops which flag matched.
+`argvSessionID` is now a two-line wrapper over a new `argvIDFlag(args) (id string,
+resume bool, ok bool)`, which holds the shared last-occurrence-wins parse and stem
+guard. **One copy** of that guard: it is the security-relevant half of the parse
+(the value reaches `filepath.Join`, now at three call sites instead of two — this
+mode's own `os.Stat(filepath.Join(dir, id+".jsonl"))`), and a duplicated guard is
+what drifts out of step with its twin. `argvSessionID`'s existing table
+(`TestArgvSessionID`) is unmodified and is the extraction's regression check.
+
+Empty ⟹ off ⟹ every existing fake-daemon test is byte-identical — no test sets
+this knob, and the check is stream-mode-only by construction.
 
 ## Argv-derived stem mode (#1195)
 
