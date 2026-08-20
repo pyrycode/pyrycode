@@ -1,4 +1,4 @@
-# Turnless `--session-id` transcript probe (#1655)
+# Session transcript & `--resume` probes (#1655, #1656)
 
 ## TL;DR
 
@@ -8,6 +8,9 @@ under `SIGTERM`. This is the premise the suspected streamsup crash-loop (observe
 and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s per-spawn
 existence probe rest on; #1630 carries the by-id-existence rule into `streamsup` and consumes
 this measurement's **after-exit** reading (the one its respawn-time probe actually takes).
+
+See the `#1656` section below for the other half: how claude answers `--resume <id>` when
+`<id>.jsonl` is absent — also **HOLDS**.
 
 ## claude version measured
 
@@ -156,3 +159,109 @@ go test -tags e2e_realclaude -race -v -run TestRealClaude_TurnlessSessionIDTrans
 e2e_realclaude ./internal/e2e/realclaude/` must be run manually — `make check` never compiles
 this package. The credential-free classifier table (`TestTurnlessTranscriptVerdict`) runs under
 plain `go test ./internal/e2e/realclaude/...` with no credentials and no live claude.
+
+## #1656 — how claude answers `--resume` against an absent transcript
+
+**HOLDS.** `--resume <id>` against an id whose `<id>.jsonl` claude has no record of exits
+non-zero, while the identical `--resume` against an id whose transcript exists does not — it
+sits on stdin past its deadline instead, the same accept-and-wait shape #1655 measured for a
+turnless `--session-id` launch. #1655 measured that the id claude is asked to resume was never
+established; this measures how claude answers when it is asked anyway, which is the half the
+suspected streamsup respawn crash-loop (observed 2026-08-18) actually turns on. #1630 consumes
+both this verdict and #1655's after-exit reading.
+
+### claude version measured
+
+**2.1.220**, measured 2026-08-20 via the dispatcher's `make e2e-realclaude` gate run (`go test
+-tags e2e_realclaude -timeout 20m`), macOS. Test
+`internal/e2e/realclaude/resume_absent_transcript_probe_test.go`,
+`TestRealClaude_ResumeAbsentTranscript` (59.63 s). Companion credential-free table test
+`TestResumeAbsentVerdict` pins the classifier's nine outcome cells offline; a third test,
+`TestResumeProbeArgsIsRespawnShape`, pins that the resume argv differs from the first-spawn argv
+only in the trailing id-flag pair.
+
+### Argv and deadline per arm
+
+All three children run in one workdir. The establish arm calls #1655's `transcriptProbeArgs`
+(the first-spawn shape, `--session-id <id>`) unchanged; both resume arms call this ticket's own
+`resumeProbeArgs(id)` — the same fixed prefix and base args with the trailing pair swapped to
+`--resume <id>` — so their argvs are identical by construction bar the id.
+
+| arm | session id | flag | deadline |
+|---|---|---|---|
+| establish | `16560000-…-000000000001` (`<A>`) | `--session-id` | 60 s exit window after stdin close |
+| absent | `16560000-…-000000000002` (`<C>`, reserved, never established) | `--resume` | 45 s |
+| control | `16560000-…-000000000001` (`<A>`, established by the establish arm) | `--resume` | 45 s |
+
+```
+claude --input-format stream-json --output-format stream-json --verbose \
+       --model claude-haiku-4-5 --max-turns 2 --resume <id>
+```
+
+The establish arm ran one turn (`"Reply with the single word: ok"`) to completion, exit 0,
+creating `16560000-…-000000000001.jsonl` (9992 bytes) in a directory the run located empirically
+via `streamNewSessionTranscriptDir` — matching the recomputed `DefaultClaudeSessionsDir` value in
+this run (`transcript_dir_match: true`).
+
+### Both `<C>` readings
+
+| reading | taken | found |
+|---|---|---|
+| pre-arm | immediately before the absent arm launched | **absent** — `stat …/16560000-…-000000000002.jsonl: no such file or directory` |
+| post-arm | after the absent arm ended, before the control arm ran | **absent** — same `stat` error |
+
+**NO STUB:** the resume of an absent id left no `<C>.jsonl` behind, so #1630's by-id existence
+probe still reads absent after a rejection and would fall back to `--session-id` rather than
+looping on `--resume` forever.
+
+### Verbatim output per arm
+
+**Absent arm** (`<C>`) — exited on its own, exit code 1, message carried on **both** streams:
+
+```
+stderr:
+No conversation found with session ID: 16560000-0000-4000-8000-000000000002
+
+stdout:
+{"type":"result","subtype":"error_during_execution","duration_ms":0,"duration_api_ms":0,
+ "is_error":true,"num_turns":0,"stop_reason":null,
+ "session_id":"16560000-0000-4000-8000-000000000002","total_cost_usd":0,
+ "usage":{...all zero...},"modelUsage":{},"permission_denials":[],
+ "uuid":"7fe052e4-7c3f-44e3-8350-a06be0f2f897",
+ "errors":["No conversation found with session ID: 16560000-0000-4000-8000-000000000002"]}
+```
+
+**Control arm** (`<A>`, transcript present) — did **not** exit within the 45 s deadline; claude
+accepted the resume and sat on stdin, exactly as #1655's turnless child did. Ended by this run's
+own `SIGTERM`, 558 ms signal-to-exit, no `SIGKILL` escalation needed. Carrying stream:
+**neither** (no output was produced before termination — a `SIGTERM`'s post-signal exit code,
+143 here, is cleanup detail the classifier never reads, never the answer).
+
+No credential value from the run environment appears in either capture — `redactCredentials` ran
+upstream of both streams, and the absent arm's message names only the session id.
+
+### Verdict
+
+**HOLDS.** `classifyResumeAbsent` reads the control arm first: it did not reject (still running
+at its deadline, not exited non-zero), so the absent arm decides — it rejected (exit 1) — giving
+**HOLDS** under AC 2's rule. `--resume <id>` against a transcript claude has no record of exits
+non-zero; a respawn that emits `--resume <id>` for a session that was never established is
+therefore asking claude to fail, which is the mechanism the suspected crash-loop needs and ADR
+032's fix (resume iff the transcript exists, by-id, no dir scan) addresses.
+
+Caveat carried forward from the design: this is a claude-version fact (2.1.220), not a guarantee
+across versions, and a control arm that itself exited non-zero would have made the run
+INCONCLUSIVE regardless of the absent arm's answer — that did not happen in this run.
+
+### How to reproduce
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=...   # or ANTHROPIC_API_KEY
+go test -tags e2e_realclaude -race -v -run TestRealClaude_ResumeAbsentTranscript ./internal/e2e/realclaude/
+```
+
+~60 s: one cheap haiku turn to establish `<A>`, a fast absent-arm rejection, then the control arm
+burning its full 45 s deadline before this run's cleanup ends it. The credential-free classifier
+table (`TestResumeAbsentVerdict`) and the argv-shape pin (`TestResumeProbeArgsIsRespawnShape`)
+both run under plain `go test ./internal/e2e/realclaude/...` with no credentials and no live
+claude.
