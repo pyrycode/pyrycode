@@ -74,6 +74,28 @@ var finOfflineExecBans = map[string][]string{
 		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
 		"probeClaudeVersion", "os.Getenv", "os.Environ",
 	},
+	// #1661. Wider than its sibling above, because this file performs no I/O in
+	// EITHER direction and the artifacts it fences off are committed. The first
+	// six keep a SKIP out, as everywhere else here. The rest keep the file away
+	// from the real testdata/: packageDir resolves it, setModeFixturePath and
+	// writeSetModeFixture are the two wrappers that reach packageDir — so banning
+	// it alone leaves the ban true and the property false — and filepath.Glob is
+	// the read direction, which is what keeps this file's controls synthetic
+	// literals rather than a directory listing.
+	//
+	// The os read/write entries are the shortest route and not the scenic one: `go
+	// test` runs in the package source directory, so a RELATIVE
+	// os.WriteFile("testdata/…") overwrites the committed fixtures without naming
+	// packageDir or either wrapper. That is the exact hazard this file exists to
+	// prevent, so the ban covers it. t.TempDir is absent for a different reason
+	// than in #1651's entry: that file's seed must write somewhere, this one
+	// writes nothing and needs no directory at all.
+	"inband_bypass_revoke_names_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "os.Getenv", "os.Environ",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
