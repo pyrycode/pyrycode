@@ -278,22 +278,22 @@ func runAgentRun(stdout io.Writer, args []string) error {
 	return fmt.Errorf("agent-run: %w", err)
 }
 
-// runAgentRunStreamRunner is the legacy stream-json subprocess path,
-// selected by PYRY_USE_STREAMJSON=1. Byte-equivalent to the pre-cutover
-// runAgentRun body; preserved indefinitely for billing-classification
-// comparison (operator decision 2026-05-19).
+// runAgentRunStreamRunner drives one claude turn as a stream-json subprocess:
+// it writes the per-spawn settings file that carries the tool boundary, then
+// hands the argv to streamrunner.Run. It is the only agent-run path — the
+// terminal-driving runner it once shared the verb with was deleted in #1348.
 func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agentRunArgs, claudeBin string, promptBytes []byte) error {
-	// Write the same per-spawn deny-default settings file the ptyrunner path
-	// writes, and for the same reason. Without it this path had NO tool
-	// boundary at all: `--dangerously-skip-permissions` defeats
-	// `--allowed-tools`, measured 2026-08-08 (pyrycode#1387). Every agent
-	// dispatched since the 2026-07-25 fleet switch ran unrestricted, which
-	// silently returned architect-only web search and subagent spawning, the
+	// Write the per-spawn deny-default settings file that carries this
+	// command's whole tool boundary. Without it there is NO tool boundary at
+	// all: `--dangerously-skip-permissions` defeats `--allowed-tools`,
+	// measured 2026-08-08 (pyrycode#1387). Every agent dispatched between the
+	// 2026-07-25 fleet switch and that fix ran unrestricted, which silently
+	// returned architect-only web search and subagent spawning, the
 	// deliberately-excluded Figma write tools, and the three human-only
 	// tools, to every role.
 	//
-	// Mirrors runAgentRunPty's block below, including the deny list, so the
-	// two paths enforce identically rather than approximately.
+	// --disallowed-tools lands in permissions.deny in the same write: a tool
+	// listed there leaves the model's surface, not denied at call time (#411).
 	settingsPath, err := settingsWrite(parsed.allowedTools, parsed.disallowedTools)
 	if err != nil {
 		return fmt.Errorf("write per-spawn settings: %w", err)
@@ -311,19 +311,19 @@ func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agent
 }
 
 // buildStreamRunnerClaudeArgs constructs the argv passed to `claude`
-// (without argv[0]) for the stream-json subprocess pipeline selected by
-// PYRY_USE_STREAMJSON=1. The ptyrunner default path owns its own argv
-// inside internal/agentrun/ptyrunner; do not unify these shapes.
+// (without argv[0]) for the stream-json subprocess pipeline, which is the
+// only pipeline agent-run has. The resulting shape is pinned by
+// TestBuildStreamRunnerClaudeArgs_Shape; change the argv and update that test.
 //
 // The permission slot (after `--verbose`, before `--append-system-prompt-file`)
 // is the YOLO toggle, filled by permissionArgs(yolo, mcpConfigPath): yolo=true
 // emits `--dangerously-skip-permissions`; yolo=false emits the
 // permission-prompt-tool + mcp-config pair that routes every tool use through
 // the daemon approval registry (see mcp_config.go). The sole production caller
-// (runAgentRunStreamRunner) passes yolo=true — the legacy PYRY_USE_STREAMJSON=1
-// path is always YOLO — so the emitted argv is byte-for-byte unchanged from the
-// pre-toggle form. The non-YOLO branch is exercised by unit tests here and
-// wired to a live spawn downstream.
+// (runAgentRunStreamRunner) passes yolo=true — agent-run always runs YOLO — so
+// the emitted argv is byte-for-byte unchanged from the pre-toggle form. The
+// non-YOLO branch is exercised by unit tests here and wired to a live spawn
+// downstream.
 //
 // Notes on individual flags:
 //
@@ -342,7 +342,7 @@ func runAgentRunStreamRunner(ctx context.Context, stdout io.Writer, parsed agent
 //     two weeks after the 2026-07-25 fleet switch to this path, the
 //     allowlist did nothing (pyrycode#1387).
 //   - `--settings` carries the per-spawn deny-default permissions file and
-//     IS the enforcement on this path, exactly as on the ptyrunner path.
+//     IS the enforcement — the only enforcement agent-run has.
 //     It survives `--dangerously-skip-permissions` where the command-line
 //     allowlist does not. `--allowed-tools` is still passed, because it is
 //     harmless and remains meaningful if the skip flag is ever dropped, but
