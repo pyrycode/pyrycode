@@ -10,15 +10,16 @@
 // the hole the compiler cannot see: a hardcoded screen string or escape
 // sequence in a string literal or comment.
 //
-// Run via `make substrate-guard` (wired into `make check` and the check.yml PR
-// gate). Scans every .go file under the repo root, skipping the allowlist;
-// exits non-zero and prints file:line for every hit.
+// Run via `make substrate-guard`, wired into `make check`. Scans every .go
+// file under the repo root, skipping the allowlist; exits non-zero and prints
+// file:line for every hit. Directories named .git, .claude, vendor,
+// node_modules and dist are not descended into: .claude/ holds agent working
+// copies of other branches, which are not this tree's source.
 //
-// Allowlist: the two sanctioned fake-claude helpers, which legitimately emit
-// these literals to simulate claude's TUI — internal/agentrun/ptyrunner/
-// helper_test.go for the ptyrunner integration tests, and internal/e2e/
-// internal/fakeclaude/main.go for the relay/send_message e2e flows (#603) — and
-// this guard's own source, which must name the patterns it bans.
+// Allowlist: the sanctioned fake-claude helper internal/e2e/internal/
+// fakeclaude/main.go, which legitimately emits these literals to simulate
+// claude's TUI for the relay/send_message e2e flows (#603), and this guard's
+// own source, which must name the patterns it bans.
 package main
 
 import (
@@ -33,7 +34,6 @@ import (
 
 // allowlist holds path suffixes exempt from the scan.
 var allowlist = []string{
-	"internal/agentrun/ptyrunner/helper_test.go",
 	"internal/e2e/internal/fakeclaude/main.go",
 	"cmd/substrate-guard/main.go",
 }
@@ -81,15 +81,28 @@ func isAllowlisted(rel string) bool {
 	return false
 }
 
-func main() {
-	var hits []string
-	walkErr := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+// hit is one banned substrate literal, at one line of one scanned file.
+type hit struct {
+	file string  // slash-separated, relative to the scan root
+	line int     // 1-based
+	pat  pattern // the first pattern matching that line
+}
+
+// scan walks root and reports every banned substrate literal in .go files
+// outside the allowlist, at most one hit per line, in walk order. Directories
+// named .git, vendor, node_modules, dist and .claude are not descended into —
+// .claude/ holds agent working copies of other branches, whose source is not
+// this tree's. Per-entry walk errors and unreadable files are skipped. The
+// returned error is non-nil only when the walk itself fails.
+func scan(root string) ([]hit, error) {
+	var hits []hit
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
 			switch d.Name() {
-			case ".git", "vendor", "node_modules", "dist":
+			case ".git", "vendor", "node_modules", "dist", ".claude":
 				return filepath.SkipDir
 			}
 			return nil
@@ -97,7 +110,13 @@ func main() {
 		if !strings.HasSuffix(path, ".go") {
 			return nil
 		}
-		rel := filepath.ToSlash(path)
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			// Unreachable for a path WalkDir produced from root; report the
+			// walked path rather than dropping the file, so no hit is lost.
+			rel = path
+		}
+		rel = filepath.ToSlash(rel)
 		if isAllowlisted(rel) {
 			return nil
 		}
@@ -108,8 +127,7 @@ func main() {
 		for i, line := range bytes.Split(data, []byte("\n")) {
 			for _, p := range patterns {
 				if bytes.Contains(line, p.substr) {
-					hits = append(hits, fmt.Sprintf("%s:%d: substrate literal %s (%s)",
-						rel, i+1, strconv.Quote(string(p.substr)), p.name))
+					hits = append(hits, hit{file: rel, line: i + 1, pat: p})
 					break // one finding per line is enough
 				}
 			}
@@ -117,7 +135,15 @@ func main() {
 		return nil
 	})
 	if walkErr != nil {
-		fmt.Fprintln(os.Stderr, "substrate-guard: walk error:", walkErr)
+		return nil, walkErr
+	}
+	return hits, nil
+}
+
+func main() {
+	hits, err := scan(".")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "substrate-guard: walk error:", err)
 		os.Exit(2)
 	}
 	if len(hits) > 0 {
@@ -125,7 +151,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "These belong in github.com/pyrycode/tui-driver, not pyrycode.")
 		fmt.Fprintln(os.Stderr, "Allowlist:", strings.Join(allowlist, ", "))
 		for _, h := range hits {
-			fmt.Fprintln(os.Stderr, "  "+h)
+			fmt.Fprintf(os.Stderr, "  %s:%d: substrate literal %s (%s)\n",
+				h.file, h.line, strconv.Quote(string(h.pat.substr)), h.pat.name)
 		}
 		os.Exit(1)
 	}
