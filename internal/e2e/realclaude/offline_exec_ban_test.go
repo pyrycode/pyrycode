@@ -65,6 +65,15 @@ var finOfflineExecBans = map[string][]string{
 		"tdnScan", "WithWorktree", "WithWorktreeAuthenticated",
 		"t.TempDir", "os.Getenv", "os.Environ", "os.Setenv",
 	},
+	// #1651. t.TempDir is deliberately absent: this file's seed writes a
+	// sessions.json, and a tempdir is where it must land. What the entry keeps out
+	// is anything that would turn its PASS into a SKIP — the whole value of these
+	// two tests is that they settle #1643's launch table with no claude binary and
+	// no credentials at all.
+	"inband_bypass_revoke_arms_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "os.Getenv", "os.Environ",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.

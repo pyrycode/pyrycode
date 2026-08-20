@@ -2066,6 +2066,54 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   touched. See `docs/specs/architecture/1622-live-pool-bypass-revocation.md` for
   the full design and the assertion-to-mutant mapping.
 
+- `inband_bypass_revoke_arms_test.go` (#1651) — **the deterministic, credential-free
+  half of #1643's three-arm substrate: which stored posture each arm launches
+  with.** #1622's `seedBypassRegistry` wrote `yolo:true` unconditionally; it now
+  takes the posture as a parameter (`seedBypassRegistry(t, path, yolo)`), and
+  #1622's own call site is unchanged (`true`). The trap this ticket exists to
+  avoid: for the `false` posture, a **stored** false and a **cold start** (no
+  registry file at all) both read back as `YOLO: false` through
+  `Pool.DefaultSettings()` — that seam cannot tell a correctly-seeded
+  `control_default` arm from a completely broken one. The only signal that
+  separates them is the registry **entry's existence** (`bootstrap: true`, an
+  `id` `sessions.ValidID` accepts), so `TestSeedBypassRegistry_StoresRequestedPostureUnderBothValues`
+  reads the seeded file directly rather than the Pool, decoding through
+  `map[string]json.RawMessage` — never `revokeSeedEntry` or `registryEntry` — so
+  a `yolo` key misspelled in the seed can't round-trip through its own struct and
+  hide from the test. `revokeSeedEntry.YOLO` keeps its `json:"yolo"` tag with no
+  `omitempty` (unlike `registryEntry.YOLO`'s `json:"yolo,omitempty"`) precisely so
+  a stored false is a **present** false key on disk, not an absent one; adding
+  `omitempty` to "match" production would make the key vanish, and only the
+  test's presence clause (checked separately from the value) reddens on it — a
+  value-only check passes, since a struct decode of an absent key is
+  indistinguishable from a decoded `false`. The second new test,
+  `TestPoolRevokeArms_PinLaunchPostureAndUpdateByName`, pins the package-level
+  `poolRevokeArms` table (`revoke`/`control_default`/`control_bypass`, each
+  carrying its launch posture and whether it takes a mid-run settings update) by
+  **name**, in both directions — deliberately not "the two controls differ",
+  since swapping `control_default` and `control_bypass` still leaves them
+  differing while making the arm names lie to every downstream consumer.
+  `poolRevokeArms` is read-only by convention (ranged over from `t.Parallel()`
+  tests in this file and by #1652); nothing appends to or reassigns it. Both
+  tests report **PASS**, not SKIP, with no claude binary and no credentials — the
+  file takes neither `WithWorktreeAuthenticated` nor `resolveClaudeBin`, enforced
+  by a new `finOfflineExecBans` entry over the file's AST rather than its prose.
+  **Two lessons surfaced while mutating the presence/value split**, reported
+  candidly against the spec's own prediction rather than silently patched: a
+  misspelled `yolo` tag reddens the presence clause on **both** rows, not the
+  spec-predicted value clause on the `true` row — because the value check is
+  nested inside the presence check's `else`, and a nested assertion is never the
+  sole red for a mutant that trips its guard; the guard is. And the map-decode
+  itself is not the "vacuous value-only check" the spec's hazard prose describes
+  for a **struct** decode: `json.Unmarshal(nil, &b)` over an absent key's `nil`
+  `json.RawMessage` errors rather than silently decoding to `false`, so a
+  map-based value check alone would have caught the vanished key too — the
+  separate presence clause earns its place on readability and naming the real
+  cause, not on being the only thing that reddens. Zero production files
+  touched. See
+  `docs/specs/architecture/1651-bypass-seed-posture-and-arm-table.md` for the
+  full design, and #1622's entry above for the seam this ticket parameterizes.
+
 - `interactive_stream_model_announced_test.go` (#1634) — the live proof that a
   real claude's announced model reaches the daemon's **own emitted frame**,
   not just claude's stdout. #1582's `interactive_stream_inband_model_test.go`
