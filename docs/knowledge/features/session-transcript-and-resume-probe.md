@@ -73,6 +73,15 @@ case difference, so the asymmetry didn't manifest. A divergence, if one is ever 
 different filesystem/case-sensitivity combination, is the finding the follow-up that supplies
 this directory on the daemon's production path needs — see the ADR's Related section.
 
+**#1631 landed that follow-up**, pinning the production derivation to exactly this composition
+(`agentrun.ResolveWorkdir` then `sessions.DefaultClaudeSessionsDir`) rather than either candidate
+alone — see [streamsup-package.md](streamsup-package.md) § `mapStreamsupConfig` /
+`streamClaudeSessionsDir`. The `canonicalCase` asymmetry itself is still unmeasured: its own
+discriminator test runs on an ordinary tmpdir path with no case difference, so it pins "derived per
+runner" but not "derived via `ResolveWorkdir` rather than a cheaper sibling". A divergence recorded
+here in the future is still
+the finding that would justify a dedicated case-difference fixture.
+
 ## Verbatim output
 
 ```json

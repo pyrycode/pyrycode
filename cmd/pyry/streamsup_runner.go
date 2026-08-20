@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
@@ -182,30 +183,86 @@ func withApprovalArgs(args []string, mcpApprovePath string) []string {
 }
 
 // mapStreamsupConfig maps a supervisor.Config to the streamsup.Config that
-// streamsup.New consumes. Pure and side-effect-free — every field on the returned
-// struct is inspectable, so the no-double-inject invariant is asserted directly
-// (see streamsup_runner_test.go).
+// streamsup.New consumes. It mutates nothing, constructs no runtime object, and
+// returns a struct every field of which is inspectable, so the no-double-inject
+// invariant is asserted directly (see streamsup_runner_test.go). It is no longer
+// syscall-free, though: #1631's ClaudeSessionsDir is derived from WorkDir by
+// streamClaudeSessionsDir, which stats the path and reads $HOME. Those reads are
+// read-only and degrade to "" rather than failing, so the mapper still has no
+// error return and no ordering constraint.
 //
 // The PTY-only fields on supervisor.Config are deliberately NOT mapped —
 // streamsup owns its own id-flag inversion (buildArgs), has no PTY bridge, no
 // transcript binding, and no .cast recorder: ResumeLast, ResolveSessionID,
-// Bridge, ValidateConversation, ResolveTranscript, RecordDir, helperEnv. Stdout
+// Bridge, ValidateConversation, ResolveTranscript, RecordDir, helperEnv.
+// ResolveSessionID stays dropped even now that a sessions DIRECTORY crosses this
+// seam: the directory is all that crosses, and streamsup's own per-spawn by-id
+// existence probe (useCreateForm) decides the flag from it. No resolver callback
+// crosses the seam in either direction, and neither side SCANS the directory —
+// the probe is by-id only (#839 deleted --continue and adopt-by-mtime). Stdout
 // stays nil HERE — the turnevent Parser that plugs into Stdout is a runtime
-// object installed one layer up in newStreamRunnerFactory (#1098), keeping this
-// mapper pure; Stderr/Env have no supervisor.Config analogue and stay nil.
+// object installed one layer up in newStreamRunnerFactory (#1098), which is the
+// line the new field does not cross: it is a plain string derived from one
+// RunnerConfig field, not a live object. Stderr/Env have no supervisor.Config
+// analogue and stay nil.
 func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 	return streamsup.Config{
 		ClaudeBin: cfg.ClaudeBin,
 		WorkDir:   cfg.WorkDir,
 		// #1108 guarantees SessionID is non-empty at both pool sites; streamsup.New
 		// requires it (streamsup owns re-injecting the id flag from this value).
-		SessionID:      cfg.SessionID,
-		Args:           stripSessionIDFlags(cfg.ClaudeArgs),
-		Logger:         cfg.Logger,
-		BackoffInitial: cfg.BackoffInitial,
-		BackoffMax:     cfg.BackoffMax,
-		BackoffReset:   cfg.BackoffReset,
+		SessionID:         cfg.SessionID,
+		ClaudeSessionsDir: streamClaudeSessionsDir(cfg.WorkDir),
+		Args:              stripSessionIDFlags(cfg.ClaudeArgs),
+		Logger:            cfg.Logger,
+		BackoffInitial:    cfg.BackoffInitial,
+		BackoffMax:        cfg.BackoffMax,
+		BackoffReset:      cfg.BackoffReset,
 	}
+}
+
+// streamClaudeSessionsDir derives the directory claude writes <uuid>.jsonl into
+// for a runner whose WorkDir is workdir — the value streamsup.Config's
+// ClaudeSessionsDir field takes, where "" means "run no probe" and every spawn's
+// id flag falls back to the Run loop's firstRun latch (#1631 arms what #1630 left
+// inert). It is derived per runner rather than once per pool because a
+// per-conversation runner's WorkDir is the phone's confined spawn dir when one
+// was requested (Pool.buildSession), so it legitimately differs from the
+// bootstrap workdir.
+//
+// The composition is pinned to the transform streamsup.New itself applies: it
+// sets the child's cmd.Dir to agentrun.ResolveWorkdir(WorkDir), and claude
+// encodes its own resolved cwd into the projects folder name, so the probe must
+// key on the SAME resolution. #1655 measured the empirical directory — located by
+// finding the transcript claude actually wrote — against
+// sessions.DefaultClaudeSessionsDir of a cwd resolved that way, and found them
+// equal.
+//
+// Do NOT substitute resolveClaudeSessionsDir or a bare DefaultClaudeSessionsDir.
+// Neither applies canonicalCase, which ResolveWorkdir does and claude does, and
+// neither confineWorkdirToHome (bootstrap) nor resolveSpawnDir (phone)
+// canonicalises case — so on a case-insensitive filesystem a wrong-cased workdir
+// would yield a directory claude never writes. That reads "absent" for a session
+// whose transcript exists, spawns --session-id against a live transcript, which
+// claude refuses (ADR 032), and — because a supplied directory makes
+// useCreateForm decide OUTRIGHT rather than latch — loops permanently instead of
+// wasting one spawn.
+//
+// Every "" arm is pre-#1631 behaviour rather than a new failure mode. An empty
+// workdir is unreachable at both pool sites (both carry a confined realpath) but
+// must not fall through to the process cwd the way resolveClaudeSessionsDir
+// deliberately does; a workdir ResolveWorkdir rejects never produced a runner at
+// all, since streamsup.New calls the same function on the same value and returns
+// an error; and an unresolvable $HOME degrades inside DefaultClaudeSessionsDir.
+func streamClaudeSessionsDir(workdir string) string {
+	if workdir == "" {
+		return ""
+	}
+	resolved, err := agentrun.ResolveWorkdir(workdir)
+	if err != nil {
+		return ""
+	}
+	return sessions.DefaultClaudeSessionsDir(resolved)
 }
 
 // stripSessionIDFlags returns a new slice with every --session-id/--resume flag

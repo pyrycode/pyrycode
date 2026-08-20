@@ -2871,6 +2871,18 @@ mutant against the spawned daemon, build it separately
 (#1512). A mutation run that skips this reads as "the assertion under test is
 vacuous" when the real cause is "the mutant never shipped".
 
+**A test-local `t.Setenv("HOME", …)` must come after `ensurePyryBuilt`/
+`ensureFakeClaudeBuilt`, not before (#1631).** Both are `sync.Once`-guarded, so
+whichever caller runs first performs the actual `go build`; every later call
+(including `spawnWith`'s own) is a no-op that just returns the cached path.
+Overriding `HOME` in the test process *before* either call sends that `go build`
+subprocess an empty module cache under the temp home, which tries to re-download
+the whole module graph and fails on a private dependency. This only bites a test
+that needs `HOME` overridden in the test process itself (e.g. to re-derive a
+daemon-side value that reads `$HOME`, as #1631's own AC 2 test does) — the
+ordinary `Harness.Run`/`StartIn` path never hits it, since it redirects `HOME` for
+the **spawned daemon's** environment via `childEnv`, not the test process's own.
+
 ## Known Limitations
 
 - **Race detector.** When `go test -tags=e2e -race` is invoked, the parent

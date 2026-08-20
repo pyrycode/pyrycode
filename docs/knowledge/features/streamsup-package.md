@@ -62,8 +62,8 @@ func useCreateForm(sessionsDir, id string, latchCreate bool) bool
 
 `beginSpawn` calls this to produce `buildArgs`'s `create` argument, in place of passing the `firstRun`/`forceFirst` latch straight through. Two modes, chosen by whether `Config.ClaudeSessionsDir` is set:
 
-- **Empty (every production path today).** Returns `latchCreate` verbatim — no syscall — so the emitted argv is byte-identical to pre-#1630. Structural, not just a default: `sessions.RunnerConfig` (the struct `cmd/pyry/streamsup_runner.go`'s `mapStreamsupConfig` builds `streamsup.Config` from) carries no sessions-directory field, so no production caller can set it until #1631.
-- **Set.** Decides *outright* — `latchCreate` is ignored, including on the first spawn and including when a `RestartFresh` rotation re-armed `forceFirst`. A confirmed by-id hit via `transcript.StatByID(sessionsDir, id)` is the only answer that yields `--resume`; every non-hit — absent file, unreadable directory, an id `ValidStem` rejects — yields `--session-id`. No error return: every non-hit is a legitimate answer, not a failure, so the probe can never fail a spawn.
+- **Empty.** Returns `latchCreate` verbatim — no syscall — so the emitted argv is byte-identical to pre-#1630. This was every production path until **#1631** armed the probe (see `mapStreamsupConfig` below); it remains the live behaviour on every arm where the sessions directory can't be derived (empty or unresolvable workdir, unresolvable `$HOME`).
+- **Set — every production path since #1631.** Decides *outright* — `latchCreate` is ignored, including on the first spawn and including when a `RestartFresh` rotation re-armed `forceFirst`. A confirmed by-id hit via `transcript.StatByID(sessionsDir, id)` is the only answer that yields `--resume`; every non-hit — absent file, unreadable directory, an id `ValidStem` rejects — yields `--session-id`. No error return: every non-hit is a legitimate answer, not a failure, so the probe can never fail a spawn.
 
 This carries [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s by-id-existence rule — previously applied only to the PTY bootstrap path — into `streamsup`, and closes two defects the `firstRun` latch alone leaves open (see the gate below): a session that launched and ran no turn has no transcript, so a `firstRun`-driven `--resume` against it exits 1 on a widening backoff forever ([#1655](session-transcript-and-resume-probe.md)/[#1656](session-transcript-and-resume-probe.md)); and a transcript that survived a daemon restart makes the latch's first spawn emit a `--session-id` claude refuses (ADR 032). Two things it deliberately never does: hand-roll `filepath.Join(sessionsDir, id+".jsonl")` + `os.Stat` in place of `StatByID` (`StatByID`'s `ValidStem` gate runs *before* the join, and neither `New` nor `RestartFresh` validates `SessionID`'s shape, so a hand-rolled join would turn a non-canonical id into an arbitrary-path existence oracle); and fall back to `transcript.Newest` (a directory scan) on a miss — #839 deleted `--continue` and the adopt-by-mtime scan specifically to close a confused-deputy gap where a restart could adopt a *different* claude's newer transcript out of the shared sessions dir, and a scan fallback would reopen it.
 
@@ -106,7 +106,7 @@ Shutdown is detected via **parent-ctx cancellation**, never via the child-exit e
 
 `spawnAndWait` returns `(started bool, waitErr error)`. `started` is `false` only when the spawn fails during **setup** (`cmd.StdinPipe()` or `cmd.Start()` erroring) — claude never launched, so `--session-id` never ran and the on-disk session was never established. The original implementation flipped `firstRun = false` unconditionally after every iteration; a transient setup failure (e.g. a momentarily-unavailable binary) would make the *next* attempt respawn with `--resume <id>` against a session that was never created, and claude would error ("no conversation found") on every subsequent attempt — a permanent, unrecoverable crash-loop that defeated the very retry the backoff loop exists for. Fixed by threading `started` through and gating the flip: `if started { firstRun = false }`. A setup failure now correctly retries with `--session-id` until one succeeds. Regression test drives `Run` against a non-existent binary and asserts every retry keeps `--session-id`.
 
-**A second, distinct crash-loop shape existed here: `started == true` does not mean a transcript exists.** The gate above only protects against claude never launching; on its own it does nothing for a claude that launches, is torn down before running a turn, and is respawned with `--resume <id>` against an id that was never written to disk. [#1655](session-transcript-and-resume-probe.md) measured against a live claude (2.1.220) that this second premise **HOLDS** — a `--session-id` launch with no turn leaves no `<id>.jsonl`, both while the child is alive and after a graceful `SIGTERM` exit. [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s by-id-existence rule (already applied to the PTY bootstrap path) is the fix; **#1630** carried it into this package as `useCreateForm` (above), and it stays inert — the `firstRun`-only gate remains the *only* live protection in `streamsup` — until #1631 threads `Config.ClaudeSessionsDir` through `sessions.RunnerConfig` on the production path.
+**A second, distinct crash-loop shape existed here: `started == true` does not mean a transcript exists.** The gate above only protects against claude never launching; on its own it does nothing for a claude that launches, is torn down before running a turn, and is respawned with `--resume <id>` against an id that was never written to disk. [#1655](session-transcript-and-resume-probe.md) measured against a live claude (2.1.220) that this second premise **HOLDS** — a `--session-id` launch with no turn leaves no `<id>.jsonl`, both while the child is alive and after a graceful `SIGTERM` exit. [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s by-id-existence rule (already applied to the PTY bootstrap path) is the fix; **#1630** carried it into this package as `useCreateForm` (above), inert until **#1631** armed it on the production path — see `mapStreamsupConfig` / `streamClaudeSessionsDir` below.
 
 ## Teardown: SIGTERM → SIGKILL grace + descendant-group reap
 
@@ -690,14 +690,63 @@ the PTY interactive argv is untouched. See [pyry-mcp-approve-command.md](pyry-mc
 sites per #1108) always surfaces as an error rather than silently degrading the bootstrap (the session
 `pyry attach` drives) to the PTY path.
 
-**`mapStreamsupConfig(cfg supervisor.Config) streamsup.Config`** is the pure, fully-inspectable mapper and
-the primary tested surface — **unchanged by #1098**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
+**`mapStreamsupConfig(cfg supervisor.Config) streamsup.Config`** is the fully-inspectable mapper and
+the primary tested surface — unchanged by #1098, extended by **#1631**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
 `Logger`/`BackoffInitial`/`BackoffMax`/`BackoffReset` copy verbatim; `ClaudeArgs → Args` (streamsup's argv
-field has a different name) through `stripSessionIDFlags`; `Stdout`/`Stderr`/`Env` stay nil **inside the
-mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper pure
-and its `Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
+field has a different name) through `stripSessionIDFlags`; `ClaudeSessionsDir` is derived per runner from
+`WorkDir` (below); `Stdout`/`Stderr`/`Env` stay nil **inside the
+mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper's
+`Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
 seven PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConversation`,
-`ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not mapped.
+`ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not mapped — `ResolveSessionID` stays off
+the list even now that a sessions *directory* crosses this seam: streamsup still owns its own id-flag
+inversion (`useCreateForm`) and decides the flag from the directory itself; no resolver callback crosses,
+and no directory scan happens on either side.
+
+**`streamClaudeSessionsDir(workdir string) string` (#1631) arms `useCreateForm` on the production path.**
+Three arms: `workdir == ""` → `""` (unreachable at both pool sites, both carry a confined realpath, but
+named explicitly rather than left to fall through); `agentrun.ResolveWorkdir(workdir)` erroring → `""`
+(introduces no new failure — `streamsup.New` calls the same function on the same value and would have
+failed to construct a runner at all); otherwise → `sessions.DefaultClaudeSessionsDir(resolved)` verbatim.
+`""` on any arm means "no probe" — `useCreateForm`'s empty-directory mode above, i.e. pre-#1631 argv.
+
+**Derived per runner, not once per pool — this is the load-bearing decision, not an implementation
+detail.** A per-conversation runner's `WorkDir` is the phone's confined spawn dir when one was requested
+(`Pool.buildSession`), and legitimately differs from the bootstrap workdir. A pool-global directory
+computed once from the bootstrap workdir would be *wrong* for exactly the phone-created sessions — and
+because a directory that's set makes `useCreateForm` decide **outright** (the latch is never consulted),
+a wrong directory doesn't waste one spawn and self-heal the way the latch does; it reads "absent" for a
+session whose transcript exists, spawns `--session-id` against a live transcript, claude refuses it (ADR
+032), and the daemon loops permanently in the mirror direction — the same defect class this ticket exists
+to close, caused by the fix. **Rejected alternative:** a new field on `sessions.RunnerConfig`, populated
+at both pool construction sites. Costs three production files instead of one and adds a second source of
+truth for a value that's a pure function of `WorkDir` — already on that struct — populated at two sites
+instead of derived at the one place (`mapStreamsupConfig`) that already builds the streamsup config. A
+future third construction site could forget the second field and silently ship an inert probe; the mapper
+derivation can't drift that way because there's only one derivation site.
+
+**Why `agentrun.ResolveWorkdir`, not `resolveClaudeSessionsDir` or a bare `sessions.DefaultClaudeSessionsDir`.**
+`streamsup.New` sets the child's `cmd.Dir` to `agentrun.ResolveWorkdir(WorkDir)`, and claude encodes its
+own resolved cwd into the projects folder name — so the probe must key on the *same* resolution as the
+child's actual cwd, not a same-looking sibling. [#1655](session-transcript-and-resume-probe.md) measured
+the empirical transcript directory against exactly this composition and found them equal. The delta
+between the candidates is `canonicalCase`, which `ResolveWorkdir` applies and a bare
+`DefaultClaudeSessionsDir` does not; neither `confineWorkdirToHome` (bootstrap) nor `resolveSpawnDir`
+(phone) canonicalises case upstream, so on a case-insensitive filesystem a wrong-cased workdir could
+survive to the pool intact while the child still lands in the canonical-case cwd, and a probe built
+without `canonicalCase` would read a directory claude never writes — the permanent-loop mirror failure
+above.
+
+**Test-coverage caveat, from code review (2026-08-20): the shipped discriminator test pins the
+per-runner-vs-pool-global property, not the `canonicalCase` half.** A per-runner derivation built on the
+*wrong* transform — `sessions.DefaultClaudeSessionsDir(cfg.WorkDir)` directly, skipping
+`ResolveWorkdir` — still passes `TestMapStreamsupConfig_ClaudeSessionsDir`, because on an ordinary tmpdir
+path (no case difference) `DefaultClaudeSessionsDir`'s own `EvalSymlinks` already matches
+`ResolveWorkdir`'s output; only a case-difference fixture would separate them, and no such fixture exists
+here (§ Open questions in the #1631 spec declines to gate the build on it — no real-world divergence has
+been observed). So: the "each runner gets its own directory" property is genuinely pinned; "that directory
+is computed via `ResolveWorkdir`, not a cheaper sibling" is not. A future edit that quietly drops
+`canonicalCase` from this composition will not be caught by this test.
 
 **`stripSessionIDFlags(args []string) []string`** returns a fresh slice — never mutating the input, which
 is aliased into the pool's `spawnBase` — with every `--session-id`/`--resume` occurrence removed (two-token

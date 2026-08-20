@@ -1,13 +1,15 @@
 package main
 
 import (
-	"github.com/pyrycode/pyrycode/internal/sessions"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
 
@@ -182,6 +184,101 @@ func TestMapStreamsupConfig_PerSession(t *testing.T) {
 	}
 	if !slices.Equal(got.Args, []string{"--settings", "p"}) {
 		t.Errorf("Args = %q, want %q", got.Args, []string{"--settings", "p"})
+	}
+}
+
+// TestMapStreamsupConfig_ClaudeSessionsDir pins #1631's derivation: the mapper
+// fills ClaudeSessionsDir from THAT runner's own WorkDir, so streamsup's by-id
+// transcript probe is live on the production path and keys on the directory
+// claude actually writes for that runner's child cwd.
+//
+// The divergent-workdir pair is the discriminator. A per-conversation runner's
+// WorkDir is the phone's confined spawn dir when one was requested
+// (Pool.buildSession), so it legitimately differs from the bootstrap workdir —
+// and a single pool-global directory derived once from cfg.Bootstrap.WorkDir
+// would be right for the bootstrap runner and wrong for exactly the
+// phone-created ones. Asserting the two mapped values DIFFER is what fails that
+// shape; asserting each equals the recomputed
+// DefaultClaudeSessionsDir(ResolveWorkdir(thatWorkDir)) is what fails a
+// per-runner derivation built on the wrong transform (the composition is
+// #1655's measured one, not a preference). Real t.TempDir()s, because the
+// derivation stats the path.
+func TestMapStreamsupConfig_ClaudeSessionsDir(t *testing.T) {
+	t.Parallel()
+
+	want := func(t *testing.T, workdir string) string {
+		t.Helper()
+		resolved, err := agentrun.ResolveWorkdir(workdir)
+		if err != nil {
+			t.Fatalf("agentrun.ResolveWorkdir(%q) error = %v, want nil", workdir, err)
+		}
+		return sessions.DefaultClaudeSessionsDir(resolved)
+	}
+	mapped := func(workdir, id string) string {
+		return mapStreamsupConfig(sessions.RunnerConfig{
+			ClaudeBin: "/opt/claude",
+			WorkDir:   workdir,
+			SessionID: id,
+		}).ClaudeSessionsDir
+	}
+
+	bootstrapDir, spawnDir := t.TempDir(), t.TempDir()
+	gotBootstrap := mapped(bootstrapDir, "boot-uuid")
+	gotSpawn := mapped(spawnDir, "conv-uuid")
+
+	if gotBootstrap == gotSpawn {
+		t.Fatalf("both runners mapped to one ClaudeSessionsDir %q — that is a pool-global value, not one derived from each runner's own workdir", gotBootstrap)
+	}
+	if w := want(t, bootstrapDir); gotBootstrap != w {
+		t.Errorf("bootstrap ClaudeSessionsDir = %q, want %q", gotBootstrap, w)
+	}
+	if w := want(t, spawnDir); gotSpawn != w {
+		t.Errorf("per-conversation ClaudeSessionsDir = %q, want %q", gotSpawn, w)
+	}
+}
+
+// TestMapStreamsupConfig_ClaudeSessionsDirDegrades covers the arms where the
+// directory cannot be derived: the mapped field is "", which is exactly what
+// keeps streamsup's probe inert and the spawn argv byte-identical to pre-#1630.
+// An empty workdir must NOT fall through to the process cwd — that is
+// resolveClaudeSessionsDir's deliberate behaviour on the startup reconciliation
+// path, and adopting it here would point a probe at a directory the child never
+// runs in.
+func TestMapStreamsupConfig_ClaudeSessionsDirDegrades(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		workdir string
+	}{
+		{"empty workdir", ""},
+		{"unresolvable path", filepath.Join(t.TempDir(), "no-such-dir")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := mapStreamsupConfig(sessions.RunnerConfig{
+				ClaudeBin: "/opt/claude",
+				WorkDir:   tt.workdir,
+				SessionID: "sess-uuid",
+			}).ClaudeSessionsDir
+			if got != "" {
+				t.Errorf("ClaudeSessionsDir = %q, want \"\" (probe inert)", got)
+			}
+		})
+	}
+}
+
+// TestStreamClaudeSessionsDir_NoHome is the third degrade arm, split out because
+// t.Setenv forbids t.Parallel. With $HOME unresolvable there is no
+// ~/.claude/projects to key into, so sessions.DefaultClaudeSessionsDir returns ""
+// and the probe stays inert rather than pointing somewhere relative to nothing.
+func TestStreamClaudeSessionsDir_NoHome(t *testing.T) {
+	workdir := t.TempDir()
+	t.Setenv("HOME", "")
+
+	if got := streamClaudeSessionsDir(workdir); got != "" {
+		t.Errorf("streamClaudeSessionsDir(%q) with HOME unset = %q, want \"\"", workdir, got)
 	}
 }
 
