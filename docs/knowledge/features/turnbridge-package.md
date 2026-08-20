@@ -1,291 +1,41 @@
-# `internal/turnbridge` — event-stream bridge
+# `internal/turnbridge` — outbound event-to-wire adapter
 
-The event-mapping core of the Phase 2 structured-event bridge (EPIC #596,
-[ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § Phase 2
-structured streaming). The package now bridges in **both** directions around the
-neutral internal turn-event model ([`internal/turnevent`](turnevent-package.md),
-#606):
+A pure value-to-value adapter mapping the neutral internal turn-event model
+([`internal/turnevent`](turnevent-package.md), #606) OUT to the v2 interactive
+mobile wire payloads ([`internal/protocol`](protocol-package.md), #607):
+`MapEvent` shapes one `turnevent.Event` into a typed payload, `BuildTurnState`
+shapes the `turn_state` payload the lifecycle machine drives. No I/O, no state,
+no envelope-ID minting, no clock read, no sealing — all of that belongs to the
+consumer, `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2`
+(`.emit` wraps a payload into an `Envelope`; `.Handle`/`.transitionTo` own the
+turn-lifecycle machine that calls `MapEvent`/`BuildTurnState`).
 
-- **Inbound producer** (`producer.go` + `mapper.go`, #615) — drains the supervised
-  claude session's unified tui-driver `Events()` stream and maps each event **into**
-  the `turnevent.Event` model.
-- **Outbound adapter** (`outbound.go`, #627) — a pure value-to-value mapper from a
-  `turnevent.Event` + explicit turn context **out** to the matching v2 interactive
-  wire payload (#607). The exact mirror of `mapEvent`. See
-  [The outbound adapter](#the-outbound-adapter-mapevent--buildturnstate) below.
-
-**#639** threads the screen-derived `stall_detected` marker through **both**
-mappers (`EventKindStallDetected → turnevent.Stall{}` inbound; `Stall → stall`
-envelope outbound) and the consumer's `Handle` fan-out — un-dropping a signal that
-formerly died at the daemon, so a stalled turn reaches interactive phones (#373).
-See [codebase/639.md](../codebase/639.md).
-
-**#1074** repeats the same pattern for two more PTY-derived status peers of
-`stall`: claude's API-error retry (`EventKindPtyApiRetry{Shown,Hidden}`) and
-auto-compaction (`EventKindPtyCompacting{Shown,Hidden}`), previously dropped by
-`mapEvent`'s `default` arm. Four new inbound-mapper arms, two new outbound-adapter
-arms, and one merged `Handle` case (`turnevent.ApiRetry, turnevent.Compacting`)
-land the two new wire types `api_retry` / `compacting` — see
-[codebase/1074.md](../codebase/1074.md).
-
-The **consumer half** — the turn-lifecycle state machine, envelope ID minting /
-sealing, and the capability-gated fan-out to phones — was originally one slice
-(#616) but shipped as a chain: capability negotiation (#626, the per-conn
-`interactive` grant + capability-aware `ActiveConns`), then the **stateful
-structured emitter** (#632, `cmd/pyry/interactive_turn_v2.go` — consumes the
-outbound adapter's payloads, derives `turn_state`, gates the fan-out on the
-`interactive` grant), then the **production wiring** (#633,
-`cmd/pyry/interactive_turn_stream_v2.go` — constructs this `Producer` over
-`Supervisor.Session()` + a rotation-following JSONL resolver and attaches
-`OnEvent: emitter.Handle(relayCtx, ev)` inside `startRelayV2`). **As of #633 the
-producer is wired live:** `startInteractiveTurnStreamV2` builds it under the v2
-foreground + sessions-dir gate, so the supervised session's structured events now flow
-to interactive phones (and keep flowing across a restart-driven `/clear` rotation).
-Before #633 the package shipped deliberately unwired — the standard "introduce the
-mapping core + tests; wire the consumer in the next slice" pattern. **#639** then
-un-drops the screen `stall_detected` marker through all three stages to the same
-fan-out: the emitter gains a `case turnevent.Stall` in `Handle` that emits with
-**no lifecycle mutation** (the stall is a peer of `turn_state`, not a droppable
-delta — droppable set is `assistant_delta` only, #610 non-dependency). See
-[codebase/632.md](../codebase/632.md) (emitter),
-[codebase/633.md](../codebase/633.md) (the live wiring + resolver), and
-[codebase/639.md](../codebase/639.md) (the stall fan-out arm).
-
-> #615 + #616 are the two halves of the originally-combined #608. Docs in #606 /
-> #607 that say "the bridge (#608)" mean: producer = #615 (here), consumer = the
-> #626 → #632 → #633 chain (#616's slices).
-
-Dependency direction stays clean — `cmd/pyry → internal/turnbridge →
-{tuidriver, turnevent, protocol}`. Only `mapper.go`/`producer.go` reach
-`tuidriver`; only `outbound.go` reaches `internal/protocol` (#627 added that
-import). The package does **not** import `internal/supervisor` (it defines its own
-`SessionHost` seam, which `*supervisor.Supervisor` satisfies structurally) and does
-**not** import `internal/sessions` (the JSONL resolver is injected). Package name
-reads naturally beside `turnevent`: `turnbridge` bridges tui-driver events into —
-and the `turnevent` model out to — the wire.
-
-- Specs: [`615-event-stream-producer.md`](../../specs/architecture/615-event-stream-producer.md)
-  (producer), [`627-outbound-turnevent-wire-mapper.md`](../../specs/architecture/627-outbound-turnevent-wire-mapper.md)
-  (outbound adapter).
-- Ticket records: [codebase/615.md](../codebase/615.md) (producer),
-  [codebase/627.md](../codebase/627.md) (outbound adapter).
-- Pivot model: [turnevent-package.md](turnevent-package.md) (#606) — what the
-  producer maps INTO and the outbound adapter maps OUT of.
-- Outbound wire target: [protocol-package.md](protocol-package.md) (#607, interactive payloads).
+**History — the package used to bridge in both directions.** An **inbound
+producer** (`producer.go` + `mapper.go`, #615, #679) drained the supervised
+claude session's PTY-hosted tui-driver `Events()` stream and mapped each event
+INTO the `turnevent.Event` model — the exact mirror of what `MapEvent` now does
+OUT. #1348 deleted every terminal-driving claude path that fed and consumed it
+(including `internal/supervisor` itself and `cmd/pyry/interactive_turn_stream_v2.go`'s
+wiring), which orphaned both files without touching them; **#1543** deleted
+`producer.go`, `producer_test.go`, `mapper.go` and `mapper_test.go` (dropping the
+package's `tui-driver` dependency) and re-homed the package doc onto
+`outbound.go`. There is no dedicated `docs/knowledge/codebase/1543.md` record —
+that directory froze 2026-08-19, the day before #1543 landed — but the
+producer's own history stays readable in the frozen ticket records linked under
+§ Related below. The live inbound counterpart today is
+[`internal/streamsup`](streamsup-package.md)'s stream-json parser — a
+structurally different path with no `turnbridge` re-mapping step, since the
+parser emits `turnevent.Event` directly.
 
 ## Files
 
 ```
 internal/turnbridge/
-├── producer.go        Producer lifecycle (drain + re-subscribe) + the follow-active NewTargetSubscriber (#679)
-├── mapper.go          mapEvent + pure helpers (the inbound tui-event → turnevent type switch)
-├── outbound.go        MapEvent / BuildTurnState + summary helpers (the outbound turnevent → wire-payload type switch, #627)
-├── producer_test.go   drain / re-subscribe-across-restart / nil-OnEvent tests (fake Subscriber)
-├── mapper_test.go     table-driven event→model + drop tests; toolResultText / toolKind / rawInput
-└── outbound_test.go   table-driven model→payload + drop tests; inputSummary / resultSummary / truncate / BuildTurnState
+├── outbound.go       MapEvent / BuildTurnState + summary helpers (#627)
+└── outbound_test.go  table-driven model→payload + drop tests; inputSummary / resultSummary / truncate / BuildTurnState
 ```
-
-Plus an additive `Session()` accessor on the supervisor (`internal/supervisor/supervisor.go`).
-
-## The core/glue split
-
-The producer is split into a **testable core** (drain + re-subscribe loop, driven
-by an injected `Subscriber`) and **live glue** (the production `Subscriber` that
-calls `Session.Events`). The split is what makes the lifecycle guarantees
-unit-testable without spawning a real claude — a `*tuidriver.Session` can only be
-`Spawn`ed, so the live subscriber is verified downstream (#633's wiring + the v2
-e2e oracle), while this slice unit-tests the core via a fake `Subscriber` and the
-pure mapper directly.
 
 ## Public API
-
-```go
-// Subscriber yields a live session's tui-driver event stream. The returned
-// channel closes when that session ends (supervisor restart) or ctx is done.
-// Returns a non-nil error ONLY on ctx cancellation; transient resolution
-// failures are retried internally, so the channel-or-ctx-done contract holds.
-type Subscriber func(ctx context.Context) (<-chan tuidriver.Event, error)
-
-// SessionHost is the supervisor seam the production Subscriber drives.
-type SessionHost interface {
-    Session() *tuidriver.Session
-    WaitForPTY(ctx context.Context) error
-}
-
-// Target is everything one (re)subscription needs, resolved fresh per
-// subscription: which host to WaitForPTY/Session() on, which JSONL to tail
-// (and from what offset), and an optional Switch that forces a re-subscribe
-// when it fires. The follow-active generalisation (#679) of the single fixed
-// host + resolver the subscriber used to bake in.
-type Target struct {
-    Host    SessionHost
-    Resolve func(ctx context.Context) (path string, startOffset int64, err error)
-    Switch  <-chan struct{} // nil ⇒ session-end + ctx are the only teardown triggers
-}
-
-// TargetResolver yields the current Target, called once per (re)subscription.
-// A non-nil error is retried (subscribeRetryDelay backoff) unless ctx is done.
-type TargetResolver func(ctx context.Context) (Target, error)
-
-type Config struct {
-    Subscribe   Subscriber             // required; New errors if nil
-    OnEvent     func(turnevent.Event)  // nil ⇒ no-op beyond draining (AC 4)
-    FlushSignal <-chan time.Time       // nil ⇒ no periodic-flush arm (#609)
-    OnFlush     func()                 // runs on the Run goroutine when FlushSignal fires; nil ⇒ ignored (#609)
-    Logger      *slog.Logger           // nil ⇒ slog.Default()
-}
-
-func New(cfg Config) (*Producer, error)            // err iff Subscribe == nil
-func (p *Producer) Run(ctx context.Context) error  // outer re-subscribe loop
-func NewTargetSubscriber(resolve TargetResolver, tr *tuidriver.Tracker, log *slog.Logger) Subscriber
-```
-
-Six exported types — `Producer`, `Config`, `Subscriber`, `SessionHost`, `Target`, `TargetResolver` (the last two added by #679; `NewSessionSubscriber` was removed in the same slice).
-
-### `Run` — the outer re-subscribe loop
-
-`Subscribe(ctx)` → `drain(ctx, ch)` → repeat. `Subscribe` blocks until a live
-stream exists, so the loop is naturally paced (no busy-spin). Returns `ctx.Err()`
-on cancellation — the only error `Subscribe` yields per its contract.
-Re-subscribing after a channel close **is** "no leaked goroutine across a session
-restart": the prior session's tui-driver merge goroutine already closed its
-channel (its per-session ctx was cancelled — see the live Subscriber).
-
-### `drain` — the inner loop
-
-A `select` over `ctx.Done()`, the event channel, and (since #609) a flush signal:
-- `ctx.Done()` → return (clean exit on cancel).
-- channel closed → return (clean exit on session restart).
-- event received → if `OnEvent == nil`, `continue` (drains the source, does
-  nothing else — AC 4); else `mapEvent(ev)` → on `ok` call `OnEvent(te)`, on
-  `!ok` `log.Debug("turnbridge: dropping unrepresentable event", "kind", ev.Kind)`.
-- `<-FlushSignal` (#609) → if `OnFlush != nil`, call it. **The producer stays
-  generic** — it knows "select a flush signal and call back on the Run
-  goroutine," not *why*. This is the seam that lets a consumer give a passive
-  single-`Run`-goroutine emitter a timer without a second goroutine or a lock: the
-  consumer **owns** the `*time.Timer` (arms/resets/stops it from `OnEvent`/`OnFlush`)
-  but hands its channel here to be selected, so the timer-driven flush runs on the
-  **same** goroutine as `OnEvent`. A nil `FlushSignal` is a never-ready arm, so
-  existing callers are unaffected (one branch, no busy-loop). First consumer: the
-  #632 interactive emitter's delta coalescing — see [codebase/609.md](../codebase/609.md).
-
-### Output is a callback, not a channel
-
-A single `OnEvent` callback (nil-allowed) models "no consumer = no-op beyond
-draining" precisely and pushes backpressure / queueing / drop-policy to #616
-(where ADR 025 § Backpressure puts it). It is set once at construction (one
-downstream bridge — no dynamic re-attach, no concurrency on the field). The
-callback runs on the single `Run` goroutine, so #616's callback **must not block
-it indefinitely** — its own queue owns backpressure.
-
-## The mapper (`mapEvent`)
-
-A **pure function** — no logger, no I/O — so the drain owns the debug-log for
-drops and the mapper stays trivially table-testable. `ok == false` means the
-internal model has no representation for the event; the caller drops + debug-logs.
-
-| `ev.Kind` | sub-condition (on `e := ev.Entry`) | result |
-|---|---|---|
-| `EventKindJsonlEntry`, `e.Type=="assistant"` | `ParseToolUse(e.RawLine) != nil` | `ToolStart` |
-| ″ | else `AssistantText(e) != ""` | `TextChunk{MessageID, Text}` |
-| ″ | else `thinkingText(e) != ""` | `ThoughtChunk{MessageID, Text}` |
-| ″ | else | drop |
-| `EventKindJsonlEntry`, `e.Type=="user"` | `ParseToolResult(e.RawLine) != nil` | `ToolUpdate` |
-| ″ | else `isInterruptMarker(e)` (#1243) | `TurnEnd{Reason: TurnEndReasonCancelled}` |
-| ″ | else | drop |
-| `EventKindJsonlEntry`, other `e.Type` | — | drop |
-| `EventKindJsonlEndOfTurn` | — | `TurnEnd{Reason: TurnEndReasonEndTurn}` |
-| `EventKindStallDetected` (#639) | — | `Stall{}` |
-| `EventKindPtyApiRetryShown` (#1074) | — | `ApiRetry{Active: true, Current: ev.Retry.Current, Total: ev.Retry.Total}` |
-| `EventKindPtyApiRetryHidden` (#1074) | — | `ApiRetry{Active: false, Current: ev.Retry.Current, Total: ev.Retry.Total}` (last-known counter forwarded) |
-| `EventKindPtyCompactingShown` (#1074) | — | `Compacting{Active: true}` |
-| `EventKindPtyCompactingHidden` (#1074) | — | `Compacting{Active: false}` |
-| remaining `EventKindPty*` / `EventKindUnknown` | — | drop |
-
-- **The brittleness split (ADR 025).** JSONL-sourced kinds (assistant text, tool
-  use/result, end-of-turn) are robust and map; the screen-derived `StallDetected`
-  marker **also maps now** that #638 gave it an internal type (`turnevent.Stall`)
-  and #639 wired it through — it surfaces the stall onset #373 consumes. **#1074**
-  extends the same split to two more screen-derived PTY-state kinds: the
-  api-retry and compacting show/hide edges now map because tui-driver hands them
-  as **bounded parsed ints** (`ev.Retry.Current`/`.Total`), never raw screen
-  bytes — the mapper never touches banner text, so the substrate seal stays
-  intact even though the signal originates on-screen. The remaining
-  **PTY-state** kinds (`PtyIdle`, `PtyThinking`, `PtyModal*`, `PtyMcpFailure*`,
-  `PtyNetworkFailure*`) and `Unknown` are still **dropped** — not because the
-  screen signals are worthless, but because the internal model (#606) has **no
-  type** for them (no idle/modal variant; that is deliberate). Idle/modal
-  surfacing are later #596/#597 children.
-- **Tool activity rides JSONL, not a dedicated kind.** There is no `tool-use` /
-  `tool-result` event *kind*. `tuidriver.ParseToolUse(e.RawLine)` extracts a
-  `tool_use` block (assistant envelope) → `ToolStart`; `ParseToolResult` extracts
-  a `tool_result` block (user envelope) → `ToolUpdate`. Branches split on `e.Type`
-  first so these re-parse-`RawLine` extractors run only where they can match.
-- **Assistant sub-conditions are mutually exclusive in practice.** Claude's
-  streaming JSONL serialises one content block per line, so an assistant line
-  never carries both `text` and a `tool_use` block; the `tool_use → text →
-  thinking` priority order is defensive and drops nothing in practice (confirmed
-  against tui-driver's own JSONL-layout doc).
-- **Turn-end ordering.** The merge loop emits `EventKindJsonlEntry` then
-  `EventKindJsonlEndOfTurn` for the same final entry, so the producer emits a
-  `TextChunk` immediately followed by a `TurnEnd` — content, then boundary.
-  `EventKindJsonlEndOfTurn` fires only after `IsEndTurn` (`stop_reason=="end_turn"`)
-  held, so `TurnEndReasonEndTurn` is the only correct reason; other stop reasons
-  are not distinguishable from this event kind in v1.3.0.
-- **An interrupted turn ends via a second, independent signal (#1243), not via
-  `EventKindJsonlEndOfTurn`.** claude records an interruption as a plain
-  `user`-role text entry (`"[Request interrupted by user…]"`), which never
-  satisfies `IsEndTurn`, so the only way to report it is to read that entry
-  directly in `mapEntry`'s `case "user"` — after the `ParseToolResult` branch,
-  so a `tool_result` (including one whose payload happens to quote the marker)
-  is always matched and returned first. The check is a **conjunction** of two
-  independently-evidenced signals, not the prose alone: `isInterruptMarker(e)`
-  requires both `!userAuthored(e)` (claude-, not client-, authored — a
-  presence-only check on the top-level `permissionMode` key, never its value)
-  **and** `userText(e)` starting with the `interruptMarkerSentinel` prefix
-  (`"[Request interrupted by user"`, covering both observed claude-version
-  variants with no code change for a new suffix). The authorship gate runs
-  first — a map lookup — so a genuine prompt's body (which can run to tens of
-  KB) is never concatenated by `userText`. Without the authorship half, a
-  client could end its own turn by echoing the marker text in a prompt
-  (`docs/protocol-mobile.md` § Threats #1, prompt injection — this is the
-  reflected variant). See [codebase/1243.md](../codebase/1243.md) for the
-  transcript census backing the authorship gate and the fixture-provenance
-  discipline (every marker/forgery test row is either quoted verbatim from
-  `internal/agentrun/jsonl/testdata/no_end_turn.jsonl` or labelled derived,
-  naming its base line).
-
-### Field mapping & helpers
-
-- `ToolStart{ToolCallID: tu.ID, Title: tu.Name, Kind: toolKind(tu.Name), RawInput: rawInput(tu.Input)}`.
-  `Locations` deferred — deriving touched files from tool input is #616/refinement.
-- `ToolUpdate{ToolCallID: tr.ToolUseID, Status: completed|failed, Content}`. A
-  `tool_result` marks the call finished → terminal status (never pending); empty/
-  absent content → `nil` (legal status-only update).
-- `TextChunk` / `ThoughtChunk` carry `MessageID = e.Message.ID`.
-- `thinkingText` mirrors `tuidriver.AssistantText`'s shape, reading `Raw["thinking"]`
-  from `type=="thinking"` blocks (the Anthropic extended-thinking block) — tui-driver
-  ships no thinking-text helper.
-- `toolResultText` extracts text from the `string | []any | nil` `tool_result`
-  Content union; `toolKind` is a best-effort claude-tool-name → ACP-kind switch
-  (`Read→read`, `Edit`/`Write→edit`, `Bash→execute`, `Grep`/`Glob→search`,
-  `WebFetch→fetch`, `Task→think`, default `other`); `rawInput` re-marshals the
-  input map to opaque JSON (empty/error → `nil`).
-
-`mapEvent` **never errors** — unrepresentable events return `(nil, false)` and are
-dropped. This follows #606's posture: the producer drops what the model can't
-hold; it does not invent error envelopes. (Malformed JSONL never reaches the
-mapper — tui-driver's `TailJSONL` silently drops unparseable lines upstream.)
-
-## The outbound adapter (`MapEvent` / `BuildTurnState`)
-
-The exact mirror of `mapEvent` (#627, `outbound.go`): where `mapEvent` maps a
-tui-driver event **into** the `turnevent.Event` model, `MapEvent` maps that model
-**out** to the matching v2 interactive wire payload (#607). It is **pure** — no
-logger, no I/O, no state, no envelope-ID minting, no clock read, no sealing. Every
-one of those belongs to the consumer (the turn-lifecycle integration slice, #616);
-keeping them out is what makes the adapter table-testable and isolates it from the
-lifecycle state machine.
 
 ```go
 // TurnContext is the per-event turn addressing the consumer supplies. The adapter
@@ -310,12 +60,14 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 func BuildTurnState(conversationID string, state TurnState) (typ string, payload protocol.TurnStatePayload)
 ```
 
-Two exported types (`TurnContext`, `TurnState`), two functions, three state constants.
+Two exported types (`TurnContext`, `TurnState`), two functions, three state
+constants — the entire public surface, since #1543.
 
-### `MapEvent` — the outbound type switch
+## The outbound adapter (`MapEvent` / `BuildTurnState`)
 
-A pure type-switch over the sealed `Event`, mirroring `mapEvent`'s `(value, ok)`
-idiom. Every field is carried verbatim from `tc` + the event:
+`MapEvent` (#627) is a pure type-switch over the sealed `turnevent.Event`,
+shaping one event + an explicit `TurnContext` into the matching v2 interactive
+wire payload (#607). Every field is carried verbatim from `tc` + the event:
 
 | `ev` concrete type | `typ` | `payload` | `ok` |
 |---|---|---|---|
@@ -339,10 +91,9 @@ idiom. Every field is carried verbatim from `tc` + the event:
 - `payload` is `any` because the payload structs share no marker interface; the
   consumer `json.Marshal`s it directly (same path as `MessagePayload`). It is always
   one of the concrete `protocol.*Payload` value structs, or `nil` when `!ok`.
-- **Zero-value-safe.** A nil `ev` falls to the default → drop, exactly like
-  `mapEvent`. Because #607's payloads carry no `omitempty`, boundary zero-values
-  (`seq:0`, `is_error:false`) are always serialized — they reach the wire rather than
-  vanishing.
+- **Zero-value-safe.** A nil `ev` falls to the default → drop. Because #607's
+  payloads carry no `omitempty`, boundary zero-values (`seq:0`, `is_error:false`)
+  are always serialized — they reach the wire rather than vanishing.
 - **Internal-only fields are not forwarded.** `ToolStart.Kind`/`Locations` and
   `*.MessageID` have no #607 wire home and are correctly dropped.
 - **`is_error = (Status == ToolStatusFailed)`** — `completed`/`pending`/`in_progress`
@@ -385,14 +136,15 @@ pure helpers derive a bounded, single-line summary:
 - **`inputSummary(json.RawMessage)`** — `json.Compact` (whitespace → one line) then
   `truncate`. Empty/nil **and** invalid-JSON both yield `""` — `RawInput` is
   best-effort/opaque (#606), so a malformed blob is a précis-less `tool_use`, not an
-  error (mirrors the inbound `rawInput` posture).
+  error.
 - **`resultSummary(turnevent.ToolContent)`** — **exhaustive** over the sealed
   `ToolContent` sum type so a future producer variant cannot silently vanish:
   `nil`→`""` (the legal status-only `ToolUpdate`), `TextContent`→its text,
   `DiffContent`→`Path`, `TerminalContent`→`"terminal <id>"` — each truncated. The
-  current inbound producer (`toolResultContent`) only ever emits `TextContent` or
-  `nil`; the Diff/Terminal arms are unreachable today but handled (kept deliberately
-  minimal) until a producer (the ACP adapter #600, or a refinement) emits them.
+  live inbound producer (`internal/streamsup`'s `toolResultContent`) only ever
+  emits `TextContent` or `nil`; the Diff/Terminal arms are unreachable today but
+  handled (kept deliberately minimal) until a producer (the ACP adapter #600, or
+  a refinement) emits them.
 - **`truncate(s, max)`** — returns `s` unchanged at ≤ `max` runes; otherwise cuts at
   `max` runes (`[]rune`, not bytes) and appends `"…"`. Rune-aware so multibyte text
   never splits mid-rune.
@@ -409,263 +161,53 @@ consumer (integration slice, building on #616's fan-out) owns the envelope `ID` 
 events, **and** every lifecycle decision (which conversation/turn/seq/state applies,
 turn-id assignment, seq advancement, coalescing). See
 `cmd/pyry/session_transition_v2.go` for the existing shape that wraps a payload into
-an `Envelope` — the structurally-identical v2 coarse emitter `assistant_turn_v2.go`
+an `Envelope`; the structurally-identical v2 coarse emitter `assistant_turn_v2.go`
 was removed in [#699](../codebase/699.md), and the v1 coarse bridge
 `cmd/pyry/assistant_turn.go` this paragraph originally also pointed at was removed in
 [#913](../codebase/913.md). This is why the adapter is pure: every clock read,
 counter, and I/O lives in the consumer.
 
-## The follow-active subscriber (`NewTargetSubscriber`, #679)
-
-Builds the production `Subscriber`. The single-host `NewSessionSubscriber` was
-**replaced** by a target-driven subscriber so the producer can **follow the
-active conversation** — re-keying its subscription host, JSONL resolver, and
-PTY-state source to whichever conversation the operator is interacting with, and
-re-subscribing when that changes. The whole re-key rides the **existing**
-`Producer.Run` re-subscribe loop (a switch closes the stream → `Run`
-re-subscribes → the fresh `TargetResolver` snapshots the now-active session);
-`Producer` itself is unchanged. The conv→session knowledge lives in the
-**caller's** `TargetResolver` callback (`cmd/pyry`'s `resolveTarget`), so this
-package stays import-neutral — see [conversation-session-binding.md](conversation-session-binding.md)
-and [codebase/679.md](../codebase/679.md) for the resolver/routing side.
-
-**Two-loop structure.** An **outer** loop calls `resolve(ctx)` once per
-(re)subscription to snapshot a `Target`; an **inner** loop runs the per-target
-sequence. Per inner iteration:
-1. `target.Host.WaitForPTY(subCtx)` — block until a session is live; abort on a
-   switch. (`WaitForPTY` returns only nil/ctx-err, so a non-nil err means
-   `subCtx` is done — parent cancel → return, else a switch → `continue resubscribe`.)
-2. `sess := target.Host.Session()`; if `nil` (torn down between wait and
-   capture), retry — `WaitForPTY` blocks for the next session, so no spin.
-3. `target.Resolve(subCtx)` → `tuidriver.WaitForSessionJSONL(subCtx, path)`.
-4. `go func(){ sess.Wait(); cancel() }()` (session-end watcher); `sess.Events(subCtx, path, off, tr)`.
-
-The outer loop snapshots the `Target` once and, if `target.Switch != nil`, spawns
-a **switch watcher** (`select { case <-target.Switch: cancel(); case <-subCtx.Done(): }`)
-that cancels the per-subscription `subCtx` on a switch and exits on
-session-end/parent-cancel — so it never outlives its subscription. Both watchers
-call the idempotent `cancel()`.
-
-**Switch-abortable pre-stream waits** (steps 1, 3, 4 all take `subCtx`) are the
-one new invariant beyond the old single-host body and are **load-bearing for
-follow-active re-key (#679 AC3)**: without them the producer can wedge forever in
-`WaitForPTY` of a stale evicted session after the operator switches
-conversations. The error arms **discriminate the cancel cause before calling the
-local `cancel()`** — `ctx.Err()` (parent → return) then `subCtx.Err()` (switch →
-`continue resubscribe`) then transient (file not present → `subscribeRetryDelay`
-backoff + retry) — because calling `cancel()` first would make `subCtx.Err()`
-unconditionally non-nil and mask a transient as a switch.
-
-**The cold/warm offset state is per-subscription, not per-retry.** The inner
-loop's transient retries reuse the **same** `target.Resolve` closure, so its
-`resolvedOnce`/`sawEmpty` state (the #671 cold-start gate) survives a
-not-yet-present JSONL within one subscription but resets on a re-subscription
-(switch / session-end → a fresh `Target` with a fresh resolver). A flat
-"re-resolve on every retry" loop would silently reintroduce the #671 cold-start
-drop for bound sessions.
-
-**The Wait-watcher is the linchpin of "no leaked goroutine across a session
-restart."** The Events merge loop exits only on its ctx or when its internal
-`TailJSONL` channel closes — but `TailJSONL` tails a file that **persists on disk
-after claude exits** (EOF → wait → retry), so it never closes on process exit
-alone. The per-session ctx, cancelled by `sess.Wait()` returning when the
-supervised process exits, is therefore the *only* thing that closes the stream on
-a restart. The watcher is spawned **only on the `Events()` success path**, so an
-open-error retry leaks no watcher; it unblocks on the supervisor's guaranteed
-`sess.Close()` at every `runOnce` exit (including root-ctx cancel), so it never
-leaks. `sess.Wait()` is documented safe to call concurrently with the
-supervisor's own `Wait`/`Close`.
-
-`tr` is required by `Session.Events` (a nil tracker panics) and drives the
-`stall_detected` rising-edge marker that now maps through to a `stall` envelope
-(#639; before that it drove only the dropped stall arm). A default
-`tuidriver.NewTracker(tuidriver.TrackerOpts{})` suffices.
-
-**A switch is silent to the consumer — the consumer must track ownership itself
-(#1062).** The subscriber's switch teardown closes the stream so `Run`
-re-subscribes; it does not, and cannot, tell the consumer's stateful emitter
-(`cmd/pyry/interactive_turn_v2.go`, [codebase/632.md](../codebase/632.md)) that the
-*conversation* changed. Before #1062 the emitter's turn lifecycle
-(`inTurn`/`turnID`/`seq`/`currentState`) was implicitly scoped to "whichever
-conversation is active", which breaks exactly when a switch lands **mid-turn**
-(the prior conversation's `TurnEnd` never arrives): the next conversation's
-opening `turn_state` transition de-duped away against the stale `currentState`,
-while its `assistant_delta` still flushed. The fix adds an explicit `turnConvID`
-owner field and a guard at the top of `Handle` that abandons an orphaned turn
-(flush its buffered delta against its own conversation, then end it) when the
-live cursor no longer matches — see [codebase/1062.md](../codebase/1062.md).
-
-## The `Session()` accessor (supervisor)
-
-```go
-// Session returns the currently-hosted tui-driver Session, or nil when no
-// claude child is attached (between restarts, mid-spawn, or idle-evicted).
-func (s *Supervisor) Session() *tuidriver.Session
-```
-
-A nil-safe getter mirroring `ScreenSnapshot`'s capture (lock `sessMu`, read
-`s.sess`, unlock). **Additive** — no existing signature changes, zero call-site
-blast radius. Returning `*tuidriver.Session` does **not** breach the substrate
-seal: the producer only calls `sess.Events()` (typed events), never
-`MirrorOutput()`/`Snapshot()` (raw bytes), so no claude-screen literal enters
-pyrycode and `cmd/substrate-guard` stays green.
-
 ## Concurrency model
 
-- **One producer goroutine** (`Producer.Run`, started by #633's
-  `startInteractiveTurnStreamV2` under the relay lifecycle ctx). Single owner of the
-  `OnEvent` invocation.
-- **One short-lived Wait-watcher goroutine per subscription**, inside the live
-  Subscriber. Exits when the session closes. No leak (see above).
-- **One switch-watcher goroutine per subscription** (#679, only when
-  `target.Switch != nil`) — selects the switch channel vs `subCtx.Done()` and
-  cancels `subCtx` on a switch. Bounded by the subscription: it exits on
-  `subCtx.Done()`, so it cannot outlive its subscription, and calls the
-  idempotent `cancel()`. (The switched-away session's Wait-watcher lingers until
-  that session ends — bounded by live-session count ≤ `ActiveCap`.)
-- **tui-driver's own merge + tail goroutines** inside `Session.Events`, governed
-  by the per-session ctx; they close the channel and exit when it is cancelled.
-- **Shutdown:** root ctx cancel → `WaitForPTY`/`drain`/Events-merge all observe
-  `ctx.Done()` → channels close → `Run` returns `ctx.Err()`; the supervisor
-  independently `Close`s its session, unblocking any in-flight Wait-watcher.
-- The only shared state is the supervisor's `sessMu` (already leaf-only), read by
-  `Session()`. The producer adds no locks.
-
-## Which JSONL, and surviving `/clear` rotation
-
-**The producer does not own JSONL-path resolution or live-`/clear`-rotation
-survival.** It accepts an injected resolver and re-subscribes per session. #615
-ships the mechanism; #633 supplies the original production resolver + the wiring.
-
-> **Since #679 the resolver is chosen per-subscription by the caller's
-> `TargetResolver`, not fixed at construction.** `resolveTarget` (`cmd/pyry`) picks
-> a **by-id** resolver (`resolveBoundSessionJSONL`, tails `<bound-session-id>.jsonl`,
-> mtime-independent) once a turn is routed to a **non-bootstrap** conversation's
-> bound session — so the reply follows the active conversation's own transcript and
-> never another conversation's more-recently-written file (cross-conversation
-> confidentiality). See [codebase/679.md](../codebase/679.md) and
-> [conversation-session-binding.md](conversation-session-binding.md).
->
-> **Corrected 2026-07 (#854): the `convID == ""` bootstrap branch does NOT use a
-> plain mtime "recency" scan.** It was probe-preferred by #827 (undocumented at the
-> time — no `codebase/827.md` exists; see [codebase/838.md](../codebase/838.md)'s
-> note) to `resolveOwnBootstrapJSONL`: it tails the transcript the daemon's *own*
-> claude child holds open (matched by PID via `rotation.Probe`), falling back to the
-> plain mtime scan (`resolveLatestSessionJSONL`, #633) only when no usable probe is
-> available — never picking a second claude's newer file in the same shared dir.
-> **#854 extends this to a third case**: a `convID != ""` conversation that resolves
-> to the **bootstrap** session (`host == bootstrap`, a pointer-identity check) also
-> uses `resolveOwnBootstrapJSONL`, not the by-id resolver. The bootstrap claude
-> spawns without `--session-id`, so it mints its own on-disk transcript uuid that
-> never equals its pool id — a by-id resolver keyed on the pool id would tail a
-> `<poolID>.jsonl` that never exists and loop forever (the fresh-daemon deadlock
-> #854 fixes: on a fresh daemon, before #854, the bootstrap-bound conversation would
-> never get a reply). The by-id resolver is now used **only** for a `convID != ""`
-> conversation bound to a **non-bootstrap** session. See [codebase/854.md](../codebase/854.md).
->
-> **Since #686 the by-id resolver's *directory* is per-conversation, not the
-> shared dir.** Once [#685](conversation-session-binding.md#cwd-is-the-validated-trust-marked-spawn-workdir-685)
-> spawns each conversation's session in its own `Cwd`, claude writes that session's
-> transcript under `~/.claude/projects/<encoded-cwd>/<id>.jsonl`, not the daemon's
-> shared `claudeSessionsDir`. `boundHost` now derives the directory from the bound
-> session's captured spawn `WorkDir` (`Supervisor.WorkDir()` → `perConversationSessionsDir`
-> → `sessions.DefaultClaudeSessionsDir`) and `resolveTarget` feeds *that* dir to
-> `resolveBoundSessionJSONL`. A default (null-`Cwd`) session, whose `WorkDir` equals
-> the bootstrap workdir, still resolves from the shared `claudeSessionsDir`
-> unchanged; an underivable dir is a hard miss (retry, never a fallback). So
-> confidentiality is now layered on **two** axes — the filename (bound UUID, #679)
-> *and* the directory (spawn workdir, #686). See [codebase/686.md](../codebase/686.md).
-
-- **Supervisor restart is handled here.** A newly-hosted session ends the prior
-  one (`sess.Wait()` returns) → per-session ctx cancels → Events channel closes →
-  `Run` re-subscribes → `WaitForPTY` blocks for the new session → `resolve` runs
-  again. This is exactly the "no leak across restart" guarantee, unit-tested via
-  the fake `Subscriber`.
-- **The production resolver (#633) is a most-recently-modified scan, NOT
-  `SessionJSONLPath`.** Because the supervised relay session spawns with `--continue`
-  (no `--session-id`), there is **no stable UUID** at spawn time — exactly why
-  `deliverViaSession` leaves `JSONLPath` empty — and `*tuidriver.Session` exposes no
-  path accessor, so `SessionJSONLPath(home, cwd, sessionID)` **cannot** be used.
-  #633's `resolveLatestSessionJSONL(dir)` instead returns the
-  **most-recently-modified `<uuid>.jsonl`** under the daemon's `claudeSessionsDir`
-  plus a `startOffset`, re-evaluated fresh per subscription so a
-  (re)subscription streams only new events instead of replaying the whole
-  conversation. See [codebase/633.md](../codebase/633.md). **Superseded as the
-  primary bootstrap resolver by #827/#854** (see the corrected callout above) —
-  `resolveLatestSessionJSONL` now survives only as `resolveOwnBootstrapJSONL`'s
-  no-probe-available fallback, not the resolver `resolveTarget` picks directly.
-- **Cold start tails from offset 0 (#671).** `startOffset = size` (EOF) was the
-  original warm default (don't replay the prior transcript to the internet-exposed
-  phone) and a `/clear` rotation, but it dropped the live reply on a **fresh**
-  session: claude under `--continue` defers JSONL creation until first input, so
-  the producer's first resolve finds nothing and retries; the phone's prompt then
-  lands and claude writes the user turn + reply together, so the next resolve
-  finds a brand-new file already sized *past* the in-flight reply and tails from
-  EOF. The resolver closure is stateful (`resolvedOnce`/`sawEmpty`, read/written
-  only on the single `Producer.Run` goroutine): the **first** file returned after
-  one or more not-found results is a cold-start file → `startOffset = 0` so its
-  whole content (the current turn) streams; warm-present and post-cold-start files
-  tail from EOF. Offset 0 is structurally confined to brand-new files (a resumed
-  transcript would already exist → warm path), so no prior session leaks. See
-  [codebase/671.md](../codebase/671.md). **#1152** replaced the warm value: instead
-  of a caller-`os.Stat`ted `size` (a cross-fd TOCTOU — the caller stats file A, the
-  tail may open a rotated file B, and the stat-time offset lands wrong), the warm
-  branch now passes `tuidriver.TailFromEnd` (`-1`) so `TailJSONL` (tui-driver
-  v1.12.0) resolves the seek against its **own** fd. `startOffset` is still
-  forwarded unchanged through `producer.go:327` → `Session.Events` → `TailJSONL`;
-  only the value the resolvers compute changed. See [codebase/1152.md](../codebase/1152.md).
-- **`/clear` survival is restart-driven (#633).** A `/clear` rotates claude's on-disk
-  session UUID **without** restarting the supervised process, so the Events channel
-  does not close on the `/clear` itself. On the **next supervisor restart**, `Run`
-  re-subscribes and the resolver re-evaluates to the newest (post-`/clear`) JSONL —
-  the per-call freshness of the resolver is the load-bearing half. A `/clear` *not*
-  followed by a restart keeps tailing the pre-`/clear` file until the next restart
-  (the producer has no live rotation signal — the fsnotify watcher feeds
-  `Pool.RotateID`, not the producer); gap-free in-process rotation is a Phase 2
-  follow-up.
+None. `MapEvent`/`BuildTurnState` are pure synchronous functions — no goroutines,
+channels, shared state, or shutdown sequence. Before #1543 this package also hosted
+the only concurrent machinery it ever had (the deleted producer's `Run`/`drain`
+re-subscribe loop plus its per-subscription Wait- and switch-watcher goroutines);
+deleting it reduced the package's concurrency surface to zero. That history is in
+[codebase/615.md](../codebase/615.md) and [codebase/679.md](../codebase/679.md).
 
 ## Not `security-sensitive`
 
-Neither direction of this package carries the label. The **producer** reads the
-supervised claude session's structured events — **trusted local input** — and maps
-them to an internal model. The **outbound adapter** (#627) is a pure value-to-value
-mapper: no untrusted-party input, no capability decision, no dispatch. No
-capability enforcement lives here in either direction — all of that lives in the
-consumer slice (#616), which carries the `security-sensitive` label. Labelling
-this package would track data lineage rather than the security-relevant design
-decision.
-
-**One narrow carve-out since #1243.** `mapEntry`'s `case "user"` now makes an
-actual authorship trust decision — `userAuthored(e)`, gating whether a
-transcript entry can be treated as claude's own record rather than a client's
-echoed-back prompt text — because a `user`-role entry is the shape **both**
-parties write to the same JSONL. It stays out of `security-sensitive` scope
-deliberately: the decision is a single presence-only map lookup (no value read,
-no external call), it grants no capability, and what it gates is narrow (can
-this entry's prose end the turn), not what the consumer slice's label is for
-(who gets to see/drive a conversation at all). See
-[codebase/1243.md](../codebase/1243.md) § Security note and the architecture
-spec's § Security review for the full analysis, including the one accepted
-fail-open direction (claude ceasing to write `permissionMode` on prompts).
+A pure value-to-value mapper: no untrusted-party input, no capability decision, no
+dispatch. All capability enforcement lives in the consumer slice (#616,
+`cmd/pyry/interactive_turn_v2.go`), which carries the `security-sensitive` label.
+Labelling this package would track data lineage rather than the security-relevant
+design decision.
 
 ## Related
 
 - [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — § Phase 2
-  structured streaming, § "The event model", § "Key architectural insight" (the
-  JSONL-robust / PTY-brittle split), § Backpressure.
-- [turnevent-package.md](turnevent-package.md) (#606) — the pivot model: what the
-  producer maps INTO and the outbound adapter maps OUT of.
+  structured streaming, § "The event model", § Backpressure.
+- [turnevent-package.md](turnevent-package.md) (#606) — the pivot model `MapEvent`
+  maps OUT of.
 - [protocol-package.md](protocol-package.md) (#607) — the v2 interactive wire types
-  the outbound adapter (#627) maps OUT to.
-- [codebase/513.md](../codebase/513.md) — `ptyrunner.Run`, the sibling consumer of
-  the same `tuidriver.Session.Events()` unified stream (different consumer, same
-  per-session-ctx Wait discipline).
-- [codebase/615.md](../codebase/615.md) — producer ticket record (patterns + lessons).
-- [codebase/627.md](../codebase/627.md) — outbound-adapter ticket record (patterns + lessons).
-- [codebase/639.md](../codebase/639.md) — the stall bridge wiring: un-drops `StallDetected` through all three stages to the capability-gated fan-out (#638's `turnevent.Stall` + `protocol.StallPayload`).
-- [codebase/1074.md](../codebase/1074.md) — repeats the #639 pattern for two more PTY-derived status peers of `stall` (api-retry, compaction): four new `mapEvent` arms, two new `MapEvent` arms, one merged `Handle` case; `security-sensitive` (forwards a screen-derived attempt counter across the tui-driver substrate seal, bounded to two ints).
-- [codebase/609.md](../codebase/609.md) — delta coalescing: the additive `Config.FlushSignal`/`OnFlush` flush-arm seam + the emitter-owned ~250ms timer it serves.
-- [codebase/679.md](../codebase/679.md) — the follow-active producer lifecycle: generalises the subscriber to `Target`/`TargetResolver`/`NewTargetSubscriber` (removing `NewSessionSubscriber`) so the reply tails the active conversation's bound-session transcript by id, re-subscribing on a switch.
-- [codebase/1062.md](../codebase/1062.md) — the consumer-side fix for a switch landing **mid-turn**: the emitter now records which conversation owns its open turn (`turnConvID`) and abandons an orphaned turn on a mismatch, so the new conversation's opening `turn_state` is no longer de-duped away.
-- [codebase/686.md](../codebase/686.md) — re-points the by-id resolver's directory to the conversation's own per-`Cwd` JSONL dir (derived from the bound session's captured spawn `WorkDir`) once #685 spawns sessions in distinct directories; default sessions keep resolving from the shared dir.
-- [codebase/1243.md](../codebase/1243.md) — an interrupted PTY turn now reports `turn_end{cancelled}`: a second, independent `mapEntry` signal (the interrupt-marker text entry, gated by a claude-vs-client authorship check) alongside `EventKindJsonlEndOfTurn`, agreeing with [streamsup-package.md](streamsup-package.md)'s `error_during_execution → cancelled` mapping on the stream-json path. Resolves the reporting gap [codebase/1191.md](../codebase/1191.md)'s live gate found.
+  `MapEvent` maps OUT to.
+- [streamsup-package.md](streamsup-package.md) — the live inbound counterpart on the
+  stream-json path (structurally different: no `turnbridge` re-mapping step; the
+  parser emits `turnevent.Event` directly). Its `toolResultContent` is what
+  `resultSummary`'s doc comment names above.
+- [acpbridge-package.md](acpbridge-package.md) (#769) — the sibling outbound ACP
+  adapter, the exact ACP mirror of this package's `MapEvent` (same neutral source,
+  different wire framing).
+- [codebase/627.md](../codebase/627.md) — this file's own ticket record (patterns +
+  lessons).
+- [codebase/639.md](../codebase/639.md), [codebase/1074.md](../codebase/1074.md) —
+  the stall / api-retry / compacting `MapEvent` rows landed by those tickets.
+- **History of the removed inbound producer** (deleted #1543; orphaned by #1348):
+  [codebase/615.md](../codebase/615.md) (the producer), [codebase/609.md](../codebase/609.md)
+  (the flush-signal coalescing seam it offered), [codebase/679.md](../codebase/679.md)
+  (the follow-active subscriber), [codebase/686.md](../codebase/686.md) (per-conversation
+  JSONL directory), [codebase/854.md](../codebase/854.md) (bootstrap resolver),
+  [codebase/1062.md](../codebase/1062.md) (mid-turn switch fix),
+  [codebase/1243.md](../codebase/1243.md) (the interrupt-marker signal) — all frozen
+  and still searchable via `mcp__qmd__query(collection: "pyrycode-docs", …)`.
