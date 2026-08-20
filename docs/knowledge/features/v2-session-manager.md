@@ -1006,12 +1006,16 @@ and widening that signature to do so was ruled out as disproportionate to the
 diagnostic gained.
 
 **#1193 closes the invariant.** The remaining two arms lived behind
-`interruptRunner` (`cmd/pyry/main.go`), the type switch that dispatches to
-`streamRunner.Interrupt()` or `*supervisor.Supervisor.SendEsc()` — reaching them
-needed a signature change, which is why they were split into their own ticket.
-`interruptRunner` now returns the `interruptArm` it dispatched to
-(`armInterrupt` / `armSendEsc` / `armNone`) alongside the chosen method's error,
-and `activeInterrupter.SendEsc()` — the only scope holding the conversation id —
+`interruptRunner` (`cmd/pyry/main.go`) — reaching them needed a signature
+change, which is why they were split into their own ticket. At the time,
+`interruptRunner` dispatched to `streamRunner.Interrupt()` or
+`*supervisor.Supervisor.SendEsc()`; `#1348` deleted `internal/supervisor`
+outright, leaving the `SendEsc` arm type-dead, and `#1548` deleted it along with
+the `armSendEsc` constant — `interruptRunner` is now an optional
+`if`-assertion with a single surviving actuation, `streamRunner.Interrupt()`.
+`interruptRunner` still returns the `interruptArm` it dispatched to
+(`armInterrupt` / `armNone`) alongside the chosen method's error, and
+`activeInterrupter.SendEsc()` — the only scope holding the conversation id —
 emits from it: `v2.interrupt.dispatched` (`conversation_id`, `arm`) on a
 successful dispatch, unconditionally including when the dispatched arm's own
 call returned an error (it records *which arm ran*, not that the child

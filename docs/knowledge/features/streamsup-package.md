@@ -1139,13 +1139,23 @@ would only narrow the race, since that call returns after `cancel()` while the k
 and the respawn all still run later on the Run goroutine.
 
 `startFreshRunner` (`cmd/pyry/main.go`) arms the gate via `beginRotationOrNoop`, an **optional**
-type assertion (`interface{ BeginRotation() func() }`) rather than a widened `RestartFresh`
-dispatch case — so `new_session_routing_test.go`'s stub-based subtests keep exercising the same
-dispatch shape rather than silently degenerating into the inert default arm. The existing
+type assertion (`interface{ BeginRotation() func() }`) rather than widening `RestartFresh`'s own
+assertion (`interface{ RestartFresh(string) }`, itself un-widened since `#1548` deleted the
+`*supervisor.Supervisor`-only arm it used to switch on) to also require the gate — so a runner
+that offers `RestartFresh` without a gate still rotates, just ungated, instead of silently
+degenerating into the inert default. `rotatingRunner` (`inbound_deliver_rotation_test.go`) is
+what makes that optionality load-bearing to existing coverage rather than academic: it exposes
+both methods unconditionally and leaves arming to the real `startFreshRunner`. The existing
 rotate-before-`RestartFresh` order (load-bearing for the double-rotation watcher skip-set) is
 unchanged; the arm is inserted ahead of both statements. `streamRunner.BeginRotation()` forwards
 it, the third concrete method reached by type assertion off the un-widened `sessions.Runner`
 after `Interrupt` (#1120) and `RestartFresh` (#1124).
+
+**A mutation-pin on the arming order needs a stub that exposes the gate.** Hoisting
+`beginRotationOrNoop` above `startFreshRunner`'s inert return is the hazard `#1330`'s ordering
+guards against (§ above); pinning it with a stub that has no `BeginRotation` method is vacuous,
+since `beginRotationOrNoop` takes its own inert branch whether or not the hoist happened, and the
+row passes on both the mutant and the fix (`#1548`).
 
 **The refusal record is logged at `Info`, deliberately diverging from the spec's `Debug`.** The
 e2e's stability guard greps the daemon's *whole* captured stderr for the literal
