@@ -4,7 +4,6 @@ go 1.26.2
 
 require (
 	github.com/coder/websocket v1.8.13
-	github.com/creack/pty v1.1.24
 	github.com/flynn/noise v1.1.0
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/mdp/qrterminal/v3 v3.2.1
@@ -15,6 +14,7 @@ require (
 )
 
 require (
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/hinshun/vt10x v0.0.0-20220301184237-5011da428d02 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	rsc.io/qr v0.2.0 // indirect
