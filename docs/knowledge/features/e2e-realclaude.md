@@ -2160,6 +2160,37 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched.
 
+- `session_transcript_probe_test.go` (#1655) — measures whether a `claude`
+  launched under `--session-id <id>` that runs no turn leaves an `<id>.jsonl`
+  on disk, the premise a suspected `streamsup` crash-loop (2026-08-18) rests
+  on and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)
+  needs before #1630 can carry its by-id-existence rule into `streamsup`.
+  `TestRealClaude_TurnlessSessionIDTranscript` runs a control arm (one turn;
+  the transcript's appearance pins the sessions directory empirically and is
+  compared against `sessions.DefaultClaudeSessionsDir`) and a turnless arm
+  read twice — while alive, and again after a `SIGTERM`→grace→`SIGKILL`
+  termination — through `classifyTurnlessTranscript`, which reads the
+  termination mode so a force-killed absence can never be recorded as the
+  fact holding. **Measured HOLDS** (claude 2.1.220): full record and
+  reproduce steps in
+  [`session-transcript-and-resume-probe.md`](session-transcript-and-resume-probe.md).
+  Credential-free companion `TestTurnlessTranscriptVerdict` pins the
+  classifier's five outcome rows offline.
+
+  **Two lessons that outlive this ticket:**
+  - **A `*bytes.Buffer` behind a live `exec.Cmd` cannot be read while the
+    child is still running.** The liveness `t.Fatalf` path reads the
+    turnless arm's stderr with the child still alive, racing `os/exec`'s own
+    copy goroutine under `-race`. A mutex-guarded `boundedBuffer` is needed
+    regardless of the separate ingest-cap requirement — a plain capped
+    buffer still races on this read.
+  - **`agentrun.ResolveWorkdir` returns `(string, error)`, not a bare
+    string.** It wraps `fs.ErrNotExist`; a caller that drops the error can
+    set `cmd.Dir` on a workdir that no longer exists and silently invalidate
+    any directory comparison built on it.
+
+  Zero production files touched.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
