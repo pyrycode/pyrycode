@@ -7,15 +7,10 @@ Pyrycode is a process supervisor that keeps a Claude Code session alive across c
 ```
 pyrycode/
 ├── cmd/pyry/                  Binary entry point
-│   ├── main.go                CLI parsing, signal setup, supervisor init
-│   └── acp.go                 `pyry acp` verb (#756): runACP composition root + serveACP core — serves internal/acp over real stdio (io.Pipe-bridged stdin closer for prompt SIGINT/SIGTERM shutdown), plain-stderr logger, exit 0 on EOF + signal; registers no handlers, drives no claude (EPIC #600)
-├── internal/supervisor/       Core process supervision
-│   ├── supervisor.go          Supervisor type: hosts claude via a tui-driver Session, I/O bridge, restart loop — non-production since 2026-07-24 and unverified since; its four live gates fail on clean main and are skipped by default (production runs the stream-json runner; see *Interactive Session* below and #1348)
-│   ├── backoff.go             Backoff timer: exponential delay with stability reset
-│   └── winsize.go             SIGWINCH → PTY size sync
+│   └── main.go                CLI parsing, signal setup, daemon composition root
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand + ValidID() canonical-shape validator
-│   ├── session.go             Session: wraps one supervisor + optional bridge; lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Attach with attach bookkeeping
+│   ├── session.go             Session: holds one `Runner` (the narrow seam over the supervised claude child, declared in runner.go); lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Evict
 │   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout + ActiveCap), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run with supervise() fan-out seam, allocated-UUID skip set (registerAllocatedUUIDLocked variant), buildSession helper shared with GetOrCreate, Snapshot, Activate (cap-aware), capMu
 │   ├── get_or_create.go       Pool.GetOrCreate take-or-create primitive (1.3b): caller-supplied UUIDv4, atomic register+persist+skip-set+g.Go(sess.Run) under p.mu; ErrInvalidSessionID
 │   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
@@ -72,11 +67,13 @@ pyrycode/
 │   ├── envelope_test.go       Golden round-trip vs. testdata/envelope_full.json, envelope_minimal.json, routing_envelope.json (canonical json.Compact compare; time.Time.Equal for TS)
 │   ├── compat_test.go         Truth-table for IsKnownAppType + drift detectors (inboundAppTypeSet covers all Type* constants; Code* match spec dotted strings)
 │   └── testdata/              envelope_full.json (every field), envelope_minimal.json (omitempty branches), routing_envelope.json (relay splice)
-├── internal/control/          Control-plane server (Unix socket, JSON)
-│   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
-│   ├── attach.go              Attach handoff to supervisor bridge
-│   └── logs.go                Ring-buffer log streaming
-├── internal/acp/              ACP bidirectional transport (EPIC #600 pyry acp, #755 inbound floor + #757 outbound; served by cmd/pyry/acp.go, #756)
+├── internal/control/          Control plane: Unix-socket server + client (line-delimited JSON)
+│   ├── client.go              Client-side verb helpers (Status / Logs / Stop / SessionsNew / SessionsRm / SessionsRename / SessionsList / SessionsHasID / Rekey / Approve) over the one-request-one-response request(); DialTimeout
+│   ├── dial.go                Socket dial with bounded retry (dialWithRetry) over transient startup errors — isTransientStartupError covers ENOENT / ECONNREFUSED during the daemon's self-restart window
+│   ├── logs.go                LogProvider read view, RingBuffer (bounded, mutex-guarded), SlogTee slog.Handler that mirrors daemon log lines into it for `pyry logs`
+│   ├── protocol.go            Package doc + wire types: Verb constants, Request / Response, ErrorCode tokens, JSONLPolicy enum
+│   └── server.go              Server, consumer-declared Session / SessionResolver / Remover / Renamer / Lister / GetOrCreator / Rekeyer / Sessioner interfaces, verb dispatch with per-conn handshake deadline
+├── internal/acp/              ACP bidirectional transport (EPIC #600 pyry acp, #755 inbound floor + #757 outbound; the `cmd/pyry/acp.go` entry point that served it was deleted by #1348 — the live consumer is `cmd/pyry`'s serveJSONRPCStdio, driven by the daemon's MCP approval server)
 │   ├── acp.go                 Transport (line-delimited JSON-RPC 2.0 over io.Reader/io.Writer + inbound method dispatch table + outbound pending-call registry), New/Register/Serve, bufio.Scanner read loop, handleLine classify+dispatch, writeMu-guarded write helpers, package doc (hard interactive-claude cost invariant + batch-rejection decision); #757 adds Call (blocking agent→client request: marshal-first, register-waiter-before-write, ctx-cancel reclaims) + routeResponse (delivers a response to its id's waiter or logs+drops unknown/reclaimed id) + reclaim, over nextID atomic.Uint64 + pendingMu-guarded pending map[uint64]chan callResult (cap-1 buffer keeps the read loop non-blocking) — the first cross-goroutine transport state, makes writeMu load-bearing; stdlib-only, does NOT import internal/protocol
 │   ├── jsonrpc.go             Code* error-code constants, exported Error + NewError, unexported wire types (single decode-by-shape rpcMessage inbound + successResponse/errorResponse/rpcError outbound; #757 adds outbound request frame + callResult delivery type)
 │   └── acp_test.go            Same-package, table-driven, -race-clean; inbound: framing/dispatch/response-frame-routing/diagnostics-isolation/no-panic/register-guards; #757 outbound via liveTransport harness (Serve on a goroutine over paired io.Pipes, syncBuffer diag sink): result/error/data path, 32 concurrent distinct ids under -race, unknown-id drop, ctx-cancel reclaim + late-response drop, malformed-error-object, marshal-params error
@@ -88,7 +85,14 @@ pyrycode/
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
 
-Dependency direction: `cmd/pyry → internal/sessions → internal/supervisor`, with `internal/control` importing `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). `internal/supervisor` has no upward imports — verifiable with `go list -deps ./internal/supervisor/...`.
+Dependency direction: `cmd/pyry → internal/sessions`, with the concrete runner handed *down* rather than imported *up* — `internal/sessions` declares the narrow `Runner` interface and takes a `Config.RunnerFactory`, and `cmd/pyry` is the only package that imports `internal/streamsup` and supplies the concrete runner. So there is no `internal/sessions → internal/streamsup` edge to trace: the arrow points the other way. `internal/control` imports `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). Both halves are checkable:
+
+```sh
+# the edge that exists — exits 0
+go list -deps ./internal/control | grep -qx github.com/pyrycode/pyrycode/internal/sessions
+# the edge that does not exist — exits 0
+! go list -deps ./internal/sessions/... | grep -qx github.com/pyrycode/pyrycode/internal/streamsup
+```
 
 ## Data Flow
 
