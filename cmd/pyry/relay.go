@@ -518,10 +518,12 @@ func startRelayV2(
 	}
 	priv := staticKey.PrivateKey()
 
-	// Daemon-singleton outstanding-modal registry. The interactive modal stream
-	// (#798, startInteractiveModalStreamV2 below) constructs the surfacer over this
-	// same instance, so a live permission/trust prompt Records here and the inbound
-	// resolver (ModalResolver seam) / deny-on-timeout consume the same entries.
+	// Daemon-singleton outstanding-modal registry. Its sole live producer is the
+	// stream-json approval bridge's Surface (#1080, newStreamApprovalBridge below),
+	// which Records a raised approval here; the consumers are the inbound resolver
+	// newModalResolverV2 builds (ModalResolver seam, including deny-on-timeout) and
+	// the connect-time replay source (the OutstandingModals field below, which is
+	// this registry's Snapshot). All three sit on this same instance.
 	modalReg := modalbridge.New()
 
 	// Inbound modal-control resolver (#727). Constructed here (not inline in the
@@ -733,39 +735,31 @@ func startRelayV2(
 		}
 	}()
 
-	// Wire the structured interactive turn stream (#633) and the interactive modal
-	// stream (#798) inside one shared PTY gate. Both follow the active conversation
-	// over resolveTarget + NewTargetSubscriber: the turn stream bridges the #615
-	// producer's mapped events to the #632 emitter; the modal stream drains the RAW
-	// event stream (a second, independent Session.Events() subscription) to the
-	// frozen #716/#717/#725/#706 surfacer, so a live permission/trust prompt emits
-	// modal_shown, arms the deny-on-timeout, and resolves modal_dismissed{local}.
-	// Gated on bridge != nil (foreground has no phone-mirroring surface) plus a
-	// resolvable sessions dir (an empty dir would make the resolver perpetually
-	// error and Warn-spam every retry; "" already disables reconcile + the rotation
-	// watcher).
-	var (
-		streamCleanup      func()
-		modalStreamCleanup func()
-		streamDrainCleanup func()
-	)
+	// Wire the structured interactive turn stream (#633). There is one producer:
+	// the stream-json turn drain, which feeds the #632 capability-gated emitter so
+	// turn_state / assistant_delta / tool / turn_end envelopes reach interactive
+	// phones. It is gated on w.streamSink != nil, the relay leg's stream-mode
+	// discriminant — since #1348 deleted the terminal arm, stream mode is the only
+	// mode with a turn producer at all.
+	//
+	// The cleanup is declared out here because it is assigned inside that branch
+	// and called from the returned drain closure. Every other mode leaves it nil,
+	// which is what the nil-guard at the call site is for.
+	var streamDrainCleanup func()
 	if w.streamSink != nil {
-		// STREAM MODE (#1081): both PTY interactive streams are gated OFF — neither
-		// startInteractiveTurnStreamV2 nor startInteractiveModalStreamV2 may build,
-		// as both dereference the typed-nil bootstrap w.sup (its pidFn / Session
-		// host, #1077 nil-deref → panic). In their place the turn stream is fed from
-		// the stream-json runner's turnevent drain; the PTY modal stream's stream-mode
-		// analogue — the #1080 approval bridge — is already wired unconditionally
-		// above (modalResolver.streamApprovals), so only the turn stream needs a
-		// replacement here. This branch does NOT gate on w.bridge / claudeSessionsDir:
-		// the drain consumes parsed turnevent.Events from the sink, not a PTY bridge
-		// or an on-disk transcript, so it runs whenever stream mode is selected.
+		// STREAM MODE (#1081): the turn stream is fed from the stream-json runner's
+		// turnevent drain, startStreamTurnDrainV2, whose cleanup blocks until its
+		// goroutine exits. The stream-mode counterpart of the modal stream #1348
+		// deleted — the #1080 approval bridge — is already wired unconditionally
+		// above (modalResolver.streamApprovals), so the turn stream is the only
+		// producer this branch builds. It does NOT gate on claudeSessionsDir: the
+		// drain consumes parsed turnevent.Events from the sink, not an on-disk
+		// transcript, so it runs whenever stream mode is selected.
 		//
-		// The emitter + SetReplaySource construction is byte-identical to the PTY
-		// path (interactive_turn_stream_v2.go): same active-conversation cursor, same
-		// session-scoped reconnect-replay source — only the feeder differs
-		// (startStreamTurnDrainV2 vs startInteractiveTurnStreamV2). The branches are
-		// mutually exclusive, so SetReplaySource runs at most once.
+		// The emitter is constructed here rather than inside the drain so this leg
+		// owns the reconnect wiring: the active-conversation cursor it stamps with
+		// and the session-scoped replay source it registers. SetReplaySource runs at
+		// most once, because this branch does.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
 		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
@@ -833,18 +827,12 @@ func startRelayV2(
 	streamSessionErrCleanup := startSessionErrorStreamV2(ctx, w.sessionErr, mgr)
 
 	return func() {
-		// Stop the producers — the structured turn stream, the modal stream, the
+		// Stop the producers — the structured turn stream's drain, the
 		// session-transition producer, the queue_state producer, and the session_error
 		// producer — before waiting on the manager so no fan-out races a winding-down
 		// manager. Each cleanup waits for its goroutine on ctx-cancel (already
 		// cancelled by the time drain runs). Then wait for the manager's Run to exit
 		// on the closed Frames channel.
-		if streamCleanup != nil {
-			streamCleanup()
-		}
-		if modalStreamCleanup != nil {
-			modalStreamCleanup()
-		}
 		if streamDrainCleanup != nil {
 			streamDrainCleanup()
 		}
