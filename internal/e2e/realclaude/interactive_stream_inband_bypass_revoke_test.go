@@ -360,6 +360,16 @@ func (h revokeLogHandler) WithGroup(string) slog.Handler      { return h }
 // unexported registryEntry and registryFile. Only the keys the warm-start path
 // reads are emitted: `label` decodes to empty and `lifecycle_state` is ignored for
 // the bootstrap entry by construction (Pool.New forces stateActive there).
+//
+// YOLO carries NO omitempty, deliberately unlike registryEntry.YOLO. The tag is
+// what puts a false posture on disk as a PRESENT key rather than an absent one,
+// so the file itself says which posture was asked for — see seedBypassRegistry
+// for why that distinction is the whole point. "Fixing" the asymmetry to match
+// production makes the key vanish, and the only assertion that reddens on it is
+// the presence clause in
+// TestSeedBypassRegistry_StoresRequestedPostureUnderBothValues: a value-only
+// check stays green, because an absent key decodes to exactly the false that
+// posture wanted.
 type revokeSeedEntry struct {
 	ID           sessions.SessionID `json:"id"`
 	CreatedAt    time.Time          `json:"created_at"`
@@ -374,21 +384,37 @@ type revokeSeedFile struct {
 }
 
 // seedBypassRegistry writes a one-entry sessions.json whose bootstrap entry
-// carries yolo:true, and returns the id it minted. It MUST run before
-// sessions.New: the model test points RegistryPath at a fresh t.TempDir() path
-// that does not exist, which is the COLD-start shape — loadRegistry returns
-// (nil, nil) and settings come out zero-valued, i.e. no bypass.
+// carries the yolo posture the CALLER chooses, and returns the id it minted. That
+// posture is the launch posture: Pool.New lifts it off the entry via
+// pickBootstrap and claudeSettingsArgs turns true into
+// --dangerously-skip-permissions and false into nothing at all.
 //
-// Each of the three ways this seed can silently fail lands on instrument check B,
-// before a single token is spent: `bootstrap` missing → pickBootstrap returns nil
-// → cold start → YOLO false; a misspelled key → decodes to false; a MALFORMED
-// yolo value → the whole loadRegistry parse fails closed and sessions.New errors.
+// It MUST run before sessions.New: the model test points RegistryPath at a fresh
+// t.TempDir() path that does not exist, which is the COLD-start shape —
+// loadRegistry returns (nil, nil) and settings come out zero-valued, i.e. no
+// bypass. That is also why a false written here is a STORED false and not the
+// same thing as no file: both reach the Pool as YOLO false, and only the ENTRY'S
+// EXISTENCE — `bootstrap` true and an id ValidID accepts — separates them. Pool
+// state cannot tell them apart, so
+// TestSeedBypassRegistry_StoresRequestedPostureUnderBothValues reads the file.
+//
+// Hand it a FRESH path. os.WriteFile applies its permission argument only when it
+// CREATES the file; on a path that already exists it truncates and keeps the mode
+// that was there, so a caller re-seeding one path across several arms silently
+// inherits whatever the first write left.
+//
+// For the bypass posture, each of the three ways this seed can silently fail
+// lands on instrument check B, before a single token is spent: `bootstrap`
+// missing → pickBootstrap returns nil → cold start → YOLO false; a misspelled key
+// → decodes to false; a MALFORMED yolo value → the whole loadRegistry parse fails
+// closed and sessions.New errors. All three land on the test named above too, on
+// BOTH postures and with no claude binary and no credentials at all.
 //
 // The id comes from sessions.NewID rather than a hand-written string:
 // writeMCPSettings gates the warm-start id on ValidID and hard-errors on anything
 // that is not a canonical UUIDv4, and claude receives it as --session-id. 0600
 // because it is the same shape saveRegistryLocked writes.
-func seedBypassRegistry(t *testing.T, path string) sessions.SessionID {
+func seedBypassRegistry(t *testing.T, path string, yolo bool) sessions.SessionID {
 	t.Helper()
 	id, err := sessions.NewID()
 	if err != nil {
@@ -402,7 +428,7 @@ func seedBypassRegistry(t *testing.T, path string) sessions.SessionID {
 			CreatedAt:    now,
 			LastActiveAt: now,
 			Bootstrap:    true,
-			YOLO:         true,
+			YOLO:         yolo,
 		}},
 	}, "", "  ")
 	if err != nil {
@@ -434,7 +460,7 @@ func TestInteractiveStream_InBandBypassRevoke_LiveChildReportsDefaultMode(t *tes
 	// BEFORE sessions.New — the whole warm-start seam depends on the file existing
 	// at construction time.
 	registryPath := filepath.Join(t.TempDir(), "sessions.json")
-	seededID := seedBypassRegistry(t, registryPath)
+	seededID := seedBypassRegistry(t, registryPath, true)
 
 	rec := newRevokeTap()
 	logHandler, spawns, notDelivered := newRevokeLogRecorder()
