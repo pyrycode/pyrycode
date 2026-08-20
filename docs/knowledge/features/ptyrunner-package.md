@@ -259,7 +259,7 @@ The chip-gate integration tests observe the loop decision through the captured `
 
 Tests do **not** need real claude — the detectors are pure functions over `[]byte` snapshots; synthetic PTY bytes that contain the UTF-8 anchors satisfy them. Same approach `streamrunner`'s tests take.
 
-CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kernel — no controlling terminal required. The same `creack/pty` v1.1.24 dep already used by `internal/supervisor` is the one tui-driver pulls in.
+CI: `tuidriver.Spawn` uses `pty.Start` which allocates a PTY pair from the kernel — no controlling terminal required. `creack/pty` v1.1.24 is a transitive-only dependency of this module, pulled in solely through tui-driver — no package here imports it directly (reclassified `// indirect` in `go.mod` by #1553).
 
 ## Out of scope
 
