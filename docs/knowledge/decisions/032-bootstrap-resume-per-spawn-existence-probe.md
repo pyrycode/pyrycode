@@ -104,6 +104,13 @@ itself fails).
   construction-time snapshot.
 - `#1165`'s rotate net still exists and is unaffected — it now only fires for
   genuinely unresumable transcripts, not the common restart case.
+- This prediction played out: **#1630** carried the rule into `internal/streamsup`
+  as a second, independent implementation (`useCreateForm`), replacing that
+  package's own `firstRun`-latch heuristic rather than adding a third shape.
+  The two implementations share one primitive (`transcript.StatByID`) and
+  neither imports the other — a third package with the same on-disk-state-dependent
+  flag decision should reach for `StatByID` directly rather than either
+  package's wrapper.
 
 **Trade-offs accepted:**
 
@@ -127,4 +134,5 @@ itself fails).
 - `docs/specs/architecture/1164-bootstrap-resume-existing-transcript.md` — build-time spec (resume-vs-rotate comparison table, full design).
 - `docs/lessons.md:54` — `--resume <uuid>` (with id) is a real, safe, used spawn form; bare `--resume` is not.
 - Sibling: #1165 — independent generic N-fast-crash rotate safety net, different fabric, not implemented by this ticket.
-- [features/session-transcript-and-resume-probe.md](../features/session-transcript-and-resume-probe.md) — #1655's live measurement (claude 2.1.220) that this decision's missing premise **HOLDS**: a `--session-id <id>` launch that runs no turn leaves no `<id>.jsonl` on disk. Feeds #1630, which carries this ADR's by-id-existence rule into `internal/streamsup`.
+- [features/session-transcript-and-resume-probe.md](../features/session-transcript-and-resume-probe.md) — #1655's live measurement (claude 2.1.220) that this decision's missing premise **HOLDS**: a `--session-id <id>` launch that runs no turn leaves no `<id>.jsonl` on disk; #1656's measurement that `--resume` against it exits 1 and leaves no stub transcript behind, so a by-id probe converges instead of latching. Together they are the evidence #1630 (below) rests its `internal/streamsup` port on.
+- [features/streamsup-package.md](../features/streamsup-package.md) § `useCreateForm` — **#1630** carried this ADR's by-id-existence rule into `internal/streamsup` as a second, independent implementation, replacing that package's own `firstRun`-latch heuristic. It ships **inert**: `Config.ClaudeSessionsDir` (mirroring `sessions.Config.ClaudeSessionsDir`'s name and semantics) defaults to empty, so the rule has no production caller until #1631 threads the directory through `sessions.RunnerConfig`.

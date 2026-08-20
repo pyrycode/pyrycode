@@ -9,11 +9,14 @@
 //
 // It is the stream-json sibling of internal/supervisor (the PTY path). Unlike
 // the PTY path it binds no transcript: there is deliberately NO transcript
-// tailing, no fsnotify, and no <uuid>.jsonl path resolution anywhere in this
-// package — that is the whole point of the stream-json path (it structurally
-// removes the bind-latency race the PTY path fought). The only filesystem
-// canonicalisation done here is resolving WorkDir before spawn (macOS
-// /tmp → /private/tmp symlink hygiene).
+// tailing, no fsnotify, and no <uuid>.jsonl path resolved for tailing or binding
+// anywhere in this package — that is the whole point of the stream-json path (it
+// structurally removes the bind-latency race the PTY path fought). The one
+// transcript touch is a by-id EXISTENCE stat, at most one per spawn and only
+// when Config.ClaudeSessionsDir is set: useCreateForm asks whether this
+// session's own transcript is already on disk to pick the spawn's id flag, and
+// reads no bytes from it. The only filesystem canonicalisation done here is
+// resolving WorkDir before spawn (macOS /tmp → /private/tmp symlink hygiene).
 //
 // This slice owns the process lifecycle only. Turn I/O — the stdin envelope
 // writer and the stdout→turnevent parser — and the turncommit/idle/stall gates
@@ -46,6 +49,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/transcript"
 )
 
 // killGrace is the SIGTERM → SIGKILL grace window applied via exec.Cmd.WaitDelay
@@ -73,11 +77,26 @@ type Config struct {
 	WorkDir string
 
 	// SessionID is the caller-minted claude session id. Required (non-empty
-	// check only — the pool owns minting and shape validation). The first spawn
-	// passes --session-id <SessionID>; every respawn passes --resume <SessionID>
-	// (reattach, append, no fork), so the on-disk id stays stable across a
-	// kill-and-restart.
+	// check only — the pool owns minting and shape validation). With no
+	// ClaudeSessionsDir the first spawn passes --session-id <SessionID> and every
+	// respawn passes --resume <SessionID> (reattach, append, no fork); with one
+	// set, the by-id transcript probe picks the form per spawn instead (see
+	// useCreateForm). Either way the SAME id is passed, so the on-disk id stays
+	// stable across a kill-and-restart.
 	SessionID string
+
+	// ClaudeSessionsDir is the directory containing claude's <uuid>.jsonl files
+	// for this WorkDir. Empty disables the by-id transcript probe, and every
+	// spawn's id flag falls back to the Run loop's firstRun latch — byte-identical
+	// to pre-#1630 argv. Name and semantics mirror sessions.Config.ClaudeSessionsDir
+	// deliberately, so the two read as one concept.
+	//
+	// It is NEVER derived from WorkDir inside this package.
+	// sessions.DefaultClaudeSessionsDir maps a workdir into the real
+	// $HOME/.claude/projects/<encoded>, so deriving it here would point every unit
+	// test — whose WorkDir is a t.TempDir() — at the developer's actual home. The
+	// directory only ever arrives through this field.
+	ClaudeSessionsDir string
 
 	// Args is the caller-supplied pass-through argv (e.g. --model <m>). streamsup
 	// owns only the fixed stream-json prefix and the id flag; everything else is
@@ -652,8 +671,26 @@ func (r *Runner) RestartFresh(newID string) {
 // It reads the fields directly instead of calling accessors: restartMu is not
 // reentrant, so any helper that takes it (as the now-deleted liveArgs and
 // nextSpawnID accessors did) would deadlock here. buildArgs is pure and copies
-// base into a fresh slice, so passing r.args needs no clone — the slice never
-// escapes the section.
+// base into a fresh slice, so passing r.args needs no clone — and handing that
+// slice header OUT of the section is safe for the same reason setArgsLocked
+// clones on the way IN: that clone makes setArgsLocked the sole writer of a
+// backing array no installer ever mutates after publication, so a later install
+// swaps the header and leaves this spawn's local pointing at the old, immutable
+// array.
+//
+// The transcript probe and the argv assembly deliberately sit BELOW the unlock
+// (#1630). restartMu is a leaf — nothing under it may take another lock or do
+// synchronous I/O, the invariant setArgsLocked states — and useCreateForm's
+// os.Stat is exactly that class of call-out; the mutex it would stall on a hung
+// $HOME is the one liveSessionID takes on WriteUserTurn's diagnostic path.
+// Moving them out does not re-split #1481's section: the forbidden outcome is a
+// live child under a pre-rotation id with NO live iteration cancel, and the
+// section still reads the spawn inputs and publishes iterCancel together, so a
+// racer arriving after the unlock finds the published cancel and tears this
+// spawn down. Only pure assembly moved, into a window that already exists (Run's
+// "spawning claude" log and spawnAndWait's setup both run in it). The id the
+// probe targets is the one snapshotted in the same section that consumed
+// rotatePending, so the decision can never skew against a racing rotation.
 //
 // forceFirst reports that a fresh-restart request was consumed; the caller re-arms
 // its Run-goroutine-private firstRun on true. Returning it rather than a new
@@ -669,11 +706,13 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	iterCtx, cancel = context.WithCancel(ctx)
 
 	r.restartMu.Lock()
-	defer r.restartMu.Unlock()
 	forceFirst = r.rotatePending
 	r.rotatePending = false
-	args = buildArgs(r.args, firstRun || forceFirst, r.sessionID)
+	base, id := r.args, r.sessionID
 	r.iterCancel = cancel
+	r.restartMu.Unlock()
+
+	args = buildArgs(base, useCreateForm(r.cfg.ClaudeSessionsDir, id, firstRun || forceFirst), id)
 	return iterCtx, cancel, args, forceFirst
 }
 
@@ -920,17 +959,71 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	return w
 }
 
+// useCreateForm reports whether this spawn's id flag should be --session-id
+// (create) rather than --resume (reattach). Pure apart from a single os.Stat.
+//
+// With sessionsDir empty the probe is not consulted at all — no syscall is made
+// — and latchCreate decides verbatim. That is what keeps a Runner constructed
+// without the directory byte-identical to pre-#1630 argv, which is every
+// production path until #1631 threads the directory through. With a directory
+// supplied the probe decides OUTRIGHT and latchCreate is ignored, including on
+// the FIRST spawn and including when a RestartFresh rotation re-armed first-run
+// form: a confirmed by-id hit is the only answer that yields --resume, and every
+// other answer — absent file, unreadable directory, an id ValidStem rejects —
+// yields the create form. So the probe has no failure mode that can fail a
+// spawn.
+//
+// The single rule is ADR 032's, carried into this package, and it closes two
+// separate defects at once. A session that launched but ran no turn establishes
+// no transcript (#1655), so the latch's true→false flip would have every respawn
+// emit --resume against an id claude has no record of, which exits 1 (#1656) on
+// a widening backoff forever; the probe reads absent and creates instead, and
+// converges because a rejected --resume leaves NO STUB behind for the next probe
+// to latch onto. And on a daemon restart the transcript survives, so the latch's
+// first spawn emits --session-id against a live transcript, which claude refuses
+// (ADR 032); the probe reads present and resumes. It also settles the
+// rotated-id-collides-with-an-existing-transcript case as "resume" simply by
+// falling out of the rule — unreachable from sessions.NewID's minting, never
+// observed, and deliberately given no branch, flag or test of its own.
+//
+// Two things this must not become, both one edit away and both load-bearing.
+// It probes via transcript.StatByID and never a hand-rolled
+// filepath.Join(sessionsDir, id+ext) + os.Stat: StatByID runs its ValidStem gate
+// BEFORE the join, and New checks only that SessionID is non-empty while
+// RestartFresh re-checks nothing, so a non-canonical id reaches here and a
+// hand-rolled join would turn it into an arbitrary-path existence oracle that
+// flips the spawn's id flag. And every non-hit falls back to the create form,
+// NEVER to a directory scan: transcript.Newest sits beside StatByID and answers
+// a superficially similar question, but #839 deleted --continue and the
+// adopt-by-mtime scan precisely to close the confused-deputy gap where a restart
+// adopts a DIFFERENT claude's newer transcript out of the shared sessions dir.
+func useCreateForm(sessionsDir, id string, latchCreate bool) bool {
+	if sessionsDir == "" {
+		return latchCreate
+	}
+	// The error is discarded because absence is the expected answer here, not a
+	// failure: StatByID reports every miss as the zero Result, so !Found() already
+	// covers the absent file, the unreadable directory and the invalid stem. A
+	// separate err != nil arm would be a return site no fixture can reach on its
+	// own.
+	res, _ := transcript.StatByID(sessionsDir, id)
+	return !res.Found()
+}
+
 // buildArgs assembles one spawn's argv: the fixed stream-json prefix, then the
-// caller's base args, then the id flag. On the first spawn the id flag is
-// --session-id <sessionID> (establishes the on-disk transcript under a known
-// id); on every respawn it is --resume <sessionID> (reattach, append, no fork).
+// caller's base args, then the id flag. create picks that flag's form:
+// --session-id <sessionID> establishes the on-disk transcript under a known id,
+// --resume <sessionID> reattaches to one that already exists (append, no fork).
+// The caller decides which, and in production that decision is useCreateForm's —
+// a by-id transcript existence probe when Config.ClaudeSessionsDir is set, the
+// Run loop's firstRun latch when it is not.
 // Passing the SAME sessionID to both is why the on-disk id is stable across a
 // kill-and-restart — plain --resume reuses the id and does not fork
 // (--fork-session is the explicit, unused opt-in). Never emits -p/--print: the
 // non-print choice is billing-tied and spike-verified (multi-turn, interrupt,
 // resume, and the approval round-trip all work without it). Pure — no Runner
 // state, and it never mutates base.
-func buildArgs(base []string, firstRun bool, sessionID string) []string {
+func buildArgs(base []string, create bool, sessionID string) []string {
 	args := make([]string, 0, len(base)+7)
 	args = append(args,
 		"--input-format", "stream-json",
@@ -938,7 +1031,7 @@ func buildArgs(base []string, firstRun bool, sessionID string) []string {
 		"--verbose",
 	)
 	args = append(args, base...)
-	if firstRun {
+	if create {
 		return append(args, "--session-id", sessionID)
 	}
 	return append(args, "--resume", sessionID)
