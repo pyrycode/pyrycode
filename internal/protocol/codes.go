@@ -656,18 +656,17 @@ const (
 // daemon-global and has no per-session key to name — but this reply is what
 // hands a client the session_id every subsequent set_session_settings must
 // address, so a client needed a way to say which conversation it meant.
-// conversation_id is untrusted network input used for exactly one thing: a
-// membership lookup into the in-memory conversations registry, through
-// handleRequestSessionSettings' KnownConversation seam. It reaches no log line,
-// no error string, no filesystem path, and not the reply.
+// conversation_id is untrusted network input used for exactly one thing: an
+// in-memory resolution through handleRequestSessionSettings' conversation-keyed
+// run-configuration seam. It reaches no log line, no error string, no filesystem
+// path, and not the reply.
 //
-// It gates WHETHER the answer is populated, NOT which session it describes: the
-// reported values are still the bootstrap session's (per #848's "do not
-// pre-carve a conversation-keyed settings seam"), a conversation the daemon does
-// not host is answered with a zero-valued session_settings rather than an error,
-// and an absent or empty id is answered exactly as the verb always has. #1587
-// makes the values follow the named conversation, at which point the reported id
-// and the reported values move in one step.
+// Since #1610 it SELECTS which session the reply describes, and the reported id
+// and the reported values move in one step because they are resolved as one
+// value. Every unresolvable case — a conversation the daemon does not host, one
+// bound to no live session, and an absent or empty id — is answered with a
+// zero-valued session_settings rather than an error, and never with the shared
+// bootstrap session's id or values.
 //
 // Two natures in one cluster, mirroring #844. request_session_settings is an
 // inbound phone → binary *control* envelope the v2 session manager intercepts at

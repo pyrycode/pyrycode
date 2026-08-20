@@ -103,8 +103,9 @@ type SettingsUpdater interface {
 // property of this type rather than a warning in a comment: the cmd/pyry producer
 // resolves the id and reads the settings under ONE pool acquisition, so no field
 // can describe a session another field does not, even against a concurrent idle
-// eviction. Contrast the three bootstrap-scoped seams on V2SessionConfig, whose
-// agreement can only be asserted in prose.
+// eviction. Contrast the bootstrap-scoped SnapshotSettings / SnapshotUsage pair
+// on V2SessionConfig, which name no session at all, so their agreement with any
+// separately-reported id could only be asserted in prose.
 //
 // An empty Model or Effort is a REAL reported value — "inherited daemon default,
 // no per-session override" — and YOLO false means permissions are enforced, the
@@ -302,14 +303,13 @@ type V2SessionConfig struct {
 	Snapshotter ScreenSnapshotter
 
 	// KnownConversation reports whether conversationID names a conversation
-	// this daemon hosts. request_snapshot rejects an unknown/foreign id with
-	// conversation.not_found before any render (AC #4).
-	// request_session_settings consults it too (#1586), but degrades rather than
-	// erroring: an unresolvable id yields the zero-valued reply the wire contract
-	// already defines as a real answer. Optional: when nil, every
-	// request_snapshot is rejected as not-found and every request_session_settings
-	// that NAMES a conversation degrades — one that names none is unaffected,
-	// because it never reaches this seam. Production wires it to a
+	// this daemon hosts. handleRequestSnapshot is its sole reader: it rejects an
+	// unknown/foreign id with conversation.not_found before any render (AC #4).
+	// request_session_settings consulted it between #1586 and #1610 and no longer
+	// does — a pure membership check reads a known but UNBOUND conversation as
+	// addressable, so that verb resolves through RunConfigFor instead, which
+	// refuses the unknown and the unbound identically. Optional: when nil, every
+	// request_snapshot is rejected as not-found. Production wires it to a
 	// conversations.Registry membership check, which takes that registry's mutex
 	// and linear-scans its slice; it is not a map lookup.
 	KnownConversation func(conversationID string) bool
@@ -347,41 +347,16 @@ type V2SessionConfig struct {
 	// above; the transcript content itself never crosses the wire).
 	SnapshotUsage func() (usedTokens, windowTokens int)
 
-	// BootstrapSessionID reports the id of the session SnapshotSettings and
-	// SnapshotUsage describe, so handleRequestSessionSettings can tell a client
-	// which session to address a set_session_settings to (#491). Optional: nil ⇒
-	// the handler reports "", which the wire contract defines as "no session to
-	// address, treat the controls as read-only" — never a crash, never a silent
-	// drop. Primitive-typed (one string) so internal/relay imports neither
-	// internal/sessions nor its SessionID type; production wires a closure over
-	// *sessions.Pool.BootstrapID.
-	//
-	// It MUST report the same session the two seams above describe, or a client
-	// would read one session's values and write to another. That is why all three
-	// are bootstrap-scoped together rather than one being conversation-keyed
-	// (#848's "do not pre-carve a conversation-keyed settings seam").
-	//
-	// That decision has since been revisited, and the three did NOT move: their
-	// conversation-keyed replacement is RunConfigFor below, one seam reporting all
-	// six values together, so the agreement this paragraph asks a reader to
-	// maintain is a property of RunConfig instead of a rule spanning three fields
-	// (#1609). These three keep their current readers, wiring and reported values
-	// until #1610 makes handleRequestSessionSettings consult RunConfigFor and
-	// retires this one.
-	//
-	// A session id is a routing key, not a secret: it already crosses the wire
-	// outbound on session_transition and inbound on set_session_settings. Read-only
-	// reflection, no authz decision, no mutation, no input parsing.
-	BootstrapSessionID func() string
-
 	// RunConfigFor reports the NAMED conversation's own run configuration — its
 	// bound session id, that session's model / effort / YOLO, and that session's
 	// context-window used / window figures — as one RunConfig describing one
-	// session (#1609). It is the conversation-keyed replacement for the three
-	// bootstrap-scoped seams above. Nothing consults it yet, so it changes no wire
-	// byte in either direction; #1610 makes handleRequestSessionSettings read it,
-	// which is when a client stops being told about the shared bootstrap session
-	// and starts being told about the conversation it is actually in.
+	// session (#1609). handleRequestSessionSettings is its reader, and since #1610
+	// its ONLY run-configuration source: a client is told about the conversation
+	// it is actually in rather than about the shared bootstrap session. It
+	// replaced a bootstrap-scoped session-id seam that reported which session the
+	// two seams above describe; the agreement a client depends on — that the
+	// reported id names the session the reported values came from — is a property
+	// of RunConfig now rather than a rule spanning separate fields.
 	//
 	// Comma-ok rather than a flag inside RunConfig: false means the conversation is
 	// not addressable — unknown to this daemon, bound to nothing, or bound to a
@@ -403,9 +378,10 @@ type V2SessionConfig struct {
 	// session id comes out of the daemon's own registry record and the producer
 	// confirms the pool holds it before reporting anything, so an unresolvable
 	// conversation addresses NOTHING: never the bootstrap session, and never a
-	// session a caller named. A session id is a routing key, not a secret (see
-	// BootstrapSessionID). Read-only reflection — it reports the YOLO control that
-	// only SettingsUpdater, the write path, can change.
+	// session a caller named. The reported id is a routing key, not a secret — it
+	// already crosses the wire outbound on session_transition and inbound on
+	// set_session_settings. Read-only reflection — it reports the YOLO control
+	// that only SettingsUpdater, the write path, can change.
 	RunConfigFor func(conversationID string) (RunConfig, bool)
 
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
