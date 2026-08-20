@@ -85,7 +85,7 @@ pyrycode/
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
 
-Dependency direction: `cmd/pyry → internal/sessions`, with the concrete runner handed *down* rather than imported *up* — `internal/sessions` declares the narrow `Runner` interface and takes a `Config.RunnerFactory`, and `cmd/pyry` is the only package that imports `internal/streamsup` and supplies the concrete runner. So there is no `internal/sessions → internal/streamsup` edge to trace: the arrow points the other way. `internal/control` imports `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). Both halves are checkable:
+Dependency direction: `cmd/pyry → internal/sessions`, with the concrete runner handed *down* rather than imported *up* — `internal/sessions` declares the narrow `Runner` interface and takes a `Config.RunnerFactory`, and `cmd/pyry` is the only package that imports `internal/streamsup` and supplies the concrete runner. So there is no `internal/sessions → internal/streamsup` edge to trace, and none in the reverse direction either — `cmd/pyry` imports both and adapts one to the other. `internal/control` imports `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). Both halves are checkable:
 
 ```sh
 # the edge that exists — exits 0
