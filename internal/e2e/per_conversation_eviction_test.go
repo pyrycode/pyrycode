@@ -55,8 +55,12 @@ import (
 //	       each idle-evicts (lifecycle_state=="evicted", claude exited) once its
 //	       idle window elapses with no attach.
 //	AC#2 — a send_message to one evicted discussion reactivates it (respawn
-//	       claude --resume <its own uuid>) and DELIVERS the turn: the phone
-//	       observes the reply, not merely the write-side ack.
+//	       claude against its OWN uuid, never a peer's) and DELIVERS the turn: the
+//	       phone observes the reply, not merely the write-side ack. Which id FLAG
+//	       that respawn carries is decided per spawn by streamsup's by-id
+//	       transcript probe since #1631 (useCreateForm), so it is --session-id here
+//	       — stream-mode fakeclaude establishes no transcript to resume. The id is
+//	       the assertion; the flag is not.
 //	AC#4 — reactivating one discussion's session leaves the other discussion's
 //	       evicted session untouched: churn in one does not disturb another.
 func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {

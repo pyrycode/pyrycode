@@ -300,6 +300,23 @@
 //	                               (#1195). Default off — when unset, no watch and
 //	                               fakeclaude is byte-identical to its prior
 //	                               behaviour.
+//	PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME  optional directory. When set, a
+//	                               stream-mode spawn whose argv's LAST id flag is
+//	                               "--resume <id>" and for which <dir>/<id>.jsonl
+//	                               does not exist writes real claude's own refusal
+//	                               to stderr and exits 1, instead of serving the
+//	                               turn. That is the never-established-session
+//	                               crash-loop #1631 closes, made observable in the
+//	                               fake-daemon tier: a session that launched but ran
+//	                               no turn establishes no transcript, so every
+//	                               --resume respawn is refused forever on a widening
+//	                               backoff until the daemon's by-id probe switches
+//	                               the flag to --session-id. Stream mode only, by
+//	                               construction — the check lives inside the
+//	                               PYRY_FAKE_CLAUDE_STREAM_JSON branch, so no
+//	                               PTY-tier test can observe it even if the env
+//	                               leaked. Default off — when unset, byte-identical
+//	                               to prior behaviour.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -330,30 +347,31 @@ import (
 )
 
 const (
-	envSessionsDir       = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
-	envInitialUUID       = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
-	envTrigger           = "PYRY_FAKE_CLAUDE_TRIGGER"
-	envStdinLog          = "PYRY_FAKE_CLAUDE_STDIN_LOG"
-	envAssistantTrigger  = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
-	envJSONLTrigger      = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
-	envTUI               = "PYRY_FAKE_CLAUDE_TUI"
-	envIdleTrigger       = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
-	envModalTrigger      = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
-	envEscEndsTurn       = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
-	envModalClearOnAns   = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
-	envClearRotates      = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
-	envTrustTrigger      = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
-	envSessionIDFromArgv = "PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV"
-	envJSONLTriggerDir   = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR"
-	envStreamJSON        = "PYRY_FAKE_CLAUDE_STREAM_JSON"
-	envStreamInterrupt   = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
-	envStreamHold        = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
-	envStreamApprove     = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
-	envStreamBogus       = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
-	envStreamRateLimit   = "PYRY_FAKE_CLAUDE_STREAM_RATE_LIMIT"
-	envApproveSocketFile = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
-	assistantMaxBytes    = 64 * 1024
-	pollInterval         = 50 * time.Millisecond
+	envSessionsDir        = "PYRY_FAKE_CLAUDE_SESSIONS_DIR"
+	envInitialUUID        = "PYRY_FAKE_CLAUDE_INITIAL_UUID"
+	envTrigger            = "PYRY_FAKE_CLAUDE_TRIGGER"
+	envStdinLog           = "PYRY_FAKE_CLAUDE_STDIN_LOG"
+	envAssistantTrigger   = "PYRY_FAKE_CLAUDE_ASSISTANT_TRIGGER"
+	envJSONLTrigger       = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER"
+	envTUI                = "PYRY_FAKE_CLAUDE_TUI"
+	envIdleTrigger        = "PYRY_FAKE_CLAUDE_IDLE_TRIGGER"
+	envModalTrigger       = "PYRY_FAKE_CLAUDE_MODAL_TRIGGER"
+	envEscEndsTurn        = "PYRY_FAKE_CLAUDE_ESC_ENDS_TURN"
+	envModalClearOnAns    = "PYRY_FAKE_CLAUDE_MODAL_CLEAR_ON_ANSWER"
+	envClearRotates       = "PYRY_FAKE_CLAUDE_CLEAR_ROTATES"
+	envTrustTrigger       = "PYRY_FAKE_CLAUDE_TRUST_TRIGGER"
+	envSessionIDFromArgv  = "PYRY_FAKE_CLAUDE_SESSION_ID_FROM_ARGV"
+	envJSONLTriggerDir    = "PYRY_FAKE_CLAUDE_JSONL_TRIGGER_DIR"
+	envStreamJSON         = "PYRY_FAKE_CLAUDE_STREAM_JSON"
+	envStreamInterrupt    = "PYRY_FAKE_CLAUDE_STREAM_INTERRUPT"
+	envStreamHold         = "PYRY_FAKE_CLAUDE_STREAM_HOLD"
+	envStreamApprove      = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
+	envStreamBogus        = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
+	envStreamRateLimit    = "PYRY_FAKE_CLAUDE_STREAM_RATE_LIMIT"
+	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
+	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
+	assistantMaxBytes     = 64 * 1024
+	pollInterval          = 50 * time.Millisecond
 )
 
 // modalScreen is the compact plaintext permission-modal screen fakeclaude writes
@@ -586,6 +604,26 @@ func main() {
 	// of the same session (--resume <sameID>) re-opens and appends to the same file,
 	// which is why append-mode stays load-bearing here.
 	if os.Getenv(envStreamJSON) != "" {
+		// Reject rider (envRejectAbsentResume, default-off): the value is the
+		// directory claude would keep this session's <id>.jsonl in. A spawn whose
+		// winning id flag is --resume against an id with no transcript there is
+		// refused exactly as real claude refuses it — stderr line, exit 1 — instead
+		// of serving turns. Checked FIRST, above the stdin tee and the startup hold,
+		// because a refused spawn must consume no stdin and observe no trigger; a
+		// child that got as far as either would have serviced the daemon in a state
+		// real claude never reaches. Empty ⟹ off ⟹ byte-identical.
+		//
+		// The stat is by-id and never a scan, mirroring the daemon-side probe it
+		// exists to exercise (streamsup.useCreateForm): the id is spliced into a
+		// path only after argvIDFlag's stem guard has refused any value carrying a
+		// separator or a dot.
+		if dir := os.Getenv(envRejectAbsentResume); dir != "" {
+			if id, resume, ok := argvIDFlag(os.Args[1:]); ok && resume {
+				if _, err := os.Stat(filepath.Join(dir, id+".jsonl")); err != nil {
+					fatalf("No conversation found with session ID: %s", id)
+				}
+			}
+		}
 		stdin := io.Reader(os.Stdin)
 		if logStem := os.Getenv(envStdinLog); logStem != "" {
 			logPath := streamStdinLogPath(logStem, os.Args[1:])
@@ -1189,17 +1227,38 @@ func rotateSession(f *os.File, dir string) *os.File {
 // reports not-found so the caller falls back to PYRY_FAKE_CLAUDE_INITIAL_UUID;
 // it never falls back to an earlier occurrence, so the resolved stem is always
 // either the spawn-time id or the env's.
+//
+// A two-line wrapper over argvIDFlag since #1631, which needed the same parse
+// plus WHICH flag carried the winning value.
 func argvSessionID(args []string) (string, bool) {
-	id := ""
+	id, _, ok := argvIDFlag(args)
+	return id, ok
+}
+
+// argvIDFlag is argvSessionID's core: it returns the id named by the LAST
+// "--session-id" / "--resume" on args, whether that winning flag was --resume,
+// and whether the value was found and passes the stem guard. Pure; never reads
+// the environment. args excludes the program name.
+//
+// Extracted (#1631) so the reject rider (envRejectAbsentResume) can ask "was this
+// spawn a RESUME?" — a question argvSessionID's two-value shape cannot answer —
+// without a second copy of the stem guard. One copy is the point: the guard is
+// the security-relevant half of this parse (the value reaches filepath.Join in
+// openSession, in the per-child JSONL trigger path, and now in the reject
+// rider's probe), and a duplicated security guard is precisely the thing that
+// drifts out of step with its twin. argvSessionID's table is the regression check
+// on the extraction.
+func argvIDFlag(args []string) (string, bool, bool) {
+	id, resume := "", false
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == "--session-id" || args[i] == "--resume" {
-			id = args[i+1]
+			id, resume = args[i+1], args[i] == "--resume"
 		}
 	}
 	if id == "" || strings.ContainsAny(id, `/\.`) {
-		return "", false
+		return "", false, false
 	}
-	return id, true
+	return id, resume, true
 }
 
 // unattributedStdinLogStem is the id component of the per-child stream stdin log
