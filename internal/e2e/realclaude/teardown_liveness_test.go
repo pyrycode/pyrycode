@@ -31,14 +31,14 @@ package realclaude
 //	2026/07/30 23:18:29 INFO agentrun: reaped claude descendant process groups count=2 pgids="[4242 77]"
 //
 // The first is the slog.NewTextHandler runSupervisor installs. The second is
-// slog.Default(), and it is the one that matters: runAgentRunPty sets no Logger
-// on ptyrunner.Config, so ptyrunner.Run falls back to slog.Default() on a nil
-// Logger, and every probe in this package spawns `pyry agent-run` and captures
-// its stderr. A matcher anchored on `msg="agentrun: reaped…"` finds nothing on
-// the live path and answers "no line" — read as "the reaper never fired" — with
-// nothing going red. So the anchor is the BARE message text, a string literal
-// in this file, never a level token, a timestamp, or a reference to what
-// reap.go defines.
+// slog.Default(), and it is the one that matters: runAgentRunStreamRunner sets
+// no Logger on streamrunner.Config, so streamrunner.Run falls back to
+// slog.Default() on a nil Logger, and every probe in this package spawns
+// `pyry agent-run` and captures its stderr. A matcher anchored on
+// `msg="agentrun: reaped…"` finds nothing on the live path and answers
+// "no line" — read as "the reaper never fired" — with nothing going red. So
+// the anchor is the BARE message text, a string literal in this file, never a
+// level token, a timestamp, or a reference to what reap.go defines.
 //
 // Membership is over PARSED INTEGERS, never a substring, because the matcher
 // inverts in both directions. A `pgids=[<held>]` substring probe is correct for
@@ -542,7 +542,7 @@ func TestTdnClassifyReapLog(t *testing.T) {
 		},
 		{
 			// The rendering the LIVE path produces: `pyry agent-run` passes no
-			// Logger, so ptyrunner falls back to slog.Default().
+			// Logger, so streamrunner.Run falls back to slog.Default().
 			name:        "slog.Default rendering, one pgid, held present",
 			stderr:      tdnFixtureDefaultOne,
 			held:        tdnFixtureHeldPGID,

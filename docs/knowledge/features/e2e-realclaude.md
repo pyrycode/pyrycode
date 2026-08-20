@@ -602,10 +602,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `no-reap-line` (ambiguous by construction — `reap.go:64` guards the emit on
   `len(reaped) > 0`, so silence means "reaped nothing" or "never fired," and
   the `Detail` names both) / `instrument-failed`. Anchored on the reap
-  message's bare text as a string literal, never `msg="..."` — `runAgentRunPty`
-  passes no `Logger`, so `ptyrunner` falls back to `slog.Default()`, not the
-  `slog.NewTextHandler` the ticket body cited, and an anchor built against the
-  wrong handler would silently read "no line" on the only path that matters.
+  message's bare text as a string literal, never `msg="..."` —
+  `runAgentRunStreamRunner` passes no `Logger`, so `streamrunner.Run` falls
+  back to `slog.Default()`, not the `slog.NewTextHandler` the ticket body
+  cited, and an anchor built against the wrong handler would silently read
+  "no line" on the only path that matters. (#1557 re-attributed this and two
+  sibling comments in the source from the `ptyrunner` path #1348 deleted to
+  the surviving `streamrunner` path; the mechanism was unchanged, only its
+  owner's name was wrong.)
   Membership decided over parsed integers via a key-boundary attribute match
   (`tdnAttrIndex`), never a substring — closes both a false negative (`slog`
   quotes `pgids=` the moment a second pgid appears) and its dual false
