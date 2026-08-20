@@ -96,6 +96,35 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1662. The first six are this family's standing set: the first four keep a
+	// SKIP out — resolveClaudeBin and WithWorktreeAuthenticated both skip INSIDE
+	// the test body, after `=== RUN` is printed, so the gate cannot tell the skip
+	// from a pass — and the last two are the credential guard.
+	//
+	// The packageDir trio is copied from the entry above for the reason that entry
+	// states: the check is an AST identifier match, so a file calling
+	// writeSetModeFixture reaches packageDir transitively while never naming it,
+	// and a packageDir-only entry leaves the ban true and the property false.
+	// writeFixture is the fourth name for the same reason — it is the spike's own
+	// packageDir wrapper, and #1661's code review flagged its absence as the one
+	// residual left for this ticket.
+	//
+	// What is deliberately ABSENT, and where this entry must NOT copy the one
+	// above: t.TempDir, os.WriteFile, os.Create, os.ReadFile, os.ReadDir and
+	// filepath.Glob all stay available. This file's entire subject is a write, a
+	// read-back and a directory listing, so banning them would be red against
+	// shipped code. The relative-path hazard those bans close for #1661 — `go
+	// test` runs in the package source directory, so a relative
+	// os.WriteFile("testdata/…") reaches the committed fixtures — cannot be closed
+	// by a ban here. It is closed instead by
+	// TestPoolRevokeFixture_RoundTripsEveryFieldIntoOneNamedEntry: a writer that
+	// sent its bytes to a relative testdata/ leaves the t.TempDir() holding ZERO
+	// entries, and the exactly-one-entry assertion goes red.
+	"inband_bypass_revoke_fixture_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "os.Getenv", "os.Environ",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
