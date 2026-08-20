@@ -251,6 +251,19 @@ two swap/revoke-only methods exist to avoid. Both share the same placement rule:
 type-assert at. See [codebase/1580.md](../codebase/1580.md) for the swap-only installer and
 [codebase/1604.md](../codebase/1604.md) for the in-band revocation.
 
+**Capability type-assertions evade `staticcheck`'s unused check from the other direction too
+(#1550).** This package's one prior instance of the pattern — `probeUsable`'s
+`probe.(interface{ Available() bool })` assertion over `rotation.Probe` — orphaned
+`noopProbe.Available` invisibly for as long as it existed: `staticcheck` never flagged the
+method, because a method reachable only from its own test still counts as "used", and the
+assertion (not an interface implementation) is the only thing that made it reachable at all.
+Deleting the resolver that held the assertion (#1550) is what stranded it, and finding that
+required a by-hand repo-wide grep, not a gate failure. The four capability interfaces above
+share the same structural blind spot: removing `interruptRunner`, `startFreshRunner`, or
+`beginRotationOrNoop` would not, by itself, surface any strandable method on
+`*streamsup.Runner` via a build or vet failure — that has to be checked by hand at deletion
+time, the same way #1550's spec did.
+
 **Typed-nil-in-interface trap for downstream consumers (#1101).** A call site that assigns `w.sup` (the `*supervisor.Supervisor` returned by `Supervisor()`) straight into a consumer-declared interface field inherits a footgun on the stream-json path: a nil `*supervisor.Supervisor` wrapped in an interface value is a **non-nil interface holding a nil pointer**, so the consumer's `== nil` guard silently fails and any method call on it panics on the nil receiver. `cmd/pyry/relay.go`'s `Snapshotter: w.sup` wiring hit exactly this and was fixed by a `screenSnapshotterOrNil` helper that returns a genuine nil when `sup == nil` — see [codebase/1101.md](../codebase/1101.md). Two sibling wiring sites carry the same unfixed trap as of #1101: `SessionStarter: w.sup` and the modal resolver's `w.sup` argument (both `cmd/pyry/relay.go`) — flagged out of scope there, not yet guarded.
 
 See [codebase/1077.md](../codebase/1077.md) and spec [`1077-sessions-runner-seam.md`](../../specs/architecture/1077-sessions-runner-seam.md).

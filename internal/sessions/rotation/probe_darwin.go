@@ -22,12 +22,6 @@ type noopProbe struct{}
 
 func (noopProbe) OpenJSONL(int) (string, error) { return "", nil }
 
-// Available reports that this probe cannot answer OpenJSONL (lsof is missing).
-// The bootstrap resolver reads this optional signal to fall back to the
-// newest-by-mtime path instead of trusting an always-empty probe. Real probes
-// (darwinProbe, linuxProbe) omit the method and are treated as usable.
-func (noopProbe) Available() bool { return false }
-
 // DefaultProbe returns the Darwin probe, or a noopProbe if lsof is not on
 // PATH. Logging at construction time means a missing-lsof shows up at
 // startup, not on the first event.
