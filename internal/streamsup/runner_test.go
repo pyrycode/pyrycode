@@ -934,7 +934,7 @@ func TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript(t *testing.T) {
 		sessionID: testSessionID,
 	}
 
-	_, cancel, args, forceFirst := r.beginSpawn(context.Background(), true)
+	_, cancel, args, forceFirst, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 
 	if forceFirst {
@@ -1265,7 +1265,7 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 
 	r.RestartFresh("")
 
-	_, cancel, args, forceFirst := r.beginSpawn(context.Background(), true)
+	_, cancel, args, forceFirst, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if forceFirst {
 		t.Errorf("beginSpawn forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
@@ -1656,6 +1656,157 @@ func TestRunner_BeginRotation_AbortIsGenerationStamped(t *testing.T) {
 	abortSecond()
 	if _, gated := r.turnTarget(); gated {
 		t.Fatal("the winning rotation's own abort did not disarm the gate; a failed rotation would leave the conversation refusing every turn until the next respawn")
+	}
+}
+
+// --- #1482: the release side is authorised -----------------------------------
+//
+// #1330 armed the gate and stamped the ARM's generation; the release side stayed
+// unauthorised, so any child that bound ended a window it had no relationship to.
+// These two rows pin the authorisation from both directions.
+
+// Payload markers for the rows below. Distinct literals so the parent-level
+// "the refused bytes never reached a child" assertion cannot match the successor's
+// echo by accident.
+const (
+	unauthorisedTurnProbe = "gate-probe-unauthorised"
+	successorTurnProbe    = "gate-probe-successor"
+)
+
+// TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed drives both halves of
+// the authorisation in ONE run: while a rotation stands, a child that binds from a
+// spawn set up BEFORE that rotation's RestartFresh landed leaves the gate armed —
+// it is not the successor, it is a child RestartFresh is about to kill — and the
+// successor itself still brings the gate down.
+//
+// The subtests are load-bearing rather than cosmetic. Against a mutant restoring
+// setStdin's unconditional clear, (a) fails while (b) still executes and passes,
+// which is the per-row evidence the discrimination matrix needs; one flat function
+// would collapse both into a single verdict.
+//
+// echo_lines stays alive until it is killed, so no crash-respawn can race the arm:
+// the arm is strictly before every later beginSpawn by program order.
+func TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 4)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	// onSpawn fires AFTER setStdin, so every receive here is a happens-after edge on
+	// that child's release point — no polling, no window calibration.
+	waitSpawn(t, spawned, "the first spawn")
+	r.BeginRotation()
+
+	t.Run("an unauthorised bind leaves the gate armed", func(t *testing.T) {
+		// Restart kills child 1 and relaunches at once (hint in hand, no backoff).
+		// That respawn's beginSpawn runs while the gate stands and before any
+		// RestartFresh, so its snapshot cannot exceed the arm's threshold: it is the
+		// Restart-driven shape of "set up before the rotation's RestartFresh landed",
+		// the same position the crash/backoff respawn occupies in the row below.
+		r.Restart(nil)
+		waitSpawn(t, spawned, "the Restart respawn")
+
+		if r.Stdin() == nil {
+			t.Fatal("Stdin() is nil after the Restart respawn; both assertions below would collapse into the pre-existing no-live-child refusal, which passes with or without the authorisation")
+		}
+		if _, gated := r.turnTarget(); !gated {
+			t.Fatal("an unrelated respawn disarmed the gate: a turn accepted on the strength of the already-fired session_transition{clear} would be written into the child RestartFresh is about to kill, msgqueue would read that successful write as a commit, and the turn would be lost silently")
+		}
+		if err := r.WriteUserTurn(context.Background(), "c1", []byte(unauthorisedTurnProbe)); !errors.Is(err, ErrNoLiveChild) {
+			t.Fatalf("WriteUserTurn = %v, want ErrNoLiveChild; the caller-visible refusal is what keeps the turn queued for the successor", err)
+		}
+	})
+
+	t.Run("the successor bind drops the gate", func(t *testing.T) {
+		// The rotation lands. Child 3's beginSpawn therefore snapshots the bumped
+		// counter — strictly greater than the arm's threshold — so it is the one
+		// spawn authorised to end this window.
+		r.RestartFresh(rotatedSessionID)
+		waitSpawn(t, spawned, "the post-rotation spawn")
+
+		if err := r.WriteUserTurn(context.Background(), "c1", []byte(successorTurnProbe)); err != nil {
+			t.Fatalf("WriteUserTurn after the successor bound = %v, want nil; the gate outlived its own rotation and the conversation refuses every turn until some later one — a worse outcome than the loss the authorisation fixes", err)
+		}
+		waitForContains(t, out, successorTurnProbe, 5*time.Second)
+		// Three children have existed and the first two are dead, so the echo above
+		// can only be the successor's: the turn observably landed in the
+		// post-rotation child, not in a pre-rotation one.
+		if got := strings.Count(out.String(), "READY"); got != 3 {
+			t.Errorf("saw %d READY lines, want 3 (first spawn, Restart respawn, successor); the echo cannot be attributed to the successor otherwise:\n%s", got, out.String())
+		}
+	})
+
+	// Asserted at the parent, not inside (a): "the refused bytes never reached a
+	// child" needs a happens-AFTER edge, and (b)'s successful echo is a
+	// deterministic one — child 2's cmd.Wait returned before child 3 was spawned,
+	// and Wait returns only once its stdout copier has drained. Placing it inside
+	// (b) would redden (b) under the mutant, where it must stay green; a sleep
+	// inside (a) would trade determinism for nothing.
+	if got := out.String(); strings.Contains(got, unauthorisedTurnProbe) {
+		t.Errorf("the refused turn reached a child after all; stdout:\n%s", got)
+	}
+}
+
+// TestRunner_BeginRotation_CrashRespawnLeavesTheGateArmed is the filed interleaving
+// itself: the child crashes, the backoff ladder respawns it under the PRE-ROTATION
+// id inside the gap between BeginRotation and its partner RestartFresh (the whole of
+// the pool's rotate — mint, re-key, register, an fsync'd atomic write, then the
+// session_transition{clear} fan-out), and that respawn must not end the window.
+//
+// The arm is placed INSIDE the first spawn's onSpawn under a sync.Once — the shape
+// TestRunner_RestartFresh_RotatesThenResumesNewID uses for its rotation — and not
+// from the test goroutine after a waitSpawn. The crash child is gone in 20 ms, so a
+// test-goroutine arm can land after the respawn has already bound, and the row would
+// then be asserting about a bind that PREDATES the arm: green on both trees, proving
+// nothing. onSpawn runs on the Run goroutine, so arming there puts the arm strictly
+// before child 2's beginSpawn by program order.
+func TestRunner_BeginRotation_CrashRespawnLeavesTheGateArmed(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "crash", &safeBuffer{}, &safeBuffer{})
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	spawned := make(chan struct{}, 4)
+	var (
+		r    *Runner
+		once sync.Once
+	)
+	cfg.onSpawn = func(int) {
+		once.Do(func() { r.BeginRotation() })
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	waitSpawn(t, spawned, "the first spawn")
+	waitSpawn(t, spawned, "the crash respawn")
+
+	// Deliberately NOT guarded by Stdin() != nil: the 20 ms crash child may already
+	// be gone, and gated is non-vacuous without it — under a mutant clearing
+	// unconditionally, child 2's setStdin has run before this second receive, so the
+	// read is deterministic in both directions.
+	if _, gated := r.turnTarget(); !gated {
+		t.Fatal("the crash/backoff respawn of the pre-rotation id disarmed the gate; a queued turn would then be accepted and written into a child RestartFresh is about to kill, and msgqueue would drop it as committed — #1330's loss reached through the backoff ladder")
 	}
 }
 
