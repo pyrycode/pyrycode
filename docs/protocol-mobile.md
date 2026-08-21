@@ -572,6 +572,12 @@ Each value is the input's own value: a JSON string arrives decoded (a path is a 
 | `is_error` | bool | Whether the tool invocation failed. |
 | `result_summary` | string | Human-readable précis of the result (not the raw output). |
 
+**Bounds.** `result_summary` is capped at **10000 runes** (runes, not bytes). A result the daemon shortened ends in `…`; a result that legitimately ends in `…` is indistinguishable from a cut one, which is an accepted cost of the marker. **`is_error` does not change the bound** — an error result is truncated at exactly the same 10000 runes a success result is, so a client must not expect a failing tool's output to arrive whole.
+
+The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML by default, so `<`, `>`, `&` and every control byte without a short escape each cost **six bytes** on the wire, while a multi-byte rune is emitted raw at 4 bytes or fewer — six bytes per rune is therefore the ceiling for any rune count. 10000 × 6 = 60000 B of escaped content, measured at a worst case of **61363 B** against the 65519-byte application-envelope cap (§ Application-envelope size cap) with hostile identity fields. A frame over that cap is **lost, not truncated**, and `tool_result` is never-droppable control class (§ Error codes, `4413`), so the operator would see an empty row rather than a shortened one. Do not read `unrecognized.raw`'s "escaping is mild in practice" argument onto this field: that one rests on the payload already being JSON text with pre-escaped control characters, where a tool result is raw command output or file contents, and reading a TSX or HTML file is an ordinary `<`-dense result.
+
+**`result_summary` is a display string, not a capability.** It is model-authored text the daemon neither resolved nor validated — `Bash` output is a command's stdout verbatim, a file read is a file's contents. Render it as inert text. Never feed it to an HTML sink, an attribute, or a URL, and never execute or re-shell any of it. This is the hazard § `tool_use` states for its input values, and here the `<`-dense case is the ordinary one rather than the contrived one.
+
 #### `turn_end`
 
 | Field | Type | Meaning |

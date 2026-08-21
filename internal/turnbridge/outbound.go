@@ -43,9 +43,11 @@ const (
 	StateIdle       TurnState = "idle"
 )
 
-// maxSummaryLen bounds the input/result précis to a single line of at most this
-// many runes. A phone-display bound, not a wire constraint (the envelope cap is
-// far larger); tunable if the mobile view wants a different cap.
+// maxSummaryLen bounds the INPUT précis to a single line of at most this many
+// runes. A phone-display bound, not a wire constraint (the envelope cap is far
+// larger); tunable if the mobile view wants a different cap. It stopped bounding
+// the RESULT précis in #1680 — that side has its own, much larger cap in
+// maxResultSummaryRunes below, which IS a wire constraint.
 const maxSummaryLen = 200
 
 // The bounds on the per-field tool input inputFields extracts (#1678). These
@@ -114,6 +116,65 @@ const (
 	// the ring's worst-case per-conversation footprint (#1678 § Security review).
 	maxInputTotalRunes = 8500
 )
+
+// maxResultSummaryRunes bounds the tool-result précis resultSummary derives
+// (#1680). Like the input-field caps above and unlike maxSummaryLen, this is a
+// WIRE constraint: the live producer (internal/streamsup's toolResultContent)
+// returns claude's result text VERBATIM with no cap of its own, so this constant
+// is the only thing standing between an arbitrarily large tool result and the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md
+// § Application-envelope size cap). Separate from maxSummaryLen because
+// input_summary keeps its meaning, its value and its own cap unchanged, and
+// because results are an order of magnitude bigger than inputs: measured across
+// 11379 local tool results, mean 2959 characters and median 721, of which only
+// 22% survive a 200-rune cap whole.
+//
+// 10000 is maxDeltaTextBytes's number (cmd/pyry) on purpose. That is the one
+// other free-text field on a v2 envelope and it solved this same problem, so a
+// different number for the same envelope would invite the two to drift. It
+// carries at least 90% of measured results whole, against 22% today. 16000 was
+// MEASURED at 96309 B — 47% over the cap — and must not be re-proposed: exceeding
+// the cap does not truncate a frame, it LOSES it (nothing on relay's push path
+// bounds the plaintext, so an oversized frame fails at the AEAD or is rejected by
+// the phone's own decode cap), and tool_result is never-droppable control class,
+// so the operator would see an empty row rather than a shortened one.
+//
+// The arithmetic, in maxDeltaTextBytes's form. encoding/json has SetEscapeHTML on
+// by default, so '<', '>', '&' and every control byte without a short escape each
+// cost six bytes on the wire. The cut here is a RUNE cut and six bytes per rune is
+// still the ceiling: a 1-byte rune escapes to at most 6, a multi-byte rune is
+// emitted RAW at 4 bytes or fewer, U+2028/U+2029 escape to 6 from 3 input bytes,
+// and an invalid byte becomes U+FFFD (6 bytes on the wire) while
+// utf8.RuneCountInString counts it as one rune. So 10000 x 6 = 60000 B is the
+// content ceiling. The bound is on PRE-ellipsis content, exactly as the input caps
+// above are: one "…" rides on top, costing 3 raw bytes rather than 6 because
+// U+2026 is emitted unescaped.
+//
+// Measured worst case: 61363 B, 93.7% of the cap, with roughly 4.2 KB of headroom
+// (the cap test's number, one byte above the spec's 61362 because "is_error":false
+// costs one more than true and the field is never omitted).
+// That headroom rests on an ASSUMPTION rather than on an enforced cap, which is
+// worth saying out loud — nothing bounds the three identity fields.
+// conversation_id and turn_id are daemon-supplied; tool_use_id is claude's
+// block.ToolUseID passed through verbatim by streamsup's emitUser, as name and
+// block.ID are on the tool_use side. The measurement therefore fills all three at
+// 64 runes, roughly 11x the longest observed. Capping them upstream is a separate
+// ticket (#1678 § Open questions, inherited by #1680).
+//
+// The invariant is ENFORCED by TestToolResultPayload_FitV2EnvelopeCap, which
+// drives this helper rather than a hand-built payload so the constant is what the
+// measurement stands on; if it ever fails, LOWER this constant — never raise it.
+// The conservative constant is the belt; the deterministic per-frame cap test is
+// the suspenders (different fabric). The second reason for the never-raise rule is
+// MEMORY: internal/eventring retains up to MaxEventsPerConversation (1024) events
+// per conversation and preferentially keeps control-class events, of which
+// tool_result is one, holding the marshalled payload bytes — so this constant
+// multiplies the ring's worst-case per-conversation footprint, from ~1.4 MiB at
+// the old bound to ~59 MiB at this one (#1680 § Security review).
+//
+// tool_use and tool_result are separate envelopes, so the input budget above does
+// not ride this frame and the two do not sum.
+const maxResultSummaryRunes = 10000
 
 // MapEvent maps one neutral turnevent.Event plus explicit turn context to the
 // matching v2 interactive wire payload and its envelope type discriminant.
@@ -529,6 +590,21 @@ func inputValue(raw json.RawMessage) string {
 // exhaustive over the sealed ToolContent sum type so a future producer variant
 // cannot silently vanish. nil (the legal status-only ToolUpdate) yields "".
 //
+// Every arm is bounded by the one maxResultSummaryRunes, not by a per-arm
+// exception. The cap is inert for two of them — a DiffContent carries a path and
+// a TerminalContent carries "terminal " + id, neither of which approaches it —
+// so the behavioural change is scoped to the TextContent arm, the only one the
+// live producer emits; one rule is cheaper to read and to test than three.
+//
+// is_error is deliberately NOT visible here. The flag is derived at the MapEvent
+// call site, and an error result is truncated at exactly this bound: uncapped is
+// unavailable (a failing build dumps as much as it likes, and an unbounded field
+// on a frame with a hard 65519-byte cap is a lost control frame waiting to
+// happen), and giving errors the envelope's own ~10693-rune headroom instead
+// would be a distinction with no behavioural difference on any content that
+// exists (#1680). Keeping the flag out is what keeps this signature and arm
+// count unchanged.
+//
 // The live inbound producer (internal/streamsup's toolResultContent) only ever
 // emits TextContent or nil; the Diff/Terminal renderings are unreachable today
 // but handled (the type is sealed) and kept deliberately minimal until a
@@ -537,11 +613,11 @@ func inputValue(raw json.RawMessage) string {
 func resultSummary(c turnevent.ToolContent) string {
 	switch v := c.(type) {
 	case turnevent.TextContent:
-		return truncate(v.Text, maxSummaryLen)
+		return truncate(v.Text, maxResultSummaryRunes)
 	case turnevent.DiffContent:
-		return truncate(v.Path, maxSummaryLen)
+		return truncate(v.Path, maxResultSummaryRunes)
 	case turnevent.TerminalContent:
-		return truncate("terminal "+v.TerminalID, maxSummaryLen)
+		return truncate("terminal "+v.TerminalID, maxResultSummaryRunes)
 	default:
 		return ""
 	}
