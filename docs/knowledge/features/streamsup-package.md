@@ -519,7 +519,7 @@ routing an inbound remote interrupt frame to the correct per-conversation runner
 crash-restart (see [codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge
 case, non-blocking for this unwired slice).
 
-## Idle/stall watchdog — receive-side, emit-not-kill (#1094)
+## Idle/stall watchdog — receive-side, emit-not-kill (#1094), arms from the send side (#1504)
 
 Lifts the type-aware idle watchdog from `streamrunner` (`internal/agentrun/streamrunner/watchdog.go`)
 with one crucial divergence: the one-shot runner **kills** on idle stall; `streamsup`'s watchdog **emits
@@ -538,6 +538,8 @@ type WatchdogConfig struct {
 
 func NewWatchdog(cfg WatchdogConfig) *Watchdog
 func (w *Watchdog) Writer() io.Writer          // the tracker; compose into Config.Stdout
+func (w *Watchdog) UserTurnSent()              // #1504 — a user turn's bytes reached the child; arms + restamps
+func (w *Watchdog) ChildExited()               // #1504 — the watched child is gone; voids what it owed
 func (w *Watchdog) Start(ctx context.Context)  // launches the one poll goroutine
 func (w *Watchdog) Wait()                       // blocks until the poll goroutine exits
 ```
@@ -554,6 +556,27 @@ the watchdog — the type-aware core), `user`/`tool_result`→awaiting, `result`
 goroutine (`Start`/`Wait`) ticks at `watchdogTickFor(Idle)` (`idle/8` clamped to `[5ms, 5s]`, lifted
 verbatim) and, on the edge of `awaiting && silent > Idle` (latched once per stall episode), evaluates
 `PendingPermission()` and calls `OnStall(pending)`.
+
+**The tracker starts not-awaiting, and the send side — not stdout — is the primary arm (#1504).** The
+original `awaiting: true` construction-time default was lifted from `streamrunner`, whose runner *is*
+the send side and so may assume an owed turn the instant it is built. `streamsup`'s watchdog is
+constructed away from the send side: the interactive child spawns on `Activate`/`RestartFresh` and
+emits `system`/`init` before any user turn exists — a message may not arrive for hours — and `init` is
+activity-only, so the old default fired a false stall 240s after every spawn, and again after every
+crash-mid-turn respawn. Because claude does **not** echo the delivered prompt back as a `user` line on
+this surface (measured; see the "Two tiers" section below), starting `awaiting: false` with no other
+change would have turned that false positive into a silent false negative — a turn that produces
+nothing would never arm the watchdog at all. The fix is two explicit lifecycle signals instead:
+`UserTurnSent()` (sets `awaiting=true` **and** restamps `lastEvent`, so an idle child's stale
+`lastEvent` doesn't fire on the very next tick) and `ChildExited()` (sets `awaiting=false` and restamps
+`lastEvent`, voiding whatever the departed child owed so the respawned child starts clean). Both are
+lifecycle facts the still-unfiled wiring slice already holds — `UserTurnSent` after a `WriteUserTurn`
+that returns `nil` (its two refusals, `ErrNoLiveChild` and `turncommit.ErrDropped`, write zero bytes and
+must not arm it), `ChildExited` from the supervise loop's respawn point — but wiring them into
+`Config.Stdout`/`Run` is deferred; this slice is additive to `watchdog.go` alone, no production caller.
+One `Watchdog` per `Runner`, not one per child: `Config.Stdout` is fixed at `New` and never re-wired, so
+a per-child watchdog would have no way to reach a respawned child's stdout. See
+[codebase/1504.md](../codebase/1504.md).
 
 **The hook annotates the signal, it does not gate it.** Both a genuine wedge (`pending=false`) and an
 approval-wait (`pending=true`) call `OnStall` — the distinction lives in the argument, not in whether the
