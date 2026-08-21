@@ -763,6 +763,7 @@ type ToolUsePayload struct {
     ToolUseID      string `json:"tool_use_id"`
     Name           string `json:"name"`
     InputSummary   string `json:"input_summary"` // human-readable précis, not raw input
+    Input          map[string]string `json:"input"` // tool input's own fields, capped (#1678)
 }
 
 type ToolResultPayload struct {
@@ -845,6 +846,37 @@ type CompactingPayload struct {
   every v1 slice. The intersection-of-capabilities trust decision, the
   internal-event → envelope mapping, and the capability-gated push all live in the
   consumer (#608).
+- **`ToolUsePayload.Input` (#1678) sends the tool input's own top-level fields
+  instead of one flattened, 200-rune-capped précis.** Each value is the input's
+  value verbatim — a JSON string decoded, any other JSON type in its compact
+  form — with the bounds owned entirely by the producer
+  (`internal/turnbridge`'s `maxInputValueRunes` / `maxInputKeyRunes` /
+  `maxInputFields` / `maxInputTotalRunes`); this struct re-decides no maximum of
+  its own, the `RateLimitedPayload` precedent for not letting two layers
+  disagree silently about a limit. Two things were considered and rejected
+  before this shape: a `kind` discriminant (the client can already run the
+  identical name-based switch `internal/streamsup`'s `toolKind` runs) and a
+  pre-chosen `subject` field (that would make the daemon own a display
+  decision — collapsed vs. expanded row — the client is better placed to
+  make). `InputSummary` is untouched by this change: same meaning, same
+  value, same cap, and it remains the whole-input fallback when the total
+  budget drops a field.
+- **`ToolUsePayload.MarshalJSON` (#1678) is the file's second custom
+  marshaller, following `BackgroundTaskRosterPayload`'s pattern exactly:** a
+  nil `Input` normalises to `"input":{}`, never `"input":null`, because the
+  payload deliberately does not distinguish an absent, empty, or non-object
+  tool input — there is nothing for `null` to mean that `{}` does not, and
+  `{}` is iterable without a branch in every client language. `Input`'s
+  presence is also what makes `ToolUsePayload` non-comparable with `==`; every
+  existing comparison already goes through `reflect.DeepEqual` or byte
+  equality.
+- **`TestToolUsePayload_FitV2EnvelopeCap` (#1678) is a second instance of the
+  measured-envelope pattern the background-task section below established:**
+  fills every value with `'<'`, plus the two upstream-unbounded identity
+  fields (`name` at a hostile 512 runes) the cap test cannot otherwise assume
+  sane. Measured **56618 B, 86.4%** of the 65519-byte cap. Same never-raise
+  rule: if the test ever fails, the fix is to lower `internal/turnbridge`'s
+  constants, not this test's literal.
 
 Eight golden round-trip tests in `interactive_test.go` decode each fixture through
 `Envelope` → `Envelope.Payload` → per-type struct, assert each field (incl. the
@@ -854,7 +886,12 @@ byte-equivalently. The shared `roundTripEnvelope` helper re-marshals the
 **decoded payload struct** (not the original `RawMessage`) back into the envelope —
 that is what pins struct → wire shape, since a missing or reordered json tag only
 surfaces when the bytes are actually re-encoded (the original-`RawMessage`-passthrough
-variant cannot catch it).
+variant cannot catch it). `TestToolUsePayload_RoundTrip`'s fixture
+(`testdata/tool_use.json`) carries a `WebSearch` input whose one field is the
+query, matching the pre-existing `input_summary` value; `Input`'s empty-map
+polarity is pinned separately by `TestToolUsePayload_NilInputNormalises` (a
+direct marshal, no fixture — mirroring `TestBackgroundTaskRosterPayload_NilTasksNormalises`
+below) and by `TestToolUsePayload_FitV2EnvelopeCap` (above).
 
 ## Background-task event payloads (#1393; mapping wired #1394)
 

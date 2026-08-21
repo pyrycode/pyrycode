@@ -64,6 +64,7 @@ func TestMapEventOutbound(t *testing.T) {
 			wantPayload: protocol.ToolUsePayload{
 				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-1",
 				Name: "Bash", InputSummary: `{"command":"ls"}`,
+				Input: map[string]string{"command": "ls"},
 			},
 			wantOK: true,
 		},
@@ -820,6 +821,197 @@ func TestInputSummary(t *testing.T) {
 			t.Parallel()
 			if got := inputSummary(tt.raw); got != tt.want {
 				t.Fatalf("inputSummary(%q): got %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInputFields pins the extraction #1678 exists for. The rows are chosen,
+// not padded: an empty json.RawMessage{} is deliberately absent because the nil
+// row already covers the len(raw)==0 branch, a bare JSON number is absent
+// because the array row already covers "does not unmarshal into a map", and a
+// >maxInputFields input is absent because a 17-entry literal costs more to read
+// than it proves — protocol's TestToolUsePayload_FitV2EnvelopeCap fills to
+// exactly that many.
+func TestInputFields(t *testing.T) {
+	t.Parallel()
+
+	// Over the per-value cap, so the truncation rows exercise the cut rather
+	// than the pass-through.
+	bulk := strings.Repeat("a", maxInputValueRunes+500)
+	cappedBulk := strings.Repeat("a", maxInputValueRunes) + "…"
+	longKey := strings.Repeat("k", maxInputKeyRunes+1)
+
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want map[string]string
+	}{
+		{"nil yields no fields", nil, nil},
+		{"empty object yields no fields", json.RawMessage(`{}`), nil},
+		{"non-object yields no fields", json.RawMessage(`["a","b"]`), nil},
+		{"invalid json yields no fields", json.RawMessage(`{not json`), nil},
+		{
+			name: "plain object crosses verbatim",
+			raw:  json.RawMessage(`{"command":"ls -la","description":"list files"}`),
+			want: map[string]string{"command": "ls -la", "description": "list files"},
+		},
+		{
+			// A string value arrives DECODED, not re-quoted: the newline is a
+			// newline and the quote is a quote, which is what makes a path a path.
+			name: "string value arrives decoded",
+			raw:  json.RawMessage(`{"text":"a\nb\"c"}`),
+			want: map[string]string{"text": "a\nb\"c"},
+		},
+		{
+			name: "non-string values arrive as compact json",
+			raw:  json.RawMessage(`{"n":1.5,"b":true,"arr":[1, 2],"obj":{ "x" : 1 },"nul":null}`),
+			want: map[string]string{
+				"n": "1.5", "b": "true", "arr": "[1,2]", "obj": `{"x":1}`, "nul": "null",
+			},
+		},
+		{
+			name: "oversized value cut at the cap with an ellipsis",
+			raw:  json.RawMessage(`{"content":"` + bulk + `"}`),
+			want: map[string]string{"content": cappedBulk},
+		},
+		{
+			name: "multibyte value cut on a rune boundary",
+			raw:  json.RawMessage(`{"content":"` + strings.Repeat("日", maxInputValueRunes+100) + `"}`),
+			want: map[string]string{"content": strings.Repeat("日", maxInputValueRunes) + "…"},
+		},
+		{
+			// The key is DROPPED, never truncated: a cut key is a false claim
+			// about the input's field name. Its siblings are unaffected.
+			name: "over-long key drops its entry only",
+			raw:  json.RawMessage(`{"` + longKey + `":"v","file_path":"/tmp/x.go"}`),
+			want: map[string]string{"file_path": "/tmp/x.go"},
+		},
+		{
+			// The regression this ticket exists for, and the row that proves
+			// shortest-first: three bulk values exhaust maxInputTotalRunes, and
+			// file_path survives INTACT because it is admitted before them.
+			// Sorted-key order would spend the budget on a_bulk and b_bulk and
+			// never reach file_path at all.
+			name: "budget binds: short identifying field survives, bulk tail drops",
+			raw: json.RawMessage(`{"a_bulk":"` + bulk + `","b_bulk":"` + bulk +
+				`","c_bulk":"` + bulk + `","file_path":"/tmp/x.go"}`),
+			want: map[string]string{
+				"file_path": "/tmp/x.go",
+				"a_bulk":    cappedBulk,
+				"b_bulk":    cappedBulk,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := inputFields(tt.raw)
+			// The nil is load-bearing, not cosmetic: the bridge must hand
+			// protocol a nil so ToolUsePayload.MarshalJSON owns the {} rather
+			// than the bridge pre-allocating one and hiding the decision.
+			if tt.want == nil && got != nil {
+				t.Fatalf("inputFields: got %#v, want a nil map", got)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("inputFields:\n got %#v\nwant %#v", got, tt.want)
+			}
+			for k, v := range got {
+				if n := utf8.RuneCountInString(k); n > maxInputKeyRunes {
+					t.Fatalf("key %q is %d runes, over the %d cap", k, n, maxInputKeyRunes)
+				}
+				if !utf8.ValidString(v) {
+					t.Fatalf("value for %q is not valid UTF-8: %q", k, v)
+				}
+			}
+		})
+	}
+}
+
+// An input with nothing to send reaches the wire as "input":{}, never
+// "input":null — the polarity is decided in protocol
+// (ToolUsePayload.MarshalJSON) and this test proves the bridge reaches it with
+// the nil intact.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, not on a
+// payload the test built, for TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire's
+// reason: a test-constructed payload would only prove protocol's MarshalJSON
+// works, not that the mapping reached it without pre-allocating an empty map of
+// its own.
+//
+// Pinning the marshalled BYTES rather than the decoded value is the point of the
+// test: decoding "input":{} and decoding "input":null both yield an empty map to
+// a Go caller, so a value-level assertion would pass in both polarities.
+func TestMapEventToolUseEmptyInputOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	tc := TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7}
+
+	tests := []struct {
+		name    string
+		raw     json.RawMessage
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "absent input",
+			raw:     nil,
+			want:    []string{`"input":{}`},
+			notWant: []string{`"input":null`},
+		},
+		{
+			name:    "empty object input",
+			raw:     json.RawMessage(`{}`),
+			want:    []string{`"input":{}`},
+			notWant: []string{`"input":null`},
+		},
+		{
+			name:    "non-object input",
+			raw:     json.RawMessage(`["a","b"]`),
+			want:    []string{`"input":{}`},
+			notWant: []string{`"input":null`},
+		},
+		{
+			// The control: {} is not what the marshaller emits for everything, so
+			// the three empty rows above pass for the right reason. input_summary
+			// rides along in the same needle set because AC 1 keeps it populated
+			// and unchanged beside the new map.
+			name: "populated input carries its fields",
+			raw:  json.RawMessage(`{"command":"ls"}`),
+			want: []string{
+				`"input":{"command":"ls"}`,
+				`"input_summary":"{\"command\":\"ls\"}"`,
+			},
+			notWant: []string{`"input":{}`, `"input":null`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			typ, payload, ok := MapEvent(turnevent.ToolStart{
+				ToolCallID: "tool-1", Title: "Bash", RawInput: tt.raw,
+			}, tc)
+			if !ok {
+				t.Fatal("ToolStart was suppressed by the mapping; it must be forwarded")
+			}
+			if typ != protocol.TypeToolUse {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeToolUse)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
 			}
 		})
 	}
