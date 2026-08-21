@@ -37,6 +37,33 @@ type queuedEnv struct {
 type pushQueue struct {
 	items   []queuedEnv // FIFO; bounded by the drop policy at pushQueueCap
 	dropped uint64      // observability counter; no app content
+
+	// bytes is the retained PAYLOAD total, Σ len(item.env.Payload) over items.
+	// It is a length, never content. Invariant: bytes == that sum at every
+	// point pushMu is not held, and bytes <= pushQueueByteCeiling always.
+	// Maintained ONLY inside pushQueue methods — enqueue's three append sites
+	// and its one evict site, plus popHead's decrement — so no caller outside
+	// the type can drift it. The fixed per-envelope fields (Type, ID, TS,
+	// EventID) and the queuedEnv slot itself are deliberately NOT charged: they
+	// are O(10²) B against a payload spanning ~100 B to 64 KB, and charging
+	// them would turn the ceiling into a partial count cap, which #1505 AC#1
+	// explicitly forbids. Residual: a producer emitting zero-payload control
+	// envelopes grows items without moving bytes; no production producer does,
+	// so that axis is named-but-undefended (spec § Open questions).
+	bytes int
+
+	// overflowed is the one-way latch enqueue sets when pushQueueByteCeiling
+	// rejects a control envelope. Push reads it under the same pushMu hold and
+	// signals V2SessionManager.pushOverflow so the Run goroutine tears the
+	// session down (handlePushOverflow). It is NEVER cleared: by the time it is
+	// set, control envelopes have already been discarded, and only the
+	// re-handshake the teardown forces replays them (#647 replay +
+	// reconcileModals / reconcileQueues). Clearing it — or re-checking whether
+	// the queue has since drained below the ceiling — would leave a surviving
+	// session with a permanent silent gap, which is exactly what #1505 rejects.
+	// Distinct from dropped: a ceiling rejection is not a drop-policy drop and
+	// must stay distinguishable from one in the logs.
+	overflowed bool
 }
 
 // enqueue applies the droppable-delta drop policy and appends env, returning
@@ -44,6 +71,12 @@ type pushQueue struct {
 // caller MUST hold m.pushMu. The method only ever removes existing entries and
 // appends at the tail, so the relative order of every surviving envelope is
 // preserved (AC#4).
+//
+// The returned bool means "the DROP POLICY dropped or evicted something" and
+// nothing else. A pushQueueByteCeiling rejection is deliberately not reported
+// through it and does not increment dropped: the two conditions would otherwise
+// be indistinguishable in the logs, and the ceiling's signal is the overflowed
+// latch, which Push reads under the same hold.
 //
 // Drop policy (AC#2/#3):
 //   - below cap: append.
@@ -53,30 +86,43 @@ type pushQueue struct {
 //   - at cap with no queued delta (all control), incoming delta: drop the
 //     incoming delta (loss-tolerant; cannot evict a control event).
 //   - at cap with no queued delta (all control), incoming control: admit past
-//     nominal cap (documented soft overflow — see § Design in the spec). The
-//     trilemma bounded ∧ never-drop-control ∧ never-block-producer is
-//     unsatisfiable here; we yield "strictly bounded". This state IS reachable:
-//     StreamBundle (#812) enqueues control-class debug_bundle_chunk /
-//     debug_bundle_done frames, so one request_debug_bundle can drive hundreds
-//     of never-droppable control events onto a connected-but-very-slow relay
-//     with zero interleaved text. What keeps it bounded is
-//     handleDebugBundleRequest's per-conn in-flight gate (#911): while a conn's
-//     queue still holds any bundle frame, further request_debug_bundle on that
-//     conn are rejected before StreamBundle, so a single conn accumulates at
-//     most one bundle's chunks (bounded ≈ 4/3 × archive) and retries can no
-//     longer stack unbounded memory.
+//     nominal cap, up to pushQueueByteCeiling (documented soft overflow — see
+//     § Design in the spec). The trilemma bounded ∧ never-drop-control ∧
+//     never-block-producer is unsatisfiable here; we yield "strictly bounded".
+//     This state IS reachable two ways:
+//     (1) The #874 transport-down hold during a live turn (#1505). drainOnce
+//     returns at its first statement while transportDown reports down, so
+//     nothing drains, while the #632 interactive emitter keeps pushing
+//     tool_result / tool_use / turn_state / turn_end — all control-class, all
+//     never-droppable. A multi-minute outage mid-turn is the growth driver
+//     here, and nothing rejects it: there is no request to reject.
+//     (2) StreamBundle (#812), which enqueues control-class
+//     debug_bundle_chunk / debug_bundle_done frames, so one
+//     request_debug_bundle can drive hundreds of never-droppable control
+//     events onto a connected-but-very-slow relay with zero interleaved text.
+//     handleDebugBundleRequest's per-conn in-flight gate (#911) bounds the
+//     RETRY axis of (2) — while a conn's queue still holds any bundle frame,
+//     further request_debug_bundle on that conn are rejected before
+//     StreamBundle, so a single conn accumulates at most one bundle's chunks
+//     (≈ 4/3 × archive) and retries can no longer stack. It says nothing about
+//     (1), and nothing about one arbitrarily large bundle.
+//     What bounds BOTH is pushQueueByteCeiling: past it the envelope is
+//     rejected and overflowed latches, which tears the session down.
 func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 	qe := queuedEnv{env: env, droppable: env.Type == protocol.TypeAssistantDelta}
 	if len(q.items) < pushQueueCap {
 		q.items = append(q.items, qe)
+		q.bytes += len(env.Payload)
 		return false
 	}
 	// At capacity. Evict the oldest queued delta (the first droppable from the
 	// front) to make room for the incoming event, delta or control.
 	for i := range q.items {
 		if q.items[i].droppable {
+			q.bytes -= len(q.items[i].env.Payload)
 			q.items = slices.Delete(q.items, i, i+1)
 			q.items = append(q.items, qe)
+			q.bytes += len(env.Payload)
 			q.dropped++
 			return true
 		}
@@ -87,10 +133,37 @@ func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 		q.dropped++
 		return true
 	}
-	// Soft overflow: admit the control event past nominal cap. Reachable via
-	// StreamBundle's bundle chunks; bounded per conn by #911's in-flight gate.
+	// Soft overflow: admit the control event past nominal cap — but only up to
+	// pushQueueByteCeiling. This is the ONLY branch that consults the ceiling,
+	// and deliberately so: the two branches above leave len(items) <=
+	// pushQueueCap, whose retained bytes cannot reach the ceiling (see the
+	// derivation on pushQueueByteCeiling), so a check there would be dead code
+	// and would cost the reader that proof.
+	//
+	// `>` not `>=`: an envelope landing exactly ON the ceiling is admitted, so
+	// the invariant is bytes <= pushQueueByteCeiling.
+	if q.bytes+len(env.Payload) > pushQueueByteCeiling {
+		// Reject and latch. Not a drop-policy drop: dropped is untouched. The
+		// envelope is gone, and only the teardown the latch triggers makes it
+		// recoverable — see the overflowed field.
+		q.overflowed = true
+		return false
+	}
 	q.items = append(q.items, qe)
+	q.bytes += len(env.Payload)
 	return false
+}
+
+// popHead removes and returns the FIFO head, keeping bytes in step. The caller
+// MUST hold m.pushMu and MUST have checked len(q.items) > 0. It is the only
+// pop path, so the byte counter cannot drift: drainOnce calls this rather than
+// hand-rolling the three-line slice pop it used before #1505.
+func (q *pushQueue) popHead() protocol.Envelope {
+	env := q.items[0].env
+	q.bytes -= len(env.Payload)
+	q.items[0] = queuedEnv{} // release the envelope for GC; slot slides out below
+	q.items = q.items[1:]    // pop head (FIFO)
+	return env
 }
 
 // pushQueueCap bounds the per-session push buffer (count of envelopes, not
@@ -98,12 +171,41 @@ func (q *pushQueue) enqueue(env protocol.Envelope) bool {
 // 220): post-#609 coalescing makes deltas arrive per-message/~250 ms, so 256
 // gives ample headroom to ride out one transport WriteTimeout window without
 // dropping while bounding worst-case per-session memory. Control events may
-// push the queue past this: StreamBundle's debug_bundle_chunk / debug_bundle_done
-// frames are control-class, so one request_debug_bundle can soft-overflow the
-// queue (see pushQueue.enqueue). #911's per-conn in-flight gate bounds that to
-// one bundle's chunks per conn (≈ 4/3 × archive); it no longer relies on the
-// all-control saturated state being unreachable.
+// push the queue past this two ways: the #874 transport-down hold parks the
+// drain while the #632 emitter keeps pushing never-droppable turn events, and
+// StreamBundle's debug_bundle_chunk / debug_bundle_done frames are
+// control-class, so one request_debug_bundle can soft-overflow the queue on its
+// own (see pushQueue.enqueue). #911's per-conn in-flight gate bounds the retry
+// axis of the second to one bundle's chunks per conn (≈ 4/3 × archive) and
+// nothing about the first. What bounds BOTH is pushQueueByteCeiling, past which
+// the session is torn down at StatusQueueOverflow.
 const pushQueueCap = 256
+
+// pushQueueByteCeiling is the hard ceiling on the retained PAYLOAD bytes
+// (Σ len(env.Payload) — see pushQueue.bytes) one session's push queue may hold.
+// Exceeding it rejects the incoming envelope and latches pushQueue.overflowed,
+// which tears the session down at StatusQueueOverflow rather than retaining an
+// unbounded number of never-droppable control envelopes until the 15-minute
+// idle sweep (idleTimeout) finally frees them (#1505).
+//
+// Derivation. A queue within pushQueueCap can already retain at most
+// 256 × 65519 = 16 772 864 B ≈ 16 MiB, because the v2 application-envelope cap
+// is 65519 bytes (docs/protocol-mobile.md § Application-envelope size cap). 32
+// MiB is ~2× that, which buys two properties:
+//   - The ceiling can NEVER trip on a queue within the nominal count cap, so
+//     "behaviour below the ceiling is unchanged" is structural rather than
+//     empirical — and the ~2× margin survives a future bump of pushQueueCap or
+//     a change to the envelope cap. This is why enqueue checks the ceiling only
+//     on its soft-overflow branch.
+//   - ~4× above the single-digit MB a realistic multi-minute transport outage
+//     mid-turn accumulates, so no realistic outage trips it.
+//
+// A legitimate debug bundle CAN trip it: debugbundle.Assemble caps nothing, and
+// StreamBundle turns an archive into ceil(len/bundleChunkBytes) never-droppable
+// control envelopes, so an archive past roughly 25 MB ends the conn. That is a
+// chosen and tested outcome (#1505 AC#5), not an accident; if it bites, the fix
+// is to cap the .cast member in debugbundle.Assemble, not to raise this.
+const pushQueueByteCeiling = 32 << 20 // 32 MiB
 
 // modalDenyTimeout is the bounded window between a surfaced modal and the
 // fail-closed safe-deny: if no modal_answer / modal_cancel resolves it first,

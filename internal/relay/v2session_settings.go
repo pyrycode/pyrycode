@@ -164,12 +164,13 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 }
 
 // handleRequestSessionSettings answers an inbound request_session_settings
-// control frame with the current run configuration (#491, #1214): the session id
-// to address changes to, the model / effort / YOLO in force, and the
-// context-window occupancy. It is the READ half of the #844 cluster, which
-// shipped write-only. Intercepted in dispatchAppFrame before dispatch.Route,
-// like handleSetSessionSettings above, and runs on the manager's single Run
-// dispatch goroutine.
+// control frame with the run configuration of the conversation the client named
+// (#491, #1214, #1610): that conversation's bound session id to address changes
+// to, the model / effort / YOLO in force on it, and its context-window
+// occupancy. It is the READ half of the #844 cluster, which shipped write-only.
+// Intercepted in dispatchAppFrame before dispatch.Route, like
+// handleSetSessionSettings above, and runs on the manager's single Run dispatch
+// goroutine.
 //
 // It deliberately does NOT consult m.cfg.Snapshotter, and that is the entire
 // point of the verb existing. A client used to read these values off
@@ -179,39 +180,38 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 // server.binary_offline and takes the settings — which have nothing to do with a
 // terminal — down with it. On the runner now in production that left the
 // run-configuration UI with no values, no session id and no context figure at
-// all. This handler reads only the three primitive seams, so it answers
-// identically on both runners.
+// all. This handler reads one conversation-keyed seam of primitives, so it
+// answers identically on both runners.
 //
 // Order mirrors the write handler, minus the steps a read cannot need:
 //  1. Capability gate (the authz boundary): a non-interactive conn is fully
-//     inert — no decode, no registry lookup, no seam call, NO reply, so it
-//     cannot even learn whether a session or a conversation exists. Same posture
-//     as the write path's AC #6, and it MUST stay ahead of both steps below.
-//  2. Decode + conversation gate (#1586): the frame names the conversation the
-//     client is asking about. A decode failure is TOLERATED — it leaves the id
-//     empty, so there is no malformed-payload branch and a bare frame from an
-//     un-updated client is never refused. NEVER echo or log the decode error;
-//     encoding/json quotes attacker bytes into its error string. An empty id
-//     short-circuits ahead of the registry rather than failing closed: on a
-//     fresh daemon conversations.Load seeds nothing, so no conversation id
-//     exists to name, and rejecting it would leave the run-configuration sheet
-//     inert before the user's first message — the desktop#491 defect returning.
-//     A named id the registry does not know, or any named id while the seam is
-//     unwired, is NOT addressable and falls through to step 3's zero values.
-//  3. No nil-seam error branch: unlike the write path, every seam here degrades
-//     to its zero value, which the wire contract defines as a real answer
+//     inert — no decode, no resolution, no seam call, NO reply, so it cannot
+//     even learn whether a session or a conversation exists. Same posture as the
+//     write path's AC #6, and it MUST stay ahead of both steps below.
+//  2. Decode, tolerated (#1586): the frame names the conversation the client is
+//     asking about. A decode failure leaves the id empty, so there is no
+//     malformed-payload branch and no error check on the Unmarshal return.
+//     NEVER echo or log the decode error; encoding/json quotes attacker bytes
+//     into its error string.
+//  3. Resolve, or don't (#1610): one conversation-keyed read of RunConfigFor.
+//     A request that names no conversation, names one this daemon does not host,
+//     or names one bound to no live session resolves NOTHING and falls through
+//     with every value at zero.
+//  4. No nil-seam error branch: unlike the write path, the seam degrades to its
+//     zero value, which the wire contract defines as a real answer
 //     ("" ⇒ nothing to address, 0 window ⇒ usage unwired). A read that reports
 //     "I have nothing" is more useful than an error, and it keeps the reply
-//     shape constant so a client parses one thing. Step 2's unaddressable case
+//     shape constant so a client parses one thing. Step 3's unresolvable case
 //     reuses that same shape rather than adding a failure branch to a verb
 //     documented as always answering.
 //
-// SCOPE: the reported values are the bootstrap session's whether or not the
-// request named a conversation — the id gates WHETHER the answer is populated,
-// not WHICH session it describes. Making the values follow the named
-// conversation is #1587, and the reported id and the reported values must move
-// in one step or a client would read one session and write to another (see
-// BootstrapSessionID's seam doc).
+// SCOPE: the reported session id and the reported values describe ONE session —
+// the one bound to the conversation the request named — because they arrive
+// together as one RunConfig, so a client can never read one session's values and
+// write its change to another. An unresolvable request addresses NOTHING: it is
+// answered with the zero reply, never the shared bootstrap session's id or
+// values, which is the route #678 AC #4 forbids any client-driven verb from
+// reaching.
 //
 // The reply NEVER carries a screen byte, a transcript byte, or a file path —
 // only the id, two short enum-ish strings, a bool and two aggregate integers.
@@ -223,51 +223,48 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 	}
 
 	var p protocol.RequestSessionSettingsPayload
-	// A decode failure is tolerated: it leaves ConversationID == "", the
-	// answered-as-today case. A bare frame from an un-updated client carries a
-	// nil Payload, which Unmarshal rejects while leaving p zeroed — that is what
-	// makes the change additive on the wire, so do NOT add an emptiness guard, an
-	// error check, or a malformed-payload branch here. The error is never echoed
-	// and never logged (encoding/json quotes attacker bytes into it).
+	// A decode failure is tolerated: it leaves ConversationID == "", which names
+	// no conversation and so addresses nothing — the zero reply below. A bare
+	// frame from an un-updated client carries a nil Payload, which Unmarshal
+	// rejects while leaving p zeroed, and reaches exactly the same place. So
+	// there is no malformed-payload branch and no error check here. The error is
+	// never echoed and never logged (encoding/json quotes attacker bytes into
+	// it).
 	_ = json.Unmarshal(env.Payload, &p)
 
-	// The conversation gate. Short-circuit order is load-bearing twice over: the
-	// empty-id test first means an unnamed request never reaches the registry at
-	// all (the fresh-daemon case, which has no id to name), and the nil-seam test
-	// second means a named id cannot be validated when the registry is unwired,
-	// so it fails closed exactly as handleRequestSnapshot's nil seam does.
-	addressable := p.ConversationID == "" ||
-		(m.cfg.KnownConversation != nil && m.cfg.KnownConversation(p.ConversationID))
-
-	// Each seam is optional and each degrades to its zero value. Read them
-	// through nil guards rather than requiring production to wire all three:
-	// the foreground and pre-wire cases have none of them. An unaddressable
-	// request consults NONE of them and falls through with every value at zero —
-	// the same reply shape, which the wire contract already defines as a real
-	// answer.
-	var sessionID string
-	var model, effort string
-	var yolo bool
-	var usedTokens, windowTokens int
-	if addressable {
-		if m.cfg.BootstrapSessionID != nil {
-			sessionID = m.cfg.BootstrapSessionID()
-		}
-		if m.cfg.SnapshotSettings != nil {
-			model, effort, yolo = m.cfg.SnapshotSettings()
-		}
-		if m.cfg.SnapshotUsage != nil {
-			usedTokens, windowTokens = m.cfg.SnapshotUsage()
+	// Resolve the named conversation, or report nothing. Three properties, each
+	// deliberate:
+	//
+	// The empty-id guard keeps "an unnamed request addresses nothing" a property
+	// of this package alone, provable against any RunConfigFor double rather than
+	// inherited from whatever the cmd/pyry producer happens to do; it is also the
+	// relay-side half of the observed Pool.Lookup("") == bootstrap hazard the
+	// producer already guards (#678).
+	//
+	// The nil-seam guard is the foreground / v1 case: nothing resolves, so the
+	// request fails closed exactly as handleRequestSnapshot's nil seam does.
+	//
+	// The comma-ok is HONOURED, not discarded. RunConfigFor's doc says a caller
+	// MUST NOT read the fields on ok == false, so cfg is assigned only on true.
+	// Writing `cfg, _ = …` would happen to work today only because the producer
+	// zeroes its refusal return — a property of cmd/pyry, not of this contract.
+	var cfg RunConfig
+	if p.ConversationID != "" && m.cfg.RunConfigFor != nil {
+		if got, ok := m.cfg.RunConfigFor(p.ConversationID); ok {
+			cfg = got
 		}
 	}
 
+	// All six fields come from the one RunConfig, so the reported id and the
+	// reported values always describe the same session — including in the zero
+	// case, which the wire contract already defines as a real answer.
 	payload, err := json.Marshal(protocol.SessionSettingsPayload{
-		SessionID:    sessionID,
-		Model:        model,
-		Effort:       effort,
-		YOLO:         yolo,
-		UsedTokens:   usedTokens,
-		WindowTokens: windowTokens,
+		SessionID:    cfg.SessionID,
+		Model:        cfg.Model,
+		Effort:       cfg.Effort,
+		YOLO:         cfg.YOLO,
+		UsedTokens:   cfg.UsedTokens,
+		WindowTokens: cfg.WindowTokens,
 	})
 	if err != nil {
 		// A closed struct of two strings, a bool and two ints; marshal cannot fail

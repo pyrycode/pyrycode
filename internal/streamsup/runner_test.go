@@ -193,6 +193,177 @@ func idFlagValue(args []string, flag string) string {
 	return ""
 }
 
+// --- The by-id transcript probe decides the id flag: #1630 -------------------
+
+// otherSessionID is an UNRELATED session's id, sitting in the same sessions
+// directory. It is what makes the probe's by-id-ness observable rather than
+// asserted: a directory scan would emit --resume <otherSessionID> where the
+// runner's own transcript is absent, and a most-recent-by-mtime scan would name
+// it even where the runner's own transcript is present.
+const otherSessionID = "77777777-6666-5555-4444-333333333333"
+
+// writeTranscript writes an empty <id>.jsonl fixture into dir with an explicit
+// mtime. Contents are irrelevant — transcript.StatByID only stats — and the
+// mtime is set rather than left to write order so the "newer <other-id>" rows
+// below discriminate deterministically instead of racing a filesystem's
+// timestamp granularity. The ".jsonl" suffix is spelled out because the fixture
+// stands in for what claude itself writes on disk, not for one of our constants.
+func writeTranscript(t *testing.T, dir, id string, modTime time.Time) {
+	t.Helper()
+	path := filepath.Join(dir, id+".jsonl")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("write transcript fixture %s: %v", path, err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatalf("chtimes transcript fixture %s: %v", path, err)
+	}
+}
+
+// TestUseCreateForm_ProbeDecidesIDFlag is the pure half of #1630: it composes
+// useCreateForm with buildArgs over a fixture directory and compares the whole
+// argv. With no directory the latch decides in both directions (the inert
+// fall-back); with one supplied the probe decides OUTRIGHT, overriding the latch
+// in both directions — which is the two defects, one row each: a latch saying
+// "resume" against an absent transcript is #1655/#1656's crash-loop, and a latch
+// saying "create" against a present one is ADR 032's refused first spawn.
+//
+// The two <other-id> rows are what discriminate a by-id probe from a directory
+// scan. Every row additionally pins the absence of --continue, which is a
+// REGRESSION PIN and not evidence: --continue has zero occurrences in this
+// package (#839 removed it along with the adopt-by-mtime scan), so that clause
+// cannot fail against a conforming implementation.
+func TestUseCreateForm_ProbeDecidesIDFlag(t *testing.T) {
+	t.Parallel()
+
+	// Distinct, ordered mtimes so "newer" is a fact about the fixture rather
+	// than about how fast the test wrote two files.
+	var (
+		older = time.Now().Add(-2 * time.Hour)
+		newer = time.Now().Add(-1 * time.Hour)
+	)
+	base := []string{"--model", "sonnet"}
+
+	tests := []struct {
+		name string
+		// dir returns the sessions directory to probe; "" means none was
+		// supplied, which is the inert path.
+		dir         func(t *testing.T) string
+		id          string
+		latchCreate bool
+		wantFlag    string
+	}{
+		{
+			name:        "no dir: a create latch falls back to --session-id",
+			dir:         func(*testing.T) string { return "" },
+			id:          testSessionID,
+			latchCreate: true,
+			wantFlag:    "--session-id",
+		},
+		{
+			name:        "no dir: a resume latch falls back to --resume",
+			dir:         func(*testing.T) string { return "" },
+			id:          testSessionID,
+			latchCreate: false,
+			wantFlag:    "--resume",
+		},
+		{
+			name: "transcript absent overrides a resume latch (the #1656 crash-loop)",
+			dir:  func(t *testing.T) string { return t.TempDir() },
+			// The latch says resume — a session that launched, ran no turn and
+			// crashed. --resume against an id with no transcript exits 1 forever.
+			id:          testSessionID,
+			latchCreate: false,
+			wantFlag:    "--session-id",
+		},
+		{
+			name: "transcript present overrides a create latch (ADR 032's refused first spawn)",
+			dir: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTranscript(t, dir, testSessionID, older)
+				return dir
+			},
+			// The latch says create — a daemon restart, first spawn. claude
+			// refuses --session-id against a transcript that already exists.
+			id:          testSessionID,
+			latchCreate: true,
+			wantFlag:    "--resume",
+		},
+		{
+			name: "only a NEWER unrelated transcript: still creates by id",
+			dir: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTranscript(t, dir, otherSessionID, newer)
+				return dir
+			},
+			id:          testSessionID,
+			latchCreate: false,
+			wantFlag:    "--session-id",
+		},
+		{
+			name: "own transcript beside a NEWER unrelated one: still resumes by id",
+			dir: func(t *testing.T) string {
+				dir := t.TempDir()
+				writeTranscript(t, dir, testSessionID, older)
+				writeTranscript(t, dir, otherSessionID, newer)
+				return dir
+			},
+			id: testSessionID,
+			// Create, so this row pins the probe overriding the latch as well as
+			// the newer neighbour losing to the by-id hit.
+			latchCreate: true,
+			wantFlag:    "--resume",
+		},
+		{
+			name: "non-existent dir reads absent, never fails the spawn",
+			dir: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "no-such-sessions-dir")
+			},
+			id:          testSessionID,
+			latchCreate: false,
+			wantFlag:    "--session-id",
+		},
+		{
+			name: "an id ValidStem rejects reads absent, never fails the spawn",
+			dir:  func(t *testing.T) string { return t.TempDir() },
+			// Not a canonical UUID stem. New checks SessionID for non-emptiness
+			// only, so such an id really does reach the probe.
+			id:          "sess-abc",
+			latchCreate: false,
+			wantFlag:    "--session-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := tt.dir(t)
+
+			got := buildArgs(base, useCreateForm(dir, tt.id, tt.latchCreate), tt.id)
+			want := []string{
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--verbose",
+				"--model", "sonnet",
+				tt.wantFlag, tt.id,
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("argv\n got  = %v\n want = %v", got, want)
+			}
+			// Neither the flag nor the id may ever name the unrelated session:
+			// the id is always the one passed in, never one read out of the dir.
+			if slices.Contains(got, otherSessionID) {
+				t.Errorf("argv names the unrelated session %q — the probe scanned the directory:\n%v",
+					otherSessionID, got)
+			}
+			// Regression pin, not evidence: #839 removed --continue with the
+			// adopt-by-mtime scan, and no fall-back may reintroduce either.
+			if slices.Contains(got, "--continue") {
+				t.Errorf("argv carries --continue, removed by #839:\n%v", got)
+			}
+		})
+	}
+}
+
 // --- New: validation --------------------------------------------------------
 
 func TestNew_RequiredFields(t *testing.T) {
@@ -740,6 +911,135 @@ func TestRunner_RestartFresh_RotatesThenResumesNewID(t *testing.T) {
 	}
 }
 
+// TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript is the wiring pin
+// for #1630: TestUseCreateForm_ProbeDecidesIDFlag proves the decision, this
+// proves beginSpawn actually feeds that decision to buildArgs instead of passing
+// its firstRun argument straight through. It calls beginSpawn with firstRun
+// TRUE — the latch saying "create" — against a directory that already holds this
+// session's transcript, which is a daemon restart: the argv must resume, because
+// claude refuses --session-id against a live transcript (ADR 032).
+//
+// Constructs the Runner directly (as TestRunner_SpawnSetupFailureRetainsSessionID
+// does) so no child process is involved and the argv is observed at the source.
+func TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript(t *testing.T) {
+	t.Parallel()
+	sessionsDir := t.TempDir()
+	writeTranscript(t, sessionsDir, testSessionID, time.Now())
+
+	r := &Runner{
+		cfg: Config{
+			SessionID:         testSessionID,
+			ClaudeSessionsDir: sessionsDir,
+		},
+		sessionID: testSessionID,
+	}
+
+	_, cancel, args, forceFirst, _ := r.beginSpawn(context.Background(), true)
+	defer cancel()
+
+	if forceFirst {
+		t.Errorf("beginSpawn reported forceFirst with no rotation pending")
+	}
+	if got := idFlagValue(args, "--resume"); got != testSessionID {
+		t.Errorf("first spawn --resume = %q, want %q — beginSpawn passed firstRun through "+
+			"instead of consulting the probe:\n%v", got, testSessionID, args)
+	}
+	if slices.Contains(args, "--session-id") {
+		t.Errorf("first spawn carries --session-id against an existing transcript, which claude "+
+			"refuses (ADR 032):\n%v", args)
+	}
+	if got := idFlagCount(args); got != 1 {
+		t.Errorf("first spawn carries %d id flags, want exactly 1:\n%v", got, args)
+	}
+}
+
+// TestRunner_RestartFresh_ProbeDecidesPerSpawn is #1630's per-spawn pin: the id
+// flag is decided on every spawn, not once at construction. The fixture is
+// deliberately ASYMMETRIC — only the PRE-rotation id has a transcript — because
+// that is the one arrangement that discriminates. A decision computed once would
+// carry spawn 1's "present ⇒ resume" answer into the rotated id and emit
+// --resume <rotated>; a fixture where both ids are absent passes under a
+// per-spawn probe and a construction-time one alike, proving nothing.
+//
+//	spawn 1: --resume     <old>   (present ⇒ resume, on the FIRST spawn)
+//	spawn 2: --session-id <new>   (rotated id, absent ⇒ create)
+//
+// Two spawns, not three: the fake child writes no transcript, so spawn 3 is also
+// --session-id <new> — correct and convergent, but it asserts nothing further.
+func TestRunner_RestartFresh_ProbeDecidesPerSpawn(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "crash", out, stderr)
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+
+	// A directory the test owns, holding ONLY the pre-rotation id's transcript.
+	sessionsDir := t.TempDir()
+	writeTranscript(t, sessionsDir, testSessionID, time.Now())
+	cfg.ClaudeSessionsDir = sessionsDir
+
+	rec := &spawnArgsRecorder{}
+	cfg.Logger = slog.New(rec)
+	var (
+		r    *Runner
+		once sync.Once
+	)
+	cfg.onSpawn = func(int) {
+		once.Do(func() { r.RestartFresh(rotatedSessionID) })
+	}
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() < 2 {
+		if time.Now().After(deadline) {
+			cancel()
+			join()
+			t.Fatalf("saw only %d spawn(s), want ≥2", rec.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	join()
+
+	spawns := rec.all()
+
+	// Spawn 1: the probe finds the pre-rotation transcript and resumes it, even
+	// though the firstRun latch says create.
+	if got := idFlagValue(spawns[0], "--resume"); got != testSessionID {
+		t.Errorf("spawn 1 --resume = %q, want %q (the probe did not see the existing transcript):\n%v",
+			got, testSessionID, spawns[0])
+	}
+	if slices.Contains(spawns[0], "--session-id") {
+		t.Errorf("spawn 1 unexpectedly carries --session-id:\n%v", spawns[0])
+	}
+
+	// Spawn 2: the rotated id has no transcript, so this spawn creates. A
+	// construction-time decision would have re-emitted spawn 1's resume answer.
+	if got := idFlagValue(spawns[1], "--session-id"); got != rotatedSessionID {
+		t.Errorf("spawn 2 --session-id = %q, want rotated %q — the flag was decided once, "+
+			"not per spawn:\n%v", got, rotatedSessionID, spawns[1])
+	}
+	if slices.Contains(spawns[1], "--resume") {
+		t.Errorf("spawn 2 unexpectedly carries --resume against an id with no transcript:\n%v", spawns[1])
+	}
+	if slices.Contains(spawns[1], testSessionID) {
+		t.Errorf("spawn 2 references the pre-rotation id %q after the rotation:\n%v",
+			testSessionID, spawns[1])
+	}
+
+	for i, args := range spawns[:2] {
+		if got := idFlagCount(args); got != 1 {
+			t.Errorf("spawn %d carries %d id flags, want exactly 1:\n%v", i+1, got, args)
+		}
+	}
+}
+
 // swapMarkerArg is the distinctive value SetSpawnArgs installs, so a spawn's argv
 // says on its face which install it came from.
 const swapMarkerArg = "swapmarker"
@@ -965,7 +1265,7 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 
 	r.RestartFresh("")
 
-	_, cancel, args, forceFirst := r.beginSpawn(context.Background(), true)
+	_, cancel, args, forceFirst, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if forceFirst {
 		t.Errorf("beginSpawn forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
@@ -1356,6 +1656,157 @@ func TestRunner_BeginRotation_AbortIsGenerationStamped(t *testing.T) {
 	abortSecond()
 	if _, gated := r.turnTarget(); gated {
 		t.Fatal("the winning rotation's own abort did not disarm the gate; a failed rotation would leave the conversation refusing every turn until the next respawn")
+	}
+}
+
+// --- #1482: the release side is authorised -----------------------------------
+//
+// #1330 armed the gate and stamped the ARM's generation; the release side stayed
+// unauthorised, so any child that bound ended a window it had no relationship to.
+// These two rows pin the authorisation from both directions.
+
+// Payload markers for the rows below. Distinct literals so the parent-level
+// "the refused bytes never reached a child" assertion cannot match the successor's
+// echo by accident.
+const (
+	unauthorisedTurnProbe = "gate-probe-unauthorised"
+	successorTurnProbe    = "gate-probe-successor"
+)
+
+// TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed drives both halves of
+// the authorisation in ONE run: while a rotation stands, a child that binds from a
+// spawn set up BEFORE that rotation's RestartFresh landed leaves the gate armed —
+// it is not the successor, it is a child RestartFresh is about to kill — and the
+// successor itself still brings the gate down.
+//
+// The subtests are load-bearing rather than cosmetic. Against a mutant restoring
+// setStdin's unconditional clear, (a) fails while (b) still executes and passes,
+// which is the per-row evidence the discrimination matrix needs; one flat function
+// would collapse both into a single verdict.
+//
+// echo_lines stays alive until it is killed, so no crash-respawn can race the arm:
+// the arm is strictly before every later beginSpawn by program order.
+func TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 4)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	// onSpawn fires AFTER setStdin, so every receive here is a happens-after edge on
+	// that child's release point — no polling, no window calibration.
+	waitSpawn(t, spawned, "the first spawn")
+	r.BeginRotation()
+
+	t.Run("an unauthorised bind leaves the gate armed", func(t *testing.T) {
+		// Restart kills child 1 and relaunches at once (hint in hand, no backoff).
+		// That respawn's beginSpawn runs while the gate stands and before any
+		// RestartFresh, so its snapshot cannot exceed the arm's threshold: it is the
+		// Restart-driven shape of "set up before the rotation's RestartFresh landed",
+		// the same position the crash/backoff respawn occupies in the row below.
+		r.Restart(nil)
+		waitSpawn(t, spawned, "the Restart respawn")
+
+		if r.Stdin() == nil {
+			t.Fatal("Stdin() is nil after the Restart respawn; both assertions below would collapse into the pre-existing no-live-child refusal, which passes with or without the authorisation")
+		}
+		if _, gated := r.turnTarget(); !gated {
+			t.Fatal("an unrelated respawn disarmed the gate: a turn accepted on the strength of the already-fired session_transition{clear} would be written into the child RestartFresh is about to kill, msgqueue would read that successful write as a commit, and the turn would be lost silently")
+		}
+		if err := r.WriteUserTurn(context.Background(), "c1", []byte(unauthorisedTurnProbe)); !errors.Is(err, ErrNoLiveChild) {
+			t.Fatalf("WriteUserTurn = %v, want ErrNoLiveChild; the caller-visible refusal is what keeps the turn queued for the successor", err)
+		}
+	})
+
+	t.Run("the successor bind drops the gate", func(t *testing.T) {
+		// The rotation lands. Child 3's beginSpawn therefore snapshots the bumped
+		// counter — strictly greater than the arm's threshold — so it is the one
+		// spawn authorised to end this window.
+		r.RestartFresh(rotatedSessionID)
+		waitSpawn(t, spawned, "the post-rotation spawn")
+
+		if err := r.WriteUserTurn(context.Background(), "c1", []byte(successorTurnProbe)); err != nil {
+			t.Fatalf("WriteUserTurn after the successor bound = %v, want nil; the gate outlived its own rotation and the conversation refuses every turn until some later one — a worse outcome than the loss the authorisation fixes", err)
+		}
+		waitForContains(t, out, successorTurnProbe, 5*time.Second)
+		// Three children have existed and the first two are dead, so the echo above
+		// can only be the successor's: the turn observably landed in the
+		// post-rotation child, not in a pre-rotation one.
+		if got := strings.Count(out.String(), "READY"); got != 3 {
+			t.Errorf("saw %d READY lines, want 3 (first spawn, Restart respawn, successor); the echo cannot be attributed to the successor otherwise:\n%s", got, out.String())
+		}
+	})
+
+	// Asserted at the parent, not inside (a): "the refused bytes never reached a
+	// child" needs a happens-AFTER edge, and (b)'s successful echo is a
+	// deterministic one — child 2's cmd.Wait returned before child 3 was spawned,
+	// and Wait returns only once its stdout copier has drained. Placing it inside
+	// (b) would redden (b) under the mutant, where it must stay green; a sleep
+	// inside (a) would trade determinism for nothing.
+	if got := out.String(); strings.Contains(got, unauthorisedTurnProbe) {
+		t.Errorf("the refused turn reached a child after all; stdout:\n%s", got)
+	}
+}
+
+// TestRunner_BeginRotation_CrashRespawnLeavesTheGateArmed is the filed interleaving
+// itself: the child crashes, the backoff ladder respawns it under the PRE-ROTATION
+// id inside the gap between BeginRotation and its partner RestartFresh (the whole of
+// the pool's rotate — mint, re-key, register, an fsync'd atomic write, then the
+// session_transition{clear} fan-out), and that respawn must not end the window.
+//
+// The arm is placed INSIDE the first spawn's onSpawn under a sync.Once — the shape
+// TestRunner_RestartFresh_RotatesThenResumesNewID uses for its rotation — and not
+// from the test goroutine after a waitSpawn. The crash child is gone in 20 ms, so a
+// test-goroutine arm can land after the respawn has already bound, and the row would
+// then be asserting about a bind that PREDATES the arm: green on both trees, proving
+// nothing. onSpawn runs on the Run goroutine, so arming there puts the arm strictly
+// before child 2's beginSpawn by program order.
+func TestRunner_BeginRotation_CrashRespawnLeavesTheGateArmed(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "crash", &safeBuffer{}, &safeBuffer{})
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	spawned := make(chan struct{}, 4)
+	var (
+		r    *Runner
+		once sync.Once
+	)
+	cfg.onSpawn = func(int) {
+		once.Do(func() { r.BeginRotation() })
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	waitSpawn(t, spawned, "the first spawn")
+	waitSpawn(t, spawned, "the crash respawn")
+
+	// Deliberately NOT guarded by Stdin() != nil: the 20 ms crash child may already
+	// be gone, and gated is non-vacuous without it — under a mutant clearing
+	// unconditionally, child 2's setStdin has run before this second receive, so the
+	// read is deterministic in both directions.
+	if _, gated := r.turnTarget(); !gated {
+		t.Fatal("the crash/backoff respawn of the pre-rotation id disarmed the gate; a queued turn would then be accepted and written into a child RestartFresh is about to kill, and msgqueue would drop it as committed — #1330's loss reached through the backoff ladder")
 	}
 }
 

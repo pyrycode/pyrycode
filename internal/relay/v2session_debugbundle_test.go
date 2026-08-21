@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/debugbundle"
+	"github.com/pyrycode/pyrycode/internal/dispatch"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -60,6 +62,14 @@ func (f *fakeBundler) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+// setResult swaps what the next invocation returns, so one manager can serve a
+// failing assembly followed by a succeeding one (the #1491 anti-lockout case).
+func (f *fakeBundler) setResult(archive []byte, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.archive, f.err = archive, err
 }
 
 // assembleFixture builds a real debug-bundle archive via the production
@@ -453,13 +463,21 @@ func TestV2Session_DebugBundle_ErrorReplies(t *testing.T) {
 				TS:   time.Now().UTC(),
 			})
 
-			// Barrier: the error reply is forwarded synchronously (forwardEnvelope),
-			// so once a later paired conn opens the reply is already recorded.
+			// Poll for the reply rather than snapshotting: since #1491 the
+			// assembly runs off Run and its failure comes back through
+			// m.bundleReady, so the assembly-error reply is sealed one Run pass
+			// after the request. (The nil-bundler branch still replies inline on
+			// Run and satisfies this poll immediately; both branches share this
+			// body.)
+			msgs := waitNoiseMsgs(t, rec, connID, 1)
+
+			// Barrier: a later paired conn opening proves Run drained every
+			// earlier frame, so a second reply — if the change had grown one —
+			// would already be recorded by the exact-count check below.
 			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", nil)
 
-			msgs := noiseMsgsForConn(t, rec, connID)
-			if len(msgs) != 1 {
-				t.Fatalf("got %d noise_msg for %s, want exactly 1 (a single error reply, no chunks)", len(msgs), connID)
+			if got := noiseMsgsForConn(t, rec, connID); len(got) != 1 {
+				t.Fatalf("got %d noise_msg for %s, want exactly 1 (a single error reply, no chunks)", len(got), connID)
 			}
 			reply := decryptAppFrame(t, msgs[0], recv)
 			if reply.Type != protocol.TypeError {
@@ -770,5 +788,461 @@ func TestV2Session_DebugBundle_PerConnIsolation(t *testing.T) {
 	}
 	if got := queueLen(mgr, connB); got != wantFrames {
 		t.Fatalf("B queue depth = %d, want %d (an in-flight bundle on A must not disturb B)", got, wantFrames)
+	}
+}
+
+// --- #1505 byte-ceiling fixtures ---
+
+// bundleCeilingPoll is the deadline for the near-ceiling bundle waits below.
+// The 2-second sibling helpers are sized for the kilobyte fixtures every other
+// test in this file uses; these two move ~32 MiB of payload through
+// bundleEnvelopes, the push queue, and (in the under-ceiling case) a per-frame
+// AEAD seal + base64 wrap on the Run goroutine, which is minutes-safe but not
+// 2-seconds-safe under -race.
+const bundleCeilingPoll = 90 * time.Second
+
+// bundleChunksUnderCeiling returns the largest whole-chunk count whose
+// StreamBundle payload total (Σ len(env.Payload) — what pushQueue.bytes
+// measures) stays under pushQueueByteCeiling. Derived by measuring one REAL
+// full chunk rather than hardcoding a number that would silently drift if
+// bundleChunkBytes or the chunk payload shape moved; the 8 B allowance per
+// chunk covers the seq field widening from one digit to four across the stream
+// plus the trailing done marker.
+func bundleChunksUnderCeiling(t *testing.T) int {
+	t.Helper()
+	envs, err := bundleEnvelopes(patternBlob(bundleChunkBytes))
+	if err != nil {
+		t.Fatalf("size one bundle chunk: %v", err)
+	}
+	return pushQueueByteCeiling / (len(envs[0].Payload) + 8)
+}
+
+// waitQueueLenBy is waitQueueLen with a caller-chosen deadline.
+func waitQueueLenBy(t *testing.T, mgr *V2SessionManager, connID string, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == want {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("queue for %s did not reach depth %d within %v (got %d)", connID, want, within, queueLen(mgr, connID))
+}
+
+// waitQueueDrainsBy is assertQueueDrains with a caller-chosen deadline.
+func waitQueueDrainsBy(t *testing.T, mgr *V2SessionManager, connID string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == 0 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("queue for %s did not drain to empty within %v (depth %d)", connID, within, queueLen(mgr, connID))
+}
+
+// waitNoiseMsgsBy is waitNoiseMsgs with a caller-chosen deadline.
+func waitNoiseMsgsBy(t *testing.T, rec *v2Recorder, connID string, n int, within time.Duration) []protocol.RoutingEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		msgs := noiseMsgsForConn(t, rec, connID)
+		if len(msgs) >= n {
+			return msgs
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("waitNoiseMsgsBy(%s): got %d, want >= %d within %v", connID, len(noiseMsgsForConn(t, rec, connID)), n, within)
+	return nil
+}
+
+// TestV2Session_DebugBundle_JustUnderCeilingStreams pins the admitted side of
+// AC#5: an archive whose streamed frames land just under pushQueueByteCeiling
+// is enqueued whole while the drain is held — no teardown, no truncation — and
+// once the transport recovers it drains and round-trips to the source archive.
+// The ceiling bounds the bundle path; it does not break it. Run under -race.
+func TestV2Session_DebugBundle_JustUnderCeilingStreams(t *testing.T) {
+	t.Parallel()
+
+	archive := patternBlob(bundleChunksUnderCeiling(t) * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+	wantFrames := wantChunks(len(archive)) + 1 // N chunks + done
+
+	mgr, frames, rec, probeUp, reconnect, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connID = "c-bundle-under-ceiling"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	// Hold the drain down so the whole bundle piles up in the queue at once —
+	// the worst case the ceiling is there to bound.
+	probeUp.Store(false)
+	requestBundle(t, frames, send, connID, 101)
+	waitQueueLenBy(t, mgr, connID, wantFrames, bundleCeilingPoll)
+
+	// Non-vacuity: the fixture really is NEAR the ceiling, not trivially under
+	// it. A fixture that drifted small would pass every assertion below while
+	// proving nothing about the boundary.
+	retained := queueBytes(mgr, connID)
+	if retained <= pushQueueByteCeiling*9/10 {
+		t.Fatalf("retained %d B is only %d%% of the ceiling %d; the fixture drifted away from the boundary",
+			retained, 100*retained/pushQueueByteCeiling, pushQueueByteCeiling)
+	}
+	if retained > pushQueueByteCeiling {
+		t.Fatalf("retained %d B exceeds the ceiling %d; the fixture is on the wrong side of the boundary", retained, pushQueueByteCeiling)
+	}
+
+	// No teardown: the conn is still open and its queue is still present.
+	waitConnOpen(t, mgr, connID)
+
+	// Recover the transport and fire the reconnect edge: the held bundle drains
+	// FIFO and reassembles to the exact source archive.
+	probeUp.Store(true)
+	reconnect <- struct{}{}
+	waitQueueDrainsBy(t, mgr, connID, bundleCeilingPoll)
+
+	msgs := waitNoiseMsgsBy(t, rec, connID, wantFrames, bundleCeilingPoll)
+	got, err := ReassembleBundle(decryptFrames(t, msgs, recv))
+	if err != nil {
+		t.Fatalf("reassemble under-ceiling bundle: %v", err)
+	}
+	if !bytes.Equal(got, archive) {
+		t.Fatalf("under-ceiling bundle did not round-trip (got %d bytes, want %d)", len(got), len(archive))
+	}
+}
+
+// TestV2Session_DebugBundle_PastCeilingTearsDownConn pins the rejected side of
+// AC#5, and makes the outcome a chosen-and-tested one rather than something a
+// future operator discovers: debugbundle.Assemble caps nothing, so a large
+// enough archive turns into more never-droppable control envelopes than
+// pushQueueByteCeiling admits. The conn is torn down at StatusQueueOverflow and
+// its queue freed, instead of retaining the whole archive until the idle sweep.
+//
+// Nothing is asserted about StreamBundle's return value: it returns the FIRST
+// Push error, and which push first observes the teardown depends on Run's
+// scheduling. Run under -race.
+func TestV2Session_DebugBundle_PastCeilingTearsDownConn(t *testing.T) {
+	t.Parallel()
+
+	// Two whole chunks past the largest admissible bundle: comfortably over the
+	// boundary while staying as cheap as possible to build.
+	archive := patternBlob((bundleChunksUnderCeiling(t) + 2) * bundleChunkBytes)
+	fake := &fakeBundler{archive: archive}
+
+	mgr, frames, rec, probeUp, _, respPub := bundleGatedManagerFor(t, fake.fn, silentLogger())
+
+	const connID = "c-bundle-past-ceiling"
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	probeUp.Store(false)
+	requestBundle(t, frames, send, connID, 202)
+
+	// The ceiling's outcome: a 4413 close with a nil frame (nothing sealed onto
+	// a transport that is down), and the queue deleted rather than retained.
+	closeEnv := waitForConnCloseBy(t, rec, connID, uint16(StatusQueueOverflow), bundleCeilingPoll)
+	if closeEnv.Frame != nil {
+		t.Errorf("close frame = %d bytes, want nil (the ceiling teardown seals nothing)", len(closeEnv.Frame))
+	}
+	if got := queueLen(mgr, connID); got != -1 {
+		t.Fatalf("queue depth for %s = %d after the teardown, want -1 (deleted, every retained byte freed)", connID, got)
+	}
+}
+
+// --- #1491 off-Run assembly fixtures ---
+
+// blockingBundler is a DebugBundler double that parks INSIDE the seam, so a test
+// can observe what the manager does while an assembly is provably in flight.
+// Each invocation bumps the call count, signals entered, blocks until release is
+// called, then returns the injectable (archive, err). The relay-side twin of
+// blockingHandler, which does the same for an application handler.
+//
+// The DebugBundler seam takes no context, so a parked assembly cannot be
+// cancelled from outside — every user MUST arrange for release to run at
+// cleanup. Register that cleanup AFTER the manager's stop cleanup: cleanups run
+// LIFO, so release then unparks the seam BEFORE stop waits for Run to exit. That
+// ordering is what makes this fixture usable as a pre-fix RED probe — on a tree
+// where the seam still runs inline on Run, a stop that ran first would wait
+// forever on a Run parked in the seam, turning an expected failure into a hang.
+type blockingBundler struct {
+	entered chan struct{}
+	rel     chan struct{}
+	relOnce sync.Once
+
+	mu      sync.Mutex
+	calls   int
+	archive []byte
+	err     error
+}
+
+func newBlockingBundler(archive []byte, err error) *blockingBundler {
+	return &blockingBundler{
+		// Buffered: fn's send is non-blocking, so an unexpected second
+		// invocation can never park before it reaches the release gate — the
+		// call-count assertions, not a lost signal, are what catch it.
+		entered: make(chan struct{}, 4),
+		rel:     make(chan struct{}),
+		archive: archive,
+		err:     err,
+	}
+}
+
+// fn is the DebugBundler seam value to wire into V2SessionConfig.
+func (b *blockingBundler) fn() ([]byte, error) {
+	b.mu.Lock()
+	b.calls++
+	b.mu.Unlock()
+	select {
+	case b.entered <- struct{}{}:
+	default:
+	}
+	<-b.rel
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.archive, b.err
+}
+
+func (b *blockingBundler) release() { b.relOnce.Do(func() { close(b.rel) }) }
+
+func (b *blockingBundler) callCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.calls
+}
+
+// waitEntered blocks until the seam has been entered — the sync point past which
+// an assembly is in flight and the manager's behaviour during it is observable.
+func (b *blockingBundler) waitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-b.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DebugBundler seam was never entered")
+	}
+}
+
+// TestV2Session_DebugBundle_AssemblyDoesNotStallRun pins AC #1: while one conn's
+// bundle assembly is in flight, Run keeps servicing its other select arms. Three
+// are exercised with the assembly parked inside the seam — another conn's
+// application frame (m.cfg.Frames → the per-conn worker → m.appReply), the push
+// drain (m.drainCh), and a timer wake (m.modalTimeout) — and each completes
+// without waiting on the assembly. Released at the end, the bundle still streams
+// and round-trips, so the offload loses nothing.
+//
+// Against the pre-fix tree the seam runs inline on Run, so Run is parked inside
+// one select arm for the whole assembly: none of the three arms advance and every
+// wait below times out.
+func TestV2Session_DebugBundle_AssemblyDoesNotStallRun(t *testing.T) {
+	// Not t.Parallel: mutates the package-level modalDenyTimeout var, exactly
+	// like TestV2Session_SlowHandler_ModalTimeoutStillFires.
+	prev := modalDenyTimeout
+	modalDenyTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { modalDenyTimeout = prev })
+
+	const (
+		connA      = "c-bundle-stall-A" // its assembly blocks
+		connB      = "c-bundle-stall-B" // application frame — the Frames arm
+		connC      = "c-bundle-stall-C" // push target — the drain arm
+		connD      = "c-bundle-stall-D" // modal target — the timer arm
+		modalID    = "modal-during-assembly"
+		wantOutT   = "denied_timeout"
+		wantSource = "timeout"
+	)
+
+	archive, _ := assembleFixture(t, bundleRecordingSentinel, []string{"during-assembly"})
+	bundler := newBlockingBundler(archive, nil)
+
+	respPriv, respPub := genV2Keypair(t)
+	resolver := &fakeModalResolver{
+		timeoutOKFor:     modalID,
+		timeoutDismissal: ModalDismissal{Outcome: wantOutT, Source: wantSource},
+	}
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		StaticPriv: respPriv,
+		Devices:    v2PairedRegistry(t, v2TestToken),
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+		Handlers: map[string]dispatch.Handler{
+			protocol.TypeListConversations: prolificHandler(),
+		},
+		ModalResolver: resolver,
+		DebugBundler:  bundler.fn,
+	})
+	t.Cleanup(stop)
+	t.Cleanup(bundler.release) // LIFO: unpark the seam before stop awaits Run.
+
+	sendA, recvA := openModalConn(t, mgr, frames, rec, respPub, connA, nil)
+	sendB, recvB := openModalConn(t, mgr, frames, rec, respPub, connB, nil)
+	_, recvC := openModalConn(t, mgr, frames, rec, respPub, connC, nil)
+	_, recvD := openModalConn(t, mgr, frames, rec, respPub, connD, []string{protocol.CapabilityInteractive})
+
+	// A requests a bundle; the seam parks inside the assembly. Every assertion
+	// below runs with that assembly in flight.
+	requestBundle(t, frames, sendA, connA, 501)
+	bundler.waitEntered(t)
+
+	// (1) The Frames arm: B's application frame is routed and its reply sealed.
+	frames <- sealAppFrameConn(t, sendB, connB, protocol.Envelope{
+		ID:      502,
+		Type:    protocol.TypeListConversations,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"count":1}`),
+	})
+	bMsgs := waitForConnNoiseMsg(t, rec, connB, 1)
+	if inner := decryptAppFrame(t, bMsgs[0], recvB); inner.Type != protocol.TypeConversations {
+		t.Errorf("conn B reply Type = %q, want %q", inner.Type, protocol.TypeConversations)
+	}
+
+	// (2) The drain arm: a queued push to C is popped, sealed and forwarded.
+	if err := mgr.Push(context.Background(), connC, buildMessageEnvelope(t, 503, "during-assembly")); err != nil {
+		t.Fatalf("Push to %s: %v", connC, err)
+	}
+	cMsgs := waitForConnNoiseMsg(t, rec, connC, 1)
+	if inner := decryptAppFrame(t, cMsgs[0], recvC); inner.Type != protocol.TypeMessage {
+		t.Errorf("conn C push Type = %q, want %q", inner.Type, protocol.TypeMessage)
+	}
+
+	// (3) The timer arm: the modal deny-on-timeout safe-deny fires on schedule.
+	mgr.ArmModalTimeout(context.Background(), modalID)
+	waitForConnNoiseMsg(t, rec, connD, 1)
+	assertModalDismissed(t, rec, connD, recvD, modalID, wantOutT, wantSource)
+
+	// Non-vacuity: all three completed while the assembly was still parked, so
+	// nothing has been sealed for A yet.
+	if got := noiseMsgsForConn(t, rec, connA); len(got) != 0 {
+		t.Fatalf("conn A got %d noise_msg while its assembly is still blocked, want 0", len(got))
+	}
+	if got := bundler.callCount(); got != 1 {
+		t.Fatalf("bundler callCount = %d, want 1", got)
+	}
+
+	// Release: A's bundle streams and round-trips — the offload did not lose it.
+	bundler.release()
+	aMsgs := waitNoiseMsgs(t, rec, connA, 2)
+	members := untarGz(t, reassembleFromFrames(t, aMsgs, recvA))
+	if !bytes.Equal(members[bundleMemberRecording], []byte(bundleRecordingSentinel)) {
+		t.Errorf("streamed recording.cast = %q, want the sentinel %q", members[bundleMemberRecording], bundleRecordingSentinel)
+	}
+}
+
+// TestV2Session_DebugBundle_RejectsSecondWhileAssembling pins the marker half of
+// AC #2 — the window the queue-derived gate cannot see. With the assembly parked
+// off Run the conn's push queue is still EMPTY, so bundleInFlight reads false; a
+// second request_debug_bundle must nonetheless be rejected with the same
+// deterministic reply and must not start a second assembly. The queue-empty
+// assertions are what make this non-vacuous: a fix relying on bundleInFlight
+// alone fails here, and would otherwise admit two concurrent full-size archives.
+func TestV2Session_DebugBundle_RejectsSecondWhileAssembling(t *testing.T) {
+	t.Parallel()
+
+	archive, _ := assembleFixture(t, bundleRecordingSentinel, []string{"gate-during-assembly"})
+	bundler := newBlockingBundler(archive, nil)
+
+	mgr, frames, rec, respPub := bundleManagerFor(t, bundler.fn, silentLogger())
+	// bundleManagerFor already registered the manager's stop cleanup; this runs
+	// first (LIFO) so the seam unparks before Run's exit is awaited.
+	t.Cleanup(bundler.release)
+
+	const connID = "c-bundle-assembling"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	requestBundle(t, frames, send, connID, 601)
+	bundler.waitEntered(t)
+
+	// Non-vacuity: the queue-derived half of the gate is blind right now —
+	// nothing has been enqueued, so only the explicit marker can reject below.
+	if got := queueLen(mgr, connID); got != 0 {
+		t.Fatalf("queue depth during assembly = %d, want 0 (the queue-derived gate must be blind here)", got)
+	}
+	if mgr.bundleInFlight(connID) {
+		t.Fatal("bundleInFlight is true during assembly; the marker half of the gate would go untested")
+	}
+
+	// The second request is rejected deterministically and never reaches the seam.
+	requestBundle(t, frames, send, connID, 602)
+	msgs := waitNoiseMsgs(t, rec, connID, 1)
+	assertBusyReject(t, msgs[0], recv, 602)
+	if got := bundler.callCount(); got != 1 {
+		t.Fatalf("bundler callCount = %d, want 1 (a rejected retry must not start a second assembly)", got)
+	}
+
+	// Release: exactly ONE bundle streams — the reject reply plus chunk + done.
+	bundler.release()
+	after := waitNoiseMsgs(t, rec, connID, 3)
+	openModalConn(t, mgr, frames, rec, respPub, "c-bundle-assembling-barrier", nil)
+	if got := noiseMsgsForConn(t, rec, connID); len(got) != 3 {
+		t.Fatalf("conn %s got %d noise_msg, want exactly 3 (one reject + one bundle: chunk + done)", connID, len(got))
+	}
+	if got := bundler.callCount(); got != 1 {
+		t.Fatalf("bundler callCount after release = %d, want 1", got)
+	}
+	// assertBusyReject consumed the recv nonce for after[0]; the bundle is the
+	// next two frames, decrypted in order.
+	blob, err := ReassembleBundle(decryptFrames(t, after[1:3], recv))
+	if err != nil {
+		t.Fatalf("reassemble the served bundle: %v", err)
+	}
+	if !bytes.Equal(blob, archive) {
+		t.Fatalf("served bundle did not round-trip (got %d bytes, want %d)", len(blob), len(archive))
+	}
+}
+
+// TestV2Session_DebugBundle_ServedAfterFailedAssembly pins AC #3 plus AC #2's
+// anti-lockout tail. An assembly that fails OFF Run still yields exactly one
+// deterministic error reply, correlated on InReplyTo, carrying only the static
+// msgDebugBundleUnavailable — the assembly error text (which quotes a recording
+// path) reaches neither the wire nor the log. And because the gate marker is
+// cleared on the failure path too, the very next request on that conn is served
+// with a fresh assembly: a missed clear would lock the conn out permanently.
+func TestV2Session_DebugBundle_ServedAfterFailedAssembly(t *testing.T) {
+	t.Parallel()
+
+	const secretErr = "assemble boom: /private/pyry-recordings/2026-08-secret-sessQRS.cast"
+	archive, _ := assembleFixture(t, bundleRecordingSentinel, []string{"after-failure"})
+	fake := &fakeBundler{err: errors.New(secretErr)}
+
+	logger, logBuf := bufferLogger()
+	mgr, frames, rec, respPub := bundleManagerFor(t, fake.fn, logger)
+
+	const connID = "c-bundle-after-fail"
+	send, recv := openModalConn(t, mgr, frames, rec, respPub, connID, nil)
+
+	const failID uint64 = 701
+	requestBundle(t, frames, send, connID, failID)
+	msgs := waitNoiseMsgs(t, rec, connID, 1)
+	if bytes.Contains(msgs[0].Frame, []byte("boom")) || bytes.Contains(msgs[0].Frame, []byte(".cast")) {
+		t.Errorf("reply wire bytes carry the assembly error text")
+	}
+	// Byte-identical to the busy-reject and nil-bundler shapes: the phone cannot
+	// tell an assembly failure from either.
+	assertBusyReject(t, msgs[0], recv, failID)
+
+	// Barrier: exactly one reply, no chunks.
+	openModalConn(t, mgr, frames, rec, respPub, "c-bundle-after-fail-barrier", nil)
+	if got := noiseMsgsForConn(t, rec, connID); len(got) != 1 {
+		t.Fatalf("got %d noise_msg for %s, want exactly 1 (a single error reply, no chunks)", len(got), connID)
+	}
+
+	waitForLogContains(t, logBuf, "v2.bundle.assemble_err")
+	if s := logBuf.String(); strings.Contains(s, "boom") || strings.Contains(s, "secret") || strings.Contains(s, ".cast") {
+		t.Errorf("assembly error text leaked into logs:\n%s", s)
+	}
+
+	// Anti-lockout: the next request is served with a FRESH assembly.
+	fake.setResult(archive, nil)
+	requestBundle(t, frames, send, connID, 702)
+	waitCallCount(t, fake, 2)
+	after := waitNoiseMsgs(t, rec, connID, 3)
+	blob, err := ReassembleBundle(decryptFrames(t, after[1:3], recv))
+	if err != nil {
+		t.Fatalf("reassemble the post-failure bundle: %v", err)
+	}
+	members := untarGz(t, blob)
+	if !bytes.Equal(members[bundleMemberRecording], []byte(bundleRecordingSentinel)) {
+		t.Errorf("post-failure recording.cast = %q, want the sentinel %q", members[bundleMemberRecording], bundleRecordingSentinel)
 	}
 }

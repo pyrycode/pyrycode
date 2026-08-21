@@ -2,7 +2,7 @@
 
 Stream-json sibling of [`internal/supervisor`](../architecture/system-overview.md) (the PTY path): supervises a **long-lived, multi-turn** headless `claude` child instead of hosting a screen. Where [`streamrunner`](streamrunner-package.md) spawns claude for one turn, writes the envelope, closes stdin, and exits, `streamsup` spawns claude **once per crash cycle**, holds its stdin open across many turns, and restarts it with the supervisor's backoff ladder on crash. Process lifecycle (#1087), the turn I/O boundary — envelope write + stdout→turnevent parser (#1088) —, the send-side turncommit gate (#1093), the receive-side idle/stall watchdog (#1094), satisfying the `sessions.Runner` seam (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + a live-restart seam, #1097), the `newStreamRunnerFactory` constructor that builds a `streamRunner` from a `supervisor.Config` (#1109), the drain that fans its parsed turnevents into the unchanged `interactiveTurnEmitterV2` (#1098), the interrupt send primitive (#1120), the fresh-restart-under-a-new-id mechanism (`RestartFresh`, #1124), and the live permission-approval-flag injection onto the factory's spawn (`withApprovalArgs`, #1168) have shipped. **It is now live in production**: the `interactive_runner: "stream-json"` config toggle (#1081) selects `newStreamRunnerFactory` as `sessions.Config.RunnerFactory` and wires its drain at the relay leg — see [config-package.md](config-package.md) and [codebase/1081.md](../codebase/1081.md).
 
-**No transcript tailing lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL-path resolution anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all.
+**No transcript *tailing* lives in this package.** That is the entire point of the stream-json path: it structurally removes the `<uuid>.jsonl` bind-latency race the PTY path fought (#528/#996/#989). The only filesystem canonicalisation `streamsup` performs is resolving `WorkDir` via `agentrun.ResolveWorkdir` before spawn (macOS `/tmp` → `/private/tmp`, the #989 symlink hazard) — no fsnotify, no JSONL path opened, watched, or read anywhere; the #1088 parser reinforces this by opening/watching/resolving no path at all. Since #1630 the package does touch a transcript path in one narrow way: an at-most-one-per-spawn `os.Stat` by id, gated on `Config.ClaudeSessionsDir` being set (see `useCreateForm` below) — an *existence* check, never a read, and never a directory scan.
 
 ## Public API
 
@@ -11,6 +11,7 @@ type Config struct {
     ClaudeBin      string        // required; resolved path to claude
     WorkDir        string        // required; resolved via agentrun.ResolveWorkdir in New
     SessionID      string        // required; caller-minted claude session UUID
+    ClaudeSessionsDir string     // optional; empty disables the #1630 by-id probe (see below)
     Args           []string      // pass-through argv (e.g. --model <m>); New clones it
     Stdout         io.Writer     // optional; nil → child stdout discarded (/dev/null)
     Stderr         io.Writer     // optional; nil → discarded
@@ -42,22 +43,37 @@ func (r *Runner) RestartFresh(newID string)
 ## `buildArgs` — the id-flag inversion that keeps the on-disk session stable
 
 ```go
-func buildArgs(base []string, firstRun bool, sessionID string) []string
+func buildArgs(base []string, create bool, sessionID string) []string
 ```
 
-Pure function, assembled fresh each spawn (never mutates `base`):
+Pure function, assembled fresh each spawn (never mutates `base`), and — since #1630 — no longer the decider of its own `create` argument:
 
 1. Fixed stream-json prefix: `--input-format stream-json --output-format stream-json --verbose`. **Never `-p`/`--print`** — the non-`-p` choice is billing-classification-tied and was spike-verified live (#1075): multi-turn, interrupt, resume, and the approval round-trip all work without it.
 2. Then the caller's `base` (`Config.Args`, e.g. `--model <m>`).
-3. Then the id flag: **first spawn** → `--session-id <sessionID>` (establishes the on-disk transcript under a known id); **every respawn** → `--resume <sessionID>` (reattach, append, **no fork** — `--fork-session` is the explicit, unused opt-in).
+3. Then the id flag: `create == true` → `--session-id <sessionID>` (establishes the on-disk transcript under a known id); `create == false` → `--resume <sessionID>` (reattach, append, **no fork** — `--fork-session` is the explicit, unused opt-in).
 
 Passing the *same* `sessionID` to both flags is why the on-disk session id survives a kill-and-restart untouched — pool id bookkeeping (eviction/reactivation) never has to reconcile a forked id. Mirrors the daemon bootstrap's deterministic-`--session-id` precedent (#839).
+
+### `useCreateForm` — a by-id transcript probe, inert until `Config.ClaudeSessionsDir` is set (#1630)
+
+```go
+func useCreateForm(sessionsDir, id string, latchCreate bool) bool
+```
+
+`beginSpawn` calls this to produce `buildArgs`'s `create` argument, in place of passing the `firstRun`/`forceFirst` latch straight through. Two modes, chosen by whether `Config.ClaudeSessionsDir` is set:
+
+- **Empty.** Returns `latchCreate` verbatim — no syscall — so the emitted argv is byte-identical to pre-#1630. This was every production path until **#1631** armed the probe (see `mapStreamsupConfig` below); it remains the live behaviour on every arm where the sessions directory can't be derived (empty or unresolvable workdir, unresolvable `$HOME`).
+- **Set — every production path since #1631.** Decides *outright* — `latchCreate` is ignored, including on the first spawn and including when a `RestartFresh` rotation re-armed `forceFirst`. A confirmed by-id hit via `transcript.StatByID(sessionsDir, id)` is the only answer that yields `--resume`; every non-hit — absent file, unreadable directory, an id `ValidStem` rejects — yields `--session-id`. No error return: every non-hit is a legitimate answer, not a failure, so the probe can never fail a spawn.
+
+This carries [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s by-id-existence rule — previously applied only to the PTY bootstrap path — into `streamsup`, and closes two defects the `firstRun` latch alone leaves open (see the gate below): a session that launched and ran no turn has no transcript, so a `firstRun`-driven `--resume` against it exits 1 on a widening backoff forever ([#1655](session-transcript-and-resume-probe.md)/[#1656](session-transcript-and-resume-probe.md)); and a transcript that survived a daemon restart makes the latch's first spawn emit a `--session-id` claude refuses (ADR 032). Two things it deliberately never does: hand-roll `filepath.Join(sessionsDir, id+".jsonl")` + `os.Stat` in place of `StatByID` (`StatByID`'s `ValidStem` gate runs *before* the join, and neither `New` nor `RestartFresh` validates `SessionID`'s shape, so a hand-rolled join would turn a non-canonical id into an arbitrary-path existence oracle); and fall back to `transcript.Newest` (a directory scan) on a miss — #839 deleted `--continue` and the adopt-by-mtime scan specifically to close a confused-deputy gap where a restart could adopt a *different* claude's newer transcript out of the shared sessions dir, and a scan fallback would reopen it.
+
+A rotated id colliding with an existing transcript (out of `sessions.NewID`'s reach, never observed) resolves to "resume" simply by falling out of the one rule — deliberately no branch, flag, or test of its own.
 
 ## Held-open stdin — the deliberate inversion from `streamrunner`
 
 `streamrunner.Run` (#390/#391) closes the child's stdin after writing one turn envelope — it's a single-turn primitive. `streamsup` is the opposite: `cmd.StdinPipe()` is opened before `cmd.Start()`, the write end is stored under a leaf mutex, and **it is never closed while the child is alive**. Turn envelopes are written onto it by the #1088 follow-on slice; this slice only owns the handle's lifecycle:
 
-- On spawn: `setStdin(stdin)` publishes the new handle, then the unexported `onSpawn(pid)` test seam fires (nil in production).
+- On spawn: `setStdin(stdin, freshSeq)` publishes the new handle unconditionally, then — since #1482 — releases the rotation gate only if that spawn's `freshSeq` snapshot authorises it (see "Rotation-delivery gate" below), then the unexported `onSpawn(pid)` test seam fires (nil in production).
 - On exit (crash or ctx-cancel teardown): `takeStdin()` clears the field first — so `Stdin()` reports "no live child" immediately — then closes the old handle **outside** the lock. `cmd.Wait()` has usually already closed the parent write end, so a broken-pipe / already-closed error here is expected; it's filtered through [`agentrun.ExitErrIsBenign`](agentrun-package.md) to avoid a spurious Warn (same discipline as `streamrunner`).
 
 ## Supervise loop (`Run`)
@@ -90,6 +106,8 @@ Shutdown is detected via **parent-ctx cancellation**, never via the child-exit e
 
 `spawnAndWait` returns `(started bool, waitErr error)`. `started` is `false` only when the spawn fails during **setup** (`cmd.StdinPipe()` or `cmd.Start()` erroring) — claude never launched, so `--session-id` never ran and the on-disk session was never established. The original implementation flipped `firstRun = false` unconditionally after every iteration; a transient setup failure (e.g. a momentarily-unavailable binary) would make the *next* attempt respawn with `--resume <id>` against a session that was never created, and claude would error ("no conversation found") on every subsequent attempt — a permanent, unrecoverable crash-loop that defeated the very retry the backoff loop exists for. Fixed by threading `started` through and gating the flip: `if started { firstRun = false }`. A setup failure now correctly retries with `--session-id` until one succeeds. Regression test drives `Run` against a non-existent binary and asserts every retry keeps `--session-id`.
 
+**A second, distinct crash-loop shape existed here: `started == true` does not mean a transcript exists.** The gate above only protects against claude never launching; on its own it does nothing for a claude that launches, is torn down before running a turn, and is respawned with `--resume <id>` against an id that was never written to disk. [#1655](session-transcript-and-resume-probe.md) measured against a live claude (2.1.220) that this second premise **HOLDS** — a `--session-id` launch with no turn leaves no `<id>.jsonl`, both while the child is alive and after a graceful `SIGTERM` exit. [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)'s by-id-existence rule (already applied to the PTY bootstrap path) is the fix; **#1630** carried it into this package as `useCreateForm` (above), inert until **#1631** armed it on the production path — see `mapStreamsupConfig` / `streamClaudeSessionsDir` below.
+
 ## Teardown: SIGTERM → SIGKILL grace + descendant-group reap
 
 Same shape as [`streamrunner`](streamrunner-package.md#teardown-reap-descendant-process-groups-reapgo-924), copied verbatim down to the seam name:
@@ -117,6 +135,8 @@ go list -deps ./internal/streamsup/... | grep pyrycode/internal/supervisor   # e
 Table-driven stdlib `testing`, `go test -race`. Fake-child harness dispatches from `TestMain` on `GO_STREAMSUP_HELPER=1` **before `flag.Parse`** — not streamrunner's `os.Args[0]` + `-test.run` re-exec trick, because `buildArgs` prepends the fixed stream-json flags *ahead of* the caller's args, so a `-test.run` flag can never be made to sort first; `go test` would exit 2 on the unknown leading flag before the helper ever ran. Dispatching from `TestMain` on an env var sidesteps flag parsing entirely. Modes keyed by `GO_STREAMSUP_HELPER_MODE`: `echo_lines` (proves stdin stays open — echoes each line, only emits `GOT_EOF` if EOF is actually reached), `block_sigterm` (teardown grace test), `crash` (forces respawns; optionally records its own argv to `GO_STREAMSUP_HELPER_ARGV_FILE` for the resume-id-stability assertion).
 
 Scenarios: `buildArgs` shape (pure, table — fixed prefix present, `-p` absent, `--session-id` vs `--resume`, id byte-identical across first-spawn/respawn, `base` order preserved and not mutated); held-open stdin (echo round-trip + `GOT_EOF` absent while alive); backoff ladder (lifted `supervisor.backoff_test.go` verbatim against the copied `backoffTimer`); restart-on-crash (≥2 spawns observed via `onSpawn`); resume-id-stable-across-restart (captured argv: spawn 1 has `--session-id <id>`, spawn 2 has `--resume <id>`, same id); teardown SIGTERM+grace (`Run` returns within `< killGrace`, "got SIGTERM" on stderr); teardown reaps descendant groups (`reapDescendantGroupsFn` swap, non-parallel); the `firstRun`-gate regression test (non-existent binary, every retry keeps `--session-id`).
+
+**#1630 added three tests, all pure insertions — the four argv-through-a-real-spawn pins and the three `buildArgs`-shape tests above stay byte-unmodified.** `TestUseCreateForm_ProbeDecidesIDFlag` (pure, table, composes `useCreateForm`+`buildArgs` over `t.TempDir()` fixtures with hand-written `<uuid>.jsonl` files, mtime-differentiated via `os.Chtimes` so a "newer unrelated transcript" row is deterministic rather than write-order-dependent); `TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript` (the wiring pin — proves `beginSpawn` actually feeds the probe's answer to `buildArgs` rather than passing `firstRun` straight through); `TestRunner_RestartFresh_ProbeDecidesPerSpawn` (the per-spawn pin — an *asymmetric* fixture, transcript present only for the pre-rotation id, is the one arrangement that discriminates a per-spawn decision from one memoised at construction; a fixture with both ids absent would pass either way). One general lesson from building the table: a row composing two functions (`useCreateForm` then `buildArgs`) only proves the override if its `latchCreate` column is set *against* the expected flag — a row where the latch already agrees with the probe's answer stays green under a mutant that deletes the probe entirely, so it reads as coverage while proving nothing about the override.
 
 ## Turn I/O — envelope write + stdout parser (#1088)
 
@@ -326,10 +346,13 @@ no log at all — the empty case diverges from the task handlers' emit-with-empt
 here. Only the undecodable path logs, and only the subtype keyword — never `err`, since `encoding/json`
 quotes offending input into its error text and would otherwise leak the value through a channel no
 per-path log check can see. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a sixth mapped arm
-(`ModelAnnounced → "model_announced"`, name only); no `Handle` arm yet, so it lands in `Handle`'s
-`default` (content-free) until a later ticket adds the protocol type and the `turnbridge.MapEvent` case
-together — `turnbridge.MapEvent`'s `default` still drops the variant today. See
-[codebase/1600.md](../codebase/1600.md).
+(`ModelAnnounced → "model_announced"`, name only), and #1638 gave it a `Handle` arm so it no longer lands
+in `Handle`'s `default`. CORRECTED 2026-08-19 (#1616): this used to say the protocol type and the
+`turnbridge.MapEvent` case would land together "in a later ticket" — they didn't. #1616 declared
+`protocol.TypeModelAnnounced` / `protocol.ModelAnnouncedPayload` alone, the same declare-then-emit split
+`rate_limited` used (#1405 ahead of #1410); `turnbridge.MapEvent` no longer drops the variant, because the
+mapping arm landed in sibling #1638, so it now reaches an interactive v2 mobile client instead of falling
+to `default:`. See [codebase/1600.md](../codebase/1600.md).
 
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
@@ -460,16 +483,24 @@ seam above, but rotates the **session id**, not the argv: a new `restartMu`-guar
 `sessionID` (the mutable analogue of the construction-time, immutable `cfg.SessionID`; seeded from it in
 `New`) and `rotatePending` (a one-shot flag), sit alongside `args`/`iterCancel` in the same field group.
 `Run`'s spawn loop reads them via `beginSpawn()` — the `restartMu`-guarded accessor that snapshots
-`(sessionID, rotatePending, args)`, clears `rotatePending`, builds the argv **and** publishes
-`iterCancel`, all in ONE acquisition — instead of `r.cfg.SessionID` directly; when `rotatePending` is
-true the returned `forceFirst` re-arms the Run-goroutine-private `firstRun` local to `true`, and the
-same section has already fed that into `buildArgs` (itself untouched). The one acquisition is the
+`(sessionID, rotatePending, args)`, clears `rotatePending`, and publishes `iterCancel`, all in ONE
+acquisition, then (since #1630) decides and assembles the argv *below* the unlock via
+`useCreateForm`+`buildArgs` — instead of `r.cfg.SessionID` directly; when `rotatePending` is true the
+returned `forceFirst` re-arms the Run-goroutine-private `firstRun` local to `true`, and that local feeds
+`useCreateForm`'s `latchCreate` argument as `firstRun || forceFirst`. With `Config.ClaudeSessionsDir`
+unset (every production path today) the latch still decides outright, exactly as before #1630; set, the
+probe overrides it — a rotated id with no transcript still creates, but a rotated id that happened to
+collide with an existing transcript would resume, contrary to `forceFirst`'s own intent. That case is
+unreachable from `sessions.NewID`'s minting and never observed, so it is deliberately left as a
+consequence of `useCreateForm`'s one rule rather than special-cased (see `useCreateForm` above). The one
+acquisition is the
 #1481 fix: splitting the id read from the `iterCancel` publish — as this loop did from #1124 until
 #1481 — leaves a gap where a racing `RestartFresh` sets `sessionID`/`rotatePending`, reads a `nil`
 cancel, cancels nothing, and the spawn launches under the pre-rotation id anyway (see the supervise
 loop above). The existing `started`-gated `firstRun`
 flip (see the gate above) then does the rest for free: a successful fresh spawn flips `firstRun` back to
-`false` so the next respawn `--resume`s the rotated id; a setup failure on the fresh spawn leaves
+`false` so the next respawn `--resume`s the rotated id (with `ClaudeSessionsDir` unset — set, the probe
+decides regardless of the flip); a setup failure on the fresh spawn leaves
 `firstRun` `true` so the retry keeps trying `--session-id <newID>` rather than `--resume`-ing a session
 that was never established. `RestartFresh` mirrors `Restart`'s hint-before-cancel ordering and
 newest-wins coalescing exactly, but **leaves `r.args` untouched** — `new_session` rotates identity, not
@@ -615,6 +646,9 @@ never a `Pool`/`Session` lock, so `Pool.UpdateSettings` can call it after releas
 lock-order concern. Because `firstRun` is already `false` after the first successful spawn, a plain
 restart always respawns via `--resume <sessionID>` — the conversation resumes rather than forking;
 `RestartFresh` is the one path that re-arms `firstRun` to force a fresh `--session-id` spawn instead.
+(With `Config.ClaudeSessionsDir` set — #1631's production path, not #1630's — `useCreateForm` can
+override this too: a `Restart` of a session that launched but never established a transcript reads
+absent and creates rather than resumes, regardless of `firstRun`.)
 
 **`SetSpawnArgs(args []string)` — the swap without the kill (#1580).** `Restart` fuses two operations:
 installing the next spawn's argv, and ending the live child so `Run` relaunches under it. `SetSpawnArgs`
@@ -679,14 +713,63 @@ the PTY interactive argv is untouched. See [pyry-mcp-approve-command.md](pyry-mc
 sites per #1108) always surfaces as an error rather than silently degrading the bootstrap (the session
 `pyry attach` drives) to the PTY path.
 
-**`mapStreamsupConfig(cfg supervisor.Config) streamsup.Config`** is the pure, fully-inspectable mapper and
-the primary tested surface — **unchanged by #1098**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
+**`mapStreamsupConfig(cfg supervisor.Config) streamsup.Config`** is the fully-inspectable mapper and
+the primary tested surface — unchanged by #1098, extended by **#1631**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
 `Logger`/`BackoffInitial`/`BackoffMax`/`BackoffReset` copy verbatim; `ClaudeArgs → Args` (streamsup's argv
-field has a different name) through `stripSessionIDFlags`; `Stdout`/`Stderr`/`Env` stay nil **inside the
-mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper pure
-and its `Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
+field has a different name) through `stripSessionIDFlags`; `ClaudeSessionsDir` is derived per runner from
+`WorkDir` (below); `Stdout`/`Stderr`/`Env` stay nil **inside the
+mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper's
+`Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
 seven PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConversation`,
-`ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not mapped.
+`ResolveTranscript`, `RecordDir`, `helperEnv`) are deliberately not mapped — `ResolveSessionID` stays off
+the list even now that a sessions *directory* crosses this seam: streamsup still owns its own id-flag
+inversion (`useCreateForm`) and decides the flag from the directory itself; no resolver callback crosses,
+and no directory scan happens on either side.
+
+**`streamClaudeSessionsDir(workdir string) string` (#1631) arms `useCreateForm` on the production path.**
+Three arms: `workdir == ""` → `""` (unreachable at both pool sites, both carry a confined realpath, but
+named explicitly rather than left to fall through); `agentrun.ResolveWorkdir(workdir)` erroring → `""`
+(introduces no new failure — `streamsup.New` calls the same function on the same value and would have
+failed to construct a runner at all); otherwise → `sessions.DefaultClaudeSessionsDir(resolved)` verbatim.
+`""` on any arm means "no probe" — `useCreateForm`'s empty-directory mode above, i.e. pre-#1631 argv.
+
+**Derived per runner, not once per pool — this is the load-bearing decision, not an implementation
+detail.** A per-conversation runner's `WorkDir` is the phone's confined spawn dir when one was requested
+(`Pool.buildSession`), and legitimately differs from the bootstrap workdir. A pool-global directory
+computed once from the bootstrap workdir would be *wrong* for exactly the phone-created sessions — and
+because a directory that's set makes `useCreateForm` decide **outright** (the latch is never consulted),
+a wrong directory doesn't waste one spawn and self-heal the way the latch does; it reads "absent" for a
+session whose transcript exists, spawns `--session-id` against a live transcript, claude refuses it (ADR
+032), and the daemon loops permanently in the mirror direction — the same defect class this ticket exists
+to close, caused by the fix. **Rejected alternative:** a new field on `sessions.RunnerConfig`, populated
+at both pool construction sites. Costs three production files instead of one and adds a second source of
+truth for a value that's a pure function of `WorkDir` — already on that struct — populated at two sites
+instead of derived at the one place (`mapStreamsupConfig`) that already builds the streamsup config. A
+future third construction site could forget the second field and silently ship an inert probe; the mapper
+derivation can't drift that way because there's only one derivation site.
+
+**Why `agentrun.ResolveWorkdir`, not `resolveClaudeSessionsDir` or a bare `sessions.DefaultClaudeSessionsDir`.**
+`streamsup.New` sets the child's `cmd.Dir` to `agentrun.ResolveWorkdir(WorkDir)`, and claude encodes its
+own resolved cwd into the projects folder name — so the probe must key on the *same* resolution as the
+child's actual cwd, not a same-looking sibling. [#1655](session-transcript-and-resume-probe.md) measured
+the empirical transcript directory against exactly this composition and found them equal. The delta
+between the candidates is `canonicalCase`, which `ResolveWorkdir` applies and a bare
+`DefaultClaudeSessionsDir` does not; neither `confineWorkdirToHome` (bootstrap) nor `resolveSpawnDir`
+(phone) canonicalises case upstream, so on a case-insensitive filesystem a wrong-cased workdir could
+survive to the pool intact while the child still lands in the canonical-case cwd, and a probe built
+without `canonicalCase` would read a directory claude never writes — the permanent-loop mirror failure
+above.
+
+**Test-coverage caveat, from code review (2026-08-20): the shipped discriminator test pins the
+per-runner-vs-pool-global property, not the `canonicalCase` half.** A per-runner derivation built on the
+*wrong* transform — `sessions.DefaultClaudeSessionsDir(cfg.WorkDir)` directly, skipping
+`ResolveWorkdir` — still passes `TestMapStreamsupConfig_ClaudeSessionsDir`, because on an ordinary tmpdir
+path (no case difference) `DefaultClaudeSessionsDir`'s own `EvalSymlinks` already matches
+`ResolveWorkdir`'s output; only a case-difference fixture would separate them, and no such fixture exists
+here (§ Open questions in the #1631 spec declines to gate the build on it — no real-world divergence has
+been observed). So: the "each runner gets its own directory" property is genuinely pinned; "that directory
+is computed via `ResolveWorkdir`, not a cheaper sibling" is not. A future edit that quietly drops
+`canonicalCase` from this composition will not be caught by this test.
 
 **`stripSessionIDFlags(args []string) []string`** returns a fresh slice — never mutating the input, which
 is aliased into the pool's `spawnBase` — with every `--session-id`/`--resume` occurrence removed (two-token
@@ -1152,20 +1235,31 @@ overlapping `new_session` frames are an ordinary sequence (the e2e's own retry l
 every ~250 ms), and the loser's `rotate()` ordinarily fails `ErrSessionNotFound`
 (`sessions/transition.go:120-123`) and runs its `abort()`. Unstamped, that would clear the
 *winner's* arm while the winner's outgoing child is still alive, reproducing the defect on
-demand from two frames. `setStdin` clears `rotating` in the same acquisition that publishes
-the new handle; `takeStdin` deliberately leaves it alone, since the teardown it performs is the
+demand from two frames. `setStdin` publishes the new handle unconditionally and clears `rotating`
+in that same acquisition only when the spawn is authorised (#1482, below); `takeStdin` deliberately
+leaves it alone, since the teardown it performs is the
 *middle* of the window the gate covers, not its end — releasing on `RestartFresh`'s return
 would only narrow the race, since that call returns after `cancel()` while the kill, `cmd.Wait`,
 and the respawn all still run later on the Run goroutine.
 
 `startFreshRunner` (`cmd/pyry/main.go`) arms the gate via `beginRotationOrNoop`, an **optional**
-type assertion (`interface{ BeginRotation() func() }`) rather than a widened `RestartFresh`
-dispatch case — so `new_session_routing_test.go`'s stub-based subtests keep exercising the same
-dispatch shape rather than silently degenerating into the inert default arm. The existing
+type assertion (`interface{ BeginRotation() func() }`) rather than widening `RestartFresh`'s own
+assertion (`interface{ RestartFresh(string) }`, itself un-widened since `#1548` deleted the
+`*supervisor.Supervisor`-only arm it used to switch on) to also require the gate — so a runner
+that offers `RestartFresh` without a gate still rotates, just ungated, instead of silently
+degenerating into the inert default. `rotatingRunner` (`inbound_deliver_rotation_test.go`) is
+what makes that optionality load-bearing to existing coverage rather than academic: it exposes
+both methods unconditionally and leaves arming to the real `startFreshRunner`. The existing
 rotate-before-`RestartFresh` order (load-bearing for the double-rotation watcher skip-set) is
 unchanged; the arm is inserted ahead of both statements. `streamRunner.BeginRotation()` forwards
 it, the third concrete method reached by type assertion off the un-widened `sessions.Runner`
 after `Interrupt` (#1120) and `RestartFresh` (#1124).
+
+**A mutation-pin on the arming order needs a stub that exposes the gate.** Hoisting
+`beginRotationOrNoop` above `startFreshRunner`'s inert return is the hazard `#1330`'s ordering
+guards against (§ above); pinning it with a stub that has no `BeginRotation` method is vacuous,
+since `beginRotationOrNoop` takes its own inert branch whether or not the hoist happened, and the
+row passes on both the mutant and the fix (`#1548`).
 
 **The refusal record is logged at `Info`, deliberately diverging from the spec's `Debug`.** The
 e2e's stability guard greps the daemon's *whole* captured stderr for the literal
@@ -1176,19 +1270,55 @@ without touching that guard. It names only the event and the runner's own sessio
 the `conversationID` parameter (accepted for interface conformance, otherwise unused) and never
 payload bytes.
 
-**Known accepted gap, not fixed (code review SHOULD FIX, below the merge-blocking threshold):
-the release side is not generation-aware.** `setStdin` clears `rotating` for *any* child that
-binds, not specifically the successor of the arm currently standing. Two overlapping frames can
-still, in principle, hand a turn to a doomed child: frame 1 arms → rotates → `RestartFresh` →
-`cancel()` returns with the respawn still pending → frame 2 arms and starts rotating → frame
-1's respawn completes → `setStdin` clears `rotating` while frame 2's outgoing child is still
-alive. Narrower than the pre-fix window by a large margin, and no failure of this shape has
-been observed — accepted per the project's evidence-based-fix-selection convention rather than
-built out speculatively. If evidence appears, the fix is a generation-aware clear: capture the
-arm's generation at `RestartFresh` and compare it in `setStdin`, the same shape `abort` already
-uses. See [codebase/1330.md](../codebase/1330.md) for the full review finding.
+**The release side is now authorised (#1482) — the two-frame gap this paragraph used to describe
+is closed in its stated shape.** `setStdin` no longer clears `rotating` for any child that binds;
+it clears only for a spawn set up after the `RestartFresh` that landed after the standing arm.
+The authorisation is a monotonic threshold, not a one-shot token — a one-shot ("clear only if
+this spawn consumed `rotatePending`") was rejected because a successor spawn that dies during
+setup would spend it and wedge the gate armed forever. The shape: `freshSeq uint64` under
+`restartMu` counts `RestartFresh` rotations that have landed; `RestartFresh` bumps it inside its
+existing `restartMu` section (the empty-id early return stays above that section, so a no-op
+call never bumps it). `BeginRotation` reads the current `freshSeq` under `restartMu` — **before**
+taking `mu` — and captures it as `armFreshSeq` in the same `mu` acquisition that sets
+`rotating = true` and bumps `rotateGen`; two sequential leaf acquisitions, never nested. Each
+spawn snapshots `freshSeq` inside `beginSpawn`'s existing `restartMu` section (the same section
+#1481 fused the id read and `iterCancel` publish into) and carries it to `setStdin`, which clears
+`rotating` iff the snapshot is strictly greater than `armFreshSeq`. Because `RestartFresh`'s bump
+and `beginSpawn`'s snapshot are both sections of the same mutex, a spawn set up before the arm's
+partner `RestartFresh` always reads a snapshot equal to `armFreshSeq` (refused) and a spawn set up
+after always reads strictly greater (authorised) — this holds for a crash/backoff respawn of the
+pre-rotation id and for a `Restart`-driven respawn alike, and it is exactly what closes the
+originally-described interleaving: frame 2's arm captures the counter *after* frame 1's
+`RestartFresh` has already bumped it, so frame 1's pending successor snapshots a value that is not
+strictly greater and cannot clear frame 2's arm.
 
-See [codebase/1330.md](../codebase/1330.md).
+**What is still open, honestly.** The window between `BeginRotation`'s `restartMu` read and its
+`mu` acquisition is not closed — a different frame's `RestartFresh` could land and a spawn take
+its snapshot in those few instructions, and that spawn's later bind would then clear the arm
+being placed. Closing it would require holding `mu` and `restartMu` at once, which this package's
+never-nested leaf-mutex discipline (§ Concurrency model, below) forbids. It is unreachable from a
+single `new_session` frame — `startFreshRunner` calls `BeginRotation` and `RestartFresh` in program order on one
+goroutine — so it needs two concurrent frames interleaving inside a handful of instructions, and
+no failure of this shape has been observed; left open per evidence-based fix selection rather
+than closed speculatively. If evidence appears, the fix is a re-read-and-re-stamp under the arm's
+own `rotateGen`, not a widening of the mutex discipline. See [codebase/1330.md](../codebase/1330.md)
+for the original gate this paragraph's fix builds on.
+
+**Testing this kind of authorisation window: the vacuity guard and the arm placement both depend
+on the harness mode, and a flat test function hides the per-row evidence a mutant needs (#1482).**
+`WriteUserTurn` returns `ErrNoLiveChild` for both "gated" and "no child bound", so every row must
+assert through `turnTarget`'s `gated` return, never `errors.Is(err, ErrNoLiveChild)` alone — but a
+`Stdin() != nil` non-vacuity guard is only safe with an `echo_lines` child that is guaranteed
+alive; adding it to a `crash`-mode row (whose 20 ms child may legitimately already be gone) trades
+a real assertion for flakiness. Where the test arms the gate matters as much as what it asserts:
+arming from the test goroutine after a `waitSpawn` receive reads naturally but races the
+respawn — with a fast enough crash the successor can already have bound before the arm lands, so
+the row passes on both the shipped and mutant trees and proves nothing. Arming inside the first
+spawn's `onSpawn` (under a `sync.Once`) puts the arm strictly before the next `beginSpawn` by
+program order on the single Run goroutine, which is what makes the row capable of failing at all.
+Subtests, not a flat function, are what let a mixed-outcome mutant (row (a) reddens, row (b) stays
+green) become visible per row — flattening them would also force the "refused bytes never reached
+a child" check into a place with no happens-after edge to hang it from.
 
 ## Production wiring — the `interactive_runner` toggle (#1081)
 

@@ -45,6 +45,25 @@ const (
 	// code is the only signal. Wire spec: docs/protocol-mobile.md
 	// § Error codes, close-code row 4426.
 	StatusHandshakeFailure websocket.StatusCode = 4426
+
+	// StatusQueueOverflow is the WS close code the binary asks the relay to
+	// apply when a v2 session's push queue exceeds pushQueueByteCeiling and
+	// handlePushOverflow tears it down (#1505). Echoes HTTP 413 (Content Too
+	// Large), consistent with the 44xx←HTTP convention. Deliberately NOT
+	// StatusIdleTimeout: reusing 4408 would mislabel an overflow as an idle
+	// session, the same class of mistake #912 documented when a transport
+	// outage surfaced as noise.rekey_failed. Wire spec:
+	// docs/protocol-mobile.md § Error codes, close-code row 4413.
+	//
+	// closeWith is called with a NIL frame on this path — nothing is sealed.
+	// The trip condition is a parked drain, which in the #874 case means the
+	// transport is down, so sealing an error envelope would burn a Noise
+	// send-nonce for a frame that cannot arrive and gap the phone's recv nonce
+	// (the #912 hazard). The idle sweep already sets this precedent, and the
+	// close code alone suffices because the phone's recovery is a fresh
+	// handshake, not a message. A future change that adds a sealed error frame
+	// here reintroduces the nonce hazard.
+	StatusQueueOverflow websocket.StatusCode = 4413
 )
 
 // idleTimeout is the bounded window a v2 session may go without any
@@ -114,8 +133,7 @@ type wakeSignal struct {
 // reply send is non-blocking even if the caller's ctx fires between enqueue
 // and reply. Mirrors manualRekeyReq minus the per-conn inputs — a snapshot
 // takes no addressed-conn argument. The reply carries the capability-aware
-// enumeration ([]ActiveConn); ActiveConnIDs is a thin projection over the
-// same reply.
+// enumeration ([]ActiveConn).
 type snapshotReq struct {
 	reply chan []ActiveConn
 }
@@ -312,6 +330,28 @@ type V2Session struct {
 	// later off-Run processing aliases nothing.
 	appFrames chan []byte
 
+	// bundleAssembling is the accept-side half of the per-conn debug-bundle
+	// in-flight gate (#1491), covering the window [request accepted →
+	// StreamBundle's enqueue complete] that the queue-derived bundleInFlight scan
+	// cannot see: the assembly now runs off Run, so between the accept and the
+	// first Push this conn's push queue holds no bundle frame to find. Set in
+	// handleDebugBundleRequest at accept, cleared in handleBundleReady after
+	// StreamBundle returns — both on Run, and the clear runs in the same Run pass
+	// as the enqueue, so the two halves overlap and no second request can slip
+	// between them.
+	//
+	// Run-owned single-writer, exactly like state/replayThrough — no lock, no
+	// atomic, and pushMu is NOT involved, so pushMu's "taken alone, never held
+	// across an Encrypt, m.send, or any channel op" invariant is untouched by
+	// construction rather than by discipline. The off-Run assembleBundle goroutine
+	// never reads or writes it.
+	//
+	// Living on the session rather than in a manager-level map is what makes a
+	// permanent lockout impossible: closeWith deletes the session, so a
+	// reconnecting conn_id gets a fresh V2Session whose marker is the zero value,
+	// and there is no entry to leak or forget to delete.
+	bundleAssembling bool
+
 	// done is closed by closeWith to stop this session's worker goroutine
 	// without waiting for Run exit (no per-session goroutine leak under conn
 	// churn). Follows the timer-cleanup pattern: created alongside appFrames
@@ -401,10 +441,10 @@ type V2SessionManager struct {
 	// so concurrent multi-conn replays are covered by the single cap-1 channel.
 	replayCh chan struct{}
 
-	// snapshot funnels (*V2SessionManager).ActiveConns (and ActiveConnIDs,
-	// which projects over it) calls onto Run's dispatch goroutine so the read
-	// of m.sessions runs under the single-owner-goroutine invariant, serialised
-	// against every map write (lazy-create, delete, state transitions).
+	// snapshot funnels (*V2SessionManager).ActiveConns calls onto Run's dispatch
+	// goroutine so the read of m.sessions runs under the single-owner-goroutine
+	// invariant, serialised against every map write (lazy-create, delete, state
+	// transitions).
 	// Unbuffered: backpressure is correct — if Run is busy, the caller waits;
 	// the caller's ctx is the escape arm. Not closed by the manager on Run
 	// exit; in-flight callers unblock via ctx.Done.
@@ -422,6 +462,40 @@ type V2SessionManager struct {
 	// manager on Run exit; in-flight workers unblock via runCtx / s.done in
 	// forwardToRun.
 	appReply chan appReplyMsg
+
+	// pushOverflow carries the connID of a session whose push queue latched
+	// pushQueue.overflowed from the off-Run producer goroutine inside Push to
+	// the Run goroutine, which tears the session down in handlePushOverflow
+	// (#1505). Mirrors modalTimeout's shape — a chan string, buffered
+	// (wakeBufferSize) — because enqueue runs off-Run under pushMu and closeWith
+	// is Run-owned, exactly the split modalTimeout bridges.
+	//
+	// The send is NON-blocking (the drainCh idiom), unlike armIdleTimer's
+	// blocking send: armIdleTimer blocks a fresh time.AfterFunc goroutine, while
+	// Push runs on the producer's goroutine, where blocking would break the
+	// never-blocks-the-producer contract this whole queue exists to uphold. The
+	// signal is level-triggered instead — the latch is never cleared, so every
+	// subsequent Push re-drives a send a full buffer dropped. With no further
+	// pushes the queue is frozen at <= the ceiling and the idle sweep reaps it,
+	// which is the pre-#1505 bound and strictly no worse.
+	pushOverflow chan string
+
+	// bundleReady carries one finished debug-bundle assembly from its off-Run
+	// goroutine (assembleBundle) back to Run, which streams it or sends the
+	// deterministic error reply in handleBundleReady (#1491). Mirrors appReply's
+	// "off-Run producer, Run consumes-and-seals" shape: the archive is built off
+	// Run, but every s.send.Encrypt — StreamBundle → drainOnce → forwardEnvelope
+	// for the stream, debugBundleReplyError → forwardEnvelope for the failure —
+	// stays on the single-owner Run goroutine. The payload type is bundleResult,
+	// defined beside the rest of the verb's machinery in v2session_debugbundle.go
+	// (the #1025 carve-out).
+	//
+	// Buffered (wakeBufferSize) like wake / modalTimeout / pushOverflow; it is
+	// only pressured by more conns finishing assembly at once than the buffer
+	// holds while Run is busy, and assembleBundle's send BLOCKS rather than drops,
+	// so that case is correct rather than lossy. Not closed by the manager on Run
+	// exit; an in-flight producer unblocks via runCtx / s.done.
+	bundleReady chan bundleResult
 
 	// modalTimeout carries a surfaced modal's id from its time.AfterFunc
 	// callback goroutine (armed off-Run by ArmModalTimeout) to the Run goroutine
@@ -480,6 +554,8 @@ func NewV2SessionManager(cfg V2SessionConfig) (*V2SessionManager, error) {
 		snapshot:     make(chan snapshotReq),
 		appReply:     make(chan appReplyMsg),
 		modalTimeout: make(chan string, wakeBufferSize),
+		pushOverflow: make(chan string, wakeBufferSize),
+		bundleReady:  make(chan bundleResult, wakeBufferSize),
 	}, nil
 }
 
@@ -508,6 +584,15 @@ func (m *V2SessionManager) Run(ctx context.Context) error {
 			m.handleWake(runCtx, w)
 		case modalID := <-m.modalTimeout:
 			m.handleModalTimeout(runCtx, modalID)
+		case connID := <-m.pushOverflow:
+			m.handlePushOverflow(runCtx, connID)
+		case res := <-m.bundleReady:
+			// A debug bundle finished assembling off Run (#1491). Stream it —
+			// or reply with the deterministic error — here, so every
+			// s.send.Encrypt stays on the single-owner Run goroutine. The
+			// assembly goroutine performed no crypto and touched nothing Run
+			// owns.
+			m.handleBundleReady(runCtx, res)
 		case req := <-m.manualRekey:
 			req.reply <- m.handleManualRekey(runCtx, req.connID)
 		case <-m.drainCh:
@@ -688,8 +773,10 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 // dispatchAppFrame runs on the Run goroutine. It splits an open-state
 // plaintext two ways: a v2 control envelope (rekey/modal/interrupt/
 // new_session/dequeue/snapshot/debug_bundle/settings) is handled inline on
-// Run — those handlers touch s.send / session state / timers and are fast;
-// an application frame is handed OFF Run to this conn's worker goroutine
+// Run — those handlers touch s.send / session state / timers and are fast,
+// with one exception: handleDebugBundleRequest is fast only because #1491 moved
+// its uncapped read+gzip off Run, leaving the accept, the gate and the seals
+// here; an application frame is handed OFF Run to this conn's worker goroutine
 // (appFrameWorker) via a non-blocking enqueue onto s.appFrames, then
 // dispatchAppFrame returns so the Run loop keeps servicing every other arm
 // (other conns' frames, m.wake, m.modalTimeout, m.manualRekey) while the
@@ -1101,6 +1188,14 @@ func (m *V2SessionManager) send(env protocol.RoutingEnvelope) {
 // and debug-logs the running count + the dropped class (env.Type only; never
 // payload bytes).
 //
+// Past pushQueueByteCeiling the soft-overflow admission stops: the envelope is
+// rejected, pushQueue.overflowed latches, and this Push signals m.pushOverflow
+// so Run tears the session down (handlePushOverflow, #1505). That is still not
+// an error the producer sees — the call returns nil, and promptly; the overflow
+// is not the producer's failure, and both production callers only debug-log an
+// error anyway. Pushes that follow the teardown find no queue and get the
+// pre-existing ErrConnNotFound, so no new error value ever reaches a producer.
+//
 // Returns ErrConnNotFound (wraps control.ErrConnNotFound) when no queue exists
 // for connID — i.e. the session never reached V2StateOpen, was never seen, or
 // has been torn down (closeWith deletes the queue). This collapses the former
@@ -1122,8 +1217,14 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 		m.pushMu.Unlock()
 		return ErrConnNotFound
 	}
+	before := q.overflowed
 	dropped := q.enqueue(env)
 	droppedCount := q.dropped
+	// Capture both the LEVEL (still latched ⇒ keep signalling) and the EDGE
+	// (just tripped ⇒ log once) under the same hold, so neither can be read
+	// against a queue another producer has since mutated.
+	overflowed, justTripped := q.overflowed, q.overflowed && !before
+	retained := q.bytes
 	m.pushMu.Unlock()
 
 	// Non-blocking wake: a cap-1 channel + this default coalesces concurrent
@@ -1133,6 +1234,28 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 	default:
 	}
 
+	if overflowed {
+		// Level-triggered: signal on EVERY push while latched, so a send this
+		// default dropped (full buffer) is re-driven by the next one. See
+		// V2SessionManager.pushOverflow for why this must not block.
+		select {
+		case m.pushOverflow <- connID:
+		default:
+		}
+	}
+	if justTripped {
+		// Edge-triggered, so an operator sees exactly one Warn per session
+		// however many pushes follow. Warn, not Debug: unlike the routine
+		// per-envelope drop below, this ends the conn. Content-free — bytes and
+		// ceiling are lengths, and type is the same discriminator v2.push.drop
+		// already carries.
+		m.cfg.Logger.Warn("relay: v2 push queue byte ceiling exceeded",
+			"event", "v2.push.ceiling",
+			"conn_id", connID,
+			"bytes", retained,
+			"ceiling", pushQueueByteCeiling,
+			"type", env.Type)
+	}
 	if dropped {
 		m.cfg.Logger.Debug("relay: v2 push drop under pressure",
 			"event", "v2.push.drop",
@@ -1141,6 +1264,39 @@ func (m *V2SessionManager) Push(ctx context.Context, connID string, env protocol
 			"type", env.Type)
 	}
 	return nil
+}
+
+// handlePushOverflow tears down the session whose push queue latched
+// pushQueue.overflowed, freeing every retained byte immediately instead of
+// waiting out the 15-minute idle sweep (#1505). Run-goroutine only — reached
+// from Run's m.pushOverflow arm — so the m.sessions read and the closeWith call
+// sit under the package's single-owner invariant, exactly like handleWake's
+// wakeIdleTimeout case. An absent session (already torn down; its queue went
+// with it) or a non-open one is a no-op, mirroring handleWake's state guard.
+//
+// It deliberately does NOT re-check whether the queue has since drained back
+// under the ceiling. Run's select is unordered, so several drainOnce passes can
+// run between the signal and this arm, and a recovered transport may have
+// emptied the queue by now — the session is torn down anyway. Envelopes were
+// already discarded when the latch tripped, and only the re-handshake this
+// teardown forces replays them (#647 replay + reconcileModals / reconcileQueues,
+// none of which fire on transport recovery alone). A "kinder" re-check would
+// leave a surviving session with a permanent silent gap in the phone's turn
+// stream and nothing to reconcile it; the cost of tearing down is one extra
+// handshake in a rare race.
+func (m *V2SessionManager) handlePushOverflow(ctx context.Context, connID string) {
+	s, ok := m.sessions[connID]
+	if !ok {
+		return
+	}
+	if s.state != V2StateOpen {
+		return
+	}
+	m.cfg.Logger.Warn("relay: v2 push queue ceiling teardown",
+		"event", "v2.push.ceiling.teardown",
+		"conn_id", connID,
+		"close_code", int(StatusQueueOverflow))
+	m.closeWith(ctx, s, StatusQueueOverflow, nil)
 }
 
 // transportDown reports whether the push drain should hold the head rather than
@@ -1207,9 +1363,7 @@ func (m *V2SessionManager) drainOnce(ctx context.Context) {
 			continue // replay in flight for this conn; hold its live events (#777).
 		}
 		connID = id
-		env = q.items[0].env
-		q.items[0] = queuedEnv{} // release the envelope for GC; slot slides out below
-		q.items = q.items[1:]    // pop head (FIFO)
+		env = q.popHead()
 		found = true
 		break
 	}
@@ -1356,31 +1510,6 @@ func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
 	case <-ctx.Done():
 		return nil
 	}
-}
-
-// ActiveConnIDs returns a snapshot of the conn IDs of every session currently
-// in V2StateOpen — the authenticated, token-validated sessions to which Push
-// may deliver. It is a thin projection over ActiveConns (dropping the
-// interactive flag) preserved for the capability-agnostic #589 fan-out
-// consumer; its signature and observable contract (unordered set, nil on ctx
-// cancellation, non-nil-empty on an empty manager) are unchanged.
-//
-// Production wire-up of *V2SessionManager into the cmd/pyry daemon for
-// server-initiated fan-out lands in a separate ticket (#572); until then this
-// method is reachable only from internal/relay tests.
-func (m *V2SessionManager) ActiveConnIDs(ctx context.Context) []string {
-	conns := m.ActiveConns(ctx)
-	if conns == nil {
-		// Preserve the nil-on-cancel contract: a cancelled snapshot is nil,
-		// distinct from a non-nil-empty snapshot of an open-session-less
-		// manager.
-		return nil
-	}
-	ids := make([]string, len(conns))
-	for i, c := range conns {
-		ids[i] = c.ConnID
-	}
-	return ids
 }
 
 // handleActiveConns runs on Run's dispatch goroutine — the only site that

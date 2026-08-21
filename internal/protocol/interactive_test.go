@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -116,6 +117,12 @@ func TestToolUsePayload_RoundTrip(t *testing.T) {
 	}
 	if payload.InputSummary != "weather in Helsinki tomorrow" {
 		t.Errorf("InputSummary: got %q, want %q", payload.InputSummary, "weather in Helsinki tomorrow")
+	}
+	// The fixture's input is the WebSearch call's one real field, so it pins a
+	// shape a client actually receives rather than a synthetic key: the same
+	// text input_summary carries, but addressable by name (#1678).
+	if len(payload.Input) != 1 || payload.Input["query"] != "weather in Helsinki tomorrow" {
+		t.Errorf("Input: got %#v, want map[query:weather in Helsinki tomorrow]", payload.Input)
 	}
 
 	roundTripEnvelope(t, env, payload, raw)
@@ -725,12 +732,287 @@ func TestRateLimitedType_IsNotClaudesVocabulary(t *testing.T) {
 	}
 }
 
+func TestModelAnnouncedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_announced.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelAnnounced {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelAnnounced)
+	}
+
+	var payload ModelAnnouncedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	// A MEASURED identifier, not an invented one: claude echoed exactly this for a
+	// bare `haiku` alias, in the committed capture
+	// internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json. A fixture is
+	// something a client author copies as if it were observed, so it has to be.
+	// (Contrast rate_limited.json's deliberately unmeasurable "<unmeasured>", which
+	// exists because no capture of its field's non-benign value set exists at all.)
+	if payload.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("Model: got %q, want %q", payload.Model, "claude-haiku-4-5-20251001")
+	}
+	// true here and false in the zero fixture on purpose: with both false a struct
+	// wiring "truncated" to the wrong field, or dropping it, would still pass. The
+	// PAIRING is not a capture — a 25-byte identifier is nowhere near the producer's
+	// 256-byte cap, so no real frame carries this model with this bool. The model
+	// value is measured; the bool is chosen to discriminate.
+	if !payload.Truncated {
+		t.Errorf("Truncated: got %v, want true", payload.Truncated)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestModelAnnouncedPayload_ZeroValue_RoundTrip pins the encoding of every
+// field's zero value, which is what this stream's no-omitempty rule
+// (docs/protocol-mobile.md § Interactive events) actually asserts: adding
+// omitempty to any one of the three fields turns this round trip red, and no
+// realistic fixture can make that claim for all three.
+//
+// The frame itself is one the bridge will never emit — Model is never empty (the
+// producer's gate does not emit on an empty model) and the bridge always supplies
+// a conversation id. It exists for the encoding, not for the scenario.
+func TestModelAnnouncedPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_announced_zero.json")
+
+	// Both guards are load-bearing rather than decoration: they are what makes
+	// "explicit zero, not elided" checkable at all. Without them an omitempty on
+	// either field would elide the key from BOTH the fixture and the re-marshalled
+	// bytes, and the round trip alone would go on passing.
+	if !bytes.Contains(canonical(t, raw), []byte(`"model":""`)) {
+		t.Errorf("fixture must carry the announced model explicitly as the empty string, got: %s", raw)
+	}
+	if !bytes.Contains(canonical(t, raw), []byte(`"truncated":false`)) {
+		t.Errorf("fixture must carry the truncation report explicitly as false, got: %s", raw)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelAnnounced {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelAnnounced)
+	}
+
+	var payload ModelAnnouncedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "")
+	}
+	if payload.Model != "" {
+		t.Errorf("Model: got %q, want %q", payload.Model, "")
+	}
+	if payload.Truncated {
+		t.Errorf("Truncated: got %v, want false", payload.Truncated)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestModelAnnouncedType_IsNotClaudesSubtype pins the translation layer this
+// frame exists to preserve, as its thinking_progress and rate_limited siblings
+// above do. The daemon is the ONE place a claude rename lands; naming the wire
+// type after claude's own `init` subtype would undo that.
+//
+// Neither sibling's exact form transfers. claude's KEY for the value is `model`,
+// so a strings.Contains(TypeModelAnnounced, "model") check would be red against
+// the correct name — `model` here is the subject noun and the daemon's own field
+// name. The discriminating word is claude's subtype `init`, which names claude's
+// LINE where ours names what the daemon reports.
+func TestModelAnnouncedType_IsNotClaudesSubtype(t *testing.T) {
+	if TypeModelAnnounced == "init" {
+		t.Errorf("wire type is claude's subtype %q; it must be the daemon's own name", TypeModelAnnounced)
+	}
+	if strings.Contains(TypeModelAnnounced, "init") {
+		t.Errorf("wire type %q is derived from claude's subtype (contains %q)", TypeModelAnnounced, "init")
+	}
+	// The exact pin, matching internal/turnevent's variant name (ModelAnnounced)
+	// in snake_case rather than anything of claude's.
+	if TypeModelAnnounced != "model_announced" {
+		t.Errorf("wire type: got %q, want %q", TypeModelAnnounced, "model_announced")
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own
+	// id/ts and would dilute the check. These are regression pins: non-discriminating
+	// today by construction, their job is to go red the day someone "helpfully"
+	// adds claude's init-line keys back. The captured init line carries 22 keys and
+	// this payload carries the substance of one.
+	body, err := json.Marshal(ModelAnnouncedPayload{
+		ConversationID: "c1",
+		Model:          "claude-haiku-4-5-20251001",
+		Truncated:      true,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{"cwd", "session_id", "tools", "mcp_servers", "permissionMode", "slash_commands"} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's excluded init-line key %q: %s", key, body)
+		}
+	}
+}
+
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
 // purpose: nothing in internal/protocol enforces the cap — the transport does —
 // so an exported constant here would imply an enforcement this package does not
 // perform.
 const maxV2AppEnvelope = 65519
+
+// TestToolUsePayload_NilInputNormalises covers the case the fixture cannot:
+// unmarshalling "input":{} yields a non-nil empty map, so the round-trip never
+// exercises the nil path. The bridge (#1678) returns nil for all three
+// no-fields cases — an absent input, an empty object, and an input that is not
+// a JSON object — and would take exactly that path; without normalisation it
+// would ship "input":null to a client while the fixture kept asserting {}.
+// Both the value and pointer forms are checked because a pointer-receiver
+// marshaller would silently miss the value path roundTripEnvelope takes. This
+// is TestBackgroundTaskRosterPayload_NilTasksNormalises's shape, for a map.
+func TestToolUsePayload_NilInputNormalises(t *testing.T) {
+	p := ToolUsePayload{ConversationID: "c1", Name: "Bash"}
+	if p.Input != nil {
+		t.Fatalf("precondition: Input must be nil, got %v", p.Input)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", p},
+		{"pointer", &p},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if bytes.Contains(out, []byte(`"input":null`)) {
+				t.Errorf("nil Input marshalled to null: %s", out)
+			}
+			if !bytes.Contains(out, []byte(`"input":{}`)) {
+				t.Errorf("nil Input did not normalise to {}: %s", out)
+			}
+		})
+	}
+
+	// The normalisation must not mutate the receiver's copy back into the caller.
+	if p.Input != nil {
+		t.Errorf("MarshalJSON mutated the receiver: Input is now %v", p.Input)
+	}
+}
+
+// The bridge's tool-input caps, mirrored from internal/turnbridge/outbound.go.
+// Copies for the same reason the streamsup block below carries copies — this
+// package is a stdlib-only leaf and must not import internal/turnbridge — and
+// each names its source constant, which is what a future cap change greps for.
+// Raising a bridge cap without updating these leaves the measurement silently
+// stale.
+const (
+	capInputValueRunes = 4000 // internal/turnbridge.maxInputValueRunes
+	capInputKeyRunes   = 128  // internal/turnbridge.maxInputKeyRunes
+	capInputFields     = 16   // internal/turnbridge.maxInputFields
+	capInputTotalRunes = 8500 // internal/turnbridge.maxInputTotalRunes
+	capSummaryLen      = 200  // internal/turnbridge.maxSummaryLen
+)
+
+// TestToolUsePayload_FitV2EnvelopeCap constructs a tool_use with its input map
+// filled to the bridge's total rune budget across its full entry count, and
+// proves the serialised envelope fits under the v2 application-envelope cap.
+// Per-field caps do not compose into an envelope guarantee on their own, so
+// this is measured rather than argued — the same statement
+// TestBackgroundTaskPayloads_FitV2EnvelopeCap below makes, and this test is
+// that one's shape.
+//
+// The fill is '<', not 'a', for the reason stated at length on that test:
+// SetEscapeHTML is on by default so one such input byte costs six on the wire,
+// and an 'a' fill under-reports by over 5x. Here the producer's cut is a RUNE
+// cut rather than a byte cut, and six bytes per rune is still the ceiling — a
+// 1-byte rune escapes to at most 6, a multi-byte rune is emitted RAW at 4 bytes
+// or fewer. '<' is the realistic case too: a Bash command value IS a shell
+// command line, and the blocked consumer is a desktop client whose own source
+// is '<'-dense TSX.
+//
+// Every value also carries the trailing "…" the bridge appends to a shortened
+// value, because the rune budget bounds PRE-ellipsis content and the ellipsis
+// rides on top of it.
+//
+// The identity fields are filled hostilely because nothing bounds them, which
+// makes this an assumption rather than an enforced cap and is worth saying out
+// loud: streamsup's emitAssistant passes claude's tool Name and ID through
+// VERBATIM with no cap, and the bridge supplies conversation_id / turn_id.
+// name gets 512 runes — four times the others' paranoia — because a fat MCP
+// tool name is the plausible way that field grows, and budgeting for it is the
+// difference between a measured guarantee and a tacit assumption. Capping name
+// upstream is a separate ticket (#1678 § Open questions).
+func TestToolUsePayload_FitV2EnvelopeCap(t *testing.T) {
+	fill := func(n int) string { return strings.Repeat("<", n) }
+
+	// Keys are filled to their own cap and made distinct by a numeric suffix
+	// (digits do not escape, so this is the hostile shape a map of maximal keys
+	// takes). Keys count against the same budget as values, so what remains is
+	// spread across the values.
+	keyRunes := capInputFields * capInputKeyRunes
+	valueRunes := capInputTotalRunes - keyRunes
+	if valueRunes <= 0 {
+		t.Fatalf("precondition: keys alone (%d runes) exhaust the %d-rune budget", keyRunes, capInputTotalRunes)
+	}
+	input := make(map[string]string, capInputFields)
+	for i := 0; i < capInputFields; i++ {
+		per := valueRunes / capInputFields
+		if i == 0 {
+			per += valueRunes % capInputFields // the remainder rides on one entry
+		}
+		if per > capInputValueRunes {
+			t.Fatalf("precondition: per-entry fill %d exceeds the %d-rune value cap", per, capInputValueRunes)
+		}
+		// The suffix keeps the key distinct; it is inside the key cap, not on top.
+		key := fill(capInputKeyRunes-2) + fmt.Sprintf("%02d", i)
+		input[key] = fill(per) + "…"
+	}
+
+	payload := ToolUsePayload{
+		ConversationID: fill(64),
+		TurnID:         fill(64),
+		ToolUseID:      fill(64),
+		Name:           fill(512),
+		InputSummary:   fill(capSummaryLen) + "…",
+		Input:          input,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	// Worst-case envelope too: max-uint64 ids and a populated EventID, so the
+	// outer frame costs as much as it ever can.
+	eventID := ^uint64(0)
+	env := Envelope{
+		ID:      ^uint64(0),
+		Type:    TypeToolUse,
+		TS:      time.Date(2026, 5, 8, 10, 33, 18, 0, time.UTC),
+		Payload: body,
+		EventID: &eventID,
+	}
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	t.Logf("tool_use at full caps: %d B, %.1f%% of the %d-byte v2 application-envelope cap",
+		len(out), float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope)
+	if len(out) >= maxV2AppEnvelope {
+		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
+	}
+}
 
 // The producer's caps, mirrored from internal/streamsup/parser.go. This package
 // is a stdlib-only leaf and must not import internal/streamsup, so these are

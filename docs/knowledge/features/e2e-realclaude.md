@@ -602,10 +602,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `no-reap-line` (ambiguous by construction — `reap.go:64` guards the emit on
   `len(reaped) > 0`, so silence means "reaped nothing" or "never fired," and
   the `Detail` names both) / `instrument-failed`. Anchored on the reap
-  message's bare text as a string literal, never `msg="..."` — `runAgentRunPty`
-  passes no `Logger`, so `ptyrunner` falls back to `slog.Default()`, not the
-  `slog.NewTextHandler` the ticket body cited, and an anchor built against the
-  wrong handler would silently read "no line" on the only path that matters.
+  message's bare text as a string literal, never `msg="..."` —
+  `runAgentRunStreamRunner` passes no `Logger`, so `streamrunner.Run` falls
+  back to `slog.Default()`, not the `slog.NewTextHandler` the ticket body
+  cited, and an anchor built against the wrong handler would silently read
+  "no line" on the only path that matters. (#1557 re-attributed this and two
+  sibling comments in the source from the `ptyrunner` path #1348 deleted to
+  the surviving `streamrunner` path; the mechanism was unchanged, only its
+  owner's name was wrong.)
   Membership decided over parsed integers via a key-boundary attribute match
   (`tdnAttrIndex`), never a substring — closes both a false negative (`slog`
   quotes `pgids=` the moment a second pgid appears) and its dual false
@@ -1962,7 +1966,20 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   #1600, is that the value reaches no daemon *log* at any level — #1600's own
   arm logs the subtype keyword on its undecodable path and nothing else, ever.
   It still reaches no *client*: `turnbridge.MapEvent`'s `default` drops the
-  variant, so no wire frame exists for it yet. No `--model` in the base argv
+  variant. CORRECTED 2026-08-19 (#1616): this used to close "so no wire frame
+  exists for it yet" — false now. `protocol.TypeModelAnnounced` /
+  `protocol.ModelAnnouncedPayload` exist, declared by #1616 so a client can be
+  written against the shape, the same declared-ahead-of-producer sequencing
+  `rate_limited` used (#1405 ahead of #1410). What survives is `MapEvent` having
+  no case for the variant: nothing emits the frame until #1617, so a client
+  still receives nothing. CORRECTED 2026-08-20 (#1639): that surviving half is
+  gone too, and so is the "still reaches no *client*" sentence above it. #1638
+  added `MapEvent`'s `turnevent.ModelAnnounced` case and `cmd/pyry`'s matching
+  `Handle` case, so the frame is emitted and an interactive v2 client does
+  receive one — #1617 was the split parent and never shipped the mapping. The
+  *log* half is the one that has never expired: the value still reaches no
+  daemon log at any level. An event is not a log, and a wire frame is not a log
+  either. No `--model` in the base argv
   (a respawn's
   recomposed argv would otherwise carry two); the starting model is read off
   turn 1 rather than assumed, so the two-alias target table (`haiku`/`sonnet`)
@@ -2005,6 +2022,296 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   production files touched; no writer for the subtype is added — #1596 decides
   that. See [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md)
   for the full measurement writeup and [`codebase/1595.md`](../codebase/1595.md).
+
+- `interactive_stream_inband_bypass_revoke_test.go` (#1622) — **live proof of the
+  composed path #1604 built, not of the wire format #1595 already proved.** #1595
+  hand-wrote the `set_permission_mode` control line onto four
+  `exec.CommandContext` children it owned directly; #1604 proved `Pool.UpdateSettings
+  → inBandDeliverable → deliverSettingsInBand → Runner.RevokeBypass` only through a
+  fake runner. Neither proved pyry's own `Pool`, holding a real `streamsup.Runner`
+  over a real claude child, actually emits those bytes. This test drives that: an
+  in-process `sessions.Pool` (#1582's shape, re-pointed) whose bootstrap child gets
+  its bypass posture from a **seeded registry entry** (`yolo:true`) rather than the
+  base argv — `revokeBaseArgs` is declared empty on purpose, because either shortcut
+  (a stored posture already matching the update, or a bypass flag baked into the
+  base argv) yields a run that measures a child nobody revoked. Two guards cover
+  that seam: a pre-spawn check on `Pool.DefaultSettings()` and a post-turn-1 check
+  that the first `init.permissionMode` is `bypassPermissions`, so a seed failure
+  reads as itself rather than as a delivery failure. The stdout tap
+  (`revokeTap`) bridges #1582's line-splitting `io.Writer` shape with #1595's
+  `setModeRecorder` field capture (`control_response`, `permissionMode`, results)
+  by embedding rather than re-deriving the classifier — the one type in the package
+  that reads `control_response` off a `Pool`-spawned child's raw stdout. A sibling
+  log recorder retains `deliverSettingsInBand`'s fire-and-forget "not delivered"
+  `Info` record verbatim, since that record is otherwise swallowed and nothing else
+  in the daemon's ordinary logs distinguishes a working revocation from a dropped
+  one. Measured 2026-08-19 against claude 2.1.220, all three runs `-race`, mutants
+  applied via `-overlay` (no mutated source ever written to the worktree): green run
+  — one `control_response`, `init.permissionMode` `[bypassPermissions default]`, one
+  spawn, pid unchanged, 5.85s; **M1** (drop the revoke-detection clause from
+  `deliverSettingsInBand`) — no `control_response`, `init.permissionMode` stays
+  `[bypassPermissions bypassPermissions]`, one spawn, pid unchanged, 50.03s — proves
+  nothing was written and nothing was torn down; **M2** (`inBandDeliverable` returns
+  false for a revoke, the pre-#1604 shape, falling through to `sup.Restart`) — no
+  `control_response`, `init.permissionMode` still flips to `[bypassPermissions
+  default]`, but two spawns and pid changes, 50.57s — the row that earns the
+  four-assertion set, since the permission-mode echo alone cannot tell a delivered
+  revocation from a respawn under a recomposed bypass-free argv. Both mutant runs
+  take ~50s against the green run's 5.85s because no `control_response` ever
+  arrives, so the tolerated wait burns its full budget — working as intended, not a
+  hang. **Scope boundary, deliberate**: asserts the revocation reached the child and
+  nothing was torn down, not that the posture is behaviourally enforced — an echoed
+  permission mode is claude's own report, not proof of enforcement; that
+  measurement is a sibling ticket that consumes this harness. One signature
+  widening in `interactive_stream_inband_model_test.go`: `inbandSendTurn`'s
+  parameter is now the `inbandResultCounter` interface (`resultCount() int`)
+  instead of the concrete `*inbandTapRecorder`, so both this file's `revokeTap` and
+  #1582's recorder satisfy it with zero call-site edits. Zero production files
+  touched. See `docs/specs/architecture/1622-live-pool-bypass-revocation.md` for
+  the full design and the assertion-to-mutant mapping.
+
+- `inband_bypass_revoke_arms_test.go` (#1651) — **the deterministic, credential-free
+  half of #1643's three-arm substrate: which stored posture each arm launches
+  with.** #1622's `seedBypassRegistry` wrote `yolo:true` unconditionally; it now
+  takes the posture as a parameter (`seedBypassRegistry(t, path, yolo)`), and
+  #1622's own call site is unchanged (`true`). The trap this ticket exists to
+  avoid: for the `false` posture, a **stored** false and a **cold start** (no
+  registry file at all) both read back as `YOLO: false` through
+  `Pool.DefaultSettings()` — that seam cannot tell a correctly-seeded
+  `control_default` arm from a completely broken one. The only signal that
+  separates them is the registry **entry's existence** (`bootstrap: true`, an
+  `id` `sessions.ValidID` accepts), so `TestSeedBypassRegistry_StoresRequestedPostureUnderBothValues`
+  reads the seeded file directly rather than the Pool, decoding through
+  `map[string]json.RawMessage` — never `revokeSeedEntry` or `registryEntry` — so
+  a `yolo` key misspelled in the seed can't round-trip through its own struct and
+  hide from the test. `revokeSeedEntry.YOLO` keeps its `json:"yolo"` tag with no
+  `omitempty` (unlike `registryEntry.YOLO`'s `json:"yolo,omitempty"`) precisely so
+  a stored false is a **present** false key on disk, not an absent one; adding
+  `omitempty` to "match" production would make the key vanish, and only the
+  test's presence clause (checked separately from the value) reddens on it — a
+  value-only check passes, since a struct decode of an absent key is
+  indistinguishable from a decoded `false`. The second new test,
+  `TestPoolRevokeArms_PinLaunchPostureAndUpdateByName`, pins the package-level
+  `poolRevokeArms` table (`revoke`/`control_default`/`control_bypass`, each
+  carrying its launch posture and whether it takes a mid-run settings update) by
+  **name**, in both directions — deliberately not "the two controls differ",
+  since swapping `control_default` and `control_bypass` still leaves them
+  differing while making the arm names lie to every downstream consumer.
+  `poolRevokeArms` is read-only by convention (ranged over from `t.Parallel()`
+  tests in this file and by #1652); nothing appends to or reassigns it. Both
+  tests report **PASS**, not SKIP, with no claude binary and no credentials — the
+  file takes neither `WithWorktreeAuthenticated` nor `resolveClaudeBin`, enforced
+  by a new `finOfflineExecBans` entry over the file's AST rather than its prose.
+  **Two lessons surfaced while mutating the presence/value split**, reported
+  candidly against the spec's own prediction rather than silently patched: a
+  misspelled `yolo` tag reddens the presence clause on **both** rows, not the
+  spec-predicted value clause on the `true` row — because the value check is
+  nested inside the presence check's `else`, and a nested assertion is never the
+  sole red for a mutant that trips its guard; the guard is. And the map-decode
+  itself is not the "vacuous value-only check" the spec's hazard prose describes
+  for a **struct** decode: `json.Unmarshal(nil, &b)` over an absent key's `nil`
+  `json.RawMessage` errors rather than silently decoding to `false`, so a
+  map-based value check alone would have caught the vanished key too — the
+  separate presence clause earns its place on readability and naming the real
+  cause, not on being the only thing that reddens. Zero production files
+  touched. See
+  `docs/specs/architecture/1651-bypass-seed-posture-and-arm-table.md` for the
+  full design, and #1622's entry above for the seam this ticket parameterizes.
+
+- `inband_bypass_revoke_names_test.go` (#1661) — **locks #1643's fixture-name
+  family out of #1595's committed one before the live run that could collide
+  exists.** #1643's three arm names (`revoke`/`control_default`/`control_bypass`)
+  are the same strings #1595 already uses, and #1595's `setModeFixtureName` is
+  package-level and reachable — reusing it on the same claude version would
+  silently overwrite three of #1595's four committed fixtures while every test
+  stayed green. `poolRevokeFixtureName` is a pure two-string namer whose
+  `pool_revoke_` prefix is a literal neither input can reach, with **both**
+  inputs (not just the version, unlike the #1595 precedent) run through
+  `versionSlug` so a hostile arm like `a/b` can't escape containment either —
+  an unslugged-but-equally-pure counterfactual namer escapes containment on 40
+  of 110 measured pairs, so that property is load-bearing, not green by
+  construction. **The property this file exists to prove is a negative claim,
+  and a negative claim needs its control anchored the same way it's checked**:
+  `fixtureGlob`/`dropcapFixtureGlob` are matched with a `testdata/` prefix,
+  #1595's family glob is matched bare, and getting either direction wrong makes
+  the "no minted name matches" loop pass unconditionally with nothing checked.
+  `anchorFixtureName` is the single function both the negative loop and each
+  row's control call, so the two can't drift apart — proven by mutation:
+  flipping the family row to `underTestdata: true` produced **zero** reds from
+  the negative loop and reddened only its control, i.e. the control was the
+  sole detector for a mis-anchored pattern going silently vacuous. Code review
+  flagged one residual, left for #1662 rather than fixed here (closed there —
+  see below): the file's header claims it can't reach any `os` read or write,
+  but its `finOfflineExecBans` entry enumerates four verbs
+  (`os.ReadFile`/`WriteFile`/`Create`/`ReadDir`), so `os.OpenFile` and a
+  `writeFixture`-shaped third `packageDir` wrapper sit outside the ban table's
+  actual coverage — true of this file today (it imports no `os`) but a gap for
+  whatever #1662 adds next to this package. Zero production files touched. See
+  `docs/specs/architecture/1661-pool-revoke-fixture-name-family.md` for the
+  full design and the anchoring table.
+
+- `inband_bypass_revoke_fixture_test.go` (#1662) — **the write half of #1643's
+  three-arm substrate: the fixture record one arm commits, and a writer whose
+  target directory is a parameter.** `poolRevokeFixtureRecord` carries exactly
+  the eighteen fields #1643 can fill — no `env` field, inherited from
+  `setModeFixtureRecord`'s constraint, since the credential reaches the child
+  through the environment while the argv carries none — and
+  `writePoolRevokeFixture` mints its target filename by passing the record's
+  slugged version token and arm **unmodified** into #1661's
+  `poolRevokeFixtureName`, never formatting its own name. `capFixtureCapture`
+  reuses #1595's `stderrFixtureCap`/`truncateString` and adds a rune-boundary
+  trim: `encoding/json` substitutes U+FFFD per invalid byte rather than
+  erroring on bad UTF-8, so a plain byte cap over a capture cut mid-rune reads
+  back over the stated cap — measured, a five-byte cut string round-trips at
+  seven bytes. Two lessons surfaced during mutation testing, both reported
+  candidly against the design's own predictions rather than silently
+  absorbed: **a reused helper's own guard can make the new wrapper's guard
+  unpinnable** — `capFixtureCapture`'s `len(s) <= cap` early return is
+  measurably dead for the value path, because `truncateString` already
+  carries the identical guard and its trim loop breaks immediately on a valid
+  tail, so dropping the wrapper's own early return reddens nothing; the
+  function's doc comment says so rather than claiming coverage it doesn't
+  have. And **`json.MarshalIndent` reflows an embedded `json.RawMessage`**, so
+  a `control_response` envelope written and read back is not byte-equal until
+  both sides are compacted first — which blinds only that whitespace and
+  still catches a dropped field, a `json:"-"` tag, or a wrong-tag decode. The
+  round-trip fixture's arm (`"revoke arm/2"`) is deliberately not
+  slug-clean: every real arm name and slugged version token already passes
+  `versionSlug` unchanged, so a writer that formats its own name instead of
+  minting through `poolRevokeFixtureName` would produce the identical name
+  and AC 2's name-equals-namer assertion would be vacuous — this is the one
+  literal choice that keeps that assertion coupled to the write path.
+  `finOfflineExecBans`' entry for the file carries a fourth wrapper beyond the
+  `packageDir`/`setModeFixturePath`/`writeSetModeFixture` trio —
+  `writeFixture`, the spike's own third `packageDir` wrapper — closing the
+  residual #1661 flagged and left open (above). Code review also flagged,
+  non-blocking, that "a field decoded from the wrong tag" — carried verbatim
+  from the design into the file's header as something non-zero, distinct
+  values catch — overstates it for a symmetric struct round trip: only a
+  **colliding** tag is caught (`encoding/json` drops both); a unique wrong tag
+  round-trips green. Worth remembering for any future file in this family
+  that reuses that phrasing. Zero production files touched. See
+  `docs/specs/architecture/1662-pool-revoke-fixture-record-and-capped-writer.md`
+  for the full design and the mutation-to-assertion table.
+
+- `interactive_stream_model_announced_test.go` (#1634) — the live proof that a
+  real claude's announced model reaches the daemon's **own emitted frame**,
+  not just claude's stdout. #1582's `interactive_stream_inband_model_test.go`
+  taps `streamsup.Config.Stdout` upstream of the parser, so it stayed green
+  through the whole period `turnbridge.MapEvent` had no
+  `turnevent.ModelAnnounced` case and would stay green if #1638's two arms
+  were reverted; `TestInteractiveStreamModelAnnouncedFrame` instead drains the
+  sealed `protocol.TypeModelAnnounced` frame at a connected fakephone and reds
+  against a tree missing either arm. Reuses #1582's `inbandModelTargets` table
+  as the equality comparand (never a fresh literal) paired with an inequality
+  against the spawn alias — the discriminator that tells a future stale-row
+  failure (inequality green) apart from claude regressing to announcing the
+  bare alias (inequality red). Carries `spawnBootstrapDaemonVerbose`, a
+  `spawnBootstrapDaemonWithIdle`-style near-copy of the shared spawner whose
+  sole delta is `-pyry-verbose`: both plausible leak sites for the value
+  (`streamsup`'s undecodable-line drop, `Handle`'s unknown-event default) log
+  at Debug, so at the shared spawner's default `LevelInfo` the no-leak
+  assertion would pass vacuously. Drain returns at the turn's
+  `turn_state{idle}` close rather than at the frame's arrival — under either
+  mutant no frame is ever emitted, so a frame-first drain would burn its full
+  budget on every red run; closing on turn-end keeps a mutation proof in this
+  package cheap (~5s red vs. the 120s timeout).
+
+  **Two lessons that outlive this ticket:**
+  - **`go test -overlay` cannot mutate this package's daemon-side targets.**
+    AC-3's mutants live in `turnbridge.MapEvent` and `cmd/pyry`'s
+    `interactiveTurnEmitterV2.Handle`, but this test asserts against a
+    *separately built* daemon binary — `ensurePyryBuilt` shells out to a
+    plain `go build` with no overlay forwarding, and the `cmd/pyry` mutant is
+    never compiled into the test binary at all. An `-overlay` passed to
+    `go test` reaches neither mutant and both mutant runs come back green — a
+    false pass, not a weak one. The route that works: `go build
+    -overlay=<abs path json> -o <tmp bin> ./cmd/pyry`, then
+    `PYRY_E2E_BIN=<tmp bin>`, which `ensurePyryBuilt` returns unbuilt without
+    rebuilding. Any future mutation proof of daemon-side (as opposed to
+    test-process-side) code in this package needs this route, not the house
+    `-overlay`-into-`go test` shortcut used elsewhere in the suite.
+  - **A no-leak haystack can contain the value it's guarding against for an
+    unrelated reason.** The daemon's `spawning claude` record logs the argv
+    verbatim, `--model haiku` included — an absence assertion searched
+    against the spawn alias rather than the drained frame's resolved `Model`
+    value fails on every healthy daemon. Search for the value that actually
+    crossed the wire, never the value that was asked for.
+
+  Zero production files touched.
+
+- `session_transcript_probe_test.go` (#1655) — measures whether a `claude`
+  launched under `--session-id <id>` that runs no turn leaves an `<id>.jsonl`
+  on disk, the premise a suspected `streamsup` crash-loop (2026-08-18) rests
+  on and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md)
+  needs before #1630 can carry its by-id-existence rule into `streamsup`.
+  `TestRealClaude_TurnlessSessionIDTranscript` runs a control arm (one turn;
+  the transcript's appearance pins the sessions directory empirically and is
+  compared against `sessions.DefaultClaudeSessionsDir`) and a turnless arm
+  read twice — while alive, and again after a `SIGTERM`→grace→`SIGKILL`
+  termination — through `classifyTurnlessTranscript`, which reads the
+  termination mode so a force-killed absence can never be recorded as the
+  fact holding. **Measured HOLDS** (claude 2.1.220): full record and
+  reproduce steps in
+  [`session-transcript-and-resume-probe.md`](session-transcript-and-resume-probe.md).
+  Credential-free companion `TestTurnlessTranscriptVerdict` pins the
+  classifier's five outcome rows offline.
+
+  **Two lessons that outlive this ticket:**
+  - **A `*bytes.Buffer` behind a live `exec.Cmd` cannot be read while the
+    child is still running.** The liveness `t.Fatalf` path reads the
+    turnless arm's stderr with the child still alive, racing `os/exec`'s own
+    copy goroutine under `-race`. A mutex-guarded `boundedBuffer` is needed
+    regardless of the separate ingest-cap requirement — a plain capped
+    buffer still races on this read.
+  - **`agentrun.ResolveWorkdir` returns `(string, error)`, not a bare
+    string.** It wraps `fs.ErrNotExist`; a caller that drops the error can
+    set `cmd.Dir` on a workdir that no longer exists and silently invalidate
+    any directory comparison built on it.
+
+  Zero production files touched.
+
+- `resume_absent_transcript_probe_test.go` (#1656) — measures the other half of
+  #1655's premise: how claude answers `--resume <id>` when `<id>.jsonl` is
+  absent, the half the suspected `streamsup` crash-loop actually turns on.
+  `TestRealClaude_ResumeAbsentTranscript` establishes a real transcript
+  `<A>` through one turn, pre- and post-reads a reserved absent id `<C>`
+  through the same by-id instrument, then runs both a `--resume <C>` arm and
+  a `--resume <A>` control arm — same builder (`resumeProbeArgs`), same
+  workdir, same 45 s deadline — through `classifyResumeAbsent`, which reads
+  the control **first**: a control that itself rejects a resume of an
+  *existing* transcript short-circuits to INCONCLUSIVE regardless of what
+  the absent arm did. **Measured HOLDS** (claude 2.1.220): the absent arm
+  exited 1 (`No conversation found with session ID: …`, carried on both
+  stdout and stderr) while the control sat on stdin past its deadline. Full
+  record and reproduce steps in
+  [`session-transcript-and-resume-probe.md`](session-transcript-and-resume-probe.md).
+  Credential-free companions `TestResumeAbsentVerdict` (all nine
+  `{exit 0, exit non-zero, did-not-exit}²` cells) and
+  `TestResumeProbeArgsIsRespawnShape` (the respawn argv differs from the
+  first-spawn argv only in the trailing id-flag pair) run with no claude at
+  all.
+
+  **Two lessons that outlive this ticket, both about classifying a
+  terminated child's exit code:**
+  - **A did-not-exit outcome needs a liveness guard, not just a code
+    comparison.** `snapshotExit` (from #1655) returns `-1` for a child that
+    has not exited, and `-1 != 0` — a "was it rejected?" predicate written
+    as `ExitCode != 0` alone reads a child still sitting on stdin as a
+    rejection. The predicate here is `Exited && ExitCode != 0`, and the
+    offline table's did-not-exit rows deliberately use `ExitCode: -1`
+    (mirroring `snapshotExit`'s real sentinel) rather than a conveniently
+    zeroed field, so a dropped guard shows up as four reds, not zero.
+  - **Terminating an arm before snapshotting it manufactures the verdict.**
+    `SIGTERM` leaves exit 143 behind, indistinguishable from a rejection at
+    read time. The fix is ordering, not a special case: snapshot the
+    pre-termination exit code first, call `endTurnlessChild` only on the
+    did-not-exit path, and route the post-signal code into a cleanup field
+    the classifier never reads. The same hazard applies to any future probe
+    in this package that classifies a child's exit code after it may have
+    been signalled.
+
+  Zero production files touched.
 
 ## Test infrastructure
 

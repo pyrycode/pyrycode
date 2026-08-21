@@ -325,6 +325,52 @@ const (
 	TypeRateLimited = "rate_limited" // binary → phone, outbound v2 usage-limit report
 )
 
+// Mobile Protocol v2 announced-model report. claude names the model it resolved
+// for the turn on its system/init line, and that value used to stop at the daemon
+// boundary: internal/streamsup's parser has translated the line into
+// turnevent.ModelAnnounced since #1600, but turnbridge.MapEvent's default dropped
+// the variant, so no client could see what claude actually ran. #1638 added the
+// case, so a client sees it now (docs/protocol-mobile.md § model_announced).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state with
+// two edges, not turn-independent work, not a periodic reading, and not a
+// condition report about a window. It is an IDENTITY report — what claude says it
+// is, for the turn it says it about.
+//
+// The NAME is the daemon's, not claude's, for the reason the three blocks above
+// give: the wire follows internal/turnevent's VARIANT (turnevent.ModelAnnounced),
+// so a claude rename lands in one place instead of breaking every client at once.
+// claude's subtype is init; the discriminating word is "init" — claude's, naming
+// its LINE — where ours names what the daemon reports. The sibling blocks' form
+// does not transfer to a test on "model": claude's KEY for the value is model, and
+// so is turnevent.ModelAnnounced's field name, so that word is the subject noun
+// rather than a vocabulary import.
+//
+// The wire field keeps the name model even though three v2 payloads already carry
+// one (ScreenSnapshotPayload, SessionSettingsPayload, SetSessionSettingsPayload).
+// Those three mean the per-session OVERRIDE, where "" is "inherited default"; this
+// means what claude ANNOUNCED, and in the ordinary case the two disagree loudly.
+// The field name is turnevent's in snake_case per the house convention, every
+// field on this wire is scoped by its envelope type, and a rename would not reach
+// a client author reading only screen_snapshot's row — the doc cross-references do
+// (docs/protocol-mobile.md § model_announced, § Screen snapshot, § Session
+// settings).
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone event an old phone never receives, and a leak
+// into that set would let a phone send a model_announced frame into
+// dispatch.Route. The drift detector in internal/protocol/compat_test.go
+// partitions Type* constants between inboundAppTypeSet and v2OnlyTypes; this
+// lives in the latter.
+//
+// The declaring ticket (#1616) was wire vocabulary only; #1638 added
+// internal/turnbridge's MapEvent case for turnevent.ModelAnnounced and cmd/pyry's
+// handler case, so this frame now reaches an interactive v2 mobile client. Same
+// declare-then-emit sequencing as #1405→#1410 and #1393→#1394.
+const (
+	TypeModelAnnounced = "model_announced" // binary → phone, outbound v2 announced-model report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
@@ -610,18 +656,17 @@ const (
 // daemon-global and has no per-session key to name — but this reply is what
 // hands a client the session_id every subsequent set_session_settings must
 // address, so a client needed a way to say which conversation it meant.
-// conversation_id is untrusted network input used for exactly one thing: a
-// membership lookup into the in-memory conversations registry, through
-// handleRequestSessionSettings' KnownConversation seam. It reaches no log line,
-// no error string, no filesystem path, and not the reply.
+// conversation_id is untrusted network input used for exactly one thing: an
+// in-memory resolution through handleRequestSessionSettings' conversation-keyed
+// run-configuration seam. It reaches no log line, no error string, no filesystem
+// path, and not the reply.
 //
-// It gates WHETHER the answer is populated, NOT which session it describes: the
-// reported values are still the bootstrap session's (per #848's "do not
-// pre-carve a conversation-keyed settings seam"), a conversation the daemon does
-// not host is answered with a zero-valued session_settings rather than an error,
-// and an absent or empty id is answered exactly as the verb always has. #1587
-// makes the values follow the named conversation, at which point the reported id
-// and the reported values move in one step.
+// Since #1610 it SELECTS which session the reply describes, and the reported id
+// and the reported values move in one step because they are resolved as one
+// value. Every unresolvable case — a conversation the daemon does not host, one
+// bound to no live session, and an absent or empty id — is answered with a
+// zero-valued session_settings rather than an error, and never with the shared
+// bootstrap session's id or values.
 //
 // Two natures in one cluster, mirroring #844. request_session_settings is an
 // inbound phone → binary *control* envelope the v2 session manager intercepts at

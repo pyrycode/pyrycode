@@ -2511,9 +2511,10 @@ func sleepUntil(t time.Time) {
 // --- unsolicited push surface tests (#571) ---
 
 // buildMessageEnvelope constructs a fully-formed binary→phone `message`
-// envelope (TypeMessage + protocol.MessagePayload) — the shape the #572
-// assistant-turn bridge will hand to Push. text identifies the frame so
-// the decrypting side can assert the payload round-tripped intact.
+// envelope (TypeMessage + protocol.MessagePayload) — the shape cmd/pyry's
+// fan-out emitters hand to Push after enumerating open conns with ActiveConns.
+// text identifies the frame so the decrypting side can assert the payload
+// round-tripped intact.
 func buildMessageEnvelope(t *testing.T, id uint64, text string) protocol.Envelope {
 	t.Helper()
 	payload, err := json.Marshal(protocol.MessagePayload{
@@ -2791,6 +2792,201 @@ func TestPushQueue_Enqueue_AllControlSoftOverflow(t *testing.T) {
 	last := q.items[len(q.items)-1]
 	if last.env.Type != protocol.TypeTurnEnd || last.env.ID != 9000 {
 		t.Errorf("tail = (%s,%d), want (turn_end,9000)", last.env.Type, last.env.ID)
+	}
+}
+
+// --- pushQueue byte-ceiling unit tests (#1505) ---
+
+// maxAppEnvelopePayload is the v2 application-envelope cap
+// (docs/protocol-mobile.md § Application-envelope size cap) — the largest
+// payload a real control envelope can carry, and the size the ceiling's
+// derivation is written against. Duplicated here rather than exported from
+// production: internal/relay enforces the cap on the Noise side
+// (maxNoisePayloadBytes), not on Payload, so there is no production constant to
+// borrow.
+const maxAppEnvelopePayload = 65519
+
+// payloadOfLen returns a payload of exactly n bytes. Its CONTENT is irrelevant
+// — pushQueue.bytes measures len(env.Payload) and nothing else — so every
+// envelope in a fill loop can share one backing array, which is what keeps a
+// 32 MiB ceiling test to a single allocation instead of hundreds.
+func payloadOfLen(n int) json.RawMessage {
+	return make(json.RawMessage, n)
+}
+
+// pqEnvPayload is pqEnv with a payload attached — the only input the byte
+// accounting reads. pqEnv itself leaves Payload nil (0 bytes), which is why
+// every pre-#1505 pushQueue test is unaffected by the ceiling.
+func pqEnvPayload(typ string, id uint64, payload json.RawMessage) protocol.Envelope {
+	e := pqEnv(typ, id)
+	e.Payload = payload
+	return e
+}
+
+// TestPushQueue_Enqueue_ByteCeilingBoundary pins AC#1's both-sides assertion:
+// filling an all-control queue right up to pushQueueByteCeiling admits the
+// envelope that lands EXACTLY on it (the bound is `>`, not `>=`), and the very
+// next envelope — one byte — is rejected, leaving the queue byte-for-byte and
+// item-for-item unchanged with the overflowed latch set and the drop-policy
+// counter untouched.
+func TestPushQueue_Enqueue_ByteCeilingBoundary(t *testing.T) {
+	t.Parallel()
+
+	big := payloadOfLen(maxAppEnvelopePayload)
+	q := &pushQueue{}
+
+	// Fill with full-size control envelopes while a whole one still fits.
+	var id uint64
+	for q.bytes+maxAppEnvelopePayload <= pushQueueByteCeiling {
+		id++
+		if dropped := q.enqueue(pqEnvPayload(protocol.TypeToolResult, id, big)); dropped {
+			t.Fatalf("enqueue(id=%d) reported a drop below the ceiling", id)
+		}
+	}
+	if q.overflowed {
+		t.Fatal("overflowed latched while every envelope still fit under the ceiling")
+	}
+
+	// The last admission: an envelope sized to land EXACTLY on the ceiling.
+	headroom := pushQueueByteCeiling - q.bytes
+	if headroom <= 0 {
+		t.Fatalf("headroom = %d, want > 0 (the fill loop must stop short of the ceiling)", headroom)
+	}
+	lenBefore := len(q.items)
+	if dropped := q.enqueue(pqEnvPayload(protocol.TypeTurnState, 9000, payloadOfLen(headroom))); dropped {
+		t.Error("the exact-fit envelope must not report a drop")
+	}
+	if len(q.items) != lenBefore+1 {
+		t.Fatalf("len = %d, want %d (an envelope landing exactly on the ceiling is admitted)", len(q.items), lenBefore+1)
+	}
+	if q.bytes != pushQueueByteCeiling {
+		t.Fatalf("bytes = %d, want exactly %d", q.bytes, pushQueueByteCeiling)
+	}
+	if q.overflowed {
+		t.Error("overflowed latched on the exact-fit envelope; the bound is `>`, not `>=`")
+	}
+
+	// The first rejection: one more byte cannot fit.
+	if dropped := q.enqueue(pqEnvPayload(protocol.TypeTurnEnd, 9001, payloadOfLen(1))); dropped {
+		t.Error("a ceiling rejection must not report a drop-policy drop")
+	}
+	if len(q.items) != lenBefore+1 {
+		t.Errorf("len = %d after the rejection, want %d (unchanged)", len(q.items), lenBefore+1)
+	}
+	if q.bytes != pushQueueByteCeiling {
+		t.Errorf("bytes = %d after the rejection, want %d (unchanged)", q.bytes, pushQueueByteCeiling)
+	}
+	if !q.overflowed {
+		t.Error("overflowed = false after a ceiling rejection, want true (it is the teardown signal)")
+	}
+	if q.dropped != 0 {
+		t.Errorf("dropped = %d, want 0 (a ceiling rejection is not a drop-policy drop)", q.dropped)
+	}
+	// The tail is still the exact-fit envelope — the rejected one never landed.
+	last := q.items[len(q.items)-1]
+	if last.env.Type != protocol.TypeTurnState || last.env.ID != 9000 {
+		t.Errorf("tail = (%s,%d), want (turn_state,9000)", last.env.Type, last.env.ID)
+	}
+}
+
+// TestPushQueue_Enqueue_ByteCeilingIsBytesNotCount pins AC#1's second case: the
+// ceiling measures BYTES, so a queue holding far more than pushQueueCap *small*
+// control envelopes — whose total stays well under the ceiling — is admitted
+// whole, with no latch and no drop. A count-only implementation fails here:
+// control payloads span ~100 B to 64 KB (a 640× spread), so any count cap
+// either permits N × 64 KB or kills legitimate bundles.
+func TestPushQueue_Enqueue_ByteCeilingIsBytesNotCount(t *testing.T) {
+	t.Parallel()
+
+	const smallLen = 100
+	const n = 20 * pushQueueCap // far past the nominal count cap
+	small := payloadOfLen(smallLen)
+
+	q := &pushQueue{}
+	for i := 0; i < n; i++ {
+		if dropped := q.enqueue(pqEnvPayload(protocol.TypeToolResult, uint64(i), small)); dropped {
+			t.Fatalf("enqueue(id=%d) reported a drop; small control events must all be admitted", i)
+		}
+	}
+	if len(q.items) != n {
+		t.Errorf("len = %d, want %d (every small control envelope admitted)", len(q.items), n)
+	}
+	if want := n * smallLen; q.bytes != want {
+		t.Errorf("bytes = %d, want %d", q.bytes, want)
+	}
+	if q.bytes >= pushQueueByteCeiling {
+		t.Fatalf("fixture bytes = %d reached the ceiling %d; the case is vacuous", q.bytes, pushQueueByteCeiling)
+	}
+	if q.overflowed {
+		t.Error("overflowed = true well under the ceiling — the bound is counting items, not bytes")
+	}
+	if q.dropped != 0 {
+		t.Errorf("dropped = %d, want 0", q.dropped)
+	}
+}
+
+// TestPushQueue_PopHead_AccountingRoundTrip guards the missed-decrement bug
+// whose production symptom is a phantom-byte leak that eventually tears down a
+// perfectly healthy long-lived session: enqueue a mix of classes and payload
+// sizes, pop every one, and the counter must return to exactly zero. Also pins
+// that popHead is FIFO.
+func TestPushQueue_PopHead_AccountingRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	sizes := []int{0, 1, 37, 4096, maxAppEnvelopePayload, 12, 999}
+	q := &pushQueue{}
+	total := 0
+	for i, n := range sizes {
+		typ := protocol.TypeToolResult
+		if i%2 == 1 {
+			typ = protocol.TypeAssistantDelta
+		}
+		q.enqueue(pqEnvPayload(typ, uint64(i), payloadOfLen(n)))
+		total += n
+	}
+	if q.bytes != total {
+		t.Fatalf("bytes after enqueue = %d, want %d", q.bytes, total)
+	}
+	for i := range sizes {
+		env := q.popHead()
+		if env.ID != uint64(i) {
+			t.Errorf("popHead #%d returned id %d, want %d (FIFO)", i, env.ID, i)
+		}
+	}
+	if len(q.items) != 0 {
+		t.Errorf("len = %d after draining, want 0", len(q.items))
+	}
+	if q.bytes != 0 {
+		t.Errorf("bytes = %d after draining every item, want 0 (a missed decrement leaks phantom bytes)", q.bytes)
+	}
+}
+
+// TestPushQueue_Enqueue_EvictionDecrementsBytes pins the evict site's side of
+// the accounting: at cap with queued deltas, admitting a control event evicts
+// the oldest delta, so the counter must fall by exactly that delta's payload
+// length and rise by the incoming one's.
+func TestPushQueue_Enqueue_EvictionDecrementsBytes(t *testing.T) {
+	t.Parallel()
+
+	const deltaLen = 400
+	const controlLen = 4321
+
+	q := &pushQueue{}
+	for i := 0; i < pushQueueCap; i++ {
+		q.enqueue(pqEnvPayload(protocol.TypeAssistantDelta, uint64(i), payloadOfLen(deltaLen)))
+	}
+	before := q.bytes
+	if want := pushQueueCap * deltaLen; before != want {
+		t.Fatalf("bytes after fill = %d, want %d", before, want)
+	}
+	if dropped := q.enqueue(pqEnvPayload(protocol.TypeTurnEnd, 9999, payloadOfLen(controlLen))); !dropped {
+		t.Fatal("control at capacity should evict a delta (reported as a drop)")
+	}
+	if want := before - deltaLen + controlLen; q.bytes != want {
+		t.Errorf("bytes = %d, want %d (evicted delta subtracted, incoming control added)", q.bytes, want)
+	}
+	if len(q.items) != pushQueueCap {
+		t.Errorf("len = %d, want %d (evict-then-append holds at cap)", len(q.items), pushQueueCap)
 	}
 }
 
@@ -3371,17 +3567,22 @@ func TestV2Session_Push_CtxCancelled_ReturnsCtxErr(t *testing.T) {
 	}
 }
 
-// --- open-session enumeration (ActiveConnIDs) tests (#588) ---
+// --- open-session enumeration (ActiveConns) tests (#588) ---
 
-// TestV2Session_ActiveConnIDs_OpenOnly pins both halves of AC#1: every
+// TestV2Session_ActiveConns_OpenOnly pins both halves of AC#1: every
 // V2StateOpen session is enumerated, and every non-open session (still
 // handshaking, or handshake-complete-but-token-unvalidated) is excluded — the
 // same V2StateOpen security gate Push enforces. White-box session injection
-// mirrors TestV2Session_Push_NotOpen: ActiveConnIDs reads s.state only (never
+// mirrors TestV2Session_Push_NotOpen: ActiveConns reads s.state only (never
 // s.send), so nil CipherStates are safe, and the snapshot channel-send is the
 // happens-before edge that publishes the map writes to Run (no frames fed, no
 // timers armed, so Run touches the map only when it services the snapshot).
-func TestV2Session_ActiveConnIDs_OpenOnly(t *testing.T) {
+//
+// The four-state injection map is load-bearing: this is the only test covering
+// the V2StateAwaitingInit arm of the gate. The sibling
+// TestV2Session_ActiveConns_MixedInteractive injects a handshake-complete
+// session but no awaiting-init one.
+func TestV2Session_ActiveConns_OpenOnly(t *testing.T) {
 	t.Parallel()
 
 	respPriv, _ := genV2Keypair(t)
@@ -3410,20 +3611,24 @@ func TestV2Session_ActiveConnIDs_OpenOnly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	got := mgr.ActiveConnIDs(ctx)
+	conns := mgr.ActiveConns(ctx)
+	got := make([]string, len(conns))
+	for i, c := range conns {
+		got[i] = c.ConnID
+	}
 	slices.Sort(got) // unordered set — sort before comparing positionally
 	want := []string{"c-open-a", "c-open-b"}
 	if !slices.Equal(got, want) {
-		t.Errorf("ActiveConnIDs() = %v, want %v (open sessions only)", got, want)
+		t.Errorf("ActiveConns() conn ids = %v, want %v (open sessions only)", got, want)
 	}
 }
 
-// TestV2Session_ActiveConnIDs_TornDownSessionAbsent pins AC#2: a session that
+// TestV2Session_ActiveConns_TornDownSessionAbsent pins AC#2: a session that
 // was opened then torn down (closeWith deletes it from the map) no longer
 // appears in the snapshot. Drives a real open, confirms its id is enumerated,
 // then drives an AEAD-failure 4421 teardown (the TestV2Session_Push_Closed
 // recipe) and re-enumerates.
-func TestV2Session_ActiveConnIDs_TornDownSessionAbsent(t *testing.T) {
+func TestV2Session_ActiveConns_TornDownSessionAbsent(t *testing.T) {
 	t.Parallel()
 
 	respPriv, respPub := genV2Keypair(t)
@@ -3445,9 +3650,13 @@ func TestV2Session_ActiveConnIDs_TornDownSessionAbsent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
+	enumerated := func(conns []ActiveConn) bool {
+		return slices.ContainsFunc(conns, func(c ActiveConn) bool { return c.ConnID == v2TestConnID })
+	}
+
 	// The freshly-opened session is enumerated.
-	if got := sess.mgr.ActiveConnIDs(ctx); !slices.Contains(got, v2TestConnID) {
-		t.Fatalf("ActiveConnIDs() = %v, want it to contain %q", got, v2TestConnID)
+	if got := sess.mgr.ActiveConns(ctx); !enumerated(got) {
+		t.Fatalf("ActiveConns() = %v, want it to contain %q", got, v2TestConnID)
 	}
 
 	// Drive an AEAD-failure 4421 teardown: flip a byte in a sealed frame's
@@ -3474,20 +3683,20 @@ func TestV2Session_ActiveConnIDs_TornDownSessionAbsent(t *testing.T) {
 		t.Fatalf("close_code = %d, want %d", closeEnvs[1].CloseCode, StatusProtocolMismatch)
 	}
 
-	if got := sess.mgr.ActiveConnIDs(ctx); slices.Contains(got, v2TestConnID) {
-		t.Errorf("ActiveConnIDs() = %v, want it to NOT contain torn-down %q", got, v2TestConnID)
+	if got := sess.mgr.ActiveConns(ctx); enumerated(got) {
+		t.Errorf("ActiveConns() = %v, want it to NOT contain torn-down %q", got, v2TestConnID)
 	}
 }
 
-// TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean pins AC#3 — the
-// -race proof. A separate goroutine hammers ActiveConnIDs in a tight loop
+// TestV2Session_ActiveConns_ConcurrentWithDispatch_RaceClean pins AC#3 — the
+// -race proof. A separate goroutine hammers ActiveConns in a tight loop
 // while inbound sealed request frames drive dispatchAppFrame replies on the
 // same open session, so the snapshot funnel and the reply path contend for the
 // single Run goroutine. Every snapshot is either {v2TestConnID} or empty —
 // never garbage; the solicited replies still decrypt in capture (= seal) order
 // afterwards, proving the concurrent reads never corrupted session state. Run
 // under -race.
-func TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean(t *testing.T) {
+func TestV2Session_ActiveConns_ConcurrentWithDispatch_RaceClean(t *testing.T) {
 	t.Parallel()
 
 	const mReq = 16
@@ -3546,9 +3755,9 @@ func TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean(t *testing.T) 
 				return
 			default:
 			}
-			for _, id := range sess.mgr.ActiveConnIDs(ctx) {
-				if id != v2TestConnID {
-					t.Errorf("snapshot contained unexpected id %q", id)
+			for _, c := range sess.mgr.ActiveConns(ctx) {
+				if c.ConnID != v2TestConnID {
+					t.Errorf("snapshot contained unexpected id %q", c.ConnID)
 				}
 			}
 		}
@@ -3572,9 +3781,9 @@ func TestV2Session_ActiveConnIDs_ConcurrentWithDispatch_RaceClean(t *testing.T) 
 	}
 }
 
-// TestV2Session_ActiveConnIDs_EmptyManager pins the empty case: a started
+// TestV2Session_ActiveConns_EmptyManager pins the empty case: a started
 // manager with zero sessions returns a len-0 slice without blocking.
-func TestV2Session_ActiveConnIDs_EmptyManager(t *testing.T) {
+func TestV2Session_ActiveConns_EmptyManager(t *testing.T) {
 	t.Parallel()
 
 	respPriv, _ := genV2Keypair(t)
@@ -3594,17 +3803,17 @@ func TestV2Session_ActiveConnIDs_EmptyManager(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	if got := mgr.ActiveConnIDs(ctx); len(got) != 0 {
-		t.Errorf("ActiveConnIDs() on empty manager = %v, want len 0", got)
+	if got := mgr.ActiveConns(ctx); len(got) != 0 {
+		t.Errorf("ActiveConns() on empty manager = %v, want len 0", got)
 	}
 }
 
-// TestV2Session_ActiveConnIDs_CtxCancelled_ReturnsNil pins the
+// TestV2Session_ActiveConns_CtxCancelled_ReturnsNil pins the
 // ctx-cancellation arm: a call whose ctx is already cancelled returns nil
 // without blocking. With no Run goroutine draining m.snapshot, the send case
 // can never proceed, so the ctx.Done arm is the only ready case —
 // deterministic, no flakiness from select picking the send.
-func TestV2Session_ActiveConnIDs_CtxCancelled_ReturnsNil(t *testing.T) {
+func TestV2Session_ActiveConns_CtxCancelled_ReturnsNil(t *testing.T) {
 	t.Parallel()
 
 	respPriv, _ := genV2Keypair(t)
@@ -3624,8 +3833,8 @@ func TestV2Session_ActiveConnIDs_CtxCancelled_ReturnsNil(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if got := mgr.ActiveConnIDs(ctx); got != nil {
-		t.Errorf("ActiveConnIDs with cancelled ctx = %v, want nil", got)
+	if got := mgr.ActiveConns(ctx); got != nil {
+		t.Errorf("ActiveConns with cancelled ctx = %v, want nil", got)
 	}
 }
 
@@ -4234,8 +4443,7 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 // conn, and a flagged-but-still-handshaking conn. ActiveConns reports the
 // correct flag per open conn and excludes the non-open one (the V2StateOpen
 // gate wins over the interactive flag — belt-and-suspenders of different
-// fabric). ActiveConnIDs is an unchanged projection: every open conn-id, flag
-// dropped. White-box injection mirrors TestV2Session_ActiveConnIDs_OpenOnly;
+// fabric). White-box injection mirrors TestV2Session_ActiveConns_OpenOnly;
 // the snapshot channel-send is the happens-before edge publishing the writes
 // to Run.
 func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
@@ -4268,12 +4476,6 @@ func TestV2Session_ActiveConns_MixedInteractive(t *testing.T) {
 	}
 	if len(got) != 2 || !got["c-int"] || got["c-plain"] {
 		t.Errorf("ActiveConns flags = %v, want {c-int:true, c-plain:false} (open only)", got)
-	}
-
-	ids := mgr.ActiveConnIDs(ctx)
-	slices.Sort(ids)
-	if want := []string{"c-int", "c-plain"}; !slices.Equal(ids, want) {
-		t.Errorf("ActiveConnIDs() = %v, want %v (projection: all open ids, flag dropped)", ids, want)
 	}
 }
 
@@ -4367,7 +4569,15 @@ func setIdleTimeout(t *testing.T, d time.Duration) {
 // conn's teardown regardless of interleaving.
 func waitForConnClose(t *testing.T, rec *v2Recorder, connID string, code uint16) protocol.RoutingEnvelope {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	return waitForConnCloseBy(t, rec, connID, code, 2*time.Second)
+}
+
+// waitForConnCloseBy is waitForConnClose with a caller-chosen deadline, for the
+// near-ceiling bundle fixtures whose teardown trails ~32 MiB of enqueue work
+// (#1505).
+func waitForConnCloseBy(t *testing.T, rec *v2Recorder, connID string, code uint16, within time.Duration) protocol.RoutingEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		for _, e := range rec.snapshot() {
 			if e.ConnID == connID && e.CloseCode == code {
@@ -4376,8 +4586,8 @@ func waitForConnClose(t *testing.T, rec *v2Recorder, connID string, code uint16)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("waitForConnClose: no envelope conn=%q close_code=%d; captured %d envelopes",
-		connID, code, len(rec.snapshot()))
+	t.Fatalf("waitForConnClose: no envelope conn=%q close_code=%d within %v; captured %d envelopes",
+		connID, code, within, len(rec.snapshot()))
 	return protocol.RoutingEnvelope{}
 }
 
@@ -4535,12 +4745,12 @@ func TestV2Session_IdleChurn_ReturnsToBaseline(t *testing.T) {
 		handshakeConnToOpen(t, frames, rec, connID, respPub, initPriv)
 		// Freshly handshaked and the ONLY open conn — every prior round was
 		// swept and deleted, so the count never climbs above one.
-		if ids := mgr.ActiveConnIDs(bg); len(ids) != 1 || ids[0] != connID {
-			t.Fatalf("after handshake %s: ActiveConnIDs = %v, want [%s] (stale sessions accumulated)", connID, ids, connID)
+		if conns := mgr.ActiveConns(bg); len(conns) != 1 || conns[0].ConnID != connID {
+			t.Fatalf("after handshake %s: ActiveConns = %v, want exactly one open conn %s (stale sessions accumulated)", connID, conns, connID)
 		}
 		waitForConnClose(t, rec, connID, uint16(StatusIdleTimeout))
-		if ids := mgr.ActiveConnIDs(bg); len(ids) != 0 {
-			t.Fatalf("after idle sweep of %s: ActiveConnIDs = %v, want [] (baseline)", connID, ids)
+		if conns := mgr.ActiveConns(bg); len(conns) != 0 {
+			t.Fatalf("after idle sweep of %s: ActiveConns = %v, want [] (baseline)", connID, conns)
 		}
 	}
 }
@@ -5235,5 +5445,134 @@ func TestV2Session_RekeyManual_TransportUp_GateInert(t *testing.T) {
 	}
 	if s.rekeyReplyTimer == nil {
 		t.Errorf("rekeyReplyTimer = nil, want armed (gate inert on transport-up path)")
+	}
+}
+
+// --- push-queue byte-ceiling teardown tests (#1505) ---
+
+// queueBytes returns connID's retained push-queue payload total under the leaf
+// lock, or -1 if no queue exists. The byte twin of queueLen; used to prove a
+// near-ceiling fixture is genuinely near the ceiling rather than trivially
+// under it.
+func queueBytes(mgr *V2SessionManager, connID string) int {
+	mgr.pushMu.Lock()
+	defer mgr.pushMu.Unlock()
+	q, ok := mgr.queues[connID]
+	if !ok {
+		return -1
+	}
+	return q.bytes
+}
+
+// waitQueueGone polls until connID's push queue is deleted — the observable
+// end of closeWith's teardown, and the point every retained byte is freed. A
+// positive settle, so poll-until is deterministic and fast.
+func waitQueueGone(t *testing.T, mgr *V2SessionManager, connID string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if queueLen(mgr, connID) == -1 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("push queue for %s still present (depth %d); the ceiling teardown never freed it", connID, queueLen(mgr, connID))
+}
+
+// TestV2Session_Push_ByteCeilingTearsDownSession pins AC#2 + AC#3: with the
+// drain parked by the #874 transport-down hold and a live stream of
+// control-class pushes, crossing pushQueueByteCeiling tears the session down —
+// it leaves the manager and its push queue is deleted, freeing every retained
+// byte — while the producer sees nothing but nil, and later pushes to the
+// torn-down conn get the pre-existing ErrConnNotFound. Run under -race:
+// exercises the off-Run Push → m.pushOverflow → Run → closeWith path.
+func TestV2Session_Push_ByteCeilingTearsDownSession(t *testing.T) {
+	t.Parallel()
+
+	// The teardown observed below must be the CEILING's, not the pre-existing
+	// idle sweep's: idleTimeout stays at its production value and this test
+	// completes in well under a second. (The idle-sweep tests that shrink it are
+	// deliberately non-parallel, so they cannot overlap with this one.)
+	if idleTimeout != 15*time.Minute {
+		t.Fatalf("idleTimeout = %v, want the production 15m; a shrunk sweep would make this test vacuous", idleTimeout)
+	}
+
+	respPriv, respPub := genV2Keypair(t)
+	initPriv, _ := genV2Keypair(t)
+	reg := v2PairedRegistry(t, v2TestToken)
+
+	// The independent probe/send wiring from
+	// TestV2Session_Push_HoldGatedOnProbeNotSendError: Connected drives the #874
+	// hold while Outbound records UNCONDITIONALLY. A plain gatedRecorder is the
+	// wrong fixture here — it records nothing while down, so the 4413 close
+	// frame would be invisible.
+	var probeUp atomic.Bool
+	probeUp.Store(true)
+	rec := &v2Recorder{}
+	frames := make(chan protocol.RoutingEnvelope, 2)
+	sess := driveToOpen(t, V2SessionConfig{
+		Frames:     frames,
+		Outbound:   rec.outbound,
+		Connected:  probeUp.Load,
+		StaticPriv: respPriv,
+		Devices:    reg,
+		ServerID:   v2TestServerID,
+		Logger:     silentLogger(),
+	}, frames, rec, respPub, initPriv)
+	t.Cleanup(sess.stop)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Park the drain: nothing pops, so the queue only grows (the #874 hold + a
+	// live turn, which is this ticket's driver).
+	probeUp.Store(false)
+
+	// Exactly enough full-size control pushes to cross the ceiling ONCE, and not
+	// one more. The teardown cannot begin before the crossing, so every push in
+	// this loop must return nil (AC#3); pushing beyond it would race the
+	// teardown into ErrConnNotFound and make the assertion non-deterministic.
+	payload := payloadOfLen(maxAppEnvelopePayload)
+	pushes := pushQueueByteCeiling/maxAppEnvelopePayload + 1
+	for i := 1; i <= pushes; i++ {
+		env := protocol.Envelope{
+			ID:      uint64(i),
+			Type:    protocol.TypeToolResult,
+			TS:      time.Now().UTC(),
+			Payload: payload,
+		}
+		if err := sess.mgr.Push(ctx, v2TestConnID, env); err != nil {
+			t.Fatalf("Push #%d/%d returned %v, want nil (the overflow is not the producer's failure)", i, pushes, err)
+		}
+	}
+
+	// The queue is deleted, so every retained byte is freed — without waiting
+	// out the 15-minute idle sweep.
+	waitQueueGone(t, sess.mgr, v2TestConnID)
+
+	// The session left V2StateOpen: closeWith deleted it, so the open-session
+	// enumeration no longer lists it.
+	for _, c := range sess.mgr.ActiveConns(ctx) {
+		if c.ConnID == v2TestConnID {
+			t.Fatalf("conn %q still enumerated as open after the ceiling teardown", c.ConnID)
+		}
+	}
+
+	// The close reached the wire as 4413 with a NIL frame — nothing sealed, so
+	// no Noise send-nonce was burned for a frame the down transport cannot
+	// deliver (the #912 hazard).
+	closeEnv := waitForConnClose(t, rec, v2TestConnID, uint16(StatusQueueOverflow))
+	if closeEnv.Frame != nil {
+		t.Errorf("close frame = %d bytes, want nil (the ceiling teardown seals nothing)", len(closeEnv.Frame))
+	}
+
+	// No NEW error value reaches a producer: the next push gets the pre-existing
+	// sentinel, errors.Is-comparable exactly as before.
+	err := sess.mgr.Push(ctx, v2TestConnID, protocol.Envelope{ID: 9999, Type: protocol.TypeToolResult, TS: time.Now().UTC()})
+	if !errors.Is(err, ErrConnNotFound) {
+		t.Fatalf("Push after teardown = %v, want ErrConnNotFound", err)
+	}
+	if !errors.Is(err, control.ErrConnNotFound) {
+		t.Errorf("Push after teardown does not wrap control.ErrConnNotFound: %v", err)
 	}
 }

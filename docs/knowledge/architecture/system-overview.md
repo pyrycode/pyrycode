@@ -7,15 +7,10 @@ Pyrycode is a process supervisor that keeps a Claude Code session alive across c
 ```
 pyrycode/
 ├── cmd/pyry/                  Binary entry point
-│   ├── main.go                CLI parsing, signal setup, supervisor init
-│   └── acp.go                 `pyry acp` verb (#756): runACP composition root + serveACP core — serves internal/acp over real stdio (io.Pipe-bridged stdin closer for prompt SIGINT/SIGTERM shutdown), plain-stderr logger, exit 0 on EOF + signal; registers no handlers, drives no claude (EPIC #600)
-├── internal/supervisor/       Core process supervision
-│   ├── supervisor.go          Supervisor type: hosts claude via a tui-driver Session, I/O bridge, restart loop — non-production since 2026-07-24 and unverified since; its four live gates fail on clean main and are skipped by default (production runs the stream-json runner; see *Interactive Session* below and #1348)
-│   ├── backoff.go             Backoff timer: exponential delay with stability reset
-│   └── winsize.go             SIGWINCH → PTY size sync
+│   └── main.go                CLI parsing, signal setup, daemon composition root
 ├── internal/sessions/         Session-addressable runtime (Phase 1.0+)
 │   ├── id.go                  SessionID + UUIDv4 NewID() via crypto/rand + ValidID() canonical-shape validator
-│   ├── session.go             Session: wraps one supervisor + optional bridge; lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Attach with attach bookkeeping
+│   ├── session.go             Session: holds one `Runner` (the narrow seam over the supervised claude child, declared in runner.go); lifecycle goroutine (active↔evicted state machine, idle timer); Activate / Run / Evict
 │   ├── pool.go                Pool: in-memory registry, Config (RegistryPath + ClaudeSessionsDir + IdleTimeout + ActiveCap), load-or-mint bootstrap on New, RotateID seam, saveLocked + persist, errgroup Run with supervise() fan-out seam, allocated-UUID skip set (registerAllocatedUUIDLocked variant), buildSession helper shared with GetOrCreate, Snapshot, Activate (cap-aware), capMu
 │   ├── get_or_create.go       Pool.GetOrCreate take-or-create primitive (1.3b): caller-supplied UUIDv4, atomic register+persist+skip-set+g.Go(sess.Run) under p.mu; ErrInvalidSessionID
 │   ├── registry.go            On-disk schema (registryFile, registryEntry); loadRegistry, saveRegistryLocked (atomic temp+rename), pickBootstrap, sortEntriesByCreatedAt
@@ -72,11 +67,13 @@ pyrycode/
 │   ├── envelope_test.go       Golden round-trip vs. testdata/envelope_full.json, envelope_minimal.json, routing_envelope.json (canonical json.Compact compare; time.Time.Equal for TS)
 │   ├── compat_test.go         Truth-table for IsKnownAppType + drift detectors (inboundAppTypeSet covers all Type* constants; Code* match spec dotted strings)
 │   └── testdata/              envelope_full.json (every field), envelope_minimal.json (omitempty branches), routing_envelope.json (relay splice)
-├── internal/control/          Control-plane server (Unix socket, JSON)
-│   ├── server.go              Server, SessionResolver / Session interfaces, verb dispatch
-│   ├── attach.go              Attach handoff to supervisor bridge
-│   └── logs.go                Ring-buffer log streaming
-├── internal/acp/              ACP bidirectional transport (EPIC #600 pyry acp, #755 inbound floor + #757 outbound; served by cmd/pyry/acp.go, #756)
+├── internal/control/          Control plane: Unix-socket server + client (line-delimited JSON)
+│   ├── client.go              Client-side verb helpers (Status / Logs / Stop / SessionsNew / SessionsRm / SessionsRename / SessionsList / SessionsHasID / Rekey / Approve) over the one-request-one-response request(); DialTimeout
+│   ├── dial.go                Socket dial with bounded retry (dialWithRetry) over transient startup errors — isTransientStartupError covers ENOENT / ECONNREFUSED during the daemon's self-restart window
+│   ├── logs.go                LogProvider read view, RingBuffer (bounded, mutex-guarded), SlogTee slog.Handler that mirrors daemon log lines into it for `pyry logs`
+│   ├── protocol.go            Package doc + wire types: Verb constants, Request / Response, ErrorCode tokens, JSONLPolicy enum
+│   └── server.go              Server, consumer-declared Session / SessionResolver / Remover / Renamer / Lister / GetOrCreator / Rekeyer / Sessioner interfaces, verb dispatch with per-conn handshake deadline
+├── internal/acp/              ACP bidirectional transport (EPIC #600 pyry acp, #755 inbound floor + #757 outbound; the `cmd/pyry/acp.go` entry point that served it was deleted by #1348 — the live consumer is `cmd/pyry`'s serveJSONRPCStdio, driven by the daemon's MCP approval server)
 │   ├── acp.go                 Transport (line-delimited JSON-RPC 2.0 over io.Reader/io.Writer + inbound method dispatch table + outbound pending-call registry), New/Register/Serve, bufio.Scanner read loop, handleLine classify+dispatch, writeMu-guarded write helpers, package doc (hard interactive-claude cost invariant + batch-rejection decision); #757 adds Call (blocking agent→client request: marshal-first, register-waiter-before-write, ctx-cancel reclaims) + routeResponse (delivers a response to its id's waiter or logs+drops unknown/reclaimed id) + reclaim, over nextID atomic.Uint64 + pendingMu-guarded pending map[uint64]chan callResult (cap-1 buffer keeps the read loop non-blocking) — the first cross-goroutine transport state, makes writeMu load-bearing; stdlib-only, does NOT import internal/protocol
 │   ├── jsonrpc.go             Code* error-code constants, exported Error + NewError, unexported wire types (single decode-by-shape rpcMessage inbound + successResponse/errorResponse/rpcError outbound; #757 adds outbound request frame + callResult delivery type)
 │   └── acp_test.go            Same-package, table-driven, -race-clean; inbound: framing/dispatch/response-frame-routing/diagnostics-isolation/no-panic/register-guards; #757 outbound via liveTransport harness (Serve on a goroutine over paired io.Pipes, syncBuffer diag sink): result/error/data path, 32 concurrent distinct ids under -race, unknown-id drop, ctx-cancel reclaim + late-response drop, malformed-error-object, marshal-params error
@@ -88,87 +85,118 @@ pyrycode/
 └── launchd/dev.pyrycode.pyry.plist   macOS launchd plist
 ```
 
-Dependency direction: `cmd/pyry → internal/sessions → internal/supervisor`, with `internal/control` importing `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). `internal/supervisor` has no upward imports — verifiable with `go list -deps ./internal/supervisor/...`.
+Dependency direction: `cmd/pyry → internal/sessions`, with the concrete runner handed *down* rather than imported *up* — `internal/sessions` declares the narrow `Runner` interface and takes a `Config.RunnerFactory`, and `cmd/pyry` is the only package that imports `internal/streamsup` and supplies the concrete runner. So there is no `internal/sessions → internal/streamsup` edge to trace, and none in the reverse direction either — `cmd/pyry` imports both and adapts one to the other. `internal/control` imports `internal/sessions` for the `SessionID` type referenced by its `SessionResolver` interface. `internal/sessions/rotation` is downstream of `internal/sessions` (no back-edge — the contract is closures over primitive types so the rotation package never imports its host). Both halves are checkable:
+
+```sh
+# the edge that exists — exits 0
+go list -deps ./internal/control | grep -qx github.com/pyrycode/pyrycode/internal/sessions
+# the edge that does not exist — exits 0
+! go list -deps ./internal/sessions/... | grep -qx github.com/pyrycode/pyrycode/internal/streamsup
+```
 
 ## Data Flow
 
 ### Interactive Session
 
 ```
-User terminal
+pyry (internal/streamsup)
     │
-    ├── stdin ──────> pyry ──> PTY master fd ──> claude (child process)
+    ├── user turn ─────> claude stdin   (stream-json envelope, written to the
+    │                                    held-open-stdin seam — one pipe serves
+    │                                    every turn of a spawn)
     │
-    └── stdout <───── pyry <── PTY master fd <── claude (child process)
+    └── turn events <─── claude stdout  (claude's own stream-json, parsed by
+                                         streamsup.NewParser)
 ```
 
-The supervisor puts the controlling terminal into raw mode so keystrokes pass through unmodified. SIGWINCH signals are forwarded to the PTY so terminal resizes propagate to the child.
+Spawn argv is `--input-format stream-json --output-format stream-json --verbose`, plus `--session-id <uuid>` on create or `--resume <uuid>` on reattach (`buildArgs`). The parsed turn events fan into a single `newStreamTurnSink` instance shared by the runner factory (`newStreamRunnerFactory`) and the one relay-leg drain.
 
-**Production path since 2026-07-24:** this tui-driver/PTY-hosted path is **not the production default, and it is not a working fallback either.** The production daemon runs the stream-json interactive runner (`internal/streamsup`, selected by `interactive_runner: "stream-json"` in the config file, #1081).
+**Production path since 2026-07-24:** the stream-json interactive runner (`internal/streamsup`, #1081) is the only interactive path. `interactive_runner: "stream-json"` in the config file selects it — and so does an absent config file, see below.
 
-**Do not read `interactive_runner: "pty"` as a rollback switch.** Setting it selects the code path described here, and that is the whole of what it does. All four of this path's live interactive gates fail on clean `main`, measured 2026-08-05 against claude 2.1.220 and reproduced on two tree states with matching durations, while all ten stream gates pass; they are now skipped by default behind `PYRY_PTY_GATE=1` (`internal/e2e/realclaude/pty_gate_test.go`). Nothing has exercised this path since the 2026-07-24 cutover. Returning to it would be real work whatever state those tests were in, so the earlier "one config line away" framing was the size of the edit, not the size of the task. Whether the path is kept at all is open as **#1348**, which carries a 2026-09-01 audit expiry.
+**`interactive_runner: "pty"` is rejected at daemon startup.** It is not a rollback switch: `selectInteractiveRunner` accepts exactly `""` and `"stream-json"`, both of which select the stream runner, and gives `"pty"` its own error arm — a daemon whose config still carries that value does not start at all, rather than starting on some other path. The dedicated arm exists so an operator with the key in a config file is told the path was deleted rather than that their value is unrecognised. The empty default moved off the terminal runner in the same change, which is the load-bearing half for an absent or reset config. #1348 executed the deletion: it removed `internal/supervisor` and the terminal-driving agent-run runner from the tree, after all four of the PTY path's live interactive gates failed on clean `main` and nothing had exercised the path since the 2026-07-24 cutover.
 
-The agent pipeline is likewise headless since 2026-07-25 — all five dispatcher forks set `PYRY_USE_STREAMJSON=1`, so `pyry agent-run` executes its stream-json path rather than `ptyrunner`. That `ptyrunner` half is measured separately and is less clear-cut: it produced no turn at all on 2026-07-30, and completed a full turn on 2026-08-06 during #1337's live probe. Treat it as untested rather than as either working or dead. tui-driver has no consumer on either production path.
+The agent pipeline is likewise headless since 2026-07-25, and `pyry agent-run` has one path too — `runAgentRunStreamRunner`. The distinction worth keeping here is *carried* versus *read*: the comment at that call site in `cmd/pyry/agent_run.go` records that all five dispatcher forks still carry `PYRY_USE_STREAMJSON=1` in their `.env`, and that `agent-run` deliberately no longer reads it — a no-op rather than an error, so no fork needs editing to keep working. That comment is the in-repo source for the fork claim; this repo holds no dispatcher checkout, so the claim is not independently verified from here. "No longer read" is scoped to the production path, not to the repo: the live-claude suite still reads the variable at two sites in `internal/e2e/realclaude/background_reach_probe_test.go` — `reachRunnerPathFromEnv`, and the skip gate in `TestRealClaude_BackgroundReachability`.
 
 ### Restart Cycle
 
+The interactive supervise loop lives in `internal/streamsup` — `Runner.Run`.
+
 ```
-supervisor.Run()
+Runner.Run  (internal/streamsup)
     │
-    ├── runOnce(iterCtx) ──> spawn claude in PTY, bridge I/O
-    │                        wait for child exit
+    ├── spawnAndWait(iterCtx, args) ──> spawn claude on the held-open stdin seam,
+    │                                   wait for child exit
     │
     ├── ctx (parent) cancelled? ──> graceful shutdown, return ctx.Err()
     │
-    ├── deliberate Restart pending? ──> skip backoff, respawn immediately
-    │                                   with the swapped args
+    ├── deliberate restart pending (drainRestart)? ──> skip backoff, respawn
+    │                                                  immediately with the
+    │                                                  swapped args
     │
-    └── child exited (crash)? ──> apply backoff delay
-                                   if uptime > resetAfter: reset backoff to initial
-                                   respawn with --continue (after first run, when ResumeLast is
-                                   true) — OR, when Config.ResolveSessionID is set (#839, the
-                                   daemon's bootstrap session), respawn with a resolved
-                                   --session-id (transcript absent) or --resume (transcript
-                                   already exists, #1164) instead, every spawn including the first
+    └── child exited (crash)? ──> apply backoff delay (below), then respawn
 ```
 
-Each iteration runs on `iterCtx`, a ctx derived from the parent `ctx` (#842).
-Shutdown is detected from the **parent** ctx (`ctx.Err() != nil`), not from
-`runOnce`'s return error — so a `Supervisor.Restart` kill (which cancels only
+Each iteration runs on `iterCtx`, a ctx derived from the parent `ctx`. Shutdown
+is detected from the **parent** ctx (`ctx.Err() != nil`), not from
+`spawnAndWait`'s return error — so a `Runner.Restart` kill (which cancels only
 `iterCtx`) falls through to relaunch instead of being mistaken for shutdown.
-See `Supervisor.Restart` below.
+
+Which id flag a spawn carries (`--session-id` vs `--resume`) is **not** a
+property of this loop and is not decided by a first-run latch: since #1630/#1631
+`buildArgs` takes its `create` argument from `useCreateForm`, a per-spawn by-id
+transcript-existence probe armed on every production path. See
+[features/streamsup-package.md](../features/streamsup-package.md) §
+"Supervise loop (`Run`)" for the loop pseudocode and the `beginSpawn`
+single-acquisition rule, and § "`buildArgs` — the id-flag inversion that keeps
+the on-disk session stable" (with its `useCreateForm` subsection) for the flag
+decision.
 
 ### Backoff Strategy
+
+The ladder is `backoffTimer` in `internal/streamsup/backoff.go` — a verbatim copy
+of the deleted `internal/supervisor/backoff.go`, duplicated rather than shared so
+streamsup keeps no dependency on the PTY supervisor (its file header records
+why).
 
 - Initial delay: 500ms
 - Doubles on each restart: 500ms → 1s → 2s → 4s → ... → 30s (max)
 - Resets to initial if the child stayed up longer than 60s (stability indicator)
-- Context cancellation (SIGINT/SIGTERM) breaks out of the backoff wait
+- The backoff wait has **three** exits: the delay elapsing, context cancellation
+  (SIGINT/SIGTERM), and a restart arriving on `restartCh` while the child is
+  already down — the last cuts the wait short and relaunches immediately
 
-### Fast-crash self-heal (#1165)
+The three durations are `streamsup.Config`'s `BackoffInitial` / `BackoffMax` /
+`BackoffReset`, which `streamsup.New` fills from `defaultBackoffInitial` /
+`defaultBackoffMax` / `defaultBackoffReset` when the caller leaves them zero.
 
-Backoff alone retries forever, which is correct for a *transient* outage but
-never recovers from a *deterministic* fast-crash (e.g. #1163's "session id
-already in use" collision — root-fixed for that trigger by #1164, but any
-future deterministic-crash cause would wedge the daemon the same way). The
-`Run` loop tracks a goroutine-local `fastCrashes` streak, incremented (after
-the parent-ctx/`drainRestart` guards, so a deliberate `Restart` is never
-miscounted) whenever a non-zero exit's `uptime < Config.FastCrashWindow`
-(default 2s), and reset to 0 on any healthy or clean exit. At
-`Config.FastCrashThreshold` (default 4) consecutive fast crashes,
-`Config.SelfHeal()` — if non-nil — fires once and the streak resets either
-way. `SelfHeal` is the same pull-not-push shape as `ResolveSessionID`: the
-supervisor never learns `SessionID`; it only signals the owner to rotate, and
-the very next spawn's pre-existing `ResolveSessionID` pull picks up the
-rotated id automatically. `SelfHeal == nil` (every non-bootstrap `Config`)
-leaves the path entirely inert — retry-forever, byte-identical to
-pre-#1165. Orthogonal to `backoffTimer` (untouched): the fresh id spawns
-after the current backoff delay, not on a reset timer. Production wiring
-sets `SelfHeal` only on the daemon's bootstrap `Config`, via
-`Pool.RotateBootstrapForSelfHeal` (see [features/sessions-package.md](../features/sessions-package.md)
-§ `Pool.RotateBootstrapForSelfHeal`) — a dedicated rotation primitive, not
-`RotateForNewSession`; see [ADR 033](../decisions/033-supervisor-self-heal-dedicated-rotation-no-skip-set.md)
-for why. See [codebase/1165.md](../codebase/1165.md).
+### Fast-crash self-heal (#1165) — no stream-path equivalent
+
+**The stream path has no fast-crash self-heal.** A deterministic crash-loop (e.g.
+#1163's "session id already in use" collision — root-fixed for that trigger by
+#1164, but any future deterministic-crash cause behaves the same way) is retried
+forever under the backoff above, with no escape.
+
+#1165 built one for `internal/supervisor`: a fast-crash streak counted in that
+package's own loop fired a self-heal hook that rotated the daemon's pinned
+session id. #1348 deleted the package and took the mechanism with it — the
+`fastCrashes` counter and its `FastCrashWindow` / `FastCrashThreshold` knobs
+return zero hits repo-wide, and no self-heal closure is installed anywhere.
+`internal/sessions/runnerstate.go`'s `RunnerConfig` doc comment is the
+authoritative record of what #1348 moved versus dropped: `SelfHeal` is one of the
+two dropped behaviours listed there rather than quietly lost, and re-adding it is
+a feature on the stream runner, not a config field to restore.
+
+Two surviving symbols rotate a session id, which makes each easy to misread as
+evidence self-heal lives on. Neither is reachable from a crash streak:
+
+- `Pool.RotateBootstrapForSelfHeal` (`internal/sessions/pool.go`) is an uncalled
+  primitive — its only caller is `selfheal_test.go`.
+- `Runner.RestartFresh` (`internal/streamsup`) is the `new_session` rotation
+  seam, driven by an explicit rotation request, never by a crash count.
+
+Historical record only, not current behaviour:
+[ADR 033](../decisions/033-supervisor-self-heal-dedicated-rotation-no-skip-set.md),
+[codebase/1165.md](../codebase/1165.md).
 
 ## Key Types
 
@@ -212,8 +240,8 @@ Extracted backoff logic. Computes the next delay based on how long the previous 
 
 | Module | Purpose | Why not stdlib |
 |--------|---------|----------------|
-| `pyrycode/tui-driver` | Hosts claude as a `Session` (PTY spawn, sealed raw-byte `MirrorOutput`, `AttachInput`, `Resize`, `Wait`/`Close`) — the PTY supervisor's host loop since #593, and `internal/agentrun/ptyrunner`'s since #471. Neither is production and neither is a proven fallback (production interactive is stream-json via `interactive_runner: "stream-json"` since 2026-07-24; the agent pipeline sets `PYRY_USE_STREAMJSON=1` since 2026-07-25), so tui-driver currently has no consumer on either production path. The interactive PTY path's four live gates fail on clean main and are skipped by default; see #1348 | Single home for all claude screen knowledge (the substrate seal, now guarding a path nothing runs); no stdlib equivalent. See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md). |
-| `creack/pty` | Reading the operator's *own* terminal size (`GetsizeFull(os.Stdin)`) for the foreground SIGWINCH watcher; pulled in transitively by tui-driver for its internal PTY allocation | No stdlib PTY support |
+| `pyrycode/tui-driver` | claude's JSONL entry vocabulary (`JSONLEntry`, consumed by `internal/agentrun/budget` and `internal/agentrun/streamjson`; plus `IsEndTurn` and `AssistantText` in the latter) and modal classification (`ModalClass`, `ModalClassPermission`, `ModalClassTrustFolder` — consumed by `internal/modalbridge` and `cmd/pyry/modal_resolve_v2.go`). The module also hosts claude as a `Session` (PTY spawn, sealed raw-byte `MirrorOutput`, `AttachInput`, `Resize`, `Wait`/`Close`), but no pyrycode path has constructed one since #1348 deleted both terminal-driving claude paths — that capability is provided, not consumed | Single home for all claude screen knowledge — the substrate seal, enforced by `cmd/substrate-guard`; no stdlib equivalent. See [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md). |
+| `creack/pty` | PTY allocation inside `pyrycode/tui-driver`'s hosted session — this module has made no direct call since #1348 deleted both terminal-driving claude paths; reclassified `// indirect` in `go.mod` by #1553 | — |
 | `fsnotify/fsnotify` | Live `/clear` rotation detection on the claude sessions dir (Phase 1.2b-B) | Cross-platform inotify+kqueue without owning two stacks. See [ADR 004](../decisions/004-fsnotify-for-rotation-detection.md). |
 | `golang.org/x/term` | Terminal raw mode, state save/restore | Extended terminal ops not in stdlib |
 | `golang.org/x/sync` | `errgroup` for `Pool.Run`'s bootstrap+watcher fan-out (Phase 1.1+ extends to N sessions) | Semi-official extension; clearer than ad-hoc 2-goroutine coordination |

@@ -3,6 +3,7 @@ package streamrunner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
@@ -80,15 +81,87 @@ func TestRun_IdleStall_AfterToolResult(t *testing.T) {
 	if err := Run(ctx, cfg); err != nil {
 		t.Fatalf("Run on post-tool-result stall: %v, want nil", err)
 	}
-	out := stdout.String()
+	// Line-level rather than substring: a newline-terminated stream must gain
+	// no blank line, so the trailer directly follows the last event. Trim the
+	// sole trailing newline, then every element must be a real line.
+	lines := strings.Split(strings.TrimSuffix(stdout.String(), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("stdout = %d lines, want 4 (system, assistant, user, synthetic trailer)\nstdout:\n%s", len(lines), stdout.String())
+	}
+	for i, l := range lines {
+		if l == "" {
+			t.Errorf("line %d is empty — a separator was written before the trailer", i)
+		}
+	}
 	// Earlier events passed through unchanged...
-	if !strings.Contains(out, `"type":"user"`) {
-		t.Errorf("passthrough missing the tool_result user line\nstdout:\n%s", out)
+	if !strings.Contains(lines[2], `"type":"user"`) {
+		t.Errorf("line 2 is not the tool_result user line: %s", lines[2])
 	}
 	// ...and the synthetic idle_stall trailer was appended.
-	if !strings.Contains(out, `"terminal_reason":"idle_stall"`) {
-		t.Errorf("missing synthetic idle_stall result\nstdout:\n%s", out)
+	if got := terminalReason(t, lines[3]); got != "idle_stall" {
+		t.Errorf("trailer terminal_reason = %q, want %q", got, "idle_stall")
 	}
+}
+
+// stalls mid-line: claude's stream ended without a closing newline, so the
+// forwarded partial is already on stdout when Run composes the trailer. The
+// trailer must start its own line — spliced onto the partial it parses as
+// nothing, the dispatcher sees no result at all, and pyry exits 0 with no
+// classifiable outcome.
+func TestRun_IdleStall_PartialLine_NewlineGuarded(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	cfg := helperRunCfg(t, "stall_partial_line", &stdout, &stderr)
+	cfg.PromptBytes = []byte("noop")
+	// Roomier than the sibling stall tests: the helper races its partial write
+	// against the watchdog's SIGTERM.
+	cfg.IdleTimeout = 300 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := Run(ctx, cfg); err != nil {
+		t.Fatalf("Run on mid-line idle stall: %v, want nil", err)
+	}
+	out := stdout.String()
+	rest, ok := strings.CutPrefix(out, partialLine)
+	if !ok {
+		t.Fatalf("stdout does not begin with the forwarded partial verbatim\n got: %q\nwant prefix: %q", out, partialLine)
+	}
+	// Exactly one newline separates the partial from the trailer.
+	trailer, ok := strings.CutPrefix(rest, "\n")
+	if !ok {
+		t.Fatalf("trailer does not start its own line; bytes after the partial: %q", rest)
+	}
+	if strings.HasPrefix(trailer, "\n") {
+		t.Fatalf("blank line between the partial and the trailer: %q", rest)
+	}
+	// ...followed by a single line, the trailer's own.
+	trailer, ok = strings.CutSuffix(trailer, "\n")
+	if !ok {
+		t.Fatalf("trailer line is not newline-terminated: %q", trailer)
+	}
+	if strings.Contains(trailer, "\n") {
+		t.Fatalf("more than one line after the partial: %q", rest)
+	}
+	if got := terminalReason(t, trailer); got != "idle_stall" {
+		t.Errorf("trailer terminal_reason = %q, want %q", got, "idle_stall")
+	}
+}
+
+// terminalReason decodes a stream-json line and returns its terminal_reason.
+// Deliberately narrow: the trailer's human-readable `result` string is not
+// asserted anywhere, because a sub-second IdleTimeout renders there as "for 0s"
+// (integer-seconds truncation in writeIdleStallResult).
+func terminalReason(t *testing.T, line string) string {
+	t.Helper()
+	var ev struct {
+		TerminalReason string `json:"terminal_reason"`
+	}
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		t.Fatalf("line does not parse as JSON: %v\nline: %s", err, line)
+	}
+	return ev.TerminalReason
 }
 
 // a legitimately long in-flight tool run (silence AFTER an assistant turn,
@@ -291,6 +364,42 @@ func TestStreamParser_OversizedLine(t *testing.T) {
 	}
 }
 
+// the open-line flag is keyed on the last byte forwarded to stdout, not on the
+// partial-line accumulator: feed drops an oversized remainder AFTER those bytes
+// were forwarded, so a buf-keyed guard reports "closed" on exactly this input
+// and the trailer would splice onto the partial.
+func TestStreamParser_OversizedPartial_LineStaysOpen(t *testing.T) {
+	t.Parallel()
+	var dst bytes.Buffer
+	p := newStreamParser(&dst, nil)
+	p.maxBuf = 64
+
+	if p.hasOpenLine() {
+		t.Error("a fresh parser must report no open line (nothing forwarded yet)")
+	}
+
+	if _, err := p.Write(bytes.Repeat([]byte("x"), 200)); err != nil {
+		t.Fatalf("Write blob: %v", err)
+	}
+	p.mu.Lock()
+	bufLen := len(p.buf)
+	p.mu.Unlock()
+	// The pair is the discriminator: accumulator empty, line still open.
+	if bufLen != 0 {
+		t.Fatalf("premise: oversized newline-less remainder not dropped: buf len = %d", bufLen)
+	}
+	if !p.hasOpenLine() {
+		t.Error("hasOpenLine() = false after an unterminated oversized blob, want true")
+	}
+
+	if _, err := p.Write([]byte(`{"type":"assistant"}` + "\n")); err != nil {
+		t.Fatalf("Write terminated line: %v", err)
+	}
+	if p.hasOpenLine() {
+		t.Error("hasOpenLine() = true after a newline-terminated write, want false")
+	}
+}
+
 func TestStreamParser_PassthroughByteExact(t *testing.T) {
 	t.Parallel()
 	var dst bytes.Buffer
@@ -322,9 +431,9 @@ func TestWatchdogTickFor(t *testing.T) {
 		idle time.Duration
 		want time.Duration
 	}{
-		{idle: idleStall, want: watchdogTick},               // 240s/8=30s, capped to 5s
+		{idle: idleStall, want: watchdogTick},                       // 240s/8=30s, capped to 5s
 		{idle: 200 * time.Millisecond, want: 25 * time.Millisecond}, // /8
-		{idle: 1 * time.Microsecond, want: minWatchdogTick}, // floored
+		{idle: 1 * time.Microsecond, want: minWatchdogTick},         // floored
 	}
 	for _, c := range cases {
 		if got := watchdogTickFor(c.idle); got != c.want {

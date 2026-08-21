@@ -80,3 +80,54 @@ func TestArgvSessionID(t *testing.T) {
 		})
 	}
 }
+
+// TestArgvIDFlagResume pins the one bit argvSessionID discards and the reject
+// rider (envRejectAbsentResume) is built on: WHICH flag carried the winning
+// value. The bit follows last-occurrence-wins in lockstep with the id, so a
+// create spawn that a later --resume overrides reads as a resume and vice
+// versa — which is exactly the discrimination the rider needs, since only a
+// resume against an absent transcript may be refused.
+func TestArgvIDFlagResume(t *testing.T) {
+	t.Parallel()
+
+	const (
+		mintedID    = "11111111-1111-4111-8111-111111111111"
+		bootstrapID = "66666666-6666-4666-8666-666666666666"
+	)
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantID     string
+		wantResume bool
+		wantOK     bool
+	}{
+		{"create spawn", []string{"--session-id", mintedID}, mintedID, false, true},
+		{"resume spawn", []string{"--resume", bootstrapID}, bootstrapID, true, true},
+		{
+			"resume wins over an earlier create",
+			[]string{"--session-id", mintedID, "--settings", "/tmp/x.json", "--resume", bootstrapID},
+			bootstrapID, true, true,
+		},
+		{
+			"create wins over an earlier resume",
+			[]string{"--resume", bootstrapID, "--session-id", mintedID},
+			mintedID, false, true,
+		},
+		// A refused value reports not-found AND a false resume bit, so no caller
+		// can act on a stem the guard rejected.
+		{"guard-rejected value", []string{"--resume", "../escape"}, "", false, false},
+		{"no id flag", []string{"--settings", "/tmp/x.json"}, "", false, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotID, gotResume, gotOK := argvIDFlag(tc.args)
+			if gotID != tc.wantID || gotResume != tc.wantResume || gotOK != tc.wantOK {
+				t.Errorf("argvIDFlag(%q) = (%q, %v, %v), want (%q, %v, %v)",
+					tc.args, gotID, gotResume, gotOK, tc.wantID, tc.wantResume, tc.wantOK)
+			}
+		})
+	}
+}

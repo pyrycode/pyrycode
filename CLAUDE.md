@@ -21,11 +21,10 @@ Pyrycode is a process supervisor for Claude Code. It wraps the `claude` CLI in a
 ```
 cmd/pyry/                      Binary entry point: CLI parsing, daemon composition root
 cmd/substrate-guard/           Build gate: no claude-TUI substrate literals outside tui-driver
-internal/supervisor/           PTY-hosted claude supervision (non-production; unverified, see #1348)
 internal/streamsup/            Stream-json supervision (production interactive path)
 internal/sessions/             Multi-session pool: registry, /clear rotation, idle eviction
 internal/agentrun/             `pyry agent-run` runner (streamrunner/streamjson; the terminal runner was deleted in #1348)
-internal/control/              Unix-socket control plane (status, logs, attach, stop)
+internal/control/              Unix-socket control plane (status, logs, stop, sessions.*, rekey, mcp.approve)
 internal/relay/ + transport/   Remote access: relay WSS client + handlers
 internal/noise/ + keys/        Noise_IK E2E crypto + static keypair
 internal/protocol/             Mobile wire-format types
@@ -158,7 +157,6 @@ Conventions:
 
 - **Unit tests:** Table-driven, `go test -race`, stdlib only
 - **No mocking frameworks.** Use interfaces and simple test doubles.
-- Tests for PTY-dependent code must handle non-TTY environments (CI runners have no terminal)
 
 ## Working Principles
 

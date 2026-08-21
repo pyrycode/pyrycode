@@ -411,8 +411,8 @@ func tdnParseTreeReport(t *testing.T, path string, fresh, same int) (tdnTree, bo
 // tdnCaptureReap runs a real ReapDescendantGroups rooted at rootPID and returns
 // the bytes slog.Default() emitted while it ran.
 //
-// Why log.SetOutput captures it: runAgentRunPty sets no Logger on
-// ptyrunner.Config, so ptyrunner.Run falls back to slog.Default() and no
+// Why log.SetOutput captures it: runAgentRunStreamRunner sets no Logger on
+// streamrunner.Config, so streamrunner.Run falls back to slog.Default() and no
 // non-test code calls slog.SetDefault — so every `pyry agent-run`, which is
 // what this package's probes spawn, renders ReapDescendantGroups's reap line
 // through Go's BUILT-IN default handler, which writes through the log package.

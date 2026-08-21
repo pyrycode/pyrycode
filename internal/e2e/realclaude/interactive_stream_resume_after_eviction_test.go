@@ -14,9 +14,12 @@ package realclaude
 //
 // Why this rung exists: the streamrunner plan flagged "restart after eviction" as
 // a risk. On idle eviction the streamsup.Runner respawns through buildArgs, whose
-// first post-eviction spawn is --session-id <id> against an EXISTING transcript
-// (claude refuses → the child exits non-zero → firstRun flips false → after
-// backoff the respawn is --resume <id> → reattach with context). Whether a real
+// post-eviction spawn resumes an EXISTING transcript under the same id — since
+// #1631 directly, because useCreateForm probes the sessions directory by id,
+// finds the real transcript claude wrote, and emits --resume on the first spawn.
+// (Before that the first spawn was --session-id, claude refused it, the child
+// exited non-zero, firstRun flipped false and the backed-off respawn resumed;
+// same destination, one wasted spawn plus a backoff slower.) Whether a real
 // claude, evicted mid-conversation and put through that one crash-recovery cycle,
 // actually reattaches to the same transcript and retains context is unproven
 // end-to-end. Idle-evict + respawn is covered only against fakeclaude and only on
@@ -38,8 +41,14 @@ package realclaude
 //       enable it, hence the coupling constraint in § Timing below.
 //
 //   (2) Re-activation re-arms firstRun (runner.go Run: firstRun := true per Run()),
-//       so resume is --session-id(refused)→backoff→--resume. This is the exact
-//       "restart after eviction" path this test verifies live.
+//       but since #1631 that latch no longer decides: with a sessions directory
+//       supplied, useCreateForm probes by id and the confirmed on-disk transcript
+//       makes the re-activation spawn --resume outright. This is the exact
+//       "restart after eviction" path this test verifies live — now without the
+//       refusal-and-backoff detour the latch used to take, which leaves the
+//       recovery budget below slack it did not previously have. The budget stays
+//       as it is: it is sized for a real claude cold spawn plus a reply, and the
+//       removed detour was never its binding term.
 //
 // The setup body is TRANSCRIBED from TestInteractiveStreamLiveness (#1153) — the
 // stream-json toggle, isolated workdir, pair (no --allow-remote-permissions), the
@@ -200,11 +209,12 @@ func TestInteractiveStreamResumeAfterEviction(t *testing.T) {
 	// Resume turn (AC3, AC4): ask claude for the exact token it was told to
 	// remember. drainForResumedTurnText returns the concatenated assistant_delta
 	// text after M1(non-empty)→M2(idle). The budget must absorb the re-activation
-	// recovery (--session-id refusal + backoff + --resume cold spawn + reply);
-	// perTurnReplyBudget=120s covers it comfortably. A RED here is the honest
-	// surface for the restart-after-eviction risk — if re-activation does not
-	// recover from the --session-id refusal to --resume, the resume turn never
-	// drains.
+	// recovery — since #1631 a --resume cold spawn plus the reply, the by-id probe
+	// having skipped the --session-id refusal and its backoff; perTurnReplyBudget
+	// =120s covered even the longer pre-#1631 shape and so covers this one with
+	// room to spare. A RED here is the honest surface for the restart-after-
+	// eviction risk — if re-activation does not reattach to the transcript, the
+	// resume turn never drains.
 	sealSendMessage(t, phone, initSend, 3, evictResumeConvID, "m-2",
 		"What was the exact token I asked you to remember earlier? "+
 			"Reply with only that token, nothing else.")
@@ -368,8 +378,8 @@ func drainForResumedTurnText(t *testing.T, phone *fakephone.Client, cs *noise.Ci
 // bootstrapUUID and stays stable across --resume (buildArgs never forks), so
 // s.currentID() — the WARN's session_id — is exactly bootstrapUUID; pinning the
 // value proves it was OUR session that evicted. Mirrors the #396 reference's
-// substring poll (respawn_after_eviction_test.go); containsAll lives in package
-// e2e (disjoint build tag), so the all-substrings check is inlined here.
+// substring poll; containsAll lives in package e2e (disjoint build tag), so the
+// all-substrings check is inlined here.
 func waitForIdleEvictionWARN(t *testing.T, d *bootstrapDaemon, bootstrapUUID string, timeout time.Duration) {
 	t.Helper()
 	want := []string{

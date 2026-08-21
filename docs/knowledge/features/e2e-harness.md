@@ -2861,6 +2861,28 @@ persistent `os.MkdirTemp` (intentionally not cleaned — `go test`'s own cleanup
 takes /tmp eventually, and there's no `TestMain` hook this package owns).
 `PYRY_E2E_BIN` short-circuits to a known-good binary on disk for CI.
 
+**An `-overlay` mutant does not reach a spawned daemon by default.** `ensurePyryBuilt`
+shells a plain `go build ./cmd/pyry` with none of the parent `go test` invocation's
+flags, so mutating `cmd/pyry` source and re-running the suite under `-overlay=<path>`
+only mutates the *test binary's own compilation unit* — the child `pyry` these specs
+spawn is unaffected and the mutant silently fails to redden anything. To exercise a
+mutant against the spawned daemon, build it separately
+(`go build -overlay=<path> -o <bin> ./cmd/pyry`) and inject it via `PYRY_E2E_BIN`
+(#1512). A mutation run that skips this reads as "the assertion under test is
+vacuous" when the real cause is "the mutant never shipped".
+
+**A test-local `t.Setenv("HOME", …)` must come after `ensurePyryBuilt`/
+`ensureFakeClaudeBuilt`, not before (#1631).** Both are `sync.Once`-guarded, so
+whichever caller runs first performs the actual `go build`; every later call
+(including `spawnWith`'s own) is a no-op that just returns the cached path.
+Overriding `HOME` in the test process *before* either call sends that `go build`
+subprocess an empty module cache under the temp home, which tries to re-download
+the whole module graph and fails on a private dependency. This only bites a test
+that needs `HOME` overridden in the test process itself (e.g. to re-derive a
+daemon-side value that reads `$HOME`, as #1631's own AC 2 test does) — the
+ordinary `Harness.Run`/`StartIn` path never hits it, since it redirects `HOME` for
+the **spawned daemon's** environment via `childEnv`, not the test process's own.
+
 ## Known Limitations
 
 - **Race detector.** When `go test -tags=e2e -race` is invoked, the parent

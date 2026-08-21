@@ -28,8 +28,24 @@ package realclaude
 // is not a log. What survives, and is the half that matters here, is the LOG half:
 // the value reaches a daemon EVENT and still reaches no daemon LOG at any level,
 // which is the #833 posture restated on handleRequestSessionSettings. It still
-// reaches no CLIENT either — turnbridge.MapEvent's default drops the variant, so no
-// wire frame exists for it yet.
+// reaches no CLIENT either — turnbridge.MapEvent's default drops the variant.
+//
+// CORRECTED 2026-08-19 (#1616): the clause above used to close "so no wire frame
+// exists for it yet". A wire frame now EXISTS — protocol.TypeModelAnnounced /
+// protocol.ModelAnnouncedPayload, declared by #1616 so a client can be written
+// against the shape — and this repo draws the declared/emitted line sharply
+// (docs/protocol-mobile.md § rate_limited). What survives is the half above:
+// MapEvent still has no case for the variant, so nothing EMITS the frame until
+// #1617 and no client receives one.
+//
+// CORRECTED 2026-08-20 (#1639): that surviving half is gone too, and so is the
+// "reaches no CLIENT" clause two paragraphs up. #1638 added MapEvent's
+// turnevent.ModelAnnounced case and cmd/pyry's matching Handle case, so the frame
+// IS emitted and an interactive v2 client does receive one. #1617 was the split
+// parent and never shipped the mapping; #1638 did. The LOG half is the one that
+// has never expired: the value still reaches no daemon log at any level, which is
+// what the #833 posture actually says. An event is not a log, and a wire frame is
+// not a log either.
 //
 // This test's own assertions are unaffected in either direction: it taps
 // streamsup.Config.Stdout, upstream of the parser, so what the parser does with the
@@ -604,10 +620,16 @@ func inbandWaitResults(rec *inbandTapRecorder, want int, budget time.Duration) b
 	}
 }
 
+// inbandResultCounter is the one thing inbandSendTurn reads off a recorder: the
+// running count of turn boundaries. Both this file's inbandTapRecorder and
+// #1622's revokeTap expose it, so the drive helper is shared rather than copied.
+type inbandResultCounter interface{ resultCount() int }
+
 // inbandSendTurn writes prompt through the sessions.Runner seam — the same method
 // deliverSettingsInBand uses, so the test's own turns and the daemon's in-band
 // command travel one path — and waits for the child to close the turn with a
-// result line.
+// result line. rec is taken as inbandResultCounter rather than the concrete
+// recorder because the count is all it reads.
 //
 // It re-sends while no new result has landed. That is for evidence run A, not for
 // the shipped green path where the first attempt lands: a tree that respawns
@@ -617,7 +639,7 @@ func inbandWaitResults(rec *inbandTapRecorder, want int, budget time.Duration) b
 // ErrNoLiveChild mirrors what msgqueue does in production. A duplicate send is
 // harmless to the verdict: the assertions read the FIRST and LAST init model, so
 // an extra turn costs tokens, not truth.
-func inbandSendTurn(t *testing.T, sup sessions.Runner, rec *inbandTapRecorder, prompt string) {
+func inbandSendTurn(t *testing.T, sup sessions.Runner, rec inbandResultCounter, prompt string) {
 	t.Helper()
 	baseline := rec.resultCount()
 	deadline := time.Now().Add(inbandTurnBudget)

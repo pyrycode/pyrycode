@@ -9,11 +9,14 @@
 //
 // It is the stream-json sibling of internal/supervisor (the PTY path). Unlike
 // the PTY path it binds no transcript: there is deliberately NO transcript
-// tailing, no fsnotify, and no <uuid>.jsonl path resolution anywhere in this
-// package — that is the whole point of the stream-json path (it structurally
-// removes the bind-latency race the PTY path fought). The only filesystem
-// canonicalisation done here is resolving WorkDir before spawn (macOS
-// /tmp → /private/tmp symlink hygiene).
+// tailing, no fsnotify, and no <uuid>.jsonl path resolved for tailing or binding
+// anywhere in this package — that is the whole point of the stream-json path (it
+// structurally removes the bind-latency race the PTY path fought). The one
+// transcript touch is a by-id EXISTENCE stat, at most one per spawn and only
+// when Config.ClaudeSessionsDir is set: useCreateForm asks whether this
+// session's own transcript is already on disk to pick the spawn's id flag, and
+// reads no bytes from it. The only filesystem canonicalisation done here is
+// resolving WorkDir before spawn (macOS /tmp → /private/tmp symlink hygiene).
 //
 // This slice owns the process lifecycle only. Turn I/O — the stdin envelope
 // writer and the stdout→turnevent parser — and the turncommit/idle/stall gates
@@ -46,6 +49,7 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/agentrun"
+	"github.com/pyrycode/pyrycode/internal/transcript"
 )
 
 // killGrace is the SIGTERM → SIGKILL grace window applied via exec.Cmd.WaitDelay
@@ -73,11 +77,26 @@ type Config struct {
 	WorkDir string
 
 	// SessionID is the caller-minted claude session id. Required (non-empty
-	// check only — the pool owns minting and shape validation). The first spawn
-	// passes --session-id <SessionID>; every respawn passes --resume <SessionID>
-	// (reattach, append, no fork), so the on-disk id stays stable across a
-	// kill-and-restart.
+	// check only — the pool owns minting and shape validation). With no
+	// ClaudeSessionsDir the first spawn passes --session-id <SessionID> and every
+	// respawn passes --resume <SessionID> (reattach, append, no fork); with one
+	// set, the by-id transcript probe picks the form per spawn instead (see
+	// useCreateForm). Either way the SAME id is passed, so the on-disk id stays
+	// stable across a kill-and-restart.
 	SessionID string
+
+	// ClaudeSessionsDir is the directory containing claude's <uuid>.jsonl files
+	// for this WorkDir. Empty disables the by-id transcript probe, and every
+	// spawn's id flag falls back to the Run loop's firstRun latch — byte-identical
+	// to pre-#1630 argv. Name and semantics mirror sessions.Config.ClaudeSessionsDir
+	// deliberately, so the two read as one concept.
+	//
+	// It is NEVER derived from WorkDir inside this package.
+	// sessions.DefaultClaudeSessionsDir maps a workdir into the real
+	// $HOME/.claude/projects/<encoded>, so deriving it here would point every unit
+	// test — whose WorkDir is a t.TempDir() — at the developer's actual home. The
+	// directory only ever arrives through this field.
+	ClaudeSessionsDir string
 
 	// Args is the caller-supplied pass-through argv (e.g. --model <m>). streamsup
 	// owns only the fixed stream-json prefix and the id flag; everything else is
@@ -160,7 +179,7 @@ type Runner struct {
 
 	// mu is a leaf mutex guarding WHICH CHILD, IF ANY, MAY RECEIVE A TURN: stdin
 	// (the write end of the live child's StdinPipe) together with the rotation gate
-	// (rotating + rotateGen). stdin is swapped at spawn/teardown by the Run
+	// (rotating + rotateGen + armFreshSeq). stdin is swapped at spawn/teardown by the Run
 	// goroutine and read by Stdin() from #1088's writer goroutine, so every access
 	// is serialised.
 	//
@@ -178,7 +197,9 @@ type Runner struct {
 	// rotating reports that a new_session rotation is armed and no successor child
 	// has bound yet. BeginRotation sets it strictly BEFORE the pool-side rotate()
 	// re-keys the binding and fires its session_transition{clear}; setStdin clears
-	// it when the fresh child binds. While it stands every WriteUserTurn refuses
+	// it when an AUTHORISED child binds — the rotation's own successor or a later
+	// spawn still, never an unrelated respawn of the pre-rotation id (see
+	// armFreshSeq). While it stands every WriteUserTurn refuses
 	// with ErrNoLiveChild instead of writing into the child RestartFresh is about
 	// to kill — the ~4 ms window on #1330's record, where the clear reaches clients
 	// while the outgoing child is still alive and msgqueue reads the successful
@@ -209,6 +230,27 @@ type Runner struct {
 	// logged, and compared only against a value BeginRotation itself captured.
 	rotateGen uint64
 
+	// armFreshSeq is the freshSeq value BeginRotation observed when it placed the
+	// STANDING arm, and is meaningful only while rotating is true. It authorises the
+	// gate's RELEASE side, which until #1482 had no authorisation at all: setStdin
+	// disarms only for a spawn whose own freshSeq snapshot is STRICTLY GREATER, i.e.
+	// one set up after a RestartFresh that landed after this arm.
+	//
+	// The gap it covers is the whole of Pool.RotateForNewSession — mint, re-key,
+	// register, an fsync'd atomic write, then the session_transition{clear} fan-out —
+	// which runs between the arm and its partner RestartFresh. A child binding in
+	// there (a crash-respawn of the pre-rotation id off the backoff ladder, or a
+	// Restart-driven one) reads EQUAL and leaves the gate standing: it is not this
+	// rotation's successor, it is the child RestartFresh is about to kill, and
+	// clearing the gate for it hands a turn accepted on the strength of the
+	// already-fired clear to a doomed child — #1330's silent loss through another
+	// door.
+	//
+	// Written in the SAME mu acquisition that sets rotating, deliberately: arming
+	// first and stamping second would leave a bind able to observe an armed gate
+	// carrying a RETIRED arm's threshold and disarm by stale comparison.
+	armFreshSeq uint64
+
 	// stateMu is a leaf mutex guarding state, the control-plane snapshot. The
 	// Run goroutine writes it via updateState; State() reads it from any
 	// goroutine. Kept separate from mu (a different concern with a different
@@ -217,7 +259,7 @@ type Runner struct {
 	state   State
 
 	// restartMu is a leaf mutex guarding the live-restart seam: args, iterCancel,
-	// and the RestartFresh id-rotation pair (sessionID + rotatePending). The
+	// and the RestartFresh id-rotation trio (sessionID + rotatePending + freshSeq). The
 	// streamsup analogue of supervisor's restartMu. args is the live spawn base
 	// argv, swapped by Restart (with the kill) or SetSpawnArgs (without it), and
 	// assigned in exactly one place — setArgsLocked; iterCancel is the current
@@ -251,6 +293,29 @@ type Runner struct {
 	// transcript), not --resume <newID>. firstRun stays Run-goroutine-private;
 	// rotatePending is the only cross-goroutine signal that re-arms it.
 	rotatePending bool
+
+	// freshSeq counts the RestartFresh rotations that have LANDED. It is bumped
+	// inside the same restartMu section that rotates sessionID and sets
+	// rotatePending, so it is totally ordered with beginSpawn's snapshot of it and
+	// no spawn can observe the rotation without the bump. RestartFresh's empty-id
+	// early return sits ABOVE that section and therefore does not bump: the counter
+	// measures rotations that happened, not calls that were made, and authorising a
+	// spawn that succeeded no rotation is precisely the failure this closes.
+	//
+	// It carries the rotation gate's release-side authorisation (#1482): a spawn
+	// snapshots it in beginSpawn and setStdin compares that snapshot against
+	// armFreshSeq. A monotonic THRESHOLD, not a one-shot token — every later spawn
+	// satisfies it and none consumes it. That is the whole reason the authorisation
+	// does not ride on rotatePending/forceFirst, which beginSpawn consumes
+	// unconditionally: a successor spawn that dies during setup (setStdin never
+	// reached) would spend the token, every later child would bind unauthorised, and
+	// the gate would wedge permanently — a conversation refusing every turn until
+	// some unrelated later rotation, which is worse than the loss being fixed.
+	//
+	// Monotonic and process-local, like rotateGen: never persisted, never
+	// serialised, never logged, and compared only against a value BeginRotation
+	// itself captured. uint64 overflow is not a reachable concern.
+	freshSeq uint64
 
 	// restartCh (buffered 1) carries the "a deliberate restart was requested"
 	// hint. Restart sends on it non-blockingly; Run consumes it either in the
@@ -343,16 +408,47 @@ func (r *Runner) Stdin() io.Writer {
 // disarm is to have placed the matching arm, and a second arm retires the first
 // one's. See rotateGen for the two-frame sequence that needs it.
 //
-// Like RestartFresh it drives only Runner-internal state — one leaf-mutex
-// acquisition, no channel, no call-out — so the sessions layer can call it with no
-// Pool lock held, which startFreshRunner does. Safe from any goroutine.
+// The arm also captures the RELEASE-side threshold (#1482): the freshSeq value
+// standing when it is placed, against which setStdin measures each binding child.
+// That is why this method takes TWO leaf mutexes where it once took one. They are
+// taken SEQUENTIALLY AND NEVER NESTED — no path in this package holds two locks at
+// once, and that is what keeps the ordering safe. Should nesting ever become
+// unavoidable, the order is restartMu → mu, the sequence established here; a
+// mu → restartMu nesting is the inversion, and recognisable as one.
+//
+// The restartMu read comes FIRST, and the mu section then publishes rotating,
+// rotateGen and armFreshSeq together. Arming first and stamping second would leave
+// the gate observably armed beside a retired arm's threshold, which a bind landing
+// in between would compare against — a disarm-by-stale-comparison bug.
+//
+// Residual window, deliberately left open: between the restartMu read and the mu
+// acquisition a DIFFERENT frame's RestartFresh could land and a spawn take its
+// snapshot, and that spawn's later bind would clear the arm being placed here.
+// Closing it needs both leaf mutexes held at once, which the two-mutex charter
+// forbids (see mu and restartMu). It is unreachable from a single new_session frame
+// — startFreshRunner calls BeginRotation and RestartFresh in program order on one
+// goroutine — and needs two concurrent frames to interleave inside a few
+// instructions. The two-frame gap in its documented shape (frame 1's respawn still
+// pending when frame 2 arms) IS closed: frame 2's arm reads the already-bumped
+// counter, so frame 1's successor snapshot is not strictly greater.
+//
+// Like RestartFresh it drives only Runner-internal state — leaf mutexes, no
+// channel, no call-out — so the sessions layer can call it with no Pool lock held,
+// which startFreshRunner does. Safe from any goroutine.
 func (r *Runner) BeginRotation() (abort func()) {
+	r.restartMu.Lock()
+	seq := r.freshSeq
+	r.restartMu.Unlock()
+
 	r.mu.Lock()
 	r.rotating = true
 	r.rotateGen++
+	r.armFreshSeq = seq
 	gen := r.rotateGen
 	r.mu.Unlock()
 
+	// The disarm leaves armFreshSeq alone: a threshold behind a disarmed gate is
+	// inert, and the next arm overwrites it.
 	return func() {
 		r.mu.Lock()
 		if r.rotateGen == gen {
@@ -607,6 +703,13 @@ func (r *Runner) setArgsLocked(args []string) {
 // --session-id "". This is a deterministic last-resort guard upholding New's
 // non-empty contract — the validating boundary is the pool/routing layer (#1125),
 // per the "caller-supplied id validation at the primitive boundary" convention.
+// The early return sits above the section below, so a no-op does NOT bump freshSeq:
+// the rotation gate's release authorisation counts rotations that landed, and no
+// production path pairs an arm with an empty-id call (startFreshRunner passes only
+// rotate()'s success value, and RotateForNewSession returns ("", err) on every
+// failure). If a pool bug ever minted an empty id the arm would outlive it until
+// the next rotation — the conservative side, since the alternative authorises a
+// spawn that succeeded no rotation at all.
 //
 // Unlike Restart it leaves r.args untouched: new_session rotates the id, not the
 // model/flags — args stay owned by Restart/UpdateSettings. Like Restart it drives
@@ -620,6 +723,10 @@ func (r *Runner) RestartFresh(newID string) {
 	r.restartMu.Lock()
 	r.sessionID = newID
 	r.rotatePending = true
+	// Bumped in the SAME section as the id rotation, so beginSpawn's snapshot can
+	// never skew against it: a spawn's section lands wholly before this one (its
+	// snapshot is not the successor's) or wholly after (it is).
+	r.freshSeq++
 	cancel := r.iterCancel
 	r.restartMu.Unlock()
 
@@ -652,15 +759,45 @@ func (r *Runner) RestartFresh(newID string) {
 // It reads the fields directly instead of calling accessors: restartMu is not
 // reentrant, so any helper that takes it (as the now-deleted liveArgs and
 // nextSpawnID accessors did) would deadlock here. buildArgs is pure and copies
-// base into a fresh slice, so passing r.args needs no clone — the slice never
-// escapes the section.
+// base into a fresh slice, so passing r.args needs no clone — and handing that
+// slice header OUT of the section is safe for the same reason setArgsLocked
+// clones on the way IN: that clone makes setArgsLocked the sole writer of a
+// backing array no installer ever mutates after publication, so a later install
+// swaps the header and leaves this spawn's local pointing at the old, immutable
+// array.
+//
+// The transcript probe and the argv assembly deliberately sit BELOW the unlock
+// (#1630). restartMu is a leaf — nothing under it may take another lock or do
+// synchronous I/O, the invariant setArgsLocked states — and useCreateForm's
+// os.Stat is exactly that class of call-out; the mutex it would stall on a hung
+// $HOME is the one liveSessionID takes on WriteUserTurn's diagnostic path.
+// Moving them out does not re-split #1481's section: the forbidden outcome is a
+// live child under a pre-rotation id with NO live iteration cancel, and the
+// section still reads the spawn inputs and publishes iterCancel together, so a
+// racer arriving after the unlock finds the published cancel and tears this
+// spawn down. Only pure assembly moved, into a window that already exists (Run's
+// "spawning claude" log and spawnAndWait's setup both run in it). The id the
+// probe targets is the one snapshotted in the same section that consumed
+// rotatePending, so the decision can never skew against a racing rotation.
 //
 // forceFirst reports that a fresh-restart request was consumed; the caller re-arms
 // its Run-goroutine-private firstRun on true. Returning it rather than a new
 // firstRun keeps that local a plain assignment at the call site, where a := would
 // shadow it and silently break the started-gated flip.
+//
+// freshSeq is this spawn's snapshot of the landed-rotation counter, threaded
+// through spawnAndWait to setStdin, where it authorises (or refuses) the rotation
+// gate's release (#1482). It is a READ inside the section that already exists, not
+// a second acquisition, so the one-acquisition-per-spawn-setup charter holds. The
+// snapshot must be taken HERE, at spawn SETUP, and never re-read at bind time:
+// the crash-respawn this closes runs its beginSpawn before RestartFresh but can
+// reach setStdin after it, so a bind-time read would see the bumped value, disarm,
+// and be killed moments later by the very rotation that bumped it. "Set up before
+// that rotation's RestartFresh landed" is a statement about setup time, and only a
+// setup-time snapshot carries it.
 func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
-	iterCtx context.Context, cancel context.CancelFunc, args []string, forceFirst bool,
+	iterCtx context.Context, cancel context.CancelFunc, args []string,
+	forceFirst bool, freshSeq uint64,
 ) {
 	// Derived BEFORE the acquisition on purpose: context.WithCancel takes the
 	// parent cancelCtx's own internal mutex, and restartMu must never be held
@@ -669,12 +806,15 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	iterCtx, cancel = context.WithCancel(ctx)
 
 	r.restartMu.Lock()
-	defer r.restartMu.Unlock()
 	forceFirst = r.rotatePending
 	r.rotatePending = false
-	args = buildArgs(r.args, firstRun || forceFirst, r.sessionID)
+	base, id := r.args, r.sessionID
+	freshSeq = r.freshSeq
 	r.iterCancel = cancel
-	return iterCtx, cancel, args, forceFirst
+	r.restartMu.Unlock()
+
+	args = buildArgs(base, useCreateForm(r.cfg.ClaudeSessionsDir, id, firstRun || forceFirst), id)
+	return iterCtx, cancel, args, forceFirst, freshSeq
 }
 
 // liveSessionID snapshots the live session id under restartMu, for a diagnostic
@@ -750,7 +890,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// with --session-id (a fresh transcript). firstRun's flip-back to false on a
 		// successful spawn (below) then makes the next respawn --resume the new id —
 		// see the started-gated flip.
-		iterCtx, cancel, args, forceFirst := r.beginSpawn(ctx, firstRun)
+		iterCtx, cancel, args, forceFirst, freshSeq := r.beginSpawn(ctx, firstRun)
 		if forceFirst {
 			firstRun = true
 		}
@@ -760,7 +900,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()
-		started, waitErr := r.spawnAndWait(iterCtx, args)
+		started, waitErr := r.spawnAndWait(iterCtx, args, freshSeq)
 		cancel()
 		r.clearIterCancel()
 		uptime := time.Since(start)
@@ -832,7 +972,11 @@ func (r *Runner) Run(ctx context.Context) error {
 // firstRun — the next attempt has to retry with --session-id, not --resume
 // against an id that --session-id never created. The Run loop distinguishes
 // shutdown from crash via ctx.Err(), not the error value.
-func (r *Runner) spawnAndWait(ctx context.Context, args []string) (started bool, waitErr error) {
+//
+// freshSeq is beginSpawn's setup-time snapshot, carried through untouched and
+// handed to setStdin as the rotation gate's release authorisation (#1482). Nothing
+// here reads or interprets it.
+func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint64) (started bool, waitErr error) {
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = r.workDir
 	cmd.Stdout = r.cfg.Stdout
@@ -870,7 +1014,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) (started bool,
 		return false, fmt.Errorf("streamsup: start: %w", err)
 	}
 
-	r.setStdin(stdin)
+	r.setStdin(stdin, freshSeq)
 	r.updateState(func(st *State) {
 		st.Phase = PhaseRunning
 		st.ChildPID = cmd.Process.Pid
@@ -896,15 +1040,36 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string) (started bool,
 }
 
 // setStdin publishes the live child's stdin write end under the leaf mutex and,
-// in the SAME acquisition, disarms the rotation gate (#1330): a successor child is
-// bound, so the window in which a turn could be written into a doomed child is
-// over. Pairing the two here is what makes "armed until the successor binds"
+// in the SAME acquisition, disarms the rotation gate (#1330) — but only for a child
+// AUTHORISED to end that window (#1482). spawnFreshSeq is beginSpawn's setup-time
+// snapshot of freshSeq; strictly greater than armFreshSeq means this spawn was set
+// up after a RestartFresh that landed after the standing arm, so it is that
+// rotation's successor or a later spawn still. A spawn set up before it reads EQUAL
+// and leaves the gate standing — a crash-respawn off the backoff ladder or a
+// Restart-driven one is not a successor, it is the child RestartFresh is about to
+// kill, and releasing the gate for it hands a turn accepted on the strength of the
+// already-fired session_transition{clear} to a doomed child.
+//
+// Pairing the release with the BIND is what makes "armed until the successor binds"
 // exact — a gate released on RestartFresh's return would only narrow the race,
 // since that call returns before the kill, the Wait and the respawn have happened.
-func (r *Runner) setStdin(w io.WriteCloser) {
+//
+// The handle is published UNCONDITIONALLY: refusing turns is the gate's job, and
+// withholding the handle would break Interrupt, RevokeBypass and the teardown
+// close. The check and the clear are one acquisition, so no TOCTOU is added.
+//
+// Nothing is logged here, and a diagnostic for a refused disarm must not be added:
+// mu is a leaf, so a slow slog handler would stall the Run goroutine mid-spawn
+// under it — the mirror of the hazard WriteUserTurn's gated record keeps outside
+// its own acquisition — and a Debug record anywhere in the daemon's stderr defeats
+// #1330's e2e instrument guard. Such a diagnostic belongs above the acquisition, in
+// spawnAndWait, at Info.
+func (r *Runner) setStdin(w io.WriteCloser, spawnFreshSeq uint64) {
 	r.mu.Lock()
 	r.stdin = w
-	r.rotating = false
+	if spawnFreshSeq > r.armFreshSeq {
+		r.rotating = false
+	}
 	r.mu.Unlock()
 }
 
@@ -920,17 +1085,71 @@ func (r *Runner) takeStdin() io.WriteCloser {
 	return w
 }
 
+// useCreateForm reports whether this spawn's id flag should be --session-id
+// (create) rather than --resume (reattach). Pure apart from a single os.Stat.
+//
+// With sessionsDir empty the probe is not consulted at all — no syscall is made
+// — and latchCreate decides verbatim. That is what keeps a Runner constructed
+// without the directory byte-identical to pre-#1630 argv, which is every
+// production path until #1631 threads the directory through. With a directory
+// supplied the probe decides OUTRIGHT and latchCreate is ignored, including on
+// the FIRST spawn and including when a RestartFresh rotation re-armed first-run
+// form: a confirmed by-id hit is the only answer that yields --resume, and every
+// other answer — absent file, unreadable directory, an id ValidStem rejects —
+// yields the create form. So the probe has no failure mode that can fail a
+// spawn.
+//
+// The single rule is ADR 032's, carried into this package, and it closes two
+// separate defects at once. A session that launched but ran no turn establishes
+// no transcript (#1655), so the latch's true→false flip would have every respawn
+// emit --resume against an id claude has no record of, which exits 1 (#1656) on
+// a widening backoff forever; the probe reads absent and creates instead, and
+// converges because a rejected --resume leaves NO STUB behind for the next probe
+// to latch onto. And on a daemon restart the transcript survives, so the latch's
+// first spawn emits --session-id against a live transcript, which claude refuses
+// (ADR 032); the probe reads present and resumes. It also settles the
+// rotated-id-collides-with-an-existing-transcript case as "resume" simply by
+// falling out of the rule — unreachable from sessions.NewID's minting, never
+// observed, and deliberately given no branch, flag or test of its own.
+//
+// Two things this must not become, both one edit away and both load-bearing.
+// It probes via transcript.StatByID and never a hand-rolled
+// filepath.Join(sessionsDir, id+ext) + os.Stat: StatByID runs its ValidStem gate
+// BEFORE the join, and New checks only that SessionID is non-empty while
+// RestartFresh re-checks nothing, so a non-canonical id reaches here and a
+// hand-rolled join would turn it into an arbitrary-path existence oracle that
+// flips the spawn's id flag. And every non-hit falls back to the create form,
+// NEVER to a directory scan: transcript.Newest sits beside StatByID and answers
+// a superficially similar question, but #839 deleted --continue and the
+// adopt-by-mtime scan precisely to close the confused-deputy gap where a restart
+// adopts a DIFFERENT claude's newer transcript out of the shared sessions dir.
+func useCreateForm(sessionsDir, id string, latchCreate bool) bool {
+	if sessionsDir == "" {
+		return latchCreate
+	}
+	// The error is discarded because absence is the expected answer here, not a
+	// failure: StatByID reports every miss as the zero Result, so !Found() already
+	// covers the absent file, the unreadable directory and the invalid stem. A
+	// separate err != nil arm would be a return site no fixture can reach on its
+	// own.
+	res, _ := transcript.StatByID(sessionsDir, id)
+	return !res.Found()
+}
+
 // buildArgs assembles one spawn's argv: the fixed stream-json prefix, then the
-// caller's base args, then the id flag. On the first spawn the id flag is
-// --session-id <sessionID> (establishes the on-disk transcript under a known
-// id); on every respawn it is --resume <sessionID> (reattach, append, no fork).
+// caller's base args, then the id flag. create picks that flag's form:
+// --session-id <sessionID> establishes the on-disk transcript under a known id,
+// --resume <sessionID> reattaches to one that already exists (append, no fork).
+// The caller decides which, and in production that decision is useCreateForm's —
+// a by-id transcript existence probe when Config.ClaudeSessionsDir is set, the
+// Run loop's firstRun latch when it is not.
 // Passing the SAME sessionID to both is why the on-disk id is stable across a
 // kill-and-restart — plain --resume reuses the id and does not fork
 // (--fork-session is the explicit, unused opt-in). Never emits -p/--print: the
 // non-print choice is billing-tied and spike-verified (multi-turn, interrupt,
 // resume, and the approval round-trip all work without it). Pure — no Runner
 // state, and it never mutates base.
-func buildArgs(base []string, firstRun bool, sessionID string) []string {
+func buildArgs(base []string, create bool, sessionID string) []string {
 	args := make([]string, 0, len(base)+7)
 	args = append(args,
 		"--input-format", "stream-json",
@@ -938,7 +1157,7 @@ func buildArgs(base []string, firstRun bool, sessionID string) []string {
 		"--verbose",
 	)
 	args = append(args, base...)
-	if firstRun {
+	if create {
 		return append(args, "--session-id", sessionID)
 	}
 	return append(args, "--resume", sessionID)

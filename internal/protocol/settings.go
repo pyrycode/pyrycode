@@ -68,27 +68,25 @@ type SessionSettingsUpdatedPayload struct {
 // the dispatch boundary before dispatch.Route is called, so there is NO
 // dispatch.Route handler for it.
 //
-// ConversationID names the conversation the client is asking about (#1586).
-// Before it the frame was genuinely bare, so a client had no way to say which
-// conversation it meant. It is untrusted network input used for exactly one
-// thing — an in-memory membership lookup through the handler's
-// KnownConversation seam — and never reaches a log line, an error string, a
-// filesystem path, or the reply.
+// ConversationID names the conversation the client is asking about (#1586), and
+// since #1610 it SELECTS the session the reply describes. Before it the frame was
+// genuinely bare, so a client had no way to say which conversation it meant. It
+// is untrusted network input used for exactly one thing — an in-memory resolution
+// through the handler's conversation-keyed run-configuration seam — and never
+// reaches a log line, an error string, a filesystem path, or the reply.
 //
 // NO omitempty, matching RequestSnapshotPayload and deliberately UNLIKE the
 // sibling SetSessionSettingsPayload above, whose per-field pointers encode a
 // presence contract. There is no presence contract here: absent and empty are
-// the SAME case — "no conversation named" — which the daemon answers exactly as
-// it always has, so nothing needs to tell them apart. Keeping the field always
-// on the wire lets a fixture pin the full shape.
+// the SAME case — "no conversation named", which names no session and so is
+// answered with the zero-valued reply — so nothing needs to tell them apart.
+// Keeping the field always on the wire lets a fixture pin the full shape.
 //
-// Scope: naming a conversation the daemon does not host is answered with a
-// zero-valued SessionSettingsPayload, never an error frame. Naming one it does
-// host — or naming none — reports the BOOTSTRAP session's values, the same
-// values the verb has always reported: this field gates WHETHER the answer is
-// populated, not WHICH session it describes. Making the values follow the named
-// conversation is #1587, the deferred follow-up noted on SessionSettingsPayload
-// below.
+// Scope: naming a conversation the daemon does not host, naming one bound to no
+// live session, or naming none at all are all answered with a zero-valued
+// SessionSettingsPayload, never an error frame and never another session's
+// values. Naming a hosted, bound conversation reports THAT session's id and
+// values together (see SessionSettingsPayload below).
 type RequestSessionSettingsPayload struct {
 	ConversationID string `json:"conversation_id"`
 }
@@ -121,15 +119,13 @@ type RequestSessionSettingsPayload struct {
 //   - WindowTokens 0 means the usage seam was not wired; UsedTokens 0 against a
 //     non-zero WindowTokens is a genuine fresh session.
 //
-// Scope: the values are the BOOTSTRAP session's, not the requesting
-// conversation's, per #848's explicit "do not pre-carve a conversation-keyed
-// settings seam". SessionID reports that same bootstrap session, so a client
-// reads and writes the same place. The request now names a conversation
-// (RequestSessionSettingsPayload above, #1586), but that name currently gates
-// only whether this payload is populated or all-zero — it does not yet choose
-// which session is described. Keying the whole set by conversation is #1587;
-// when it lands, both the values and SessionID move together or the read and the
-// write would address different sessions.
+// Scope: the values are those of the session bound to the conversation the
+// request named (RequestSessionSettingsPayload above, #1586/#1610), and SessionID
+// names that same session, so a client reads and writes the same place. The whole
+// set is keyed by conversation and resolved as ONE value, so no field can describe
+// a session another field does not — which is why a client can never read one
+// session's values and write its change to another. A request that resolves to no
+// session gets every field at its zero value, never some other session's.
 type SessionSettingsPayload struct {
 	SessionID    string `json:"session_id"`
 	Model        string `json:"model"`

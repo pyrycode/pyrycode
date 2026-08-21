@@ -42,12 +42,72 @@ type AssistantDeltaPayload struct {
 // (docs/protocol-mobile.md § tool_use). Binary → phone direction; announces
 // a tool invocation. InputSummary is a human-readable précis of the tool
 // input, not the raw input.
+//
+// Input is the tool input's own top-level fields (#1678), each value the
+// input's value verbatim — a JSON string decoded, any other JSON type in its
+// compact JSON form — so a client can show what a call ACTS ON instead of the
+// first 200 runes of a compacted blob. It is what InputSummary could never be:
+// per-field rather than one flattened line, so an Edit's file_path survives
+// alongside the replaced text rather than being buried inside it.
+//
+// The bounds are the bridge's, decided at construction
+// (internal/turnbridge's maxInputValueRunes / maxInputKeyRunes /
+// maxInputFields / maxInputTotalRunes), so this struct re-decides no maximum,
+// for RateLimitedPayload's reason: a second cap here would be a second place
+// the limit is decided and the two could disagree silently. A value the bridge
+// shortened ends in "…" — this wire's value-level truncation convention, the
+// one InputSummary already uses — and there is deliberately no
+// truncated_fields list to name the cut or dropped fields (#1678 decided this
+// explicitly). The known cost is that a value legitimately ending in "…" is
+// indistinguishable from a cut one.
+//
+// A field can be ABSENT because the total bound dropped it; InputSummary
+// remains the whole-input fallback. Key order on the wire is alphabetical, a
+// marshalling artefact of the map rather than the input's own order, so
+// display order is the client's choice. The key is always present and never
+// null — see MarshalJSON.
+//
+// This map is what makes ToolUsePayload non-comparable with ==. Every existing
+// comparison already goes through reflect.DeepEqual or byte equality; a future
+// == against an any-typed copy would compile and panic at runtime.
+//
+// SECURITY: the values are DISPLAY STRINGS, NOT CAPABILITIES. They are
+// model-authored text that crossed the subprocess trust boundary and that the
+// daemon neither resolved nor validated — a file_path is not canonicalised and
+// may be relative or traversing, and a Bash command value is a literal shell
+// command line. A client may render them as inert text; it must never open one
+// as a path on its own filesystem, execute or re-shell one, or feed one to an
+// HTML sink, an attribute, or a URL.
 type ToolUsePayload struct {
-	ConversationID string `json:"conversation_id"`
-	TurnID         string `json:"turn_id"`
-	ToolUseID      string `json:"tool_use_id"`
-	Name           string `json:"name"`
-	InputSummary   string `json:"input_summary"`
+	ConversationID string            `json:"conversation_id"`
+	TurnID         string            `json:"turn_id"`
+	ToolUseID      string            `json:"tool_use_id"`
+	Name           string            `json:"name"`
+	InputSummary   string            `json:"input_summary"`
+	Input          map[string]string `json:"input"`
+}
+
+// MarshalJSON normalises a nil Input to an empty map, so a tool call with no
+// sendable fields always serialises as "input":{} and never as "input":null.
+//
+// This is BackgroundTaskRosterPayload.MarshalJSON's pattern applied to a map,
+// and its doc comment is the single source of truth for why the deviation is
+// worth the lines and why a doc comment alone would not have been enough. The
+// same reasoning holds here: the bridge (#1678) returns a nil map for all three
+// no-fields cases — an absent input, an empty object, and an input that is not
+// a JSON object at all — so without this method those would ship null while the
+// fixture went on asserting {}, and nothing in `make check` would notice.
+//
+// Between null and {}, {} is the better client contract for the reason [] beats
+// null there: it is iterable without a branch in every client language. The
+// payload deliberately does not distinguish the three no-fields cases, so there
+// is nothing for null to mean that {} does not.
+func (p ToolUsePayload) MarshalJSON() ([]byte, error) {
+	if p.Input == nil {
+		p.Input = map[string]string{}
+	}
+	type alias ToolUsePayload
+	return json.Marshal(alias(p))
 }
 
 // ToolResultPayload is the body of an Envelope whose Type == TypeToolResult
@@ -248,7 +308,8 @@ type BackgroundTaskRosterPayload struct {
 // MarshalJSON normalises a nil Tasks to an empty array, so an empty roster
 // always serialises as "tasks":[] and never as "tasks":null.
 //
-// This is the file's only custom marshaller, and the deviation is deliberate.
+// This was the file's first custom marshaller (ToolUsePayload's is the second,
+// #1678, and follows this one), and the deviation is deliberate.
 // omitempty is out — eliding the key would erase the frame's whole point, since
 // an empty roster is a POSITIVE statement rather than an absence. Between null
 // and [], [] is the better client contract: it reads as an empty list where null
@@ -394,4 +455,73 @@ type RateLimitedPayload struct {
 	LimitType       string   `json:"limit_type"`
 	ResetsAt        int64    `json:"resets_at"`
 	TruncatedFields []string `json:"truncated_fields"`
+}
+
+// ModelAnnouncedPayload is the body of an Envelope whose Type ==
+// TypeModelAnnounced (docs/protocol-mobile.md § model_announced, #1616). Binary →
+// phone direction; the wire form of turnevent.ModelAnnounced, which reports the
+// model claude named for the current turn on its system/init line.
+//
+// Emitted since #1638: the shape was declared here (#1616) so a client could be
+// written against it, and #1638 added turnbridge.MapEvent's case for the variant —
+// the sequencing #1405 used ahead of #1410.
+//
+// Like RateLimitedPayload it is conversation-scoped rather than turn-scoped, so
+// there is no turn_id, and receiving one neither opens nor closes a turn: a
+// per-turn announcement is not a turn boundary (turnevent.ModelAnnounced's own
+// doc). The bridge (#1638) supplies ConversationID because the internal event
+// carries none. claude's session_id and cwd are deliberately absent for
+// BackgroundTaskStartedPayload's reason plus #1380's — one is claude's session
+// identity and the other the operator's local filesystem path, neither is the
+// daemon's conversation identity, and neither is even declared on the producer's
+// decode target (streamsup's systemInitLine), so this payload cannot carry them
+// even by accident.
+//
+// The value's semantics are NOT restated here: turnevent.ModelAnnounced's field
+// comments are their single source of truth, in the manner ThinkingProgressPayload
+// delegates its two consumer hazards. Named and delegated: Model is claude's
+// identifier VERBATIM and never empty; claude echoes an identifier at least as
+// specific as the one it was given, so the value is not reliably dated and need
+// not appear in any published model list, which makes a lookup miss ORDINARY
+// rather than an error; and bounded-and-UTF-8-valid is all it is. A
+// consumer-facing statement of each is in docs/protocol-mobile.md
+// § model_announced.
+//
+// Truncated is a bool rather than the siblings' TruncatedFields []string,
+// following UnrecognizedMessagePayload: this payload bounds a SINGLE string, so a
+// name list would be permanently either nil or ["model"] — a variable-length
+// container carrying one bit, plus a name the reader must check against the only
+// field there is. The slice exists on the background-task and rate-limit payloads
+// because they bound two to four fields and the report has to say which. It is
+// load-bearing either way — a payload that dropped it would present claude's cut
+// text to a phone as complete.
+//
+// Three v2 payloads already carry a wire field named model — ScreenSnapshotPayload,
+// SessionSettingsPayload and SetSessionSettingsPayload — and all three mean the
+// per-session OVERRIDE, where "" means "inherited default, no override". This one
+// means what claude ANNOUNCED for the turn, and in the ordinary case the two
+// disagree: the override is "" while claude has named a concrete model. The name
+// is kept (turnevent's field name in snake_case, per the convention
+// RateLimitedPayload states) and the distinction is drawn by cross-reference in
+// docs/protocol-mobile.md, which is what reaches a client author reading only one
+// of the existing rows.
+//
+// SECURITY: Model is a claude-authored string that crossed the subprocess trust
+// boundary. It is safe to RENDER as inert text and must never be fed to an HTML
+// sink, an attribute, or a URL; the daemon bounds it but does not sanitize it — no
+// control-character or terminal-escape stripping happens on this path — so it stays
+// untrusted, model-influenced text all the way to the client, and the render
+// boundary owing the sanitization is the CLIENT's. Its bound is the producer's,
+// decided at construction (internal/streamsup/parser.go's maxModelField), so this
+// struct re-decides no maximum: a second cap here would be a second place the limit
+// is decided, and the two could disagree silently. Nor is there a charset check —
+// internal/relay's validModel bounds a PHONE-supplied override and is deliberately
+// a different rule; applying it here would reject identifiers claude legitimately
+// announces. The constraint on turnevent.ModelAnnounced follows the data onto the
+// wire: it is a REPORT, never a control input, so a client MUST NOT branch
+// security-relevant behaviour on Model.
+type ModelAnnouncedPayload struct {
+	ConversationID string `json:"conversation_id"`
+	Model          string `json:"model"`
+	Truncated      bool   `json:"truncated"`
 }

@@ -29,17 +29,6 @@ const (
 	// in-memory ring buffer.
 	VerbLogs Verb = "logs"
 
-	// VerbAttach upgrades the connection: after a JSON ack from the server,
-	// the rest of the connection is raw bytes bridged to the supervised
-	// claude process's PTY. Standard "protocol upgrade" pattern.
-	VerbAttach Verb = "attach"
-
-	// VerbResize carries a live window-size update for an attached session.
-	// One-shot request/response on a fresh control connection — independent
-	// of the (long-lived) attach connection so a malformed resize never
-	// disturbs the byte stream.
-	VerbResize Verb = "resize"
-
 	// VerbSessionsNew creates a new session. Request.Sessions carries an
 	// optional human-friendly label; Response.SessionsNew carries the
 	// minted session UUID. First member of the Phase 1.1 sessions.* verb
@@ -157,41 +146,9 @@ const (
 // Request is the wire format for a single client request.
 type Request struct {
 	Verb     Verb             `json:"verb"`
-	Attach   *AttachPayload   `json:"attach,omitempty"`   // populated for VerbAttach
-	Resize   *ResizePayload   `json:"resize,omitempty"`   // populated for VerbResize
 	Sessions *SessionsPayload `json:"sessions,omitempty"` // populated for VerbSessionsNew (Phase 1.1+)
 	Rekey    *RekeyPayload    `json:"rekey,omitempty"`    // populated for VerbRekey
 	Approve  *ApprovePayload  `json:"approve,omitempty"`  // populated for VerbMCPApprove
-}
-
-// AttachPayload carries the client's terminal geometry at attach time and
-// (Phase 1.1+) selects which session to attach to.
-//
-// SessionID is a loose-input selector: a full UUID, a unique prefix, or
-// empty to mean "the bootstrap session". The server resolves it through
-// Pool.ResolveID; see that method for resolution rules. The omitempty tag
-// is load-bearing — an empty SessionID must marshal to no field on the
-// wire so v0.5.x clients (which don't know the field) keep round-tripping
-// byte-identically against a v0.7.x server during the rollover window.
-//
-// Handshake Cols/Rows are applied to the supervised PTY at attach time via
-// Bridge.Resize (see #136). Either dimension being zero is the "unknown /
-// don't touch" sentinel — no resize is issued.
-//
-// Live resize updates while attached are carried by VerbResize on a
-// separate control connection (see ResizePayload), emitted from the client
-// by the SIGWINCH handler in pyry attach (startWinsizeWatcher).
-type AttachPayload struct {
-	Cols      int    `json:"cols,omitempty"`
-	Rows      int    `json:"rows,omitempty"`
-	SessionID string `json:"sessionID,omitempty"`
-	// CreateIfMissing opts in to take-or-create attach: if SessionID is
-	// not registered, the daemon mints a session under that exact UUID
-	// before binding. Off by default — pre-existing callers fail with
-	// "no such session" against an unknown id, byte-for-byte unchanged.
-	// Omitempty is load-bearing for the same v0.5.x rollover guarantee
-	// that pins SessionID's tag.
-	CreateIfMissing bool `json:"createIfMissing,omitempty"`
 }
 
 // SessionsPayload carries arguments shared across the sessions.* verb
@@ -221,9 +178,8 @@ type SessionsPayload struct {
 // RekeyPayload carries the v2 conn id to re-key. ConnID has no omitempty:
 // an empty connID is invalid input and the server-side guard
 // (handleRekey) rejects it before calling Rekeyer. The camelCase JSON tag
-// matches the control-socket convention (SessionsPayload.ID,
-// AttachPayload.SessionID, ResizePayload.SessionID) — not to be confused
-// with RoutingEnvelope.ConnID's snake-case `conn_id`, which is the
+// matches the control-socket convention (SessionsPayload.ID) — not to be
+// confused with RoutingEnvelope.ConnID's snake-case `conn_id`, which is the
 // mobile-WS wire and unrelated.
 type RekeyPayload struct {
 	ConnID string `json:"connID"`
@@ -260,18 +216,6 @@ type ApproveResult struct {
 	Behavior     string          `json:"behavior"`
 	UpdatedInput json.RawMessage `json:"updatedInput,omitempty"` // allow only
 	Message      string          `json:"message,omitempty"`      // deny only
-}
-
-// ResizePayload carries a live window-size update for an attached session.
-// SessionID resolution mirrors AttachPayload — empty selects bootstrap, full
-// UUID or unique prefix selects a specific session. Cols/Rows are wire ints
-// for symmetry with AttachPayload; the server narrows + swaps at the seam
-// boundary. Either dimension being zero is the "unknown / don't touch"
-// sentinel — no resize is issued (same rule as the handshake path).
-type ResizePayload struct {
-	SessionID string `json:"sessionID,omitempty"`
-	Cols      int    `json:"cols,omitempty"`
-	Rows      int    `json:"rows,omitempty"`
 }
 
 // Response is the wire format for a single server response. On success
@@ -364,11 +308,11 @@ type LogsPayload struct {
 // JSON round-trip without losing precision the way nanosecond integers do
 // when piped through tools like jq.
 type StatusPayload struct {
-	Phase        string `json:"phase"`                   // starting | running | backoff | stopped
-	ChildPID     int    `json:"child_pid,omitempty"`     // 0 when no child is running
-	StartedAt    string `json:"started_at"`              // RFC3339
-	Uptime       string `json:"uptime"`                  // since StartedAt
-	RestartCount int    `json:"restart_count"`           // number of times the child has exited
-	LastUptime   string `json:"last_uptime,omitempty"`   // duration of the most recent child
-	NextBackoff  string `json:"next_backoff,omitempty"`  // delay scheduled before the next spawn
+	Phase        string `json:"phase"`                  // starting | running | backoff | stopped
+	ChildPID     int    `json:"child_pid,omitempty"`    // 0 when no child is running
+	StartedAt    string `json:"started_at"`             // RFC3339
+	Uptime       string `json:"uptime"`                 // since StartedAt
+	RestartCount int    `json:"restart_count"`          // number of times the child has exited
+	LastUptime   string `json:"last_uptime,omitempty"`  // duration of the most recent child
+	NextBackoff  string `json:"next_backoff,omitempty"` // delay scheduled before the next spawn
 }

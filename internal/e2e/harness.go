@@ -409,21 +409,7 @@ func StartRotationWithRelay(t *testing.T, home, sessionsDir, initialUUID, trigge
 func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL string, extraEnv ...string) *Harness {
 	t.Helper()
 
-	// Opt the daemon into the stream-json interactive runner via the production
-	// config toggle. resolveConfigPath reads <home>/.pyry/config.json once at
-	// startup, so this must land BEFORE spawn. A raw JSON literal (not an
-	// internal/config import) keeps harness.go import-lean under e2e || e2e_install,
-	// mirroring seedBootstrapRegistry. A partial config keeps every other field at
-	// its default (config.Load overlay); -pyry-relay overrides relay_url, so only
-	// interactive_runner is written here.
-	pyryDir := filepath.Join(home, ".pyry")
-	if err := os.MkdirAll(pyryDir, 0o700); err != nil {
-		t.Fatalf("e2e: mkdir .pyry: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"),
-		[]byte(`{"interactive_runner":"stream-json"}`), 0o600); err != nil {
-		t.Fatalf("e2e: write config.json: %v", err)
-	}
+	writeStreamInteractiveConfig(t, home)
 
 	fakeBin := ensureFakeClaudeBuilt(t)
 	seedBootstrapRegistry(t, home, initialUUID)
@@ -464,6 +450,30 @@ func StartStreamInteractiveWithRelay(t *testing.T, home, initialUUID, relayURL s
 		t.Fatalf("e2e: %v", err)
 	}
 	return h
+}
+
+// writeStreamInteractiveConfig opts the daemon into the stream-json interactive
+// runner via the production config toggle. resolveConfigPath reads
+// <home>/.pyry/config.json once at startup, so this must land BEFORE spawn. A raw
+// JSON literal (not an internal/config import) keeps harness.go import-lean under
+// e2e || e2e_install, mirroring seedBootstrapRegistry. A partial config keeps
+// every other field at its default (config.Load overlay); -pyry-relay overrides
+// relay_url, so only interactive_runner is written here.
+//
+// One copy, deliberately: a duplicated toggle string is a silent failure. Rename
+// interactive_runner and a missed copy leaves that harness's daemon on the
+// default runner while its test keeps passing, asserting nothing about the path
+// it names — the defect class #1512 fixed in startPerConvHarness.
+func writeStreamInteractiveConfig(t *testing.T, home string) {
+	t.Helper()
+	pyryDir := filepath.Join(home, ".pyry")
+	if err := os.MkdirAll(pyryDir, 0o700); err != nil {
+		t.Fatalf("e2e: mkdir .pyry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pyryDir, "config.json"),
+		[]byte(`{"interactive_runner":"stream-json"}`), 0o600); err != nil {
+		t.Fatalf("e2e: write config.json: %v", err)
+	}
 }
 
 // seedBoundConversation writes conversations.json for the "test" instance with a

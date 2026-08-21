@@ -50,10 +50,8 @@ const maxDeltaTextBytes = 10000
 
 // interactiveBroadcaster is the capability-aware fan-out surface the structured
 // emitter needs: the interactive-conn snapshot (#626) and the per-conn sealed
-// push (#571). Distinct from #589's v2Broadcaster, which uses the
-// capability-agnostic ActiveConnIDs. *relay.V2SessionManager satisfies it.
-// Declared at the consumer (CODING-STYLE) so the emitter unit-tests drive it
-// without a real manager.
+// push (#571). *relay.V2SessionManager satisfies it. Declared at the consumer
+// (CODING-STYLE) so the emitter unit-tests drive it without a real manager.
 type interactiveBroadcaster interface {
 	ActiveConns(ctx context.Context) []relay.ActiveConn
 	Push(ctx context.Context, connID string, env protocol.Envelope) error
@@ -341,6 +339,37 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// emitRateLimit's gate fires at most once per run.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ModelAnnounced:
+		// claude's announced model for the turn (#1638), taking the same shape as
+		// the status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
+		// transitionTo / endTurn; inTurn, turnID, currentState untouched).
+		//
+		// Kept a separate case from RateLimited above despite the identical body,
+		// following this switch's own rule: it merges arms that share a REASON
+		// (ApiRetry/Compacting, the three background-task variants) and keeps
+		// ThinkingProgress and RateLimited apart because each has its own. So does
+		// this one. A usage limit is a condition of the ACCOUNT; an announced model
+		// is a property of the TURN'S CONFIGURATION — claude emits its init line once
+		// per turn, so the frame rides along with every turn rather than delimiting
+		// one, and arrives in every conversation rather than in an unlucky one. That
+		// last part is why opening a turn here would be worse than it is for the
+		// peers above: it would wedge ALL of them. TestTurnMarkFor_TotalOverEveryVariant
+		// already pins the lifecycle answer as turnMarkNone.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position
+		// ahead of the announcement. Like turn_state this flows through emit() and is
+		// NOT a droppable delta (the droppable set is assistant_delta only, #610), so
+		// it holds a queue slot. Nothing bounds the rate on either side and that is
+		// deliberate: the producer applies no dedup (one event per init line), the
+		// frames are small, and the cadence is claude's own rather than anything
+		// network-reachable — a second, differently-shaped filter here is the hazard
+		// the ThinkingProgress and RateLimited arms both name.
+		//
+		// No capability gate in the arm. The interactive grant is filtered once, in
+		// emit(), for every frame type; writing a second one here is how that single
+		// gate stops being single.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -615,13 +644,19 @@ func eventKind(ev turnevent.Event) string {
 		// YOLO values are NEVER logged at any level", exists to keep out of a log. It
 		// is not returned here.
 		//
-		// Unlike the two arms above, this variant has no Handle case at all — no wire
-		// mapping exists yet (turnbridge.MapEvent's default drops it), so it lands in
-		// Handle's own default and this file's `interactive_turn.unknown` Debug is a
-		// live call site rather than only the ACP surface's. Without the arm every
-		// eventKind site — here, acp_turn_stream.go, stream_turn_busy.go,
-		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
-		// recognize.
+		// Like the two arms above, this variant is now claimed by a Handle case on
+		// this lane (#1638), so this file's `interactive_turn.unknown` Debug is no
+		// longer a live call site for it — nor for anything else the production
+		// producer emits. Handle now has an arm for 15 of turnevent.Event's 16
+		// implementations, and the one without is PermissionRequest, which
+		// streamsup.Parser never produces: it is PTY/modalbridge-only, as
+		// TestTurnMarkFor_TotalOverEveryVariant states independently. "No variant the
+		// production producer emits" is the accurate claim rather than "unreachable" —
+		// a nil Event still lands in that default. The reachable eventKind call site
+		// left on this lane is the no-cursor drop, which returns before the type
+		// switch. Without the arm every eventKind site — here, acp_turn_stream.go,
+		// stream_turn_busy.go, stream_turn_drain.go — would read kind=unknown for a
+		// variant the daemon does recognize.
 		return "model_announced"
 	default:
 		return "unknown"
