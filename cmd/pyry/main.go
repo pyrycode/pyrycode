@@ -17,14 +17,11 @@
 //	pyry status           Query the running daemon via its control socket
 //	pyry stop             Graceful shutdown via the control socket
 //	pyry logs             Recent supervisor log lines
-//	pyry attach           Attach local terminal to a service-mode daemon
 //	pyry sessions <verb>  Multi-session management (verbs: new, rm, rename, list)
 //	pyry pair             Mint a device token and print the QR / paste payload
 //	pyry install-service  Write a systemd / launchd unit file for pyry
 //	pyry agent-run        Drive a single supervised claude turn headlessly
 //	                       (replaces `claude -p` in the dispatcher)
-//	pyry acp              Serve the ACP JSON-RPC transport over stdio
-//	                       (spawned by an ACP host)
 //	pyry help             Show help
 //
 // See https://github.com/pyrycode/pyrycode for documentation.
@@ -220,39 +217,70 @@ func main() {
 	}
 }
 
-func run() error {
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
+// errAttachRemoved and errACPRemoved are what the `attach` and `acp` verbs
+// return now that #1348 has deleted both implementations. They exist because
+// the fall-through for an unrecognised first argument is a full daemon start:
+// without an arm, `pyry attach` trust-marks the cwd in ~/.claude.json, binds
+// the control socket, contacts the relay, and hands claude the verb string as
+// its initial prompt. Same posture as the "pty" arm in selectInteractiveRunner
+// — name the removal, and never render the dead thing as something to run.
+//
+// Sentinels rather than fmt.Errorf at the call site so callers and tests match
+// on identity instead of prose.
+var (
+	errAttachRemoved = errors.New("attach was removed in #1348: the terminal path it bridged no longer exists, so there is nothing to attach to. Watch a live session from the desktop or mobile client instead")
+	errACPRemoved    = errors.New("acp was removed in #1348: pyry no longer serves the ACP JSON-RPC transport over stdio. Remove the verb from the ACP host's launch configuration — there is no replacement")
+)
+
+func run() error { return runArgs(os.Args) }
+
+// runArgs dispatches on args[1], where args is the full argv (args[0] is the
+// program name). Split out of run so a test can drive the router without going
+// through the process's real os.Args.
+//
+// The switch deliberately has no default: an unrecognised first argument
+// forwards to claude verbatim, which is the near-drop-in design stated in this
+// package's doc comment. Removed verbs therefore need explicit constant cases.
+func runArgs(args []string) error {
+	if len(args) >= 2 {
+		switch args[1] {
 		case "version", "-v", "--version":
 			fmt.Println("pyry", Version)
 			return nil
 		case "status":
-			return runStatus(os.Args[2:])
+			return runStatus(args[2:])
 		case "stop":
-			return runStop(os.Args[2:])
+			return runStop(args[2:])
 		case "logs":
-			return runLogs(os.Args[2:])
+			return runLogs(args[2:])
 		case "sessions":
-			return runSessions(os.Args[2:])
+			return runSessions(args[2:])
 		case "pair":
-			return runPair(os.Args[2:])
+			return runPair(args[2:])
 		case "rekey":
-			return runRekey(os.Args[2:])
+			return runRekey(args[2:])
 		case "install-service":
-			return runInstallService(os.Args[2:])
+			return runInstallService(args[2:])
 		case "update":
-			return runUpdate(os.Args[2:])
+			return runUpdate(args[2:])
 		case "agent-run":
-			return runAgentRun(os.Stdout, os.Args[2:])
+			return runAgentRun(os.Stdout, args[2:])
 		case "mcp-approve":
-			return runMCPApprove(os.Args[2:])
+			return runMCPApprove(args[2:])
+		// Verbs #1348 deleted. Duplicate constant cases are a compile error, so
+		// a future edit that tries to revive either one as a live verb fails the
+		// build rather than silently shadowing a working route.
+		case "attach":
+			return errAttachRemoved
+		case "acp":
+			return errACPRemoved
 		case "help", "-h", "--help":
 			printHelp()
 			return nil
 		}
 	}
 
-	return runSupervisor(os.Args[1:])
+	return runSupervisor(args[1:])
 }
 
 // pyryFlagBools are pyry-specific boolean flags. Recognised by their exact
@@ -2440,7 +2468,13 @@ func runInstallService(args []string) error {
 }
 
 func printHelp() {
-	fmt.Print(`pyry — Pyrycode daemon, a supervisor for Claude Code
+	fmt.Print(helpText)
+}
+
+// helpText is what printHelp prints. It is a package-level constant rather than
+// a literal inlined in printHelp so TestHelpTextDropsRemovedVerbs can read the
+// advertised verb list without capturing os.Stdout.
+const helpText = `pyry — Pyrycode daemon, a supervisor for Claude Code
 
 pyry is a near-drop-in replacement for ` + "`claude`" + `: anything it doesn't
 recognize is forwarded to claude verbatim. pyry's own configuration uses an
@@ -2453,13 +2487,6 @@ Usage:
   pyry status [flags]                            query the running daemon
   pyry stop [flags]                              ask the daemon to shut down
   pyry logs [flags]                              print recent supervisor logs
-  pyry attach [flags] [--stdio] [<id>]           attach local terminal to daemon
-                                                  (Ctrl-B d to detach; <id>
-                                                  selects a session — full
-                                                  UUID or unique prefix; omit
-                                                  for the bootstrap session;
-                                                  --stdio: no-PTY raw byte
-                                                  forwarding for SDK consumers)
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
   pyry pair [flags] [--name <label>] [--relay <url>]
@@ -2481,9 +2508,6 @@ Usage:
                                                   ` + "`claude -p`" + ` in the dispatcher
                                                   (see --help on the verb for the
                                                   full flag list)
-  pyry acp                                       serve the ACP JSON-RPC transport
-                                                  over stdio (spawned by an ACP
-                                                  host; takes no flags or args)
   pyry mcp-approve [flags]                       serve the MCP approve tool over
                                                   stdio, forwarding each tool-use
                                                   approval to the daemon
@@ -2515,11 +2539,9 @@ Examples:
   pyry status                           # check on the running daemon
   pyry stop                             # graceful shutdown via control socket
   pyry logs                             # last 200 lines of supervisor logs
-  pyry attach                           # interactive bridge to a service-mode daemon
   pyry install-service                  # write a systemd/launchd unit (template)
   pyry install-service -- --dangerously-skip-permissions \
         --channels plugin:discord@claude-plugins-official  # bake flags into ExecStart
 
 See https://github.com/pyrycode/pyrycode for documentation.
-`)
-}
+`
