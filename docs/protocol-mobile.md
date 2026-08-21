@@ -550,6 +550,17 @@ These fifteen envelope types form the structured live-session stream. They are s
 | `tool_use_id` | string | Correlates this call with its later `tool_result`. |
 | `name` | string | Tool name. |
 | `input_summary` | string | Human-readable précis of the tool input (not the raw input). |
+| `input` | object (string → string) | The tool input's own top-level fields, each value the input's value verbatim. Always present, never `null`. |
+
+`input` is what a client shows to say what a call *acts on* — an `Edit`'s `file_path` beside its replaced text rather than buried inside it — where `input_summary` is the whole input compacted onto one line and cut short. Both are sent; `input_summary` keeps its exact meaning and value.
+
+Each value is the input's own value: a JSON string arrives decoded (a path is a path, an embedded newline is a newline), any other JSON type arrives as its compact JSON form (so `null`, `true`, `[1,2]` and `{"x":1}` are those literal strings). Nothing is normalised — no path is rewritten to a workspace-relative form.
+
+**Bounds.** Each value is capped at **4000 runes** (runes, not bytes), and the map as a whole at **8500 runes** of keys plus values across at most **16 fields**. A value the daemon shortened ends in `…`; a value that legitimately ends in `…` is indistinguishable from a cut one, which is an accepted cost of the marker. A field may be **absent** because the total bound dropped it — dropped fields are not listed anywhere, and `input_summary` remains the whole-input fallback. Key order on the wire is alphabetical, a marshalling artefact rather than the input's own order, so display order is the client's choice.
+
+**Empty cases.** An input that is absent, an empty object, or not a JSON object at all all yield `"input":{}` — never `null`, and never an error. The frame does not distinguish the three.
+
+**Values are display strings, not capabilities.** They are model-authored text the daemon neither resolved nor validated: a `file_path` is not canonicalised and may be relative or traversing, and a `Bash` `command` value is a literal shell command line. Render them as inert text. Never open one as a path on your own filesystem, execute or re-shell one, or feed one to an HTML sink, an attribute, or a URL.
 
 #### `tool_result`
 

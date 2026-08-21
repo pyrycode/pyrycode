@@ -42,12 +42,72 @@ type AssistantDeltaPayload struct {
 // (docs/protocol-mobile.md § tool_use). Binary → phone direction; announces
 // a tool invocation. InputSummary is a human-readable précis of the tool
 // input, not the raw input.
+//
+// Input is the tool input's own top-level fields (#1678), each value the
+// input's value verbatim — a JSON string decoded, any other JSON type in its
+// compact JSON form — so a client can show what a call ACTS ON instead of the
+// first 200 runes of a compacted blob. It is what InputSummary could never be:
+// per-field rather than one flattened line, so an Edit's file_path survives
+// alongside the replaced text rather than being buried inside it.
+//
+// The bounds are the bridge's, decided at construction
+// (internal/turnbridge's maxInputValueRunes / maxInputKeyRunes /
+// maxInputFields / maxInputTotalRunes), so this struct re-decides no maximum,
+// for RateLimitedPayload's reason: a second cap here would be a second place
+// the limit is decided and the two could disagree silently. A value the bridge
+// shortened ends in "…" — this wire's value-level truncation convention, the
+// one InputSummary already uses — and there is deliberately no
+// truncated_fields list to name the cut or dropped fields (#1678 decided this
+// explicitly). The known cost is that a value legitimately ending in "…" is
+// indistinguishable from a cut one.
+//
+// A field can be ABSENT because the total bound dropped it; InputSummary
+// remains the whole-input fallback. Key order on the wire is alphabetical, a
+// marshalling artefact of the map rather than the input's own order, so
+// display order is the client's choice. The key is always present and never
+// null — see MarshalJSON.
+//
+// This map is what makes ToolUsePayload non-comparable with ==. Every existing
+// comparison already goes through reflect.DeepEqual or byte equality; a future
+// == against an any-typed copy would compile and panic at runtime.
+//
+// SECURITY: the values are DISPLAY STRINGS, NOT CAPABILITIES. They are
+// model-authored text that crossed the subprocess trust boundary and that the
+// daemon neither resolved nor validated — a file_path is not canonicalised and
+// may be relative or traversing, and a Bash command value is a literal shell
+// command line. A client may render them as inert text; it must never open one
+// as a path on its own filesystem, execute or re-shell one, or feed one to an
+// HTML sink, an attribute, or a URL.
 type ToolUsePayload struct {
-	ConversationID string `json:"conversation_id"`
-	TurnID         string `json:"turn_id"`
-	ToolUseID      string `json:"tool_use_id"`
-	Name           string `json:"name"`
-	InputSummary   string `json:"input_summary"`
+	ConversationID string            `json:"conversation_id"`
+	TurnID         string            `json:"turn_id"`
+	ToolUseID      string            `json:"tool_use_id"`
+	Name           string            `json:"name"`
+	InputSummary   string            `json:"input_summary"`
+	Input          map[string]string `json:"input"`
+}
+
+// MarshalJSON normalises a nil Input to an empty map, so a tool call with no
+// sendable fields always serialises as "input":{} and never as "input":null.
+//
+// This is BackgroundTaskRosterPayload.MarshalJSON's pattern applied to a map,
+// and its doc comment is the single source of truth for why the deviation is
+// worth the lines and why a doc comment alone would not have been enough. The
+// same reasoning holds here: the bridge (#1678) returns a nil map for all three
+// no-fields cases — an absent input, an empty object, and an input that is not
+// a JSON object at all — so without this method those would ship null while the
+// fixture went on asserting {}, and nothing in `make check` would notice.
+//
+// Between null and {}, {} is the better client contract for the reason [] beats
+// null there: it is iterable without a branch in every client language. The
+// payload deliberately does not distinguish the three no-fields cases, so there
+// is nothing for null to mean that {} does not.
+func (p ToolUsePayload) MarshalJSON() ([]byte, error) {
+	if p.Input == nil {
+		p.Input = map[string]string{}
+	}
+	type alias ToolUsePayload
+	return json.Marshal(alias(p))
 }
 
 // ToolResultPayload is the body of an Envelope whose Type == TypeToolResult
@@ -248,7 +308,8 @@ type BackgroundTaskRosterPayload struct {
 // MarshalJSON normalises a nil Tasks to an empty array, so an empty roster
 // always serialises as "tasks":[] and never as "tasks":null.
 //
-// This is the file's only custom marshaller, and the deviation is deliberate.
+// This was the file's first custom marshaller (ToolUsePayload's is the second,
+// #1678, and follows this one), and the deviation is deliberate.
 // omitempty is out — eliding the key would erase the frame's whole point, since
 // an empty roster is a POSITIVE statement rather than an absence. Between null
 // and [], [] is the better client contract: it reads as an empty list where null
