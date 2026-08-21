@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -22,6 +23,14 @@ func TestMapEventOutbound(t *testing.T) {
 	// the short row so that row's failure output stays legible.
 	const modelSentinel = "QQ-Model-Sentinel-ZZ"
 	overCapModel := "QQ-OverCap-Model-" + strings.Repeat("M", 300)
+
+	// One over-cap result fixture, used by a failed row and a completed row that
+	// differ ONLY in Status, so the pair pins the bound rather than the flag:
+	// is_error does not change how much of a result reaches the wire (#1680 AC 3).
+	// resultSummary cannot see is_error — the flag is derived here at the MapEvent
+	// level — which is why this belongs in this table and not in TestResultSummary.
+	overCapResult := strings.Repeat("r", maxResultSummaryRunes+100)
+	cutResult := strings.Repeat("r", maxResultSummaryRunes) + "…"
 
 	tests := []struct {
 		name        string
@@ -95,6 +104,36 @@ func TestMapEventOutbound(t *testing.T) {
 			wantPayload: protocol.ToolResultPayload{
 				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-2",
 				IsError: false, ResultSummary: "all good",
+			},
+			wantOK: true,
+		},
+		{
+			name: "ToolUpdate failed -> over-cap error result truncated",
+			ev: turnevent.ToolUpdate{
+				ToolCallID: "tool-5",
+				Status:     turnevent.ToolStatusFailed,
+				Content:    turnevent.TextContent{Text: overCapResult},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-5",
+				IsError: true, ResultSummary: cutResult,
+			},
+			wantOK: true,
+		},
+		{
+			name: "ToolUpdate completed -> over-cap result truncated at the same bound",
+			ev: turnevent.ToolUpdate{
+				ToolCallID: "tool-6",
+				Status:     turnevent.ToolStatusCompleted,
+				Content:    turnevent.TextContent{Text: overCapResult},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-6",
+				IsError: false, ResultSummary: cutResult,
 			},
 			wantOK: true,
 		},
@@ -1020,7 +1059,12 @@ func TestMapEventToolUseEmptyInputOnTheWire(t *testing.T) {
 func TestResultSummary(t *testing.T) {
 	t.Parallel()
 
-	long := strings.Repeat("b", 300)
+	// Expressed against the constant, never a bare literal: the row exercises the
+	// cut, so it has to move with the bound rather than pin a number (#1680). The
+	// multibyte fixture is the rune-safety guard on the COMPOSITION at the new
+	// bound — truncate is unmodified and TestTruncate already covers it directly.
+	long := strings.Repeat("b", maxResultSummaryRunes+300)
+	longMultibyte := strings.Repeat("日", maxResultSummaryRunes+10)
 
 	tests := []struct {
 		name string
@@ -1029,18 +1073,108 @@ func TestResultSummary(t *testing.T) {
 	}{
 		{"nil -> empty", nil, ""},
 		{"text verbatim", turnevent.TextContent{Text: "done"}, "done"},
-		{"text truncated", turnevent.TextContent{Text: long}, strings.Repeat("b", maxSummaryLen) + "…"},
+		{"text truncated", turnevent.TextContent{Text: long}, strings.Repeat("b", maxResultSummaryRunes) + "…"},
+		{"multibyte text cut on a rune boundary", turnevent.TextContent{Text: longMultibyte}, strings.Repeat("日", maxResultSummaryRunes) + "…"},
 		{"diff -> path", turnevent.DiffContent{Path: "/tmp/x.go"}, "/tmp/x.go"},
 		{"terminal -> reference", turnevent.TerminalContent{TerminalID: "term-9"}, "terminal term-9"},
+	}
+
+	// head keeps a failure legible: the over-cap fixtures are 10000+ runes and
+	// dumping two of them whole buries the mismatch it is meant to show.
+	head := func(s string) string {
+		r := []rune(s)
+		if len(r) <= 40 {
+			return string(r)
+		}
+		return string(r[:40]) + "…"
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := resultSummary(tt.in); got != tt.want {
-				t.Fatalf("resultSummary(%#v): got %q, want %q", tt.in, got, tt.want)
+			got := resultSummary(tt.in)
+			if got != tt.want {
+				t.Fatalf("resultSummary: got %d runes %q, want %d runes %q",
+					utf8.RuneCountInString(got), head(got), utf8.RuneCountInString(tt.want), head(tt.want))
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("resultSummary produced invalid UTF-8: %q", head(got))
 			}
 		})
+	}
+}
+
+// maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
+// (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
+// purpose, for the reason protocol's constant of the same name states: nothing in
+// internal/turnbridge enforces the cap — the transport does — so a package-level
+// constant here would imply an enforcement this package does not perform.
+const maxV2AppEnvelope = 65519
+
+// TestToolResultPayload_FitV2EnvelopeCap drives the REAL resultSummary with the
+// largest result in the measured corpus and proves the serialised envelope fits
+// under the v2 application-envelope cap. Per-field caps do not compose into an
+// envelope guarantee on their own, so this is measured rather than argued — the
+// statement protocol's TestToolUsePayload_FitV2EnvelopeCap makes, and this is
+// that test's shape with one deliberate difference: it lives HERE, in the
+// producer's package, so that maxResultSummaryRunes is what the measurement
+// stands on. A hand-built payload over in protocol cannot call the unexported
+// resultSummary at all and would stay green with the constant raised to 16000 —
+// the exact shape that let #1678's maxInputFields ship with no test standing on
+// it (docs/knowledge/features/turnbridge-package.md).
+//
+// The fill is '<', not 'a': encoding/json has SetEscapeHTML on by default, so one
+// such rune costs six bytes on the wire and an 'a' fill measures 10309 B where
+// this measures 60000-odd — it would pass a cap that is 47% over. Here '<' is the
+// REALISTIC case rather than the contrived one, which is more than the precedent
+// tests can say: a tool result is raw command output or file contents, and
+// reading a TSX or HTML file is an ordinary '<'-dense result.
+//
+// The three identity fields are filled hostilely because nothing bounds them —
+// conversation_id and turn_id are daemon-supplied, tool_use_id is claude's value
+// verbatim — so the guarantee is an assumption worth stating rather than an
+// enforced cap. 64 runes is roughly 11x the longest observed.
+func TestToolResultPayload_FitV2EnvelopeCap(t *testing.T) {
+	t.Parallel()
+
+	fill := func(n int) string { return strings.Repeat("<", n) }
+
+	// 64525 is the largest tool result in the measured corpus (#1680). The
+	// producer applies no cap of its own, so resultSummary is what cuts it.
+	summary := resultSummary(turnevent.TextContent{Text: fill(64525)})
+	if n := utf8.RuneCountInString(summary); n != maxResultSummaryRunes+1 {
+		t.Fatalf("precondition: summary is %d runes, want %d (the cap plus one ellipsis)", n, maxResultSummaryRunes+1)
+	}
+
+	// IsError is explicitly false because that is the worst case: "false" costs
+	// one byte more on the wire than "true", and the field is never omitted.
+	body, err := json.Marshal(protocol.ToolResultPayload{
+		ConversationID: fill(64),
+		TurnID:         fill(64),
+		ToolUseID:      fill(64),
+		IsError:        false,
+		ResultSummary:  summary,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	// Worst-case envelope too: max-uint64 ids and a populated EventID, so the
+	// outer frame costs as much as it ever can.
+	eventID := ^uint64(0)
+	out, err := json.Marshal(protocol.Envelope{
+		ID:      ^uint64(0),
+		Type:    protocol.TypeToolResult,
+		TS:      time.Date(2026, 8, 21, 10, 33, 18, 0, time.UTC),
+		Payload: body,
+		EventID: &eventID,
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	t.Logf("tool_result at the result cap: %d B, %.1f%% of the %d-byte v2 application-envelope cap",
+		len(out), float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope)
+	if len(out) >= maxV2AppEnvelope {
+		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
 	}
 }
 
