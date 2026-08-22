@@ -862,6 +862,182 @@ func TestModelAnnouncedType_IsNotClaudesSubtype(t *testing.T) {
 	}
 }
 
+// TestModelListPayload_NilModelsNormalises covers the case no fixture could —
+// and here that is the ONLY path there is. Unmarshalling "models":[] always
+// yields a non-nil empty slice, so the nil branch is reachable only by
+// constructing the value directly, and this slice (#1704) ships no fixture at all
+// (internal/protocol/testdata/ is #1705's). A producer (#1693) mapping an empty
+// or absent claude models array would hand this type a nil slice and, without
+// normalisation, would ship "models":null to a phone.
+//
+// Both the value and pointer forms are checked because a pointer-receiver
+// marshaller would silently miss the value path roundTripEnvelope takes. This is
+// TestBackgroundTaskRosterPayload_NilTasksNormalises's shape.
+func TestModelListPayload_NilModelsNormalises(t *testing.T) {
+	p := ModelListPayload{ConversationID: "c1"}
+	if p.Models != nil {
+		t.Fatalf("precondition: Models must be nil, got %v", p.Models)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", p},
+		{"pointer", &p},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if bytes.Contains(out, []byte(`"models":null`)) {
+				t.Errorf("nil Models marshalled to null: %s", out)
+			}
+			if !bytes.Contains(out, []byte(`"models":[]`)) {
+				t.Errorf("nil Models did not normalise to []: %s", out)
+			}
+		})
+	}
+
+	// The normalisation must not mutate the receiver's copy back into the caller.
+	if p.Models != nil {
+		t.Errorf("MarshalJSON mutated the receiver: Models is now %v", p.Models)
+	}
+}
+
+// TestModelOption_NilSliceEncodings pins the asymmetry between the entry's two
+// list fields, which no fixture could pin either: decoding [] always yields a
+// non-nil slice, and this slice ships no fixture at all. EffortLevels normalises
+// nil to [], TruncatedFields does not and stays null.
+//
+// truncated_fields is pinned at all precisely BECAUSE it ships no fixture — the
+// route BackgroundTaskRosterPayload's second roster entry takes is not open here.
+// An unpinned null is one that a later omitempty, or a third normaliser copied
+// from the field above it, silently turns into something else.
+//
+// The nested-in-payload subtest proves the entry marshaller fires through the
+// payload's, and its trailing assertion is the only thing that would catch a
+// payload marshaller normalising entries IN PLACE — that would reach through
+// p.Models[i] into the caller's backing array.
+func TestModelOption_NilSliceEncodings(t *testing.T) {
+	o := ModelOption{Value: "sonnet"}
+	if o.EffortLevels != nil || o.TruncatedFields != nil {
+		t.Fatalf("precondition: both slices must be nil, got %v / %v", o.EffortLevels, o.TruncatedFields)
+	}
+
+	assertEncodings := func(t *testing.T, out []byte) {
+		t.Helper()
+		if bytes.Contains(out, []byte(`"effort_levels":null`)) {
+			t.Errorf("nil EffortLevels marshalled to null: %s", out)
+		}
+		if !bytes.Contains(out, []byte(`"effort_levels":[]`)) {
+			t.Errorf("nil EffortLevels did not normalise to []: %s", out)
+		}
+		if !bytes.Contains(out, []byte(`"truncated_fields":null`)) {
+			t.Errorf("nil TruncatedFields must stay null, not normalise: %s", out)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", o},
+		{"pointer", &o},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			assertEncodings(t, out)
+		})
+	}
+
+	t.Run("nested in payload", func(t *testing.T) {
+		p := ModelListPayload{ConversationID: "c1", Models: []ModelOption{o}}
+		out, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		assertEncodings(t, out)
+		if p.Models[0].EffortLevels != nil {
+			t.Errorf("payload marshalling mutated the caller's backing array: EffortLevels is now %v", p.Models[0].EffortLevels)
+		}
+	})
+
+	// The entry's own normalisation must not write back through the receiver.
+	if o.EffortLevels != nil {
+		t.Errorf("MarshalJSON mutated the receiver: EffortLevels is now %v", o.EffortLevels)
+	}
+}
+
+// TestModelListType_IsNotClaudesVocabulary pins the translation layer this frame
+// exists to preserve, as its thinking_progress, rate_limited and model_announced
+// siblings above do. The daemon is the ONE place a claude rename lands; naming
+// the wire type after claude's own `initialize` subtype, or after its `models`
+// array key, would undo that.
+//
+// The model_announced sibling's trap is this frame's too, and sharper here: a
+// strings.Contains(TypeModelList, "model") check would be RED against the correct
+// name — "model" is this frame's subject noun and the daemon's own word. The
+// discriminating words are claude's subtype "init" and its array key "models",
+// and "model_list" contains neither.
+//
+// The exact-equality pin is the half that fails a WRONG name rather than merely a
+// claude-derived one: the negative checks alone leave every other wrong name
+// green.
+func TestModelListType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeModelList == "initialize" {
+		t.Errorf("wire type is claude's control_request subtype %q; it must be the daemon's own name", TypeModelList)
+	}
+	if strings.Contains(TypeModelList, "init") {
+		t.Errorf("wire type %q is derived from claude's subtype (contains %q)", TypeModelList, "init")
+	}
+	if strings.Contains(TypeModelList, "models") {
+		t.Errorf("wire type %q is derived from claude's array key (contains %q)", TypeModelList, "models")
+	}
+	// The exact pin, naming what the frame IS to a client rather than anything of
+	// claude's.
+	if TypeModelList != "model_list" {
+		t.Errorf("wire type: got %q, want %q", TypeModelList, "model_list")
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own
+	// id/ts and would dilute the check. These are regression pins: non-discriminating
+	// today by construction, their job is to go red the day someone wires claude's
+	// camelCase entry keys back in or adds a field this shape deliberately drops.
+	// "models" is NOT in the list and must not be: it is this payload's own wire
+	// key, so checking for it would be red against the correct shape.
+	//
+	// Value is opus[1m] deliberately — one of the two measured values
+	// internal/relay's validModel rejects — so this fixture-free test carries the
+	// hazard ModelOption's Value paragraph describes.
+	body, err := json.Marshal(ModelListPayload{
+		ConversationID: "c1",
+		Models: []ModelOption{{
+			ResolvedModel:    "claude-opus-4-5-20251101",
+			Value:            "opus[1m]",
+			DisplayName:      "Opus (1M context)",
+			EffortLevels:     []string{"low", "medium", "high", "xhigh", "max"},
+			SupportsAutoMode: true,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{
+		"resolvedModel", "displayName", "supportsEffort",
+		"supportedEffortLevels", "supportsAutoMode", "supportsFastMode",
+		"description",
+	} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's entry key or a deliberately-dropped field %q: %s", key, body)
+		}
+	}
+}
+
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
 // purpose: nothing in internal/protocol enforces the cap — the transport does —
