@@ -2360,9 +2360,46 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched. See
   `docs/specs/architecture/1696-initialize-capture-fixture-name-lock.md` for
-  the full design and the per-mutant table. #1697 (unbuilt at time of
-  writing) is the write half: the fixture record and the writer that joins
-  this name under a caller-supplied directory.
+  the full design and the per-mutant table. The write half is #1702 (#1697,
+  named here at the time, was superseded and closed before it was built).
+
+- `initialize_control_record_test.go` (#1701) — **the record half of the
+  `initialize` fixture family: fixes the JSON contract #1688's live capture,
+  #1690's decoder and #1692's fake all read, and pins the fixture standing in
+  for it against the two ways it could degenerate silently.**
+  `initControlFixtureRecord` carries the 22 fields the capture needs (no
+  `env` field; the 18 shared with `setModeFixtureRecord` carry that record's
+  JSON tags and Go types unchanged), and `initControlFullRecord` returns a
+  **fresh pointer per call** rather than a package-level `var`, so #1700's
+  parallel subtests mutating the record are not a `-race` data race. The
+  hand-written `initControlFixtureFields` listing is what #1702 zips against
+  both sides of its round trip instead of restating the field set; its
+  length is asserted against the struct's `reflect` field count, so a field
+  added later with no row reddens instead of going silently unchecked.
+  Registered in `finOfflineExecBans` with #1696's seventeen names copied
+  whole — this file performs no I/O in either direction, unlike #1702's
+  writer, which is why the two files need separate, differently-scoped
+  entries rather than one shared one.
+
+  **One lesson that outlives this ticket:**
+  - **A duplicate-name row in a hand-written listing reddens more than the
+    property it was written to test, so a mutant table has to be checked by
+    failure *message*, not by which subtest went red.** Listing `argv` twice
+    while dropping `prompts` was predicted to redden only the
+    listing-covers-every-field subtest's uniqueness pass. It also puts two
+    identical `[]string` rows into the same-typed-fields-distinct
+    comparison, so that subtest fires as collateral — while the length check
+    inside the first subtest stays green the whole time, still counting 22
+    rows. Two subtests firing where one was predicted is invisible if you
+    only read red/green; it shows up only in what each failure message says
+    caused it. Any future mutant table in this family that predicts "exactly
+    one subtest reds" needs its message read, not just its count.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1701-initialize-capture-fixture-record.md` for
+  the full design and the per-field distinctness-group table. #1702
+  (unbuilt at time of writing) is the write half: the writer and the round
+  trip that reuses this file's record and listing.
 
 ## Test infrastructure
 

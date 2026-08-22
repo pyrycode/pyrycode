@@ -166,6 +166,43 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1701. The entry above, copied whole — same seventeen names, for the reason
+	// that entry states: like #1696's file, this one performs no I/O in EITHER
+	// direction. It builds a record and asserts on its values. Do NOT widen it
+	// toward #1702's narrower twelve, and do not narrow it toward #1662's: #1702
+	// is the writer half and legitimately needs os.WriteFile, os.Create,
+	// os.ReadFile, os.ReadDir and filepath.Glob, which is why it gets its own
+	// file. This map is keyed by file name and each file gets exactly one entry,
+	// so folding both slices into one file would mean shipping the intersection
+	// and losing this file's defining property.
+	//
+	// captureClaudeVersion matters MORE here than it did in #1696. It is the
+	// package's own direct `claude --version` exec and it returns (raw, token) —
+	// which is both of initControlFixtureRecord's version fields at once — so the
+	// fully-populated fixture gives a developer two separate pulls toward the one
+	// call that hands over real values for both, and
+	// `versionRaw, versionToken := captureClaudeVersion(t)` is already the literal
+	// line four sibling files in this package use. It t.Fatalf's rather than
+	// skipping, so it would not fake a pass; what it would destroy is this file's
+	// defining property, that it settles with no claude binary at all — and it
+	// would take the slug guard down with it, because a real token is slug-clean
+	// and TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken
+	// would then redden against honest code, with the check below green the whole
+	// time. Do not harmonise it away against the older siblings that omit it.
+	//
+	// os.LookupEnv is the two-value form of os.Getenv reading the same
+	// environment, which here carries CLAUDE_CODE_OAUTH_TOKEN and
+	// ANTHROPIC_API_KEY; #1662's entry omits it, #1696 added it as a deliberate
+	// superset, and this follows #1696. exec.Command and exec.CommandContext were
+	// considered and declined for #1696's reason: this file imports no os/exec,
+	// and the package's own exec helpers are already covered above.
+	"initialize_control_record_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
