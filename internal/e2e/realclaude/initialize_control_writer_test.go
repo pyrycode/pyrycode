@@ -12,19 +12,23 @@ package realclaude
 // is COMPLETE (no field silently dropped on the way to disk), BOUNDED (no
 // unbounded credential-bearing capture) and ATOMIC (no half-written residue
 // stranded for a later commit). None of the three needs a claude binary. This
-// file settles COMPLETE and ATOMIC.
+// file settles all three.
 //
 // # What this file deliberately is not
 //
 // It adds no field to initControlFixtureRecord and mints no second fixture —
-// both are #1701's, and this file reads them. It does NOT prove the bound holds:
+// both are #1701's, and this file reads them.
+//
+// The scope limit that remains is the ROUND TRIP's, not the file's:
 // initControlFullRecord's stderr_capture is well under stderrFixtureCap, so
-// writeInitControlFixture's capFixtureCapture call is a no-op here and the row
-// compares equal on both sides. #1700 mutates the record to an over-cap capture
-// and is what proves BOUNDED. The writer's no-mutation contract is structurally
-// the same claim — observing it needs a capture the cap actually shortens — so it
-// is #1700's too, exactly as TestPoolRevokeFixture_WriterCapsChildOutputCapture
-// carries the sibling's rather than its round trip. No live run: that is #1688.
+// writeInitControlFixture's capFixtureCapture call is a no-op inside
+// TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry and that row
+// compares equal on both sides. TestInitControlFixture_WriterCapsStderrCapture
+// mutates the record to an over-cap capture and is what proves BOUNDED. The
+// writer's no-mutation contract is structurally the same claim — observing it
+// needs a capture the cap actually shortens — so it rides there too, exactly as
+// TestPoolRevokeFixture_WriterCapsChildOutputCapture carries the sibling's rather
+// than its round trip. No live run: that is #1688.
 //
 // # What the round trip catches, and what it cannot
 //
@@ -86,7 +90,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // --- the writer -----------------------------------------------------------------
@@ -112,7 +118,8 @@ import (
 // shares every slice header with the caller's record, so a future writer that
 // capped one of the slice-valued fields would be writing through the caller's
 // backing array from behind a copy that looks defensive. Nothing here proves the
-// cap bound or the no-mutation contract; both are #1700's.
+// cap bound or the no-mutation contract; both are
+// TestInitControlFixture_WriterCapsStderrCapture's.
 //
 // Failure is always t.Fatalf naming claude_version and the error and NOTHING
 // ELSE: a %+v of the record would move up to stderrFixtureCap bytes of child
@@ -214,7 +221,7 @@ func compactInitControlRawRows(t *testing.T, rows []initControlFixtureField) ([]
 // ship in TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken and
 // are preconditions this test consumes rather than assertions it repeats — and
 // there is no cap row, because the fixture's capture is far under the cap and
-// that row is #1700's whole subject.
+// that row is TestInitControlFixture_WriterCapsStderrCapture's whole subject.
 func TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) {
 	t.Parallel()
 
@@ -246,8 +253,8 @@ func TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 				// worth far more than protecting a 53-byte fixture string. #1688
 				// fills this same record from a live child and must not inherit
 				// the pattern — its stderr_capture is real, bounded child output,
-				// and #1700's cap rows report lengths and a short prefix for
-				// exactly that reason.
+				// and TestInitControlFixture_WriterCapsStderrCapture's rows report
+				// lengths and a short prefix for exactly that reason.
 				t.Errorf("#1702: %s did not survive the round trip: wrote %v, read back %v; "+
 					"#1688 commits this record as its only durable trace",
 					want[i].name, want[i].value, have[i].value)
@@ -294,5 +301,180 @@ func TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 			"bytes went somewhere the caller never chose, and a differently-spelled entry means "+
 			"the writer formats its own name instead of minting through initControlFixtureName",
 			names, wantName)
+	}
+}
+
+// --- the cap ------------------------------------------------------------------------
+
+// TestInitControlFixture_WriterCapsStderrCapture is #1700: writeInitControlFixture
+// bounds the free-text capture, so #1688 cannot forget to. stderr_capture absorbs
+// unbounded text from a process this repo does not control, and the file it lands
+// in gets committed.
+//
+// capFixtureCapture is already proven by #1662's own cap test. What is proven here
+// is different and unreachable by calling that helper: that THIS writer calls it,
+// on THE RIGHT FIELD, and that the bound survives a write and a read-back FROM
+// DISK. Every assertion therefore runs over the bytes read out of the written file
+// — a direct call to capFixtureCapture inside an assertion collapses the
+// cap-omitted and wrong-field mis-implementations to green, because it cannot
+// catch a writer that never applied the cap at all. Every length assertion is on
+// len(), never on rune count: the cap is a byte cap and truncateString slices
+// bytes.
+//
+// # Why two rows, and why neither is dead weight
+//
+// Each row is the sole red for a distinct mis-implementation, measured through
+// json.MarshalIndent and back:
+//
+//   - Calling truncateString(s, stderrFixtureCap) directly instead of
+//     capFixtureCapture: the multi-byte row reads back at 8194, over the bound the
+//     writer states, and is RED — SOLE. encoding/json does not error on invalid
+//     UTF-8, it substitutes U+FFFD at three bytes per invalid byte, so a byte cap
+//     with no rune-boundary trim reads back OVER its own cap. The ASCII row, where
+//     a byte cut is a rune cut, stays perfectly green.
+//   - A trim that removes one byte too many: the ASCII row reads back at 8191 and
+//     is RED — SOLE. That is why the ASCII assertion must be EXACT while the
+//     multi-byte one can only be a RANGE — the rune-boundary trim legitimately
+//     removes up to utf8.UTFMax-1 bytes, so a range is the strongest claim the
+//     multi-byte row can make and an over-trim hides inside it.
+//   - A writer that caps the caller's record instead of a copy: only the
+//     no-mutation check is RED — SOLE.
+//
+// There is deliberately no under-cap row. Both capFixtureCapture and
+// truncateString carry a len(s) <= max early return, so an under-cap input reddens
+// nothing; #1662's header records that as measured. Two cases, not three.
+//
+// # Do not print the capture
+//
+// Failure messages report LENGTHS, the cap constant, the row's diagnosis and at
+// most a 16-byte prefix. A %q of want/got here dumps up to stderrFixtureCap bytes
+// of child output into an unbounded -v run log, which defeats the field's entire
+// purpose. The 16-byte prefix is safe only because this test's literals are
+// synthetic; #1688 must not inherit even that much.
+func TestInitControlFixture_WriterCapsStderrCapture(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		capture string
+		// precheck asserts a property of this row's OWN literal that the row's
+		// ability to discriminate depends on. nil where the row has none.
+		//
+		// This is a deliberate divergence from
+		// TestPoolRevokeFixture_WriterCapsChildOutputCapture, which guards the
+		// same property with an `if tc.name == …` branch in the loop body. A
+		// name-string match stops firing silently if anyone renames the row,
+		// which is exactly the class of silent degradation the control exists to
+		// prevent.
+		precheck func(t *testing.T, capture string)
+		check    func(t *testing.T, capture, back string)
+	}{
+		{
+			name:    "over_cap_ascii",
+			capture: strings.Repeat("A", stderrFixtureCap+1024),
+			check: func(t *testing.T, capture, back string) {
+				// EXACT, not a range: this is the sole red for a trim that removes
+				// one byte too many, and a range here would swallow it.
+				if len(back) != stderrFixtureCap {
+					t.Errorf("#1700: a %d-byte capture reads back at %d bytes, want exactly %d; "+
+						"the writer leaves the cap to its caller, or trims past the boundary, "+
+						"and #1688 then commits an unbounded credential-bearing dump",
+						len(capture), len(back), stderrFixtureCap)
+				}
+			},
+		},
+		{
+			// One ASCII byte then two-byte runes, so rune starts land on odd byte
+			// indices and the byte at stderrFixtureCap is a CONTINUATION byte —
+			// truncateString alone would split a rune here.
+			name:    "over_cap_multibyte",
+			capture: "A" + strings.Repeat("é", 5000),
+			precheck: func(t *testing.T, capture string) {
+				// The vacuity control, and it must Fatalf rather than skip: if a
+				// later edit to the literal moves the boundary onto a rune start,
+				// truncateString alone no longer splits a rune, the
+				// direct-truncateString mis-implementation goes green, and this
+				// row proves nothing while still passing. A row that cannot
+				// discriminate is a broken instrument, not a passing test.
+				if utf8.RuneStart(capture[stderrFixtureCap]) {
+					t.Fatalf("#1700: byte %d of this row's %d-byte capture starts a rune, so "+
+						"truncateString alone would not split one and the rune-boundary trim "+
+						"is never exercised", stderrFixtureCap, len(capture))
+				}
+			},
+			check: func(t *testing.T, capture, back string) {
+				// A RESTATEMENT, not coverage for any mis-implementation. Measured:
+				// the read-back is valid UTF-8 under every one of them, because
+				// that same U+FFFD substitution happens on the way to disk — a
+				// split rune surfaces as a length and prefix violation, never as an
+				// invalid one. It is carried because it names the failure mode the
+				// range check below actually detects.
+				if !utf8.ValidString(back) {
+					t.Errorf("#1700: the %d-byte read-back is not valid UTF-8; the writer split a "+
+						"rune", len(back))
+				}
+				if len(back) > stderrFixtureCap || len(back) < stderrFixtureCap-(utf8.UTFMax-1) {
+					t.Errorf("#1700: a %d-byte multi-byte capture reads back at %d bytes, want "+
+						"within [%d, %d]; encoding/json substitutes U+FFFD per invalid byte, so a "+
+						"byte cap with no rune-boundary trim reads back OVER the cap it states",
+						len(capture), len(back), stderrFixtureCap-(utf8.UTFMax-1), stderrFixtureCap)
+				}
+				if !strings.HasPrefix(capture, back) {
+					t.Errorf("#1700: the %d-byte read-back (first bytes %q) is not a prefix of the "+
+						"original; the writer rewrote content rather than trimming a split tail, "+
+						"and a substituted U+FFFD is not in the original either",
+						len(back), back[:min(16, len(back))])
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if tc.precheck != nil {
+				tc.precheck(t, tc.capture)
+			}
+
+			// INSIDE the subtest. The fresh pointer per call is why
+			// initControlFullRecord is a function and not a package-level var:
+			// hoisting this to the parent makes the assignment below a -race data
+			// race across two parallel subtests, which its doc comment predicts.
+			rec := initControlFullRecord()
+			rec.StderrCapture = tc.capture
+			// A fresh tempdir per row, and not stylistic: both rows mint the SAME
+			// filename from the same ClaudeVersion, so a shared directory would
+			// have them overwrite each other's artifact under a racing read-back.
+			path := writeInitControlFixture(t, t.TempDir(), rec)
+
+			// The no-mutation contract, checked BEFORE the read-back: the writer
+			// caps a copy, so the caller's record still holds everything it held.
+			//
+			// Scoped to the capped field deliberately. writeInitControlFixture's
+			// `out := *rec` is a shallow copy sharing every slice header with the
+			// caller, sufficient today only because the sole mutation is to a
+			// string field. No mis-implementation above violates the slice-valued
+			// fields; the shallow-copy hazard is a note for whoever caps a slice
+			// field later, not something to widen this check for.
+			if len(rec.StderrCapture) != len(tc.capture) {
+				t.Errorf("#1700: the writer left the caller's record at %d bytes, want the "+
+					"original %d; it caps in place, so an assertion against the caller's record "+
+					"compares a mutated value with its own decode and proves nothing",
+					len(rec.StderrCapture), len(tc.capture))
+			}
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("#1700: read back the capped fixture for claude_version %q: %v",
+					rec.ClaudeVersion, err)
+			}
+			var back initControlFixtureRecord
+			if err := json.Unmarshal(data, &back); err != nil {
+				t.Fatalf("#1700: decode the capped fixture for claude_version %q: %v",
+					rec.ClaudeVersion, err)
+			}
+			tc.check(t, tc.capture, back.StderrCapture)
+		})
 	}
 }
