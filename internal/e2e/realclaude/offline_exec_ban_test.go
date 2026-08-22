@@ -125,6 +125,47 @@ var finOfflineExecBans = map[string][]string{
 		"probeClaudeVersion", "os.Getenv", "os.Environ",
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 	},
+	// #1696. Shaped like inband_bypass_revoke_names_test.go's entry above — that
+	// file performs no I/O in either direction either — with three additions and
+	// the same 4+2 split #1662's entry states: the first four keep a SKIP out
+	// (resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body,
+	// after `=== RUN` is printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`), the environment readers are the credential guard.
+	//
+	// captureClaudeVersion is in no sibling entry and is here because this file's
+	// SUBJECT is version tokens: it is the package's own direct `claude --version`
+	// exec and it returns precisely initControlFixtureName's input, so it is the
+	// exec a developer is most likely to reach for thinking "use the real token".
+	// It fails loudly rather than skipping, so it would not fake a pass; what it
+	// would destroy is this file's defining property, that it settles with no
+	// claude binary at all. Do not harmonise it away against the siblings.
+	//
+	// os.LookupEnv is the two-value form of os.Getenv reading the same
+	// environment, so leaving it out is a hole in the credential guard as the
+	// sibling entries have it. Added here as a deliberate superset; retrofitting
+	// the siblings is not this ticket's. exec.Command and exec.CommandContext were
+	// declined: this file imports no os/exec, and the package's own exec helpers —
+	// the ones reachable without a new import — are already covered above.
+	//
+	// The packageDir group is the trio plus writeFixture, for the reason the two
+	// entries above state: the check is an AST identifier match, so a file calling
+	// a wrapper reaches packageDir transitively while never naming it. The os
+	// read/write entries and filepath.Glob close the relative-path hazard — `go
+	// test` runs in the package source directory, so a relative
+	// os.WriteFile("testdata/…") reaches the committed fixtures without naming any
+	// wrapper — and filepath.Glob is what keeps this file's controls synthetic
+	// literals rather than a directory listing. t.TempDir is absent for #1661's
+	// reason rather than #1651's: this file writes nothing and needs no directory.
+	//
+	// filepath.Match, filepath.Join and filepath.Dir are unaffected — a dotted
+	// entry is matched as a selector, so filepath.Glob bans only filepath.Glob.
+	"initialize_control_names_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
