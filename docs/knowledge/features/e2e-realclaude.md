@@ -2459,9 +2459,42 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched. See
   `docs/specs/architecture/1702-initialize-capture-fixture-writer-and-round-trip.md`
-  for the full design and the twelve-mutant table. This closes the
-  `initialize` fixture family's complete/atomic half; bounded is #1700,
-  which reads this writer.
+  for the full design and the twelve-mutant table. This closed the
+  `initialize` fixture family's complete/atomic half; bounded closed in #1700,
+  below, which adds a fourth test to this same file and updates the file's own
+  COMPLETE/ATOMIC/BOUNDED self-description and in-file pointers accordingly.
+
+- **`initialize_control_writer_test.go` (#1700 — bounded, same file as
+  above)** — `TestInitControlFixture_WriterCapsStderrCapture` proves the
+  `capFixtureCapture` call on the bytes the writer actually leaves **on
+  disk**: an over-cap ASCII row asserted exactly at `stderrFixtureCap`, and an
+  over-cap multi-byte row (its byte at the cap is a UTF-8 continuation byte,
+  enforced by a `t.Fatalf` vacuity control on the literal itself) asserted as
+  a range plus a prefix check. Each row also confirms the caller's record
+  came back unmutated. Mutation-verified via `go test -overlay` (no worktree
+  writes): the cap-omitted, direct-`truncateString`, over-trim, and
+  caps-the-caller's-record mutants each have exactly one sole-red instrument
+  among the two rows and the no-mutation check.
+
+  **Two lessons that outlive this ticket:**
+  - **A "sole red" claim from the spec is still worth re-measuring, not
+    trusting.** Re-running the mutant matrix surfaced that the multi-byte
+    row's *prefix* clause reddens alongside its *range* clause on the
+    direct-`truncateString` mutant — the substituted U+FFFD is not in the
+    original capture, so both clauses fire together. The row carries two
+    independent discriminators, not one; a future simplification to a single
+    length check would silently drop one of them.
+  - **A hand-rolled `perl -pe 'script' -0777 file` mutation one-liner can
+    silently no-op.** Perl only consumes flags that appear *before* the
+    script argument, so `-0777` placed after it is read as a filename
+    instead, and the "mutated" file comes back byte-identical to its source
+    — a false negative indistinguishable from a dead assertion once the test
+    still passes. `diff -q` each generated mutant against its source and fail
+    loudly on a match; that check is what caught it here.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1700-initialize-fixture-writer-cap.md` for the
+  full design and the five-row mutant matrix.
 
 ## Test infrastructure
 
