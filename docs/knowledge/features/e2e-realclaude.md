@@ -2313,6 +2313,57 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched.
 
+- `initialize_control_names_test.go` (#1696) — **the fourth fixture-name lock in
+  this package, and the first for a single-input namer.** #1688 will spend live
+  tokens capturing claude's `initialize` `control_request`/`models` round trip;
+  this ticket mints the filename those bytes land under —
+  `initialize_control_v<slug>.json` via `initControlFixtureName`, reusing
+  #1661's `poolRevokeNamePattern` row type and `anchorFixtureName` — and proves,
+  with no claude binary and no disk I/O, that no minted name can join
+  `fixtureGlob`, `dropcapFixtureGlob`, or #1595's `setModeFamilyGlob`.
+  `poolRevokeFixtureName` (#1661) carries an arm parameter because #1643 had
+  three arms; this capture has one, so the namer takes one input and the
+  lock table collapses to tokens × 1. Registered in `finOfflineExecBans` with
+  #1661's list plus `writeFixture`, `captureClaudeVersion`, and
+  `os.LookupEnv` — the middle one because it is the package's own
+  `claude --version` exec and returns exactly this namer's input, making it
+  the exec a developer touching version tokens is likeliest to reach for.
+
+  **Two lessons that outlive this ticket:**
+  - **Collapsing an input dimension can silently empty the hazard shape a
+    lock measures.** #1661 covered path-separator escape through its
+    `hostileArms` list, not its token list; #1643's arm names were the
+    separator-bearing inputs, not its version tokens. Dropping the arm
+    parameter here was the ticket's size win, and it also removed nearly
+    every `/`-bearing input from the table — a token list of plausible
+    `claude --version` strings plus `..` and `""` leaves the whole file green
+    against a namer that never calls `versionSlug` (confirmed by mutation:
+    the raw-interpolation mutant reddens only on tokens carrying `/`, and
+    `..` is not among them — unslugged, it mints a clean
+    `initialize_control_v...json`). When a split drops a dimension a
+    predecessor used to cover a property, re-derive which inputs the
+    surviving assertions still redden on; don't inherit the predecessor's
+    table and assume the coverage came with it.
+  - **`-overlay` cannot verify a check that parses source at run time**, and
+    this is a different reason than #1634's daemon-side overlay gap above.
+    `TestFinOfflineFilesReachNoExecHelper` calls `parser.ParseFile` with a
+    `nil` source, so it reads the registered file off disk at test run time;
+    `-overlay` is a build-time mapping consumed by the `go` command and
+    never interposes on the test binary's own reads. A banned call injected
+    via overlay compiles cleanly while the check parses the unmodified file
+    and stays green — a misleading pass reading as "the ban does not bite."
+    Verifying a ban entry in this file needs a real edit and a real revert,
+    confirmed byte-identical against the pristine file before committing;
+    `-overlay` stays correct for the three ordinary compiled-code namer
+    mutants above it. Any future AST-parses-off-disk check in this package
+    inherits the same caveat.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1696-initialize-capture-fixture-name-lock.md` for
+  the full design and the per-mutant table. #1697 (unbuilt at time of
+  writing) is the write half: the fixture record and the writer that joins
+  this name under a caller-supplied directory.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
