@@ -2397,9 +2397,71 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched. See
   `docs/specs/architecture/1701-initialize-capture-fixture-record.md` for
-  the full design and the per-field distinctness-group table. #1702
-  (unbuilt at time of writing) is the write half: the writer and the round
-  trip that reuses this file's record and listing.
+  the full design and the per-field distinctness-group table. The write half —
+  the writer and the round trip that reuses this file's record and listing —
+  is `initialize_control_writer_test.go` (#1702), described next.
+
+- `initialize_control_writer_test.go` (#1702) — **the write half of the
+  `initialize` fixture family: the directory-injectable, atomic writer for
+  #1701's record, and the offline round trip proving no field is dropped on
+  the way.** `writeInitControlFixture` mirrors #1662's
+  `writePoolRevokeFixture` step for step — `dir` parameter, `os.MkdirAll`,
+  name minted from `out.ClaudeVersion` (never `ClaudeVersionRaw`, and never
+  self-formatted) through #1696's `initControlFixtureName`, `MarshalIndent`,
+  `.tmp` write, `os.Rename` — and caps `stderr_capture` on a shallow copy
+  (`out := *rec`), whose doc comment states the caveat explicitly: the copy
+  shares every slice header with the caller, so it is safe only because the
+  sole capped field is a `string`; a future writer that caps a slice-valued
+  field would be mutating the caller's backing array through a copy that
+  looks defensive. `compactInitControlRawRows` normalises the record's three
+  raw-JSON-bearing rows (`control_request_sent`, `control_responses`,
+  `stdout_events`) by **Go type**, not by name — a `json.RawMessage` case and
+  a `[]json.RawMessage` case — so a fourth raw-JSON field added later to
+  #1701's record is picked up automatically; the round trip pins that
+  type-scoped selection separately, asserting the touched-name set equals
+  exactly those three, so a normaliser silently widened or narrowed still
+  reddens even though the type switch itself never needs editing. Registered
+  in `finOfflineExecBans` with the same twelve names as #1696 and #1701 carry
+  minus their five I/O names (`filepath.Glob`, `os.ReadFile`, `os.WriteFile`,
+  `os.Create`, `os.ReadDir`) — this file, unlike its two siblings, performs
+  real directory I/O (a write, a read-back, a directory listing), so those
+  five stay available rather than banned; the relative-path hazard that
+  leaves closed for the siblings is closed here instead by the exactly-one-
+  entry assertion, which goes to zero entries if a write escapes to the real
+  `testdata/`.
+
+  **Two lessons that outlive this ticket:**
+  - **The zero-entry arm of an exactly-one-entry assertion doesn't require
+    writing into the committed `testdata/`.** The spec's prescribed mutant
+    for "writer ignores `dir`" was to join a relative `testdata/` path,
+    which lands a real file in the repo and needs a manual delete plus a
+    `git status` check to verify cleanly afterward. Redirecting the writer
+    to a *second* `t.TempDir()` instead hits the identical
+    `len(names) != 1` branch and leaves the worktree untouched — worth
+    reaching for whenever a mutant's only hazard is where its bytes land,
+    not what they are.
+  - **`%v` over a `json.RawMessage` row prints a decimal byte dump, not
+    JSON.** `json.RawMessage` implements `MarshalJSON` but not `String`, so
+    `%v` in the round trip's mismatch message renders a ~300-byte envelope
+    as `[123 34 116 ...]`. Kept for consistency with #1662's sibling, and
+    the row *name* still carries the diagnosis so the test isn't weakened —
+    but a future file in this family that wants a readable raw-JSON diff has
+    to type-switch at the print site; the row's `any` type can't use `%s`
+    without mangling the int and bool rows alongside it.
+
+  Code review flagged, non-blocking: the touched-set guard's failure message
+  names two causes (normaliser widened, normaliser narrowed) but not the
+  third the type-switch design itself predicts — #1701 grows a fourth
+  raw-JSON field, the switch picks it up correctly and automatically, and
+  the hardcoded three-name `wantTouched` reddens against an honest writer
+  and an honest normaliser. The fix is one more clause in the message, not a
+  design change, and was not applied in this ticket.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1702-initialize-capture-fixture-writer-and-round-trip.md`
+  for the full design and the twelve-mutant table. This closes the
+  `initialize` fixture family's complete/atomic half; bounded is #1700,
+  which reads this writer.
 
 ## Test infrastructure
 

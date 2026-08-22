@@ -203,6 +203,53 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1702. The write half of the same family, and the entry the two above warn
+	// against copying whole: twelve names rather than seventeen. The first four
+	// keep a SKIP out, as everywhere in this family — resolveClaudeBin and
+	// WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is
+	// printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`.
+	//
+	// captureClaudeVersion is carried from the two entries above and must not be
+	// harmonised away against #1662's, which omits it. It is the package's own
+	// direct `claude --version` exec and returns (raw, token) — both of the
+	// record's version fields AND initControlFixtureName's input — so it is the
+	// exec a developer minting a name here is most likely to reach for thinking
+	// "use the real token". It t.Fatalf's rather than skipping, so it would not
+	// fake a pass; what it would destroy is this file's defining property, that it
+	// settles with no claude binary at all, with the check below green the whole
+	// time. A real token is also slug-clean, which empties the "named exactly what
+	// the namer mints" assertion — the same coupling #1701's slug guard protects.
+	//
+	// os.LookupEnv is the two-value form of os.Getenv reading the same environment,
+	// which here carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY; #1662 omits
+	// it, #1696 added it as a deliberate superset, and this follows #1696.
+	// exec.Command and exec.CommandContext were considered and declined for #1696's
+	// reason: this file imports no os/exec, and the package's own exec helpers are
+	// already covered above.
+	//
+	// The packageDir group is the trio plus writeFixture, for the reason all three
+	// entries above state: the check is an AST identifier match, so a file calling
+	// a wrapper reaches packageDir transitively while never naming it, and a
+	// packageDir-only entry leaves the ban true and the property false.
+	//
+	// What is deliberately ABSENT, and where this entry copies #1662's rather than
+	// its two nearer siblings': t.TempDir, os.WriteFile, os.Create, os.ReadFile,
+	// os.ReadDir and filepath.Glob all stay available. Those two files perform no
+	// I/O in either direction; this file's entire subject is a write, a read-back
+	// and a directory listing, so banning them would be red against shipped code.
+	// The relative-path hazard those bans close for them — `go test` runs in the
+	// package source directory, so a relative os.WriteFile("testdata/…") reaches
+	// the committed fixtures — is closed here by
+	// TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry instead: a
+	// writer that sent its bytes to a relative testdata/ leaves the t.TempDir()
+	// holding ZERO entries, and the exactly-one-entry assertion goes red.
+	"initialize_control_writer_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
