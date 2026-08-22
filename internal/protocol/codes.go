@@ -371,6 +371,58 @@ const (
 	TypeModelAnnounced = "model_announced" // binary → phone, outbound v2 announced-model report
 )
 
+// Mobile Protocol v2 model-list report. The daemon can already ask claude which
+// models it will accept — a control_request with subtype initialize, written on
+// the child's held-open stdin, returns a models array — but that inventory stops
+// at the daemon boundary, so no client can build a model menu, know which
+// reasoning-effort levels a model supports, or know which models accept auto
+// permission mode (pyrycode-desktop#561, blocked since 2026-08-19; #682 is the
+// same defect for the permission-mode menu).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state with
+// two edges, not turn-independent work, not a periodic reading, not a condition
+// report about a window, and not an identity report about one turn. It is a
+// CAPABILITY report — what claude says it CAN be, where model_announced reports
+// what it IS for the turn it says it about. An inventory rather than an event: it
+// does not open or close a turn and is not turn-scoped.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give:
+// the wire type names what the frame IS to a client, so a claude rename lands in
+// one place instead of breaking every client at once. claude's words on this path
+// are initialize (the control_request subtype) and models (the array key), so the
+// discriminating words are "init" and "models" — model_list contains neither. The
+// sibling blocks' form does not transfer to a test on "model": that is this
+// frame's subject noun and the daemon's own word, so a strings.Contains check on
+// it would be RED against the correct name, the same trap TypeModelAnnounced's
+// block records for its own name.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone report an old phone never receives, and a leak
+// into that set would let a phone send a model_list frame into dispatch.Route.
+// Two drift detectors classify it, both mandatory from the moment the constant
+// exists rather than from the moment something emits it: the partition in
+// internal/protocol/compat_test.go splits Type* constants between
+// inboundAppTypeSet and v2OnlyTypes (this lives in the latter), and
+// cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
+//
+// No inbound request verb is declared here, and that is not an omission.
+// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
+// here would be red by construction, and filing it under excludedTypes to dodge
+// that would be a lie to the guard. If #1693 picks request/reply it declares the
+// verb together with its handler and moves this constant from push to reply; a
+// client's decode path is the same frame either way, which is what declaring the
+// shape now exists to freeze.
+//
+// The declaring ticket (#1704) is wire vocabulary only: #1693 produces and emits
+// the frame, and #1705 adds the encoding fixtures and the docs/protocol-mobile.md
+// § model_list section. Same declare-then-emit sequencing as #1405→#1410 and
+// #1616→#1638.
+const (
+	TypeModelList = "model_list" // binary → phone, outbound v2 model-list report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
