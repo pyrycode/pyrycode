@@ -2673,10 +2673,22 @@ func TestParser_RateLimitCapturedBenignLineIsSilent(t *testing.T) {
 // one measured-benign status becomes exactly one turnevent.RateLimited carrying
 // claude's own values.
 //
-// The value set beyond "allowed" is UNMEASURED — no capture of a limit actually in
-// force exists — so the rows deliberately do not pin one hypothetical alternative.
-// Two different non-benign values are what assert "anything but the benign value",
-// and the case-differing row is the byte-exact match made visible.
+// The value set beyond "allowed" is ALMOST entirely unmeasured — no capture of a
+// limit actually in force exists — so the hypothetical rows deliberately do not pin
+// one invented alternative. Two different non-benign values are what assert
+// "anything but the benign value", and the case-differing row is the byte-exact
+// match made visible.
+//
+// ONE row is not hypothetical. "allowed_warning" was observed live on 2026-08-22
+// (claude 2.1.239, limit_type "seven_day"): the account sat inside its weekly
+// warning band and every turn still ran. It is a NEW SIBLING of the benign value
+// rather than a rename of it, which is why benignRateLimitStatus is unchanged and
+// this row asserts the frame FIRES. Warning ahead of the wall is the moment the
+// mapping is worth most, so suppressing it here would leave the event useful only
+// once the user is already blocked. The live tier that first saw it tolerates it by
+// name (internal/e2e/realclaude's warnRateLimitStatus); this row is the offline
+// half, so the observation survives without a claude login and without the account
+// happening to be near its ceiling again.
 func TestParser_RateLimitEmitsForNonBenignStatus(t *testing.T) {
 	t.Parallel()
 	const (
@@ -2688,6 +2700,13 @@ func TestParser_RateLimitEmitsForNonBenignStatus(t *testing.T) {
 		status string
 		why    string
 	}{
+		{
+			name: "the MEASURED warning-band status emits", status: "allowed_warning",
+			why: "observed live 2026-08-22 on claude 2.1.239 against limit_type seven_day — the only " +
+				"non-benign value on record, and the one row here that is not hypothetical. It is a " +
+				"new sibling of the benign value, not a rename, so it must EMIT: a phone that only " +
+				"hears about the usage window once the wall is hit cannot act on it",
+		},
 		{
 			name: "a plausible limited status emits", status: "exceeded",
 			why: "the direction the gate exists for",
