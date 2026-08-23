@@ -2496,6 +2496,75 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `docs/specs/architecture/1700-initialize-fixture-writer-cap.md` for the
   full design and the five-row mutant matrix.
 
+- `initialize_control_probe_test.go` (#1688) — **the live run that closes the
+  `initialize` fixture family: one real child, one tool-free probe turn, one
+  `control_request` with subtype `initialize` on the held-open stdin, the
+  reply written through #1702's writer into
+  `testdata/initialize_control_v2.1.239.json` (committed).** Reuses
+  `setModeRecorder`, `setModeWaitFor`, `setModeTurnLine` and
+  `setModeResponseIDMatches` from `set_permission_mode_probe_test.go`
+  wholesale; ports none of that file's arm/verdict machinery (`probeOutcome`,
+  `setModeFieldMatches`, `setModeDirections`) since this run has one arm and
+  no control. Measured against claude 2.1.239: `subtype:"success"`, 6
+  `models` entries, also carrying `commands` (51, for #1683) and `agents` (6).
+
+  **The `control_response` payload nests one level deeper than
+  `streamsup/parser.go`'s documented shape accounts for.** That shape records
+  `subtype`/`request_id` inverted under `response` relative to the request —
+  true, and `initControlSummarize` reads it there — but the actual payload
+  (`models`, `commands`, `agents`, `account`, `pid`, …) is nested a further
+  level, under `response.response`. `internal/streamsup` never parses past
+  `subtype`, so its own documented shape was never wrong; it was just not the
+  whole shape a payload-reading caller needs. Any future code that decodes
+  this control-reply's payload — #1690's decoder, #1693's model-list
+  producer — reads `response.response`, not `response`. The verbatim capture
+  is `initControlFixtureRecord.ControlResponses[0]` in the committed fixture.
+
+  **Two lessons that outlive this ticket:**
+  - **A "check both placements" instruction, derived correctly from one
+    known fact, can still be one level short — and the computed field built
+    on top of it will report the wrong answer while looking internally
+    consistent.** The spec derived two placements (top level, under
+    `response`) from `streamsup`'s documented `subtype`/`request_id` shape.
+    The first live run of this file read only those two, and recorded
+    `models_present:false` against a reply that carried six models — a
+    `false` that had nothing pointing back at it, because the run had
+    otherwise passed cleanly (a `control_response` arrived, stdout was
+    non-empty). What caught it was reading the produced fixture's raw
+    `control_responses` bytes rather than trusting the summary field they
+    were supposed to justify. For any field a summariser computes by walking
+    a shape nobody has fully decoded yet, diff the summary against the raw
+    bytes it summarises before trusting a green run — a green run only
+    proves the gates it checks, not the fields it computes.
+  - **A credential guard scoped to the surface named in the design is not
+    the same as a credential guard scoped to the surface the ticket
+    commits.** The spec's security review enumerated argv, env and stderr as
+    the credential-bearing surfaces and closed the first two by construction;
+    `initControlScrubbed` guards the third. But every byte this family
+    commits is claude's **stdout**, and no deterministic check runs over it —
+    the PR's clean bill came from two independent human reads of the
+    committed JSON, not from code. `dropped_line_capture_test.go`'s
+    `dropcapScanner` already exists in this package for exactly this (scans
+    arbitrary bytes for credential values and operator-path classes, and
+    records which classes it checked so "no hits" stays distinguishable from
+    "never ran") — a live-capture test that writes stdout-derived bytes to a
+    committed fixture should run it over the marshalled record before the
+    write, not rely on a human `grep`. Deferred to #1694, which inherits this
+    driver and is the family's next live run.
+
+  Code review also flagged, non-blocking: the `!= "null"` guard in
+  `initControlSummarize` — the one thing distinguishing `"models":null` from
+  `"models":[]`, which the function's own doc comment says is exactly what
+  #1690 needs — has no test row pinning it (confirmed by mutation: dropping
+  the guard leaves the summariser's test green). Worth a row before #1690
+  starts decoding against this shape.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1688-initialize-control-round-trip-capture.md` for
+  the full design and security review. This closes the `initialize` fixture
+  family opened by #1695's split (#1696/#1701/#1702/#1700); the trigger-design
+  questions (send point, session perturbation) are carved out to #1694.
+
 ## Test infrastructure
 
 `fixtures_test.go` re-execs the test binary as a fake `pyry` when `GO_TEST_HELPER_PROCESS=1` is set (via a `TestMain` branch), and pins `PYRY_E2E_BIN=os.Args[0]` for every other test so `ensurePyryBuilt` short-circuits to the fake. The fake selects behaviour from `PYRY_E2E_FAKE_MODE` (`happy`, `fail`, `sleep`, `argv`). This lets the helper's contract be validated entirely from within the package — no real `claude` and no real `pyry` build are required for the helper's own tests. (The smoke test `TestClaudeBinaryAvailable` from #361 remains the only test in the suite that depends on real `claude` being on PATH.)
