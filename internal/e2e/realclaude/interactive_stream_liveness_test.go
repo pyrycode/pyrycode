@@ -164,6 +164,29 @@ func writeStreamInteractiveConfig(t *testing.T, home string) {
 	}
 }
 
+// warnRateLimitStatus is the ONE non-benign rate_limit_info.status this drain
+// TOLERATES: claude reporting that the account sits inside its usage-limit
+// warning band while still ALLOWING the turn. The daemon is right to emit the
+// frame for it — warning before the wall is the whole point of #1404's mapping,
+// and folding this value into streamsup.benignRateLimitStatus would leave the
+// frame firing only once the user is already blocked, which is too late to act
+// on. What was wrong was this drain's assumption that a healthy turn is a SILENT
+// one.
+//
+// MEASURED, not chosen: status "allowed_warning" against limit_type "seven_day",
+// resets_at 1787551200, observed on claude 2.1.239 on 2026-08-22 in all five
+// tests that share this drain. Every capture on record predates it and reports
+// "allowed" against "five_hour", a window that was nowhere near its ceiling. So
+// this is a NEW SIBLING value rather than a rename of the benign one, and
+// streamsup.benignRateLimitStatus stays exactly as it is.
+//
+// Matched byte-exact — no fold, no trim, and deliberately NOT a prefix match on
+// "allowed". streamsup.benignRateLimitStatus's doc rejects a prefix for the
+// reason that applies here verbatim: it would swallow whatever claude names the
+// state after this one, and swallowing it HERE is silent, in the one tier that
+// reads what claude sends today.
+const warnRateLimitStatus = "allowed_warning"
+
 // drainForCompletedTurn reads binary→phone noise_msg frames in receive order —
 // the receive nonce is sequential, so every frame MUST be decrypted in order to
 // keep the CipherState in sync — and returns once it observes a full turn: a
@@ -179,7 +202,8 @@ func writeStreamInteractiveConfig(t *testing.T, home string) {
 // frame. claude emits its rate_limit_event line once per run whatever the state of
 // the usage-limit window, so a healthy run's silence rests on the parser's gate
 // matching claude's benign status value — another measurement, with its own day to
-// go stale. See that arm for the two readings a red run carries.
+// go stale. See that arm for what it tolerates and the three readings a red run
+// carries.
 //
 // It mirrors the fake-side two-milestone drain (#1141,
 // `TestRelayV2_StreamSendMessageDrainsTurn`) with the real-claude adaptation: NO
@@ -269,17 +293,21 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			// the usage-limit window — every capture on record reported "allowed", i.e.
 			// no limit in force, and the line fired anyway. So the parser gates it:
 			// the one measured-benign status is silent, any other non-empty status
-			// emits. A normal turn against live claude must therefore produce ZERO of
-			// these, and this is the only tier that can say so about what claude sends
-			// TODAY. Its hermetic sibling (internal/e2e/relay_v2_stream_rate_limit_test.go)
-			// feeds the captured bytes and would stay green through a change in
-			// claude's status vocabulary; this one would not.
+			// emits. A normal turn against live claude must therefore produce zero
+			// frames THIS DRAIN DOES NOT RECOGNISE, and this is the only tier that can
+			// say so about what claude sends TODAY. Its hermetic sibling
+			// (internal/e2e/relay_v2_stream_rate_limit_test.go) feeds the captured bytes
+			// and would stay green through a change in claude's status vocabulary; this
+			// one would not.
 			//
 			// No conversation filter, matching the arm above: a usage limit is a
 			// condition of the ACCOUNT, so a frame bound to any conversation is the
 			// alarm.
 			//
-			// Going red has TWO readings, and status is the discriminator:
+			// warnRateLimitStatus is LOGGED AND TOLERATED rather than fatal — see its
+			// doc for the measurement and for why the daemon emitting it is correct.
+			// Anything else is fatal, and going red has THREE readings, with status the
+			// discriminator:
 			//
 			//  1. A USAGE LIMIT REALLY IS IN FORCE on this account right now. Not a
 			//     daemon bug — this is the frame working. The window resets; re-run then.
@@ -288,15 +316,31 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			//     streamsup.benignRateLimitStatus ("allowed") has gone stale and every
 			//     healthy run now emits. One constant edit fixes it — confirm against a
 			//     fresh drop-census capture before making it.
+			//
+			//  3. claude grew ANOTHER allowed-but-notable status beside the two already
+			//     measured, the way "allowed_warning" appeared beside "allowed" on
+			//     2026-08-22. The daemon is behaving correctly and it is this drain that
+			//     needs to learn the value — capture it before adding it, exactly as
+			//     reading 2 requires.
 			var p protocol.RateLimitedPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode rate_limited payload: %v", err)
 			}
-			t.Fatalf("a NORMAL turn produced a rate_limited frame: status=%q limit_type=%q resets_at=%d "+
-				"truncated_fields=%v conversation_id=%q\n\n"+
-				"Either a usage limit is genuinely in force on this account (re-run after the window "+
-				"resets), or claude changed the benign status value and streamsup.benignRateLimitStatus "+
-				"is stale — status above is what tells those apart.",
+			if p.Status == warnRateLimitStatus {
+				t.Logf("rate_limited frame TOLERATED (not a failure): status=%q limit_type=%q "+
+					"resets_at=%d conversation_id=%q — the account is inside its usage-limit "+
+					"warning band and the turn was still allowed, so the daemon is reporting "+
+					"this correctly. Expect it on every run until the window resets.",
+					p.Status, p.LimitType, p.ResetsAt, p.ConversationID)
+				continue
+			}
+			t.Fatalf("a NORMAL turn produced an UNRECOGNISED rate_limited frame: status=%q "+
+				"limit_type=%q resets_at=%d truncated_fields=%v conversation_id=%q\n\n"+
+				"Either a usage limit is genuinely in force on this account (re-run after the "+
+				"window resets), or claude changed the benign status value and "+
+				"streamsup.benignRateLimitStatus is stale, or claude grew another "+
+				"allowed-but-notable status this drain has not measured — status above is what "+
+				"tells those apart.",
 				p.Status, p.LimitType, p.ResetsAt, p.TruncatedFields, p.ConversationID)
 		case protocol.TypeAssistantDelta:
 			if sawDelta {
