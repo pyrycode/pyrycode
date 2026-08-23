@@ -163,7 +163,15 @@ func TestSession_ActivateRespawns(t *testing.T) {
 	if got := sess.LifecycleState(); got != stateActive {
 		t.Errorf("LifecycleState = %v, want active", got)
 	}
-	if !pollUntil(t, 2*time.Second, func() bool {
+	// 10s, not 2s: respawning spawns a child process, and this wait is a
+	// DEADLINE rather than a measurement — pollUntil returns the moment the
+	// phase flips, so a longer bound costs a healthy run nothing and only buys
+	// patience on a loaded machine. Observed red at 2s on 2026-08-23 with
+	// phase=starting, during a `make check` run that followed a live-claude
+	// suite and a full race build back to back; it passed three times in
+	// isolation immediately after. Sibling waits in pool_cap_test.go and
+	// pool_create_test.go already sit at 5s and 10s for the same reason.
+	if !pollUntil(t, 10*time.Second, func() bool {
 		return sess.State().Phase == PhaseRunning
 	}) {
 		t.Errorf("supervisor did not re-enter PhaseRunning after Activate; phase=%v", sess.State().Phase)
