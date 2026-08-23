@@ -72,6 +72,20 @@ const (
 	// producer's 256-byte per-field cap, so nothing here touches truncation.
 	rateLimitControlStatus = "e2e-not-allowed"
 
+	// The one MEASURED non-benign status, and the opposite kind of value to the
+	// synthetic control above: claude's own bytes, observed live on 2026-08-22
+	// (claude 2.1.239, against limit_type "seven_day") when the account sat inside
+	// its weekly warning band and every turn still ran normally. It is a NEW SIBLING
+	// of the benign value rather than a rename of it, which is why
+	// streamsup.benignRateLimitStatus is unchanged and this status must EMIT.
+	//
+	// The synthetic control proves "anything but the benign value reaches the phone".
+	// This proves the real one does, through the same four layers, on the only value
+	// a user has actually been able to receive. Warning ahead of the wall is the one
+	// moment the frame can still be acted on, so it is the moment worth pinning
+	// end-to-end rather than at the parser alone.
+	rateLimitWarnStatus = "allowed_warning"
+
 	// The captured rate_limit_info values the rider writes verbatim. Duplicated as
 	// literals because the fake is a separate main package (same discipline as the
 	// bogus needles in relay_v2_stream_unrecognized_test.go).
@@ -343,5 +357,41 @@ func TestRelayV2_StreamRateLimitNonBenignReachesPhone(t *testing.T) {
 		t.Errorf("truncated_fields: got %#v, want nil — nothing was truncated (the fed status is %d bytes, "+
 			"an order of magnitude under the producer's cap), so the wire value must be null, not []",
 			p.TruncatedFields, len(rateLimitControlStatus))
+	}
+}
+
+// TestRelayV2_StreamRateLimitWarningBandReachesPhone drives the same rider with the
+// one status claude has actually been seen to send that is not the benign value, and
+// demands the same single frame its synthetic sibling above demands.
+//
+// Why a third test rather than a second row on the control: the control's value is
+// invented, so on its own it proves the gate's SHAPE and nothing about claude. This
+// one proves the shape holds for the bytes a real account produced, and it is the
+// tier that would notice if some future narrowing of the gate — a prefix match on
+// "allowed", say — quietly swallowed the warning band. A parser unit test would not:
+// it is one layer, and the swallow would look like correct silence there too.
+//
+// It is deliberately thinner than its sibling on the field plumbing, which that test
+// already pins across four layers. The claim here is about the STATUS.
+func TestRelayV2_StreamRateLimitWarningBandReachesPhone(t *testing.T) {
+	obs := driveRateLimitTurn(t, rateLimitWarnStatus)
+
+	if !obs.sawEcho {
+		t.Fatalf("the reply never arrived (no assistant_delta carrying %q); rate_limited=%d unrecognized=%d "+
+			"turn_end=%v", rateLimitEchoNeedle, len(obs.rateLimited), obs.unrecognized, obs.sawTurnEnd)
+	}
+	if obs.unrecognized != 0 {
+		t.Errorf("unrecognized_message frames: got %d, want 0 — the fed rate_limit_event reached the "+
+			"unrecognized lane instead of the gate", obs.unrecognized)
+	}
+	if len(obs.rateLimited) != 1 {
+		t.Fatalf("usage-limit frames: got %d, want exactly 1 — %q is a warning band, NOT the benign "+
+			"value, so the gate must emit once and the frame must reach the phone. A zero here means "+
+			"the warning band is being swallowed, which leaves the frame useful only once the user is "+
+			"already blocked\n%+v",
+			len(obs.rateLimited), rateLimitWarnStatus, obs.rateLimited)
+	}
+	if p := obs.rateLimited[0]; p.Status != rateLimitWarnStatus {
+		t.Errorf("status: got %q, want %q (claude's measured value, verbatim)", p.Status, rateLimitWarnStatus)
 	}
 }

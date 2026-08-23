@@ -941,8 +941,8 @@ both directions.
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose turn observed the usage-limit report. |
-| `status` | string | **Why** the frame fired: claude's own status for the usage-limit window, verbatim. An **open string with a mostly unmeasured value set** — see below. |
-| `limit_type` | string | **Which** limit is in force (`five_hour` is the only observed value). An open string, not a closed set — one observed value does not earn one. |
+| `status` | string | **Why** the frame fired: claude's own status for the usage-limit window, verbatim. An **open string with a mostly unmeasured value set**, and **it does not imply the turn was blocked** — see below. |
+| `limit_type` | string | **Which** limit the report concerns (`five_hour` and `seven_day` are the observed values). An open string, not a closed set — two observed values do not earn one. |
 | `resets_at` | int | When claude says the limit lifts, as **unix seconds**. `0` means claude did not report it — **not** the epoch. Unvalidated in both directions; see below. |
 | `truncated_fields` | array of string \| null | Names of the fields the daemon cut to fit its cap, using the field names in this table: `status`, `limit_type`. `null` when nothing was cut. |
 
@@ -964,12 +964,26 @@ status emits**. That direction is deliberate — an unrecognised status surfaces
 and a human looks, rather than a real limit vanishing.
 
 **`status` is an open string, and what a client may do with it is bounded.** Its
-value set beyond the benign one is **unmeasured**: no capture of a limit actually
-in force exists, on any claude version on record. It is claude's raw string,
-carried precisely so the set gets measured the first time a real limit fires.
-Render it as an **opaque label**. A client **MUST NOT branch security-relevant
-behaviour on it**, and must not treat it as a closed set — doing so is a bug
-waiting for claude's next release.
+value set beyond the benign one is **almost entirely unmeasured**: exactly one
+non-benign value is on record, and **no capture of a limit actually in force
+exists** on any claude version. It is claude's raw string, carried precisely so
+the set gets measured the first time a real limit fires. Render it as an **opaque
+label**. A client **MUST NOT branch security-relevant behaviour on it**, and must
+not treat it as a closed set — doing so is a bug waiting for claude's next
+release.
+
+**A frame is not proof that anything was blocked, and this is the realistic
+client bug.** The one measured non-benign value is `allowed_warning`, seen
+2026-08-22 on claude 2.1.239 against `limit_type` `seven_day`: the account was
+inside its weekly warning band and **every turn still ran normally**. So the
+frame's plain reading is "claude said something about the usage window worth
+repeating", not "you are rate limited", and a client that renders it as the
+latter will tell the user they are blocked while their turns keep working.
+Warning ahead of the wall is the frame's most useful moment — it is the only one
+where the user can still act — so the fix is wording that does not overclaim, not
+suppression. Both the daemon and the live drain
+(`internal/e2e/realclaude`'s `warnRateLimitStatus`) treat this value as expected
+rather than as a fault.
 
 **`resets_at` is claude's number, not the daemon's clock**, and it is unvalidated
 in **both** directions. A consumer must not assume it lies in the future, and must
