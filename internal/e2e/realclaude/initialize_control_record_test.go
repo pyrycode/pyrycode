@@ -136,7 +136,7 @@ type initControlResultTrailer struct {
 
 // initControlFixtureRecord is the durable artifact #1688's live run commits, and
 // the JSON contract #1690's decoder and #1692's fake read. Nineteen of its
-// twenty-seven fields are setModeFixtureRecord's, carrying that record's JSON tags
+// twenty-eight fields are setModeFixtureRecord's, carrying that record's JSON tags
 // and Go types unchanged: three slices decode this shape, and a gratuitous
 // divergence in a shared field is a defect that surfaces two tickets away. Arm is
 // the nineteenth and is copied whole from that record — same tag, same Go type,
@@ -232,6 +232,50 @@ type initControlResultTrailer struct {
 // ScannerError is load-bearing for #1688, which caps its reader per line: an
 // over-long line must surface HERE rather than truncating silently.
 //
+// Redaction is the census redactInitControlRecord returned — the classes that
+// actually fired, the placeholder each rewrote to, and how often. It is
+// POPULATED at the fill site from what that pass RETURNS, exactly as
+// ModelsPresent, ModelsCount and ModelsEntryFields are populated rather than
+// computed: the pass reports the census and stores nothing, and
+// TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical is what keeps
+// that true.
+//
+// AN EMPTY CENSUS IS NOT AN ABSENT ONE. dropcapRedactor.substitutions returns a
+// NON-NIL EMPTY slice when nothing fired, while a record that never reached the
+// pass holds a nil one — so `[]` says the redactor ran and matched nothing, and
+// `null` says it never ran. That whole distinction lives in the marshalled
+// bytes, and one `omitempty` on the tag — or one helper that normalises nil to
+// empty on the way to the file — erases it with every other test in this package
+// still green. TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne
+// is what reddens.
+//
+// AN EMPTY CENSUS IS ALSO NOT A CLEAN ARTIFACT, and that is the reading a
+// reviewer is most likely to supply unprompted. `[]` says the redactor RAN; it
+// says nothing about whether the file is free of operator paths. dropcapRedactor
+// installs no rule for an empty value, so a class armed with "" — or with a
+// wrong or transposed path — matches nothing, and the census then honestly
+// reports `[]` while the committed file still carries the real path under a class
+// the table never armed. This field is an AUDIT TRAIL OVER THE REDACTOR, not a
+// clean bill of health over the artifact; #1729's deny-scan is the fail-closed
+// net that makes the second claim, and this one must not be read as making it.
+//
+// It also makes dropcapSubstitution a COMMITTED shape for this family. Until
+// #1731 that type reached the initialize capture only through a t.Logf; every
+// field of it is now marshalled into testdata/ and committed to git, and per the
+// exception below it is not visited by the redaction pass. That is safe only
+// because every field of it is harness-minted — Class is one of the dropcapClass*
+// constants, Replacement one of the `$`-prefixed literals in
+// newInitControlRedactor's table, Count an int — and it stops being safe the
+// moment that type, which belongs to the DROPCAP family and whose next author is
+// not reading this file, gains a field carrying a matched value, a sample or a
+// path. NOTHING IN THIS PACKAGE REDDENS WHEN IT DOES; this paragraph is the
+// guard, and #1729's deny-scan over the written bytes is the net behind it.
+//
+// It needs NO CAP, and the reason is structural rather than a judgement call:
+// its length is bounded by the number of armed classes — at most the four
+// newInitControlRedactor installs — and Count is an int, so it cannot grow with
+// child output. It is not the shape a cap exists for. Do not add one.
+//
 // A STRING-BEARING FIELD ADDED HERE MUST BE VISITED BY redactInitControlRecord,
 // which since #1733 rewrites every string, []string, json.RawMessage and
 // []json.RawMessage field of this type before the record reaches the writer. That
@@ -239,6 +283,18 @@ type initControlResultTrailer struct {
 // silently; the NumField assertion in
 // TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken forces a
 // conscious edit to this file but says nothing about the pass.
+//
+// REDACTION IS THAT INSTRUCTION'S ONE EXCEPTION, scoped to this one field and
+// never to "fields the author judges safe" — the instruction's whole value is
+// that it admits no judgement call, and a string-bearing field added here that is
+// not this one gets no exception. Two reasons, and the second is not a
+// convenience: its strings are the REDACTOR'S OWN VOCABULARY — class identifiers
+// and the $HOME, $WORKDIR, $TEMP_HOME and $TMPDIR placeholders minted by
+// newInitControlRedactor, never child output, never a path, never read off the
+// environment — so rewriting a placeholder is meaningless; and the field is
+// assigned from what the pass RETURNS, so a pass that visited it would have to
+// read a value that does not exist until it returns. The obligation is circular,
+// not merely unnecessary.
 //
 // NOTHING IN THIS FILE CAPS ANYTHING. StderrCapture is bounded by #1702's writer
 // through capFixtureCapture and proven by #1700; this type carries no bound and
@@ -281,11 +337,13 @@ type initControlFixtureRecord struct {
 	ContextDeadlineTripped bool     `json:"context_deadline_tripped"`
 	DurationMs             int64    `json:"duration_ms"`
 	ScannerError           string   `json:"scanner_error"`
+
+	Redaction []dropcapSubstitution `json:"redaction"`
 }
 
 // --- the fully-populated fixture -------------------------------------------------
 
-// initControlFullRecord returns a record in which every one of the twenty-seven
+// initControlFullRecord returns a record in which every one of the twenty-eight
 // fields carries a non-zero value, and every pair of same-typed non-bool fields
 // carries a DISTINCT one. Both properties are asserted below rather than trusted.
 //
@@ -319,7 +377,7 @@ type initControlFixtureRecord struct {
 // nothing, so an instance carrying send_point_index 0 would pin 0 == 0 through a
 // writer that never touched the value. Do not build one.
 //
-// Six literal choices are load-bearing:
+// Seven literal choices are load-bearing:
 //
 //  1. ClaudeVersion must NOT survive versionSlug unchanged. That helper
 //     lowercases, rewrites runs outside [a-z0-9._-] to _, then clamps at 32, so a
@@ -390,6 +448,25 @@ type initControlFixtureRecord struct {
 //     needless risk, while a plain decimal marshals and decodes exactly and keeps
 //     the round-trip row honest with no normaliser.
 //
+//  7. Redaction carries AT LEAST ONE ENTRY, and no path inside it.
+//     fixtureFieldNonZero judges container kinds BY LENGTH, so an empty
+//     []dropcapSubstitution{} fails the non-zero property above — the census a
+//     genuinely path-free run produces is precisely the value this fixture
+//     cannot carry. ONE entry is enough: every substitution has the same shape
+//     and nothing in this file asserts the census's ORDER, so there is no
+//     discriminating-pair argument of the kind note 6 makes for the trailers. A
+//     class identifier and a `$`-placeholder carry no path, and a realistic one
+//     put in Replacement "for realism" reddens
+//     TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical. Note 2
+//     does NOT extend to this row: that constraint is specific to the three
+//     raw-JSON literals, and dropcapSubstitution is an ordinary struct of
+//     ordinary strings, which round-trips '<', '>' and '&' unchanged.
+//     Distinctness constrains this row NOT AT ALL, stated so nobody counts on it
+//     either way — that subtest groups by reflect.TypeOf of the ROW's value,
+//     []dropcapSubstitution has no same-typed sibling here, and it never looks
+//     inside the slice, so the nested Count cannot collide with models_count,
+//     non_json_line_count or exit_code.
+//
 // Where self-consistency costs nothing it is kept: ControlRequestID, the
 // request_id inside ControlRequestSent and the one inside ControlResponses all
 // agree, which is what ControlResponseRequestIDMatched claims; ModelsCount and
@@ -438,6 +515,10 @@ func initControlFullRecord() *initControlFixtureRecord {
 		ContextDeadlineTripped: true,
 		DurationMs:             1842,
 		ScannerError:           "bufio.Scanner: token too long",
+
+		Redaction: []dropcapSubstitution{
+			{Class: dropcapClassWorkdir, Replacement: "$WORKDIR", Count: 3},
+		},
 	}
 }
 
@@ -450,7 +531,7 @@ type initControlFixtureField struct {
 	value any
 }
 
-// initControlFixtureFields lists rec's twenty-seven fields once, in declaration
+// initControlFixtureFields lists rec's twenty-eight fields once, in declaration
 // order. #1702 applies it to both the written record and its decode and zips the
 // two rather than restating the fields; #1700 reaches it the same way.
 //
@@ -503,6 +584,7 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 		{"context_deadline_tripped", rec.ContextDeadlineTripped},
 		{"duration_ms", rec.DurationMs},
 		{"scanner_error", rec.ScannerError},
+		{"redaction", rec.Redaction},
 	}
 }
 
