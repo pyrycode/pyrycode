@@ -1,0 +1,311 @@
+package protocol
+
+import (
+	"bytes"
+	"encoding/json"
+	"math"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestAttachmentChunkPayload_Upload_RoundTrip pins the CLIENT → DAEMON leg: the
+// first chunk of a two-chunk upload, on a plain envelope with no in_reply_to.
+// The absent in_reply_to is what makes this fixture structurally different from
+// its retrieval sibling rather than merely differently-valued.
+//
+// filename carries a character encoding/json escapes, and that is the point of
+// the fixture rather than decoration: the committed bytes read
+// "report \u003cdraft\u003e.pdf", the one place in this package's testdata where
+// HTML escaping is visible — and that escaping is the property the whole of
+// MaxAttachmentChunkBytes' arithmetic rests on.
+//
+// index is 0 deliberately. A populated fixture only earns omitempty coverage on
+// a key whose value is that key's own zero value, and index is the only such key
+// here — measured against all eight mutants, not predicted: index's omitempty is
+// the one that reddens this test. That coverage does not survive regeneration
+// (regenerate the fixture under the mutant and this round trip goes green
+// again), so attachment_chunk_zero.json's byte guards are what hold every key.
+//
+// The data blob is a handful of synthetic ASCII bytes. The fixtures pin the
+// encoding at small size; TestAttachmentChunkPayload_FitV2EnvelopeCap measures a
+// chunk filled to the bound. Neither one alone covers both.
+func TestAttachmentChunkPayload_Upload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "attachment_chunk_upload.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeAttachmentChunk {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeAttachmentChunk)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got pointer to %d, want nil on the client → daemon leg", *env.InReplyTo)
+	}
+
+	var payload AttachmentChunkPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if want := "3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67"; payload.AttachmentID != want {
+		t.Errorf("AttachmentID: got %q, want %q", payload.AttachmentID, want)
+	}
+	if payload.Index != 0 {
+		t.Errorf("Index: got %d, want 0", payload.Index)
+	}
+	if payload.TotalChunks != 2 {
+		t.Errorf("TotalChunks: got %d, want 2", payload.TotalChunks)
+	}
+	// The escaped-and-unescaped pair: the wire carries \u003c, the decoded value
+	// carries '<'. Both halves are asserted, because either one alone would go on
+	// passing if the encoder stopped escaping.
+	if want := "report <draft>.pdf"; payload.Filename != want {
+		t.Errorf("Filename: got %q, want %q", payload.Filename, want)
+	}
+	if want := []byte(`"filename":"report \u003cdraft\u003e.pdf"`); !bytes.Contains(canonical(t, raw), want) {
+		t.Errorf("fixture must carry the HTML-escaped filename %s, got: %s", want, raw)
+	}
+	if want := "application/pdf"; payload.MimeType != want {
+		t.Errorf("MimeType: got %q, want %q", payload.MimeType, want)
+	}
+	if payload.Size != 54 {
+		t.Errorf("Size: got %d, want 54 (both chunks of the whole file)", payload.Size)
+	}
+	if want := "b78d66ba036a61e9f2c5b781d0077270bfafa7e94e0a8bfd5910493a57a76902"; payload.SHA256 != want {
+		t.Errorf("SHA256: got %q, want %q", payload.SHA256, want)
+	}
+	if want := []byte("attachment upload, chunk 0\n"); !bytes.Equal(payload.Data, want) {
+		t.Errorf("Data: got %q, want %q", payload.Data, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestAttachmentChunkPayload_Retrieval_RoundTrip pins the DAEMON → CLIENT leg:
+// the second chunk of a two-chunk retrieval, on an envelope carrying
+// in_reply_to. Retrieval answers #1746's request verb, so it takes the response
+// shape every other daemon → client frame in this testdata takes
+// (conversations.json carries in_reply_to; send_message.json does not).
+//
+// The in_reply_to assertion is the only thing distinguishing this test from its
+// upload sibling. Without it "both directions" would be two value sets over one
+// shape. What is pinned here is the ENVELOPE a daemon → client chunk rides;
+// #1746 still owns whether and how the retrieval verb correlates.
+func TestAttachmentChunkPayload_Retrieval_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "attachment_chunk_retrieval.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeAttachmentChunk {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeAttachmentChunk)
+	}
+	if env.InReplyTo == nil || *env.InReplyTo != 91 {
+		t.Errorf("InReplyTo: got %v, want pointer to 91", env.InReplyTo)
+	}
+
+	var payload AttachmentChunkPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if want := "7c1d5e92-4a30-4b8f-9e21-6d4c3b0a8f55"; payload.AttachmentID != want {
+		t.Errorf("AttachmentID: got %q, want %q", payload.AttachmentID, want)
+	}
+	if payload.Index != 1 {
+		t.Errorf("Index: got %d, want 1", payload.Index)
+	}
+	if payload.TotalChunks != 2 {
+		t.Errorf("TotalChunks: got %d, want 2", payload.TotalChunks)
+	}
+	if want := "screenshot.png"; payload.Filename != want {
+		t.Errorf("Filename: got %q, want %q", payload.Filename, want)
+	}
+	if want := "image/png"; payload.MimeType != want {
+		t.Errorf("MimeType: got %q, want %q", payload.MimeType, want)
+	}
+	if payload.Size != 60 {
+		t.Errorf("Size: got %d, want 60 (both chunks of the whole file)", payload.Size)
+	}
+	if want := "bf848ca98a786db9fe841b727fa49abab5364b097f88f43dba6eb515ff701e22"; payload.SHA256 != want {
+		t.Errorf("SHA256: got %q, want %q", payload.SHA256, want)
+	}
+	if want := []byte("attachment retrieval, chunk 1\n"); !bytes.Equal(payload.Data, want) {
+		t.Errorf("Data: got %q, want %q", payload.Data, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestAttachmentChunkPayload_ZeroValue_RoundTrip pins the encoding of every
+// field's zero value, which is what AttachmentChunkPayload's no-omitempty rule
+// actually asserts.
+//
+// The eight byte guards, not the round trip, are what make "explicit zero, not
+// elided" checkable at all. The fixtures here are generated by marshalling
+// through this package, so an omitempty added to a field would elide its key
+// from the regenerated fixture and from the decode alike and the round trip
+// would go on passing — the guards stay red across that regeneration. Measured
+// across all eight mutants: as committed, only index also reddens a directional
+// fixture; once the fixtures are regenerated under the mutant, all eight rest on
+// this test alone.
+//
+// total_chunks: 0 contradicts AttachmentChunkPayload's documented >= 1 on
+// purpose. This is a frame no producer will ever emit; it exists for the
+// encoding, not the scenario, exactly as model_list_zero.json's single all-zero
+// entry does.
+func TestAttachmentChunkPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "attachment_chunk_zero.json")
+
+	// All eight wire keys, because no field carries omitempty and this is the
+	// fixture AttachmentChunkPayload's doc means by "pin the full shape".
+	for _, want := range []string{
+		`"attachment_id":""`,
+		`"index":0`,
+		`"total_chunks":0`,
+		`"filename":""`,
+		`"mime_type":""`,
+		`"size":0`,
+		`"sha256":""`,
+		`"data":null`,
+	} {
+		if !bytes.Contains(canonical(t, raw), []byte(want)) {
+			t.Errorf("fixture must carry %s explicitly at its zero value, got: %s", want, raw)
+		}
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeAttachmentChunk {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeAttachmentChunk)
+	}
+
+	var payload AttachmentChunkPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.AttachmentID != "" {
+		t.Errorf("AttachmentID: got %q, want %q", payload.AttachmentID, "")
+	}
+	if payload.Index != 0 {
+		t.Errorf("Index: got %d, want 0", payload.Index)
+	}
+	if payload.TotalChunks != 0 {
+		t.Errorf("TotalChunks: got %d, want 0", payload.TotalChunks)
+	}
+	if payload.Filename != "" {
+		t.Errorf("Filename: got %q, want %q", payload.Filename, "")
+	}
+	if payload.MimeType != "" {
+		t.Errorf("MimeType: got %q, want %q", payload.MimeType, "")
+	}
+	if payload.Size != 0 {
+		t.Errorf("Size: got %d, want 0", payload.Size)
+	}
+	if payload.SHA256 != "" {
+		t.Errorf("SHA256: got %q, want %q", payload.SHA256, "")
+	}
+	// nil marshals to null while []byte{} marshals to "": the fixture commits to
+	// null, so the decode side has to pin nil specifically.
+	if payload.Data != nil {
+		t.Errorf("Data: got %q, want nil", payload.Data)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// attachmentSHA256HexLen mirrors AttachmentChunkPayload.SHA256's declared
+// "always 64 hex characters" — a contract in prose with no validator behind it
+// yet, copied here for the same reason the capInput* block copies the bridge's
+// caps: the fill below has to trace to a bound recorded in shipped code rather
+// than to a number chosen inside this test. #1741 writes the hex validator and
+// is the natural place for this to become a fifth exported constant, if it
+// should.
+const attachmentSHA256HexLen = 64
+
+// TestAttachmentChunkPayload_FitV2EnvelopeCap fills a chunk to
+// MaxAttachmentChunkBytes with every metadata field simultaneously at its
+// worst case for JSON escaping, and proves the serialised envelope still fits
+// under the v2 application-envelope cap. Per-field bounds do not compose into
+// an envelope guarantee on their own, so this is measured rather than argued —
+// TestToolUsePayload_FitV2EnvelopeCap's shape and its statement.
+//
+// The fill is '<', not 'a': SetEscapeHTML is on by default, so one such input
+// byte costs six on the wire and an 'a' fill under-reports by over 5x. The
+// constant's own comment budgets 4186 B of metadata against 60000 B of base64
+// data, leaving ~1300 B spare; this test measures the real total and asserts the
+// one thing that matters, that it lands under the cap.
+//
+// Two fills deliberately exceed what a contract-respecting frame can carry, and
+// both are cheap against that headroom:
+//
+//   - sha256 is 64 '<', not 64 hex characters. Hex never escapes, so the
+//     contract-respecting worst case is 64 B and this costs 384 B. The extra
+//     320 B buys a proof that holds for a length-respecting but non-hex value,
+//     which is exactly what an inbound attacker sends.
+//   - index, total_chunks and size are at the widest decimal their declared Go
+//     types admit, even though the contract says Index >= 0, TotalChunks >= 1
+//     and Size is a byte length. Nothing enforces those yet, and the declared
+//     type IS the bound recorded in shipped code. A negative size here is the
+//     ceiling, not a mistake.
+//
+// The three metadata bounds this fills to are DECLARED HERE AND ENFORCED
+// NOWHERE, so this is a proof about frames that respect them: #1741 makes them
+// true inbound, #1744 and #1746 outbound. Until then a frame violating them
+// exceeds the cap and the transport drops it.
+//
+// Neither the Logf nor the failure message prints the marshalled bytes — lengths
+// only, as the tool_use precedent does. A 64 KB dump is unreadable in CI, and
+// Data is the field AttachmentChunkPayload marks content-bearing and NEVER
+// LOGGED; #1744 enforces that rule and will copy whatever this test does.
+func TestAttachmentChunkPayload_FitV2EnvelopeCap(t *testing.T) {
+	fill := func(n int) string { return strings.Repeat("<", n) }
+
+	payload := AttachmentChunkPayload{
+		AttachmentID: fill(MaxAttachmentIDBytes),
+		Index:        math.MinInt,
+		TotalChunks:  math.MinInt,
+		Filename:     fill(MaxAttachmentFilenameBytes),
+		MimeType:     fill(MaxAttachmentMimeTypeBytes),
+		Size:         math.MinInt64,
+		SHA256:       fill(attachmentSHA256HexLen),
+		Data:         bytes.Repeat([]byte{0xFF}, MaxAttachmentChunkBytes),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	// Worst-case envelope too: max-uint64 on all three ids, payload_encrypted
+	// present, and a ts at full nanosecond width. payload_encrypted is a byte
+	// ceiling and not a scenario — IsKnownAppType rejects an inbound frame
+	// carrying it — but 25 bytes is cheaper than the argument. EventID is set for
+	// the same ceiling reason and is NOT a claim that this frame rides the event
+	// ring: at 45000 raw bytes a frame the ring retains is a per-conversation
+	// memory multiplier rather than a per-frame cap, and ring membership is
+	// #1744's call.
+	maxID := ^uint64(0)
+	inReplyTo := ^uint64(0)
+	eventID := ^uint64(0)
+	env := Envelope{
+		ID:               maxID,
+		Type:             TypeAttachmentChunk,
+		TS:               time.Date(2026, 8, 25, 10, 33, 18, 123456789, time.UTC),
+		Payload:          body,
+		InReplyTo:        &inReplyTo,
+		EventID:          &eventID,
+		PayloadEncrypted: true,
+	}
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	t.Logf("attachment_chunk at full bounds: %d B, %.1f%% of the %d-byte v2 application-envelope cap",
+		len(out), float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope)
+	if len(out) >= maxV2AppEnvelope {
+		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
+	}
+}
