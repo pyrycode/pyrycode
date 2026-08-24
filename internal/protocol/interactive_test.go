@@ -1535,3 +1535,58 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 		})
 	}
 }
+
+// TestSlashCommandListType_IsNotClaudesVocabulary pins the translation layer
+// this frame exists to preserve, as its rate_limited, model_announced and
+// model_list siblings do. The daemon is the ONE place a claude rename lands;
+// naming the wire type after claude's own vocabulary would undo that.
+//
+// claude has FOUR words on this path, not the two model_list had: the
+// control_request subtype `initialize`, the control reply's array key
+// `commands`, the system/init stdout line's `slash_commands`, and that same
+// line's `terminal_slash_commands`. Only two of them appear in code below, and
+// the reason is the containment lattice:
+//
+// The SINGULAR subject nouns cannot be checks at all. `command`,
+// `slash_command` and `slash` are each a substring of the correct name, so a
+// strings.Contains on any of the three would be RED against it — the trap
+// TestModelAnnouncedType_IsNotClaudesSubtype records for `model` and
+// TestModelListType_IsNotClaudesVocabulary for `models`, three words wide here
+// instead of one. claude's keys differ from this frame's subject noun by a
+// trailing s, so the discriminating checks are the PLURALS.
+//
+// One plural check covers all three. `commands` is a substring of
+// `slash_commands`, which is a substring of `terminal_slash_commands`, so a name
+// derived from either longer key necessarily contains the shorter one. Neither
+// longer check could be sole-red for anything; adding them would be
+// documentation rather than coverage, and this comment is the documentation.
+//
+// The `initialize` equality check is likewise subsumed — any name equal to it
+// also contains `init` — and is kept anyway, as all three sibling pins keep
+// theirs: it is the named statement of the one wrong name a reader would most
+// plausibly reach for, so its redundancy is deliberate rather than an oversight.
+//
+// The exact-equality pin is the half that fails a WRONG name rather than merely
+// a claude-derived one: the negative checks alone leave every other wrong name
+// green. Naming is this ticket's (#1726) whole deliverable and nothing
+// downstream supplies the string, so the pin is load-bearing.
+//
+// There is no payload-bytes half. Every sibling pin ends with a regression check
+// over its payload's bytes; this frame has no payload until #1727, so that half
+// arrives there rather than being faked with an inline struct here.
+func TestSlashCommandListType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeSlashCommandList == "initialize" {
+		t.Errorf("wire type is claude's control_request subtype %q; it must be the daemon's own name", TypeSlashCommandList)
+	}
+	if strings.Contains(TypeSlashCommandList, "init") {
+		t.Errorf("wire type %q is derived from claude's subtype (contains %q)", TypeSlashCommandList, "init")
+	}
+	if strings.Contains(TypeSlashCommandList, "commands") {
+		t.Errorf("wire type %q is derived from claude's array key (contains %q)", TypeSlashCommandList, "commands")
+	}
+	// The exact pin, naming what the frame IS to a client rather than anything of
+	// claude's.
+	if TypeSlashCommandList != "slash_command_list" {
+		t.Errorf("wire type: got %q, want %q", TypeSlashCommandList, "slash_command_list")
+	}
+}
