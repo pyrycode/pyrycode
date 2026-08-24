@@ -70,11 +70,30 @@ package realclaude
 // The packageDir / os.WriteFile group the three nearest sibling entries carry is
 // absent from this file's entry, and deliberately: this file has no writer, no
 // reader and no fixture. It builds a table and substitutes into byte slices.
+//
+// # #1733 — the pass that applies the table to the record
+//
+// redactInitControlRecord and its two tests join this file rather than taking a
+// file of their own, because finOfflineExecBans is keyed by FILENAME and
+// TestFinOfflineFilesReachNoExecHelper drives its subtests from `for f := range
+// finOfflineExecBans`: a new file with no entry produces no subtest and no
+// failure. This file's entry already bans realHome and os.TempDir, which are the
+// two ambient reads the pass must not acquire, and already permits t.TempDir,
+// which initControlDivergentDir needs. Everything #1733 adds below builds its
+// values from this file's own constants and from initControlDivergentDir, so the
+// entry needs no change.
+//
+// The pass still writes no file and reads none. Its two callers are the live
+// capture's fill site, which is in a file that execs and is correctly unbanned,
+// and the two tests below.
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -374,5 +393,361 @@ func TestInitControlRedactorLeavesUnrelatedBytesIdentical(t *testing.T) {
 
 	if got := string(red.redact([]byte(in))); got != in {
 		t.Errorf("redact(%q) = %q, want it back unchanged", in, got)
+	}
+}
+
+// --- #1733: the pass over the record ------------------------------------------
+
+// initControlRedactRaws is redact for a []json.RawMessage field. It is shaped
+// exactly like dropcapRedactor.strs — including the make(…, len(in)) that turns a
+// nil field into an empty one — because the two slice shapes behaving identically
+// is worth more than preserving a distinction this record does not use.
+//
+// The nil-becomes-empty consequence is ACCEPTED rather than guarded. It can only
+// move a committed `null` to `[]`, only for models_entry_fields and
+// stdin_write_errors, and only on a run where they carried nothing. The record
+// deliberately carries no `omitempty` on any tag so that absent values stay
+// visible as present keys in an artifact a human reads, and `[]` is the more
+// legible of the two. Nothing decodes the committed bytes.
+func initControlRedactRaws(red *dropcapRedactor, in []json.RawMessage) []json.RawMessage {
+	out := make([]json.RawMessage, len(in))
+	for i, raw := range in {
+		out[i] = json.RawMessage(red.redact(raw))
+	}
+	return out
+}
+
+// redactInitControlRecord rewrites every string-bearing field of rec through red,
+// in place, and returns the classes that fired. It assigns NOTHING else to rec.
+//
+// # Every field of every string-bearing shape, never a curated list
+//
+// The record carries four string-bearing Go shapes — string, []string,
+// json.RawMessage and []json.RawMessage — and a pass that visits one and not
+// another is green on a fixture that exercises only the shape it visits.
+// control_request_sent is the trap: a bare json.RawMessage, a DIFFERENT Go type
+// from the two raw-JSON slices beside it, so a type switch naming
+// []json.RawMessage and forgetting json.RawMessage leaves it untouched.
+// compactInitControlRawRows' doc records that same split as "red on arrival", not
+// a latent risk.
+//
+// wait_error, scanner_error and stdin_write_errors carry a child's own error text,
+// which is exactly where a path arrives that a targeted pass forgets. They are
+// visited for that reason rather than singled out.
+//
+// # Never a whole-record round trip
+//
+// Marshalling the record, substituting into the bytes and unmarshalling back is
+// NOT a legal implementation of "uniform". Measured on this toolchain 2026-08-24:
+// it strips insignificant whitespace from every json.RawMessage and HTML-escapes
+// '<', '>' and '&' inside them into numeric \u escapes, so a payload that named no
+// path comes back CHANGED. Each payload is rewritten over its own bytes instead,
+// and TestInitControlRedactRecord_ReplacesEveryClassInEveryShape's byte-identity
+// subtest is what reports the round trip.
+//
+// # It REPORTS the census, it does not STORE it
+//
+// initControlFixtureRecord gains no field here. #1731 is the slice that puts the
+// census on the record. A field added in this slice reddens
+// TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical on arrival — the
+// marshal before the pass carries it at its zero value and the marshal after
+// carries it populated — and the record's field listing counts with
+// reflect.TypeOf(initControlFixtureRecord{}).NumField(), so it would not even have
+// collided with #1731; it would simply be #1731's work in the wrong slice.
+//
+// after_send_point_result_trailers is deliberately NOT visited: every field of
+// initControlResultTrailer is an int, a float64 or a bool, so no path can reach it
+// and the pass has nothing to do there. Leaving it alone is also what keeps the
+// path-free row honest — initControlFullRecord's two trailer entries survive byte
+// for byte.
+func redactInitControlRecord(red *dropcapRedactor, rec *initControlFixtureRecord) []dropcapSubstitution {
+	rec.ClaudeVersionRaw = red.str(rec.ClaudeVersionRaw)
+	rec.ClaudeVersion = red.str(rec.ClaudeVersion)
+	rec.Arm = red.str(rec.Arm)
+	rec.ControlRequestID = red.str(rec.ControlRequestID)
+	rec.ControlResponseSubtype = red.str(rec.ControlResponseSubtype)
+	rec.StderrCapture = red.str(rec.StderrCapture)
+	rec.WaitError = red.str(rec.WaitError)
+	rec.ScannerError = red.str(rec.ScannerError)
+
+	rec.Argv = red.strs(rec.Argv)
+	rec.Prompts = red.strs(rec.Prompts)
+	rec.ModelsEntryFields = red.strs(rec.ModelsEntryFields)
+	rec.StdinWriteErrors = red.strs(rec.StdinWriteErrors)
+
+	// redact over a nil []byte returns nil, so a record that sent no control
+	// request keeps its nil-ness here rather than acquiring `""`.
+	rec.ControlRequestSent = json.RawMessage(red.redact(rec.ControlRequestSent))
+	rec.ControlResponses = initControlRedactRaws(red, rec.ControlResponses)
+	rec.StdoutEvents = initControlRedactRaws(red, rec.StdoutEvents)
+
+	return red.substitutions()
+}
+
+// The two payloads the byte-identity subtest measures, named as constants so that
+// the comparison uses the SAME constant on both sides rather than a variable the
+// record also holds. Reading the expectation back off the subject asserts nothing.
+//
+// Each MUST carry at least one of '<', '>', '&' or insignificant whitespace, and
+// that is the whole reason for their content. Without it the byte-identity clause
+// is 0-RED against the whole-record round trip it exists to reject, because a
+// re-marshal moves nothing else here: the event carries '<', '>' and '&' in a
+// realistic assistant-text shape, and the response carries a space after each
+// colon.
+//
+// initControlFullRecord must NOT acquire any of these characters — literal-choice
+// 2 in its own doc comment forbids exactly that, and the path-free row below is
+// that record. These belong here instead.
+const (
+	initControlUntouchedEvent    = `{"type":"assistant","message":{"content":[{"type":"text","text":"if a < b && c > d"}]}}`
+	initControlUntouchedResponse = `{"type": "control_response", "response": {"subtype": "success"}}`
+)
+
+// TestInitControlRedactRecord_ReplacesEveryClassInEveryShape is AC2, AC3 and AC5
+// over ONE record the parent builds, redacts once, and hands to four read-only
+// subtests.
+//
+// The fixture puts a value of every class in a field of each of the four
+// string-bearing Go shapes, so a pass that visits one shape and not another
+// reddens HERE rather than on the next live run:
+//
+//   - []string — the operator home, in argv[0].
+//   - string — the system temp dir, in stderr_capture.
+//   - []json.RawMessage — the workdir in its RESOLVED spelling, as the captured
+//     system/init line's cwd, beside the composite memory_paths.auto value.
+//   - json.RawMessage — the workdir in the HANDED spelling, in
+//     control_request_sent. A real initialize request carries no cwd; this one
+//     does, because that field's SHAPE is what no other row here exercises and a
+//     type switch that forgets the bare json.RawMessage is green on every other
+//     row.
+//
+// The composite reproduces what line-by-line measurement found in the committed
+// artifact's memory_paths.auto, with its MIXED SPELLINGS: the temp home as a
+// literal prefix in the spelling the harness handed over, then /.claude/projects/,
+// then the project-slug spelling of the workdir's RESOLVED form, then /memory/.
+// The mix is the measurement, not a flourish — it is why one value collapses to
+// $TEMP_HOME and the other to $WORKDIR through rules of two different spellings,
+// and a row built with both values in their handed spellings is green even against
+// a table that never enumerated a resolved form, which is precisely the miss the
+// measured cwd proved.
+//
+// Every value is assembled from this row's OWN inputs and never from the measured
+// bytes, which name the operator's machine. No value is read from a credential or
+// from a live claude: each is a literal this test controls or the pair
+// initControlDivergentDir mints, so the whole test runs on a machine with no
+// claude and no credentials.
+//
+// The comparison is against expected BYTES rather than an absence, and on the
+// composite that is the only thing that discriminates: both substitution orderings
+// leave zero denied values behind there, so an absence check passes on the mangled
+// string.
+func TestInitControlRedactRecord_ReplacesEveryClassInEveryShape(t *testing.T) {
+	t.Parallel()
+
+	handed, resolved := initControlDivergentDir(t)
+
+	composite := initControlTempHomeValue + "/.claude/projects/" + dropcapSlug(resolved) + "/memory/"
+	initEvent := `{"type":"system","subtype":"init","cwd":"` + resolved +
+		`","memory_paths":{"auto":"` + composite + `"}}`
+	requestSent := `{"type":"control_request","request_id":"req_init_1",` +
+		`"request":{"subtype":"initialize","cwd":"` + handed + `"}}`
+
+	rec := &initControlFixtureRecord{
+		ClaudeVersionRaw: "2.1.239 (Claude Code)",
+		ClaudeVersion:    "2.1.239",
+
+		Arm: "after_completed_turn",
+
+		Argv:    []string{initControlOperatorHomeValue + "/.local/bin/claude", "--verbose"},
+		Prompts: []string{"probe turn one"},
+
+		ControlRequestID:       "req_init_1",
+		ControlRequestSent:     json.RawMessage(requestSent),
+		ControlResponses:       []json.RawMessage{json.RawMessage(initControlUntouchedResponse)},
+		ControlResponseSubtype: "success",
+
+		ModelsEntryFields: []string{"model", "displayName"},
+
+		StdoutEvents: []json.RawMessage{
+			json.RawMessage(initEvent),
+			json.RawMessage(initControlUntouchedEvent),
+		},
+
+		StdinWriteErrors: []string{"write |1: broken pipe"},
+		StderrCapture:    "child stderr: shim log at " + initControlTempDirValue + "/claude-shim.log",
+		WaitError:        "signal: killed",
+		ScannerError:     "bufio.Scanner: token too long",
+	}
+
+	beforeEvents := len(rec.StdoutEvents)
+	beforeResponses := len(rec.ControlResponses)
+
+	// The SHIPPED construction, over real values — never a rule table hand-built
+	// beside it, and never four empty strings, which hold no rules and cannot
+	// rewrite anything. The workdir slot takes the HANDED spelling, exactly as the
+	// live call site hands it the workdir it created.
+	red := newInitControlRedactor(
+		initControlOperatorHomeValue,
+		initControlTempHomeValue,
+		handed,
+		initControlTempDirValue,
+	)
+
+	subs := redactInitControlRecord(red, rec)
+
+	t.Run("each value is replaced by the placeholder of its own class", func(t *testing.T) {
+		t.Parallel()
+
+		// Every want is a literal assembled from this row's own inputs. The
+		// stdout_events[0] row compares the WHOLE payload rather than the two
+		// leaked values separately: that covers cwd and the composite at once and
+		// also asserts that nothing else in the payload moved, which two substring
+		// rows would not.
+		tests := []struct {
+			field string
+			got   string
+			want  string
+		}{
+			{"argv[0]", rec.Argv[0], "$HOME/.local/bin/claude"},
+			{"stderr_capture", rec.StderrCapture, "child stderr: shim log at $TMPDIR/claude-shim.log"},
+			{"stdout_events[0]", string(rec.StdoutEvents[0]),
+				`{"type":"system","subtype":"init","cwd":"$WORKDIR",` +
+					`"memory_paths":{"auto":"$TEMP_HOME/.claude/projects/$WORKDIR/memory/"}}`},
+			{"control_request_sent", string(rec.ControlRequestSent),
+				`{"type":"control_request","request_id":"req_init_1",` +
+					`"request":{"subtype":"initialize","cwd":"$WORKDIR"}}`},
+		}
+		for _, tc := range tests {
+			if tc.got != tc.want {
+				t.Errorf("#1733: %s redacted to %q, want %q; every value naming the operator's "+
+					"home, the run's temp home, the child's workdir or the system temp dir must "+
+					"carry the placeholder of its OWN class before the record reaches the writer",
+					tc.field, tc.got, tc.want)
+			}
+		}
+	})
+
+	t.Run("the captured payloads still count and still decode", func(t *testing.T) {
+		t.Parallel()
+
+		if got := len(rec.StdoutEvents); got != beforeEvents {
+			t.Errorf("#1733: the pass left %d stdout_events, want %d unchanged", got, beforeEvents)
+		}
+		if got := len(rec.ControlResponses); got != beforeResponses {
+			t.Errorf("#1733: the pass left %d control_responses, want %d unchanged", got, beforeResponses)
+		}
+
+		if !json.Valid(rec.ControlRequestSent) {
+			t.Errorf("#1733: control_request_sent no longer decodes as JSON after the pass: %s",
+				rec.ControlRequestSent)
+		}
+		for i, raw := range rec.StdoutEvents {
+			if !json.Valid(raw) {
+				t.Errorf("#1733: stdout_events[%d] no longer decodes as JSON after the pass: %s", i, raw)
+			}
+		}
+		for i, raw := range rec.ControlResponses {
+			if !json.Valid(raw) {
+				t.Errorf("#1733: control_responses[%d] no longer decodes as JSON after the pass: %s", i, raw)
+			}
+		}
+	})
+
+	t.Run("payloads that named no path come back byte-identical", func(t *testing.T) {
+		t.Parallel()
+
+		// Against the CONSTANTS the record was built from, never against a
+		// variable the record also holds and never against the written file:
+		// writeInitControlFixture marshals with json.MarshalIndent, which
+		// re-indents INSIDE an embedded raw message, so a file-level assertion
+		// here reddens for a perfectly correct pass.
+		//
+		// This is the sole red for a pass implemented as a whole-record marshal,
+		// substitute and unmarshal back: that round trip strips the response's
+		// spaces after its colons and escapes the event's '<', '>' and '&' into
+		// numeric \u escapes.
+		if got := rec.StdoutEvents[1]; !bytes.Equal(got, []byte(initControlUntouchedEvent)) {
+			t.Errorf("#1733: stdout_events[1] named no path yet came back changed:\n got %s\nwant %s",
+				got, initControlUntouchedEvent)
+		}
+		if got := rec.ControlResponses[0]; !bytes.Equal(got, []byte(initControlUntouchedResponse)) {
+			t.Errorf("#1733: control_responses[0] named no path yet came back changed:\n got %s\nwant %s",
+				got, initControlUntouchedResponse)
+		}
+	})
+
+	t.Run("the census names exactly the classes that fired, with their counts", func(t *testing.T) {
+		t.Parallel()
+
+		// Re-derived against the fixture above rather than assumed. Counting is
+		// per RULE within a class and accumulates on the redactor across every
+		// field the pass visits, and longest-first means a longer rule's
+		// replacement hides the shorter rules' values from the bytes that follow:
+		//
+		//   operator_home 1 — argv[0].
+		//   temp_dir      1 — stderr_capture. It does NOT also fire inside the
+		//                     composite, because $TEMP_HOME has already consumed
+		//                     that prefix by the time the shorter rule runs.
+		//   temp_home     1 — the composite's literal prefix.
+		//   workdir       3 — `handed` in control_request_sent, `resolved` in cwd,
+		//                     and dropcapSlug(resolved) inside the composite.
+		//
+		// Which is why the composite contributes one temp-home hit and one
+		// workdir hit rather than three of anything.
+		want := []dropcapSubstitution{
+			{Class: dropcapClassOperatorHome, Replacement: "$HOME", Count: 1},
+			{Class: dropcapClassTempDir, Replacement: "$TMPDIR", Count: 1},
+			{Class: dropcapClassTempHome, Replacement: "$TEMP_HOME", Count: 1},
+			{Class: dropcapClassWorkdir, Replacement: "$WORKDIR", Count: 3},
+		}
+		if !reflect.DeepEqual(subs, want) {
+			t.Errorf("#1733: the pass reported %+v, want %+v; the census is what #1731 puts on "+
+				"the record, and a wrong substitution order silently mis-assigns it", subs, want)
+		}
+	})
+}
+
+// TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical is AC4, run
+// through the SAME construction the capture's fill site uses — the same function,
+// over real values, never a rule table hand-built beside it.
+//
+// initControlFullRecord carries no path value: its argv[0] is the literal "claude"
+// and no field carries a denied prefix, so the writer's offline callers stay green
+// and this row asks only that the pass rewrite nothing it was not asked to.
+//
+// It is not tautological. That record carries a `0` in three places —
+// turn_boundaries [0, 7], total_cost_usd 0.0731 and a second trailer entry whose
+// cost is zero — so it goes RED the moment the construction acquires a nonce rule
+// (strconv.FormatInt never returns "", so add's empty-value guard cannot stop one,
+// and 0 installs a rule that rewrites every `0` byte) or any other rule over a
+// value it legitimately carries. It is also the sole red for a pass that stores its
+// census on a new record field: the marshal before carries the field at its zero
+// value and the marshal after carries it populated.
+func TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	rec := initControlFullRecord()
+
+	before, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("#1733: marshal the record before the pass: %v", err)
+	}
+
+	red := newInitControlRedactor(
+		initControlOperatorHomeValue,
+		initControlTempHomeValue,
+		initControlWorkdirValue,
+		initControlTempDirValue,
+	)
+	redactInitControlRecord(red, rec)
+
+	after, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("#1733: marshal the record after the pass: %v", err)
+	}
+
+	if !bytes.Equal(before, after) {
+		t.Errorf("#1733: a record carrying no path value did not survive the pass unchanged:\n"+
+			"before %s\n after %s", before, after)
 	}
 }
