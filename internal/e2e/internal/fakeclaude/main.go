@@ -1535,9 +1535,16 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // and an interrupt control_request emits a control_response ack echoing the request's
 // id (#1500) followed by a result{error_during_execution} — which the daemon's parser
 // consumes content-free and maps to TurnEnd{cancelled} respectively, ending the
-// in-flight turn interrupted. With honorInterrupt false the control_request is ignored
-// (the default the send / new_session / queue riders depend on staying byte-identical).
-// The mode is stateless: it emits that pair on each interrupt control_request.
+// in-flight turn interrupted. With honorInterrupt false the INTERRUPT control_request
+// is ignored (the default the send / new_session / queue riders depend on staying
+// byte-identical). The mode is stateless: it emits that pair on each interrupt
+// control_request.
+//
+// An `initialize` control_request (#1689) is answered in BOTH modes and under no
+// rider — see writeInitializeAck. It is the one control line the fake handles
+// unconditionally, because once the daemon starts sending it every fake-daemon run
+// sees it regardless of rider; nothing sends it today, so no existing suite's bytes
+// change. Every other control_request keeps its behaviour exactly.
 //
 // rateLimitStatus selects the rate-limit rider (#1411, default-off): non-empty
 // prepends one top-level rate_limit_event line carrying that string as its
@@ -1585,6 +1592,17 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				if werr != nil {
 					return
 				}
+			} else if reqID, ok := controlRequestID(b, subtypeInitialize); ok {
+				// The daemon asked this child to initialize (#1689) — the request real
+				// claude answers with the session's model list. Answered UNCONDITIONALLY,
+				// beside the honorInterrupt arm rather than inside it: once the daemon
+				// starts sending the line every fake-daemon run sees it regardless of
+				// rider, so a gated answer would leave the default path — the one every
+				// existing suite runs — silently unanswered. Nothing sends the request
+				// today, so no existing suite's bytes change.
+				if werr := writeInitializeAck(w, reqID); werr != nil {
+					return
+				}
 			} else if honorInterrupt {
 				if reqID, ok := interruptControlRequest(b); ok {
 					// The daemon routed a phone interrupt to this child as a control_request:
@@ -1630,23 +1648,42 @@ func userTurnText(line []byte) (string, bool) {
 	return "", true
 }
 
-// interruptControlRequest reports whether line is the interrupt control_request the
-// daemon writes to the child's stdin on a phone interrupt
-// (streamsup.marshalInterruptEnvelope:
-// {"type":"control_request",…"request":{"subtype":"interrupt"}}), returning its
-// correlation id for the ack to echo (#1500). It mirrors userTurnText's decode
-// discipline: a minimal struct, and a line that fails to decode or is not an
-// interrupt control_request returns ("", false) — the caller ignores it, preserving
-// the parser's per-line resilience.
-func interruptControlRequest(line []byte) (string, bool) {
+// The control_request subtypes fakeclaude answers, named so the dispatch in
+// runStreamJSON reads by name rather than by bare literal. Both are the daemon's
+// strings: interrupt is streamsup.marshalInterruptEnvelope's (#1136/#1500), initialize
+// is the request the daemon sends to collect the session's model list (#1689).
+const (
+	subtypeInterrupt  = "interrupt"
+	subtypeInitialize = "initialize"
+)
+
+// controlRequestID reports whether line is a control_request carrying subtype,
+// returning its correlation id for an ack to echo. It mirrors userTurnText's decode
+// discipline: a minimal struct, and a line that fails to decode or carries another
+// type or subtype returns ("", false) — the caller ignores it, preserving the
+// parser's per-line resilience.
+//
+// ONE decode parameterised by subtype rather than a twin per subtype, mirroring the
+// argvSessionID → argvIDFlag extraction #1631 made in this file: a duplicated decode
+// is what drifts when the request envelope moves.
+func controlRequestID(line []byte, subtype string) (string, bool) {
 	var in inControlRequest
 	if err := json.Unmarshal(line, &in); err != nil {
 		return "", false
 	}
-	if in.Type != "control_request" || in.Request.Subtype != "interrupt" {
+	if in.Type != "control_request" || in.Request.Subtype != subtype {
 		return "", false
 	}
 	return in.RequestID, true
+}
+
+// interruptControlRequest reports whether line is the interrupt control_request the
+// daemon writes to the child's stdin on a phone interrupt
+// (streamsup.marshalInterruptEnvelope:
+// {"type":"control_request",…"request":{"subtype":"interrupt"}}), returning its
+// correlation id for the ack to echo (#1500).
+func interruptControlRequest(line []byte) (string, bool) {
+	return controlRequestID(line, subtypeInterrupt)
 }
 
 // writeStreamResponse writes fakeclaude's canned reply to one user turn: one
@@ -1792,6 +1829,93 @@ func writeInterruptAck(w io.Writer, requestID string) error {
 			"request_id": requestID,
 		},
 	})
+}
+
+// writeInitializeAck writes the control_response real claude answers an `initialize`
+// control_request with (#1692): the ack envelope writeInterruptAck documents —
+// `subtype` and `request_id` nested UNDER `response`, the inverse of the request side
+// — wrapping the initialize payload one level deeper still, as `response.response`,
+// which is where the model list lives.
+//
+// The envelope and the entries are transcribed from the committed capture
+// (internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json, claude 2.1.239).
+// What is NOT transcribed is everything else the real answer carries: the inner
+// payload also holds commands (51 in the capture), agents, output_style, account, pid
+// and session_state, and the outer object holds pending_permission_requests and
+// pending_user_dialog_requests. All of it is OMITTED rather than invented — this is a
+// fake, not a mirror, and models alone is what the consumers riding this need. #1683
+// extends the same answer with commands when it lands.
+//
+// Going through writeJSONLine is load-bearing for the echo rather than a style
+// preference. requestID is inbound bytes — whatever the daemon wrote to this child's
+// stdin — reflected straight back onto stdout, which the daemon's stream parser reads
+// as line-delimited JSON. json.Marshal escapes it, so a request_id carrying a newline
+// and a forged envelope lands as one escaped string inside one physical line; built
+// with fmt.Sprintf instead, that same value would split the output and fabricate an
+// extra stream line the parser consumes as a real event. writeAssistantEcho already
+// depends on exactly this property for the echoed prompt. A strange id is echoed,
+// never rejected: the fake does not police the daemon's correlation ids.
+//
+// A map[string]any like writeInterruptAck and writeRateLimitEvent: keys marshal
+// sorted, so the line is deterministic without declaring a struct for a shape nothing
+// else reads. Returns the first marshal/write error.
+func writeInitializeAck(w io.Writer, requestID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response": map[string]any{
+				"models": initializeModels,
+			},
+		},
+	})
+}
+
+// initializeModels is the canned model list writeInitializeAck answers with — two
+// entries transcribed VERBATIM from the committed capture
+// (internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json), chosen because
+// their two key sets are the contrast a consumer branches on:
+//
+//   - sonnet carries the capture's eight-key shape: the full five effort levels and
+//     supportsAutoMode true.
+//   - haiku carries its four-key shape — value, resolvedModel, displayName,
+//     description, and NOTHING ELSE.
+//
+// The capture's own models_entry_fields is a nine-name UNION across entries and
+// cannot see per-entry shape; both sets above were read by walking the entries, and
+// initialize_control_test.go re-walks them to prove neither shape is invented. The
+// capture's opus entry carries a ninth key (supportsFastMode); it is deliberately not
+// canned, because two arms is what the consumers need.
+//
+// A map per entry, not a struct with omitempty: ABSENCE is the load-bearing property
+// and a map makes it literal — the key is simply not there. omitempty would conflate
+// false with absent for supportsAutoMode, which is precisely the distinction the
+// minimal entry exists to carry, and #1704 leaves the daemon-internal reading of that
+// distinction for #1690 to decide. A fake emitting "supportedEffortLevels":[] instead
+// of omitting the key would settle it first.
+//
+// READ-ONLY: never appended to, never reassigned. It is marshalled from
+// runStreamJSON's single goroutine in production and from t.Parallel() subtests in
+// the package unit test; a mutation would race in a way -race catches only when the
+// runs happen to overlap.
+var initializeModels = []map[string]any{
+	{
+		"value":                    "sonnet",
+		"resolvedModel":            "claude-sonnet-5",
+		"displayName":              "Sonnet",
+		"description":              "Sonnet 5 · Efficient for routine tasks",
+		"supportsEffort":           true,
+		"supportedEffortLevels":    []string{"low", "medium", "high", "xhigh", "max"},
+		"supportsAdaptiveThinking": true,
+		"supportsAutoMode":         true,
+	},
+	{
+		"value":         "haiku",
+		"resolvedModel": "claude-haiku-4-5-20251001",
+		"displayName":   "Haiku",
+		"description":   "Haiku 4.5 · Fastest for quick answers",
+	},
 }
 
 // writeInterruptedResult writes a single result{subtype:"error_during_execution"}
