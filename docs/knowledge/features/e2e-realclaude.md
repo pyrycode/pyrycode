@@ -2313,10 +2313,12 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched.
 
-- `initialize_control_names_test.go` (#1696, extended #1712) — **the fourth
-  fixture-name lock in this package. #1696 built it for a single-input namer;
-  #1712 gave the file a second, arm-carrying one and corrected the header
-  section that used to say the family would stay single-input.** #1688 spent
+- `initialize_control_names_test.go` (#1696, extended #1712 and #1722) — **the
+  fourth fixture-name lock in this package. #1696 built it for a single-input
+  namer; #1712 gave the file a second, arm-carrying one and corrected the
+  header section that used to say the family would stay single-input; #1722
+  is what finally gives the arm-carrying namer a caller and turns the arm
+  identifier list into a row table.** #1688 spent
   live tokens capturing claude's `initialize` `control_request`/`models` round
   trip; #1696 minted the filename those bytes land under —
   `initialize_control_v<slug>.json` via `initControlFixtureName`, reusing
@@ -2330,22 +2332,34 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   arms — through the one-input namer alone, all three arms mint the same path,
   the last write wins, and the other two vanish with nothing red anywhere.
   #1712 added `initControlArmFixtureName(versionToken, arm string)` alongside
-  it (never replacing it — every current caller of the one-input namer is
-  unchanged, and #1713 is what migrates the writer) plus the read-only
-  `initControlArms` declaration naming #1715's three send-point arms
-  (`before_first_turn`, `after_completed_turn`, `control_no_request`), and a
-  five-subtest lock proving: no minted name joins a committed family; every
-  pattern's control still matches; no minted name collides with what
-  `initControlFixtureName` mints from the same token (string equality, since
-  `testdata/initialize_control_v*` is addressed by no glob at all); distinct
-  declared arms mint distinct names; and every name is one clean path
-  component for hostile inputs in both the token and arm columns. Registered
-  in `finOfflineExecBans` with #1661's list plus `writeFixture`,
-  `captureClaudeVersion`, and `os.LookupEnv` — the middle one because it is the
-  package's own `claude --version` exec and returns exactly this namer's
-  input, making it the exec a developer touching version tokens is likeliest
-  to reach for. #1712 added no new banned names: the second namer performs no
-  I/O either, so the existing seventeen-name entry already covered it.
+  it (never replacing it — every current caller of the one-input namer stayed
+  unchanged until #1722 migrated `writeInitControlFixture` onto the
+  arm-carrying one) plus the read-only `initControlArms` declaration naming
+  #1715's three send-point arms (`before_first_turn`, `after_completed_turn`,
+  `control_no_request`), and a five-subtest lock proving: no minted name joins
+  a committed family; every pattern's control still matches; no minted name
+  collides with what `initControlFixtureName` mints from the same token
+  (string equality, since `testdata/initialize_control_v*` is addressed by no
+  glob at all); distinct declared arms mint distinct names; and every name is
+  one clean path component for hostile inputs in both the token and arm
+  columns. Registered in `finOfflineExecBans` with #1661's list plus
+  `writeFixture`, `captureClaudeVersion`, and `os.LookupEnv` — the middle one
+  because it is the package's own `claude --version` exec and returns exactly
+  this namer's input, making it the exec a developer touching version tokens
+  is likeliest to reach for. #1712 added no new banned names: the second
+  namer performs no I/O either, so the existing seventeen-name entry already
+  covered it.
+
+  #1722 grew `initControlArms` in place from a `[]string` into a
+  `[]initControlArm` of `{id string; probed bool}` rows — the growth point
+  #1712's own doc comment named, rather than a second table keyed by the same
+  names. `probed` marks the one arm `initialize_control_probe_test.go`'s
+  single-arm run actually sends at; `initControlProbedArm` ranges the table
+  and returns that row's `id`, or `""` when zero or more than one row carries
+  the marker. The identifiers, their order and their meaning are unchanged —
+  this was a shape change, not a vocabulary change — and the field is meant
+  to go away the moment #1715 ranges the table for a real three-arm rig, at
+  which point the arm becomes a parameter and no row is special.
 
   **Lessons that outlive these tickets:**
   - **Collapsing an input dimension can silently empty the hazard shape a
@@ -2403,6 +2417,17 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     confirmed byte-identical against the pristine file before committing;
     `-overlay` stays correct for the ordinary compiled-code namer mutants
     (both files' worth, as of #1712).
+  - **A degenerate-table selector can collapse its distinct failure modes on
+    purpose, if the collapse buys one sole-red instrument instead of two
+    partial ones.** #1722's `initControlProbedArm` returns `""` for both a
+    zero-marked and a multi-marked `initControlArms`, so one non-emptiness
+    assertion is the sole red for both shapes instead of needing a second
+    "exactly one row is marked" count that would otherwise be the only thing
+    catching one of them. The cost lands in the failure message, which has
+    to name both possible causes since the selector itself cannot tell the
+    reader which one produced the empty string — worth the trade whenever a
+    selector's callers only need "did this resolve", not "how did it fail to
+    resolve."
 
   Zero production files touched by either ticket. See
   `docs/specs/architecture/1696-initialize-capture-fixture-name-lock.md` for
@@ -2410,15 +2435,27 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `docs/specs/architecture/1712-arm-carrying-initialize-fixture-name.md` for
   #1712's. The write half is #1702
   (#1697, named here at the time, was superseded and closed before it was
-  built); #1713 is what migrates the writer onto `initControlArmFixtureName`.
+  built); #1713 closed as a split and #1722 is what performs the migration
+  onto `initControlArmFixtureName`, described in the writer entry below.
 
-- `initialize_control_record_test.go` (#1701) — **the record half of the
-  `initialize` fixture family: fixes the JSON contract #1688's live capture,
-  #1690's decoder and #1692's fake all read, and pins the fixture standing in
-  for it against the two ways it could degenerate silently.**
-  `initControlFixtureRecord` carries the 22 fields the capture needs (no
-  `env` field; the 18 shared with `setModeFixtureRecord` carry that record's
-  JSON tags and Go types unchanged), and `initControlFullRecord` returns a
+- `initialize_control_record_test.go` (#1701, extended #1722) — **the record
+  half of the `initialize` fixture family: fixes the JSON contract #1688's
+  live capture, #1690's decoder and #1692's fake all read, and pins the
+  fixture standing in for it against the two ways it could degenerate
+  silently.** `initControlFixtureRecord` carries the 24 fields the capture
+  needs (no `env` field; nineteen of them carry `setModeFixtureRecord`'s
+  JSON tags and Go types unchanged). #1722 added the two fields past
+  eighteen: `Arm` — the send point the run *intended*, not a claim that the
+  turn completed; `turn_boundaries` is what tells a reader whether the turn
+  actually did — copied from `setModeFixtureRecord.Arm` at the same tag and
+  the same relative position, and `ControlResponseWithinWait`, a fact that
+  is measured and not derivable. Unlike `ControlResponseRequestIDMatched`,
+  which is a function of two verbatim fields recorded beside it, this one is
+  a function of a bounded wait that has already expired by the time the
+  record is built, and no other field — not even the verbatim response
+  bytes — can reconstruct it, because a `control_response` carries no
+  arrival time relative to the budget the harness chose.
+  `initControlFullRecord` returns a
   **fresh pointer per call** rather than a package-level `var`, so #1700's
   parallel subtests mutating the record are not a `-race` data race. The
   hand-written `initControlFixtureFields` listing is what #1702 zips against
@@ -2430,7 +2467,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   writer, which is why the two files need separate, differently-scoped
   entries rather than one shared one.
 
-  **One lesson that outlives this ticket:**
+  **Lessons that outlive this ticket:**
   - **A duplicate-name row in a hand-written listing reddens more than the
     property it was written to test, so a mutant table has to be checked by
     failure *message*, not by which subtest went red.** Listing `argv` twice
@@ -2438,25 +2475,56 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     listing-covers-every-field subtest's uniqueness pass. It also puts two
     identical `[]string` rows into the same-typed-fields-distinct
     comparison, so that subtest fires as collateral — while the length check
-    inside the first subtest stays green the whole time, still counting 22
-    rows. Two subtests firing where one was predicted is invisible if you
-    only read red/green; it shows up only in what each failure message says
-    caused it. Any future mutant table in this family that predicts "exactly
-    one subtest reds" needs its message read, not just its count.
+    inside the first subtest stays green the whole time, still counting the
+    field total. Two subtests firing where one was predicted is invisible if
+    you only read red/green; it shows up only in what each failure message
+    says caused it. Any future mutant table in this family that predicts
+    "exactly one subtest reds" needs its message read, not just its count.
+  - **A fixture literal that is deliberately not a real value needs its own
+    slugging property pinned, or two unrelated writer mutants both go dead
+    without the round trip noticing.** #1722's `initControlFullRecord` needed
+    a synthetic `after_completed_turn-FIXTURE` arm for the same reason
+    `claude_version` is `2.1.220-FIXTURE`: every declared arm in
+    `initControlArms` is already inside `versionSlug`'s clean character
+    class, so a "tidied" literal reading a real arm would let the round
+    trip's name assertion pass against *both* a writer that interpolates the
+    arm raw and one that hardcodes an arm entirely. Measured by running
+    those two mutants against a clean literal: both went 0-red, and only a
+    widened does-not-survive-slugging subtest caught the difference. A
+    single-mutant matrix would have credited the round trip with coverage it
+    did not have; the pairwise run is what showed one subtest was carrying
+    the weight of two.
+  - **A bool field's non-zero property can forbid the very pair the field
+    exists to express, and the fix is a second record instance, not a
+    weaker property.** `ControlResponseWithinWait` exists to state "bytes
+    captured, wait not satisfied" — but non-zero for a bool means `true`, so
+    the fully-populated fixture, which must carry every field non-zero,
+    necessarily carries the *coherent* pair (`true` beside captured bytes)
+    and cannot demonstrate the discriminating one. #1722 put that pair in a
+    second record instance inside its own round-trip test instead, guarded
+    by a vacuity check that the fixture's response bytes are non-empty
+    before the write. The mutant this catches — the field derived from
+    `len(ControlResponses) > 0` instead of the wait's own result — is
+    invisible to the main round trip, which only ever sees the coherent
+    pair.
 
   Zero production files touched. See
   `docs/specs/architecture/1701-initialize-capture-fixture-record.md` for
-  the full design and the per-field distinctness-group table. The write half —
+  the full design and the per-field distinctness-group table, and
+  `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
+  the arm and wait-result fields. The write half —
   the writer and the round trip that reuses this file's record and listing —
   is `initialize_control_writer_test.go` (#1702), described next.
 
-- `initialize_control_writer_test.go` (#1702) — **the write half of the
-  `initialize` fixture family: the directory-injectable, atomic writer for
-  #1701's record, and the offline round trip proving no field is dropped on
-  the way.** `writeInitControlFixture` mirrors #1662's
-  `writePoolRevokeFixture` step for step — `dir` parameter, `os.MkdirAll`,
-  name minted from `out.ClaudeVersion` (never `ClaudeVersionRaw`, and never
-  self-formatted) through #1696's `initControlFixtureName`, `MarshalIndent`,
+- `initialize_control_writer_test.go` (#1702, extended #1700 and #1722) —
+  **the write half of the `initialize` fixture family: the
+  directory-injectable, atomic writer for #1701's record, and the offline
+  round trip proving no field is dropped on the way.** `writeInitControlFixture`
+  mirrors #1662's `writePoolRevokeFixture` step for step — `dir` parameter,
+  `os.MkdirAll`, name minted from `out.ClaudeVersion` and `out.Arm` (never
+  `ClaudeVersionRaw`, and never self-formatted) through #1712's
+  `initControlArmFixtureName` — both columns passed through unmodified, so
+  the writer itself formats no filename and slugs nothing — `MarshalIndent`,
   `.tmp` write, `os.Rename` — and caps `stderr_capture` on a shallow copy
   (`out := *rec`), whose doc comment states the caveat explicitly: the copy
   shares every slice header with the caller, so it is safe only because the
@@ -2506,9 +2574,23 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   and an honest normaliser. The fix is one more clause in the message, not a
   design change, and was not applied in this ticket.
 
+  #1722 re-pointed `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry`'s
+  `wantName` onto `initControlArmFixtureName(rec.ClaudeVersion, rec.Arm)` and
+  added `TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes`
+  alongside it — the incoherent-pair test described in the record entry
+  above (bytes captured, wait not satisfied), placed in this file because it
+  is the only one in the family whose `finOfflineExecBans` entry permits
+  `os.WriteFile`/`os.ReadFile`. Its vacuity control (`t.Fatalf` if the
+  fixture's `ControlResponses` is empty) follows this file's own
+  `TestInitControlFixture_WriterCapsStderrCapture` precedent below rather
+  than a skip, on the same reasoning: a row that cannot discriminate is a
+  broken instrument, not a passing test.
+
   Zero production files touched. See
   `docs/specs/architecture/1702-initialize-capture-fixture-writer-and-round-trip.md`
-  for the full design and the twelve-mutant table. This closed the
+  for the full design and the twelve-mutant table, and
+  `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
+  the arm-namer migration and the incoherent-pair test. This closed the
   `initialize` fixture family's complete/atomic half; bounded closed in #1700,
   below, which adds a fourth test to this same file and updates the file's own
   COMPLETE/ATOMIC/BOUNDED self-description and in-file pointers accordingly.
@@ -2545,10 +2627,10 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `docs/specs/architecture/1700-initialize-fixture-writer-cap.md` for the
   full design and the five-row mutant matrix.
 
-- `initialize_control_probe_test.go` (#1688) — **the live run that closes the
-  `initialize` fixture family: one real child, one tool-free probe turn, one
-  `control_request` with subtype `initialize` on the held-open stdin, the
-  reply written through #1702's writer into
+- `initialize_control_probe_test.go` (#1688, extended #1722) — **the live run
+  that closes the `initialize` fixture family: one real child, one tool-free
+  probe turn, one `control_request` with subtype `initialize` on the
+  held-open stdin, the reply written through #1702's writer into
   `testdata/initialize_control_v2.1.239.json` (committed).** Reuses
   `setModeRecorder`, `setModeWaitFor`, `setModeTurnLine` and
   `setModeResponseIDMatches` from `set_permission_mode_probe_test.go`
@@ -2556,6 +2638,23 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `setModeFieldMatches`, `setModeDirections`) since this run has one arm and
   no control. Measured against claude 2.1.239: `subtype:"success"`, 6
   `models` entries, also carrying `commands` (51, for #1683) and `agents` (6).
+  The committed fixture predates #1722's `Arm` field and is **not** renamed
+  or reshaped to carry one — the next live run to supersede it is #1715's
+  three-arm rig, not this slice.
+
+  `runInitControlChild` used to call `setModeWaitFor(...)` and drop its
+  result into a `t.Logf` alone; #1722 keeps that log and also records the
+  result as `ControlResponseWithinWait` on the record, and records the send
+  point it targets as `Arm: initControlProbedArm()`. `initControlProbedArm`
+  reads the one row `initialize_control_names_test.go`'s `initControlArms`
+  marks `probed`, so the identifier is declared in exactly one place.
+  `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm`, added beside
+  `TestInitControlSummarize_ReadsAllThreePlacements`, decides offline that
+  the selector's result is non-empty and is one of `initControlArms`'
+  declared ids — without spawning a child — so an unset or mistyped arm
+  reddens before a live run ever runs, deliberately without asserting the
+  literal identifier itself: which arm is probed is fixed by the marked row,
+  not by a second spelling of it in a test.
 
   **The `control_response` payload nests one level deeper than
   `streamsup/parser.go`'s documented shape accounts for.** That shape records
@@ -2610,9 +2709,12 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched. See
   `docs/specs/architecture/1688-initialize-control-round-trip-capture.md` for
-  the full design and security review. This closes the `initialize` fixture
-  family opened by #1695's split (#1696/#1701/#1702/#1700); the trigger-design
-  questions (send point, session perturbation) are carved out to #1694.
+  the full design and security review, and
+  `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
+  the arm-recording and wait-result changes. This closes the `initialize`
+  fixture family opened by #1695's split (#1696/#1701/#1702/#1700); the
+  trigger-design questions (send point, session perturbation) are carved out
+  to #1694.
 
 ## Test infrastructure
 
