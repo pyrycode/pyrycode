@@ -617,10 +617,12 @@ TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-pack
   `atomic.Bool` signals are reached. Stream-json travels over a **pipe**, not a PTY,
   so canonical line discipline / CR mapping don't apply — `enterRawMode()` is never
   called in this mode.
-- **Default mode still ignores every non-`"user"` line**, including a
-  `control_request` — responding only to user turns with `assistant`+`result(success)`.
-  new_session / queue / modal remain out of scope for the fake. Interrupt is now
-  handled by the `honorInterrupt` rider, below (#1136).
+- **Default mode still ignores every non-`"user"` line, with one exception.** An
+  `initialize` `control_request` gets a canned answer regardless of mode or rider (#1692,
+  see § Initialize control request answer below); every other `control_request` —
+  including `interrupt` in default mode — is still dropped unlooked-at. new_session /
+  queue / modal remain out of scope for the fake. Interrupt is handled by the
+  `honorInterrupt` rider, below (#1136).
 - **No new glyph, no allowlist change.** Stream mode emits pure JSON — no TUI
   substrate glyphs — so `cmd/substrate-guard`'s allowlist for this file is
   unaffected.
@@ -689,6 +691,75 @@ gets the right behaviour for free; nothing polices "interrupt with no turn open"
 `turnevent.TurnEndReasonCancelled` and every other subtype to `end_turn`, so this is
 the specific value that makes the daemon report the turn as interrupted rather than
 merely errored. See [codebase/1136.md](../codebase/1136.md).
+
+### Initialize control request answer (#1692)
+
+The daemon is gaining the ability to ask its stream child to `initialize` (#1689) — the
+request real claude answers with the session's model list and slash-command list. Unlike
+every rider above, this answer is **unconditional, not env-gated**: `runStreamJSON`'s
+dispatch matches an `initialize` `control_request` in an arm placed *beside*
+`honorInterrupt`, evaluated before it, so the answer fires in both stream modes and needs
+no new env var, no widened signature, no new `main()` call site. This is a deliberate
+departure from this doc's "default-off, byte-identical when unset" house rule for riders:
+nothing sends the request yet, so the unconditional answer changes no existing suite's
+bytes today, and gating it behind a knob would leave the default path — the one every
+future suite runs once #1689 lands — silently unanswered. `streamsup.Parser`'s
+`control_response` case reads nothing below the top-level `type`, so today the answer
+reaches no client and changes no frame count anywhere; #1690 is what teaches the daemon
+to read it.
+
+`controlRequestID(line []byte, subtype string) (string, bool)` is the shared decode
+`interruptControlRequest` used to own alone, generalised by subtype (`subtypeInterrupt`
+vs `subtypeInitialize`) rather than duplicated — the same
+extract-the-shared-half-into-a-parameter move #1631 made for `argvSessionID` →
+`argvIDFlag` in this file. `interruptControlRequest` is now a one-line wrapper and its
+existing behaviour, and every existing interrupt-mode test, are unchanged by construction.
+
+`writeInitializeAck` answers with the same inverted envelope `writeInterruptAck`
+established (`subtype`/`request_id` nested *under* `response`), one level deeper still:
+the initialize payload sits at `response.response`, carrying `models` only —
+`writeInitializeAck`/`initializeModels` — never `commands`, `agents`, `account`, or the
+rest of the real payload (#1683 is what extends this same answer with `commands`).
+
+**Absent is not present-and-empty, and a map is what makes that literal.** The canned
+list carries two entries transcribed verbatim from
+`internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` — a `sonnet` entry
+with the full eight-key shape (five effort levels, `supportsAutoMode: true`) and a
+`haiku` entry with only four keys, `supportedEffortLevels`/`supportsAutoMode` **absent as
+JSON keys**, not `false` or `[]`. `internal/protocol`'s `ModelOption.MarshalJSON` (#1704)
+already decided that absent and empty both publish as `[]` on the *wire*, deliberately
+leaving the daemon-internal reading of that distinction for #1690 — a fake that emitted
+`[]`/`false` for the minimal entry would settle #1690's question before it got there.
+Each canned entry is a `map[string]any`, like `writeInterruptAck`/`writeRateLimitEvent`:
+a struct with `omitempty` would conflate `false` with absent for exactly the field this
+ticket exists to keep distinct.
+
+**The `request_id` echo depends on going through `writeJSONLine`, not `fmt.Sprintf`.**
+`requestID` is inbound bytes the daemon wrote to this child's stdin, reflected straight
+back onto stdout, which the daemon's stream parser reads as line-delimited JSON.
+`json.Marshal` escapes it, so a `request_id` carrying an embedded newline plus a forged
+envelope lands as one escaped string inside one physical line; built by string
+concatenation instead, that same value would split the output and fabricate an extra
+stream line the parser would consume as real — the same property `writeAssistantEcho`
+already depends on for the echoed prompt.
+
+The mode-independence claim (fires in both `honorInterrupt` states) turned out to have a
+two-sided mutation proof, and the sides are not symmetric with what you'd guess from the
+placement rule alone: a mutant that gates the arm *inside* the `honorInterrupt` branch
+reddens only the **default-mode** row (the arm never runs there); a mutant that reaches
+the arm *only when `honorInterrupt` is false* reddens only the **interrupt-mode** row.
+Both rows earn their place, each catching the opposite mis-gating — worth knowing before
+trimming a two-row table that looks redundant from the code alone.
+
+Pinned by the untagged `initialize_control_test.go` (`stream_detect_test.go`'s
+no-build-tag discipline, so `make check` runs it in both the `test` and `e2e` targets):
+both stream modes get the double-nested ack, both canned key sets are attested by
+re-walking `internal/e2e/realclaude/testdata/initialize_control_v*.json` (never trusting
+that capture's own `models_entry_fields` union summary, which cannot see per-entry
+shape), and an unknown-subtype `control_request` is confirmed unchanged. The capture is
+a live developer recording (`argv` carries a home path, the inner payload carries an
+`account` object) — the test's failure messages print key **names** only, never a
+decoded entry or file dump, to avoid republishing that into CI output on a red run.
 
 ### Stream-path stdin tee (`PYRY_FAKE_CLAUDE_STDIN_LOG`, #1137, per-child since #1331)
 
