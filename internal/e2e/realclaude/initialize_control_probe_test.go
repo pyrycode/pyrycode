@@ -335,7 +335,20 @@ func initControlScrubbed(t *testing.T, stderr string) {
 // that never closed, a control_response that never came, one that came with
 // subtype "error", a mismatched request_id, a stdin write error, an over-long
 // line, a non-zero exit, a tripped deadline.
-func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionToken string) *initControlFixtureRecord {
+//
+// SINCE #1733 IT TAKES A REDACTOR RATHER THAN THREE MORE PATH STRINGS. The
+// alternative — operatorHome, tempHome and tempDir threaded in beside the workdir
+// already here — makes this signature eight positional parameters, six of them
+// strings, and puts the four-argument construction at two sites instead of one. A
+// transposition of operatorHome and tempHome is silent (both install rules, both
+// produce a placeholder, just the wrong one) and no offline test can see it,
+// because every offline row builds its own redactor. One construction site is one
+// place to get that order right. It also leaves #1715 free to mint a fresh
+// redactor per arm inside its loop, which it must: dropcapRedactor's counters are
+// unlocked and its census accumulates across every call, so a shared redactor
+// would both race and report one arm's substitutions against another's.
+func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRedactor,
+	versionRaw, versionToken string) *initControlFixtureRecord {
 	t.Helper()
 
 	// The send point this run drives, taken from the ONE row initControlArms marks
@@ -503,6 +516,30 @@ func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionTo
 		ScannerError:           scannerErr,
 	}
 
+	// #1733: the redaction pass. It sits between the record literal and the write,
+	// so writeInitControlFixture — whose `out := *rec` copy and StderrCapture cap
+	// are #1729's byte-identity subject — is unchanged and still receives a record
+	// it only copies.
+	//
+	// Position alone does NOT protect the two log sites below that would otherwise
+	// leak what the fixture no longer carries — the loop over the captured
+	// control_responses, and the summary line that logs scanner_error. Both land in
+	// a run log this pipeline salvages, and both must read the RECORD'S OWN fields
+	// to see the redacted bytes: the pass assigns fresh values rather than writing
+	// through what it was handed, so scanner_error is safe because the summary line
+	// reads record.ScannerError, and the response loop is safe only because it
+	// ranges record.ControlResponses. Ranging the pre-pass local `responses` there
+	// printed the unredacted bytes past a correctly placed pass — measured on the
+	// first cut of this slice, and the reason the placement claim is stated per log
+	// site rather than per position.
+	//
+	// The census is REPORTED, never stored: the record gains no field in this
+	// slice — that is #1731 — and the log line carries class names, replacements
+	// and counts only, never a value, so it cannot leak one. This is not a
+	// widening of the "never %+v the record" rule; subs is not child output.
+	subs := redactInitControlRecord(red, record)
+	t.Logf("#1733: redaction applied: %+v", subs)
+
 	// packageDir is os.Getwd(), which under `go test` is this package's own
 	// source directory — no untrusted component anywhere in it. Choosing dir is
 	// the caller's job, which initControlFixtureName's doc hands over explicitly;
@@ -523,8 +560,13 @@ func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionTo
 		record.ModelsPresent, record.ModelsCount, record.ModelsEntryFields,
 		record.ControlResponseRequestIDMatched, exitCode, record.ContextDeadlineTripped,
 		record.ScannerError, duration.Round(time.Millisecond))
-	for i, resp := range responses {
-		t.Logf("#1688: control_response[%d] verbatim: %s", i, resp)
+	// record.ControlResponses, never the pre-pass local `responses`. The pass
+	// builds a fresh slice of fresh byte slices — initControlRedactRaws allocates
+	// and redact returns bytes.ReplaceAll's result — so nothing it does writes
+	// through the local, and a loop ranging it prints exactly the bytes the
+	// fixture no longer carries. Redacted rather than verbatim since #1733.
+	for i, resp := range record.ControlResponses {
+		t.Logf("#1688: control_response[%d] redacted: %s", i, resp)
 	}
 	t.Logf("#1688: fixture written: %s", path)
 
@@ -555,10 +597,22 @@ func TestRealClaude_InitializeControl_Capture(t *testing.T) {
 	versionRaw, versionToken := captureClaudeVersion(t)
 	t.Logf("#1688: claude version %q (token %q)", versionRaw, versionToken)
 
+	// #1733's table, built HERE and only here. realHome and os.TempDir() are
+	// legitimate at this site and nowhere else in the family: this file execs and
+	// correctly carries no finOfflineExecBans entry, while the file the
+	// construction lives in bans both by name — and a file that named either could
+	// not honestly carry that ban entry.
+	//
+	// Do NOT re-trim os.TempDir()'s trailing slash: #1732 moved that trim inside
+	// the construction, where it is the one permitted normalisation. realHome may
+	// be empty when HOME was unset at launch; add drops an empty-valued rule, so
+	// this site needs no guard of its own.
+	red := newInitControlRedactor(realHome, home, workdir, os.TempDir())
+
 	// No t.Parallel and no subtests: one child, one reader goroutine, one pinned
 	// $HOME. The fixture is on disk before this returns, so the assertion below
 	// runs against an artifact a human can already read.
-	rec := runInitControlChild(t, claudeBin, workdir, versionRaw, versionToken)
+	rec := runInitControlChild(t, claudeBin, workdir, red, versionRaw, versionToken)
 
 	if len(rec.ControlResponses) == 0 {
 		t.Fatalf("#1688: no control_response arrived within %s, so the round trip this ticket "+

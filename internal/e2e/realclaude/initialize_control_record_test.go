@@ -232,6 +232,14 @@ type initControlResultTrailer struct {
 // ScannerError is load-bearing for #1688, which caps its reader per line: an
 // over-long line must surface HERE rather than truncating silently.
 //
+// A STRING-BEARING FIELD ADDED HERE MUST BE VISITED BY redactInitControlRecord,
+// which since #1733 rewrites every string, []string, json.RawMessage and
+// []json.RawMessage field of this type before the record reaches the writer. That
+// pass visits by field rather than by reflection, so a new field escapes it
+// silently; the NumField assertion in
+// TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken forces a
+// conscious edit to this file but says nothing about the pass.
+//
 // NOTHING IN THIS FILE CAPS ANYTHING. StderrCapture is bounded by #1702's writer
 // through capFixtureCapture and proven by #1700; this type carries no bound and
 // must not be read as implying one. The three verbatim-bytes fields

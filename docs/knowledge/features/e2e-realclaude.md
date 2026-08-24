@@ -2749,8 +2749,8 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     The fix landed as three tickets, not the #1694 this entry originally
     pointed at (#1694 turned out to be the send-point/session-perturbation
     ticket, unrelated) — #1729 (open) is the fail-closed deny-scan itself;
-    #1732 (below) builds the redaction table; #1733 (open) applies it at the
-    fill site and wires the scan in.
+    #1732 (below) builds the redaction table; #1733 (below) applies it at the
+    fill site; #1729 is what will wire the fail-closed scan in once armed.
 
   Code review also flagged, non-blocking: the `!= "null"` guard in
   `initControlSummarize` — the one thing distinguishing `"models":null` from
@@ -2799,7 +2799,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   handed values nest (workdir under temp home under system temp), because
   that's what makes one class's slug spelling a substring of the next —
   over unrelated values both orderings agree and the row proves nothing.
-  This ticket ships the table only; #1733 (open) applies it to the capture
+  This ticket ships the table only; #1733 (below) applies it to the capture
   record at the fill site, and #1729 (open) is the fail-closed deny-scan
   behind it — redaction and scanning are deliberately different fabric (see
   the #1260 entry above).
@@ -2834,6 +2834,62 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   check substitutes for the other. Zero production files touched. See
   `docs/specs/architecture/1732-initialize-capture-redaction-table.md` for
   the full design, the mutant table and the security review.
+
+- `initialize_control_redaction_test.go` (#1733) — **applies #1732's table to
+  every field of `initControlFixtureRecord`, at the fill site.**
+  `redactInitControlRecord(red *dropcapRedactor, rec *initControlFixtureRecord)
+  []dropcapSubstitution` visits all 27 fields by name — no reflection, no
+  whole-record marshal/substitute/unmarshal (that round trip strips
+  insignificant whitespace and HTML-escapes `<`/`>`/`&` inside every
+  `json.RawMessage`, which a byte-identity row over path-free payloads
+  catches) — and returns the classes that fired instead of storing them;
+  `initControlFixtureRecord` gains no field. `runInitControlChild` now takes
+  a `*dropcapRedactor` instead of three more path strings, built once at the
+  live call site (`newInitControlRedactor(realHome, home, workdir,
+  os.TempDir())`); `writeInitControlFixture` is unchanged. `control_request_sent`
+  is a bare `json.RawMessage`, a different Go type from the `[]json.RawMessage`
+  pair beside it, and is visited separately — the split
+  `compactInitControlRawRows`'s doc comment already called "red on arrival".
+
+  **Two lessons from review:**
+  - **A "the pass runs before the log site" placement claim is really a
+    claim about which *variable* the log site reads.** The first cut placed
+    the pass correctly — ahead of both post-write `t.Logf` sites — but the
+    `control_response` log loop ranged the pre-pass local `responses` rather
+    than `record.ControlResponses`. `initControlRedactRaws` allocates a fresh
+    slice and `redact` returns `bytes.ReplaceAll`'s result; neither writes
+    through the input, so a pre-pass alias is untouched no matter where the
+    pass sits. Correct placement plus a stale alias leaks exactly as a late
+    pass does, and a comment asserting the mitigation reads identically in
+    both worlds. When a log site is the mitigation's subject, name the field
+    it reads, not just the pass's position.
+  - **A field an AC names explicitly can still ship with no test that
+    reddens if the code stops visiting it.** AC1 names `control_responses`
+    by hand as one of the payloads the pass must reach, but the fixture
+    gives it exactly one entry and that entry is path-free — deleting
+    `rec.ControlResponses = initControlRedactRaws(...)` from the pass and
+    running the whole offline suite stayed green (confirmed by mutation,
+    not assumed). The pass itself is correct; the row proving it for this
+    field is not. Shipped anyway as a known gap (two SHOULD-FIX findings,
+    under the fail threshold) — worth closing before #1729 arms the
+    fail-closed scan on top of this, since that ticket will be reasoning
+    about which fields the redaction already guarantees.
+
+  One more standing gap from the same review, for whoever next edits this
+  file: `initControlRedactRaws`'s doc comment says the nil→`[]` consequence
+  applies "only for `models_entry_fields` and `stdin_write_errors`" — both
+  `[]string` fields that never go through this helper. `control_responses`
+  *does* go through it and is nilable on a live run
+  (`snapshotControlResponses` returns `append([]json.RawMessage(nil),
+  ...)`), so a no-response capture now commits `"control_responses": []`
+  where it used to commit `null`. The behaviour is accepted (nothing decodes
+  the committed bytes, and `[]` reads better in an artifact a human opens);
+  the comment's field list is simply wrong and still says so as of this
+  writing.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1733-initialize-capture-record-redaction-pass.md`
+  for the full design, the nine-mutant table and the security review.
 
 ## Test infrastructure
 
