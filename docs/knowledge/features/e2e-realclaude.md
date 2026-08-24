@@ -2438,12 +2438,12 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   built); #1713 closed as a split and #1722 is what performs the migration
   onto `initControlArmFixtureName`, described in the writer entry below.
 
-- `initialize_control_record_test.go` (#1701, extended #1722, #1723) — **the
-  record half of the `initialize` fixture family: fixes the JSON contract
-  #1688's live capture, #1690's decoder and #1692's fake all read, and pins
-  the fixture standing in for it against the two ways it could degenerate
-  silently.** `initControlFixtureRecord` carries 27 fields (no `env` field;
-  nineteen of them carry `setModeFixtureRecord`'s
+- `initialize_control_record_test.go` (#1701, extended #1722, #1723, #1731) —
+  **the record half of the `initialize` fixture family: fixes the JSON
+  contract #1688's live capture, #1690's decoder and #1692's fake all read,
+  and pins the fixture standing in for it against the two ways it could
+  degenerate silently.** `initControlFixtureRecord` carries 28 fields (no
+  `env` field; nineteen of them carry `setModeFixtureRecord`'s
   JSON tags and Go types unchanged). #1722 added the two fields past
   eighteen: `Arm` — the send point the run *intended*, not a claim that the
   turn completed; `turn_boundaries` is what tells a reader whether the turn
@@ -2471,7 +2471,27 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   these fields yet — #1715 is the live run that populates them; until then
   every field in this group reads at its zero value, and a zero
   `SendPointIndex` in an artifact predating #1715 is an unpopulated field,
-  not a `before_first_turn` capture.
+  not a `before_first_turn` capture. #1731 added a fourth, one-field group:
+  `Redaction []dropcapSubstitution` (tag `redaction`, no `omitempty`) — the
+  census of which redaction classes fired and how often, populated at the
+  fill site (`runInitControlChild`) from what #1733's
+  `redactInitControlRecord` returns, never inside the pass and never inside
+  `writeInitControlFixture`. `[]` versus `null` is deliberate and is the
+  entire distinction: a non-nil empty census means the redactor ran and
+  found nothing, and `null` means it never ran — a reader of a committed
+  fixture could otherwise not tell those apart. That census is an audit
+  trail over the redactor, not a clean bill of health over the artifact: an
+  empty or wrongly-armed class in `newInitControlRedactor`'s table would
+  match nothing and still report `[]` while the file kept the real path
+  under an unarmed class. #1729's deny-scan is the fail-closed net that
+  makes the clean-artifact claim; this field does not. The record's standing
+  instruction — every string-bearing field added here must be visited by
+  `redactInitControlRecord` — now names `Redaction` as its one exception,
+  since its strings are the redactor's own vocabulary (the four
+  `dropcapClass*` identifiers and the `$`-prefixed placeholders
+  `newInitControlRedactor` mints), never child output or an environment
+  value, and since the field is assigned *from* the pass's return, so
+  visiting it would be circular.
   `initControlFullRecord` returns a
   **fresh pointer per call** rather than a package-level `var`, so #1700's
   parallel subtests mutating the record are not a `-race` data race. The
@@ -2838,12 +2858,16 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 - `initialize_control_redaction_test.go` (#1733) — **applies #1732's table to
   every field of `initControlFixtureRecord`, at the fill site.**
   `redactInitControlRecord(red *dropcapRedactor, rec *initControlFixtureRecord)
-  []dropcapSubstitution` visits all 27 fields by name — no reflection, no
-  whole-record marshal/substitute/unmarshal (that round trip strips
-  insignificant whitespace and HTML-escapes `<`/`>`/`&` inside every
-  `json.RawMessage`, which a byte-identity row over path-free payloads
-  catches) — and returns the classes that fired instead of storing them;
-  `initControlFixtureRecord` gains no field. `runInitControlChild` now takes
+  []dropcapSubstitution` visits every string-bearing field of the record by
+  name — no reflection, no whole-record marshal/substitute/unmarshal (that
+  round trip strips insignificant whitespace and HTML-escapes `<`/`>`/`&`
+  inside every `json.RawMessage`, which a byte-identity row over path-free
+  payloads catches) — and returns the classes that fired instead of storing
+  them; `initControlFixtureRecord` gained no field from this ticket. (#1731,
+  below, later adds one — `Redaction`, the census itself — assigned at the
+  fill site from this pass's return value, and deliberately the one field
+  this pass does not visit, since visiting it would mean reading a value
+  that does not exist until the pass returns.) `runInitControlChild` now takes
   a `*dropcapRedactor` instead of three more path strings, built once at the
   live call site (`newInitControlRedactor(realHome, home, workdir,
   os.TempDir())`); `writeInitControlFixture` is unchanged. `control_request_sent`
@@ -2890,6 +2914,56 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   Zero production files touched. See
   `docs/specs/architecture/1733-initialize-capture-record-redaction-pass.md`
   for the full design, the nine-mutant table and the security review.
+
+- `initialize_control_writer_test.go` (#1731) — **the new field lands on the
+  record (described above), but its one new test lives here, not on the
+  record file or the redaction file, because it is the only one of the
+  three that writes and reads back.** `TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne`
+  writes two otherwise-identical records — one with `Redaction` set to the
+  post-pass census, one with it forced back to `nil` — through
+  `writeInitControlFixture` into separate `t.TempDir()`s (both records mint
+  the same filename via `initControlArmFixtureName`, so one directory would
+  make the second write clobber the first) and asserts the two files'
+  bytes differ. Going through the writer rather than a bare `json.Marshal`
+  is deliberate: it is the one instrument that catches both an `omitempty`
+  tag on the new field *and* a nil-normalising helper inside
+  `writeInitControlFixture`, since both would produce identical files this
+  test can compare, and a bare marshal-and-compare only catches the first.
+  The fill site (`runInitControlChild` in `initialize_control_probe_test.go`)
+  now assigns `record.Redaction = redactInitControlRecord(red, record)`
+  rather than discarding the pass's return — the sibling family's
+  `dropcapWriteRecord` assigns its identically-shaped field *inside the
+  writer*, and is the counter-example here, not the model:
+  `writeInitControlFixture` takes an `out := *rec` copy and must go on
+  receiving a record it only copies.
+
+  **Lessons from review:**
+  - **A vacuity precheck can need two separate failure messages, not one,
+    because the two ways it can fail have different causes.** A `nil`
+    census after the pass means `dropcapRedactor.substitutions` stopped
+    returning a non-nil empty slice (the whole distinction this test exists
+    to protect is gone, everywhere); a *non-empty* census means
+    `initControlFullRecord` picked up a real path value, so the row is
+    silently comparing a populated census against `nil` and proving nothing
+    about the empty-census case it's named for. One combined message
+    diagnoses neither failure.
+  - **An inherited "that is why" clause needs to be re-derived against the
+    fixture's current value, not carried forward verbatim.** Code review
+    caught two: a literal-choice note claiming a realistic path in
+    `Redaction.Replacement` would redden
+    `TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical` (false —
+    that row never visits `Redaction`, so the path survives untouched and the
+    bytes still match; the actual guard is the doc-comment prose plus #1729's
+    future deny-scan), and `redactInitControlRecord`'s own doc describing
+    "before: zero value, after: populated" when `initControlFullRecord` now
+    ships a non-zero census, inverting which marshal is empty. Both
+    directives were right; only the justification attached to each had gone
+    stale the moment the fixture value it described was no longer what it
+    used to be.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1731-record-redaction-census.md` for the full
+  design and the security review.
 
 ## Test infrastructure
 
