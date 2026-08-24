@@ -447,13 +447,13 @@ func initControlRedactRaws(red *dropcapRedactor, in []json.RawMessage) []json.Ra
 //
 // # It REPORTS the census, it does not STORE it
 //
-// initControlFixtureRecord gains no field here. #1731 is the slice that puts the
-// census on the record. A field added in this slice reddens
+// initControlFixtureRecord gains no field here. #1731 put the census on the
+// record, and runInitControlChild is what assigns it there, from what this
+// function RETURNS. A census stored by this pass instead still reddens
 // TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical on arrival — the
-// marshal before the pass carries it at its zero value and the marshal after
-// carries it populated — and the record's field listing counts with
-// reflect.TypeOf(initControlFixtureRecord{}).NumField(), so it would not even have
-// collided with #1731; it would simply be #1731's work in the wrong slice.
+// marshal before the pass carries the field at its zero value and the marshal
+// after carries it populated — which is what keeps the census out of the pass now
+// that the field exists.
 //
 // after_send_point_result_trailers is deliberately NOT visited: every field of
 // initControlResultTrailer is an int, a float64 or a bool, so no path can reach it

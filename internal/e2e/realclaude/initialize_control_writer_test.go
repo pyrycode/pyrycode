@@ -94,6 +94,7 @@ package realclaude
 // credentials skip.
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -414,6 +415,117 @@ func TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes(t *tes
 			"without captured bytes on the other side, control_response_within_wait==false "+
 			"above is satisfied by a field that is simply always false",
 			len(back.ControlResponses), len(rec.ControlResponses))
+	}
+}
+
+// --- the census -----------------------------------------------------------------
+
+// TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne is #1731's
+// second criterion: a record that RAN the redaction and needed none writes
+// DIFFERENT bytes than one that never ran it, so a reader of a committed fixture
+// cannot take "nothing needed redacting" for "the redactor was skipped".
+//
+// The whole distinction is `[]` versus `null`. dropcapRedactor.substitutions
+// returns a NON-NIL EMPTY slice when nothing fired while an unfilled field is
+// nil, and this record carries no `omitempty` on any tag, so the two marshal
+// differently. It is one tag and one nil-normalising helper away from gone, and
+// nothing else in this package notices either: writeInitControlFixture's
+// `out := *rec` is a shallow copy that preserves nil-ness today, so the
+// distinction reaches the file intact while every other row here stays green.
+//
+// THROUGH THE WRITER RATHER THAN A BARE json.Marshal, deliberately. The two
+// mutants are an `omitempty` on the tag and a helper that normalises nil to empty
+// ON THE WAY TO THE FILE; marshalling here directly catches only the first, and
+// the writer's own marshal is what produces the bytes a reviewer of a committed
+// artifact actually reads. It lands in this file rather than the record's or the
+// redaction file's for the reason #1722's row does: it writes and reads back, and
+// this is the file whose finOfflineExecBans entry permits os.WriteFile and
+// os.ReadFile. The TestInitControlFixture_ prefix is load-bearing — this file's
+// header documents a -run filter that keys on it.
+//
+// Deliberately NO bytes.Contains assertion pinning `"redaction": []` against
+// `"redaction": null`. Inequality already reddens for every mutant in the class —
+// an `omitempty` drops the key from BOTH sides, a nil-normaliser renders `[]` on
+// both, a `json:"-"` drops it from both — and a literal-spelling assertion would
+// additionally pin json.MarshalIndent's whitespace, which is not this row's
+// subject.
+//
+// WHAT IT DOES NOT MEASURE, so that nobody credits it with more than it proves:
+// it catches a writer-side helper that turns a NIL census non-nil. It does NOT
+// catch a writer that overwrites a non-nil census with a DIFFERENT value, and
+// nothing in #1731 does — that half rests on writeInitControlFixture's
+// copy-and-don't-mutate contract, with #1729's byte-identity criterion as its
+// future instrument.
+func TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne(t *testing.T) {
+	t.Parallel()
+
+	// The same construction TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical
+	// uses — the same constructor over the same four synthetic values — so the two
+	// rows stay in step rather than drifting into two different redactors. Neither
+	// value is read off the environment, which is what keeps this file's ban on
+	// realHome and os.TempDir untouched.
+	rec := initControlFullRecord()
+	red := newInitControlRedactor(
+		initControlOperatorHomeValue,
+		initControlTempHomeValue,
+		initControlWorkdirValue,
+		initControlTempDirValue,
+	)
+	census := redactInitControlRecord(red, rec)
+
+	// The vacuity controls, and they must Fatalf rather than skip — precheck's
+	// precedent in the cap test below. Two distinct failures, so two messages: a
+	// property that cannot discriminate is a broken instrument, not a passing test.
+	if census == nil {
+		t.Fatalf("#1731: the pass returned a NIL census over a path-free record, so this row " +
+			"compares nil against nil and `[]` versus `null` is no longer a distinction " +
+			"anywhere: dropcapRedactor.substitutions stopped returning a NON-NIL EMPTY slice, " +
+			"and that non-nil-ness is the entire mechanism the redaction field carries")
+	}
+	if len(census) != 0 {
+		t.Fatalf("#1731: the pass fired %d class(es) over initControlFullRecord, so this row "+
+			"compares a POPULATED census against nil and settles nothing about the EMPTY "+
+			"case it exists for; that fixture acquired a path value, which also reddens "+
+			"TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical", len(census))
+	}
+
+	// Two shallow copies of the POST-PASS record, differing in exactly one field
+	// and leaning on no other row's byte-identity claim. Only the new field is
+	// assigned on either copy, so no slice field's backing array is touched and the
+	// fresh pointer initControlFullRecord hands out stays unshared.
+	ran := *rec
+	ran.Redaction = census
+	skipped := *rec
+	skipped.Redaction = nil
+
+	// A tempdir EACH, and not stylistic: both copies carry the same claude_version
+	// and the same arm, so initControlArmFixtureName mints one filename for both
+	// and a shared directory would have them overwrite each other.
+	write := func(rec *initControlFixtureRecord) []byte {
+		t.Helper()
+		path := writeInitControlFixture(t, t.TempDir(), rec)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("#1731: read back the fixture for claude_version %q arm %q: %v",
+				rec.ClaudeVersion, rec.Arm, err)
+		}
+		return data
+	}
+	ranBytes := write(&ran)
+	skippedBytes := write(&skipped)
+
+	if bytes.Equal(ranBytes, skippedBytes) {
+		// Printing both blobs is the same narrowly-scoped exception the round-trip
+		// and byte-identity rows already take: every value in this record is a
+		// synthetic literal, and the diagnostic is worth more than the bytes.
+		// runInitControlChild fills this same record from a live child and must not
+		// inherit the pattern.
+		t.Errorf("#1731: a record whose redaction pass fired NOTHING wrote bytes identical to "+
+			"one that never ran the pass, so a reader of a committed fixture cannot tell "+
+			"\"nothing needed redacting\" from \"the redactor was skipped\": an `omitempty` on "+
+			"the redaction tag drops the key from both sides, and a helper that normalises nil "+
+			"to empty on the way to the file renders `[]` on both.\nran     %s\nskipped %s",
+			ranBytes, skippedBytes)
 	}
 }
 

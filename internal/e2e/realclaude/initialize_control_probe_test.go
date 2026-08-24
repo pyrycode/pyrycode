@@ -533,12 +533,24 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 	// first cut of this slice, and the reason the placement claim is stated per log
 	// site rather than per position.
 	//
-	// The census is REPORTED, never stored: the record gains no field in this
-	// slice — that is #1731 — and the log line carries class names, replacements
-	// and counts only, never a value, so it cannot leak one. This is not a
-	// widening of the "never %+v the record" rule; subs is not child output.
-	subs := redactInitControlRecord(red, record)
-	t.Logf("#1733: redaction applied: %+v", subs)
+	// #1731: the census is assigned ONTO THE RECORD, and HERE is where — at the
+	// fill site, from what the pass RETURNS. Not inside redactInitControlRecord,
+	// which reports the census and stores nothing and whose
+	// TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical is the sole
+	// red for a pass that stores it; and not inside writeInitControlFixture, which
+	// takes an `out := *rec` copy and must go on receiving a record it only
+	// copies. The sibling family's dropcapWriteRecord assigns in ITS writer and is
+	// the counter-example here, not the model; the precedent to follow is that
+	// same family's construction-site `CredentialScanApplied: scanner.applied()`.
+	//
+	// The log line carries class names, replacements and counts only, never a
+	// value, so it cannot leak one — and that clause now constrains the COMMITTED
+	// FILE as well as a salvaged run log, because since #1731 the same values go
+	// both places. It is still not a widening of the "never %+v the record" rule:
+	// the census is not child output. It reads the record's own field for the
+	// reason the two log sites above do.
+	record.Redaction = redactInitControlRecord(red, record)
+	t.Logf("#1733: redaction applied: %+v", record.Redaction)
 
 	// packageDir is os.Getwd(), which under `go test` is this package's own
 	// source directory — no untrusted component anywhere in it. Choosing dir is
