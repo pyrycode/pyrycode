@@ -2438,12 +2438,12 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   built); #1713 closed as a split and #1722 is what performs the migration
   onto `initControlArmFixtureName`, described in the writer entry below.
 
-- `initialize_control_record_test.go` (#1701, extended #1722) — **the record
-  half of the `initialize` fixture family: fixes the JSON contract #1688's
-  live capture, #1690's decoder and #1692's fake all read, and pins the
-  fixture standing in for it against the two ways it could degenerate
-  silently.** `initControlFixtureRecord` carries the 24 fields the capture
-  needs (no `env` field; nineteen of them carry `setModeFixtureRecord`'s
+- `initialize_control_record_test.go` (#1701, extended #1722, #1723) — **the
+  record half of the `initialize` fixture family: fixes the JSON contract
+  #1688's live capture, #1690's decoder and #1692's fake all read, and pins
+  the fixture standing in for it against the two ways it could degenerate
+  silently.** `initControlFixtureRecord` carries 27 fields (no `env` field;
+  nineteen of them carry `setModeFixtureRecord`'s
   JSON tags and Go types unchanged). #1722 added the two fields past
   eighteen: `Arm` — the send point the run *intended*, not a claim that the
   turn completed; `turn_boundaries` is what tells a reader whether the turn
@@ -2454,7 +2454,24 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   a function of a bounded wait that has already expired by the time the
   record is built, and no other field — not even the verbatim response
   bytes — can reconstruct it, because a `control_response` carries no
-  arrival time relative to the budget the harness chose.
+  arrival time relative to the budget the harness chose. #1723 added a third
+  group past those two: `SendPointIndex`, one positional anchor into
+  `stdout_events` (same index units `turn_boundaries` uses — `0` and
+  `len(stdout_events)` are both legitimate readings, not sentinels, and
+  carry no presence flag), plus two reads scoped to the window
+  `stdout_events[anchor:]` it defines — a `system`/`init` line count, and
+  `AfterSendPointResultTrailers`, one `initControlResultTrailer` per
+  `result` line in that window pairing its turn count with its cost and a
+  `TotalCostUSDPresent` flag populated from the trailer's raw bytes, never
+  derived from the decoded value. The nested type is invisible to
+  `reflect.TypeOf(initControlFixtureRecord{}).NumField()` and to the
+  record's same-typed-distinctness property, so it carries its own
+  hand-written listing (`initControlTrailerFields`) and its own three
+  subtests rather than riding the record's existing ones. Nothing computes
+  these fields yet — #1715 is the live run that populates them; until then
+  every field in this group reads at its zero value, and a zero
+  `SendPointIndex` in an artifact predating #1715 is an unpopulated field,
+  not a `before_first_turn` capture.
   `initControlFullRecord` returns a
   **fresh pointer per call** rather than a package-level `var`, so #1700's
   parallel subtests mutating the record are not a `-race` data race. The
@@ -2507,12 +2524,41 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     `len(ControlResponses) > 0` instead of the wait's own result — is
     invisible to the main round trip, which only ever sees the coherent
     pair.
+  - **The write-half's touched-name canary selects by the row's Go type, not
+    by field, so it cannot see raw JSON hidden inside a struct-slice row.**
+    #1723's spec predicted that wrapping `TotalCostUSD` in a
+    `json.RawMessage` "to be safe" would trip
+    `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry`'s
+    `wantTouched` assertion — the same canary that catches it on the record's
+    three top-level raw-JSON fields. Measured via `go test -overlay`: it
+    doesn't. `compactInitControlRawRows` matches on the *row's* declared Go
+    type (`json.RawMessage` / `[]json.RawMessage`), and the row here is
+    `[]initControlResultTrailer`, so the touched set never changes; the round
+    trip holds too, because `MarshalIndent` has no interior to indent inside
+    a scalar. The canary only guards a fourth raw-JSON field added directly
+    to the record — a raw-JSON field nested inside a struct-slice element is
+    unenforced by any test in the family and has to stay a doc-comment-and-
+    review rule (`initControlResultTrailer`'s own comment states this
+    outright rather than citing a test that never runs over the value).
+  - **A listing subtest that indexes a fixture's slice panics on an emptied
+    list instead of reddening, which is the wrong failure mode when a sibling
+    subtest's vacuity check exists to report exactly that mutant.** The
+    "trailer listing covers every field" property is a claim about the
+    *type*, not about any one entry, so it has to run over the zero value of
+    `initControlResultTrailer{}` rather than over `entries[0]` — indexing the
+    fixture's `AfterSendPointResultTrailers` would crash the whole test
+    binary against an emptied list, stepping on the non-zero subtest's
+    `t.Fatalf` vacuity control, which is where that mutant is meant to surface
+    cleanly. Any future per-field-listing subtest added to this family should
+    default to the zero value unless it specifically needs a populated entry.
 
   Zero production files touched. See
   `docs/specs/architecture/1701-initialize-capture-fixture-record.md` for
-  the full design and the per-field distinctness-group table, and
+  the full design and the per-field distinctness-group table,
   `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
-  the arm and wait-result fields. The write half —
+  the arm and wait-result fields, and
+  `docs/specs/architecture/1723-send-point-anchor-and-window-observables.md`
+  for the anchor and window-observable fields. The write half —
   the writer and the round trip that reuses this file's record and listing —
   is `initialize_control_writer_test.go` (#1702), described next.
 
