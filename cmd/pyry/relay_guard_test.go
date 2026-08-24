@@ -179,6 +179,21 @@ var excludedTypes = map[string]string{
 	// the guard. If #1720 picks request/reply, the verb and its handler land
 	// together and this entry becomes "reply".
 	"TypeSlashCommandList": "push",
+
+	// pending handler — the v2 attachment chunk (#1752). Its own label rather
+	// than one of the eight pushes above, because the frame is BIDIRECTIONAL:
+	// upload rides it client→daemon and retrieval rides it daemon→client, so
+	// "push" and the reason its neighbours give for it ("this slice declares no
+	// inbound request verb") would both be false here. inboundTypes is wrong
+	// too — this slice ships no dispatch, so Assertion #1 would fail it by
+	// construction. Excluded under the reason that is actually true: the inbound
+	// leg has no handler YET. #1744 adds the dispatchAppFrame case, at which
+	// point this entry moves to inboundTypes as "switch-intercepted". TypeHello
+	// above is the precedent — a borderline phone→binary type deliberately not
+	// filed inbound, carrying its own label. Mandatory here from the moment the
+	// constant exists: Assertion #3 reports an unclassified constant, not an
+	// unemitted one.
+	"TypeAttachmentChunk": "pending handler (#1744)",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {
