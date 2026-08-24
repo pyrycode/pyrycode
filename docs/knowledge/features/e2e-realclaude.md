@@ -2743,8 +2743,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     records which classes it checked so "no hits" stays distinguishable from
     "never ran") — a live-capture test that writes stdout-derived bytes to a
     committed fixture should run it over the marshalled record before the
-    write, not rely on a human `grep`. Deferred to #1694, which inherits this
-    driver and is the family's next live run.
+    write, not rely on a human `grep`. This was re-measured true on
+    2026-08-24, against the same committed fixture, for `argv[0]`, `cwd` and
+    `memory_paths.auto`: two independent human reads had already passed it.
+    The fix landed as three tickets, not the #1694 this entry originally
+    pointed at (#1694 turned out to be the send-point/session-perturbation
+    ticket, unrelated) — #1729 (open) is the fail-closed deny-scan itself;
+    #1732 (below) builds the redaction table; #1733 (open) applies it at the
+    fill site and wires the scan in.
 
   Code review also flagged, non-blocking: the `!= "null"` guard in
   `initControlSummarize` — the one thing distinguishing `"models":null` from
@@ -2761,6 +2767,73 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   fixture family opened by #1695's split (#1696/#1701/#1702/#1700); the
   trigger-design questions (send point, session perturbation) are carved out
   to #1694.
+
+- `initialize_control_redaction_test.go` (#1732) — **the redaction table for
+  the `initialize` fixture family, proved over raw bytes with no record
+  involved.** `newInitControlRedactor(operatorHome, tempHome, workdir,
+  tempDir string) *dropcapRedactor` reuses `dropped_line_capture_test.go`'s
+  `dropcapRedactor` mechanism (`add`, `redact`, `dropcapPathSpellings`,
+  `dropcapSlug`, the four path class constants) unchanged and replaces only
+  its constructor. `newDropcapRedactor` was not reusable as-is: it reads
+  `realHome` and `os.TempDir()` on its own, so a redactor "constructed from
+  synthetic values" still carried two machine-dependent rules, and it
+  formats a `nonce int64` with `strconv.FormatInt`, which never returns
+  `""` — the empty-value guard in `add` can't stop it, so every `int64`
+  including `0` installs a rule that rewrites every `0` byte. The new
+  constructor takes every path value as a parameter and takes no nonce, no
+  session id, no FIFO path, which makes both failures impossible rather
+  than guarded against, and reads nothing ambient — a rule exists if and
+  only if a caller handed a value for it. `strings.TrimSuffix(v, "/")` is
+  the one normalisation applied to each parameter (`os.TempDir()` returns a
+  trailing `/` on macOS); the trim lives in the constructor rather than at
+  the caller so #1733's call site can't forget it. Also ships
+  `initControlDivergentDir(t) (handed, resolved string)`, a real directory
+  under `t.TempDir()` reached through a symlink the test also creates —
+  needed because a path that does not exist has no `filepath.EvalSymlinks`
+  form (`lstat: no such file or directory`), so a row built only from
+  invented paths can't exercise the resolved-spelling rule at all, and
+  `t.TempDir()` alone diverges from its resolved form on macOS but not on
+  Linux, so a row resting on that alone is green-and-vacuous on Linux.
+  Ordering is longest-value-first (inherited from `dropcapRedactor`'s own
+  sort): re-verified 2026-08-24 that this is load-bearing only when the
+  handed values nest (workdir under temp home under system temp), because
+  that's what makes one class's slug spelling a substring of the next —
+  over unrelated values both orderings agree and the row proves nothing.
+  This ticket ships the table only; #1733 (open) applies it to the capture
+  record at the fill site, and #1729 (open) is the fail-closed deny-scan
+  behind it — redaction and scanning are deliberately different fabric (see
+  the #1260 entry above).
+
+  **Two lessons from review:**
+  - **A test helper that reimplements the construction's own logic to
+    compute its expected values looks like duplication, but the duplication
+    is what makes the row non-vacuous.** `initControlExpectedRules` calls
+    the same `dropcapPathSpellings` and writes the same `TrimSuffix` as
+    `newInitControlRedactor`. Collapsing that into one shared helper both
+    functions call would make the trailing-slash-trim mutant (drop the trim
+    in the constructor) green, because the expectation and the table under
+    test would then always agree on whether the trim happened. The
+    independence — two call sites, not one — is the thing actually under
+    test.
+  - **A mutant that reddens more rows than the design predicted isn't
+    automatically a problem; check whether the rows still isolate different
+    defects.** The nonce-parameter mutant was expected to redden only the
+    unrelated-bytes row; it also reddens both armed-values rows, because an
+    extra `prompt_nonce` triple is exactly "a rule the caller's values can't
+    explain" from that row's own perspective. Code review separately found
+    a sixth mutant the written spec's table hadn't listed (fall back to
+    `realHome`/`os.TempDir()` only when the parameter is absent, rather than
+    unconditionally) — the spec's own prose already named it, the mutant
+    table just hadn't been built from that sentence. Each of the file's five
+    rows still has at least one mutant for which it's the sole red.
+
+  Registered in `finOfflineExecBans` with this family's standing eight names
+  plus `realHome` and `os.TempDir` — the two ambient reads the parameters
+  replace, and precisely the two the AST-identifier ban can catch that a
+  values-only assertion also catches through any helper indirection; neither
+  check substitutes for the other. Zero production files touched. See
+  `docs/specs/architecture/1732-initialize-capture-redaction-table.md` for
+  the full design, the mutant table and the security review.
 
 ## Test infrastructure
 

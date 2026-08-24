@@ -250,6 +250,47 @@ var finOfflineExecBans = map[string][]string{
 		"os.Getenv", "os.Environ", "os.LookupEnv",
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 	},
+	// #1732. The same family's standing eight — the first four keep a SKIP out
+	// (resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body,
+	// after `=== RUN` is printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`), captureClaudeVersion follows the three entries above
+	// and must not be harmonised away against #1662's, and the three environment
+	// readers are the credential guard for a process environment carrying
+	// CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// realHome and os.TempDir are this entry's two additions and the reason it
+	// exists. They are precisely the two ambient reads newDropcapRedactor performs
+	// on its own, and newInitControlRedactor's whole subject is taking both as
+	// parameters instead — so a rule exists if and only if a caller handed a value
+	// for it. The check matches a bare *ast.Ident as well as a dotted selector, so
+	// the plain realHome reference is caught.
+	//
+	// The ban and the file's own armed-values assertion are different fabric and
+	// neither substitutes for the other: this check is per-file SYNTAX, not a call
+	// graph, so realHome and os.TempDir() stay reachable through a helper the file
+	// calls while the ban stays green. TestInitControlRedactorArmsOnlyItsCallersValues
+	// reddens on such a rule however many hops away the read happened, and it
+	// cannot see a direct reference that arms nothing.
+	//
+	// What is deliberately ABSENT, and where this entry must NOT copy its three
+	// nearest siblings: the packageDir group and the os read/write group. Those
+	// entries fence a file off from the committed testdata/ because their subject
+	// IS a fixture, and `go test` runs in the package source directory so a
+	// relative os.WriteFile("testdata/…") reaches the real artifacts. This file has
+	// no writer, no reader and no fixture — it builds a table and substitutes into
+	// byte slices — so the group would ban names the file has no route to anyway.
+	//
+	// t.TempDir is absent for #1651's reason rather than #1661's: initControlDivergentDir
+	// has to create its directory somewhere, and that is where. filepath.EvalSymlinks,
+	// os.Symlink and os.MkdirAll stay available for the same reason — they are that
+	// helper's own mechanism, and the symlink it follows is one the test created
+	// inside its own t.TempDir(), never derived from an argument or the environment.
+	"initialize_control_redaction_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"realHome", "os.TempDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
