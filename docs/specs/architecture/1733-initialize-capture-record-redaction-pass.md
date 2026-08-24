@@ -144,10 +144,19 @@ t.Logf("#1733: redaction applied: %+v", subs)     // new — classes, replacemen
 path := writeInitControlFixture(t, …, record)     // unchanged
 ```
 
-That position is also ahead of the two log sites that would otherwise leak what the fixture
-no longer carries: the loop that `t.Logf`s each captured `control_response` verbatim, and
-the summary line that logs `scanner_error`. Both sit after the write, both land in a run log
-this pipeline salvages. A pass placed after them would clean the file and leak into the log.
+That position is ahead of the two log sites that would otherwise leak what the fixture no
+longer carries: the loop over the captured `control_responses`, and the summary line that
+logs `scanner_error`. Both sit after the write, both land in a run log this pipeline
+salvages. A pass placed after them would clean the file and leak into the log.
+
+**Position is necessary and not sufficient — each of those log sites must read the RECORD'S
+field.** The pass assigns fresh values rather than writing through what it was handed
+(`initControlRedactRaws` allocates, and `redact` returns `bytes.ReplaceAll`'s result), so a
+pre-pass local aliasing the same payloads keeps the unredacted bytes. Measured on the first
+cut of this slice: the response loop ranged the local `responses` and printed the operator
+path past a correctly placed pass, while the summary line was safe because it reads
+`record.ScannerError`. The loop ranges `record.ControlResponses`, and it prints the redacted
+form rather than the verbatim one.
 
 The census log line is the fill site's consumer for the returned value — class names,
 replacements and counts only, never a value, so it is safe for a run log. #1731 is what puts
@@ -372,10 +381,15 @@ record fields and a selector).
   `stderr_capture` on disk. The pass runs on the raw in-memory string, which is a superset
   of what is written — stricter, and the same discipline `initControlScrubbed` already uses.
 - **[Error messages, logs, telemetry]** The one real hazard in this slice, and the design
-  addresses it by **placement**: the pass sits ahead of both post-write log sites — the loop
-  that `t.Logf`s each captured `control_response` verbatim, and the summary line that logs
-  `scanner_error`. Those bytes land in a run log this pipeline salvages, so a pass placed
-  after them would clean the fixture and leak into the log. Two log sites are knowingly left
+  addresses it by **placement plus what each log site reads**: the pass sits ahead of both
+  post-write log sites — the loop over the captured `control_responses`, and the summary
+  line that logs `scanner_error` — and both of them read the record's own fields. Those
+  bytes land in a run log this pipeline salvages, so a pass placed after them would clean
+  the fixture and leak into the log; and because the pass assigns fresh values rather than
+  writing through what it was handed, a log site holding a pre-pass local leaks past a
+  correctly placed pass. Measured on the first cut of this slice, where the response loop
+  ranged the local `responses`; it ranges `record.ControlResponses` and prints the redacted
+  form. Two log sites are knowingly left
   unredacted and are named out of scope for #1729: the zero-stdout-lines `t.Fatalf`, which
   prints raw child stderr and fires before the record exists, and the earlier line printing
   the control request sent, which the harness builds from constants and which carries no

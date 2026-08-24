@@ -516,15 +516,22 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		ScannerError:           scannerErr,
 	}
 
-	// #1733: the redaction pass, and its position is load-bearing twice over. It
-	// sits between the record literal and the write, so writeInitControlFixture —
-	// whose `out := *rec` copy and StderrCapture cap are #1729's byte-identity
-	// subject — is unchanged and still receives a record it only copies. And it
-	// sits AHEAD of the two log sites below that would otherwise leak what the
-	// fixture no longer carries: the loop that t.Logf's each captured
-	// control_response verbatim, and the summary line that logs scanner_error.
-	// Both land in a run log this pipeline salvages, so a pass placed after them
-	// would clean the file and leak into the log.
+	// #1733: the redaction pass. It sits between the record literal and the write,
+	// so writeInitControlFixture — whose `out := *rec` copy and StderrCapture cap
+	// are #1729's byte-identity subject — is unchanged and still receives a record
+	// it only copies.
+	//
+	// Position alone does NOT protect the two log sites below that would otherwise
+	// leak what the fixture no longer carries — the loop over the captured
+	// control_responses, and the summary line that logs scanner_error. Both land in
+	// a run log this pipeline salvages, and both must read the RECORD'S OWN fields
+	// to see the redacted bytes: the pass assigns fresh values rather than writing
+	// through what it was handed, so scanner_error is safe because the summary line
+	// reads record.ScannerError, and the response loop is safe only because it
+	// ranges record.ControlResponses. Ranging the pre-pass local `responses` there
+	// printed the unredacted bytes past a correctly placed pass — measured on the
+	// first cut of this slice, and the reason the placement claim is stated per log
+	// site rather than per position.
 	//
 	// The census is REPORTED, never stored: the record gains no field in this
 	// slice — that is #1731 — and the log line carries class names, replacements
@@ -553,8 +560,13 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		record.ModelsPresent, record.ModelsCount, record.ModelsEntryFields,
 		record.ControlResponseRequestIDMatched, exitCode, record.ContextDeadlineTripped,
 		record.ScannerError, duration.Round(time.Millisecond))
-	for i, resp := range responses {
-		t.Logf("#1688: control_response[%d] verbatim: %s", i, resp)
+	// record.ControlResponses, never the pre-pass local `responses`. The pass
+	// builds a fresh slice of fresh byte slices — initControlRedactRaws allocates
+	// and redact returns bytes.ReplaceAll's result — so nothing it does writes
+	// through the local, and a loop ranging it prints exactly the bytes the
+	// fixture no longer carries. Redacted rather than verbatim since #1733.
+	for i, resp := range record.ControlResponses {
+		t.Logf("#1688: control_response[%d] redacted: %s", i, resp)
 	}
 	t.Logf("#1688: fixture written: %s", path)
 
