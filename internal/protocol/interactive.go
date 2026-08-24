@@ -721,8 +721,8 @@ func (o ModelOption) MarshalJSON() ([]byte, error) {
 }
 
 // SlashCommandListPayload is the body of an Envelope whose Type ==
-// TypeSlashCommandList (docs/protocol-mobile.md § slash_command_list — that
-// section lands with the fixtures in #1718). Binary → phone direction; the wire
+// TypeSlashCommandList (docs/protocol-mobile.md § slash_command_list). Binary →
+// phone direction; the wire
 // form of the slash-command inventory claude returns from a control_request with
 // subtype initialize, alongside the models array ModelListPayload carries: the
 // set of commands this session in this working directory will accept. A SNAPSHOT
