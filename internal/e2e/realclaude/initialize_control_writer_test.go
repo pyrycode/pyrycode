@@ -3,9 +3,10 @@
 package realclaude
 
 // #1702 — the write half of the `initialize` control-request capture: the writer
-// that puts #1701's record on disk under #1696's minted name, into a directory
-// its caller chooses, and the offline round trip proving no field is dropped on
-// the way.
+// that puts #1701's record on disk under a minted name, into a directory its
+// caller chooses, and the offline round trip proving no field is dropped on the
+// way. The name came from #1696's one-input namer until #1722 migrated the writer
+// onto #1712's arm-carrying one.
 //
 // A measurement whose only trace is a test log evaporates when the run ends, so
 // #1688's artifact is the point — and an artifact is worth committing only if it
@@ -29,6 +30,14 @@ package realclaude
 // needs a capture the cap actually shortens — so it rides there too, exactly as
 // TestPoolRevokeFixture_WriterCapsChildOutputCapture carries the sibling's rather
 // than its round trip. No live run: that is #1688.
+//
+// #1722 added a third test here for the same structural reason the cap has its
+// own: TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes needs
+// a record the fully-populated fixture cannot be — captured response bytes beside
+// an UNSATISFIED wait — and #1701's non-zero property forbids that pair there,
+// since a bool is non-zero only when true. It lands in this file rather than the
+// record's because it writes and reads back, and this is the file whose
+// finOfflineExecBans entry permits os.WriteFile and os.ReadFile.
 //
 // # What the round trip catches, and what it cannot
 //
@@ -105,13 +114,27 @@ import (
 // testdata/ later. os.MkdirAll is a no-op against a t.TempDir() and is kept for
 // the same reason the sibling writer keeps it: #1688's directory may not exist.
 //
-// The filename is MINTED by initControlFixtureName from ClaudeVersion passed
-// through UNMODIFIED, never formatted here. A writer that interpolates its own
-// "initialize_control_v%s.json" puts #1688's committed artifact back inside the
+// The filename is MINTED by initControlArmFixtureName from ClaudeVersion and Arm,
+// BOTH passed through UNMODIFIED, never formatted here and never slugged here —
+// that namer owns both columns. A writer that interpolates its own
+// "initialize_control_v%s_%s.json" puts #1688's committed artifact back inside the
 // overwrite hazard #1696's lock exists to close, with #1696's own test still
-// green. The input is claude_version and not claude_version_raw: #1701's
-// distinctness property keeps the two strings apart, and the raw form carries a
-// space and parens that slug to something else entirely.
+// green; one that interpolates the ARM raw reopens the traversal hazard
+// setModeFixtureName still carries, which is the wrong pattern sitting in this
+// same package waiting to be copied.
+//
+// #1722 migrated this off the one-input initControlFixtureName. Through that namer
+// all three of #1715's arms mint one path: the last arm wins and the other two
+// vanish with nothing red anywhere. The input is claude_version and not
+// claude_version_raw: #1701's distinctness property keeps the two strings apart,
+// and the raw form carries a space and parens that slug to something else
+// entirely.
+//
+// DO NOT ADD A MEMBERSHIP OR SHAPE GUARD ON Arm HERE. Rejecting an arm outside
+// initControlArms rejects initControlFullRecord's own synthetic arm — which is
+// deliberately not a declared one, so that #1701's slug subtest has something to
+// pin — and fatals the round trip below. The containment guarantee is lexical and
+// belongs to the namer.
 //
 // rec is never mutated — the cap lands on a local copy. THE SHALLOW COPY IS
 // SUFFICIENT ONLY BECAUSE THE SOLE MUTATION IS TO A string FIELD: `out := *rec`
@@ -121,11 +144,13 @@ import (
 // cap bound or the no-mutation contract; both are
 // TestInitControlFixture_WriterCapsStderrCapture's.
 //
-// Failure is always t.Fatalf naming claude_version and the error and NOTHING
-// ELSE: a %+v of the record would move up to stderrFixtureCap bytes of child
-// output out of the bounded file and into an unbounded run log, the exact thing
-// the cap exists to prevent. claude_version is safe to print — it is already in
-// the filename.
+// Failure is always t.Fatalf naming claude_version and arm and the error and
+// NOTHING ELSE: a %+v of the record would move up to stderrFixtureCap bytes of
+// child output out of the bounded file and into an unbounded run log, the exact
+// thing the cap exists to prevent. Both are safe to print for the same reason —
+// each is already in the filename and neither came from the child. The arm joined
+// the message with #1722's per-arm path: once #1715 writes three fixtures, a
+// failure that cannot say which arm failed is a real diagnosis gap.
 func writeInitControlFixture(t *testing.T, dir string, rec *initControlFixtureRecord) string {
 	t.Helper()
 
@@ -133,22 +158,26 @@ func writeInitControlFixture(t *testing.T, dir string, rec *initControlFixtureRe
 	out.StderrCapture = capFixtureCapture(out.StderrCapture)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("#1702: mkdir fixture dir for claude_version %q: %v", out.ClaudeVersion, err)
+		t.Fatalf("#1702: mkdir fixture dir for claude_version %q arm %q: %v",
+			out.ClaudeVersion, out.Arm, err)
 	}
-	path := filepath.Join(dir, initControlFixtureName(out.ClaudeVersion))
+	path := filepath.Join(dir, initControlArmFixtureName(out.ClaudeVersion, out.Arm))
 	data, err := json.MarshalIndent(&out, "", "  ")
 	if err != nil {
-		t.Fatalf("#1702: marshal fixture for claude_version %q: %v", out.ClaudeVersion, err)
+		t.Fatalf("#1702: marshal fixture for claude_version %q arm %q: %v",
+			out.ClaudeVersion, out.Arm, err)
 	}
 	// Temp file and rename, the discipline both sibling writers use: an
 	// interrupted run must not strand a half-written fixture under the target
 	// name for a later commit.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		t.Fatalf("#1702: write fixture tmp for claude_version %q: %v", out.ClaudeVersion, err)
+		t.Fatalf("#1702: write fixture tmp for claude_version %q arm %q: %v",
+			out.ClaudeVersion, out.Arm, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		t.Fatalf("#1702: rename fixture for claude_version %q: %v", out.ClaudeVersion, err)
+		t.Fatalf("#1702: rename fixture for claude_version %q arm %q: %v",
+			out.ClaudeVersion, out.Arm, err)
 	}
 	return path
 }
@@ -212,7 +241,8 @@ func compactInitControlRawRows(t *testing.T, rows []initControlFixtureField) ([]
 // TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry is #1702's AC 2 and
 // AC 3: every field of #1701's fully-populated record survives
 // write-then-read-back, and the target directory afterwards holds exactly one
-// entry, named exactly what initControlFixtureName mints.
+// entry, named exactly what initControlArmFixtureName mints from the record's own
+// claude_version and arm.
 //
 // The subtests share one written artifact and are deliberately NOT parallel; the
 // parent owns the tempdir.
@@ -283,9 +313,16 @@ func TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 	// instead of a rename, any stray file, a write that escaped to the package's
 	// real testdata/ (which leaves this tempdir at ZERO entries — the
 	// relative-path hazard no AST ban can close), and a writer that minted its
-	// target name some other way instead of calling initControlFixtureName. The
-	// last is non-vacuous only because #1701's claude_version carries an uppercase
-	// run versionSlug rewrites; against a slug-clean token it would be 0-red.
+	// target name some other way instead of calling initControlArmFixtureName —
+	// which since #1722 covers a writer left on the one-input initControlFixtureName,
+	// one interpolating its own "initialize_control_v%s_%s.json", and one passing a
+	// hardcoded arm instead of the record's.
+	//
+	// The last is non-vacuous only because BOTH columns of #1701's fixture carry a
+	// literal versionSlug rewrites: claude_version's uppercase run and arm's. Against
+	// a slug-clean token it is 0-red on the version column; against a clean declared
+	// arm it is 0-red on the arm column, which is the whole reason that literal is
+	// "after_completed_turn-FIXTURE" and not a declared arm.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("#1702: list the fixture directory for claude_version %q: %v", rec.ClaudeVersion, err)
@@ -294,13 +331,89 @@ func TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	wantName := initControlFixtureName(rec.ClaudeVersion)
+	wantName := initControlArmFixtureName(rec.ClaudeVersion, rec.Arm)
 	if len(names) != 1 || names[0] != wantName {
 		t.Errorf("#1702: the target directory holds %q, want exactly [%q]: a .tmp left here is a "+
 			"half-written fixture a later commit would pick up, an empty directory means the "+
 			"bytes went somewhere the caller never chose, and a differently-spelled entry means "+
-			"the writer formats its own name instead of minting through initControlFixtureName",
+			"the writer formats its own name, or hardcodes an arm, instead of minting through "+
+			"initControlArmFixtureName from the record's own claude_version and arm",
 			names, wantName)
+	}
+}
+
+// --- the unanswered wait ------------------------------------------------------------
+
+// TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes is #1722's
+// second half: a record carrying captured response bytes AND
+// control_response_within_wait FALSE is representable, and it survives a write and
+// a read-back carrying both halves.
+//
+// THAT PAIR IS THE WHOLE POINT, and it is reachable on the live path rather than
+// hypothetical. runInitControlChild's setModeWaitFor returns when its budget
+// expires, and ControlResponses is snapshotted much later — after stdinPipe.Close()
+// and cmd.Wait(). A response landing in that window is captured with the wait
+// already false. "There are response bytes" and "the wait was satisfied" are two
+// different facts, and before #1722 only the first survived the run.
+//
+// It is the SOLE red for a control_response_within_wait derived from
+// len(ControlResponses) > 0 instead of from the wait's own result. The main round
+// trip cannot catch that mutant: initControlFullRecord carries the COHERENT pair —
+// bytes and a satisfied wait — because a bool is non-zero only when true, so
+// #1701's non-zero property forbids the discriminating case there. Hence a second
+// record instance here rather than a change to the fixture.
+//
+// The failure messages report the two field names and a response COUNT, never the
+// response bytes. runInitControlChild fills this same record from a live child, and
+// this file's sibling rows deliberately report lengths and short prefixes for that
+// reason; this must not be the site that breaks the pattern.
+func TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes(t *testing.T) {
+	t.Parallel()
+
+	// A fresh pointer, mutated here and shared with nothing: initControlFullRecord
+	// is a function and not a package-level var precisely so this and the cap test's
+	// parallel subtests cannot race on one record.
+	rec := initControlFullRecord()
+	rec.ControlResponseWithinWait = false
+
+	// The vacuity control, and it must Fatalf rather than skip — precheck's
+	// precedent in the cap test below. If a later edit empties the fixture's
+	// responses, this row stops discriminating between "the field is measured" and
+	// "the field is always false" while still passing, and a row that cannot
+	// discriminate is a broken instrument.
+	if len(rec.ControlResponses) == 0 {
+		t.Fatalf("#1722: the fixture carries no control_responses, so asserting " +
+			"control_response_within_wait==false beside captured bytes proves nothing: the " +
+			"derived-from-the-count mutant reads back false here too and this test goes 0-red")
+	}
+
+	path := writeInitControlFixture(t, t.TempDir(), rec)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("#1722: read back the fixture for claude_version %q arm %q: %v",
+			rec.ClaudeVersion, rec.Arm, err)
+	}
+	var back initControlFixtureRecord
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatalf("#1722: decode the fixture for claude_version %q arm %q: %v",
+			rec.ClaudeVersion, rec.Arm, err)
+	}
+
+	// Both halves are needed and neither catches the other's mutant: the first is
+	// the claim, the second is what makes the first mean something other than "the
+	// field is always false".
+	if back.ControlResponseWithinWait {
+		t.Errorf("#1722: control_response_within_wait reads back true from a record written "+
+			"with it false and %d control_responses captured; that is a field derived from "+
+			"the response count instead of from the bounded wait's own result, and the main "+
+			"round trip — which carries the coherent pair — stays green over it",
+			len(back.ControlResponses))
+	}
+	if len(back.ControlResponses) == 0 {
+		t.Errorf("#1722: control_responses reads back with %d entries, want the %d written; "+
+			"without captured bytes on the other side, control_response_within_wait==false "+
+			"above is satisfied by a field that is simply always false",
+			len(back.ControlResponses), len(rec.ControlResponses))
 	}
 }
 
@@ -444,8 +557,9 @@ func TestInitControlFixture_WriterCapsStderrCapture(t *testing.T) {
 			rec := initControlFullRecord()
 			rec.StderrCapture = tc.capture
 			// A fresh tempdir per row, and not stylistic: both rows mint the SAME
-			// filename from the same ClaudeVersion, so a shared directory would
-			// have them overwrite each other's artifact under a racing read-back.
+			// filename from the same ClaudeVersion and the same Arm, so a shared
+			// directory would have them overwrite each other's artifact under a
+			// racing read-back.
 			path := writeInitControlFixture(t, t.TempDir(), rec)
 
 			// The no-mutation contract, checked BEFORE the read-back: the writer

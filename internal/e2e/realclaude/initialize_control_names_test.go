@@ -35,10 +35,15 @@ package realclaude
 // # Two namers, one family (#1712)
 //
 // This file carries two. initControlFixtureName takes ONE input and mints the
-// name of #1688's single committed capture; it keeps every current caller,
-// writeInitControlFixture among them. initControlArmFixtureName takes TWO and
-// mints one name per arm of #1715's three-arm measurement; nothing consumes it
-// until #1713 migrates the writer onto it.
+// name of #1688's single committed capture. initControlArmFixtureName takes TWO
+// and mints one name per arm of #1715's three-arm measurement; #1722 migrated
+// writeInitControlFixture onto it, so it is the namer every fixture on disk is
+// now written under.
+//
+// The one-input namer is NOT deleted now that it has no writer. Its own lock
+// still proves its properties, and the collision subtest below compares the two
+// namers' output against each other — delete it and that collision proof goes
+// with it.
 //
 // #1696 collapsed the arm dimension deliberately and recorded the reason:
 // poolRevokeFixtureName carries an arm because #1643 measures three postures,
@@ -138,39 +143,88 @@ func initControlFixtureName(versionToken string) string {
 
 // --- the arm table --------------------------------------------------------------
 
+// initControlArm is one row of the table below. #1696 collapsed the arm dimension
+// and #1712 brought it back as a []string; #1722 grew that slice into rows, which
+// is what its own doc comment said to do rather than shadowing it with a second
+// list. poolRevokeArm and setModeArm are the two precedents in this package.
+type initControlArm struct {
+	// id names the arm's SEND POINT, because the send point is the only dimension
+	// the arms vary on. It is the identifier a capture records in its `arm` field
+	// and the one initControlArmFixtureName slugs into the fixture's filename.
+	id string
+
+	// probed marks the arm the ONE live run in initialize_control_probe_test.go
+	// sends at, and it is the first column this table carried beyond the
+	// identifier. It exists because initControlProbedArm has to answer "which arm
+	// does the single-arm run drive?" without a second spelling of the identifier
+	// and without an index into this slice — initControlArms[1] is one insertion
+	// away from silently recording the wrong arm.
+	//
+	// IT SHOULD NOT SURVIVE #1715. Once that rig ranges this table for all three
+	// arms the arm is a parameter and no row is special, so delete this column and
+	// initControlProbedArm with it rather than working around them.
+	probed bool
+}
+
 // initControlArms names the three arms of #1715's `initialize` control-request
-// measurement. Each identifier names the arm's SEND POINT, because the send point
-// is the only dimension the arms vary on:
+// measurement:
 //
 //   - before_first_turn — the control request is written before the first user turn
 //   - after_completed_turn — it is written after a turn has completed
 //   - control_no_request — no control request is sent at all
 //
+// The identifiers, their order and their meaning are UNCHANGED across #1722's
+// shape change: this is a table of rows now, not a different vocabulary.
+//
 // READ-ONLY: never append to it, never reassign it. It is ranged over from
-// t.Parallel() tests here and, once #1713 and #1715 land, from parallel tests in
-// their files too; a mutation would race in a way -race catches only when the runs
-// happen to overlap. Ranging is the only supported access — nothing hands the
-// slice out, so no defensive copy is needed. poolRevokeArms carries the same
-// contract for the same reason.
+// t.Parallel() tests here, from initialize_control_probe_test.go's offline arm
+// test, and from #1715's files once they land; a mutation would race in a way
+// -race catches only when the runs happen to overlap. Ranging is the only
+// supported access — nothing hands the slice out, so no defensive copy is needed.
+// poolRevokeArms carries the same contract for the same reason.
 //
-// GROW THIS DECLARATION rather than shadowing it. When #1713 or #1715 needs
-// per-arm behaviour — the send point's semantics, the prompt, the drive sequence —
-// those fields go here and this slice becomes a table of rows, exactly as
-// poolRevokeArms is. A SECOND table keyed by these names is the duplication the
-// distinctness subtest below exists to prevent: two sources of truth for the arm
-// set is how a run reports more arms measured than there are fixtures on disk.
-//
-// A []string and not a one-field struct: this slice needs identifiers and nothing
-// else today, and a one-field struct is a shape #1713 would have to change the
-// moment it knows its fields.
+// GROW THIS DECLARATION rather than shadowing it. When #1715 needs more per-arm
+// behaviour — the prompt, the drive sequence — those fields go on initControlArm.
+// A SECOND table keyed by these names is the duplication the distinctness subtest
+// below exists to prevent: two sources of truth for the arm set is how a run
+// reports more arms measured than there are fixtures on disk.
 //
 // The hostile arms the lock below feeds through the namer are that test's OWN
 // literals and must NOT be appended here, for the reason #1661 gives about
 // poolRevokeArms: this declaration is what other files range.
-var initControlArms = []string{
-	"before_first_turn",
-	"after_completed_turn",
-	"control_no_request",
+var initControlArms = []initControlArm{
+	{id: "before_first_turn"},
+	{id: "after_completed_turn", probed: true},
+	{id: "control_no_request"},
+}
+
+// initControlProbedArm returns the id of the ONE row marked probed, and "" when
+// the count is not exactly one.
+//
+// Collapsing BOTH degenerate shapes — no row marked, and two or more marked — to
+// the empty string is deliberate. It makes
+// TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm's non-emptiness check
+// the sole red for both, instead of needing a separate "exactly one row is marked"
+// count that would then be the only thing catching one of them.
+//
+// It returns "" rather than fataling because it is a pure function with no
+// *testing.T — the same discipline both namers in this file hold. A degenerate
+// table surfaces as that test's red and as an empty `arm` in a live fixture, not
+// as a helper reaching for a `t` it does not have.
+//
+// It ranges initControlArms read-only: no sort, no filter in place, no mutation.
+func initControlProbedArm() string {
+	found := ""
+	for _, arm := range initControlArms {
+		if !arm.probed {
+			continue
+		}
+		if found != "" {
+			return ""
+		}
+		found = arm.id
+	}
+	return found
 }
 
 // --- the arm-carrying namer -----------------------------------------------------
@@ -180,8 +234,8 @@ var initControlArms = []string{
 // two inputs: no directory parameter, no *testing.T, no I/O in either direction.
 //
 // It lands ALONGSIDE initControlFixtureName rather than replacing it: that namer
-// keeps its one input and every current caller, and #1713 is what migrates
-// writeInitControlFixture onto this one.
+// keeps its one input and its own lock, and #1722 migrated writeInitControlFixture
+// onto this one.
 //
 // The initialize_control_v prefix is a literal here on purpose, exactly as it is
 // there: filepath.Match anchors a pattern's literal head at position 0, so a name
@@ -199,8 +253,9 @@ var initControlArms = []string{
 // two namers agree on one string, which is #1688's committed capture overwritten
 // by a live arm with nothing red anywhere.
 //
-// CONTRACT for #1713's writer: the result is always a SINGLE CLEAN PATH COMPONENT
-// — it carries no separator and is never "." or "..", for any PAIR of inputs. That
+// CONTRACT for writeInitControlFixture, which #1722 migrated onto this namer: the
+// result is always a SINGLE CLEAN PATH COMPONENT — it carries no separator and is
+// never "." or "..", for any PAIR of inputs. That
 // is what makes filepath.Join(dir, name) land in dir at the call site. Nothing in
 // the signature says so; the containment subtest below is what proves it.
 //
@@ -254,9 +309,10 @@ func TestInitControlFixtureName_AvoidsCommittedFamiliesAndStaysContained(t *test
 	//
 	// Function-local although every control here is a literal and it could be a
 	// package-level var: it is used by exactly one test, and keeping it here
-	// holds this file's package-scope surface at five identifiers —
-	// initControlFixtureName, initControlArmFixtureName, initControlArms and the
-	// two tests — which is what keeps concurrent siblings from colliding with it.
+	// holds this file's package-scope surface at seven identifiers —
+	// initControlFixtureName, initControlArmFixtureName, initControlArm,
+	// initControlArms, initControlProbedArm and the two tests — which is what
+	// keeps concurrent siblings from colliding with it.
 	patterns := []poolRevokeNamePattern{
 		{
 			glob:     setModeFamilyGlob,
@@ -391,7 +447,7 @@ func TestInitControlFixtureName_AvoidsCommittedFamiliesAndStaysContained(t *test
 // family, every pattern making that claim can still match something, no minted
 // name collides with #1688's committed one-arm capture, distinct arms mint
 // distinct names, and every minted name stays a plain component directly inside
-// whatever directory #1713's writer joins it under.
+// whatever directory writeInitControlFixture joins it under.
 //
 // Five properties and not one restated five ways: each subtest is the SOLE red
 // for a distinct mutant — an arm interpolated raw reddens only containment, a
@@ -441,7 +497,8 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 
 	// The other input dimension. These are this test's OWN literals and must NOT be
 	// added to initControlArms: that table is read-only and is ranged from
-	// t.Parallel() tests, here and later in #1713's and #1715's files. #1661's
+	// t.Parallel() tests, here, in initialize_control_probe_test.go's offline arm
+	// test, and later in #1715's files. #1661's
 	// hostileArms is the precedent and carries the same shapes, for the same reason
 	// — the arm table is where a fourth arm gets added by somebody typing a string.
 	//
@@ -466,7 +523,9 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 	// The declared arms plus the hostile ones. The distinctness subtest below
 	// deliberately does NOT use this slice — see the note there.
 	arms := make([]string, 0, len(initControlArms)+len(hostileArms))
-	arms = append(arms, initControlArms...)
+	for _, declared := range initControlArms {
+		arms = append(arms, declared.id)
+	}
 	arms = append(arms, hostileArms...)
 
 	// #1661's row type and the single anchorFixtureName, reused across the family
@@ -600,7 +659,8 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 		// arms measured than there are fixtures on disk.
 		for _, token := range tokens {
 			seen := make(map[string]string, len(initControlArms))
-			for _, arm := range initControlArms {
+			for _, declared := range initControlArms {
+				arm := declared.id
 				name := initControlArmFixtureName(token, arm)
 				if prev, dup := seen[name]; dup {
 					t.Errorf("token %q: arms %q and %q both mint %q, so one arm's capture "+
@@ -632,9 +692,9 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 			for _, arm := range arms {
 				base := initControlArmFixtureName(token, arm)
 				if got := filepath.Dir(filepath.Join(targetDir, base)); got != targetDir {
-					t.Errorf("token %q arm %q mints %q, which joined under %q lands in %q: #1713's "+
-						"writer joins this name under a real directory, and a name carrying a "+
-						"separator writes somewhere its caller never chose",
+					t.Errorf("token %q arm %q mints %q, which joined under %q lands in %q: "+
+						"writeInitControlFixture joins this name under a real directory, and a "+
+						"name carrying a separator writes somewhere its caller never chose",
 						token, arm, base, targetDir, got)
 				}
 
@@ -647,9 +707,9 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 				// interpolated raw in either column still mints a perfectly clean
 				// component and this assertion stays green.
 				if base == "." || base == ".." {
-					t.Errorf("token %q arm %q mints %q, which is not a filename at all: #1713's "+
-						"writer would join it under a real directory and resolve to that directory "+
-						"or its parent", token, arm, base)
+					t.Errorf("token %q arm %q mints %q, which is not a filename at all: "+
+						"writeInitControlFixture would join it under a real directory and resolve "+
+						"to that directory or its parent", token, arm, base)
 				}
 			}
 		}

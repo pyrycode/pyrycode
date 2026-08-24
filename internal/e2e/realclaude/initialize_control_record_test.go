@@ -78,15 +78,45 @@ import (
 // --- the record ---------------------------------------------------------------
 
 // initControlFixtureRecord is the durable artifact #1688's live run commits, and
-// the JSON contract #1690's decoder and #1692's fake read. Eighteen of its
-// twenty-two fields are setModeFixtureRecord's, carrying that record's JSON tags
+// the JSON contract #1690's decoder and #1692's fake read. Nineteen of its
+// twenty-four fields are setModeFixtureRecord's, carrying that record's JSON tags
 // and Go types unchanged: three slices decode this shape, and a gratuitous
-// divergence in a shared field is a defect that surfaces two tickets away.
+// divergence in a shared field is a defect that surfaces two tickets away. Arm is
+// the nineteenth and is copied whole from that record — same tag, same Go type,
+// same position relative to the version pair — for exactly that reason.
 //
 // There is deliberately no `env` field, and there must never be one — the
 // constraint and its reasoning are inherited from setModeFixtureRecord. The
 // credential reaches the child through the environment while the argv carries
 // none, so recording argv is safe and recording env would not be.
+//
+// Arm names the send point the run INTENDED, and it is one of initControlArms'
+// identifiers for a live capture — initControlFullRecord's is deliberately not one
+// (see its literal-choice note). RECORDING AN ARM IS NOT A CLAIM THAT THE TURN
+// COMPLETED: runInitControlChild already logs the case where its probe turn
+// produced no result line inside the budget, and turn_boundaries is what tells a
+// reader so. Read `after_completed_turn` as the arrangement the run was aiming at,
+// never as an assertion about what happened.
+//
+// It also puts the two inputs initControlArmFixtureName mints a filename from
+// adjacent in this declaration, which is what the fixture's path is now derived
+// from end to end.
+//
+// ControlResponseWithinWait is MEASURED, NOT DERIVED, and it is NOT DERIVABLE —
+// which is what separates it from both neighbouring paragraphs.
+// ControlResponseRequestIDMatched is a function of two fields recorded verbatim
+// beside it; ModelsPresent, ModelsCount and ModelsEntryFields are populated from a
+// response a live run holds in hand. This field is a function of a WAIT THAT HAS
+// ALREADY EXPIRED. No other field can reconstruct it and neither can the verbatim
+// bytes: a control_response carries no arrival time relative to a budget the
+// harness chose, and runInitControlChild snapshots ControlResponses after the child
+// exits, so a response arriving past the budget still lands in that field. "There
+// are response bytes" and "the wait was satisfied" are two different facts. A
+// reader who tidies this into len(ControlResponses) > 0 deletes the measurement;
+// TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes is what
+// reddens. It sits with the response fields rather than in the instrument-health
+// block for ControlResponseRequestIDMatched's reason: a response that arrived late
+// is a finding about claude's latency, not a fault in the harness.
 //
 // ControlResponseRequestIDMatched is the one DERIVED field: its value is a
 // function of ControlRequestID and ControlResponses, both of which are recorded
@@ -115,6 +145,8 @@ type initControlFixtureRecord struct {
 	ClaudeVersionRaw string `json:"claude_version_raw"`
 	ClaudeVersion    string `json:"claude_version"`
 
+	Arm string `json:"arm"`
+
 	Argv    []string `json:"argv"`
 	Prompts []string `json:"prompts"`
 
@@ -123,6 +155,7 @@ type initControlFixtureRecord struct {
 	ControlResponses                []json.RawMessage `json:"control_responses"`
 	ControlResponseSubtype          string            `json:"control_response_subtype"`
 	ControlResponseRequestIDMatched bool              `json:"control_response_request_id_matched"`
+	ControlResponseWithinWait       bool              `json:"control_response_within_wait"`
 
 	ModelsPresent     bool     `json:"models_present"`
 	ModelsCount       int      `json:"models_count"`
@@ -143,7 +176,7 @@ type initControlFixtureRecord struct {
 
 // --- the fully-populated fixture -------------------------------------------------
 
-// initControlFullRecord returns a record in which every one of the twenty-two
+// initControlFullRecord returns a record in which every one of the twenty-four
 // fields carries a non-zero value, and every pair of same-typed non-bool fields
 // carries a DISTINCT one. Both properties are asserted below rather than trusted.
 //
@@ -157,10 +190,18 @@ type initControlFixtureRecord struct {
 // non-zero property forces every instrument-health field to report trouble at the
 // same time — a non-zero exit, a wait error, a scanner error, a tripped deadline,
 // a stdin write error — alongside a successful control_response subtype, and all
-// three bools are true for that same reason. A reader who takes this for a
+// four bools are true for that same reason. A reader who takes this for a
 // recording will reconcile it and empty half the properties doing it.
 //
-// Three literal choices are load-bearing:
+// That is also why the ONE pair the record most needs to be able to express is
+// absent here: captured response bytes alongside control_response_within_wait
+// FALSE. A bool is non-zero only when true, so this fixture necessarily carries
+// the coherent combination — bytes and a satisfied wait. The incoherent pair gets
+// its own record instance in
+// TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes rather than
+// a change here; do not "improve" this literal to demonstrate it.
+//
+// Four literal choices are load-bearing:
 //
 //  1. ClaudeVersion must NOT survive versionSlug unchanged. That helper
 //     lowercases, rewrites runs outside [a-z0-9._-] to _, then clamps at 32, so a
@@ -188,7 +229,21 @@ type initControlFixtureRecord struct {
 //     characters round-trips unchanged — the constraint is specific to the
 //     raw-JSON fields.
 //
-//  3. ControlResponses and StdoutEvents must carry DIFFERENT content. Both are
+//  3. Arm must NOT survive versionSlug unchanged either, and it must NOT be one
+//     of initControlArms' identifiers. All three of those are already slug-clean —
+//     lowercase letters and `_`, every character inside versionSlug's [a-z0-9._-]
+//     class — so a clean "after_completed_turn" copied in here would slug to
+//     itself and #1702's "named exactly what the namer mints" assertion would go
+//     0-RED ON THE ARM COLUMN against BOTH a writer interpolating the arm raw and
+//     a writer passing a hardcoded arm instead of the record's. The uppercase run
+//     is what makes the slug differ, exactly as it is for claude_version above,
+//     and the word FIXTURE is what stops a later reader "correcting" the literal
+//     into a declared arm. 28 bytes, comfortably inside versionSlug's 32-character
+//     clamp. This is not in tension with the live contract: initControlArms binds
+//     what a CAPTURE records, and this is a synthetic record that is deliberately
+//     not a coherent capture.
+//
+//  4. ControlResponses and StdoutEvents must carry DIFFERENT content. Both are
 //     []json.RawMessage, so distinctness binds them — and in a real capture the
 //     control response arrives ON stdout, which is exactly the literal a
 //     developer repeats into both. The resolution is two literals, not a weakened
@@ -203,6 +258,8 @@ func initControlFullRecord() *initControlFixtureRecord {
 		ClaudeVersionRaw: "2.1.220-FIXTURE (Claude Code)",
 		ClaudeVersion:    "2.1.220-FIXTURE",
 
+		Arm: "after_completed_turn-FIXTURE",
+
 		Argv:    []string{"claude", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"},
 		Prompts: []string{"probe turn one", "probe turn two"},
 
@@ -213,6 +270,7 @@ func initControlFullRecord() *initControlFixtureRecord {
 		},
 		ControlResponseSubtype:          "success",
 		ControlResponseRequestIDMatched: true,
+		ControlResponseWithinWait:       true,
 
 		ModelsPresent:     true,
 		ModelsCount:       2,
@@ -244,7 +302,7 @@ type initControlFixtureField struct {
 	value any
 }
 
-// initControlFixtureFields lists rec's twenty-two fields once, in declaration
+// initControlFixtureFields lists rec's twenty-four fields once, in declaration
 // order. #1702 applies it to both the written record and its decode and zips the
 // two rather than restating the fields; #1700 reaches it the same way.
 //
@@ -272,6 +330,7 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 	return []initControlFixtureField{
 		{"claude_version_raw", rec.ClaudeVersionRaw},
 		{"claude_version", rec.ClaudeVersion},
+		{"arm", rec.Arm},
 		{"argv", rec.Argv},
 		{"prompts", rec.Prompts},
 		{"control_request_id", rec.ControlRequestID},
@@ -279,6 +338,7 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 		{"control_responses", rec.ControlResponses},
 		{"control_response_subtype", rec.ControlResponseSubtype},
 		{"control_response_request_id_matched", rec.ControlResponseRequestIDMatched},
+		{"control_response_within_wait", rec.ControlResponseWithinWait},
 		{"models_present", rec.ModelsPresent},
 		{"models_count", rec.ModelsCount},
 		{"models_entry_fields", rec.ModelsEntryFields},
@@ -300,7 +360,14 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 // TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken is #1701
 // whole: the listing covers every field of the record exactly once, every listed
 // field carries a non-zero value, every pair of same-typed non-bool fields
-// carries a distinct one, and the version token does not survive slugging.
+// carries a distinct one, and NEITHER of the two literals the fixture's filename
+// is minted from survives slugging.
+//
+// The name is incomplete after #1722 widened the last subtest to the arm column,
+// not false — it still pins every field and the sluggable version token. Renaming
+// it would cascade into prose in initialize_control_writer_test.go and into this
+// file's finOfflineExecBans entry for no behavioural gain, and every -run filter in
+// this family keys on the TestInitControlFullRecord_ prefix.
 //
 // It reads nothing off disk and spawns nothing. The parent computes the record
 // and the listing once; the subtests only read them, so the shared slice is safe
@@ -352,7 +419,7 @@ func TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken(t *test
 		t.Parallel()
 
 		// Scoped to non-bool fields because booleans cannot carry distinct
-		// non-zero values — there is only one — so all three of this record's are
+		// non-zero values — there is only one — so all four of this record's are
 		// true and a swapped pair of them stays invisible here. That is stated
 		// rather than written as an assertion which cannot hold. What still
 		// catches a tag COLLISION between two bools is the non-zero subtest
@@ -383,18 +450,34 @@ func TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken(t *test
 		}
 	})
 
-	t.Run("the version token does not survive slugging", func(t *testing.T) {
+	t.Run("neither minting input survives slugging", func(t *testing.T) {
 		t.Parallel()
 
+		// Two checks, deliberately not folded into a loop: each names the mutants
+		// its own column goes 0-red against, and those sets are different.
+		// writeInitControlFixture mints its path from BOTH of these literals, so
+		// #1702's "named exactly what the namer mints" assertion is only as
+		// discriminating as the weaker column.
 		if got := versionSlug(rec.ClaudeVersion); got == rec.ClaudeVersion {
 			t.Errorf("#1701: claude_version %q survives versionSlug unchanged (slugs to %q); "+
-				"initControlFixtureName over a slug-clean token is byte-identical to what a "+
-				"writer formatting its own \"initialize_control_v%%s.json\" produces, so "+
+				"initControlArmFixtureName over a slug-clean token is byte-identical to what a "+
+				"writer formatting its own \"initialize_control_v%%s_%%s.json\" produces, so "+
 				"#1702's \"named exactly what the namer mints\" assertion goes 0-RED against "+
 				"precisely the self-formatting writer #1696's lock exists to close — with "+
 				"#1696's own test still green. If you arrived here after tidying this literal "+
 				"into a clean version, that is what you emptied",
 				rec.ClaudeVersion, got)
+		}
+
+		if got := versionSlug(rec.Arm); got == rec.Arm {
+			t.Errorf("#1722: arm %q survives versionSlug unchanged (slugs to %q); every "+
+				"identifier in initControlArms is already slug-clean, so a clean arm here "+
+				"makes #1702's \"named exactly what the namer mints\" assertion 0-RED ON THE "+
+				"ARM COLUMN against BOTH a writer interpolating the arm raw and a writer "+
+				"passing a hardcoded arm instead of the record's. If you arrived here after "+
+				"\"correcting\" this literal into a declared arm, that is what you emptied — "+
+				"this record is a synthetic fixture, not a capture, and initControlArms binds "+
+				"what a capture records", rec.Arm, got)
 		}
 	})
 }
