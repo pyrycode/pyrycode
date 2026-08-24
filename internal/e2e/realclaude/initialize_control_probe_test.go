@@ -65,12 +65,12 @@ package realclaude
 // # Running it
 //
 //	go test -tags e2e_realclaude -race -v \
-//	  -run 'TestRealClaude_InitializeControl|TestInitControlSummarize_|TestInitControlProbedArm_' \
+//	  -run 'TestRealClaude_InitializeControl|TestInitControlSummarize_|TestInitControlProbedArm_|TestInitControlScanApplied_' \
 //	  ./internal/e2e/realclaude/
 //
-// The two non-live tests in this file — the summariser's table and the probed
-// arm's — spawn nothing and must report PASS, not SKIP, on a machine with no
-// claude and no credentials.
+// The three non-live tests in this file — the summariser's table, the probed arm's
+// and the arming completion's (TestInitControlScanApplied_...) — spawn nothing and
+// must report PASS, not SKIP, on a machine with no claude and no credentials.
 //
 // Read the count of tests that executed, never the exit code: this package is
 // behind the e2e_realclaude tag, `make check` never compiles it, and the suite
@@ -322,6 +322,64 @@ func initControlScrubbed(t *testing.T, stderr string) {
 	}
 }
 
+// --- the arming census ----------------------------------------------------------
+
+// initControlScanPathClasses names the classes newDropcapScanner arms through
+// addDynamicPath, and it is a SECOND, INDEPENDENT COPY of that constructor's
+// addDynamicPath calls rather than a read of them. That is deliberate, and the
+// drift costs differ in the two directions, so both are worth stating: a class
+// added to that constructor and not here VANISHES from the recorded map whenever
+// its value is empty — which is the exact defect this list exists to close for
+// artifact_dir — while a name here that no scanner arms writes a `false` key for a
+// class that does not exist. TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath's
+// staleness control binds three of the four names; operator_home is carved out
+// there for a reason its message gives.
+//
+// The two credential classes and the five fixed literals are DELIBERATELY ABSENT.
+// They cannot vanish: addDynamic appends its needle unconditionally, so an unset
+// CLAUDE_CODE_OAUTH_TOKEN lands as `false` rather than as no key at all, and the
+// fixed needles are authoring-time literals that are never empty.
+var initControlScanPathClasses = []string{
+	dropcapClassTempHome,
+	dropcapClassOperatorHome,
+	dropcapClassArtifactDir,
+	dropcapClassWorkdir,
+}
+
+// initControlScanApplied returns s.applied() with every path class PRESENT — the
+// completion #1747 exists for, and it belongs here at the fill site rather than in
+// dropcapScanner, which is shared with the dropcap family and whose record shape is
+// already committed.
+//
+// The two arming paths behave differently for an absent value, and only one of them
+// behaves the way "an unset credential arms nothing" suggests. addDynamic appends
+// unconditionally, so a class handed "" lands as `false`. addDynamicPath goes
+// through dropcapPathSpellings, which returns nil for "" — so NO needle is
+// appended, and applied, which builds its map by ranging the needles, carries no
+// key for that class AT ALL. This run hands newDropcapScanner no artifact directory,
+// so artifact_dir would vanish from the record outright: an omitted class reads
+// exactly like a class nobody ever thought about, which is the outcome the field
+// exists to prevent. operator_home has the identical hole whenever realHome is
+// empty, so all four are closed here rather than only the one that is certain.
+//
+// Only a MISSING key is added. An existing entry — true or false — is left alone: a
+// completion that assigned false unconditionally would report every armed class as
+// armed-nothing while still satisfying the artifact_dir check, and the workdir
+// control in TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath
+// is its sole red.
+//
+// applied returns a FRESH map per call, so this mutates a map it owns and no
+// caller's value is shared. Do not take a defensive second copy.
+func initControlScanApplied(s dropcapScanner) map[string]bool {
+	out := s.applied()
+	for _, class := range initControlScanPathClasses {
+		if _, ok := out[class]; !ok {
+			out[class] = false
+		}
+	}
+	return out
+}
+
 // --- the driver ---------------------------------------------------------------
 
 // runInitControlChild spawns one child under pyry's stream-json-in/stream-json-out
@@ -347,8 +405,49 @@ func initControlScrubbed(t *testing.T, stderr string) {
 // redactor per arm inside its loop, which it must: dropcapRedactor's counters are
 // unlocked and its census accumulates across every call, so a shared redactor
 // would both race and report one arm's substitutions against another's.
+//
+// SINCE #1747 IT TAKES A SCANNER TOO, and it arrives by the same route and for the
+// same reason: one construction site is one place to get newDropcapScanner's
+// parameter order right, and that site is where the pinned $HOME — which plays
+// tempHome — is in hand. Unlike newInitControlRedactor, newDropcapScanner reads
+// realHome and os.Getenv ITSELF, so the call site needs neither in hand. #1715 is
+// free to mint one per arm inside its loop the way it must for the redactor.
+//
+// A SCANNER IS NOT A REDACTOR, and a reader will otherwise guess this asymmetry the
+// wrong way round. dropcapRedactor accumulates unlocked counters across every call,
+// which is why a fresh one per arm is mandatory. dropcapScanner is append-only
+// during construction and read-only afterwards — addDynamic and addDynamicPath are
+// pointer-receiver and run only inside newDropcapScanner, while applied and scan
+// are value receivers that read the needles and allocate their own results — so a
+// scanner shared across arms would neither race nor carry one arm's state into
+// another's record. Do not copy the redactor's per-arm rule to it for a reason that
+// does not apply, and do not read this as licence to share a redactor.
+//
+// THE SCANNER VALUE IS CREDENTIAL-BEARING: NEVER FORMAT IT. newDropcapScanner reads
+// CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY and stores those values in the
+// needles, so a dropcapScanner in scope is TWO LIVE CREDENTIALS IN A STRUCT — and
+// before #1747 no such value existed anywhere in this file. A %v, %+v, %#v or %q on
+// the scanner, on one of its needles, or on the needle slice prints sk-ant-… into a
+// run log this pipeline salvages. initControlScrubbed does NOT catch it: that guard
+// reads the CHILD's stderr, and this would be the harness's own output. This
+// instruction is the only guard, which is why it is written here at the site rather
+// than only in the ticket.
+//
+// applied's MAP is safe to print, and it is the diagnostic worth printing — a
+// reader who knows only "the scanner is dangerous" writes a failure message with
+// nothing in it. Its keys are declared vocabulary (the two environment-variable
+// NAMES, the dropcapClass* constants, the deny-class identifiers) and its values
+// are bools; applied keys by the needle's class and never by its value, so no
+// needle, path or credential can reach a key. The dropcap file states this rule for
+// its own site and dropcapWriteRecord already takes a scanner by value under it;
+// this carries the same rule to the second site rather than inventing one.
+//
+// Handing this driver the finished map[string]bool instead of the scanner would
+// keep the credential values out of it entirely, and that is rejected deliberately:
+// #1748 needs the SCANNER here, to scan the bytes the writer produced, and splitting
+// the two would move the parameter twice.
 func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRedactor,
-	versionRaw, versionToken string) *initControlFixtureRecord {
+	scanner dropcapScanner, versionRaw, versionToken string) *initControlFixtureRecord {
 	t.Helper()
 
 	// The send point this run drives, taken from the ONE row initControlArms marks
@@ -514,6 +613,18 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		ContextDeadlineTripped: errors.Is(ctx.Err(), context.DeadlineExceeded),
 		DurationMs:             duration.Milliseconds(),
 		ScannerError:           scannerErr,
+
+		// #1747: assigned HERE, in the literal, from the scanner the capture site
+		// built. The value is available at literal time — unlike Redaction, which is
+		// assigned below from what the redaction pass returns — and the sibling
+		// family's construction-site `CredentialScanApplied: scanner.applied()` is the
+		// precedent. Not in writeInitControlFixture, whose `out := *rec` copy must go
+		// on receiving a record it only copies.
+		//
+		// initControlScanApplied rather than scanner.applied(): this run hands the
+		// constructor no artifact directory, and the raw call omits that class's key
+		// outright rather than recording it as armed-nothing. See that helper.
+		CredentialScanApplied: initControlScanApplied(scanner),
 	}
 
 	// #1733: the redaction pass. It sits between the record literal and the write,
@@ -621,10 +732,27 @@ func TestRealClaude_InitializeControl_Capture(t *testing.T) {
 	// this site needs no guard of its own.
 	red := newInitControlRedactor(realHome, home, workdir, os.TempDir())
 
+	// #1747's net, built HERE for the redactor's reason: one construction site is one
+	// place to get the parameter order right, and this is where `home` — which plays
+	// tempHome — is in hand. This constructor reads realHome and os.Getenv itself, so
+	// unlike the line above this site names neither.
+	//
+	// THE EMPTY SLOT IS THE SECOND PARAMETER, artifactDir, and the emptiness is the
+	// fact the record is recording rather than an omission to tidy up. The signature
+	// is newDropcapScanner(tempHome, artifactDir, workdir): passing workdir into the
+	// middle slot would arm artifact_dir with the workdir path and leave workdir
+	// unarmed, and MINTING a directory to fill it would report an arming that never
+	// happened. initControlScanApplied is what keeps the empty class PRESENT in the
+	// record as armed-nothing instead of missing from it.
+	//
+	// The value carries the two credentials os.Getenv returned. Never %v it — see
+	// runInitControlChild's doc.
+	scanner := newDropcapScanner(home, "", workdir)
+
 	// No t.Parallel and no subtests: one child, one reader goroutine, one pinned
 	// $HOME. The fixture is on disk before this returns, so the assertion below
 	// runs against an artifact a human can already read.
-	rec := runInitControlChild(t, claudeBin, workdir, red, versionRaw, versionToken)
+	rec := runInitControlChild(t, claudeBin, workdir, red, scanner, versionRaw, versionToken)
 
 	if len(rec.ControlResponses) == 0 {
 		t.Fatalf("#1688: no control_response arrived within %s, so the round trip this ticket "+
@@ -680,6 +808,111 @@ func TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm(t *testing.T) {
 		"(it declares %q); the arm a live capture records must come from that table rather "+
 		"than from a literal, or a mistyped arm reaches the fixture's `arm` field and its "+
 		"filename with nothing red until somebody reads the artifact", got, ids)
+}
+
+// TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath is #1747's
+// third criterion: with no artifact directory at the fill site, artifact_dir is
+// PRESENT in the recorded map as armed-nothing rather than missing from it.
+//
+// It spawns nothing, reads nothing off disk and passes on a machine with no claude
+// and no credentials. It lives in THIS file — the exec-ing one — because this is
+// the fill site's file and this file correctly carries no finOfflineExecBans entry.
+// The record, writer and redaction files each ban os.Getenv, os.Environ and
+// os.LookupEnv BY AST NAME IN THAT FILE, so a test calling newDropcapScanner from
+// one of them would leave the ban green while reading the environment one hop away
+// — the "different fabric" caveat those entries already state. Green-but-dishonest
+// is not where this belongs. TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm
+// is the precedent for an offline test living here.
+//
+// The scanner is built over the family's existing synthetic path constants rather
+// than fresh literals. Both are comfortably longer than dropcapMinNeedle, and
+// dropcapPathSpellings only ATTEMPTS filepath.EvalSymlinks, so a non-existent
+// synthetic path is deterministic and touches no filesystem state.
+//
+// WHAT IT MUST NOT ASSERT, and why: three of the map's classes are
+// environment-dependent. Both credential classes read os.Getenv and operator_home
+// reads realHome, so those three flip between an operator machine and CI. Every
+// assertion here is over a class fixed by a caller-passed value.
+//
+// The empty-needle half is already green elsewhere and is NOT re-commissioned here:
+// TestDropcapRedactionAndDenyScan's "a short dynamic needle is skipped and
+// reported, never matched" subtest pins that a needle with an empty value is
+// skipped and reported false. It builds its needles BY HAND and never goes through
+// newDropcapScanner, so it proves the addDynamic half only and says nothing about
+// the missing-key behaviour this row exists for.
+//
+// FAILURE MESSAGES PRINT THE MAP, NEVER THE SCANNER. This test's scanner holds the
+// operator's two live credentials exactly as the capture's does; the map's keys are
+// declared vocabulary and its values are bools, so it is both safe and the
+// diagnostic worth having. See runInitControlChild's doc.
+func TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath(t *testing.T) {
+	t.Parallel()
+
+	// Exactly the fill site's construction: tempHome and workdir in hand, nothing
+	// for artifactDir, the middle parameter.
+	scanner := newDropcapScanner(initControlTempHomeValue, "", initControlWorkdirValue)
+
+	// The precheck, and it is this row's headline fact rather than a formality. If
+	// the raw map already carried the class, the completion below would be dead
+	// weight and the subject check would pass for the wrong reason.
+	raw := scanner.applied()
+	if _, ok := raw[dropcapClassArtifactDir]; ok {
+		t.Fatalf("#1747: newDropcapScanner with an EMPTY artifactDir already reports %q in "+
+			"applied() (map %v), so addDynamicPath started appending a needle for an empty "+
+			"path — dropcapPathSpellings no longer returns nil for \"\". initControlScanApplied "+
+			"is then dead weight and the assertions below settle nothing about the missing-key "+
+			"behaviour they exist for", dropcapClassArtifactDir, raw)
+	}
+
+	got := initControlScanApplied(scanner)
+
+	// Two checks and two messages: present-but-true and absent-entirely are
+	// different defects, and a single combined assertion cannot say which happened.
+	armed, ok := got[dropcapClassArtifactDir]
+	if !ok {
+		t.Fatalf("#1747: the recorded map omits %q entirely (got %v), so an artifact directory "+
+			"the run never had reads exactly like a class nobody ever armed — which is the one "+
+			"outcome this field exists to prevent", dropcapClassArtifactDir, got)
+	}
+	if armed {
+		t.Errorf("#1747: the recorded map reports %q as ARMED (got %v) although the fill site "+
+			"hands newDropcapScanner no artifact directory; a committed capture would then "+
+			"claim a needle ran when none was ever built", dropcapClassArtifactDir, got)
+	}
+
+	// The vacuity control, and the SOLE RED for a completion that assigns false
+	// unconditionally — which would satisfy the subject above while destroying the
+	// field's whole meaning.
+	if !got[dropcapClassWorkdir] {
+		t.Errorf("#1747: %q was handed a non-empty path and still reads armed-nothing (got %v), "+
+			"so the completion overwrites entries instead of only adding MISSING ones and every "+
+			"armed class in a committed capture is reported as having armed nothing",
+			dropcapClassWorkdir, got)
+	}
+
+	// The staleness control: for a scanner built with all three path parameters
+	// non-empty, every name in the list must be a class some scanner actually arms.
+	// SOLE red for a renamed or mistyped entry, which would otherwise write a false
+	// key for a class that does not exist.
+	//
+	// operator_home is carved out WITH ITS REASON rather than left silent: its value
+	// is realHome, a package-level os.Getenv("HOME") read no test can control, so
+	// binding it here would fail on a legitimately-configured machine launched with
+	// HOME unset. newDropcapScanner is the declaration a reader checks for that one
+	// name.
+	full := newDropcapScanner(initControlTempHomeValue, initControlTempDirValue, initControlWorkdirValue).applied()
+	for _, class := range initControlScanPathClasses {
+		if class == dropcapClassOperatorHome {
+			continue
+		}
+		if _, ok := full[class]; !ok {
+			t.Errorf("#1747: initControlScanPathClasses names %q, which a scanner built with every "+
+				"path parameter non-empty does not arm (it armed %v); a name no scanner arms puts "+
+				"a false key for a non-existent class into every committed capture. %q is the one "+
+				"name deliberately not checked here — its value is realHome, an os.Getenv(\"HOME\") "+
+				"read no test can control", class, full, dropcapClassOperatorHome)
+		}
+	}
 }
 
 // TestInitControlSummarize_ReadsBothPlacements is the targeted check on the one
