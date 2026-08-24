@@ -168,6 +168,17 @@ var excludedTypes = map[string]string{
 	// #1693 picks request/reply, the verb and its handler land together and this
 	// entry becomes "reply".
 	"TypeModelList": "push",
+
+	// outbound push — the v2 slash-command-list report (#1726). Outbound-only like
+	// the seven above, and mandatory here from the moment the constant exists
+	// rather than from the moment something emits it (the producer is #1720) —
+	// Assertion #3 reports an unclassified constant, not an unemitted one. It is a
+	// push and not a reply because this slice declares no inbound request verb: an
+	// inbound type needs a handler in Handlers or dispatchAppFrame or Assertion #1
+	// fails, and filing a handler-less verb here to dodge that would be a lie to
+	// the guard. If #1720 picks request/reply, the verb and its handler land
+	// together and this entry becomes "reply".
+	"TypeSlashCommandList": "push",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

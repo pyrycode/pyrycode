@@ -423,6 +423,84 @@ const (
 	TypeModelList = "model_list" // binary → phone, outbound v2 model-list report
 )
 
+// Mobile Protocol v2 slash-command-list report. The set of slash commands the
+// running child accepts for this conversation, sourced from the same initialize
+// control reply the block above uses — that reply carries a commands array
+// alongside its models array, so one round trip answers both. The defect it
+// closes: the desktop's Actions menu offers reset, compact and knowledge
+// capture, and knowledge capture is workspace-specific — it exists in the
+// operator's vault and in almost no repository — so a menu that always offers it
+// is wrong in most repositories, and sending it there produces an "Unknown
+// command" reply in the thread. Two consumers wait on the frame
+// (pyrycode-desktop#681, the Actions-menu grey-out; pyrycode-desktop#694, a
+// slash-command type-ahead in the message box).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state
+// with two edges, not turn-independent work, not a periodic reading, not a
+// condition report about a window, and not an identity report about one turn. It
+// is a capability inventory of VERBS — what the operator may ask the session to
+// do — where model_list is a capability inventory of identities and
+// model_announced reports the one identity in force. It is not merged into the
+// TypeModelList block despite sharing the initialize round trip: sharing a
+// source is not sharing a subject, the two naming paragraphs have to say
+// different things (two claude words there, four here), and every block in this
+// run groups alone.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give:
+// the wire type names what the frame IS to a client, so a claude rename lands in
+// one place instead of breaking every client at once.
+//
+// claude has FOUR words on this path where model_list had two: initialize (the
+// control_request subtype), commands (the array key in the control reply, 51
+// entries in the committed capture initialize_control_v2.1.239.json),
+// slash_commands (a key on the system/init stdout line carrying the identical 51
+// names as bare strings) and terminal_slash_commands (a different array on that
+// same line, 2 entries: doctor and color). The names-only twin is not the source
+// because it carries none of the 11 alias strings the control reply publishes
+// across 9 of its 51 entries — a daemon forwarding it would ship the grey-out
+// consumer a list in which reset does not appear, and reset is the desktop
+// Actions menu's own entry (an alias of clear, not a command name).
+//
+// The discriminating checks are therefore the PLURALS, and the sibling blocks'
+// subject-noun trap cuts three words wide here rather than one: command,
+// slash_command and slash are each a substring of the correct name, so a
+// strings.Contains check on any of the three would be RED against it — the same
+// trap TypeModelAnnounced's block records for model and TypeModelList's for
+// models. slash_command_list contains none of claude's four words and no init,
+// which is what makes the negative pins satisfiable at all. One plural check
+// covers all three: commands is a substring of slash_commands, which is a
+// substring of terminal_slash_commands, so a name derived from either longer key
+// necessarily contains the shorter one (see
+// TestSlashCommandListType_IsNotClaudesVocabulary).
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone report an old phone never receives, and a leak
+// into that set would let a phone send a slash_command_list frame into
+// dispatch.Route. Two drift detectors classify it, both mandatory from the
+// moment the constant exists rather than from the moment something emits it: the
+// partition in internal/protocol/compat_test.go splits Type* constants between
+// inboundAppTypeSet and v2OnlyTypes (this lives in the latter), and
+// cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
+//
+// No inbound request verb is declared here, and that is not an omission.
+// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
+// here would be red by construction, and filing it under excludedTypes to dodge
+// that would be a lie to the guard. If #1720 picks request/reply it declares the
+// verb together with its handler and moves this constant from push to reply; a
+// client's decode path is the same frame either way, which is what declaring the
+// type now exists to freeze.
+//
+// The declaring ticket (#1726) is wire vocabulary only: #1727 declares the
+// payload and its entry type, #1720 produces and emits the frame, and #1718 adds
+// the encoding fixtures and the docs/protocol-mobile.md § slash_command_list
+// section. Same declare-then-emit sequencing as #1405→#1410, #1616→#1638 and
+// #1704→#1693.
+const (
+	TypeSlashCommandList = "slash_command_list" // binary → phone, outbound v2 slash-command-list report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
