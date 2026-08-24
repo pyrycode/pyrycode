@@ -719,3 +719,214 @@ func (o ModelOption) MarshalJSON() ([]byte, error) {
 	type alias ModelOption
 	return json.Marshal(alias(o))
 }
+
+// SlashCommandListPayload is the body of an Envelope whose Type ==
+// TypeSlashCommandList (docs/protocol-mobile.md § slash_command_list — that
+// section lands with the fixtures in #1718). Binary → phone direction; the wire
+// form of the slash-command inventory claude returns from a control_request with
+// subtype initialize, alongside the models array ModelListPayload carries: the
+// set of commands this session in this working directory will accept. A SNAPSHOT
+// of what claude will accept, not a delta, and conversation-scoped rather than
+// turn-scoped — receiving one neither opens nor closes a turn.
+//
+// Declared here (#1727) ahead of its producer so a client can be written against
+// the shape — the sequencing #1405 used ahead of #1410, #1616 ahead of #1638 and
+// #1704 ahead of #1693. Nothing in the tree constructs this type yet; #1720 is
+// what will. Two consumers are blocked on the shape today: pyrycode-desktop#681,
+// the Actions-menu grey-out that matches its menu entries against this list, and
+// pyrycode-desktop#694, a type-ahead that filters the whole list live and renders
+// each row as a name, an argument hint and a description.
+//
+// ConversationID is present and unfilled by this ticket — the producer supplies
+// it at mapping time, the seam every v2 interactive payload uses. claude's own
+// session_id is deliberately absent for BackgroundTaskStartedPayload's reason:
+// claude's session identity is not the daemon's conversation identity.
+//
+// Commands is in claude's own order. The key is always present on the wire and
+// never null — see MarshalJSON.
+//
+// The COUNT is workspace- and version-dependent, and no client may assume one:
+// 51 entries against claude 2.1.239 in this repository, while an earlier hand
+// count against 2.1.220 in a different working directory reported 74. That
+// variation is the feature's whole point, and it is why the list is per session
+// and per working directory rather than a one-off global — so a client must not
+// cache one list across working directories.
+//
+// The payload's cost lives in the descriptions: the capture's 51 entries
+// serialise to 14,277 bytes of compact UTF-8 against the 65519-byte v2
+// application-envelope cap. Comfortable but not free, so a cut has to be
+// REPORTABLE rather than silent, which is what DroppedCommands and
+// SlashCommand.TruncatedFields are for.
+//
+// DroppedCommands is how many entries the producer cut that this frame does NOT
+// carry; 0 when nothing was dropped. NOTHING COUNTS IT YET, and no entry cap is
+// enforced anywhere — so do NOT read len(Commands) + DroppedCommands as the
+// menu's true size today, and do not infer from the field's presence that a cap
+// exists. It is declared now anyway because a wire with nowhere to put a drop
+// discards it silently, while a permanent 0 reads as "nothing was dropped",
+// which is a lie rather than a gap. #1719 owns making the decode record it;
+// #1720 is where the field and a counter meet, and is also where the CAUSES are
+// settled — the field says entries were cut without naming a cause, deliberately,
+// so that a drop for a shape reason lands in the same count. The count reports
+// here rather than as a name in a top-level truncated_fields — which is why this
+// payload has none, BackgroundTaskRosterPayload's stated reason — because a
+// name-only report loses HOW MANY were lost, and each dimension reports where it
+// is decided: a text cut is a property of one entry and rides that entry as
+// SlashCommand.TruncatedFields.
+//
+// The per-entry key set is COMPLETE, and that is measured rather than assumed.
+// Against the committed capture
+// internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json (claude
+// 2.1.239), name, description, argumentHint and aliases are the entire per-entry
+// vocabulary: 42 of the 51 entries carry the first three, the other 9 carry all
+// four, and there is no third key set. This shape adopts ALL FOUR, so unlike
+// ModelOption it drops nothing — which means a key a later claude adds arrives as
+// a documented gap against a stated measurement rather than as a silent drop.
+type SlashCommandListPayload struct {
+	ConversationID  string         `json:"conversation_id"`
+	Commands        []SlashCommand `json:"commands"`
+	DroppedCommands int            `json:"dropped_commands"`
+}
+
+// MarshalJSON normalises a nil Commands to an empty array, so a slash-command
+// list always serialises as "commands":[] and never as "commands":null.
+//
+// This implements BackgroundTaskRosterPayload.MarshalJSON's reason unchanged, and
+// that whole rationale transfers: omitempty is out because an empty list is a
+// POSITIVE statement — it says claude offered nothing — rather than an absence,
+// and between null and [], [] reads as an empty list where null reads as
+// absent/unknown, so a client decoding into a non-optional array type never has
+// to branch. SlashCommand.MarshalJSON normalises its own Aliases for a DIFFERENT
+// reason — read it there, so the asymmetry is not taken for an accident — and
+// deliberately leaves TruncatedFields alone.
+//
+// This method cannot do the entry's job for it. Assigning a fresh slice to this
+// copy's own Commands field is safe, but reaching THROUGH it into p.Commands[i]
+// would mutate the caller's backing array, which for a payload shared between an
+// emitter goroutine and a per-connection fan-out is a data race as well as a
+// correctness bug; and a payload-level normalisation would not fire at all when a
+// SlashCommand is marshalled on its own.
+//
+// Value receiver, so it applies to the value form a round trip and a bridge both
+// take, and so the substitution lands on a copy rather than on the caller's
+// slice. The type alias is the standard indirection that keeps json.Marshal from
+// recursing back into this method.
+func (p SlashCommandListPayload) MarshalJSON() ([]byte, error) {
+	if p.Commands == nil {
+		p.Commands = []SlashCommand{}
+	}
+	type alias SlashCommandListPayload
+	return json.Marshal(alias(p))
+}
+
+// SlashCommand is one row of a SlashCommandListPayload (docs/protocol-mobile.md
+// § slash_command_list, #1727). Its fields are exactly the four per-entry keys
+// claude's initialize reply carries and nothing invented; the measurement behind
+// "exactly" is in SlashCommandListPayload's doc.
+//
+// All three strings cross, not just the name. The Actions-menu grey-out needs
+// names to match against, but the type-ahead renders all three: at 51 entries the
+// description is what makes the list usable rather than a wall of names, and the
+// argument hint is what tells the operator that a command takes something after
+// it.
+//
+// Name is NOT an identifier. One name in the capture is __remote-workflow, so no
+// charset assumption belongs in this struct or in a client.
+//
+// ArgumentHint is EMPTY on 33 of the capture's 51 entries, and no entry omits the
+// key — so an empty hint is the ordinary case rather than missing data. That is
+// why no string key here is optional: eliding it would make the common row
+// indistinguishable from a malformed one.
+//
+// Description may contain NEWLINES — claude-api's does — and 0x0a is the ONLY
+// sub-0x20 byte anywhere across the 51 entries' four string fields. Newlines are
+// therefore the control characters on this path rather than one class among
+// several, and a client rendering a single-line row must handle that specific
+// case.
+//
+// Aliases is what makes the grey-out correct, and a shape dropping it would break
+// the first consumer. The desktop Actions menu's own reset entry is an ALIAS of
+// clear, not a command name, so a client matching against Name alone greys out a
+// command that works. It is also why the cheap source cannot answer the question:
+// the same capture's system/init line carries slash_commands, the identical 51
+// names in the identical order as bare strings, and not one of the 11 aliases.
+// The key is always present on the wire and never null — see MarshalJSON, and
+// read its rationale, which is NOT SlashCommandListPayload.MarshalJSON's.
+//
+// TruncatedFields names THIS row's cut fields — "name", "argument_hint",
+// "description", "aliases", the wire names rather than the Go ones, as
+// RateLimitedPayload.TruncatedFields uses its JSON tags — and is null when
+// nothing was cut. All four are enumerated because all four are strings the
+// SECURITY paragraph credits and a producer may cut; #1720 reads this line to
+// pick the names its producer emits, so an under-enumeration here would
+// under-cover a real field. Deliberately NOT normalised the way Aliases is — see
+// MarshalJSON. It is load-bearing rather than decoration: a row that dropped it
+// would present claude's cut text to a phone as complete.
+//
+// SECURITY: Name, ArgumentHint, Description and every string in Aliases are
+// WORKSPACE-authored strings that crossed the subprocess trust boundary. That
+// strengthens ModelOption's claude-authored warning rather than restating it: a
+// command defined in a repository was written by whoever wrote that repository,
+// which is a lower-trust origin than claude. They are safe to RENDER as inert
+// text and must never be fed to an HTML sink, an attribute, or a URL; the daemon
+// bounds them but does not sanitize them — no control-character or
+// terminal-escape stripping happens on this path — so they stay untrusted text
+// all the way to the client, and the render boundary owing the sanitization is
+// the CLIENT's. Their bound is the producer's (#1719/#1720), decided at
+// construction, so this struct re-decides no maximum and declares no charset
+// check: a second cap here would be a second place the limit is decided, and the
+// two could disagree silently.
+//
+// The family's convention sentence — it is a REPORT, never a control input —
+// needs the amendment ModelOption.Value carries, for a different reason: a client
+// is meant to send a Name BACK, as the text of an ordinary message, because
+// sending the slash command IS the feature. Publishing a name does not make it
+// trusted. It arrives inbound as ordinary message text, on a path that does not
+// treat it as a command vocabulary and does not consult this list, and no field
+// here reaches a child as an argv element. This frame declares no inbound verb —
+// TypeSlashCommandList's own doc has that reasoning — and grants nothing.
+type SlashCommand struct {
+	Name            string   `json:"name"`
+	ArgumentHint    string   `json:"argument_hint"`
+	Description     string   `json:"description"`
+	Aliases         []string `json:"aliases"`
+	TruncatedFields []string `json:"truncated_fields"`
+}
+
+// MarshalJSON normalises a nil Aliases to an empty array, so a row always
+// serialises as "aliases":[] and never as "aliases":null. It deliberately leaves
+// TruncatedFields alone, which stays null when nothing was cut.
+//
+// The reason is NOT SlashCommandListPayload.MarshalJSON's, and the asymmetry
+// between the two is not an accident. An empty alias list is not a positive
+// statement here, it is a COLLAPSE — and that is measured rather than argued.
+// claude never sends "aliases": []: zero of the capture's 51 entries carry an
+// empty array, 42 omit the key entirely and 9 carry a non-empty one. An entry
+// with no aliases and an entry with the key absent are the same statement, and a
+// client must not have to branch on absent-vs-empty to match an alias, so the
+// wire states ONE position for both and [] is the position that spares every row
+// an optional-array branch. This is exactly ModelOption.MarshalJSON's
+// EffortLevels collapse with the frequency INVERTED: the majority case here, the
+// single exception (Haiku) there. Whether the daemon-internal value keeps the
+// absent/empty distinction is #1719's call, as #1690 owns it for the model list;
+// the wire's position is stated here either way, because an undeclared position
+// is one #1720 would have to invent.
+//
+// TruncatedFields is exempt for BackgroundTaskRosterPayload.MarshalJSON's own
+// carve-out reason, unchanged: nil and [] say the identical thing there ("nothing
+// was cut") and no consumer branches on the difference.
+//
+// This method cannot be folded into the payload's: a payload marshaller
+// normalising entries in place would mutate the caller's backing array unless the
+// slice were copied first, and it would not fire at all when a SlashCommand is
+// marshalled on its own.
+//
+// Value receiver and the type alias, for SlashCommandListPayload.MarshalJSON's
+// reasons.
+func (c SlashCommand) MarshalJSON() ([]byte, error) {
+	if c.Aliases == nil {
+		c.Aliases = []string{}
+	}
+	type alias SlashCommand
+	return json.Marshal(alias(c))
+}

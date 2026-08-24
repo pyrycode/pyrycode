@@ -1536,6 +1536,120 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 	}
 }
 
+// TestSlashCommandListPayload_NilCommandsNormalises covers the case no fixture
+// could — and here that is the ONLY path there is. Unmarshalling "commands":[]
+// always yields a non-nil empty slice, so the nil branch is reachable only by
+// constructing the value directly, and this slice (#1727) ships no fixture at all
+// (internal/protocol/testdata/ is #1718's). A producer (#1720) mapping an empty
+// or absent claude commands array would hand this type a nil slice and, without
+// normalisation, would ship "commands":null to a phone.
+//
+// Both the value and pointer forms are checked because a pointer-receiver
+// marshaller would silently miss the value path roundTripEnvelope takes. This is
+// TestModelListPayload_NilModelsNormalises's shape.
+func TestSlashCommandListPayload_NilCommandsNormalises(t *testing.T) {
+	p := SlashCommandListPayload{ConversationID: "c1"}
+	if p.Commands != nil {
+		t.Fatalf("precondition: Commands must be nil, got %v", p.Commands)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", p},
+		{"pointer", &p},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if bytes.Contains(out, []byte(`"commands":null`)) {
+				t.Errorf("nil Commands marshalled to null: %s", out)
+			}
+			if !bytes.Contains(out, []byte(`"commands":[]`)) {
+				t.Errorf("nil Commands did not normalise to []: %s", out)
+			}
+		})
+	}
+
+	// The normalisation must not mutate the receiver's copy back into the caller.
+	if p.Commands != nil {
+		t.Errorf("MarshalJSON mutated the receiver: Commands is now %v", p.Commands)
+	}
+}
+
+// TestSlashCommand_NilSliceEncodings pins the asymmetry between the entry's two
+// list fields, which no fixture could pin either: decoding [] always yields a
+// non-nil slice, and this slice ships no fixture at all. Aliases normalises nil
+// to [], TruncatedFields does not and stays null.
+//
+// truncated_fields is pinned at all precisely BECAUSE it ships no fixture. An
+// unpinned null is one that a later omitempty, or a third normaliser copied from
+// the field above it, silently turns into something else.
+//
+// The nested-in-payload subtest proves the entry marshaller fires through the
+// payload's, and its trailing assertion is the only thing that would catch a
+// payload marshaller normalising entries IN PLACE — that would reach through
+// p.Commands[i] into the caller's backing array, and its JSON is byte-identical
+// to the correct implementation's, so no byte check could tell the two apart.
+//
+// This is TestModelOption_NilSliceEncodings's shape, shared assertEncodings
+// helper included, so the three assertions are stated once.
+func TestSlashCommand_NilSliceEncodings(t *testing.T) {
+	c := SlashCommand{Name: "clear"}
+	if c.Aliases != nil || c.TruncatedFields != nil {
+		t.Fatalf("precondition: both slices must be nil, got %v / %v", c.Aliases, c.TruncatedFields)
+	}
+
+	assertEncodings := func(t *testing.T, out []byte) {
+		t.Helper()
+		if bytes.Contains(out, []byte(`"aliases":null`)) {
+			t.Errorf("nil Aliases marshalled to null: %s", out)
+		}
+		if !bytes.Contains(out, []byte(`"aliases":[]`)) {
+			t.Errorf("nil Aliases did not normalise to []: %s", out)
+		}
+		if !bytes.Contains(out, []byte(`"truncated_fields":null`)) {
+			t.Errorf("nil TruncatedFields must stay null, not normalise: %s", out)
+		}
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   any
+	}{
+		{"value", c},
+		{"pointer", &c},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := json.Marshal(tc.in)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			assertEncodings(t, out)
+		})
+	}
+
+	t.Run("nested in payload", func(t *testing.T) {
+		p := SlashCommandListPayload{ConversationID: "c1", Commands: []SlashCommand{c}}
+		out, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		assertEncodings(t, out)
+		if p.Commands[0].Aliases != nil {
+			t.Errorf("payload marshalling mutated the caller's backing array: Aliases is now %v", p.Commands[0].Aliases)
+		}
+	})
+
+	// The entry's own normalisation must not write back through the receiver.
+	if c.Aliases != nil {
+		t.Errorf("MarshalJSON mutated the receiver: Aliases is now %v", c.Aliases)
+	}
+}
+
 // TestSlashCommandListType_IsNotClaudesVocabulary pins the translation layer
 // this frame exists to preserve, as its rate_limited, model_announced and
 // model_list siblings do. The daemon is the ONE place a claude rename lands;
@@ -1571,9 +1685,11 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 // green. Naming is this ticket's (#1726) whole deliverable and nothing
 // downstream supplies the string, so the pin is load-bearing.
 //
-// There is no payload-bytes half. Every sibling pin ends with a regression check
-// over its payload's bytes; this frame has no payload until #1727, so that half
-// arrives there rather than being faked with an inline struct here.
+// The payload-bytes half below arrived with the shape (#1727), which is what
+// every sibling pin ends with. It checks that a populated payload's bytes carry
+// none of claude's spellings this shape does NOT adopt, and it is
+// non-discriminating today by construction: its job is to go red the day someone
+// wires claude's own spellings, or the names-only twin, back in.
 func TestSlashCommandListType_IsNotClaudesVocabulary(t *testing.T) {
 	if TypeSlashCommandList == "initialize" {
 		t.Errorf("wire type is claude's control_request subtype %q; it must be the daemon's own name", TypeSlashCommandList)
@@ -1588,5 +1704,50 @@ func TestSlashCommandListType_IsNotClaudesVocabulary(t *testing.T) {
 	// claude's.
 	if TypeSlashCommandList != "slash_command_list" {
 		t.Errorf("wire type: got %q, want %q", TypeSlashCommandList, "slash_command_list")
+	}
+
+	// The payload's own bytes, not the envelope's — the envelope carries its own
+	// id/ts and would dilute the check.
+	//
+	// The check list is DERIVED, not copied, and two derivations are why it is so
+	// short. First, this shape adopts all FOUR of claude's per-entry keys, so
+	// "name", "description" and "aliases" would be red against the correct struct
+	// and must not be checked; only argumentHint differs from what this wire
+	// spells (argument_hint), so it is the one per-entry spelling a check can
+	// name. Do NOT copy TestModelListType_IsNotClaudesVocabulary's list — it
+	// contains "description", which this shape adopts, so carrying it over
+	// verbatim would ship a check that fails against the correct implementation.
+	// For the same reason there is no deliberately-dropped-field half here, unlike
+	// that sibling's: this shape drops nothing.
+	//
+	// Second, "commands" is absent because it is this payload's own wire key — the
+	// same trap the sibling records for "models". Of claude's two array keys on
+	// this path, slash_commands is the load-bearing check: terminal_slash_commands
+	// is subsumed by it in the byte-containment direction, since any bytes
+	// containing the longer contain the shorter. The longer one is kept as the
+	// named statement of claude's fourth word, the same deliberate redundancy the
+	// `initialize` equality check above is.
+	//
+	// The row is clear's deliberately: an empty argument hint (the ordinary case,
+	// 33 of the capture's 51 entries) and the aliases whose first member, reset,
+	// is the desktop Actions menu's own entry.
+	body, err := json.Marshal(SlashCommandListPayload{
+		ConversationID: "c1",
+		Commands: []SlashCommand{{
+			Name:         "clear",
+			ArgumentHint: "",
+			Description:  "Clear conversation history and free up context",
+			Aliases:      []string{"reset", "new"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	for _, key := range []string{
+		"argumentHint", "slash_commands", "terminal_slash_commands",
+	} {
+		if bytes.Contains(body, []byte(key)) {
+			t.Errorf("payload carries claude's spelling %q: %s", key, body)
+		}
 	}
 }
