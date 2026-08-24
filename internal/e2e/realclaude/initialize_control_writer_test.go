@@ -872,6 +872,255 @@ func TestInitControlFixture_ScanRefusesAPlantedCredential(t *testing.T) {
 	}
 }
 
+// --- the per-class sweep ----------------------------------------------------------
+
+// The three synthetic needle values #1749 mints. The other three dynamic classes
+// reuse initControlTempHomeValue, initControlOperatorHomeValue and
+// initControlWorkdirValue, which the redaction family already declares.
+//
+// Every constraint below is load-bearing, not taste:
+//
+//   - EACH IS AT LEAST dropcapMinNeedle (16) BYTES. A shorter dynamic needle is
+//     skipped, its class reads as not applied, and its row is green-and-vacuous.
+//     initControlTempDirValue (/synthetic/tmp) is 14 bytes and is the family
+//     constant that fails this — it must never be used as a needle.
+//   - NEITHER CREDENTIAL VALUE STARTS WITH sk-ant-, so each credential row
+//     isolates its own class from the fixed anthropic-key-prefix class instead of
+//     hitting two.
+//   - NEITHER CREDENTIAL VALUE IS A SUBSTRING OF THE OTHER, or both credential
+//     rows would hit both credential classes and neither would be the sole red for
+//     its own.
+//   - NEITHER CREDENTIAL VALUE IS A SUBSTRING OF "CLAUDE_CODE_OAUTH_TOKEN" OR
+//     "ANTHROPIC_API_KEY". Those two class names are the only armed class names at
+//     or above the minimum (23 and 17 bytes), so a needle hiding inside one would
+//     make the net hit its own metadata on every run —
+//     TestDropcapDenyClassNamesDoNotCarryTheirNeedle guards that hazard for the
+//     five FIXED names and does not cover the dynamic six. It bites the moment a
+//     record carries the eleven-class arming census; initControlFullRecord's
+//     credential_scan_applied map carries workdir (7) and artifact_dir (12), both
+//     under the minimum, so it is safe today and this constraint is what keeps it
+//     safe if that map ever grows.
+//   - THE ARTIFACT-DIR VALUE IS NOT NESTED UNDER THE TEMP-HOME VALUE. It shares
+//     only /synthetic/tmp, which no class arms, so its row hits exactly one class.
+//     initControlWorkdirValue is the counter-example the table below records: it
+//     IS nested, and its row legitimately hits three.
+//   - NO VALUE CONTRIBUTES A SEGMENT NEEDLE. addDynamicPath also arms every '/'-
+//     or '-'-separated segment at least dropcapMinNeedle bytes long; the longest
+//     segment across all four paths is "synthetic" (9), so today none does. A
+//     newly invented value with a long segment would change the hit sets recorded
+//     on the rows below.
+const (
+	initControlSyntheticOAuthToken  = "synthetic-oauth-token-not-a-real-credential"
+	initControlSyntheticAPIKey      = "synthetic-api-key-not-a-real-credential"
+	initControlSyntheticArtifactDir = "/synthetic/tmp/artifacts"
+)
+
+// initControlPlantSuffix is the trailing free text every planted stderr_capture
+// carries, and IT MUST NOT BEGIN WITH '/'. Appending a path segment synthesises
+// needles the planted value alone does not carry: initControlTempHomeValue + "/x"
+// is /synthetic/tmp/home/x, which contains the fixed /home/ literal and turns a
+// one-class row into a two-class one. This is the shape #1748's row already plants.
+const initControlPlantSuffix = ": child stderr the redaction table did not predict"
+
+// newInitControlOfflineScanner mirrors the eleven classes newDropcapScanner arms,
+// from synthetic constants only: the same five arming calls in the same order, then
+// dropcapFixedNeedles wholesale, with that constructor's two os.Getenv reads and its
+// realHome read replaced by declared values.
+//
+// The substitution is the point rather than a convenience. A table built through the
+// real constructor arms the OPERATOR's environment — it stores two live credentials
+// as needle values and takes $HOME as operator_home — so every row would be green or
+// red depending on whose machine ran it. This file's finOfflineExecBans entry bans
+// both names for exactly that reason, and the ban is an AST identifier match, so it
+// cannot be answered out of a comment.
+//
+// The returned scanner reads nothing from the environment, the filesystem or the
+// clock, and is read-only after construction — the property
+// TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne already
+// leans on — so one instance is safely shared by every parallel row.
+func newInitControlOfflineScanner() dropcapScanner {
+	s := dropcapScanner{}
+	s.addDynamic("CLAUDE_CODE_OAUTH_TOKEN", initControlSyntheticOAuthToken)
+	s.addDynamic("ANTHROPIC_API_KEY", initControlSyntheticAPIKey)
+	s.addDynamicPath(dropcapClassTempHome, initControlTempHomeValue)
+	s.addDynamicPath(dropcapClassOperatorHome, initControlOperatorHomeValue)
+	s.addDynamicPath(dropcapClassArtifactDir, initControlSyntheticArtifactDir)
+	s.addDynamicPath(dropcapClassWorkdir, initControlWorkdirValue)
+	s.needles = append(s.needles, dropcapFixedNeedles()...)
+	return s
+}
+
+// TestInitControlFixture_ScanRefusesAPlantedValueOfEveryArmedClass is #1749: one row
+// per class the scanner arms, each planting a value of that class into the record
+// and asserting the class is among the scan's hits. #1748 shipped ONE planted row
+// and said so out loud; this is the sweep it deferred, and it turns "the net works"
+// into a table rather than a claim about ten classes nobody measured.
+//
+// IT EXERCISES THE SCAN OVER THE MARSHALLED RECORD, NEVER writeInitControlFixture's
+// FATAL, for the reason TestInitControlFixture_ScanRefusesAPlantedCredential states
+// at length: a t.Fatalf from the writer takes the calling subtest down with it,
+// there is no fake testing.TB in this package and testing.TB cannot be implemented
+// outside testing, so nothing can assert on a refusal from inside one. The assertion
+// is still on the DECIDING VALUE rather than on a proxy — scanInitControlFixture
+// refuses iff len(hits) > 0.
+//
+// ONE PLANT SITE PER ROW IS ENOUGH, and the reason is structural rather than a
+// budget: scan reads the WHOLE marshalled blob, so field coverage comes for free and
+// a per-field table would separate nothing. redactInitControlRecord is the opposite
+// case — it visits fields BY NAME, which is why the redaction family does need
+// per-field rows.
+//
+// # What this table does not prove, so that nobody credits it with more
+//
+//   - That scanInitControlFixture CALLS scan. That is construction, and the one
+//     untestable link, per the paragraph above.
+//   - That newInitControlOfflineScanner arms the same class SET as
+//     newDropcapScanner. The four path classes come from the shared dropcapClass*
+//     constants and the five fixed classes from dropcapFixedNeedles() wholesale, so
+//     those nine cannot drift. The two credential class names are spelled as string
+//     literals in both files, and that is the entire drift surface. They are spelled
+//     INDEPENDENTLY in the builder and in the table below for what that is worth: a
+//     typo on one side reddens — the row misses its class, or the builder arms a
+//     class no row claims — while a typo made identically in both is invisible here.
+//   - The SLUG spellings. Every row plants a raw value, so addDynamicPath's slug
+//     half is never exercised; TestDropcapRedactionAndDenyScan's slug-mangled
+//     subtest is where that already lives.
+//   - Anything about the committed testdata/initialize_control_v2.1.239.json. Do NOT
+//     add a row that re-scans it: re-measured 2026-08-25, it still carries /Users/
+//     once, /private/var/folders/ once and /var/folders/ twice, one of those two
+//     being the tail of the /private/ occurrence, so such a row is red on arrival.
+//     #1733's redaction takes effect on the next live capture, which replaces the
+//     file.
+//
+// The failure messages name class constants and the hits and applied values. They
+// never print a needle, the needle slice, the scanner or a planted value — the rule
+// scanInitControlFixture's doc states for every line added to this file. Every value
+// here is synthetic, so printing one would leak nothing; the point is that the live
+// callers inherit no pattern worth copying.
+func TestInitControlFixture_ScanRefusesAPlantedValueOfEveryArmedClass(t *testing.T) {
+	t.Parallel()
+
+	scanner := newInitControlOfflineScanner()
+
+	rows := []struct {
+		class string
+		plant string
+	}{
+		// The two credential classes. Their names are literals here, spelled
+		// independently of the builder's, per the drift note above.
+		{class: "CLAUDE_CODE_OAUTH_TOKEN", plant: initControlSyntheticOAuthToken},
+		{class: "ANTHROPIC_API_KEY", plant: initControlSyntheticAPIKey},
+
+		// The four dynamic path classes.
+		{class: dropcapClassTempHome, plant: initControlTempHomeValue},
+		{class: dropcapClassOperatorHome, plant: initControlOperatorHomeValue},
+		{class: dropcapClassArtifactDir, plant: initControlSyntheticArtifactDir},
+		// MEASURED, THREE CLASSES, and nobody should "fix" it:
+		// /synthetic/tmp/home/work contains initControlTempHomeValue AND the fixed
+		// /home/ literal, so this row hits home-path-prefix, temp_home and workdir.
+		// That is why every row below asserts CONTAINMENT and never equality — an
+		// equality assertion here is red on arrival. Containment still leaves this
+		// row red when the workdir needle is dropped, which is what it is for.
+		{class: dropcapClassWorkdir, plant: initControlWorkdirValue},
+
+		// The five fixed classes. initControlPlantedPath is #1748's plant, reused
+		// verbatim rather than duplicated into a second /Users/ constant.
+		{class: dropcapDenySkAnt, plant: "sk-ant-synthetic-not-a-real-key"},
+		{class: dropcapDenyUsers, plant: initControlPlantedPath},
+		{class: dropcapDenyHome, plant: "/home/synthetic-operator/.claude/logs/shim.log"},
+		// MEASURED, TWO CLASSES: /private/var/folders/ carries /var/folders/ as its
+		// own tail, so this row hits var-folders-prefix too. Containment again.
+		{class: dropcapDenyPVarF, plant: "/private/var/folders/sy/synthetic/T/shim.log"},
+		{class: dropcapDenyVarF, plant: "/var/folders/sy/synthetic/T/shim.log"},
+	}
+
+	// The arming check, once over the shared scanner and therefore a per-row fact:
+	// every class the table claims is a class this scanner ACTUALLY ARMED. A row
+	// whose needle was skipped is green and settles nothing, which is why this is a
+	// criterion of its own rather than prose.
+	//
+	// scan's second return is discarded throughout, unlike in #1748's row, and the
+	// divergence is a decision rather than an oversight: notApplied reports the
+	// short-needle case ONLY, while applied() reports that case AND the
+	// absent-class case. An assertion on notApplied would be red only where the
+	// !armed check below is already red — dead weight, not a second net.
+	applied := scanner.applied()
+
+	// Set-size equality, which together with the per-row presence check below makes
+	// the table's eleven and the builder's armed eleven the SAME SET. Sole red for a
+	// twelfth class added to the builder with no row behind it.
+	if len(applied) != len(rows) {
+		t.Fatalf("#1749: the offline scanner armed %d class(es) %v while the table carries %d "+
+			"row(s); the two must be the same set, or a class the scan arms has no row behind "+
+			"it and this table's per-class coverage is short by one",
+			len(applied), applied, len(rows))
+	}
+
+	// Two defects, two messages: absent-entirely and present-but-false are different
+	// failures and a single combined assertion cannot say which happened. The absent
+	// case is reachable rather than theoretical — addDynamicPath("") goes through
+	// dropcapPathSpellings, which returns nil for the empty string, so no needle is
+	// appended and the class never reaches the map at all. That is the arm
+	// TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath exists
+	// for, and the one a "did anything come back skipped" check would miss.
+	for _, row := range rows {
+		armed, ok := applied[row.class]
+		if !ok {
+			t.Fatalf("#1749: the offline scanner's applied() omits %q ENTIRELY (armed %v), so the "+
+				"table claims a class no needle was ever built for — an empty path handed to "+
+				"addDynamicPath appends nothing and the class silently leaves the census",
+				row.class, applied)
+		}
+		if !armed {
+			t.Errorf("#1749: the offline scanner reports %q as ARMED-NOTHING (armed %v), so its "+
+				"needle is under the dropcapMinNeedle minimum and was skipped; that row's "+
+				"assertion below is green-and-vacuous", row.class, applied)
+		}
+	}
+
+	// The clean-record control, and it is load-bearing rather than tidiness: without
+	// it a scanner that reported EVERY class on EVERY input would pass all eleven
+	// planted rows. It is also the vacuity control for the whole table at once —
+	// zero hits over the clean record is exactly the statement that no row's plant
+	// was already present in the fixture, proved for eleven classes in one assertion
+	// instead of eleven. Fatal rather than skip: a property that cannot discriminate
+	// is a broken instrument, not a passing test.
+	clean, err := json.MarshalIndent(initControlFullRecord(), "", "  ")
+	if err != nil {
+		t.Fatalf("#1749: marshal the unplanted fixture: %v", err)
+	}
+	if cleanHits, _ := scanner.scan(clean); len(cleanHits) != 0 {
+		t.Fatalf("#1749: the UNPLANTED fixture already hits %d class(es) %v against the "+
+			"eleven-class offline scanner, so the planted rows below cannot tell \"the plant was "+
+			"seen\" from \"this record always hits\"", len(cleanHits), cleanHits)
+	}
+
+	for _, row := range rows {
+		t.Run(row.class, func(t *testing.T) {
+			t.Parallel()
+
+			// stderr_capture is the carrier for the reason #1748's row chose it:
+			// child stderr is where an unpredicted operator path actually shows up.
+			// The plant goes at the FRONT and the whole capture stays well inside
+			// stderrFixtureCap, so no cap can move it into a truncated tail.
+			rec := initControlFullRecord()
+			rec.StderrCapture = row.plant + initControlPlantSuffix
+
+			planted, err := json.MarshalIndent(rec, "", "  ")
+			if err != nil {
+				t.Fatalf("#1749: marshal the fixture planted for class %q: %v", row.class, err)
+			}
+			hits, _ := scanner.scan(planted)
+			if !dropcapContains(hits, row.class) {
+				t.Errorf("#1749: hits = %v, want %q among them: a value of that class planted in "+
+					"stderr_capture survived the deny-scan, so writeInitControlFixture would commit "+
+					"it and the fail-closed net behind #1733's redaction table covers ten of the "+
+					"eleven classes it arms", hits, row.class)
+			}
+		})
+	}
+}
+
 // --- the cap ------------------------------------------------------------------------
 
 // TestInitControlFixture_WriterCapsStderrCapture is #1700: writeInitControlFixture

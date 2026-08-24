@@ -3101,8 +3101,42 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   Zero production files touched. See
   `docs/specs/architecture/1748-deny-scan-the-initialize-fixture-before-writing.md`
   for the full design, the mutant table and the security review. #1749
-  (open, blocked-by this ticket) sweeps the remaining armed classes; this
-  slice shipped only the one planted row needed to prove the mechanism live.
+  (below) swept the remaining ten armed classes; this slice shipped only the
+  one planted row needed to prove the mechanism live.
+
+- `initialize_control_writer_test.go` (#1749) — **the per-class sweep #1748
+  deferred:** one row per class `newDropcapScanner` arms (all eleven), each
+  planting a value of that class into `initControlFullRecord().StderrCapture`
+  and asserting the class is among `scanner.scan`'s hits. `scan` reads the
+  whole marshalled blob, so one plant site per row is enough — unlike
+  `redactInitControlRecord`, which visits fields by name and needs per-field
+  rows. `newInitControlOfflineScanner` mirrors `newDropcapScanner`'s five
+  arming calls with its two `os.Getenv` reads and its `realHome` read
+  replaced by declared synthetic constants, so the table runs — not skips —
+  with no claude and no credentials; code review re-ran it with
+  `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` deliberately *set* to fake
+  values and got the same 12/12/0-skips result, confirming
+  environment-independence rather than mere credential-freeness. The scanner
+  is built once and shared read-only across eleven parallel subtests. Two
+  rows legitimately hit more than one class — `workdir`'s plant nests inside
+  both the fixed `/home/` literal and its own `temp_home` value, and
+  `private-var-folders-prefix`'s plant contains `var-folders-prefix` as a
+  literal tail — so the table asserts containment, never equality.
+
+  **A per-row presence check plus `len(applied) != len(rows)` does not by
+  itself prove the row-class set equals the armed-class set.** Code review
+  found the gap by measurement: swapping one row's class for a duplicate of
+  another's leaves the count at eleven and every row's presence check green,
+  while the class that lost its row goes uncaught. The fix — dedup `rows` by
+  class, or diff it against `applied`'s key set — was filed as a
+  non-blocking follow-up rather than shipped in #1749. Anyone editing this
+  table's row list should close that gap first; until then, the size check
+  only proves the *builder-arms-a-class-with-no-row* direction, not its
+  converse.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1749-per-class-capture-scan-coverage.md` for the
+  full design and the mutant table.
 
 ## Test infrastructure
 
