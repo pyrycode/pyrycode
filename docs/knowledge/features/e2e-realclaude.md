@@ -2797,11 +2797,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     write, not rely on a human `grep`. This was re-measured true on
     2026-08-24, against the same committed fixture, for `argv[0]`, `cwd` and
     `memory_paths.auto`: two independent human reads had already passed it.
-    The fix landed as three tickets, not the #1694 this entry originally
+    The fix landed as four tickets, not the #1694 this entry originally
     pointed at (#1694 turned out to be the send-point/session-perturbation
-    ticket, unrelated) — #1729 (open) is the fail-closed deny-scan itself;
-    #1732 (below) builds the redaction table; #1733 (below) applies it at the
-    fill site; #1729 is what will wire the fail-closed scan in once armed.
+    ticket, unrelated) — #1732 (below) builds the redaction table; #1733
+    (below) applies it at the fill site; #1747 (below) records which classes
+    a scan armed; #1748 (below) is the fail-closed deny-scan itself, wired in
+    on the write path. #1749 (open) proves the scan refuses one planted
+    record per armed class, not only the `/Users/` class #1748 shipped a row
+    for.
 
   Code review also flagged, non-blocking: the `!= "null"` guard in
   `initControlSummarize` — the one thing distinguishing `"models":null` from
@@ -3053,6 +3056,53 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   Zero production files touched. See
   `docs/specs/architecture/1747-armed-credential-classes-on-the-initialize-capture.md`
   for the full design and the mutant table.
+
+- `initialize_control_writer_test.go` (#1748) — **the fail-closed net behind
+  #1732/#1733's redaction table: a `dropcapScanner` deny-scan on the write
+  path, refusing the record outright on a hit instead of rewriting it.**
+  `scanInitControlFixture` copies the record, caps `StderrCapture` with
+  `capFixtureCapture`, marshals with `json.MarshalIndent`, runs
+  `scanner.scan` over the blob and returns exactly those bytes — making no
+  filesystem call of any kind, so a hit's `t.Fatalf` strands nothing under
+  the target directory, not even a `.tmp`. `writeInitControlFixture` takes
+  the scanner as a parameter (never a `newDropcapScanner` call inside the
+  file — `finOfflineExecBans` bans that name and `realHome` there for the
+  same reason #1732's entry banned `os.Getenv`) and writes the returned
+  slice byte for byte, with `os.MkdirAll` strictly after the step returns.
+  A table only rewrites what it predicted; this is different fabric on
+  purpose.
+
+  **The cap has to sit inside the scanning step, not before or after it, and
+  no bound assertion alone can tell the difference.** Length, prefix and
+  UTF-8 checks all stay green whether the cap runs before the scan, inside
+  it, or after it — moving the cap across the scan boundary changes only
+  which bytes get scanned, and only a byte-identity comparison between the
+  scanned bytes and the disk bytes can see that. That comparison is also
+  vacuous everywhere `json.MarshalIndent` is a no-op transform (it's
+  deterministic, so re-marshalling an under-cap record is byte-identical to
+  writing the returned slice) — it only discriminates over a record the cap
+  actually shortens, which is why the assertion rides inside
+  `TestInitControlFixture_WriterCapsStderrCapture`, the one test with
+  over-cap rows, rather than in a function of its own.
+
+  **A refusal that fatals has no seam to assert the refusal from.**
+  `testing.TB` can't be implemented outside `testing`, so "nothing was
+  written" and "no excerpt is printed" are properties of construction — the
+  scan sits inside the sole producer of the write's bytes, which touches the
+  filesystem not at all — not properties a test observes directly. Proving
+  the scan itself fires against a hit has to happen one level down, over the
+  marshalled record, the way `dropped_line_capture_test.go`'s
+  `dropcapWriteRecord`/`TestDropcapRedactionAndDenyScan` already do it for
+  the sibling family — `TestInitControlFixture_ScanRefusesAPlantedCredential`
+  follows that shape here, planting a `/Users/`-prefixed value and asserting
+  `dropcapContains(hits, dropcapDenyUsers)`, with a clean-record control row
+  first so the plant assertion can't pass vacuously.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1748-deny-scan-the-initialize-fixture-before-writing.md`
+  for the full design, the mutant table and the security review. #1749
+  (open, blocked-by this ticket) sweeps the remaining armed classes; this
+  slice shipped only the one planted row needed to prove the mechanism live.
 
 ## Test infrastructure
 
