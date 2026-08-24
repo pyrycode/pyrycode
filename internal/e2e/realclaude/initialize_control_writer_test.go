@@ -15,6 +15,11 @@ package realclaude
 // stranded for a later commit). None of the three needs a claude binary. This
 // file settles all three.
 //
+// #1748 added a FOURTH, and it is the only one that can refuse the write:
+// SCAN-CLEAN — the marshalled bytes carry no value of an armed deny class. That
+// property lives in scanInitControlFixture, ahead of every filesystem call, and it
+// needs no claude binary either.
+//
 // # What this file deliberately is not
 //
 // It adds no field to initControlFixtureRecord and mints no second fixture —
@@ -22,7 +27,7 @@ package realclaude
 //
 // The scope limit that remains is the ROUND TRIP's, not the file's:
 // initControlFullRecord's stderr_capture is well under stderrFixtureCap, so
-// writeInitControlFixture's capFixtureCapture call is a no-op inside
+// scanInitControlFixture's capFixtureCapture call is a no-op inside
 // TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry and that row
 // compares equal on both sides. TestInitControlFixture_WriterCapsStderrCapture
 // mutates the record to an over-cap capture and is what proves BOUNDED. The
@@ -105,6 +110,116 @@ import (
 	"unicode/utf8"
 )
 
+// --- the fail-closed scan -----------------------------------------------------
+
+// scanInitControlFixture returns the exact bytes writeInitControlFixture will put
+// on disk, refusing the record outright when the deny-scan hits.
+//
+// #1748. Every byte this family COMMITS is claude's stdout, and until this step
+// no deterministic check ran over any of it — #1688's clean bill came from two
+// human reads of the committed JSON, and both passed an `account` and a `pid`
+// under response.response. #1732 and #1733 landed the redaction table; a table
+// only rewrites what it PREDICTED. This is the fail-closed net behind it,
+// deliberately different fabric: it rewrites nothing and refuses the write.
+//
+// IT MAKES NO FILESYSTEM CALL OF ANY KIND, and that is the mechanism rather than
+// a coincidence of layout. This step is the sole producer of the bytes the writer
+// puts on disk and the scan is INSIDE it, so the writer cannot hold a blob the
+// scan has not passed; and the first filesystem call anywhere on the path is the
+// writer's os.MkdirAll, strictly after this returns. A hit therefore leaves the
+// target directory holding nothing — no record, no .tmp under any name, nothing
+// written and then deleted. That claim has no seam to observe it from (a hit is a
+// t.Fatalf that takes the calling subtest down), so it is discharged by
+// construction; the executable half of it is
+// TestInitControlFixture_WriterCapsStderrCapture's byte-identity row, which reads
+// the same mechanism from the other end.
+//
+// THE CAP LIVES HERE, NOT IN THE WRITER AND NOT IN THE CALLER. The bytes scanned
+// are then exactly the bytes on disk, so a needle surviving only in the truncated
+// tail is correctly not reported — the file cannot carry what the scan did not
+// see, and the scan does not refuse over bytes the file will not carry. Capping in
+// the CALLER mutates the caller's record, which the cap test's no-mutation check
+// already reddens. Capping in the WRITER, between this scan and the write, leaves
+// the scanned bytes longer than the disk bytes — and the byte-identity row is that
+// mutant's SOLE red, because every length, prefix and UTF-8 assertion in the cap
+// test stays green over a file that is still correctly bounded.
+//
+// THE STEP MUST NEVER MODIFY A FIELD initControlArmFixtureName READS. The writer
+// mints the name from the CALLER's record while writing the bytes this copy
+// produced, which is sound only while the two agree on claude_version and arm. The
+// cap is scoped to stderr_capture, so they do — and that equivalence is not left as
+// a claim: TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry computes
+// its expected name from the caller's record, so a step that touched either field
+// reddens there.
+//
+// rec is never mutated — the cap lands on a local copy. THE SHALLOW COPY IS
+// SUFFICIENT ONLY BECAUSE THE SOLE MUTATION IS TO A string FIELD: `out := *rec`
+// shares every slice header with the caller's record, so a future step that capped
+// one of the slice-valued fields would be writing through the caller's backing
+// array from behind a copy that looks defensive. Nothing here proves the cap bound
+// or the no-mutation contract; both are
+// TestInitControlFixture_WriterCapsStderrCapture's.
+//
+// # What it does NOT do that dropcapWriteRecord does
+//
+// The exemplar additionally scans every base64 payload's decoded bytes, because
+// bytes.Contains cannot see through base64. initControlFixtureRecord carries NO
+// base64-encoded field — its payload-bearing fields are json.RawMessage and plain
+// strings, all of which the blob scan reads directly. dropcapBase64Payloads and
+// dropcapLocateHits are deliberately not ported; there is nothing here for either
+// to narrow, and an offset would localise the hit INSIDE the record, which is that
+// helper's job in the sibling and deliberately nobody's here.
+//
+// scan's second return is discarded. The arming census is already a recorded record
+// field — credential_scan_applied, filled at the construction site by
+// initControlScanApplied — so reporting it again from here would duplicate the fact
+// in a second place that can drift from the first.
+//
+// # The refusal, and the two rules that bind every line added here
+//
+// On a hit: t.Fatalf naming the COUNT and the CLASS NAMES and nothing else. No
+// excerpt, no record dump, no needle value, no byte offset. "Let me include the
+// payload to help debug it" is exactly how a token reaches a salvaged run log and
+// inverts the whole control. There is no fake testing.TB in this package and
+// testing.TB cannot be implemented outside testing, so no row observes what this
+// prints; the rule is the guard.
+//
+// NEVER FORMAT THE SCANNER. newDropcapScanner stores CLAUDE_CODE_OAUTH_TOKEN and
+// ANTHROPIC_API_KEY as needle values, so a dropcapScanner in scope is TWO LIVE
+// CREDENTIALS IN A STRUCT — no %v, %+v, %#v or %q on the scanner, on a needle or
+// on the needle slice, here or in the writer or in any new row. initControlScrubbed
+// does not catch it: that guard reads the CHILD's stderr, and this would be the
+// harness's own output. runInitControlChild's doc states the same rule for the
+// construction site.
+//
+// t.Fatalf requires the test goroutine. This step and the writer are both called
+// directly from one — runInitControlChild's stdout reader goroutine calls neither —
+// so t.Helper() plus a direct call is the whole discipline. Do not call either from
+// a goroutine.
+func scanInitControlFixture(t *testing.T, scanner dropcapScanner, rec *initControlFixtureRecord) []byte {
+	t.Helper()
+
+	out := *rec
+	out.StderrCapture = capFixtureCapture(out.StderrCapture)
+
+	data, err := json.MarshalIndent(&out, "", "  ")
+	if err != nil {
+		t.Fatalf("#1702: marshal fixture for claude_version %q arm %q: %v",
+			rec.ClaudeVersion, rec.Arm, err)
+	}
+	hits, _ := scanner.scan(data)
+	if len(hits) > 0 {
+		t.Fatalf("#1748: deny-scan found %d denied class(es) in the fixture for claude_version %q "+
+			"arm %q: %v\nNOTHING was written — no record, no .tmp, nothing under the target "+
+			"directory at all. Extend newInitControlRedactor's table with the named class and "+
+			"re-run one live capture. The offending value is deliberately not printed, and neither "+
+			"is its offset: putting either in a run log this pipeline salvages is exactly the "+
+			"exposure this scan exists to prevent",
+			len(hits), rec.ClaudeVersion, rec.Arm, hits)
+	}
+	return data
+}
+
 // --- the writer -----------------------------------------------------------------
 
 // writeInitControlFixture writes rec into dir and returns the written path.
@@ -115,8 +230,18 @@ import (
 // testdata/ later. os.MkdirAll is a no-op against a t.TempDir() and is kept for
 // the same reason the sibling writer keeps it: #1688's directory may not exist.
 //
+// The bytes come from scanInitControlFixture and are written BYTE FOR BYTE, with
+// nothing appended — not even dropcapWriteRecord's trailing newline, which would
+// break the byte-identity contract by one byte. That step copies, caps, marshals
+// and runs the deny-scan, and it touches the filesystem not at all, so the first
+// filesystem call on this path is the os.MkdirAll below and a refused record
+// strands nothing under dir. Read its doc for why the cap lives there.
+//
 // The filename is MINTED by initControlArmFixtureName from ClaudeVersion and Arm,
-// BOTH passed through UNMODIFIED, never formatted here and never slugged here —
+// BOTH passed through UNMODIFIED — from the CALLER's rec, not from the step's
+// capped copy, which no longer exists out here. The two agree because the cap is
+// scoped to stderr_capture; the step's doc carries that rule and names the row
+// that enforces it. Never formatted here and never slugged here —
 // that namer owns both columns. A writer that interpolates its own
 // "initialize_control_v%s_%s.json" puts #1688's committed artifact back inside the
 // overwrite hazard #1696's lock exists to close, with #1696's own test still
@@ -137,13 +262,20 @@ import (
 // pin — and fatals the round trip below. The containment guarantee is lexical and
 // belongs to the namer.
 //
-// rec is never mutated — the cap lands on a local copy. THE SHALLOW COPY IS
-// SUFFICIENT ONLY BECAUSE THE SOLE MUTATION IS TO A string FIELD: `out := *rec`
-// shares every slice header with the caller's record, so a future writer that
-// capped one of the slice-valued fields would be writing through the caller's
-// backing array from behind a copy that looks defensive. Nothing here proves the
-// cap bound or the no-mutation contract; both are
+// rec is never mutated: the copy and the cap moved into scanInitControlFixture
+// with #1748, and its doc carries the shallow-copy caveat that used to live here.
+// Nothing here proves the cap bound or the no-mutation contract; both are
 // TestInitControlFixture_WriterCapsStderrCapture's.
+//
+// The scanner is a PARAMETER, the way dir already is, and NEVER a newDropcapScanner
+// call in this file. That constructor reads os.Getenv twice and realHome, and this
+// file's finOfflineExecBans entry bans all four names precisely because the check is
+// an AST identifier match — calling the constructor here would satisfy the ban on
+// os.Getenv to the letter while destroying the offline property it protects. The
+// five offline callers below pass dropcapScanner{needles: dropcapFixedNeedles()},
+// which reads no environment and whose five needles are not dynamic, so
+// dropcapMinNeedle never skips them and the net is armed identically on every
+// machine. NEVER FORMAT THE SCANNER: see scanInitControlFixture's doc.
 //
 // Failure is always t.Fatalf naming claude_version and arm and the error and
 // NOTHING ELSE: a %+v of the record would move up to stderrFixtureCap bytes of
@@ -152,33 +284,29 @@ import (
 // each is already in the filename and neither came from the child. The arm joined
 // the message with #1722's per-arm path: once #1715 writes three fixtures, a
 // failure that cannot say which arm failed is a real diagnosis gap.
-func writeInitControlFixture(t *testing.T, dir string, rec *initControlFixtureRecord) string {
+func writeInitControlFixture(t *testing.T, dir string, scanner dropcapScanner, rec *initControlFixtureRecord) string {
 	t.Helper()
 
-	out := *rec
-	out.StderrCapture = capFixtureCapture(out.StderrCapture)
+	// FIRST, and before any filesystem call: a refused record must strand nothing
+	// under dir, not even a .tmp.
+	data := scanInitControlFixture(t, scanner, rec)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("#1702: mkdir fixture dir for claude_version %q arm %q: %v",
-			out.ClaudeVersion, out.Arm, err)
+			rec.ClaudeVersion, rec.Arm, err)
 	}
-	path := filepath.Join(dir, initControlArmFixtureName(out.ClaudeVersion, out.Arm))
-	data, err := json.MarshalIndent(&out, "", "  ")
-	if err != nil {
-		t.Fatalf("#1702: marshal fixture for claude_version %q arm %q: %v",
-			out.ClaudeVersion, out.Arm, err)
-	}
+	path := filepath.Join(dir, initControlArmFixtureName(rec.ClaudeVersion, rec.Arm))
 	// Temp file and rename, the discipline both sibling writers use: an
 	// interrupted run must not strand a half-written fixture under the target
 	// name for a later commit.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		t.Fatalf("#1702: write fixture tmp for claude_version %q arm %q: %v",
-			out.ClaudeVersion, out.Arm, err)
+			rec.ClaudeVersion, rec.Arm, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		t.Fatalf("#1702: rename fixture for claude_version %q arm %q: %v",
-			out.ClaudeVersion, out.Arm, err)
+			rec.ClaudeVersion, rec.Arm, err)
 	}
 	return path
 }
@@ -258,7 +386,11 @@ func TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 
 	dir := t.TempDir()
 	rec := initControlFullRecord()
-	path := writeInitControlFixture(t, dir, rec)
+	// The offline construction, written inline at each caller rather than behind a
+	// local helper: it is one short expression, it is the spelling the sibling
+	// family already uses, and inline keeps "this reads no environment" visible at
+	// the site this file's finOfflineExecBans entry protects.
+	path := writeInitControlFixture(t, dir, dropcapScanner{needles: dropcapFixedNeedles()}, rec)
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -388,7 +520,7 @@ func TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes(t *tes
 			"derived-from-the-count mutant reads back false here too and this test goes 0-red")
 	}
 
-	path := writeInitControlFixture(t, t.TempDir(), rec)
+	path := writeInitControlFixture(t, t.TempDir(), dropcapScanner{needles: dropcapFixedNeedles()}, rec)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("#1722: read back the fixture for claude_version %q arm %q: %v",
@@ -429,7 +561,7 @@ func TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes(t *tes
 // returns a NON-NIL EMPTY slice when nothing fired while an unfilled field is
 // nil, and this record carries no `omitempty` on any tag, so the two marshal
 // differently. It is one tag and one nil-normalising helper away from gone, and
-// nothing else in this package notices either: writeInitControlFixture's
+// nothing else in this package notices either: scanInitControlFixture's
 // `out := *rec` is a shallow copy that preserves nil-ness today, so the
 // distinction reaches the file intact while every other row here stays green.
 //
@@ -453,9 +585,9 @@ func TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes(t *tes
 // WHAT IT DOES NOT MEASURE, so that nobody credits it with more than it proves:
 // it catches a writer-side helper that turns a NIL census non-nil. It does NOT
 // catch a writer that overwrites a non-nil census with a DIFFERENT value, and
-// nothing in #1731 does — that half rests on writeInitControlFixture's
-// copy-and-don't-mutate contract, with #1729's byte-identity criterion as its
-// future instrument.
+// nothing in #1731 does — that half rests on the copy-and-don't-mutate contract,
+// now scanInitControlFixture's, whose byte-identity instrument #1748 shipped inside
+// TestInitControlFixture_WriterCapsStderrCapture.
 func TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne(t *testing.T) {
 	t.Parallel()
 
@@ -501,9 +633,16 @@ func TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne(t *testing
 	// A tempdir EACH, and not stylistic: both copies carry the same claude_version
 	// and the same arm, so initControlArmFixtureName mints one filename for both
 	// and a shared directory would have them overwrite each other.
+	// Built ONCE above the closure and captured. dropcapScanner is append-only
+	// during construction and read-only afterwards — scan is a value receiver that
+	// allocates its own results — so one value serves both writes; see
+	// runInitControlChild's doc, which states exactly this asymmetry against the
+	// redactor. It reads no environment, which is what keeps this file's ban on
+	// newDropcapScanner and realHome untouched.
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
 	write := func(rec *initControlFixtureRecord) []byte {
 		t.Helper()
-		path := writeInitControlFixture(t, t.TempDir(), rec)
+		path := writeInitControlFixture(t, t.TempDir(), scanner, rec)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("#1731: read back the fixture for claude_version %q arm %q: %v",
@@ -541,7 +680,7 @@ func TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne(t *testing
 // NON-NIL EMPTY map when no needle was appended while an unfilled field is nil, and
 // this record carries no `omitempty` on any tag, so the two marshal differently.
 // It is one tag and one nil-normalising helper away from gone, and nothing else in
-// this package notices either: writeInitControlFixture's `out := *rec` is a shallow
+// this package notices either: scanInitControlFixture's `out := *rec` is a shallow
 // copy that preserves nil-ness today.
 //
 // The armed-nothing side is built from dropcapScanner{}.applied() rather than from
@@ -600,9 +739,13 @@ func TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne(t *te
 	// A tempdir EACH, and not stylistic: both copies carry the same claude_version
 	// and the same arm, so initControlArmFixtureName mints one filename for both and
 	// a shared directory would have them overwrite each other.
+	// Built ONCE above the closure and captured, for the reason the census row
+	// above states: dropcapScanner is read-only after construction, and this
+	// construction reads no environment.
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
 	write := func(rec *initControlFixtureRecord) []byte {
 		t.Helper()
-		path := writeInitControlFixture(t, t.TempDir(), rec)
+		path := writeInitControlFixture(t, t.TempDir(), scanner, rec)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("#1747: read back the fixture for claude_version %q arm %q: %v",
@@ -623,6 +766,109 @@ func TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne(t *te
 			"armed\" from \"the scanner never ran\": an `omitempty` on the credential_scan_applied "+
 			"tag drops the key from both sides, and a helper that normalises nil to empty on the "+
 			"way to the file renders `{}` on both.\nran     %s\nskipped %s", ranBytes, skippedBytes)
+	}
+}
+
+// --- the planted credential ------------------------------------------------------
+
+// initControlPlantedPath is the synthetic operator path AC 3's row plants. It is a
+// FIXED deny class (/Users/), armed on every scanner and exempt from
+// dropcapMinNeedle by construction — a dynamic needle shorter than that minimum
+// arms nothing, so a row planting one is green and proves nothing.
+// initControlTempDirValue (/synthetic/tmp) is 14 bytes and would be skipped;
+// initControlTempHomeValue and initControlOperatorHomeValue are long enough but are
+// not armed on the fixed-only offline scanner at all.
+const initControlPlantedPath = "/Users/synthetic-operator/Library/Logs/shim.log"
+
+// TestInitControlFixture_ScanRefusesAPlantedCredential is #1748's AC 3: a record
+// carrying a planted value of an armed class is refused, and the refusal names the
+// class that hit.
+//
+// IT EXERCISES THE SCAN OVER THE MARSHALLED RECORD, NEVER writeInitControlFixture's
+// FATAL — the sibling family's resolution for the same shape, where
+// dropcapWriteRecord's net is proved by TestDropcapRedactAndScan's "the net is not
+// decorative" subtest, which marshals its own blob and calls scan. A t.Fatalf from
+// the writer takes the calling subtest down with it, there is no fake testing.TB in
+// this package and testing.TB cannot be implemented outside testing, so nothing can
+// assert on a refusal from inside one. That is also why AC 4 — the refusal prints no
+// excerpt, no record dump and no needle value — is discharged by CONSTRUCTION at
+// scanInitControlFixture rather than by a row here.
+//
+// WHAT THIS ROW DOES NOT PROVE, so that nobody credits it with more: it does not
+// prove that scanInitControlFixture CALLS scan. That is construction — the step is
+// the sole producer of the write's bytes and the scan is inside it — and it is the
+// one untestable link in the chain. What it proves is that a fixed-class value
+// planted in THIS record's marshalled form IS reported, by name, by the scanner the
+// five offline callers pass.
+//
+// ONE planted class here, deliberately. The per-class sweep is #1749, already wired
+// blocked-by this ticket.
+//
+// It does NOT re-scan the committed testdata/initialize_control_v2.1.239.json, and
+// the temptation is real because the sibling family's scanner exists partly so
+// offline validation can re-scan a committed capture forever. That file still
+// carries three of the five fixed classes — re-measured 2026-08-24: /Users/ once,
+// /private/var/folders/ once, /var/folders/ twice, one of those two being the tail
+// of the /private/ occurrence — so a row that re-scanned it would be red on arrival.
+// #1733's redaction takes effect on the next live capture, which replaces the file.
+// The scan this slice ships is on the WRITE PATH ONLY.
+//
+// The failure messages name class constants and the hits slice. They never print the
+// planted value, the blob or the record, so runInitControlChild has no pattern here
+// to inherit.
+func TestInitControlFixture_ScanRefusesAPlantedCredential(t *testing.T) {
+	t.Parallel()
+
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
+
+	clean, err := json.MarshalIndent(initControlFullRecord(), "", "  ")
+	if err != nil {
+		t.Fatalf("#1748: marshal the unplanted fixture: %v", err)
+	}
+	cleanHits, notApplied := scanner.scan(clean)
+
+	// The vacuity controls, and they must Fatalf rather than skip — the cap test's
+	// precedent. Two distinct failures, so two messages: a property that cannot
+	// discriminate is a broken instrument, not a passing test.
+	//
+	// The first is also the one row that says out loud WHY the five offline
+	// writeInitControlFixture callers do not fatal: this fixture is path-free.
+	// Without it the planted assertion below cannot tell "the plant was seen" from
+	// "this fixture always hits".
+	if len(cleanHits) != 0 {
+		t.Fatalf("#1748: the UNPLANTED fixture already hits %d class(es) %v, so the planted "+
+			"assertion below cannot tell \"the plant was seen\" from \"this record always hits\" — "+
+			"and the five offline writeInitControlFixture callers, which write this same record, "+
+			"are now fataling too", len(cleanHits), cleanHits)
+	}
+	// The five fixed needles are not dynamic, so dropcapMinNeedle never skips them.
+	// If a later edit marked one dynamic, its class would be skipped, the planted
+	// assertion below would go green-and-vacuous, and nothing else would notice.
+	if len(notApplied) != 0 {
+		t.Fatalf("#1748: the offline scanner reports %d class(es) NOT APPLIED %v; every fixed "+
+			"needle is exempt from the dropcapMinNeedle minimum by construction, so a skipped one "+
+			"means a fixed needle was marked dynamic and the planted assertion below goes "+
+			"green-and-vacuous", len(notApplied), notApplied)
+	}
+
+	// stderr_capture is the realistic carrier — child stderr is where an operator
+	// path shows up, and initialize_control_redaction_test.go's own fixture plants a
+	// shim-log path there — and it puts this row in the same field as the
+	// byte-identity row above. The planted value goes at the FRONT and the whole
+	// capture stays well inside stderrFixtureCap, so the cap cannot move it into a
+	// truncated tail.
+	rec := initControlFullRecord()
+	rec.StderrCapture = initControlPlantedPath + ": child stderr the redaction table did not predict"
+
+	planted, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		t.Fatalf("#1748: marshal the planted fixture: %v", err)
+	}
+	hits, _ := scanner.scan(planted)
+	if !dropcapContains(hits, dropcapDenyUsers) {
+		t.Errorf("#1748: hits = %v, want %q among them: an operator path planted in stderr_capture "+
+			"survived the deny-scan, so writeInitControlFixture would commit it and the fail-closed "+
+			"net behind #1733's redaction table is decorative", hits, dropcapDenyUsers)
 	}
 }
 
@@ -665,6 +911,12 @@ func TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne(t *te
 // There is deliberately no under-cap row. Both capFixtureCapture and
 // truncateString carry a len(s) <= max early return, so an under-cap input reddens
 // nothing; #1662's header records that as measured. Two cases, not three.
+//
+// #1748 added a THIRD claim to this loop body rather than a third row, and for the
+// same vacuity reason: the disk bytes must be the bytes the deny-scan passed, which
+// is a distinction only an over-cap record can make. It reads
+// scanInitControlFixture's no-filesystem-call property from the other end — see the
+// comment at the assertion itself.
 //
 // # Do not print the capture
 //
@@ -765,11 +1017,12 @@ func TestInitControlFixture_WriterCapsStderrCapture(t *testing.T) {
 			// race across two parallel subtests, which its doc comment predicts.
 			rec := initControlFullRecord()
 			rec.StderrCapture = tc.capture
+			scanner := dropcapScanner{needles: dropcapFixedNeedles()}
 			// A fresh tempdir per row, and not stylistic: both rows mint the SAME
 			// filename from the same ClaudeVersion and the same Arm, so a shared
 			// directory would have them overwrite each other's artifact under a
 			// racing read-back.
-			path := writeInitControlFixture(t, t.TempDir(), rec)
+			path := writeInitControlFixture(t, t.TempDir(), scanner, rec)
 
 			// The no-mutation contract, checked BEFORE the read-back: the writer
 			// caps a copy, so the caller's record still holds everything it held.
@@ -791,6 +1044,43 @@ func TestInitControlFixture_WriterCapsStderrCapture(t *testing.T) {
 			if err != nil {
 				t.Fatalf("#1700: read back the capped fixture for claude_version %q: %v",
 					rec.ClaudeVersion, err)
+			}
+
+			// #1748's AC 2, and it rides HERE rather than in a test function of its
+			// own because the claim is VACUOUS UNDER-CAP: json.MarshalIndent is
+			// deterministic, so over a record the cap does not shorten, re-marshalling
+			// the caller's record is byte-identical and the row separates nothing. It
+			// discriminates only over an over-cap record, and this test carries the
+			// only two.
+			//
+			// Re-deriving the scanned bytes by calling the step again is legitimate
+			// precisely because of the two contracts asserted a few lines above and in
+			// its own doc: the writer does not mutate rec, and the step makes no
+			// filesystem call.
+			//
+			// SOLE RED for two mis-implementations that leave every other assertion in
+			// this test green: a writer that produced the disk bytes by some route
+			// other than the returned slice in a way that still decodes (json.Marshal
+			// instead of json.MarshalIndent, or dropcapWriteRecord's append(blob,
+			// '\n')); and the CAP MOVED AFTER THE SCAN, where the scanned bytes are the
+			// uncapped marshal while the file is still correctly bounded, so every
+			// length, prefix and UTF-8 check below passes.
+			scanned := scanInitControlFixture(t, scanner, rec)
+			if !bytes.Equal(data, scanned) {
+				// Lengths and an offset, never the blobs — this test's "# Do not print
+				// the capture" rule. The offset is publishable here and NOT in the
+				// step's refusal: both blobs compared here have already passed the
+				// scan, so an offset between them localises nothing a fixture does not
+				// already commit.
+				diff := 0
+				for diff < len(data) && diff < len(scanned) && data[diff] == scanned[diff] {
+					diff++
+				}
+				t.Errorf("#1748: the file holds %d bytes and the scan saw %d, first differing at "+
+					"byte %d; the bytes committed must be exactly the bytes the deny-scan passed, "+
+					"or the scan cleared a blob the file does not carry — and a cap applied after "+
+					"the scan reads exactly like this while every bound assertion below stays green",
+					len(data), len(scanned), diff)
 			}
 			var back initControlFixtureRecord
 			if err := json.Unmarshal(data, &back); err != nil {
