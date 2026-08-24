@@ -2442,7 +2442,7 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   **the record half of the `initialize` fixture family: fixes the JSON
   contract #1688's live capture, #1690's decoder and #1692's fake all read,
   and pins the fixture standing in for it against the two ways it could
-  degenerate silently.** `initControlFixtureRecord` carries 28 fields (no
+  degenerate silently.** `initControlFixtureRecord` carries 29 fields (no
   `env` field; nineteen of them carry `setModeFixtureRecord`'s
   JSON tags and Go types unchanged). #1722 added the two fields past
   eighteen: `Arm` — the send point the run *intended*, not a claim that the
@@ -2491,7 +2491,38 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `dropcapClass*` identifiers and the `$`-prefixed placeholders
   `newInitControlRedactor` mints), never child output or an environment
   value, and since the field is assigned *from* the pass's return, so
-  visiting it would be circular.
+  visiting it would be circular. #1747 added a fifth, one-field group past
+  those four: `CredentialScanApplied map[string]bool` (tag
+  `credential_scan_applied`, no `omitempty`) — `dropcapRecord`'s own field
+  name and Go type reused rather than re-derived, per the shared-field rule
+  above. It is the other half of `Redaction`'s story: not which classes the
+  redaction table rewrote, but which classes a `dropcapScanner`'s needles
+  were **armed** for, populated at the fill site from the scanner the
+  capture built — never computed here. **`dropcapScanner`'s two arming
+  paths disagree about "absent."** `addDynamic` (the two credential
+  classes) appends a needle unconditionally, so an unset
+  `ANTHROPIC_API_KEY` still lands as a `false` key; `addDynamicPath` (the
+  four path classes) calls `dropcapPathSpellings`, which returns `nil` for
+  an empty path, so no needle is appended and `applied()` — which builds
+  its map by iterating `s.needles` — carries **no key at all** for that
+  class. The capture hands `newDropcapScanner` no artifact directory (and
+  `operator_home`'s `realHome` can be empty too, whenever HOME is unset at
+  launch), so `scanner.applied()` alone would have **omitted** those
+  classes rather than recording them as armed-nothing — indistinguishable
+  from a class that scanned and found nothing. `initControlScanApplied`
+  closes the gap at the fill site by adding `false` for any class in its
+  own hand-written `initControlScanPathClasses` list that `applied()`
+  doesn't already carry, touching no existing key; `dropcapScanner` itself
+  is unchanged, since it is shared with the `dropcapRecord` family whose
+  shape is already committed. The field takes `Redaction`'s exception to
+  the visit-every-string-field rule for the same reason: its keys are the
+  scanner's own declared vocabulary (`dropcapClass*` identifiers, the deny-
+  class names, the two credential env-var names), never a matched value —
+  `applied` keys by `n.class`, never `n.value`. **Until #1748 lands, the
+  classes are armed and nothing scans the written bytes with them** — same
+  caveat `Redaction`'s doc already carries, for the same reason: a reader
+  must not mistake a populated field for evidence the artifact was
+  checked.
   `initControlFullRecord` returns a
   **fresh pointer per call** rather than a package-level `var`, so #1700's
   parallel subtests mutating the record are not a `-race` data race. The
@@ -2964,6 +2995,64 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   Zero production files touched. See
   `docs/specs/architecture/1731-record-redaction-census.md` for the full
   design and the security review.
+
+- `initialize_control_probe_test.go` (#1747) — **builds a `dropcapScanner`
+  beside the redactor at the capture site and wires it to the fifth field
+  described above.** `newDropcapScanner(home, "", workdir)` — the middle
+  parameter, `artifactDir`, is left empty deliberately: not by reusing
+  `workdir` (which would arm `artifact_dir` under the wrong value and leave
+  `workdir` itself unarmed) and not by minting a directory to fill the
+  slot. The empty value **is** the fact the field exists to record.
+  `CredentialScanApplied: initControlScanApplied(scanner)` is assigned in
+  `runInitControlChild`'s record literal, beside the other populated
+  fields — not inside `writeInitControlFixture`, whose `out := *rec` copy
+  must go on receiving a record it only copies (`Redaction`'s precedent).
+
+  **A scanner in scope is two live credentials, and the hazard is new to
+  this file.** `newDropcapScanner` reads `CLAUDE_CODE_OAUTH_TOKEN` and
+  `ANTHROPIC_API_KEY` into each `dropcapNeedle.value`, so `scanner` now
+  sits beside a driver that logs on nearly every path.
+  `initControlScrubbed` does not cover it — that guard reads the child's
+  stderr, and a `%+v` on the scanner would be the harness's own output,
+  not the child's. `runInitControlChild`'s doc now states the ban next to
+  the redactor's own concurrency note, and names `applied()`'s map as the
+  safe, useful thing to print instead: its keys are declared vocabulary
+  (env-var names, `dropcapClass*` identifiers) and its values are bools,
+  so no needle, path or credential can reach one. Any future parameter
+  added to this driver that carries a `dropcapNeedle`-shaped value needs
+  its own instruction written at its own call site — the ban does not
+  propagate from one parameter to the next by association.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1747-armed-credential-classes-on-the-initialize-capture.md`
+  for the full design and security review.
+
+- `initialize_control_writer_test.go` (#1747) — **one new test,
+  `TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne`,
+  reusing #1731's `...DistinguishesAnEmptyCensusFromAnAbsentOne` shape**
+  for the new field, with one change: the armed-nothing map under test is
+  built from `dropcapScanner{}.applied()`, not a `map[string]bool{}`
+  literal — `applied()`'s non-nil-empty return is the entire mechanism the
+  `{}`-vs-`null` distinction rests on, and a literal would pin the test's
+  own value rather than the production one.
+
+  **A writer that filters armed-nothing entries out on the way to disk is
+  invisible to the very test built to catch nil-normalisation.** Confirmed
+  by mutation: a writer-side filter dropping every `false`-valued map
+  entry leaves this new test green, because its `{}`-vs-`null` comparison
+  never has an entry on either side for the filter to remove.
+  What reddens instead is
+  `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry` — and only
+  because `initControlFullRecord`'s fixture value carries one entry of
+  each kind (`dropcapClassWorkdir: true`, `dropcapClassArtifactDir:
+  false`), not just one entry of any kind. A record field whose *values*
+  carry meaning, not only its presence, needs a fixture value of each kind
+  it can hold, or a mutant that discriminates by value has no test whose
+  sole purpose is to catch it.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1747-armed-credential-classes-on-the-initialize-capture.md`
+  for the full design and the mutant table.
 
 ## Test infrastructure
 
