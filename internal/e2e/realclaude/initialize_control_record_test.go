@@ -136,7 +136,7 @@ type initControlResultTrailer struct {
 
 // initControlFixtureRecord is the durable artifact #1688's live run commits, and
 // the JSON contract #1690's decoder and #1692's fake read. Nineteen of its
-// twenty-eight fields are setModeFixtureRecord's, carrying that record's JSON tags
+// twenty-nine fields are setModeFixtureRecord's, carrying that record's JSON tags
 // and Go types unchanged: three slices decode this shape, and a gratuitous
 // divergence in a shared field is a defect that surfaces two tickets away. Arm is
 // the nineteenth and is copied whole from that record — same tag, same Go type,
@@ -296,6 +296,67 @@ type initControlResultTrailer struct {
 // read a value that does not exist until it returns. The obligation is circular,
 // not merely unnecessary.
 //
+// CredentialScanApplied says, per class, whether that class's needle was actually
+// ARMED for the run — the other half of the story Redaction tells. It is
+// POPULATED at the fill site from the scanner the capture built, exactly as
+// Redaction, ModelsPresent, ModelsCount and ModelsEntryFields are populated, and
+// nothing here computes it.
+//
+// ARMED IS NOT SCANNED, and until #1748 lands the classes are armed and NOTHING
+// SCANS WITH THEM. This record's scanner is built, it reports its arming, and no
+// pass runs those needles over the bytes the writer produces. Same shape and same
+// reason as the empty-census paragraphs above: a reader must not mistake a field
+// that is merely present for evidence the artifact was checked.
+//
+// AN ARMED-NOTHING SCAN IS NOT AN ABSENT ONE. dropcapScanner.applied returns a
+// NON-NIL EMPTY map while a record that never reached the fill site holds a nil
+// one, so `{}` says the scanner was built and armed nothing and `null` says it
+// never ran. That whole distinction lives in the marshalled bytes, and one
+// `omitempty` on the tag — or one writer-side helper normalising nil to empty —
+// erases it with every other test in this package still green.
+// TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne is what
+// reddens.
+//
+// THE TWO CENSUSES ARE NOT RESTATEMENTS OF EACH OTHER, and they do not even cover
+// the same class set. newInitControlRedactor arms four PATH classes, one of them a
+// $TMPDIR class; newDropcapScanner arms two credential classes, four path classes
+// and five fixed literals, and has no tempdir class at all. Neither field can be
+// derived from the other.
+//
+// THE NAME IS INHERITED, NOT DESCRIPTIVE. The tag says credential_scan_applied
+// while the map also carries path classes and fixed literals. That is
+// dropcapRecord's spelling for the identical field, and this record's standing
+// rule — a shared field's gratuitous divergence is a defect two tickets away —
+// forbids diverging from it. Do not "fix" the tag: the two records decode the same
+// shape.
+//
+// IT TAKES REDACTION'S EXCEPTION, for Redaction's second reason and scoped the
+// same way. Its KEYS are the SCANNER'S OWN VOCABULARY — the dropcapClass*
+// identifiers, the deny-class identifiers and the two environment-variable NAMES —
+// never child output, never a path, never a matched value; its values are bools.
+// Recording that is part of this field's edit rather than a follow-up, and it is a
+// COMMENT edit and not a pass edit: redactInitControlRecord names its fields
+// explicitly, visits no map, and nothing in this package reddens for an unvisited
+// field — which is exactly why this paragraph is the guard.
+//
+// THAT EXCEPTION IS CONDITIONAL ON THE KEYS STAYING DECLARED IDENTIFIERS, and it
+// makes map[string]bool a COMMITTED shape for a field owned by the DROPCAP family,
+// whose next author is not reading this file — the same warning the
+// dropcapSubstitution paragraph above already carries. dropcapScanner.applied keys
+// by the needle's class and NEVER by its value, so no needle, path or credential
+// can reach a key today, and TestDropcapDenyClassNamesDoNotCarryTheirNeedle is
+// what keeps a deny-class name from carrying its own needle — after the first live
+// capture failed exactly that way. A class name derived from a MATCHED VALUE would
+// put that value straight into a committed artifact under a field the redaction
+// pass deliberately does not visit. NOTHING IN THIS PACKAGE REDDENS WHEN IT DOES;
+// this paragraph is the guard and #1748's deny-scan over the written bytes is the
+// net behind it.
+//
+// It needs NO CAP either, and structurally rather than as a judgement call: its
+// length is bounded by the classes newDropcapScanner can arm — two credential,
+// four path, five fixed — and its values are bools, so it cannot grow with child
+// output. Same argument Redaction's own paragraph makes. Do not add one.
+//
 // NOTHING IN THIS FILE CAPS ANYTHING. StderrCapture is bounded by #1702's writer
 // through capFixtureCapture and proven by #1700; this type carries no bound and
 // must not be read as implying one. The three verbatim-bytes fields
@@ -338,12 +399,13 @@ type initControlFixtureRecord struct {
 	DurationMs             int64    `json:"duration_ms"`
 	ScannerError           string   `json:"scanner_error"`
 
-	Redaction []dropcapSubstitution `json:"redaction"`
+	Redaction             []dropcapSubstitution `json:"redaction"`
+	CredentialScanApplied map[string]bool       `json:"credential_scan_applied"`
 }
 
 // --- the fully-populated fixture -------------------------------------------------
 
-// initControlFullRecord returns a record in which every one of the twenty-eight
+// initControlFullRecord returns a record in which every one of the twenty-nine
 // fields carries a non-zero value, and every pair of same-typed non-bool fields
 // carries a DISTINCT one. Both properties are asserted below rather than trusted.
 //
@@ -377,7 +439,7 @@ type initControlFixtureRecord struct {
 // nothing, so an instance carrying send_point_index 0 would pin 0 == 0 through a
 // writer that never touched the value. Do not build one.
 //
-// Seven literal choices are load-bearing:
+// Eight literal choices are load-bearing:
 //
 //  1. ClaudeVersion must NOT survive versionSlug unchanged. That helper
 //     lowercases, rewrites runs outside [a-z0-9._-] to _, then clamps at 32, so a
@@ -467,6 +529,33 @@ type initControlFixtureRecord struct {
 //     inside the slice, so the nested Count cannot collide with models_count,
 //     non_json_line_count or exit_code.
 //
+//  8. CredentialScanApplied carries TWO ENTRIES, one true and one false, and no
+//     path in either key. fixtureFieldNonZero judges container kinds BY LENGTH and
+//     handles reflect.Map in the same arm as String and Slice, so an empty
+//     map[string]bool{} fails the non-zero property above. Class identifiers carry
+//     no path, so TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical
+//     stays green over them — TestDropcapDenyClassNamesDoNotCarryTheirNeedle is
+//     what keeps a class name from carrying its own needle, after the first live
+//     capture failed exactly that way.
+//
+//     THE false ENTRY IS LOAD-BEARING and this row therefore does NOT follow note
+//     7's "one entry is enough". A writer that FILTERED armed-nothing classes out
+//     of the map on the way to disk is precisely the normalisation #1747's second
+//     criterion forbids, and it is invisible to
+//     TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne, which
+//     compares `{}` against `null` — neither side carries an entry at all.
+//     TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry is that
+//     mutant's SOLE RED, and only while this fixture carries a false-valued entry.
+//     That is a discriminating-pair argument of the kind note 6 makes for the
+//     trailers.
+//
+//     Distinctness constrains this row NOT AT ALL, stated so nobody counts on it
+//     either way: that subtest groups by reflect.TypeOf of the ROW's value,
+//     map[string]bool has no same-typed sibling here, and it never looks inside
+//     the map. encoding/json marshals map keys in sorted order, so the two entries
+//     are byte-stable across runs — the byte-identity row and the committed
+//     artifact both depend on that and neither needs a normaliser.
+//
 // Where self-consistency costs nothing it is kept: ControlRequestID, the
 // request_id inside ControlRequestSent and the one inside ControlResponses all
 // agree, which is what ControlResponseRequestIDMatched claims; ModelsCount and
@@ -519,6 +608,10 @@ func initControlFullRecord() *initControlFixtureRecord {
 		Redaction: []dropcapSubstitution{
 			{Class: dropcapClassWorkdir, Replacement: "$WORKDIR", Count: 3},
 		},
+		CredentialScanApplied: map[string]bool{
+			dropcapClassWorkdir:     true,
+			dropcapClassArtifactDir: false,
+		},
 	}
 }
 
@@ -531,7 +624,7 @@ type initControlFixtureField struct {
 	value any
 }
 
-// initControlFixtureFields lists rec's twenty-eight fields once, in declaration
+// initControlFixtureFields lists rec's twenty-nine fields once, in declaration
 // order. #1702 applies it to both the written record and its decode and zips the
 // two rather than restating the fields; #1700 reaches it the same way.
 //
@@ -585,6 +678,7 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 		{"duration_ms", rec.DurationMs},
 		{"scanner_error", rec.ScannerError},
 		{"redaction", rec.Redaction},
+		{"credential_scan_applied", rec.CredentialScanApplied},
 	}
 }
 

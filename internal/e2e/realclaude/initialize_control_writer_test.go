@@ -529,6 +529,103 @@ func TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne(t *testing
 	}
 }
 
+// --- the arming census ---------------------------------------------------------------
+
+// TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne is #1747's
+// second criterion, and it is the census row above for the other field: a record
+// whose scanner was BUILT and armed nothing writes DIFFERENT bytes than one that
+// never reached the fill site, so a reader of a committed fixture cannot take "no
+// class armed" for "the field was never filled".
+//
+// The whole distinction is `{}` versus `null`. dropcapScanner.applied returns a
+// NON-NIL EMPTY map when no needle was appended while an unfilled field is nil, and
+// this record carries no `omitempty` on any tag, so the two marshal differently.
+// It is one tag and one nil-normalising helper away from gone, and nothing else in
+// this package notices either: writeInitControlFixture's `out := *rec` is a shallow
+// copy that preserves nil-ness today.
+//
+// The armed-nothing side is built from dropcapScanner{}.applied() rather than from
+// a map[string]bool{} literal. The non-nil-ness of that return is the entire
+// mechanism the distinction rests on, and a literal would pin this test's own value
+// instead of the production one. initControlScanApplied cannot serve here either:
+// by construction it always adds the four path classes and can never return empty.
+//
+// THROUGH THE WRITER RATHER THAN A BARE json.Marshal, and with deliberately NO
+// bytes.Contains assertion pinning the spelling — both for the reasons
+// TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne states. It lands
+// in this file for that row's reason too, and the TestInitControlFixture_ prefix is
+// load-bearing: this file's header documents a -run filter that keys on it.
+//
+// WHAT IT DOES NOT MEASURE: it catches a writer-side helper that turns a NIL map
+// non-nil. It does NOT catch a writer that overwrites a non-nil map with a
+// DIFFERENT value — a writer that FILTERED the armed-nothing classes out on the way
+// to disk is invisible here, because neither side of this comparison carries an
+// entry at all; initControlFullRecord's false-valued entry and
+// TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry are what catch that
+// one, per note 8 on that fixture. And the `null` side is genuinely reachable in
+// the committed corpus: every fixture predating this field decodes with a nil map,
+// which is what makes the distinction worth bytes.
+func TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne(t *testing.T) {
+	t.Parallel()
+
+	// A zero scanner has no needles, so applied() ranges nothing and returns its
+	// non-nil empty map. This file's finOfflineExecBans entry stays untouched:
+	// nothing here reads the environment, which newDropcapScanner would.
+	armedNothing := dropcapScanner{}.applied()
+
+	// The vacuity controls, and they must Fatalf rather than skip — the cap test
+	// below is the precedent. Two distinct failures, so two messages: a property that
+	// cannot discriminate is a broken instrument, not a passing test.
+	if armedNothing == nil {
+		t.Fatalf("#1747: dropcapScanner.applied returned NIL over a scanner with no needles, so " +
+			"this row compares nil against nil and `{}` versus `null` is no longer a distinction " +
+			"anywhere: that non-nil-ness is the entire mechanism credential_scan_applied carries")
+	}
+	if len(armedNothing) != 0 {
+		t.Fatalf("#1747: dropcapScanner.applied returned %d entr(ies) over a scanner with NO "+
+			"needles, so this row compares a POPULATED map against nil and settles nothing about "+
+			"the armed-nothing case it exists for", len(armedNothing))
+	}
+
+	// Two shallow copies of one record, differing in exactly one field and leaning on
+	// no other row's byte-identity claim. Only the new field is assigned on either
+	// copy, so no slice field's backing array is touched and the fresh pointer
+	// initControlFullRecord hands out stays unshared.
+	rec := initControlFullRecord()
+	ran := *rec
+	ran.CredentialScanApplied = armedNothing
+	skipped := *rec
+	skipped.CredentialScanApplied = nil
+
+	// A tempdir EACH, and not stylistic: both copies carry the same claude_version
+	// and the same arm, so initControlArmFixtureName mints one filename for both and
+	// a shared directory would have them overwrite each other.
+	write := func(rec *initControlFixtureRecord) []byte {
+		t.Helper()
+		path := writeInitControlFixture(t, t.TempDir(), rec)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("#1747: read back the fixture for claude_version %q arm %q: %v",
+				rec.ClaudeVersion, rec.Arm, err)
+		}
+		return data
+	}
+	ranBytes := write(&ran)
+	skippedBytes := write(&skipped)
+
+	if bytes.Equal(ranBytes, skippedBytes) {
+		// Printing both blobs is the same narrowly-scoped exception the round-trip and
+		// byte-identity rows already take: every value in this record is a synthetic
+		// literal. runInitControlChild fills this same record from a live child and
+		// must not inherit the pattern.
+		t.Errorf("#1747: a record whose scanner armed NOTHING wrote bytes identical to one whose "+
+			"field was never filled, so a reader of a committed fixture cannot tell \"no class "+
+			"armed\" from \"the scanner never ran\": an `omitempty` on the credential_scan_applied "+
+			"tag drops the key from both sides, and a helper that normalises nil to empty on the "+
+			"way to the file renders `{}` on both.\nran     %s\nskipped %s", ranBytes, skippedBytes)
+	}
+}
+
 // --- the cap ------------------------------------------------------------------------
 
 // TestInitControlFixture_WriterCapsStderrCapture is #1700: writeInitControlFixture
