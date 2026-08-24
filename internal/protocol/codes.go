@@ -836,3 +836,59 @@ const (
 const (
 	TypeSessionError = "session_error" // binary → phone, outbound v2 unsolicited terminal session-error frame
 )
+
+// Mobile Protocol v2 attachment chunk (#1752, split from #1750; the
+// docs/protocol-mobile.md § Attachments section is #1751). One slice of one
+// attachment's bytes, carrying the whole transfer's metadata on every chunk
+// (AttachmentChunkPayload, attachments.go). A file crossing the encrypted mobile
+// channel routinely exceeds one AEAD frame, so the client splits it and the
+// receiver reassembles; the relay stays transport-only, with no blob endpoint —
+// that option was considered and rejected upstream.
+//
+// BOTH DIRECTIONS RIDE THIS ONE FRAME, which is why the trailing comment below
+// carries the file's only bidirectional arrow rather than a typo. Upload
+// (client → daemon) and retrieval (daemon → client) are built months apart, and
+// declaring exactly one type is what makes them impossible to drift apart: there
+// is no second shape to update. The trust asymmetry that creates — inbound every
+// field is a client claim, outbound the same fields are daemon-authored — cannot
+// be expressed in a struct, so it lives in AttachmentChunkPayload's SECURITY
+// block.
+//
+// There is NO completion frame, and that is not an omission. TotalChunks rides
+// every chunk, so a receiver learns the expected count from the FIRST frame it
+// sees and detects a truncated stream earlier than debug_bundle_done detects one
+// for the bundle stream — whose chunks carry only seq and therefore need a
+// terminal frame to learn the count at all. A terminal *error* (a retrieval the
+// daemon abandons mid-stream) is TypeError correlated via in_reply_to, which is
+// #1751's reject vocabulary, not a second attachment frame.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an
+// old (v1) phone must never receive this frame, and rejection is also what keeps
+// the type off the v1 inbound path — the upload leg really is inbound, so
+// IsKnownAppType refusing it is the structural bar against a v1 client sending
+// one into dispatch.Route. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
+//
+// cmd/pyry/relay_guard_test.go's excludedTypes records it too, and NOT as a
+// "push": the reason its seven newest neighbours give — this slice declares no
+// inbound request verb — is false for a frame whose upload leg is inbound, so
+// copying one would put a lie in the guard. Filing it in inboundTypes instead
+// would fail Assertion #1, which requires an inbound type to be wired into
+// cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this slice ships no dispatch. So the entry is
+// excluded under its own label with the reason that is actually true — the
+// inbound leg has no handler YET. #1744 adds the dispatchAppFrame case, at which
+// point the entry moves to inboundTypes as "switch-intercepted". TypeHello, a
+// borderline phone → binary type deliberately not filed inbound, is the
+// precedent followed there rather than the pushes.
+//
+// The declaring ticket (#1752) is wire vocabulary only: #1753 adds the per-chunk
+// size cap and the both-direction encoding fixtures, #1751 publishes the
+// client-facing contract and the attachment.* reject codes, #1741 reassembles
+// and checks the claims, #1743 stores, #1744 dispatches the inbound leg, and
+// #1746 serves retrieval. Same declare-then-emit sequencing as #1616→#1638 and
+// #1704→#1693.
+const (
+	TypeAttachmentChunk = "attachment_chunk" // phone ↔ binary, one chunk of an attachment's bytes (both directions)
+)
