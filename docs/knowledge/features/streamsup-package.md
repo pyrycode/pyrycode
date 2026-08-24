@@ -354,6 +354,21 @@ in `Handle`'s `default`. CORRECTED 2026-08-19 (#1616): this used to say the prot
 mapping arm landed in sibling #1638, so it now reaches an interactive v2 mobile client instead of falling
 to `default:`. See [codebase/1600.md](../codebase/1600.md).
 
+**Kind-log capture tests in `interactive_turn_v2_test.go` must strip slog's own `time=` attribute before
+asserting bare numeric needles.** `TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant`'s
+negatives were `strings.Contains` over the whole captured `slog.TextHandler` record, which writes `time=`
+first; the `ThinkingProgress` readings' numeric needles (`184`/`37`, for `EstimatedTokens`/
+`EstimatedTokensDelta`) can match the timestamp's own digits instead of a real leak — measured at ≈5% of
+runs (not the ~2% first estimated from a single `-count=N` burst, which structurally can't observe the
+two 1-in-60 minute/second collision terms), and 100% of runs whose log instant lands in minute or second
+`:37` (#1758). The `RateLimited` (#1410) and `ModelAnnounced` (#1600) kind-log tests already carried a
+`ReplaceAttr` dropping `slog.TimeKey` for this exact reason; #1758 applied the same closure to the
+`ThinkingProgress` test and added an explicit `time=`-absence assertion so a future removal of the
+`ReplaceAttr` is red on every run instead of on the unlucky ~1-in-20. Only three of the file's six
+capture-logger construction sites need this — the three whose readings loop asserts bare numeric needles;
+the other three assert alphabetic sentinels that cannot collide with a timestamp and are deliberately left
+without it.
+
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
 `maxTaskFieldID` (256) / `maxTaskDescription` (4096) / `maxTaskPatch` (4096). `BackgroundTaskRoster`

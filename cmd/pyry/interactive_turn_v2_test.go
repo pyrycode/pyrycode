@@ -2025,7 +2025,22 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *te
 	t.Parallel()
 
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr, for the reason measured on this very test
+		// and recorded above TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant.
+		// This test is the one that carried the hazard: its needles below are bare
+		// numerals, so the timestamp's digits matched them. With the attr gone the
+		// whole record — the message, event=interactive_turn.no_cursor and
+		// kind=thinking_progress — carries no digit at all, so either needle can
+		// now match only a genuine leak.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
 
 	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
@@ -2042,6 +2057,14 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *te
 	}
 	if strings.Contains(logs, "kind=unknown") {
 		t.Fatalf("eventKind returned unknown for thinking_progress:\n%s", logs)
+	}
+	// slog's own time= is the digit source that made this test's numeric needles
+	// flaky; the readings check below is only sound while it is absent. Asserted
+	// rather than merely configured, because dropping the ReplaceAttr above leaves
+	// the readings check passing on most runs — the disarming has to be red on
+	// EVERY run, not on the ~5% where the clock happens to spell a needle.
+	if strings.Contains(logs, "time=") {
+		t.Fatalf("capture carries slog's timestamp; the readings check below can match the clock:\n%s", logs)
 	}
 	// Both readings are claude's own integers; neither ever reaches a log.
 	for _, reading := range []string{"184", "37"} {
@@ -2201,10 +2224,17 @@ func TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant(t *testing
 		// Drop slog's own time= attr. The negative below is a strings.Contains
 		// over the WHOLE captured log, and the timestamp is a host-dependent
 		// source of digits a numeric needle can collide with — measured on the
-		// ThinkingProgress test above, whose "37" needle hits the timestamp in
-		// ~2% of runs on this host, and whose safety for a "-1"-shaped needle
-		// depends on the host's UTC offset. Removing the attr deletes the
-		// false-positive source outright rather than choosing needles around it.
+		// ThinkingProgress test above, whose "37" needle hits the timestamp on
+		// ~5% of runs and on 100% of runs landing in any minute :37 or any
+		// second :37, and whose safety for a "-1"-shaped needle depends on the
+		// host's UTC offset. That is a scheduled flake, not a rare one: against
+		// 2026-08-25T00:12:31.378+03:00 the needle matches when the minute is 37
+		// (1/60), when the second is 37 (1/60), or when the millisecond field
+		// contains it (~1.9%). An earlier ~2% figure recorded here undercounted,
+		// because it was taken inside a single -count=N burst — one burst shares
+		// a minute and usually a second, so it structurally cannot observe the
+		// two 1/60 terms. Removing the attr deletes the false-positive source
+		// outright rather than choosing needles around it.
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if len(groups) == 0 && a.Key == slog.TimeKey {
 				return slog.Attr{}
