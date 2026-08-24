@@ -1,5 +1,103 @@
 package protocol
 
+// Published byte bounds for one attachment_chunk frame (AttachmentChunkPayload
+// below). All four are producer-side CONTRACTS WITH NO VALIDATOR in this
+// package — the same posture the payload type itself ships with. Inbound
+// enforcement is #1741's, outbound is #1744's and #1746's; nothing here checks
+// anything, so a reader must not mistake a declared bound for a checked one.
+//
+// The three metadata bounds count BYTES (len(s)), not runes. The escape ceiling
+// the arithmetic below rests on composes directly on bytes — a one-byte input
+// costs at most six on the wire, while a multi-byte rune is emitted raw at four
+// bytes or fewer, so six-per-input-byte is the ceiling either way — and a
+// filename's real-world limit is a byte limit too.
+//
+// The metadata bounds matter for a reason the inbound leg does not show. A
+// filename arrives attacker-chosen on the upload leg, is stored, and is echoed
+// back daemon-authored on the retrieval leg: unbounded, a 100 KB filename makes
+// the DAEMON's OWN outbound frame exceed the envelope cap and be dropped.
+const (
+	// MaxAttachmentChunkBytes bounds the RAW, pre-base64 bytes of one chunk's
+	// Data so the marshalled application envelope stays under the v2
+	// application-envelope cap of 65519 B (docs/protocol-mobile.md
+	// § Application-envelope size cap: the 65535-byte Noise transport message
+	// minus the 16-byte AEAD tag). The unit is raw bytes of Data — not base64
+	// characters, not payload bytes, not envelope bytes — and no other reading
+	// composes with Size, which is a raw file length.
+	//
+	// The arithmetic, budgeted against 65519 B. Every metadata figure is its
+	// bound × 6, encoding/json's HTML-escaping ceiling: SetEscapeHTML is on by
+	// default, so '<', '>', '&' and every control byte without a short escape
+	// cost six bytes each (docs/protocol-mobile.md § tool_result works the same
+	// multiplier out for a bounded text field, with a measured worst case).
+	//
+	//	envelope wrapper, every optional key present      194
+	//	payload braces, keys, quotes, colons, commas      104
+	//	index + total_chunks + size, 3 × 20                60
+	//	sha256, 64 × 6                                    384
+	//	attachment_id, MaxAttachmentIDBytes × 6           384
+	//	filename, MaxAttachmentFilenameBytes × 6         1530
+	//	mime_type, MaxAttachmentMimeTypeBytes × 6        1530
+	//	                                        fixed    4186
+	//	data at the bound, 4 × ceil(45000 / 3)          60000
+	//	                                        frame   64186   (1333 B spare)
+	//
+	// The ceiling is floor((65519 − 4186) / 4) × 3 = 45999. 45000 sits below it
+	// and is a multiple of 3, so base64 lands on exactly 60000 bytes with no
+	// padding and the table is checkable by eye. The invariant is ENFORCED by
+	// TestAttachmentChunkPayload_FitV2EnvelopeCap, which measures the real total
+	// rather than trusting this table; if that test ever fails, LOWER this
+	// constant — never raise the cap. The conservative constant is the belt; the
+	// deterministic per-frame test is the suspenders.
+	//
+	// Exported, where the sibling measurement constant maxV2AppEnvelope is
+	// deliberately not: the envelope cap is enforced by the transport, so
+	// exporting that one would imply an enforcement this package does not
+	// perform. This bound is a producer-side contract every client must obey to
+	// chunk a file at all, so it has to be readable from outside.
+	//
+	// THE CROSS-CHECK. AttachmentChunkPayload's NEVER ALLOCATE FROM A CLAIM
+	// block cross-checks a claimed TotalChunks against a claimed Size using this
+	// number, and the division is raw-over-raw: Size is raw file bytes and this
+	// is raw chunk bytes, neither is base64 and neither is envelope bytes. Only
+	// the EQUALITY form bounds TotalChunks from above. A maximum chunk size
+	// yields a LOWER bound on the honest chunk count, so softening the rule to
+	// TotalChunks >= ceil(Size / bound) for tolerance caps nothing and leaves
+	// the make([][]byte, TotalChunks) allocation attack open. The equality has a
+	// price of its own: it mandates that every chunk but the last carry exactly
+	// this many raw bytes, so a client chunking at its own buffer size sends a
+	// conforming-looking transfer a strict guard rejects. And it is already
+	// false at Size == 0, where ceil(0 / bound) == 0 against the documented
+	// TotalChunks >= 1. Both consequences are #1741's to decide; this constant
+	// fixes the units and states the direction, and enforces neither.
+	MaxAttachmentChunkBytes = 45000
+
+	// MaxAttachmentIDBytes bounds AttachmentID. It is a CEILING FOR THE CAP
+	// ARITHMETIC, not a canonical shape: conversations.ValidID's 36-character
+	// UUIDv4 form is the precedent AttachmentChunkPayload's doc names, and 64
+	// sits comfortably above it and above a 64-hex token, so #1741 and #1743 can
+	// pick the shape without this constant constraining them. They may narrow
+	// below it; they must not exceed it.
+	//
+	// A LENGTH CEILING IS NOT A SAFETY PROPERTY. 64 bytes accommodates
+	// "../../../../etc/passwd" several times over, so this constant does nothing
+	// about the traversal hazard AttachmentChunkPayload's doc assigns to the
+	// canonical-shape check that must run before the id becomes a path
+	// component.
+	MaxAttachmentIDBytes = 64
+
+	// MaxAttachmentFilenameBytes bounds Filename at POSIX NAME_MAX, the
+	// single-path-component limit on ext4 and APFS. Filename is documented as a
+	// display string and a sanitiser input, never a path, so one component is
+	// the right ceiling.
+	MaxAttachmentFilenameBytes = 255
+
+	// MaxAttachmentMimeTypeBytes bounds MimeType. RFC 6838 § 4.2 bounds a type
+	// name and a subtype name at 127 characters each, so "type/subtype" is at
+	// most 255.
+	MaxAttachmentMimeTypeBytes = 255
+)
+
 // AttachmentChunkPayload is the body of an Envelope whose Type ==
 // TypeAttachmentChunk (docs/protocol-mobile.md § Attachments, published by
 // #1751). One slice of one attachment's bytes, plus the whole transfer's
