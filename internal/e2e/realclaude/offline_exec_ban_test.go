@@ -244,11 +244,27 @@ var finOfflineExecBans = map[string][]string{
 	// TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry instead: a
 	// writer that sent its bytes to a relative testdata/ leaves the t.TempDir()
 	// holding ZERO entries, and the exactly-one-entry assertion goes red.
+	//
+	// newDropcapScanner and realHome are #1748's two additions, and they are the
+	// deterministic fabric behind that slice's scanner PARAMETER — #1732's entry
+	// below added realHome/os.TempDir for exactly this reason. The writer runs a
+	// deny-scan over the marshalled record before its first filesystem call, and the
+	// scanner arrives from its caller; a file that built its own would call a
+	// constructor reading os.Getenv twice and realHome, satisfying this entry's
+	// os.Getenv ban to the letter while destroying the offline property it protects.
+	// The check matches a bare *ast.Ident as well as a dotted selector, so both the
+	// wrapper and the plain realHome reference are caught.
+	//
+	// os.TempDir is deliberately NOT added, unlike #1732's entry: newDropcapScanner
+	// takes tempHome, artifactDir and workdir as parameters and reads only realHome
+	// and the environment on its own, so os.TempDir is not a route to anything here
+	// and would be a ban name with no hazard behind it.
 	"initialize_control_writer_test.go": {
 		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
 		"probeClaudeVersion", "captureClaudeVersion",
 		"os.Getenv", "os.Environ", "os.LookupEnv",
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"newDropcapScanner", "realHome",
 	},
 	// #1732. The same family's standing eight — the first four keep a SKIP out
 	// (resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body,

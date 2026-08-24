@@ -667,7 +667,14 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 	// source directory — no untrusted component anywhere in it. Choosing dir is
 	// the caller's job, which initControlFixtureName's doc hands over explicitly;
 	// this is the call site that discharges it.
-	path := writeInitControlFixture(t, filepath.Join(packageDir(t), "testdata"), record)
+	//
+	// #1748: the scanner this driver already holds goes with it. The writer runs the
+	// deny-scan over the marshalled record BEFORE its first filesystem call, so a
+	// value #1733's table did not predict aborts the run with no fixture written —
+	// where it previously wrote one. A reviewer who sees that has found a gap in the
+	// table, not a bug in the writer. It also means every log site below is reached
+	// only after the scan passed.
+	path := writeInitControlFixture(t, filepath.Join(packageDir(t), "testdata"), scanner, record)
 
 	// Never %+v the record into a log or a fatal message: that moves up to
 	// stderrFixtureCap bytes of child output out of the bounded file and into an
