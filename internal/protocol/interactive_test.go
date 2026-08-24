@@ -1038,6 +1038,241 @@ func TestModelListType_IsNotClaudesVocabulary(t *testing.T) {
 	}
 }
 
+// TestModelListPayload_RoundTrip pins the populated menu's bytes: the five rows
+// claude 2.1.220 returned from a control_request with subtype initialize,
+// measured 2026-08-21, in claude's own order.
+//
+// Haiku's row is the load-bearing one. claude's reply OMITS supportsAutoMode and
+// supportedEffortLevels on that entry, and this wire states ONE position for
+// absent and empty (ModelOption.MarshalJSON's rationale), so the row carries
+// false and [] rather than an elided key. An empty effort list is a real shape a
+// client meets on the first frame it ever decodes.
+//
+// Three values here are CHOSEN rather than captured, in
+// TestModelAnnouncedPayload_RoundTrip's register — a fixture is something a client
+// author copies as if it were observed, so the parts that were not observed have
+// to say so:
+//
+//   - resolved_model. The 2026-08-21 measurement recorded displayName, value,
+//     supportsAutoMode and supportedEffortLevels and no resolvedModel-shaped key,
+//     so rows 1-4 carry rate_limited.json's "<unmeasured>" sentinel — whose angle
+//     brackets double as the pin on Go's HTML escaping. Row 5 carries the
+//     resolution of the `haiku` alias measured on the SAME claude version in the
+//     committed capture internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json,
+//     which is a turn announcement rather than an initialize reply. #1693 measures
+//     the initialize reply's own per-entry keys and replaces the four sentinels.
+//   - truncated_fields. Populated on row 3 and null on the other four —
+//     background_task_roster.json's two-entry pattern. No measured value is
+//     anywhere near a producer cap, so no real frame carries this row with this
+//     report; the flag is chosen to discriminate a struct that drops or mis-wires
+//     the field, and a cut `value` is the sharpest pairing available, being doubly
+//     un-sendable.
+//   - dropped_models. 2, non-zero so this fixture pins the value rather than the
+//     zero encoding (background_task_roster.json's dropped_tasks: 3). Nothing
+//     counts it yet: #1690 owns making the decode record it, #1693 is where the
+//     field and a counter meet.
+func TestModelListPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_list.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelList)
+	}
+
+	var payload ModelListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if len(payload.Models) != 5 {
+		t.Fatalf("Models: got %d entries, want 5", len(payload.Models))
+	}
+
+	const allLevels = "low,medium,high,xhigh,max"
+	rows := []struct {
+		resolvedModel    string
+		value            string
+		displayName      string
+		effortLevels     string // joined, the idiom the roster test uses
+		supportsAutoMode bool
+		truncatedFields  []string // nil where the row reports no cut
+	}{
+		{"<unmeasured>", "default", "Default (recommended)", allLevels, true, nil},
+		{"<unmeasured>", "opus[1m]", "Opus (1M context)", allLevels, true, nil},
+		{"<unmeasured>", "claude-fable-5[1m]", "Fable", allLevels, true, []string{"value"}},
+		{"<unmeasured>", "sonnet", "Sonnet", allLevels, true, nil},
+		{"claude-haiku-4-5-20251001", "haiku", "Haiku", "", false, nil},
+	}
+	for i, want := range rows {
+		got := payload.Models[i]
+		t.Run(want.value, func(t *testing.T) {
+			if got.ResolvedModel != want.resolvedModel {
+				t.Errorf("ResolvedModel: got %q, want %q", got.ResolvedModel, want.resolvedModel)
+			}
+			if got.Value != want.value {
+				t.Errorf("Value: got %q, want %q", got.Value, want.value)
+			}
+			if got.DisplayName != want.displayName {
+				t.Errorf("DisplayName: got %q, want %q", got.DisplayName, want.displayName)
+			}
+			if joined := strings.Join(got.EffortLevels, ","); joined != want.effortLevels {
+				t.Errorf("EffortLevels: got %q, want %q", joined, want.effortLevels)
+			}
+			if got.SupportsAutoMode != want.supportsAutoMode {
+				t.Errorf("SupportsAutoMode: got %v, want %v", got.SupportsAutoMode, want.supportsAutoMode)
+			}
+			// Both forms of the per-entry truncation report are pinned across the
+			// five rows: populated on one, null on the rest. truncated_fields is
+			// deliberately NOT normalised the way effort_levels is — nil and []
+			// say the identical thing here.
+			if want.truncatedFields == nil && got.TruncatedFields != nil {
+				t.Errorf("TruncatedFields: got %v, want nil", got.TruncatedFields)
+			}
+			if joined, wantJoined := strings.Join(got.TruncatedFields, ","), strings.Join(want.truncatedFields, ","); joined != wantJoined {
+				t.Errorf("TruncatedFields: got %q, want %q", joined, wantJoined)
+			}
+		})
+	}
+
+	// The count dimension, decided at the menu level and distinct from any row's
+	// text cut. Nothing counts it yet, so a client must not read
+	// len(models) + dropped_models as the menu's true size today.
+	if payload.DroppedModels != 2 {
+		t.Errorf("DroppedModels: got %d, want 2", payload.DroppedModels)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestModelListPayload_Empty_RoundTrip pins the frame carrying no models at all,
+// on background_task_roster_empty.json's shape.
+//
+// The opening byte guard is that sibling's own device and is load-bearing rather
+// than decoration: without it an omitempty on Models would elide the key from
+// BOTH the fixture and the re-marshalled bytes, and the round trip alone would go
+// on passing. An empty menu is a positive statement rather than an absence, which
+// is why the key is present as [] — see ModelListPayload.MarshalJSON.
+func TestModelListPayload_Empty_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_list_empty.json")
+
+	if !bytes.Contains(canonical(t, raw), []byte(`"models":[]`)) {
+		t.Errorf("fixture must carry the models key as an empty array, got: %s", raw)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelList)
+	}
+
+	var payload ModelListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if len(payload.Models) != 0 {
+		t.Errorf("Models: got %d entries, want 0", len(payload.Models))
+	}
+	if payload.DroppedModels != 0 {
+		t.Errorf("DroppedModels: got %d, want 0", payload.DroppedModels)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestModelListPayload_ZeroValue_RoundTrip pins the encoding of every field's zero
+// value across BOTH types, which is what this stream's no-omitempty rule
+// (docs/protocol-mobile.md § Interactive events) actually asserts.
+//
+// It is the fixture that carries most of the wire: five of the nine keys are
+// reachable only here, and models carries exactly one entry precisely because an
+// empty list cannot reach ModelOption's keys at all. The asymmetry inside that
+// entry — effort_levels [] beside truncated_fields null — is the two marshallers'
+// decided positions rather than a typo; ModelOption.MarshalJSON says why the two
+// list fields differ.
+//
+// The six byte guards are what make "explicit zero, not elided" checkable at all,
+// exactly as TestModelAnnouncedPayload_ZeroValue_RoundTrip's two are: an
+// omitempty on any of those keys would elide it from both sides and the round
+// trip would go on passing.
+//
+// The frame is one no producer will ever emit — a real menu names a conversation
+// and its rows carry identifiers. It exists for the encoding, not the scenario.
+func TestModelListPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "model_list_zero.json")
+
+	// Two payload keys and four entry keys: the six whose zero value an omitempty
+	// would elide. The three list keys are covered by the constructed-value tests
+	// above, which is the only route that reaches a nil slice at all.
+	for _, want := range []string{
+		`"conversation_id":""`,
+		`"dropped_models":0`,
+		`"resolved_model":""`,
+		`"value":""`,
+		`"display_name":""`,
+		`"supports_auto_mode":false`,
+	} {
+		if !bytes.Contains(canonical(t, raw), []byte(want)) {
+			t.Errorf("fixture must carry %s explicitly at its zero value, got: %s", want, raw)
+		}
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeModelList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeModelList)
+	}
+
+	var payload ModelListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "")
+	}
+	if payload.DroppedModels != 0 {
+		t.Errorf("DroppedModels: got %d, want 0", payload.DroppedModels)
+	}
+	if len(payload.Models) != 1 {
+		t.Fatalf("Models: got %d entries, want 1", len(payload.Models))
+	}
+
+	entry := payload.Models[0]
+	if entry.ResolvedModel != "" {
+		t.Errorf("ResolvedModel: got %q, want %q", entry.ResolvedModel, "")
+	}
+	if entry.Value != "" {
+		t.Errorf("Value: got %q, want %q", entry.Value, "")
+	}
+	if entry.DisplayName != "" {
+		t.Errorf("DisplayName: got %q, want %q", entry.DisplayName, "")
+	}
+	if entry.SupportsAutoMode {
+		t.Errorf("SupportsAutoMode: got %v, want false", entry.SupportsAutoMode)
+	}
+	// Decoding [] yields a non-nil empty slice while null yields nil, so this pair
+	// pins the fixture's asymmetry on the decode side too.
+	if entry.EffortLevels == nil || len(entry.EffortLevels) != 0 {
+		t.Errorf("EffortLevels: got %v, want an empty non-nil slice", entry.EffortLevels)
+	}
+	if entry.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil", entry.TruncatedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
 // purpose: nothing in internal/protocol enforces the cap — the transport does —
