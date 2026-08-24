@@ -77,9 +77,66 @@ import (
 
 // --- the record ---------------------------------------------------------------
 
+// initControlResultTrailer is ONE `result` trailer recorded inside the send-point
+// window: the turn count that trailer carried, and its cost. #1715 fills these
+// from bytes claude wrote; nothing in this slice computes one.
+//
+// THE TWO READ-FROM FIELDS MIRROR CLAUDE'S OWN KEY NAMES. A real `result` line
+// carries `num_turns` and `total_cost_usd` — the committed capture under
+// testdata/ is where both spellings come from. Mirroring them makes the record's
+// provenance checkable against the stdout_events bytes sitting in the same file,
+// and leaves #1715's read site unambiguous. A divergence here is not cosmetic:
+// it makes that provenance claim false, and #1702's round trip structurally
+// cannot catch it, because it decodes through the struct that wrote the file.
+//
+// TotalCostUSDPresent IS POPULATED FROM THE TRAILER'S RAW BYTES AND IS NEVER
+// DERIVED FROM TotalCostUSD. A trailer that carried no cost field is a different
+// fact from one that carried zero, and a reader who tidies this flag into
+// TotalCostUSD != 0 deletes the measurement. initControlSummarize decides
+// ModelsPresent on raw bytes for exactly this reason — `"models":[]` and an
+// absent `models` both decode to nil — and ModelsPresent beside ModelsCount is
+// the pairing this flag beside its value copies.
+//
+// The limit on that contract is stated rather than dressed up as coverage:
+// NOTHING COMPUTES THIS FLAG IN THIS SLICE, so the derived-from-the-value mutant
+// is not reachable here. What exists here is this paragraph, plus a fixture
+// carrying one entry of each shape so that both survive #1702's round trip
+// carrying their different flags. #1715 — where a trailer carrying
+// `"total_cost_usd": 0` in its raw bytes can exist at all — is where that mutant
+// becomes reachable. Do not build a test here that pretends otherwise.
+//
+// No `omitempty` on any field, matching every other tag in this family. That
+// keeps `total_cost_usd: 0` and `total_cost_usd_present: false` visible as
+// present keys in a committed artifact a human reads. It is NOT what makes the
+// round trip pass: reflect.DeepEqual over the decoded slice holds either way,
+// since both sides decode through this same struct.
+//
+// NO json.RawMessage ANYWHERE IN THIS TYPE, and NOTHING ENFORCES THAT — which is
+// the reason it is written here in capitals. A float64 survives
+// json.MarshalIndent and its decode exactly, so the round-trip row over a slice
+// of these holds with no normaliser at all; wrapping the cost "to be safe" buys
+// nothing and costs the reader a decimal byte dump in every failure message.
+//
+// The obvious guard is not one. compactInitControlRawRows selects BY THE ROW'S GO
+// TYPE, and the row this type reaches it through is []initControlResultTrailer —
+// so raw JSON nested INSIDE a struct-slice row is invisible to the type switch,
+// the touched-name set is unchanged, and the touched-name subtest of
+// TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry stays green.
+// Measured on this toolchain 2026-08-24: wrapping TotalCostUSD in a
+// json.RawMessage carrying `0.0731` reddens NOTHING in this package — the round
+// trip holds too, because MarshalIndent has no interior to indent in a scalar.
+// That canary guards a fourth raw-JSON field on the RECORD; it does not guard
+// this type, and a reader who assumes otherwise is trusting a test that never
+// runs over the value.
+type initControlResultTrailer struct {
+	NumTurns            int     `json:"num_turns"`
+	TotalCostUSD        float64 `json:"total_cost_usd"`
+	TotalCostUSDPresent bool    `json:"total_cost_usd_present"`
+}
+
 // initControlFixtureRecord is the durable artifact #1688's live run commits, and
 // the JSON contract #1690's decoder and #1692's fake read. Nineteen of its
-// twenty-four fields are setModeFixtureRecord's, carrying that record's JSON tags
+// twenty-seven fields are setModeFixtureRecord's, carrying that record's JSON tags
 // and Go types unchanged: three slices decode this shape, and a gratuitous
 // divergence in a shared field is a defect that surfaces two tickets away. Arm is
 // the nineteenth and is copied whole from that record — same tag, same Go type,
@@ -132,6 +189,46 @@ import (
 // #1688's live run fills them from a real response; a summarizer built here would
 // have no response to summarize.
 //
+// SendPointIndex is the ONE positional anchor for the send point: the number of
+// stdout_events lines already recorded when the arm reached it, in the same index
+// units turn_boundaries uses — setModeRecorder.add assigns both from the position
+// a line lands at. The window the two fields after it read is
+// stdout_events[SendPointIndex:], and it is one anchor rather than one per read
+// so that two reads cannot disagree about which window they measured.
+//
+// BOTH EDGES ARE LEGITIMATE VALUES, NOT ERRORS. 0 means the send point preceded
+// every recorded line, which is `before_first_turn`'s real value and not a
+// sentinel; len(StdoutEvents) means nothing followed it. DO NOT ADD A PRESENCE
+// FLAG BESIDE THIS ANCHOR. The symmetry with initControlResultTrailer's
+// TotalCostUSDPresent is the trap: a flag there separates two facts that are
+// genuinely different, while one here would make `before_first_turn`'s honest
+// reading indistinguishable from a bug.
+//
+// The `control_no_request` arm writes no request and still carries an anchor: the
+// equivalent point its drive sequence reached, the one corresponding to where the
+// other two arms write. That is what makes the three arms' reads cover comparable
+// windows. It is a contract #1715 implements; nothing here enforces it, and
+// whether two arms' windows are then genuinely comparable is that ticket's to
+// arrange rather than this record's.
+//
+// AfterSendPointSystemInitCount counts the `system`/`init` lines in that window —
+// `"type":"system"` with `"subtype":"init"`, the same pair setModeRecorder.add
+// switches on. That switch is the definition; this is deliberately not a second
+// copy of it. AfterSendPointResultTrailers carries one entry per `result` line in
+// the window, in arrival order.
+//
+// NO WHOLE-RUN FIGURE IS RECORDED A SECOND TIME. The whole-run `result` count is
+// len(TurnBoundaries); the window's is len(AfterSendPointResultTrailers). Neither
+// gets a field of its own, and a later slice must not add one.
+//
+// All three are POPULATED, never computed here, exactly as the models fields are.
+// Until #1715 fills them a live re-run leaves all three at their zero values, so
+// an artifact carrying `send_point_index: 0` today is an UNPOPULATED FIELD and
+// not a `before_first_turn` capture — only the ticket that fills them makes the
+// two distinguishable. That is accepted rather than papered over with a presence
+// flag: the committed initialize_control_v2.1.239.json already predates arm and
+// control_response_within_wait.
+//
 // ScannerError is load-bearing for #1688, which caps its reader per line: an
 // over-long line must surface HERE rather than truncating silently.
 //
@@ -165,6 +262,10 @@ type initControlFixtureRecord struct {
 	NonJSONLineCount int               `json:"non_json_line_count"`
 	TurnBoundaries   []int             `json:"turn_boundaries"`
 
+	SendPointIndex                int                        `json:"send_point_index"`
+	AfterSendPointSystemInitCount int                        `json:"after_send_point_system_init_count"`
+	AfterSendPointResultTrailers  []initControlResultTrailer `json:"after_send_point_result_trailers"`
+
 	StdinWriteErrors       []string `json:"stdin_write_errors"`
 	StderrCapture          string   `json:"stderr_capture"`
 	ExitCode               int      `json:"exit_code"`
@@ -176,7 +277,7 @@ type initControlFixtureRecord struct {
 
 // --- the fully-populated fixture -------------------------------------------------
 
-// initControlFullRecord returns a record in which every one of the twenty-four
+// initControlFullRecord returns a record in which every one of the twenty-seven
 // fields carries a non-zero value, and every pair of same-typed non-bool fields
 // carries a DISTINCT one. Both properties are asserted below rather than trusted.
 //
@@ -201,7 +302,16 @@ type initControlFixtureRecord struct {
 // TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes rather than
 // a change here; do not "improve" this literal to demonstrate it.
 //
-// Four literal choices are load-bearing:
+// The anchor's OTHER legitimate edge — send_point_index 0 — is likewise absent
+// here, and unlike the pair above it gets NO second record instance. The
+// resolutions differ for a reason worth stating, since the two cases otherwise
+// look identical: #1722's second instance exists because a
+// control_response_within_wait DERIVED from the response count reads back wrong
+// there, so that instance is the sole red for a real mutant. #1723 computes
+// nothing, so an instance carrying send_point_index 0 would pin 0 == 0 through a
+// writer that never touched the value. Do not build one.
+//
+// Six literal choices are load-bearing:
 //
 //  1. ClaudeVersion must NOT survive versionSlug unchanged. That helper
 //     lowercases, rewrites runs outside [a-z0-9._-] to _, then clamps at 32, so a
@@ -249,6 +359,29 @@ type initControlFixtureRecord struct {
 //     developer repeats into both. The resolution is two literals, not a weakened
 //     assertion.
 //
+//  5. SendPointIndex and AfterSendPointSystemInitCount must not be 1, 2 or 3, and
+//     must differ from each other. The same-typed-non-bool distinctness subtest
+//     binds every int row against models_count (2), non_json_line_count (3) and
+//     exit_code (1) as well as against each other, so a "tidier" value collides
+//     and that subtest reddens. DurationMs is an int64 — a different reflect type
+//     — so it constrains nothing here. The anchor's 4 sits past the end of the
+//     two-element StdoutEvents, exactly as TurnBoundaries' {0, 7} already does:
+//     incoherence is what buys this fixture its distinctness, and coherence here
+//     would cost precisely that.
+//
+//  6. AfterSendPointResultTrailers carries ONE ENTRY OF EACH COST SHAPE — one
+//     with the presence flag true beside a non-zero cost, one with it false
+//     beside a zero cost. That is the discriminating pair, and it is why the
+//     absent-cost fact needs no second record instance: unlike a bool field, a
+//     slice holds both shapes at once, so both reach #1702's round trip carrying
+//     their different flags. NumTurns is non-zero in both for realism; the
+//     property over this type asks only for non-zero in AT LEAST ONE entry, which
+//     is what lets the absent-cost entry exist beside the record's own non-zero
+//     property at all. The cost is an ORDINARY DECIMAL: json.Marshal errors on
+//     NaN and ±Inf, and a value whose shortest representation is exponential is a
+//     needless risk, while a plain decimal marshals and decodes exactly and keeps
+//     the round-trip row honest with no normaliser.
+//
 // Where self-consistency costs nothing it is kept: ControlRequestID, the
 // request_id inside ControlRequestSent and the one inside ControlResponses all
 // agree, which is what ControlResponseRequestIDMatched claims; ModelsCount and
@@ -283,6 +416,13 @@ func initControlFullRecord() *initControlFixtureRecord {
 		NonJSONLineCount: 3,
 		TurnBoundaries:   []int{0, 7},
 
+		SendPointIndex:                4,
+		AfterSendPointSystemInitCount: 5,
+		AfterSendPointResultTrailers: []initControlResultTrailer{
+			{NumTurns: 6, TotalCostUSD: 0.0731, TotalCostUSDPresent: true},
+			{NumTurns: 9, TotalCostUSD: 0, TotalCostUSDPresent: false},
+		},
+
 		StdinWriteErrors:       []string{"write |1: broken pipe"},
 		StderrCapture:          "child stderr: the free-text stream this field absorbs",
 		ExitCode:               1,
@@ -302,7 +442,7 @@ type initControlFixtureField struct {
 	value any
 }
 
-// initControlFixtureFields lists rec's twenty-four fields once, in declaration
+// initControlFixtureFields lists rec's twenty-seven fields once, in declaration
 // order. #1702 applies it to both the written record and its decode and zips the
 // two rather than restating the fields; #1700 reaches it the same way.
 //
@@ -345,6 +485,9 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 		{"stdout_events", rec.StdoutEvents},
 		{"non_json_line_count", rec.NonJSONLineCount},
 		{"turn_boundaries", rec.TurnBoundaries},
+		{"send_point_index", rec.SendPointIndex},
+		{"after_send_point_system_init_count", rec.AfterSendPointSystemInitCount},
+		{"after_send_point_result_trailers", rec.AfterSendPointResultTrailers},
 		{"stdin_write_errors", rec.StdinWriteErrors},
 		{"stderr_capture", rec.StderrCapture},
 		{"exit_code", rec.ExitCode},
@@ -352,6 +495,40 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 		{"context_deadline_tripped", rec.ContextDeadlineTripped},
 		{"duration_ms", rec.DurationMs},
 		{"scanner_error", rec.ScannerError},
+	}
+}
+
+// initControlTrailerFields lists tr's fields once, in declaration order, and
+// carries initControlFixtureFields' hand-written obligation unchanged: these
+// names are a SECOND, INDEPENDENT COPY of the tags, and a reflection-driven
+// listing reads each name off the very tag it was meant to check. That matters
+// twice over here, because num_turns and total_cost_usd are claude's own key
+// names — a misspelling makes the record's provenance claim false against the
+// stdout_events bytes in this same file, and no round trip can catch it.
+//
+// It takes tr BY VALUE: three scalars, and every caller ranges a slice of them.
+//
+// One obligation is this listing's alone.
+// reflect.TypeOf(initControlFixtureRecord{}).NumField() counts the record's OWN
+// fields, so every field of initControlResultTrailer is invisible to all three of
+// the record's properties. This listing, plus the two trailer subtests in
+// TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken, is the only
+// thing standing between a field added to that type and no coverage anywhere.
+//
+// What does NOT bind here, stated so that nobody counts on it: the record's
+// distinctness property groups by reflect.TypeOf, and []initControlResultTrailer
+// has no same-typed sibling in the record, so distinctness gives that row nothing
+// — and nothing at all binds the fields INSIDE the type. Their whole coverage is
+// the length assertion plus the non-zero-in-at-least-one-entry property.
+//
+// The two listings cannot be folded into one. The row type is shared, but the
+// field sets are different, and a single reflection-driven listing over both is
+// exactly what both doc comments forbid.
+func initControlTrailerFields(tr initControlResultTrailer) []initControlFixtureField {
+	return []initControlFixtureField{
+		{"num_turns", tr.NumTurns},
+		{"total_cost_usd", tr.TotalCostUSD},
+		{"total_cost_usd_present", tr.TotalCostUSDPresent},
 	}
 }
 
@@ -363,11 +540,17 @@ func initControlFixtureFields(rec *initControlFixtureRecord) []initControlFixtur
 // carries a distinct one, and NEITHER of the two literals the fixture's filename
 // is minted from survives slugging.
 //
-// The name is incomplete after #1722 widened the last subtest to the arm column,
-// not false — it still pins every field and the sluggable version token. Renaming
-// it would cascade into prose in initialize_control_writer_test.go and into this
-// file's finOfflineExecBans entry for no behavioural gain, and every -run filter in
-// this family keys on the TestInitControlFullRecord_ prefix.
+// The name is incomplete after #1722 widened the last subtest to the arm column
+// and #1723 added three subtests over initControlResultTrailer, not false — it
+// still pins every field and the sluggable version token. Renaming it would
+// cascade into prose in initialize_control_writer_test.go and into this file's
+// finOfflineExecBans entry for no behavioural gain, and every -run filter in this
+// family keys on the TestInitControlFullRecord_ prefix.
+//
+// The last three subtests are the record's three properties again, applied to the
+// nested type the record's own properties cannot see: reflect over the record
+// counts its OWN fields, so a field on initControlResultTrailer is checked by
+// those three subtests or by nothing.
 //
 // It reads nothing off disk and spawns nothing. The parent computes the record
 // and the listing once; the subtests only read them, so the shared slice is safe
@@ -478,6 +661,97 @@ func TestInitControlFullRecord_PinsEveryFieldAndTheSluggableVersionToken(t *test
 				"\"correcting\" this literal into a declared arm, that is what you emptied — "+
 				"this record is a synthetic fixture, not a capture, and initControlArms binds "+
 				"what a capture records", rec.Arm, got)
+		}
+	})
+
+	t.Run("the trailer listing covers every trailer field exactly once", func(t *testing.T) {
+		t.Parallel()
+
+		// Over the ZERO VALUE, deliberately: this is a claim about the TYPE's
+		// field set, and the values play no part in it. Taking it over
+		// rec.AfterSendPointResultTrailers[0] instead would panic — not redden —
+		// against a fixture whose trailer list was emptied, and a panic takes the
+		// whole test binary down with it. The emptied list is the next subtest's
+		// t.Fatalf to report.
+		trRows := initControlTrailerFields(initControlResultTrailer{})
+
+		if want := reflect.TypeOf(initControlResultTrailer{}).NumField(); len(trRows) != want {
+			t.Errorf("#1723: the trailer listing has %d rows, want %d — one per field of "+
+				"initControlResultTrailer; the record's own NumField check counts the RECORD's "+
+				"fields and cannot see this type at all, so a field added here with no row is "+
+				"unchecked by every property in this file and by #1702's round trip",
+				len(trRows), want)
+		}
+
+		// Both halves, for the record listing's stated reason: length alone is
+		// green against a listing that names one field twice and omits another.
+		seen := make(map[string]bool, len(trRows))
+		for _, row := range trRows {
+			if seen[row.name] {
+				t.Errorf("#1723: the trailer listing names %q twice, so it holds the right number "+
+					"of rows while some other trailer field has none at all", row.name)
+			}
+			seen[row.name] = true
+		}
+	})
+
+	t.Run("every trailer field is non-zero in at least one entry", func(t *testing.T) {
+		t.Parallel()
+
+		// The vacuity control, and it must Fatalf rather than skip — precheck's
+		// precedent in TestInitControlFixture_WriterCapsStderrCapture. An empty
+		// list makes the property below vacuously true, and a property that cannot
+		// discriminate is a broken instrument, not a passing test.
+		if len(rec.AfterSendPointResultTrailers) == 0 {
+			t.Fatalf("#1723: the fixture carries no after_send_point_result_trailers, so every " +
+				"claim about that type's fields below is vacuously true and #1702's round trip " +
+				"zips an empty slice against an empty slice")
+		}
+
+		// PER FIELD ACROSS ENTRIES, not per entry, and that is not a weakening:
+		// the record's own non-zero property applied to each entry would forbid
+		// the absent-cost entry this fixture exists to carry — total_cost_usd 0
+		// beside total_cost_usd_present false. Row order is stable across entries
+		// because the listing is hand-written in declaration order.
+		trRows := initControlTrailerFields(rec.AfterSendPointResultTrailers[0])
+		nonZero := make([]bool, len(trRows))
+		for _, tr := range rec.AfterSendPointResultTrailers {
+			for i, row := range initControlTrailerFields(tr) {
+				if fixtureFieldNonZero(row.value) {
+					nonZero[i] = true
+				}
+			}
+		}
+		for i, row := range trRows {
+			if !nonZero[i] {
+				t.Errorf("#1723: %s is zero in all %d after_send_point_result_trailers entries; a "+
+					"zero-valued field round-trips under ANY tag arrangement, so #1702's row over "+
+					"this slice settles nothing about it", row.name, len(rec.AfterSendPointResultTrailers))
+			}
+		}
+	})
+
+	t.Run("the trailer list carries an entry of each cost shape", func(t *testing.T) {
+		t.Parallel()
+
+		// SCOPED TO THE FLAG ALONE, never to the flag paired with a non-zero cost:
+		// pairing them would make this subtest fire as collateral every time the
+		// non-zero subtest above fires, and each subtest here is meant to be the
+		// sole red for its own mutant.
+		var present, absent int
+		for _, tr := range rec.AfterSendPointResultTrailers {
+			if tr.TotalCostUSDPresent {
+				present++
+				continue
+			}
+			absent++
+		}
+		if present == 0 || absent == 0 {
+			t.Errorf("#1723: the fixture carries %d trailer(s) with total_cost_usd_present true and "+
+				"%d with it false, want at least one of each; collapsed to one shape, #1702's "+
+				"round trip stops proving that two entries survive carrying DIFFERENT flags, "+
+				"which is the whole of the claim that a trailer carrying no cost field stays "+
+				"distinguishable from one carrying zero", present, absent)
 		}
 	})
 }
