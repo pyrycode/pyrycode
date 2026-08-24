@@ -28,6 +28,16 @@ package realclaude
 // before the first user turn, and whether the round trip perturbs the live
 // session, need a three-arm rig with a no-request control and are #1694's.
 //
+// Since #1722 the run RECORDS that arrangement rather than only describing it
+// here: the capture's `arm` field carries after_completed_turn, and the one place
+// that decides it is the row initControlArms marks `probed`. Change the
+// arrangement and that row is what moves — there is deliberately no second
+// spelling of the identifier in this file, and no index into that table.
+//
+// The recorded arm is the send point the run INTENDED. It is not a claim that the
+// turn completed: the probe turn can produce no result line inside its budget, in
+// which case the log below says so and turn_boundaries stays empty in the fixture.
+//
 // # What passes
 //
 // A response carrying subtype:"error" is a refusal, and a recorded refusal is a
@@ -55,7 +65,12 @@ package realclaude
 // # Running it
 //
 //	go test -tags e2e_realclaude -race -v \
-//	  -run TestRealClaude_InitializeControl ./internal/e2e/realclaude/
+//	  -run 'TestRealClaude_InitializeControl|TestInitControlSummarize_|TestInitControlProbedArm_' \
+//	  ./internal/e2e/realclaude/
+//
+// The two non-live tests in this file — the summariser's table and the probed
+// arm's — spawn nothing and must report PASS, not SKIP, on a machine with no
+// claude and no credentials.
 //
 // Read the count of tests that executed, never the exit code: this package is
 // behind the e2e_realclaude tag, `make check` never compiles it, and the suite
@@ -323,6 +338,12 @@ func initControlScrubbed(t *testing.T, stderr string) {
 func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionToken string) *initControlFixtureRecord {
 	t.Helper()
 
+	// The send point this run drives, taken from the ONE row initControlArms marks
+	// probed rather than from a literal here or an index into that table. #1715
+	// turns this into a parameter when it ranges the table for three arms; leaving
+	// it a local call keeps that change to the signature.
+	arm := initControlProbedArm()
+
 	// The fixed stream-json prefix is streamsup's buildArgs'; the two cost flags
 	// occupy the `base` slot that function appends after it.
 	argv := []string{
@@ -401,7 +422,13 @@ func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionTo
 	controlSent := json.RawMessage(bytes.TrimRight(controlLine, "\n"))
 	t.Logf("#1688: writing control request: %s", controlSent)
 	writeLine("control request", controlLine)
-	if !setModeWaitFor(rec.controlResponseCount, 1, initControlControlBudget) {
+	// The wait's own RESULT, kept rather than dropped into the log. Snapshotting
+	// ControlResponses happens after cmd.Wait() below, so a response arriving past
+	// this budget still lands in that field — under a log line that already claimed
+	// absence. control_response_within_wait is the only place that distinction
+	// survives the run; see its paragraph on initControlFixtureRecord.
+	withinWait := setModeWaitFor(rec.controlResponseCount, 1, initControlControlBudget)
+	if !withinWait {
 		t.Logf("#1688: no control_response within %s (recorded as absence, continuing)",
 			initControlControlBudget)
 	}
@@ -441,6 +468,8 @@ func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionTo
 		ClaudeVersionRaw: versionRaw,
 		ClaudeVersion:    versionToken,
 
+		Arm: arm,
+
 		Argv:    append([]string{claudeBin}, argv...),
 		Prompts: []string{initControlPrompt},
 
@@ -449,6 +478,7 @@ func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionTo
 		ControlResponses:                responses,
 		ControlResponseSubtype:          summary.subtype,
 		ControlResponseRequestIDMatched: setModeResponseIDMatches(responses, initControlRequestID),
+		ControlResponseWithinWait:       withinWait,
 
 		ModelsPresent:     summary.modelsPresent,
 		ModelsCount:       summary.modelsCount,
@@ -482,10 +512,14 @@ func runInitControlChild(t *testing.T, claudeBin, workdir, versionRaw, versionTo
 	// Never %+v the record into a log or a fatal message: that moves up to
 	// stderrFixtureCap bytes of child output out of the bounded file and into an
 	// unbounded run log, the exact thing the cap exists to prevent.
-	t.Logf("#1688: %d line(s), %d non-JSON, %d control_response(s), subtype=%q, "+
-		"models_present=%v models_count=%d models_entry_fields=%v, request_id matched=%v, "+
-		"exit=%d, deadline_tripped=%v, scanner_error=%q, %s",
-		len(lines), record.NonJSONLineCount, len(responses), record.ControlResponseSubtype,
+	//
+	// arm and within_wait are safe to add for the reason claude_version is: neither
+	// is child output. Do not widen this further toward the record's other fields.
+	t.Logf("#1688: arm=%q, %d line(s), %d non-JSON, %d control_response(s), within_wait=%v, "+
+		"subtype=%q, models_present=%v models_count=%d models_entry_fields=%v, "+
+		"request_id matched=%v, exit=%d, deadline_tripped=%v, scanner_error=%q, %s",
+		record.Arm, len(lines), record.NonJSONLineCount, len(responses),
+		record.ControlResponseWithinWait, record.ControlResponseSubtype,
 		record.ModelsPresent, record.ModelsCount, record.ModelsEntryFields,
 		record.ControlResponseRequestIDMatched, exitCode, record.ContextDeadlineTripped,
 		record.ScannerError, duration.Round(time.Millisecond))
@@ -532,6 +566,54 @@ func TestRealClaude_InitializeControl_Capture(t *testing.T) {
 			"decode against. The written fixture holds %d stdout line(s) and is the evidence "+
 			"for why; do NOT commit it", initControlControlBudget, len(rec.StdoutEvents))
 	}
+}
+
+// TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm is #1722's AC 4: the
+// arm runInitControlChild records is non-empty and is one initControlArms
+// declares, decided WITHOUT spawning a child.
+//
+// The live capture is the only thing that fills the record's `arm` field, so
+// without this the first evidence of an unset or mistyped arm is a fixture at the
+// end of a run that spent tokens. This test spawns nothing, reads nothing off
+// disk, and passes on a machine with no claude and no credentials —
+// TestInitControlSummarize_ReadsAllThreePlacements is the precedent for an offline
+// test living in this exec-ing file.
+//
+// IT DELIBERATELY DOES NOT ASSERT THE LITERAL "after_completed_turn". That is a
+// second spelling of an identifier the table already declares, and it is exactly
+// what the probed column exists to avoid. Which arm is probed is fixed by the
+// marked row and by this file's header; a test restating it would pin the copy.
+func TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm(t *testing.T) {
+	t.Parallel()
+
+	got := initControlProbedArm()
+
+	// SOLE red for both degenerate tables, which initControlProbedArm collapses to
+	// one value on purpose: no row marked probed, and two or more marked. The
+	// message names both because the selector cannot tell a reader which it was.
+	if got == "" {
+		t.Fatalf("#1722: initControlProbedArm returns the empty string, so runInitControlChild " +
+			"records an empty arm and the capture cannot say which measurement produced it. " +
+			"Either NO row of initControlArms carries probed, or MORE THAN ONE does — the " +
+			"selector collapses both, and this is the assertion for both")
+	}
+
+	// SOLE red for a selector returning a string the table does not declare: a
+	// hardcoded fallback, a typo'd literal, a mangled return. Ranged rather than
+	// indexed, so it stays true when a fourth arm arrives.
+	for _, arm := range initControlArms {
+		if arm.id == got {
+			return
+		}
+	}
+	ids := make([]string, 0, len(initControlArms))
+	for _, arm := range initControlArms {
+		ids = append(ids, arm.id)
+	}
+	t.Errorf("#1722: initControlProbedArm returns %q, which initControlArms does not declare "+
+		"(it declares %q); the arm a live capture records must come from that table rather "+
+		"than from a literal, or a mistyped arm reaches the fixture's `arm` field and its "+
+		"filename with nothing red until somebody reads the artifact", got, ids)
 }
 
 // TestInitControlSummarize_ReadsBothPlacements is the targeted check on the one
