@@ -2313,37 +2313,84 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched.
 
-- `initialize_control_names_test.go` (#1696) — **the fourth fixture-name lock in
-  this package, and the first for a single-input namer.** #1688 will spend live
-  tokens capturing claude's `initialize` `control_request`/`models` round trip;
-  this ticket mints the filename those bytes land under —
+- `initialize_control_names_test.go` (#1696, extended #1712) — **the fourth
+  fixture-name lock in this package. #1696 built it for a single-input namer;
+  #1712 gave the file a second, arm-carrying one and corrected the header
+  section that used to say the family would stay single-input.** #1688 spent
+  live tokens capturing claude's `initialize` `control_request`/`models` round
+  trip; #1696 minted the filename those bytes land under —
   `initialize_control_v<slug>.json` via `initControlFixtureName`, reusing
-  #1661's `poolRevokeNamePattern` row type and `anchorFixtureName` — and proves,
+  #1661's `poolRevokeNamePattern` row type and `anchorFixtureName` — and proved,
   with no claude binary and no disk I/O, that no minted name can join
-  `fixtureGlob`, `dropcapFixtureGlob`, or #1595's `setModeFamilyGlob`.
-  `poolRevokeFixtureName` (#1661) carries an arm parameter because #1643 had
-  three arms; this capture has one, so the namer takes one input and the
-  lock table collapses to tokens × 1. Registered in `finOfflineExecBans` with
-  #1661's list plus `writeFixture`, `captureClaudeVersion`, and
-  `os.LookupEnv` — the middle one because it is the package's own
-  `claude --version` exec and returns exactly this namer's input, making it
-  the exec a developer touching version tokens is likeliest to reach for.
+  `fixtureGlob`, `dropcapFixtureGlob`, or #1595's `setModeFamilyGlob`. At the
+  time, `poolRevokeFixtureName` (#1661) carried an arm parameter because #1643
+  had three arms and this capture had one, so #1696 deliberately collapsed the
+  arm dimension: one input, lock table tokens × 1. That was correct for a
+  one-probe family and expired the moment #1715 gave the same capture three
+  arms — through the one-input namer alone, all three arms mint the same path,
+  the last write wins, and the other two vanish with nothing red anywhere.
+  #1712 added `initControlArmFixtureName(versionToken, arm string)` alongside
+  it (never replacing it — every current caller of the one-input namer is
+  unchanged, and #1713 is what migrates the writer) plus the read-only
+  `initControlArms` declaration naming #1715's three send-point arms
+  (`before_first_turn`, `after_completed_turn`, `control_no_request`), and a
+  five-subtest lock proving: no minted name joins a committed family; every
+  pattern's control still matches; no minted name collides with what
+  `initControlFixtureName` mints from the same token (string equality, since
+  `testdata/initialize_control_v*` is addressed by no glob at all); distinct
+  declared arms mint distinct names; and every name is one clean path
+  component for hostile inputs in both the token and arm columns. Registered
+  in `finOfflineExecBans` with #1661's list plus `writeFixture`,
+  `captureClaudeVersion`, and `os.LookupEnv` — the middle one because it is the
+  package's own `claude --version` exec and returns exactly this namer's
+  input, making it the exec a developer touching version tokens is likeliest
+  to reach for. #1712 added no new banned names: the second namer performs no
+  I/O either, so the existing seventeen-name entry already covered it.
 
-  **Two lessons that outlive this ticket:**
+  **Lessons that outlive these tickets:**
   - **Collapsing an input dimension can silently empty the hazard shape a
-    lock measures.** #1661 covered path-separator escape through its
-    `hostileArms` list, not its token list; #1643's arm names were the
-    separator-bearing inputs, not its version tokens. Dropping the arm
-    parameter here was the ticket's size win, and it also removed nearly
-    every `/`-bearing input from the table — a token list of plausible
-    `claude --version` strings plus `..` and `""` leaves the whole file green
-    against a namer that never calls `versionSlug` (confirmed by mutation:
-    the raw-interpolation mutant reddens only on tokens carrying `/`, and
-    `..` is not among them — unslugged, it mints a clean
-    `initialize_control_v...json`). When a split drops a dimension a
-    predecessor used to cover a property, re-derive which inputs the
-    surviving assertions still redden on; don't inherit the predecessor's
-    table and assume the coverage came with it.
+    lock measures — the collapse itself needs a recorded reason, because the
+    fix is to re-expand it later, not to leave it collapsed.** #1661 covered
+    path-separator escape through its `hostileArms` list, not its token list;
+    #1643's arm names were the separator-bearing inputs, not its version
+    tokens. Dropping the arm parameter in #1696 was correct for that ticket
+    and it also removed nearly every `/`-bearing input from the table — a
+    token list of plausible `claude --version` strings plus `..` and `""`
+    leaves the whole file green against a namer that never calls
+    `versionSlug`. When #1712 put the arm dimension back for a second namer,
+    the separator-bearing shapes came back too, in both the token *and* the
+    arm columns, because both inputs now reach the name. The general form:
+    when a split drops a dimension a predecessor used to cover a property,
+    record *why* the collapse is currently safe — the next reader needs that
+    reason to know when it stops being safe, not just the fact that it was
+    collapsed.
+  - **A token table inherited across a namer whose glob-anchoring shape
+    changed can silently stop exercising the mutant it exists for.** #1712's
+    family-glob subtest needs tokens that smuggle a *different* fixture
+    family's name past the new namer's literal prefix — but #1696's own
+    smuggle tokens were the bare family heads (`permission_protocol`,
+    `set_permission_mode`, `dropped_lines`), and those mint nothing that
+    matches e.g. `set_permission_mode_v*_*.json`: the pattern needs a literal
+    `v` immediately after the head, and the bare head never supplies one.
+    Measured by substitution: swap #1712's `_v1`-suffixed smuggle tokens back
+    for #1696's bare heads and the whole file goes green, all five subtests —
+    the one mutant the family-glob subtest exists to catch stops existing.
+    Any future addition to a family-glob token table must re-check the
+    pattern's exact anchoring, not just reuse the vocabulary of a working
+    table from a sibling lock.
+  - **A pattern-based lock cannot cover a committed family that no glob
+    describes.** `testdata/initialize_control_v*` is matched by no pattern in
+    this package — it is addressed only by exact filename — so the
+    family-glob subtest sweeps straight past the one collision that is
+    actually reachable by a live #1715 run. That gap needed its own
+    string-equality subtest (`initControlArmFixtureName(token, arm) !=
+    initControlFixtureName(token)`) rather than a fourth glob; the empty-arm
+    token/arm pairing is the only row that reddens its mutant (drop the
+    separator between the two slugs and an empty arm makes the two namers
+    agree). Before assuming three globs plus a pairwise-distinctness check
+    cover a fixture family end to end, check whether the family is matched by
+    a glob at all — a committed capture addressed by exact name only needs an
+    equality check, and no amount of pattern coverage substitutes for it.
   - **`-overlay` cannot verify a check that parses source at run time**, and
     this is a different reason than #1634's daemon-side overlay gap above.
     `TestFinOfflineFilesReachNoExecHelper` calls `parser.ParseFile` with a
@@ -2354,14 +2401,16 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     and stays green — a misleading pass reading as "the ban does not bite."
     Verifying a ban entry in this file needs a real edit and a real revert,
     confirmed byte-identical against the pristine file before committing;
-    `-overlay` stays correct for the three ordinary compiled-code namer
-    mutants above it. Any future AST-parses-off-disk check in this package
-    inherits the same caveat.
+    `-overlay` stays correct for the ordinary compiled-code namer mutants
+    (both files' worth, as of #1712).
 
-  Zero production files touched. See
+  Zero production files touched by either ticket. See
   `docs/specs/architecture/1696-initialize-capture-fixture-name-lock.md` for
-  the full design and the per-mutant table. The write half is #1702 (#1697,
-  named here at the time, was superseded and closed before it was built).
+  #1696's full design and per-mutant table, and
+  `docs/specs/architecture/1712-arm-carrying-initialize-fixture-name.md` for
+  #1712's. The write half is #1702
+  (#1697, named here at the time, was superseded and closed before it was
+  built); #1713 is what migrates the writer onto `initControlArmFixtureName`.
 
 - `initialize_control_record_test.go` (#1701) — **the record half of the
   `initialize` fixture family: fixes the JSON contract #1688's live capture,
