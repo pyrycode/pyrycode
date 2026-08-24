@@ -342,6 +342,13 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeRelayServerIDConflict":       CodeRelayServerIDConflict,
 		"CodeSessionNotFound":             CodeSessionNotFound,
 		"CodeSessionBlocked":              CodeSessionBlocked,
+		"CodeAttachmentInvalidChunk":      CodeAttachmentInvalidChunk,
+		"CodeAttachmentIntegrityFailed":   CodeAttachmentIntegrityFailed,
+		"CodeAttachmentTooManyUploads":    CodeAttachmentTooManyUploads,
+		"CodeAttachmentTooLarge":          CodeAttachmentTooLarge,
+		"CodeAttachmentStorageFailed":     CodeAttachmentStorageFailed,
+		"CodeAttachmentNotFound":          CodeAttachmentNotFound,
+		"CodeAttachmentStreamAborted":     CodeAttachmentStreamAborted,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -358,6 +365,13 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeRelayServerIDConflict":       "relay.server_id_conflict",
 		"CodeSessionNotFound":             "session.not_found",
 		"CodeSessionBlocked":              "session.blocked",
+		"CodeAttachmentInvalidChunk":      "attachment.invalid_chunk",
+		"CodeAttachmentIntegrityFailed":   "attachment.integrity_failed",
+		"CodeAttachmentTooManyUploads":    "attachment.too_many_uploads",
+		"CodeAttachmentTooLarge":          "attachment.too_large",
+		"CodeAttachmentStorageFailed":     "attachment.storage_failed",
+		"CodeAttachmentNotFound":          "attachment.not_found",
+		"CodeAttachmentStreamAborted":     "attachment.stream_aborted",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))
