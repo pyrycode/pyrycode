@@ -32,6 +32,29 @@ const (
 	// Session errors.
 	CodeSessionNotFound = "session.not_found"
 	CodeSessionBlocked  = "session.blocked" // terminal give-up; NOT a retry hint (contrast server.binary_busy)
+
+	// Attachment errors (#1751; docs/protocol-mobile.md § Attachments). The
+	// reject vocabulary both attachment_chunk legs answer with, declared in one
+	// place so #1741, #1743, #1744 and #1746 do not each invent a name. The
+	// reasoning is published in that section rather than duplicated here.
+	//
+	// attachment.not_found is DELIBERATELY MERGED: it answers every retrieval
+	// that yields no bytes — an unknown id, a non-canonical id, and an id
+	// resolving outside the named conversation's directory alike. Two
+	// distinguishable codes would make the retrieval verb a path-existence
+	// oracle, so the merge is a disclosure decision, not an imprecision.
+	//
+	// The three retryable members (too_many_uploads, storage_failed,
+	// stream_aborted) are published as retry-AFTER-A-BACKOFF: an immediate
+	// resend turns each into a hot loop, and too_many_uploads' bound clears
+	// only when OTHER uploads finish.
+	CodeAttachmentInvalidChunk    = "attachment.invalid_chunk"
+	CodeAttachmentIntegrityFailed = "attachment.integrity_failed"
+	CodeAttachmentTooManyUploads  = "attachment.too_many_uploads" // transient; the bound clears when other uploads finish (contrast attachment.too_large)
+	CodeAttachmentTooLarge        = "attachment.too_large"        // the WHOLE transfer exceeds the receiver's per-upload bound; ONE oversize envelope is message.too_long
+	CodeAttachmentStorageFailed   = "attachment.storage_failed"
+	CodeAttachmentNotFound        = "attachment.not_found"
+	CodeAttachmentStreamAborted   = "attachment.stream_aborted" // a TypeError correlated via in_reply_to, never a second attachment frame
 )
 
 // Envelope-type constants — wire values for Envelope.Type

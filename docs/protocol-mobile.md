@@ -41,7 +41,7 @@ In scope:
 
 Out of scope (v2):
 
-- **Attachments.** v2 is the encryption layer; first attachment release rides on top.
+- **Attachments — the daemon-side implementation.** The *wire contract* is published in this document ([Attachments](#attachments)): the shared `attachment_chunk` frame, its chunking and reassembly rules, and the `attachment.*` reject vocabulary. What is still out of scope is everything behind it — nothing in the daemon emits, accepts, stores or enforces any of it yet.
 - **Voice / WebRTC.** Phase 6 concern; signalling channel will be added later as new envelope types inside the AEAD channel.
 - **Multi-device key sharing.** Each paired phone has its own Noise session and its own device-static keypair. No cross-device key sync.
 - **Per-message-counter rotation.** Noise's 2⁶⁴ transport-message counter is not a practical limit; time-based + explicit-rekey is sufficient.
@@ -301,7 +301,7 @@ Envelope-level fields beyond the v1 set:
 
 Encoding: line-delimited JSON over WS text frames. One outer envelope per frame. UTF-8.
 
-**Application-envelope size cap.** Because every transport frame fits inside a single Noise transport message (65535 bytes including 16-byte AEAD tag), the decrypted application envelope is capped at **65519 bytes**. v1's 1 MiB `message.too_long` cap is **superseded** in v2; v2 implementations enforce the 65519-byte cap and emit `message.too_long` for any application envelope that, after JSON serialisation, exceeds it. Large payloads (e.g. attachments, deferred to a later v2 feature release) require an envelope-level chunking scheme that is out of scope for this spec.
+**Application-envelope size cap.** Because every transport frame fits inside a single Noise transport message (65535 bytes including 16-byte AEAD tag), the decrypted application envelope is capped at **65519 bytes**. v1's 1 MiB `message.too_long` cap is **superseded** in v2; v2 implementations enforce the 65519-byte cap and emit `message.too_long` for any application envelope that, after JSON serialisation, exceeds it. Large payloads are carried by an **envelope-level chunking scheme**, not by a bigger envelope: a file is split into `attachment_chunk` frames each carrying at most **45000 raw bytes** of file data before base64, which is what keeps a chunk's serialised envelope under this cap — see [Attachments](#attachments). That per-chunk bound is a **producer-side contract with no validator**; an application envelope that exceeds 65519 bytes after serialisation is rejected by the transport with `message.too_long`, never with an `attachment.*` code.
 
 ## Identifiers
 
@@ -469,6 +469,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
 | **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
+| **`attachment_chunk`** | phone ↔ binary | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's only **bidirectional** entry: upload rides it phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. Nothing emits, accepts or enforces it yet. See [Attachments](#attachments). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -1411,6 +1412,164 @@ settled by [`request_debug_bundle`](#request_debug_bundle) above (pairing);
 the streaming transport faithfully seals whatever blob it is handed to an
 already-authenticated, open conn.
 
+### Attachments
+
+A client uploads a file to the daemon, and retrieves one back, as a stream of
+**`attachment_chunk`** frames. A file crossing the encrypted mobile channel
+routinely exceeds one AEAD frame, so the sender splits it and the receiver
+reassembles it; the relay stays transport-only, with no blob endpoint. Split from
+#1740 — the frame and its payload are #1752, the per-chunk byte bound is #1753,
+and this section plus the `attachment.*` reject vocabulary is #1751.
+
+**One frame carries both directions.** Upload (phone → binary) and retrieval
+(binary → phone) ride the same `attachment_chunk`, and declaring exactly one
+shape is what stops the two legs drifting as they are built months apart: there
+is no second shape to keep in step. What differs between the legs is not the
+shape but the **trust** — see **Trust and content hygiene** below.
+
+**Nothing emits, accepts or enforces any of this yet.** The contract is published
+ahead of its implementation, the same declare-then-publish sequencing
+[`model_list`](#model_list) and [`slash_command_list`](#slash_command_list) used:
+reassembly and claim-checking are #1741, storage is #1743, the inbound dispatch
+is #1744, and retrieval is #1746. Two things this section deliberately does
+**not** publish: the **retrieval request verb**, which #1746 declares (no such
+type exists in the daemon today), and the **upload success reply**, which is
+#1744's. No success frame is declared here, and a client must not invent one.
+
+#### `attachment_chunk`
+
+Direction **phone ↔ binary**. One slice of one attachment's bytes, plus the whole
+transfer's metadata repeated on every chunk. **Every field is always present in
+both directions** — no field is ever elided, so a decoder may rely on all eight.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `attachment_id` | string | The transfer this chunk belongs to, repeated identically on every chunk: the key a receiver accumulates under, and the identifier that later resolves to a file. At most 64 bytes. **Not a capability** — not secret, not unguessable, and never the only thing standing between a caller and a file. |
+| `index` | integer | 0-based position of this chunk within the attachment, in `[0, total_chunks)`. It **decides where the bytes land**: a receiver addresses by it and never appends. |
+| `total_chunks` | integer | How many chunks the whole attachment splits into: ≥ 1, and identical on every chunk of one transfer. Because it rides every chunk, this stream needs **no completion frame**. |
+| `filename` | string | The client's own name for the file: a display string and a sanitiser input, **never a path**. At most 255 bytes (POSIX `NAME_MAX` — one path component). |
+| `mime_type` | string | The client's declared media type: a display and dispatch hint, **not a verified property of the bytes**. At most 255 bytes (RFC 6838 § 4.2's two 127-character halves). |
+| `size` | integer | Declared byte length of the **whole file**, not of this chunk. |
+| `sha256` | string | Lowercase hex sha256 of the **whole file**, not of this chunk; always 64 characters. |
+| `data` | string (base64) | This chunk's raw bytes, standard-base64 (`base64.StdEncoding`, padded). At most **45000 raw bytes before encoding** — see **Chunking** below. |
+
+The three metadata bounds (64 / 255 / 255) count **bytes, not runes**, and a
+client must obey them for its own frames to fit the envelope cap. A length
+ceiling on `attachment_id` is **not** a safety property: 64 bytes accommodates
+`../../../../etc/passwd` several times over, so containment is the receiver's
+resolution check and never the bound.
+
+There is **no `conversation_id`**, and the omission is a security property rather
+than an oversight. An upload lands in the conversation the authenticated session
+is already on, decided daemon-side from session context, so a client cannot steer
+bytes into another conversation's directory by naming one. Retrieval's request
+verb does name a conversation, but that is a different frame and #1746's to
+declare.
+
+**Chunking (the sender's obligation).** The per-chunk bound is **45000 raw bytes
+of `data` before base64** — not base64 characters, not payload bytes, not
+envelope bytes. A sender that mistakes it for base64 characters produces frames
+that fit but wastes a quarter of every one. The rule is arithmetic a client can
+implement directly:
+
+- every chunk but the last carries **exactly 45000** raw bytes; the last carries
+  the remainder;
+- `total_chunks = max(1, ceil(size / 45000))`. The `max(1, …)` is what defines
+  the **zero-byte file**: one chunk carrying zero bytes, consistent with
+  `total_chunks ≥ 1`.
+
+45000 is chosen so that a chunk's serialised envelope — base64 ×4/3, plus every
+metadata field at its bound with worst-case JSON escaping — stays under the
+[65519-byte application-envelope cap](#wire-shapes). That is a
+**producer-side contract with no validator**: an envelope exceeding 65519 bytes
+after serialisation is rejected by the transport with **`message.too_long`**,
+never with an `attachment.*` code. The two size codes say different things —
+`message.too_long` means **one envelope** was too big, `attachment.too_large`
+means the **whole transfer** exceeds the receiver's per-upload bound.
+
+**Reassembly & integrity (the receiver's rules).** The receiver stores each
+chunk's decoded `data` **at its `index`**, so **chunks may arrive in any order**.
+That is deliberately weaker than [`debug_bundle_chunk`](#debug_bundle_chunk)'s
+`seq`, which demands strict succession — the neighbouring rule is the obvious
+thing to copy and it is the wrong one here.
+
+- A **duplicate `index`**, an `index` outside `[0, total_chunks)`, or a
+  `total_chunks` disagreeing with the stream's earlier chunks: the stream is
+  discarded and the receiver answers `attachment.invalid_chunk`.
+- The transfer is **complete** when every index in `[0, total_chunks)` has
+  arrived exactly once. Only then does the receiver compare the assembled length
+  against `size`, and `sha256(assembled)` against `sha256`, as **lowercase hex
+  for exact equality**. A case-insensitive or prefix comparison is a hole, while
+  a comparison that rejects an uppercase-sending client is an availability bug —
+  so the canonical form is lowercase and clients send it that way.
+- Either mismatch → `attachment.integrity_failed`. A receiver **never emits
+  partial or corrupted output**.
+- `sha256` is **integrity, not authenticity**. The same party supplies the bytes
+  and the digest, so a match proves the transfer was not corrupted and proves
+  nothing about whether the content is safe. It is also **not a fetch key**:
+  content-addressed retrieval ("know the hash, fetch the blob") would promote a
+  non-secret claim into a capability, and retrieval names a conversation and an
+  attachment, never a hash.
+- **Never allocate from a claim.** On the inbound leg `total_chunks` and `size`
+  are attacker-chosen integers: sizing a buffer from a claimed `total_chunks` of
+  2³¹−1 is a multi-gigabyte allocation driven by a single ~60 KB frame. A
+  receiver range-checks both, and cross-checks them against each other through
+  the 45000-byte bound, **before** anything is sized — a check available from the
+  **first** chunk, before one byte is accumulated. A transfer over the receiver's
+  per-upload byte bound is refused with `attachment.too_large`; one arriving
+  while too many uploads are already in flight is refused with
+  `attachment.too_many_uploads`. Both of those bounds are **receiver-configured
+  and unpublished** — a client learns them by being rejected, not by reading this
+  document.
+
+**Retrieval, and its two terminal signals.** Retrieval is the same frame,
+daemon-authored, flowing binary → phone in reply to the request verb #1746
+declares.
+
+- **Completion** is `total_chunks` distinct indices received. There is **no
+  completion frame**, and none is coming:
+  [`debug_bundle_done`](#debug_bundle_done) exists because bundle chunks carry
+  only `seq` and the count is unknowable until the end, whereas here the count
+  rides frame one — so a truncated stream is detectable *earlier* rather than
+  later.
+- **Abandonment** is `attachment.stream_aborted`, an `error` envelope correlated
+  by `in_reply_to` — not a second attachment frame. On receiving it a client
+  **MUST discard everything accumulated for that transfer** and MUST NOT present
+  the partial bytes as the file. With no completion frame this is the stream's
+  only negative signal, and a client that keeps its buffer renders a truncated
+  file as a whole one.
+- A stream that simply **stops**, with no abort frame (the session died), is
+  detected by the client's own timeout. The protocol offers no frame for it.
+- A request that yields no bytes at all is `attachment.not_found` — one code for
+  every such outcome; see [Error codes](#error-codes).
+
+**Trust and content hygiene.** **Inbound, every field is a claim, not a fact**,
+and the daemon validates each before use. **Outbound the fields are
+daemon-authored — but two of them are laundered client input.** `filename` and
+`mime_type` arrive attacker-chosen at upload time, are stored, and are echoed
+back verbatim on the retrieval leg, so "daemon-authored" must not be read as
+"trustworthy" for those two. A client **MUST** sanitise `filename` before
+rendering it, **MUST NOT** use it as a path or a filesystem name unsanitised, and
+**MUST NOT** dispatch on `mime_type` in any way that grants the content
+privileges — no rendering an attacker-declared `text/html` as markup. A client
+should also **bound what it allocates** from an outbound `size` / `total_chunks`
+against its own memory budget and refuse a transfer larger than it can hold
+rather than attempt it: the daemon is trusted here, but a fixed-budget client
+still has a budget.
+
+`data` is **content-bearing and never logged** — a stronger rule than the debug
+bundle's, because those are daemon-authored diagnostics and these are a user's
+own private file bytes. `filename` gets the same treatment for two independent
+reasons: a filename is often private in itself, and a client-supplied string in a
+line-oriented log is a log-injection shape. Log the attachment id, the index and
+the total; never the bytes, and never a raw filename. The rule binds both ends of
+the channel, not just the daemon.
+
+**Authorization is pairing**, enforced structurally at the Noise IK handshake,
+exactly as [`request_debug_bundle`](#request_debug_bundle) records: an unpaired
+device is refused at the handshake (WS `4401`) and never reaches these paths.
+There is no per-verb authorization gate on either leg, and none is invented here.
+
 ### Session settings (v2)
 
 A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
@@ -1541,6 +1700,13 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
 | `session.not_found` | no | The `set_session_settings` target `session_id` names no live session. Returned by the handler (#845). |
 | `session.blocked` | no | Terminal — the daemon gave up delivering a conversation's queued backlog after repeated failures (msgqueue give-up, #1000). Carried in a `session_error` frame, not an `error` envelope; the emitting producer is #1008. A client attaches it to the `conversation_id` and MUST NOT retry (contrast the transient `server.binary_busy`). |
+| `attachment.invalid_chunk` | no | An `attachment_chunk`'s framing claims are inconsistent or out of range: a duplicate `index`, an `index` outside `[0, total_chunks)`, or a `total_chunks` disagreeing with the stream's earlier chunks (#1741). The receiver discards the whole in-flight stream; resending the same frames reproduces it, so the repair is to re-chunk. See [Attachments](#attachments). |
+| `attachment.integrity_failed` | no | The assembled bytes do not match the declared `sha256`, **or** the assembled length does not match the declared `size` (#1741). One code for both mismatches: a client's repair for either is to re-derive the metadata from the file and re-upload, never to retry the same bytes against the same claims. |
+| `attachment.too_many_uploads` | yes, after a backoff | The receiver's bound on **concurrent in-flight uploads** is hit (#1741). The one bound in this family that clears on its own — it clears when *other* uploads finish, so a client MUST back off rather than resend immediately: an immediate retry both fails and consumes the capacity it is waiting for. Contrast the permanent `attachment.too_large`. |
+| `attachment.too_large` | no | **One upload** exceeds the receiver's per-upload byte bound, detected either from the declared `size` on the first chunk or from accumulated bytes later (#1741). Permanent for that file — the same bytes fail the same way every time, so a client shrinks the file rather than retrying. Not `message.too_long`, which says one **envelope** was oversized. |
+| `attachment.storage_failed` | yes, after a backoff | A verified attachment could not be written to the host (#1743, surfaced by #1744). Carries a **static** message — never the host path and never the underlying filesystem error, either of which discloses the daemon's layout. The host condition may not clear at all, so a client MUST back off and MUST NOT hot-loop the re-upload. |
+| `attachment.not_found` | no | A retrieval request did not resolve to a file inside the named conversation's directory (#1746). **Deliberately indistinguishable** across an unknown id, an id whose canonical shape is invalid, and an id resolving outside that directory — a disclosure decision, not an imprecision: two codes would make the retrieval verb a path-existence oracle for a traversal probe. Nothing is lost by the merge, because all of those outcomes mean the same thing to a client — re-list the conversation's attachments — so there are no sub-cases to branch on. The message is static and never echoes the requested id or the resolved path. |
+| `attachment.stream_aborted` | yes, after a backoff | The daemon abandoned a retrieval **mid-stream** (#1746). An `error` envelope correlated via `in_reply_to`, never a second attachment frame. The client **MUST discard everything accumulated for that transfer** and MUST NOT present the partial bytes as the file — with no completion frame this is the only negative signal the stream has. A re-request re-runs the same resolution work, so retry after a backoff, never immediately. |
 
 WS close codes used at the transport layer:
 
@@ -1835,6 +2001,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-08-25`: Published [Attachments](#attachments) and the seven `attachment.*` reject codes (#1751). #1752 landed the shared `attachment_chunk` frame and #1753 its 45000-raw-byte per-chunk bound with **nothing published here**, so a client author had to reverse-engineer both legs from Go struct comments — and this document actively contradicted the landed code in two places, **both corrected**: § Application-envelope size cap claimed large payloads "require an envelope-level chunking scheme that is out of scope for this spec", and § Scope listed attachments as out of scope outright (now narrowed to the daemon-side implementation, which really is unbuilt). The section publishes the one frame carrying **both** directions — upload phone → binary, retrieval binary → phone — with its eight always-present fields, the sender's chunking arithmetic (`total_chunks = max(1, ceil(size / 45000))`, every chunk but the last exactly at the bound, the `max(1, …)` defining a zero-byte file as one empty chunk), the receiver's **index-addressed** reassembly where chunks may arrive in **any order** — deliberately weaker than `debug_bundle_chunk`'s strict `seq` succession, which is the neighbouring rule a reader would otherwise copy — exact-lowercase-hex `sha256` compared as **integrity, not authenticity** and explicitly not a fetch key, and the **never allocate from a claim** rule with its first-chunk cross-check. The reject vocabulary is declared in one place so #1741, #1743, #1744 and #1746 answer from a shared list instead of each inventing a name months apart, and two of its decisions are published as contracts rather than left to those implementations. `attachment.not_found` is **one code for every retrieval that yields no bytes** — unknown id, non-canonical id, and an id resolving outside the named conversation's directory alike, with a static message that never echoes the id or the resolved path — because two distinguishable codes would make the retrieval verb a path-existence oracle for a traversal probe; nothing is lost, since all of those outcomes mean the same thing to a client. And the receiver's resource bound **splits into two codes on retryability**: "too many concurrent uploads" clears when *other* uploads finish, while "this upload is over the byte bound" is permanent for that file, so a single code would tell a client either to re-upload an oversized file in a loop or to give up on a bound that clears in seconds. All three retryable rows carry an explicit **back off, never resend immediately** obligation, matching the `4429` row's existing language, because `retryable: yes` alone turns a conforming client into a hot loop. Neither the per-upload byte bound nor the concurrency bound is given a **number** — those are #1741's to pick, and publishing a figure ahead of the code that enforces it is what #1752 existed to prevent; a client learns them by being rejected. **Nothing emits, accepts or enforces any of this yet** (reassembly #1741, storage #1743, inbound dispatch #1744, retrieval #1746), the same declare-then-publish sequencing #1704→#1705 and #1726→#1718 used. `attachment_chunk` also gains the application-message-types table's first genuinely **bidirectional** row.
 - `2026-08-24`: Added `slash_command_list` (binary → phone, interactive-capability-gated, #1718). The wire type — `TypeSlashCommandList` — was declared by #1726 and the shape — `SlashCommandListPayload`, `SlashCommand` and their two `MarshalJSON` normalisers — by #1727, both with no fixtures and no section here, so a client author had to write a decoder by reading Go structs; this entry lands the committed bytes and the prose together, exactly as #1705 did for `model_list` and #1405 and #1616 each did before it. Two consumers are blocked on the shape rather than on the producer: pyrycode-desktop#681, the Actions-menu grey-out that matches its menu entries against the list, and pyrycode-desktop#694, a slash-command type-ahead that renders each row as a name, an argument hint and a description. **Nothing emits the frame yet**: the producer is #1720, the fourth instance of the declare-then-emit sequencing #1405 used ahead of #1410, #1616 ahead of #1638 and #1704 ahead of #1693. Three fixtures pin the encoding — a **populated** frame carrying five rows drawn in claude's own order from the committed capture `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` (claude 2.1.239, re-measured 2026-08-24), covering both of the capture's key sets, an empty argument hint, a multi-element and a single-element alias array, the `<model>` hint that pins Go's HTML escaping, `claude-api`'s two embedded newlines beside raw non-ASCII, and one row reporting a cut `description` beside four reporting `null`; an **empty** frame carrying no commands at all, where `commands` is present as `[]` rather than elided; and a **zero-value** payload whose single all-zero entry is the only route to five of the eight wire keys, since a frame carrying no entries cannot reach `SlashCommand`'s keys at all. Adding `omitempty` to any one of those eight keys, one at a time, was **run** rather than reasoned about — each mutant scoped to one struct over a scratch overlay, since `json:"conversation_id"` alone appears 17 times in the file — and all eight turn at least one test red, with the five that reach no other assertion in the tree (`conversation_id`, `dropped_commands`, `name`, `argument_hint`, `description`) reddened by the fixtures this entry commits. Four client-facing properties are stated because a client gets each wrong by default: **a name-only match misses aliases** (11 across 9 of the 51 entries, and the desktop Actions menu's own `reset` is an alias of `clear`, not a name), and the cheaper source cannot repair it because the same capture's `system`/`init` line carries a names-only `slash_commands` twin — identical 51 names, identical order, not one of the 11 aliases; **the count is workspace- and version-dependent** (51 here against 2.1.239, an earlier hand count against 2.1.220 in a different working directory reported 74), so no client may cache it, assume a floor, or treat a small list as an error; **the strings are workspace-authored, bounded but not sanitized**, a lower-trust origin than claude's own, with `0x0a` the only sub-`0x20` byte anywhere across the 51 entries' four string fields, so a type-ahead row assuming one line per description will not get one; and **a cut is reportable and must be read**, with the size quoted with its unit named (14,277 bytes of compact UTF-8 against 14,371 `\u`-escaped, and the wire exactly neither because Go escapes only `<`, `>`, `&` and U+2028/U+2029). Because `aliases` collapses absent and empty into the same `[]`, a `truncated_fields` naming `aliases` is the only signal separating "cut to nothing" from "none", and the section says a client must read it as *unknown*. `dropped_commands` is documented with `model_list`'s honest qualification copied: nothing counts it yet, so `len(commands) + dropped_commands` is not the menu's true size today and no entry cap is enforced — #1719 and #1720 own the bound. § `model_list` gains one sentence and a link so the two frames reach each other from either arrival point: both publish a per-conversation menu from the same `initialize` reply, one inventorying identities and the other verbs. **No live count moved**: this frame is not a `turnevent` variant and is not one of the turn-stream events, so all three sentences carrying that count — § Interactive events, `session_transition` and `model_list` — still read **fifteen**, and landing the subsection **after** § `model_list` is what keeps every one of them checkable by counting `####` headings. § `unrecognized_message`'s count of five is likewise untouched — it counts `system` subtypes the parser maps internally, and this frame arrives on a `control_response`. Apart from that single added sentence in § `model_list`, the whole diff to this file is additive.
 - `2026-08-22`: Added `model_list` (binary → phone, interactive-capability-gated, #1705). The shape — `TypeModelList`, `ModelListPayload`, `ModelOption` — was declared by #1704 with no fixtures and no section here, so a client author had to write a decoder by reading Go structs; this entry lands the committed bytes and the prose together, as #1405 and #1616 each did. The consumer is pyrycode-desktop#561, blocked since 2026-08-19, which derives its model menu from the identifiers and its effort segments from the per-model levels; pyrycode-desktop#682 is the second consumer, for `supports_auto_mode` — claude refuses `auto` permission mode per model, so a permission-mode menu needs the flag to grey the option out. **Nothing emits the frame yet**: the producer is #1693, the same declare-then-emit sequencing #1405 used ahead of #1410 and #1616 ahead of #1638. Three fixtures pin the encoding — a **populated** menu carrying the five rows measured live against claude 2.1.220 on 2026-08-21 (including Haiku's, whose effort list is empty because claude's reply omits the key entirely, and one row reporting a cut `value` beside four reporting `null`); an **empty** frame carrying no models at all, where `models` is present as `[]` rather than elided; and a **zero-value** payload whose single all-zero entry is the only route to five of the nine wire keys, since a frame carrying no entries cannot reach `ModelOption`'s keys at all. Adding `omitempty` to any one of those nine keys, one at a time, was **run** rather than reasoned about, and each of the nine turns at least one test red. Four client-facing properties are stated because a client gets each wrong by default: `value` is **not a dated identifier** (an alias, a bracketed variant, or `default`), so it cannot be split on `-` to derive a family; a lookup against this list **can miss and that is ordinary**, since claude announces an identifier at least as specific as the one it was given, and `display_name` rather than `resolved_model` is the intended join back to `model_announced`; **two of the five measured values are rejected by the daemon's own inbound validator** (`opus[1m]` and `claude-fable-5[1m]` — the bracket is outside the charset), so a menu row is not necessarily sendable back, and the charset is **not** widened to close the gap because it is #845's argv-injection defense; and the strings are claude-authored, **bounded but not sanitized**, a report and never a control input, with the amendment that `value` is the first field in this family a client is meant to send back and publishing it does not make it trusted. `dropped_models` is documented with its honest qualification: nothing counts it yet, so `len(models) + dropped_models` is not the menu's true size today and no entry cap is enforced. `model_announced` gains one sentence and a link so the two frames reach each other from either arrival point. **No live count moved**: this frame is not a `turnevent` variant and is not one of the turn-stream events, so § Interactive events and `session_transition` both still read **fifteen**, and landing the subsection **after** `session_transition` is what keeps both sentences checkable by counting `####` headings. § `unrecognized_message`'s count of five is likewise untouched — it counts `system` subtypes the parser maps internally, and this frame arrives on a `control_response`. The three existing rows carrying a wire field named `model` are **not** re-pointed: unlike #1616's collision the name is not literally shared here (this payload has `models`, `value` and `resolved_model`), and the distinction that needed drawing is the one between the two frames that publish model identity.
 - `2026-08-20`: `request_session_settings` now answers for the conversation the client **named** (#1610). The reply's `session_id` and its five reported values all describe the session bound to that conversation; before this they described the shared **bootstrap** session whichever conversation was named, and the client then put that bootstrap id on its `set_session_settings` — so an operator changing the model, effort or **bypass-permissions** posture from a sheet was silently reconfiguring a background session they were not looking at. The id and the values move as one because the daemon resolves them together, which is the property the previous shape could only assert in prose. **An absent or empty `conversation_id` now gets the all-zero reply**, inverting the `2026-08-19` entry below: a request that names no conversation names no session, and the only alternative would be to hand-build an explicit fallback to the shared session, which is the route the multi-session work forbids. Still never an error frame, and still no failure branch — the all-zero `session_settings` is the answer for every unresolvable case, and an unknown conversation is indistinguishable from an unbound one. **Client companion change, not lock-step:** an un-updated client that sends the older bare frame now gets a visibly inert sheet until it puts `{"conversation_id": "<the conversation the sheet is for>"}` on the payload. That is the accepted trade in this direction — an inert sheet beats one that silently writes a bypass-permissions choice into someone else's session — and the field has existed since #1586, so a client that starts sending it **today**, before this lands, is answered identically. The reply's `session_id` then already addresses the right session, so the existing `set_session_settings` write path needs no change. `screen_snapshot`'s side-loaded copies of these values are untouched and remain bootstrap-scoped; they were already deprecated in favour of this route.
