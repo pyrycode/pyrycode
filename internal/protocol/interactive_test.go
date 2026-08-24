@@ -1539,8 +1539,9 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 // TestSlashCommandListPayload_NilCommandsNormalises covers the case no fixture
 // could — and here that is the ONLY path there is. Unmarshalling "commands":[]
 // always yields a non-nil empty slice, so the nil branch is reachable only by
-// constructing the value directly, and this slice (#1727) ships no fixture at all
-// (internal/protocol/testdata/ is #1718's). A producer (#1720) mapping an empty
+// constructing the value directly: slash_command_list_empty.json carries the key
+// as [] and decodes to an empty non-nil slice, never to nil. A producer (#1720)
+// mapping an empty
 // or absent claude commands array would hand this type a nil slice and, without
 // normalisation, would ship "commands":null to a phone.
 //
@@ -1581,13 +1582,15 @@ func TestSlashCommandListPayload_NilCommandsNormalises(t *testing.T) {
 }
 
 // TestSlashCommand_NilSliceEncodings pins the asymmetry between the entry's two
-// list fields, which no fixture could pin either: decoding [] always yields a
-// non-nil slice, and this slice ships no fixture at all. Aliases normalises nil
+// list fields at the one value no fixture can reach: decoding [] always yields a
+// non-nil slice, so only a constructed value is nil here. Aliases normalises nil
 // to [], TruncatedFields does not and stays null.
 //
-// truncated_fields is pinned at all precisely BECAUSE it ships no fixture. An
-// unpinned null is one that a later omitempty, or a third normaliser copied from
-// the field above it, silently turns into something else.
+// The fixtures (#1718) now pin "truncated_fields":null in the wire bytes, and
+// this test survives that because it reaches what they cannot: the value form,
+// the pointer form, the nested-in-payload form, and the caller's-backing-array
+// assertion below. An unpinned nil is one that a later omitempty, or a third
+// normaliser copied from the field above it, silently turns into something else.
 //
 // The nested-in-payload subtest proves the entry marshaller fires through the
 // payload's, and its trailing assertion is the only thing that would catch a
@@ -1750,4 +1753,268 @@ func TestSlashCommandListType_IsNotClaudesVocabulary(t *testing.T) {
 			t.Errorf("payload carries claude's spelling %q: %s", key, body)
 		}
 	}
+}
+
+// TestSlashCommandListPayload_RoundTrip pins the populated menu's bytes: five
+// rows drawn from the 51-entry array claude 2.1.239 returned from a
+// control_request with subtype initialize (the committed capture
+// internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json,
+// re-measured 2026-08-24), in claude's own capture order.
+//
+// The five are a SAMPLE, not the whole array and not evidence of any cap. They
+// are chosen to cover both of the capture's key sets — 42 of 51 carry name,
+// description and argumentHint, the other 9 add aliases, and there is no third
+// — and the four properties a client otherwise gets wrong: clear carries the
+// aliases whose reset is the desktop Actions menu's own entry (a name-only
+// matcher greys out a command that works), config carries a single-element
+// alias array beside clear's two, model's <model> hint is the pin on Go's HTML
+// escaping, usage pairs aliases with an empty hint, and claude-api carries the
+// only sub-0x20 byte on this path — 0x0a — beside raw non-ASCII em dashes that
+// the same encoder passes through unescaped.
+//
+// Two values are CHOSEN rather than captured, in TestModelListPayload_RoundTrip's
+// register — a fixture is something a client author copies as if it were
+// observed, so the parts that were not observed have to say so:
+//
+//   - "aliases":[] on rows 1 and 4. claude never sends an empty alias array:
+//     zero of the capture's 51 entries carry one and 42 omit the key. [] is the
+//     position SlashCommand.MarshalJSON decided for both, so it is what the wire
+//     states and what a fixture has to show.
+//   - truncated_fields on row 1. Nothing cut that description; the fixture
+//     carries it at its full measured length. The flag is chosen to discriminate
+//     a struct that drops or mis-wires the field, and claude-api is the sharpest
+//     pairing available — 1078 bytes against the capture's 69-byte median, in the
+//     10-of-51 population a per-field bound cuts first. Populated on one row and
+//     null on the other four is model_list.json's own two-form pattern.
+//   - dropped_commands. 2, non-zero so this fixture pins the value rather than
+//     the zero encoding. Nothing counts it yet: #1719 owns making the decode
+//     record it, #1720 is where the field and a counter meet.
+//
+// Row 1's description is asserted by measured property rather than as an exact
+// string — it is the only row too long for the table, and byte length, rune
+// length, the newline count and a prefix pin it more legibly than 1078 bytes of
+// literal would.
+//
+// An omitempty on name, argument_hint or description is red here as well as on
+// the zero-value fixture: canonical is json.Compact only, so the round trip
+// re-encodes through the struct and the elided key diverges the bytes.
+func TestSlashCommandListPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "slash_command_list.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSlashCommandList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSlashCommandList)
+	}
+
+	var payload SlashCommandListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if len(payload.Commands) != 5 {
+		t.Fatalf("Commands: got %d entries, want 5", len(payload.Commands))
+	}
+
+	rows := []struct {
+		name            string
+		argumentHint    string
+		description     string // empty where the row asserts by property below
+		aliases         string // joined, the idiom the roster and model-list tests use
+		truncatedFields []string
+	}{
+		{"claude-api", "", "", "", []string{"description"}},
+		{"clear", "[name]", "Start a new session with empty context; previous session stays on disk (resumable with /resume)", "reset,new", nil},
+		{"config", "key=value", "Set a setting by key", "settings", nil},
+		{"model", "<model>", "Set the AI model for Claude Code", "", nil},
+		{"usage", "", "Show session cost, plan usage, and what's contributing to your limits", "cost,stats", nil},
+	}
+	for i, want := range rows {
+		got := payload.Commands[i]
+		t.Run(want.name, func(t *testing.T) {
+			if got.Name != want.name {
+				t.Errorf("Name: got %q, want %q", got.Name, want.name)
+			}
+			if got.ArgumentHint != want.argumentHint {
+				t.Errorf("ArgumentHint: got %q, want %q", got.ArgumentHint, want.argumentHint)
+			}
+			if want.description != "" && got.Description != want.description {
+				t.Errorf("Description: got %q, want %q", got.Description, want.description)
+			}
+			// Absent and empty are the same [] position (SlashCommand.MarshalJSON's
+			// COLLAPSE), so rows 1 and 4 decode to an empty slice and join to "".
+			if joined := strings.Join(got.Aliases, ","); joined != want.aliases {
+				t.Errorf("Aliases: got %q, want %q", joined, want.aliases)
+			}
+			// Both forms of the per-entry truncation report are pinned across the
+			// five rows: populated on one, null on the rest. truncated_fields is
+			// deliberately NOT normalised the way aliases is — nil and [] say the
+			// identical thing here.
+			if want.truncatedFields == nil && got.TruncatedFields != nil {
+				t.Errorf("TruncatedFields: got %v, want nil", got.TruncatedFields)
+			}
+			if joined, wantJoined := strings.Join(got.TruncatedFields, ","), strings.Join(want.truncatedFields, ","); joined != wantJoined {
+				t.Errorf("TruncatedFields: got %q, want %q", joined, wantJoined)
+			}
+		})
+	}
+
+	// claude-api's description by measured property. The newline count is the
+	// load-bearing one: 0x0a is the ONLY sub-0x20 byte anywhere across the 51
+	// entries' four string fields, so a type-ahead row assuming one line per
+	// description meets its counterexample on this frame. The byte/rune split is
+	// the em dashes, which Go's encoder passes through as raw UTF-8.
+	t.Run("claude-api description", func(t *testing.T) {
+		d := payload.Commands[0].Description
+		if len(d) != 1078 {
+			t.Errorf("byte length: got %d, want 1078", len(d))
+		}
+		if runes := len([]rune(d)); runes != 1068 {
+			t.Errorf("rune length: got %d, want 1068", runes)
+		}
+		if n := strings.Count(d, "\n"); n != 2 {
+			t.Errorf("newline count: got %d, want 2", n)
+		}
+		const prefix = "Reference for the Claude API / Anthropic SDK — model ids, pricing,"
+		if !strings.HasPrefix(d, prefix) {
+			t.Errorf("prefix: got %q, want it to start with %q", d, prefix)
+		}
+	})
+
+	// The count dimension, decided at the menu level and distinct from any row's
+	// text cut. Nothing counts it yet, so a client must not read
+	// len(commands) + dropped_commands as the menu's true size today.
+	if payload.DroppedCommands != 2 {
+		t.Errorf("DroppedCommands: got %d, want 2", payload.DroppedCommands)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSlashCommandListPayload_Empty_RoundTrip pins the frame carrying no
+// commands at all, on TestModelListPayload_Empty_RoundTrip's shape.
+//
+// The opening byte guard is that sibling's own device and is load-bearing rather
+// than decoration: without it an omitempty on Commands would elide the key from
+// BOTH the fixture and the re-marshalled bytes, and the round trip alone would go
+// on passing. An empty menu is a positive statement — claude offered nothing —
+// rather than an absence, which is why the key is present as [] — see
+// SlashCommandListPayload.MarshalJSON.
+func TestSlashCommandListPayload_Empty_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "slash_command_list_empty.json")
+
+	if !bytes.Contains(canonical(t, raw), []byte(`"commands":[]`)) {
+		t.Errorf("fixture must carry the commands key as an empty array, got: %s", raw)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSlashCommandList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSlashCommandList)
+	}
+
+	var payload SlashCommandListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if len(payload.Commands) != 0 {
+		t.Errorf("Commands: got %d entries, want 0", len(payload.Commands))
+	}
+	if payload.DroppedCommands != 0 {
+		t.Errorf("DroppedCommands: got %d, want 0", payload.DroppedCommands)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSlashCommandListPayload_ZeroValue_RoundTrip pins the encoding of every
+// field's zero value across BOTH types, which is what this stream's no-omitempty
+// rule (docs/protocol-mobile.md § Interactive events) actually asserts.
+//
+// It is the fixture that carries most of the wire: five of the eight keys are
+// reachable only here, and commands carries exactly one entry precisely because
+// an empty list cannot reach SlashCommand's keys at all. The asymmetry inside
+// that entry — aliases [] beside truncated_fields null — is the two marshallers'
+// decided positions rather than a typo; SlashCommand.MarshalJSON says why the
+// two list fields differ.
+//
+// The five byte guards are what make "explicit zero, not elided" checkable at
+// all, exactly as TestModelListPayload_ZeroValue_RoundTrip's six are. Measured by
+// running each of the eight keys as an omitempty mutant over a scratch overlay:
+// conversation_id, dropped_commands, name, argument_hint and description reach no
+// other assertion in the tree, so this fixture is the only thing that reddens
+// them; commands, aliases and truncated_fields are red here too and additionally
+// under the constructed-value tests above, the only route that reaches a nil
+// slice at all.
+//
+// The frame is one no producer will ever emit — a real menu names a conversation
+// and its rows carry command names. It exists for the encoding, not the scenario.
+func TestSlashCommandListPayload_ZeroValue_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "slash_command_list_zero.json")
+
+	// Two payload keys and three entry keys: the five whose zero value an
+	// omitempty would elide and which no other test reaches.
+	for _, want := range []string{
+		`"conversation_id":""`,
+		`"dropped_commands":0`,
+		`"name":""`,
+		`"argument_hint":""`,
+		`"description":""`,
+	} {
+		if !bytes.Contains(canonical(t, raw), []byte(want)) {
+			t.Errorf("fixture must carry %s explicitly at its zero value, got: %s", want, raw)
+		}
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSlashCommandList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSlashCommandList)
+	}
+
+	var payload SlashCommandListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "")
+	}
+	if payload.DroppedCommands != 0 {
+		t.Errorf("DroppedCommands: got %d, want 0", payload.DroppedCommands)
+	}
+	if len(payload.Commands) != 1 {
+		t.Fatalf("Commands: got %d entries, want 1", len(payload.Commands))
+	}
+
+	entry := payload.Commands[0]
+	if entry.Name != "" {
+		t.Errorf("Name: got %q, want %q", entry.Name, "")
+	}
+	if entry.ArgumentHint != "" {
+		t.Errorf("ArgumentHint: got %q, want %q", entry.ArgumentHint, "")
+	}
+	if entry.Description != "" {
+		t.Errorf("Description: got %q, want %q", entry.Description, "")
+	}
+	// Decoding [] yields a non-nil empty slice while null yields nil, so this pair
+	// pins the fixture's asymmetry on the decode side too.
+	if entry.Aliases == nil || len(entry.Aliases) != 0 {
+		t.Errorf("Aliases: got %v, want an empty non-nil slice", entry.Aliases)
+	}
+	if entry.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil", entry.TruncatedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
 }
