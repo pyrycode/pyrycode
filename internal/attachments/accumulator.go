@@ -16,8 +16,11 @@
 // it yields the complete bytes or it fails cleanly, and never partial or
 // corrupted output.
 //
-// In-memory only. Nothing here touches the filesystem, reads a socket, or emits
-// a wire code, and the package makes zero log calls. Every refusal is a Go
+// In-memory for accumulation and admission: nothing on those paths touches the
+// filesystem, and EnsureDir — which resolves and creates the directory an
+// attachment is filed under — is the sole function here that does. Nothing
+// reads a socket or emits a wire code, and the package makes zero log calls,
+// EnsureDir included. Every refusal is a Go
 // sentinel so the daemon's logs and this package's tests can tell them apart;
 // mapping the three framing refusals to the single attachment.invalid_chunk
 // wire code and the two integrity refusals to attachment.integrity_failed is
