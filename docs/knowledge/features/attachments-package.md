@@ -1,12 +1,15 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776), four slices of the family split from
-#1741/#1766: holds one inbound attachment upload's chunks in memory, addressed
-by index, refuses a stream whose framing contradicts what the transfer
-declared at admission (#1769), and — once the transfer is complete — checks
-the assembled bytes against the transfer's declared length and lowercase-hex
-sha256 before yielding a single byte (#1770). In-memory only — no disk, no
-wire codes, no logger, no lock.
+Package (#1769, #1770, #1772, #1776, #1777), five slices of the family split
+from #1741/#1766: holds one inbound attachment upload's chunks in memory,
+addressed by index, refuses a stream whose framing contradicts what the
+transfer declared at admission (#1769), and — once the transfer is complete —
+checks the assembled bytes against the transfer's declared length and
+lowercase-hex sha256 before yielding a single byte (#1770). Bounds the
+retained bytes of one upload to a receiver-configured, unpublished ceiling,
+refusing at either the declared size or the accumulated total (#1777, see
+§ "Per-upload byte bound" below). In-memory only — no disk, no wire codes, no
+logger, no lock.
 
 `SanitizeFilename` (#1772, `filename.go`) is unrelated in shape but shares the
 package: a pure, stateless function turning a client-supplied
@@ -82,15 +85,75 @@ no validator, by design.
   an absolute size cap here would be scope creep this ticket deliberately
   declined.
 
+## Per-upload byte bound (#1777)
+
+Two rungs enforce one constant, `maxUploadBytes` (16 MiB, `admission.go`), and
+share one sentinel, `ErrUploadTooLarge`: `CheckDeclaredSize` refuses a
+declared `size` above the bound on the first chunk, before any bytes are
+held; `Add`'s step 5 — last in its fixed check order, after the duplicate
+check, immediately before the store — refuses the chunk that would take the
+held total past it, routed through the existing `reject` latch. The crossing
+chunk's own bytes are the one transient "slack," bounded by the transport's
+65519-byte envelope cap and never retained.
+
+- **The declared rung is a sibling of `CheckDeclaration`, not a fold-in** —
+  measured, not assumed, same as the admission-layer decisions above.
+  `TestCheckDeclaration`'s `math.MaxInt64` row is the only row that pins the
+  ceiling arithmetic's exact value; folding a magnitude check into
+  `CheckDeclaration` would refuse that pair and destroy the sole pin on the
+  wrapping form that silently admits the wire's largest declaration. Two
+  sentinels with two different client-visible repairs — re-chunk vs. shrink
+  the file — is also a worse contract from one function than from two.
+- **`CheckDeclaredSize` admits a negative `size` on purpose.** Magnitude is
+  its whole subject; `CheckDeclaration` already owns the negative-`size`
+  refusal, and a second owner would make which sentinel a caller sees depend
+  on call order. Both checks must run, on the first chunk, before
+  `NewAccumulator` — #1744's obligation, not either function's, since neither
+  can enforce the other's presence.
+- **The pairing is what bounds the key space, not either check alone.**
+  `CheckDeclaration` bounds `total_chunks` from above, `CheckDeclaredSize`
+  bounds `size` from above; together an admitted transfer declares at most
+  373 chunks. `CheckDeclaredSize` alone admits a declaration of 2³¹−1 declared
+  zero-byte chunks, which no byte bound can refuse, since Σ `len(Data)` stays
+  0 regardless of how many chunks are declared.
+- **The accumulated rung is subtraction, not a sum**: `len(chunk.Data) >
+  maxUploadBytes - a.received`, never `received + len > bound`. The
+  invariant `0 <= received <= maxUploadBytes` is what keeps the subtraction's
+  right operand non-negative; the addend is a materialised slice length
+  rather than a claimed number, so the sum form's wrap isn't reachable in
+  practice either, but the safe form is written anyway so a later reader
+  doesn't "simplify" it back or read the discipline as cargo cult.
+- **Code review correction: the daemon-wide worst-case *peak* is `2N ×
+  bound`, not `(N+1) × bound`.** The landed doc's "Retained is not peak"
+  paragraph states the worst case as one bound of retained memory across `N`
+  concurrent uploads plus a single extra bound for one in-flight `Assemble`
+  call — true only if `Assemble` calls across sessions were serialized. They
+  are not: `appFrameWorker` (`internal/relay/v2session.go`) documents "no two
+  handlers for **the same conn** run concurrently," which is a per-session
+  guarantee, not a daemon-wide one — one worker is spawned per session, so
+  `N` concurrent sessions can each be inside their own `Assemble` call at the
+  same moment. The correct worst-case peak is `N` bounds retained plus up to
+  `N` more in flight — 128 MiB at a concurrency of 4, not 80 MiB. The
+  *resident* (non-peak) figure the constant's doc states — `bound ×
+  concurrency` — is correct and is what #1778 should inherit as its budget;
+  it is only the peak-during-assembly refinement layered on top that
+  undercounts. **#1778: budget peak as `2N × bound`, not the `(N+1) × bound`
+  the code comment currently states** — this was a code-review SHOULD FIX
+  landed as text-only (no enforcement is wrong, only the doc's peak
+  refinement), so the comment itself was not corrected.
+
+Blocked, still: the in-flight-upload count and the registry (#1778) — this
+package bounds one upload's bytes, not how many uploads may exist at once.
+
 ## Sentinels and discard semantics
 
-Six exported sentinels, `errors.New("attachments: …")` house style, in two
-families plus one non-discarding outlier. Five discard the transfer (latched
-on first refusal — every later `Add` and `Assemble` returns the identical
-wrapped error, and the held chunk bytes are dropped at the moment of refusal
-so a poisoned accumulator holds no memory past that point). `ErrIncomplete` is
-the outlier and does **not** latch or discard — it is the resumable answer a
-later chunk can turn into bytes.
+Seven exported sentinels, `errors.New("attachments: …")` house style, in
+three families plus one non-discarding outlier. Six discard the transfer
+(latched on first refusal — every later `Add` and `Assemble` returns the
+identical wrapped error, and the held chunk bytes are dropped at the moment
+of refusal so a poisoned accumulator holds no memory past that point).
+`ErrIncomplete` is the outlier and does **not** latch or discard — it is the
+resumable answer a later chunk can turn into bytes.
 
 | Sentinel | Family | Latches? |
 |---|---|---|
@@ -99,20 +162,30 @@ later chunk can turn into bytes.
 | `ErrDuplicateIndex` | framing | yes |
 | `ErrSizeMismatch` (#1770) | integrity | yes |
 | `ErrDigestMismatch` (#1770) | integrity | yes |
+| `ErrUploadTooLarge` (#1777) | resource | yes (from `Add`); n/a (from `CheckDeclaredSize` — no `Accumulator` exists yet) |
 | `ErrIncomplete` | — | no |
+
+`ErrUploadTooLarge` is the one sentinel not scoped to `accumulator.go`'s var
+block, whose opening sentence reads "Sentinel errors returned by `Add` and
+`Assemble`" — it is also returned by an admission function that runs before
+an `Accumulator` exists, so it lives in `admission.go` beside
+`ErrInvalidDeclaration` instead.
 
 Mapping these to the wire is #1744's job at the dispatch site — this package
 emits no wire codes and does not import `codes.go`. The mapping is
-deliberately many-to-one within each family: all three framing sentinels
-answer `CodeAttachmentInvalidChunk`, both integrity sentinels answer
-`CodeAttachmentIntegrityFailed`. Distinguishability is wanted in-process, for
-this package's own tests and for the daemon's logs, not on the wire — a
-single corrupt transfer must still resolve to exactly one wire code, which is
-why `reject` (the shared latch primitive both families call) has to run for
-an integrity failure too: without the latch, a chunk sent after an integrity
-reject on an already-complete transfer would fall through to
-`ErrDuplicateIndex`, and one transfer would emit two different wire codes at
-#1744.
+deliberately many-to-one within the framing and integrity families: all
+three framing sentinels answer `CodeAttachmentInvalidChunk`, both integrity
+sentinels answer `CodeAttachmentIntegrityFailed`. `ErrUploadTooLarge` is
+one-to-one — `CodeAttachmentTooLarge` — and permanent for that file, in
+contrast to #1778's still-unbuilt `CodeAttachmentTooManyUploads`, which is
+marked transient because it clears once other uploads finish. Distinguishing
+sentinel from sentinel is wanted in-process, for this package's own tests and
+for the daemon's logs, not on the wire — a single corrupt transfer must still
+resolve to exactly one wire code, which is why `reject` (the shared latch
+primitive every discarding family calls) has to run for a resource refusal
+too: without the latch, a chunk sent after an `ErrUploadTooLarge` reject on
+an already-refused transfer would fall through to a framing check, and one
+transfer would emit two different wire codes at #1744.
 
 `Assemble`'s two integrity comparisons (#1770) both read the assembled `out`
 slice itself — never a proxy computed from the chunk map or the per-chunk
@@ -251,6 +324,14 @@ surfaced:
   under the fast-path mutant instead of just this row — a sole-redness
   measurement taken against that setup would report the wrong thing about a
   mutant that is genuinely caught.
+- **Deleting a struct field's `+=` update is not the same hazard as deleting
+  a local's sole read or an import** (#1777, refining the build-failure trap
+  above). Dropping `a.received += int64(len(chunk.Data))` compiles cleanly —
+  a field that's assigned but never read doesn't trip Go's unused-variable
+  check the way a local does — so the mutant measured the crossing test's
+  real coverage with no `_ = a.received` prop needed. The "grep for `build
+  failed`" trap is specific to locals and imports; a field-update deletion
+  needs no such guard before trusting its verdict.
 
 All three properties #1769 shipped without a test pin are now pinned,
 landed alongside #1770's own checks rather than left for a third mutation
@@ -284,11 +365,14 @@ hash, fetch the blob"), which is a requirement from
 
 - **#1767** — closed, split into this family. The first-chunk
   `total_chunks`/`size` cross-check landed as `CheckDeclaration` (#1776, see
-  § "Admission layer" above). Still blocked: the per-upload byte bound
-  (**#1777**) and the in-flight-upload count plus the registry
+  § "Admission layer" above), and the per-upload byte bound landed as
+  `CheckDeclaredSize` + `Add`'s step 5 (#1777, see § "Per-upload byte bound"
+  above). Still blocked: the in-flight-upload count and the registry
   (`attachment_id` → `*Accumulator`) that needs its own lock (**#1778**) —
   `Accumulator` itself carries none, because it is fed serially by one
-  session's `appFrameWorker` goroutine.
+  session's `appFrameWorker` goroutine, and should inherit the `2N × bound`
+  peak / `N × bound` resident figures from § "Per-upload byte bound" rather
+  than re-deriving them.
 - **#1742** — expiry/abandonment of a partial upload. Note this covers
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch

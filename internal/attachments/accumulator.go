@@ -26,12 +26,16 @@
 //
 // The receiver's resource bounds are owned three separate ways, and admission
 // runs before an Accumulator exists: how many uploads may be in flight is
-// #1778's, how many bytes one may accumulate is #1777's, and the first-chunk
-// total_chunks/size cross-check that refuses before allocating is
-// CheckDeclaration, in this package. What this slice bounds on its own is the
-// KEY SPACE: the range check means no accumulator ever holds more entries than
-// the count it was constructed with, and nothing here is ever sized from a
-// claim.
+// #1778's; how many bytes one may accumulate is maxUploadBytes, enforced twice
+// in this package — the declared size at CheckDeclaredSize and the accumulated
+// bytes at step 5 of Add — and the first-chunk total_chunks/size cross-check
+// that refuses before allocating is CheckDeclaration, also in this package. What
+// this package bounds on its own is the KEY SPACE: the range check means no
+// accumulator ever holds more entries than the count it was constructed with,
+// and nothing here is ever sized from a claim. With both admission checks run
+// that claim is now absolute rather than merely relative — an admitted transfer
+// declares at most 373 chunks, since maxUploadBytes at
+// protocol.MaxAttachmentChunkBytes needs no more.
 package attachments
 
 import (
@@ -118,6 +122,23 @@ type Accumulator struct {
 	// and completion counts entries — neither ever tests a value for nil.
 	chunks map[int][]byte
 
+	// received is Σ len(data) of the chunks CURRENTLY HELD, maintained by Add
+	// as it stores them. INVARIANT: 0 <= received <= maxUploadBytes, which is
+	// what lets step 5's comparison be written as a subtraction that cannot
+	// wrap.
+	//
+	// Never reset, a refusal included: reject drops the map and latches, and
+	// every path out of a refused transfer short-circuits on that latch before
+	// reaching this field, so zeroing it would be a write nothing can observe.
+	//
+	// It is NOT substitutable into Assemble, which looks like the one place a
+	// running total would save work and is the one place it must not be used:
+	// sizing or comparing from a counter maintained here would reintroduce
+	// exactly the proxy "the bytes verified are the bytes returned" forbids, and
+	// a later regression in the assembly loop would become invisible to a green
+	// check.
+	received int64
+
 	// rejected latches the first refusal, framing or integrity, wrapped with
 	// the offending numbers. Once set, the transfer is discarded: every later
 	// Add and every Assemble answers with this identical error value and never
@@ -173,6 +194,31 @@ func NewAccumulator(totalChunks int, size int64, sha256 string) *Accumulator {
 //     ONCE, so a re-send is refused even when it repeats the bytes already
 //     held. Accepting it would also let a client probe which indices the
 //     receiver holds by observing which re-sends are accepted.
+//  5. the chunk's bytes would take the held total past maxUploadBytes →
+//     ErrUploadTooLarge. This rung sits on the DATA PATH and so cannot be
+//     skipped the way the two admission functions can, which is what bounds
+//     retained memory even for a caller that ran neither.
+//
+// Three properties of step 5 are contract rather than preference:
+//
+//   - LAST, NOT FIRST. received counts only bytes this accumulator actually
+//     retains, so the check belongs with the store rather than ahead of the
+//     checks that decide whether a store happens at all. Its one observable
+//     consequence is which sentinel a frame carrying two faults gets — every
+//     unstored chunk rejects the transfer, so a counter that moved for one
+//     could never be read afterwards — and placing it last leaves every
+//     existing two-fault frame answering the sentinel it answers today.
+//   - SUBTRACTION, NOT A SUM. received + len > bound forms a sum that could in
+//     principle wrap; len > bound - received cannot, because the invariant on
+//     received keeps the right operand within [0, maxUploadBytes]. The addend
+//     here is a materialised slice length rather than a claimed number, so the
+//     wrap is not reachable in practice — the safe form is written anyway, and
+//     it is the INVARIANT rather than the unreachability doing the work, so a
+//     later reader neither simplifies it back nor concludes that
+//     CheckDeclaration's overflow discipline was cargo cult.
+//   - `>` AND NOT `>=`. A transfer landing exactly on the bound is admitted:
+//     the bound is a ceiling on what may be held, not on what may be
+//     approached.
 //
 // Add reads exactly three of the payload's eight fields — Index, TotalChunks
 // and Data — and the omissions are deliberate rather than oversights.
@@ -189,7 +235,8 @@ func NewAccumulator(totalChunks int, size int64, sha256 string) *Accumulator {
 // not mutate it, nor decode into a reused buffer, after Add returns. That holds
 // for today's caller because encoding/json allocates a fresh slice for each
 // base64 field. A defensive copy is deliberately not made: it would double peak
-// memory for every upload against the byte bound #1777 introduces.
+// memory for every upload against maxUploadBytes, whose doc carries that
+// arithmetic.
 func (a *Accumulator) Add(chunk protocol.AttachmentChunkPayload) error {
 	if a.rejected != nil {
 		return a.rejected
@@ -206,7 +253,12 @@ func (a *Accumulator) Add(chunk protocol.AttachmentChunkPayload) error {
 		return a.reject(fmt.Errorf("attachments: chunk index %d of %d already received: %w",
 			chunk.Index, a.totalChunks, ErrDuplicateIndex))
 	}
+	if int64(len(chunk.Data)) > maxUploadBytes-a.received {
+		return a.reject(fmt.Errorf("attachments: chunk %d carries %d bytes, transfer already holds %d, per-upload bound is %d: %w",
+			chunk.Index, len(chunk.Data), a.received, maxUploadBytes, ErrUploadTooLarge))
+	}
 	a.chunks[chunk.Index] = chunk.Data
+	a.received += int64(len(chunk.Data))
 	return nil
 }
 

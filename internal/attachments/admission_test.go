@@ -68,10 +68,12 @@ func TestCheckDeclaration(t *testing.T) {
 		{size: 100000, totalChunks: 3, admit: true},
 
 		// Arithmetically conforming but enormous is ADMITTED here: bounding the
-		// magnitude of one upload is the per-upload byte bound's job (#1777),
-		// and adding an absolute cap here would refuse this row. It is also the
-		// only row that reads the ceiling's exact value rather than merely
-		// asserting it is not 1, so it is what pins the arithmetic itself.
+		// magnitude of one upload is CheckDeclaredSize's job, in a sibling
+		// function, and that separation is what keeps this row admitted —
+		// folding the byte bound into CheckDeclaration would refuse it. It is
+		// also the only row that reads the ceiling's exact value rather than
+		// merely asserting it is not 1, so it is what pins the arithmetic
+		// itself, and refusing it here would destroy that pin.
 		//
 		// The count needs a 64-bit int. If this ever has to build where int is
 		// 32 bits, this row is the one that fails to compile — loudly, which is
@@ -92,6 +94,102 @@ func TestCheckDeclaration(t *testing.T) {
 			if !errors.Is(err, ErrInvalidDeclaration) {
 				t.Fatalf("CheckDeclaration(%d, %d) = %v, want ErrInvalidDeclaration", tt.totalChunks, tt.size, err)
 			}
+		})
+	}
+}
+
+// wantOnlyUploadTooLarge asserts that err reports ErrUploadTooLarge and that
+// errors.Is separates it from every sentinel this package exported before it,
+// enumerated by name rather than sampled. It is called from both refusal sites
+// — CheckDeclaredSize's rows below and the accumulated rung's crossing test —
+// so "both refusals answer with ONE sentinel" is pinned against the two real
+// wrapped errors rather than against the bare sentinel value.
+//
+// Both directions are checked, because a refactor that wrapped one sentinel in
+// the other is invisible from one: the new one must report none of the seven,
+// and none of the seven may report the new one.
+func wantOnlyUploadTooLarge(t *testing.T, err error) {
+	t.Helper()
+
+	if !errors.Is(err, ErrUploadTooLarge) {
+		t.Fatalf("error = %v, want it to report ErrUploadTooLarge", err)
+	}
+	existing := []struct {
+		name string
+		err  error
+	}{
+		{"ErrInvalidDeclaration", ErrInvalidDeclaration},
+		{"ErrTotalChunksMismatch", ErrTotalChunksMismatch},
+		{"ErrIndexOutOfRange", ErrIndexOutOfRange},
+		{"ErrDuplicateIndex", ErrDuplicateIndex},
+		{"ErrSizeMismatch", ErrSizeMismatch},
+		{"ErrDigestMismatch", ErrDigestMismatch},
+		{"ErrIncomplete", ErrIncomplete},
+	}
+	for _, s := range existing {
+		if errors.Is(err, s.err) {
+			t.Errorf("error = %v, want it not to also report %s", err, s.name)
+		}
+		if errors.Is(ErrUploadTooLarge, s.err) {
+			t.Errorf("ErrUploadTooLarge reports %s, want the two separable", s.name)
+		}
+		if errors.Is(s.err, ErrUploadTooLarge) {
+			t.Errorf("%s reports ErrUploadTooLarge, want the two separable", s.name)
+		}
+	}
+}
+
+// TestCheckDeclaredSize drives the declared rung of the per-upload byte bound:
+// a first chunk's declared size above maxUploadBytes is refused before any of
+// its bytes are held, and everything at or below it is admitted.
+//
+// The rows either side of the bound are what state the comparison as
+// size > maxUploadBytes: the row AT the bound dies if it is written >=, and the
+// row one past it dies if the comparison reads any other constant or carries an
+// off-by-one.
+func TestCheckDeclaredSize(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		size  int64
+		admit bool
+	}{
+		// The zero-byte file, and the byte below the bound.
+		{size: 0, admit: true},
+		{size: maxUploadBytes - 1, admit: true},
+
+		// Exactly the bound is ADMITTED: it is a ceiling on what may be
+		// declared, not on what may be approached.
+		{size: maxUploadBytes, admit: true},
+
+		// One byte past it is refused.
+		{size: maxUploadBytes + 1, admit: false},
+
+		// The declaration TestCheckDeclaration's largest row ADMITS, refused
+		// here — the division of labour between the two functions made
+		// observable rather than argued.
+		{size: math.MaxInt64, admit: false},
+
+		// A negative size is ADMITTED here, and that is not an oversight:
+		// magnitude is this function's whole subject, and the negative case is
+		// CheckDeclaration's, which refuses it with its own sentinel. A second
+		// owner for that fault would make which sentinel a caller sees depend
+		// on the order it happened to run the two checks, which is why both
+		// must run.
+		{size: -1, admit: true},
+	}
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("size=%d", tt.size), func(t *testing.T) {
+			t.Parallel()
+
+			err := CheckDeclaredSize(tt.size)
+			if tt.admit {
+				if err != nil {
+					t.Fatalf("CheckDeclaredSize(%d) = %v, want nil", tt.size, err)
+				}
+				return
+			}
+			wantOnlyUploadTooLarge(t, err)
 		})
 	}
 }
