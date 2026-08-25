@@ -19,7 +19,7 @@ import (
 // The fixture is tens of bytes rather than anything near
 // protocol.MaxAttachmentChunkBytes because this package enforces no byte cap —
 // a bound-sized fixture would only be slow and would imply an enforcement that
-// lives in #1767.
+// lives in #1777.
 var (
 	testFixture = []byte("0123456789abcdefghijklmn")
 	testParts   = [][]byte{testFixture[0:10], testFixture[10:20], testFixture[20:24]}
