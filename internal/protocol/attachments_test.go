@@ -218,12 +218,19 @@ func TestAttachmentChunkPayload_ZeroValue_RoundTrip(t *testing.T) {
 }
 
 // attachmentSHA256HexLen mirrors AttachmentChunkPayload.SHA256's declared
-// "always 64 hex characters" — a contract in prose with no validator behind it
-// yet, copied here for the same reason the capInput* block copies the bridge's
+// "always 64 hex characters" — a contract in prose with no validator behind it,
+// copied here for the same reason the capInput* block copies the bridge's
 // caps: the fill below has to trace to a bound recorded in shipped code rather
-// than to a number chosen inside this test. #1741 writes the hex validator and
-// is the natural place for this to become a fifth exported constant, if it
-// should.
+// than to a number chosen inside this test.
+//
+// It stays a TEST-LOCAL mirror rather than becoming a fifth exported constant
+// beside a hex validator. #1770, the slice that added the receiver's digest
+// comparison in attachments.Accumulator's Assemble, is the one that would have
+// written that validator and declined: an uppercase, truncated, non-hex or
+// empty claim already loses the exact-equality comparison there and is an
+// integrity reject, so a shape check would add a production file in this
+// package for a check that changes no outcome — and one gated on the claim's
+// shape would be an integrity opt-out the sender controls.
 const attachmentSHA256HexLen = 64
 
 // TestAttachmentChunkPayload_FitV2EnvelopeCap fills a chunk to

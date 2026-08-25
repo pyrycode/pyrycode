@@ -1,9 +1,12 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-New package (#1769), first slice of the blocked family split from #1741/#1766:
-holds one inbound attachment upload's chunks in memory, addressed by index, and
+Package (#1769, #1770), two slices of the family split from #1741/#1766:
+holds one inbound attachment upload's chunks in memory, addressed by index,
 refuses a stream whose framing contradicts what the transfer declared at
-admission. In-memory only — no disk, no wire codes, no logger, no lock.
+admission (#1769), and — once the transfer is complete — checks the
+assembled bytes against the transfer's declared length and lowercase-hex
+sha256 before yielding a single byte (#1770). In-memory only — no disk, no
+wire codes, no logger, no lock.
 
 - Wire contract: [`protocol-package.md`](protocol-package.md) § "v2 attachment-chunk vocabulary" (`AttachmentChunkPayload`, `MaxAttachmentChunkBytes`).
 - Design reference this package deliberately diverges from: [`v2-session-manager.md`](v2-session-manager.md) § "Debug-bundle streaming" — `ReassembleBundle`.
@@ -31,21 +34,68 @@ caller. `Accumulator` copies exactly one property from it and diverges on two:
 
 ## Sentinels and discard semantics
 
-Four exported sentinels, `errors.New("attachments: …")` house style. Three
-discard the transfer (latched on first refusal — every later `Add` and
-`Assemble` returns the identical wrapped error, and the held chunk bytes are
-dropped at the moment of refusal so a poisoned accumulator holds no memory
-past that point). `ErrIncomplete` is the fourth and does **not** latch or
-discard — it is the resumable answer a later chunk can turn into bytes.
+Six exported sentinels, `errors.New("attachments: …")` house style, in two
+families plus one non-discarding outlier. Five discard the transfer (latched
+on first refusal — every later `Add` and `Assemble` returns the identical
+wrapped error, and the held chunk bytes are dropped at the moment of refusal
+so a poisoned accumulator holds no memory past that point). `ErrIncomplete` is
+the outlier and does **not** latch or discard — it is the resumable answer a
+later chunk can turn into bytes.
 
-| Sentinel | Latches? |
-|---|---|
-| `ErrTotalChunksMismatch` | yes |
-| `ErrIndexOutOfRange` | yes |
-| `ErrDuplicateIndex` | yes |
-| `ErrIncomplete` | no |
+| Sentinel | Family | Latches? |
+|---|---|---|
+| `ErrTotalChunksMismatch` | framing | yes |
+| `ErrIndexOutOfRange` | framing | yes |
+| `ErrDuplicateIndex` | framing | yes |
+| `ErrSizeMismatch` (#1770) | integrity | yes |
+| `ErrDigestMismatch` (#1770) | integrity | yes |
+| `ErrIncomplete` | — | no |
 
-Mapping these to the wire's single `attachment.invalid_chunk` code (`internal/protocol/codes.go`'s `CodeAttachmentInvalidChunk`) is #1744's job at the dispatch site — this package emits no wire codes and does not import `codes.go`.
+Mapping these to the wire is #1744's job at the dispatch site — this package
+emits no wire codes and does not import `codes.go`. The mapping is
+deliberately many-to-one within each family: all three framing sentinels
+answer `CodeAttachmentInvalidChunk`, both integrity sentinels answer
+`CodeAttachmentIntegrityFailed`. Distinguishability is wanted in-process, for
+this package's own tests and for the daemon's logs, not on the wire — a
+single corrupt transfer must still resolve to exactly one wire code, which is
+why `reject` (the shared latch primitive both families call) has to run for
+an integrity failure too: without the latch, a chunk sent after an integrity
+reject on an already-complete transfer would fall through to
+`ErrDuplicateIndex`, and one transfer would emit two different wire codes at
+#1744.
+
+`Assemble`'s two integrity comparisons (#1770) both read the assembled `out`
+slice itself — never a proxy computed from the chunk map or the per-chunk
+lengths — so a future regression in the assembly loop above can't slip past
+a green check. That's also why `Assemble` must keep allocating a fresh slice
+on every call rather than fast-pathing a single-chunk transfer to
+`chunks[0]`: with a fresh copy, the bytes verified are the bytes returned, and
+no later mutation of the accumulator's stored chunks — or of a caller's own
+copy of a previous return — can retroactively change what an already-returned
+slice contains. `internal/update`'s `VerifySHA256` is the nearest existing
+"bytes against a declared hex digest" comparison in the repo and folds case
+with `strings.EqualFold`; that's correct where it lives (a digest already
+lowercased by its own file's parser) and wrong here — the published contract
+in `docs/protocol-mobile.md` calls a case-insensitive or prefix comparison a
+hole, in the same sentence that resolves the seeming tension with an
+uppercase sender by requiring clients to send lowercase. The comparison here
+is plain `!=` against `hex.EncodeToString`'s (lowercase) output — no
+normalisation, no `subtle.ConstantTimeCompare` either, since both the bytes
+and the claimed digest are attacker-supplied, so timing leaks nothing the
+attacker doesn't already hold.
+
+Neither integrity error string carries the declared `sha256` itself — it's an
+attacker-chosen, JSON-decoded string headed for #1744's line-oriented log, the
+same hazard `AttachmentChunkPayload`'s `Data` and `Filename` are already
+banned from error strings for. `ErrDigestMismatch`'s message instead carries
+the **computed** digest (daemon-authored, fixed shape, one-way) and
+`len(a.sha256)` as a diagnostic for a truncated or empty claim. `len` on a Go
+string is a **byte** count, not a rune count, and the message currently calls
+it "characters" — code review flagged this as a NIT (not fixed, since the
+value itself is still bounded and injection-free): a 64-emoji claim would
+report 256. Worth remembering before reaching for `len(str)` on any other
+attacker-supplied, JSON-decoded string in this codebase — say "bytes" or use
+`utf8.RuneCountInString`, not both loosely.
 
 **Presence comes from map-key membership, never from the stored value.**
 `Add`'s duplicate check is a two-value lookup (`_, dup := a.chunks[i]`); a
@@ -53,62 +103,96 @@ Mapping these to the wire's single `attachment.invalid_chunk` code (`internal/pr
 `nil` `Data` and an empty non-nil slice are legitimate "received" values). The
 zero-byte-attachment criterion exists specifically to catch this class of bug.
 
-## A mutation-testing lesson worth carrying into #1770
+## Mutation-testing lessons (measured across #1769 and #1770)
 
-The architecture spec's testing strategy credited scenario 2's
-*identical-bytes* duplicate row as the sole red test for the
-`!= nil`-vs-two-value-lookup mistake above. Measured under that mutant (`go
-test -overlay`, no worktree write), that row stays **green**: it re-sends ten
-non-empty bytes, so a non-nil value is still parked at the key and the buggy
-check still reports the duplicate correctly. The mutant only surfaces where
-the stored value is legitimately nil — a **zero-byte** re-send — which is why
-the shipped tests add `TestAccumulator_DuplicateZeroByteChunk` as the actual
-sole red for it (confirmed: exactly one failing test under the mutant).
+This package's sole-redness claims are measured with `go test -overlay`
+(mutants applied via an absolute-path JSON manifest, no worktree write), not
+argued from the table alone. Four traps found that way, in the order they
+surfaced:
 
-**Generalization:** a test row aimed at "presence must come from the key, not
-the value" has to use the value that is *indistinguishable from absent* for
-the type in play (here, zero-byte `Data`). Any other value can leave a
-presence-from-value mutant alive while looking like coverage. #1770 adds the
-sibling claim checks (`size`/`sha256`) against this same file — worth
-re-checking each new presence- or value-based assertion there against this
-same trap before trusting a sole-redness claim on paper.
+- **A presence check needs a value indistinguishable from absent.** #1769's
+  spec credited the *identical-bytes* duplicate row as the sole red test for
+  writing the duplicate check as `chunks[i] != nil` instead of the two-value
+  map lookup. Measured, that row stayed **green**: it re-sends ten non-empty
+  bytes, so a non-nil value is still parked at the key and the buggy check
+  still reports the duplicate correctly. The mutant only surfaces where the
+  stored value is legitimately nil — a **zero-byte** re-send — which is why
+  `TestAccumulator_DuplicateZeroByteChunk` exists as the actual sole red for
+  it. Generalization: a row aimed at "presence must come from the key, not the
+  value" has to use the value that is *indistinguishable from absent* for the
+  type in play; any other value can leave a presence-from-value mutant alive
+  while looking like coverage. #1770's `size`/`sha256` checks were built with
+  this trap in mind — see the next point.
+- **A value-based digest assertion can't pin what the digest is computed
+  over when the value doesn't vary.** #1770's zero-byte round-trip row (empty
+  bytes, empty-input digest) is credited with nothing about the digest's
+  input, because the empty digest is the same whether it's computed over the
+  real assembly or over nothing — only the non-empty rows (flip a byte in the
+  *last* chunk, not the first, so a "digest over `chunks[0]`" mutant can't
+  survive it) pin that.
+- **An overlay mutant that deletes a check can also delete the only use of an
+  import, and that fails the *build*, not a test — and `go test` exits 1
+  either way.** A mutation harness that reads the exit code, or counts
+  `--- FAIL:` lines, scores a build failure as *green* ("no test covers
+  this"), which is the opposite of what happened. Two of #1770's eight mutant
+  claims first measured green for exactly this reason. Fix: keep the deleted
+  check's import alive in the mutant (e.g. `sum := sha256.Sum256(out); _ =
+  hex.EncodeToString(sum[:])` with the comparison itself removed), and grep
+  the overlay run's output for `"build failed"` before trusting any verdict —
+  a passing `go test` on a broken build looks identical to a passing one on
+  working code from the exit code alone.
+- **A "returns a fresh copy" test must mutate its own copy of the fixture,
+  not the shared package-level one.** `TestAccumulator_SingleChunk_ReturnsAFreshCopy`
+  has to feed the accumulator a copy of `testFixture`, then mutate the
+  *returned* slice to prove the accumulator's copy is independent. Feeding
+  `testFixture` directly and mutating the return would scribble on the
+  package-level fixture, reddening every other parallel test in the file
+  under the fast-path mutant instead of just this row — a sole-redness
+  measurement taken against that setup would report the wrong thing about a
+  mutant that is genuinely caught.
 
-## Three shipped properties with no test pin (as of #1769)
+All three properties #1769 shipped without a test pin are now pinned,
+landed alongside #1770's own checks rather than left for a third mutation
+pass to rediscover: `Assemble` on a declared `total_chunks == 0` answering
+`ErrIncomplete` rather than a vacuous empty success
+(`TestAccumulator_ZeroDeclaredCount_IsIncomplete`), a refused transfer's
+`chunks` map going `nil` at the moment of refusal (the shared reject-row body
+in `TestAccumulator_IntegrityFaults_RejectAndDiscard`), and `Assemble` never
+fast-pathing a single-chunk transfer to `chunks[0]`
+(`TestAccumulator_SingleChunk_ReturnsAFreshCopy`, the same test the
+fixture-copy trap above is about).
 
-Code review passed #1769 with three SHOULD-FIX/NIT findings that are real
-gaps in the spec's testing strategy, not deviations from it — all three
-behaviors are correctly implemented but unpinned, so a future refactor of this
-file could silently regress them:
+## What a successful `Assemble` does not mean
 
-- `Assemble` on a `NewAccumulator(0, …)` (declared `total_chunks == 0`)
-  returns `ErrIncomplete` rather than a vacuous empty-bytes success — no test
-  asserts this; deleting the `totalChunks < 1` guard leaves the package green.
-- A refused transfer's `chunks` map is set to `nil` at the moment of refusal
-  (so a hostile client's bytes don't outlive the refusal) — no test asserts
-  `a.chunks == nil` after a reject; deleting that line also leaves the
-  package green.
-- `Assemble` never fast-paths a single-chunk transfer by returning
-  `chunks[0]` directly (it always allocates a fresh slice, so a caller
-  mutating one returned slice cannot corrupt the accumulator or a second
-  caller's copy) — no test currently assembles a single-chunk transfer with
-  non-empty bytes to catch a fast-path regression.
+Both #1770 checks pass when the assembled bytes match what the transfer
+declared — that's integrity, not authenticity. The same party (the uploading
+client) supplies both the bytes and the declared digest, so a match proves
+the transfer wasn't corrupted in transit and proves nothing about whether the
+content is safe. `protocol.AttachmentChunkPayload`'s doc block states this
+directly; it matters here because the consumers of a successful `Assemble`
+— #1772's filename sanitiser, #1773's storage, #1746's retrieval — are the
+ones who'd otherwise read a green `Assemble` as a safety verdict rather than
+a corruption check.
 
-#1770 touches this same production file and test file to add the `size`/`sha256`
-checks; land these three pins there rather than leaving them to be
-rediscovered by another mutation pass.
+The declared `sha256` is also deliberately **not** promoted to a lookup key
+anywhere in this package: there's no content-addressed retrieval ("know the
+hash, fetch the blob"), which is a requirement from
+`AttachmentChunkPayload`'s SECURITY block, not an oversight.
 
-## Blocked family (not this slice)
+## Blocked family (not landed)
 
-- **#1770** — checks the assembled bytes against the transfer's latched
-  `size` and `sha256`. Reads the two fields `NewAccumulator` already latches
-  and this slice never reads.
 - **#1767** — admission: the first-chunk `total_chunks`/`size` cross-check,
   the byte bound, the in-flight-upload count, and the registry (`attachment_id`
   → `*Accumulator`) that needs its own lock — `Accumulator` itself carries
   none, because it is fed serially by one session's `appFrameWorker` goroutine.
-- **#1742** — expiry/abandonment of a partial upload.
-- **#1743** — storage, filename sanitisation, resolving `attachment_id` to a
-  path.
-- **#1744** — wires the dispatch site: maps the three discard sentinels to
-  `CodeAttachmentInvalidChunk` via `errors.Is`, and is the first production
-  caller of this package.
+- **#1742** — expiry/abandonment of a partial upload. Note this covers
+  *partial* uploads only — a complete-but-corrupt transfer that fails one of
+  #1770's integrity checks is not partial, so it's #1770's own `reject` latch
+  (not #1742's reaper) that frees those held bytes.
+- **#1772** — filename sanitisation.
+- **#1773** — storage, and resolving `attachment_id` to a path. (#1743 split
+  into #1772/#1773 while this family waited.)
+- **#1744** — wires the dispatch site: maps the three framing sentinels to
+  `CodeAttachmentInvalidChunk` and the two integrity sentinels to
+  `CodeAttachmentIntegrityFailed`, both via `errors.Is`, and is the first
+  production caller of this package.
