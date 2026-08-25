@@ -19,8 +19,8 @@ import "sync"
 // MEMBERSHIP CERTIFIES NOTHING. That a pair is held says only that something
 // inserted it — not that the id is canonical, bounded, or safe to make a path
 // component. The canonical-shape check that must run before it becomes one is
-// #1781's, and what bounds the attacker-influenced half of these bytes is the
-// entry cap (#1786), not anything here.
+// #1781's, and what bounds the attacker-influenced half of these bytes is
+// maxInFlightUploads, not anything here.
 type uploadKey struct {
 	connID       string
 	attachmentID string
@@ -33,14 +33,15 @@ type uploadKey struct {
 // mu is taken once per operation and held for that whole operation, never once
 // to look up and again to write. That is more than race-freedom: a registry
 // splitting the two still tells two concurrent inserts of one pair that both
-// were fresh, and it is the exact shape the count-then-admit gate (#1796) cannot
-// be built on, whose "the registry holds exactly the uploads it held before the
-// chunk arrived" needs look-up-then-count-then-insert to be indivisible. The
-// precedent is sessions' Pool.capMu, whose doc names the sequence it serializes
-// so a later caller re-uses it rather than wrapping it; the sequence this one
-// serializes is check-the-declaration-then-check-the-pair-then-write-the-map,
-// and #1796 re-uses that one acquisition rather than wrapping it in a second
-// lock of its own.
+// were fresh, and it is the exact shape the count-then-admit gate (#1796)
+// cannot be built on, whose "the registry holds exactly the uploads it held
+// before the chunk arrived" needs look-up-then-count-then-insert to be
+// indivisible. The precedent is sessions' Pool.capMu, whose doc names the
+// sequence it serializes so a later caller re-uses it rather than wrapping it;
+// the sequence this one serializes is
+// check-the-declaration-then-check-the-pair-then-write-the-map, and the
+// maxInFlightUploads gate re-uses that one acquisition rather than wrapping it
+// in a second lock of its own.
 //
 // mu is a LEAF: never held across a call into Accumulator — not Add, not
 // Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
@@ -50,10 +51,11 @@ type uploadKey struct {
 // that takes no lock, which is what lets Admit and insert run ONE critical
 // section rather than two copies free to drift; the Locked suffix is this
 // repo's signal for a caller-holds-the-lock body, as in sessions' saveLocked.
-// #1796's gate is what must keep it that way: a count read under one
+// The maxInFlightUploads gate keeps it that way: a count read under one
 // acquisition followed by an insert under another does not deadlock, it is the
-// split lock above, which is why the enforcing check belongs inside the section
-// Admit already holds.
+// split lock above, which is why the enforcing check lives inside the section
+// Admit already holds and reads len(uploads) directly rather than calling
+// count.
 //
 // Feeding happens OFF-LOCK: the caller takes the *Accumulator back and feeds it
 // with mu released. That is sound BECAUSE the key carries the conn — relay
@@ -72,10 +74,17 @@ func NewRegistry() *Registry {
 }
 
 // insertLocked stores a as the upload in flight for the pair and answers
-// (a, true), or — when the pair is already held — stores NOTHING and answers
-// the incumbent with false. Caller MUST hold r.mu. It takes no lock itself and
-// is the one method here callable with mu held, which is what keeps mu a leaf
-// while two methods share this body.
+// (a, true, nil); or — when the pair is already held — stores NOTHING and
+// answers the incumbent with false; or — when the registry is already at
+// maxInFlightUploads — stores nothing and answers capacityRefusal. Caller MUST
+// hold r.mu. It takes no lock itself and is the one method here callable with
+// mu held, which is what keeps mu a leaf while two methods share this body.
+//
+// THE CAPACITY GATE IS THE LAST OF THE THREE STEPS THAT CAN REFUSE and sits
+// BEHIND the incumbent look-up, which is what exempts a held pair from a
+// capacity refusal without any early return in front of Admit's declaration
+// checks: a pair already held occupies an entry it already occupies, so it
+// reaches its incumbent at capacity like anywhere else.
 //
 // Never replacing is a security property rather than hygiene: a second
 // first-chunk for a live pair, declaring a different size or sha256, has its
@@ -91,22 +100,32 @@ func NewRegistry() *Registry {
 // It is a shared core rather than one method's body copied into the other so
 // that TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh, which
 // drives insert, pins the exact critical section Admit executes. It is also the
-// cheaper seam for #1796's entry cap: a gate placed HERE, between the look-up
-// and the store, bounds both callers at once for the price of an error return
-// on an unexported helper, where a gate in Admit's body alone leaves insert
-// ungated.
-func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool) {
+// cheaper seam the entry cap (#1796) took: a gate HERE, between the look-up and
+// the store, bounds both callers at once for the price of an error return on an
+// unexported helper, where a gate in Admit's body alone would leave insert
+// ungated. What that buys is that "the registry never holds more than
+// maxInFlightUploads" is a property of the CONTAINER rather than of one entry
+// point, which is what makes count's meaning uniform.
+func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool, err error) {
 	key := uploadKey{connID: connID, attachmentID: attachmentID}
 	if held, ok := r.uploads[key]; ok {
-		return held, false
+		return held, false, nil
+	}
+	// len(r.uploads) DIRECTLY, never r.count(): that one takes mu, this body
+	// runs with mu held, and sync.Mutex is not reentrant — the call would
+	// deadlock rather than race. >= and not ==, which is equivalent only
+	// because this gate runs ahead of every store in the package; the safe form
+	// is written anyway, the same discipline Add's subtraction records.
+	if len(r.uploads) >= maxInFlightUploads {
+		return nil, false, capacityRefusal(len(r.uploads))
 	}
 	r.uploads[key] = a
-	return a, true
+	return a, true, nil
 }
 
 // insert takes mu for the whole of insertLocked and is otherwise that function:
-// the same never-replace answer, the same inverted inserted, the same non-nil
-// precondition on a.
+// the same never-replace answer, the same inverted inserted, the same capacity
+// refusal, the same non-nil precondition on a.
 //
 // Its callers are this package's tests. Admit does not call it — it holds mu
 // across a decision wider than one insert and reaches insertLocked directly, and
@@ -116,7 +135,7 @@ func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (up
 // CheckDeclaration and CheckDeclaredSize before constructing an Accumulator, is
 // meant to be the only exported way an upload enters, and exporting the raw
 // insert would ship the bypass around admission that Admit exists to close.
-func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool) {
+func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.insertLocked(connID, attachmentID, a)
@@ -124,30 +143,44 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 
 // Admit is the registry's only exported way in: it runs BOTH declaration checks
 // on a first chunk and, only on a nil answer from both, constructs the
-// Accumulator from the declared numbers and stores it. A refusal constructs
-// nothing and stores nothing, so the registry is left exactly as it was and
-// nothing about the refused pair is remembered — the same attachment_id,
-// re-declared correctly, is admitted immediately afterwards.
+// Accumulator from the declared numbers and offers it to insertLocked, which
+// stores it unless the pair is held or the registry is at maxInFlightUploads.
+// EVERY refusal stores nothing, so the registry is left exactly as it was and
+// nothing about the refused pair is remembered — no id is blacklisted, and the
+// same attachment_id is admitted as soon as it carries an admissible
+// declaration and there is a free slot: immediately for a declaration refusal,
+// which never took one, and on the next Release for a capacity refusal.
 //
 // THE WHOLE DECISION RUNS UNDER ONE ACQUISITION of mu — declaration verdict,
-// incumbent look-up, construction, store — so that #1796's entry cap can read
-// the count and admit without releasing it in between, which is what a cap needs
+// incumbent look-up, capacity, construction, store — so the entry cap reads the
+// count and admits without releasing it in between, which is what a cap needs
 // and what a split acquisition cannot give it. mu stays a LEAF: both checks are
 // pure and stateless per their own docs, insertLocked takes no lock, and
 // NewAccumulator allocates and returns. That last one is bounded work only
 // BECAUSE its chunk map takes no capacity hint — a rule stated there on
 // independent grounds that this critical section now depends on, since a hint
 // read from the attacker-chosen totalChunks would put an attacker-scaled
-// allocation inside this package's only mutex. All three return paths release mu
-// through the one defer: two of them are refusals a client triggers at will with
-// a single malformed declaration, and an explicit unlock missed on either would
-// wedge the registry for every conn rather than race.
+// allocation inside this package's only mutex. All four return paths release mu
+// through the one defer: three of them are refusals a client triggers at will —
+// two with a single malformed declaration, one by holding the bound's worth of
+// transfers open — and an explicit unlock missed on any would wedge the registry
+// for every conn rather than race.
 //
-// It CONSTRUCTS NO ERROR OF ITS OWN. Each refusal is the check's error
-// verbatim, neither wrapped nor annotated, which is the strongest available form
-// of the never-log rule protocol.AttachmentChunkPayload's SECURITY block states
-// at a function that necessarily holds two of the four strings that rule bans:
-// there is no format string for attachmentID or sha256 to enter. The other two,
+// AT CAPACITY NewAccumulator STILL RUNS and its result is dropped, deliberately
+// and cheaply. Checking capacity here, ahead of the construction, would have to
+// redo insertLocked's incumbent look-up to keep a held pair exempt, reaching
+// into r.uploads from a method that does not touch it today; the dropped
+// allocation is bounded for the reason above, and the whole decision stays in
+// one acquisition.
+//
+// It CONSTRUCTS NO ERROR OF ITS OWN. Each refusal is another function's error
+// verbatim, neither wrapped nor annotated here — a check's, or insertLocked's
+// capacityRefusal. That remains the never-log rule
+// protocol.AttachmentChunkPayload's SECURITY block states at a function that
+// necessarily holds two of the four strings that rule bans: there is no format
+// string in this body for attachmentID or sha256 to enter, and the one format
+// string the admission path now has lives in capacityRefusal, whose only
+// parameter is an int and which therefore cannot see either. The other two,
 // Filename and Data, are excluded structurally instead, by taking the
 // declaration as scalars the way NewAccumulator and CheckDeclaration do —
 // decoding a payload into them is the dispatch site's job (#1744). errors.Is
@@ -157,11 +190,13 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 // WHICH CHECK RUNS FIRST IS NOT A CONTRACT. A doubly-bad declaration gets
 // whichever sentinel runs first, and nothing has decided which that should be;
 // CheckDeclaration runs first because it mirrors the file order, so no caller
-// and no test may read an order out of it. The two are written as independent
-// guard statements rather than chained, so #1796's concurrency bound can go
-// BEHIND both of them, and behind the incumbent look-up, as a pure addition: a
-// pair already held is exempt from a capacity refusal because it occupies an
-// entry it already occupies.
+// and no test may read an order out of it. WHERE THE CONCURRENCY BOUND SITS IS
+// A CONTRACT, and it is BEHIND both of them, in insertLocked and behind the
+// incumbent look-up: at capacity, a first chunk whose declaration is also
+// invalid answers the declaration sentinel, so a client is told the fault that
+// will never clear ahead of the one that clears by itself. That is the only
+// ordering pinned here — which of the two declaration checks runs first stays
+// undecided.
 //
 // A NIL ERROR CERTIFIES THE TWO NUMBERS AND NOTHING ELSE. Not the
 // attachment_id, whose canonical-shape check before it may become a path
@@ -174,9 +209,9 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 // is a client error worth naming, so it answers its own sentinel and the
 // incumbent is left untouched; handing back the incumbent instead would answer
 // an accumulator latched with the FIRST declaration's numbers, which that
-// client's next chunk fails to feed anyway. It also keeps #1796's gate honest —
-// exempting a held pair from a capacity REFUSAL is not the same thing as
-// short-circuiting the checks.
+// client's next chunk fails to feed anyway. It also keeps the capacity gate
+// honest — exempting a held pair from a capacity REFUSAL is not the same thing
+// as short-circuiting the checks.
 // TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent pins it.
 //
 // AN ADMISSIBLE REPEAT answers the INCUMBENT with a nil error and drops the
@@ -206,7 +241,10 @@ func (r *Registry) Admit(connID, attachmentID string, totalChunks int, size int6
 	// insertLocked's answer, never the accumulator just constructed: on a fresh
 	// pair they are the same pointer, and on a repeat returning the constructed
 	// one double-admits. insertLocked and not insert, which takes mu.
-	upload, _ := r.insertLocked(connID, attachmentID, NewAccumulator(totalChunks, size, sha256))
+	upload, _, err := r.insertLocked(connID, attachmentID, NewAccumulator(totalChunks, size, sha256))
+	if err != nil {
+		return nil, err
+	}
 	return upload, nil
 }
 
@@ -231,10 +269,16 @@ func (r *Registry) Release(connID, attachmentID string) {
 	delete(r.uploads, uploadKey{connID: connID, attachmentID: attachmentID})
 }
 
-// count is how many uploads are in flight. Unexported because in-package tests
-// are its only reader: an exported one would publish exactly the TOCTOU shape
-// #1796 must not be built on, a cap check reading the count under one
-// acquisition and admitting under another.
+// count is how many uploads are in flight, which is exactly the set of live
+// admitted uploads: no refusal leaves an entry, and every insertion path in
+// this package runs the maxInFlightUploads gate, so this never exceeds it.
+//
+// Unexported because in-package tests are its only reader: an exported one
+// would publish exactly the TOCTOU shape the capacity gate must not be built
+// on, a cap check reading the count under one acquisition and admitting under
+// another. The gate itself reads len(uploads) rather than calling this, for a
+// second reason as well — mu is not reentrant, so this call from a body holding
+// it deadlocks.
 func (r *Registry) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

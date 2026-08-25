@@ -29,7 +29,8 @@
 //
 // The receiver's resource bounds are owned three separate ways, and admission
 // runs before an Accumulator exists: how many uploads may be in flight is
-// #1778's; how many bytes one may accumulate is maxUploadBytes, enforced twice
+// maxInFlightUploads, enforced by Registry's admission gate; how many bytes one
+// may accumulate is maxUploadBytes, enforced twice
 // in this package — the declared size at CheckDeclaredSize and the accumulated
 // bytes at step 5 of Add — and the first-chunk total_chunks/size cross-check
 // that refuses before allocating is CheckDeclaration, also in this package. What

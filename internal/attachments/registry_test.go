@@ -41,6 +41,13 @@ func boundChunk(i int) protocol.AttachmentChunkPayload {
 // channel BUFFERED TO N is the join — unbuffered, an assertion failing
 // mid-drain would park every goroutine not yet drained for the life of the test
 // binary.
+//
+// The r.insert calls below discard insert's error with _, and the reason is
+// stated once here rather than at each of the seven sites: except in
+// TestRegistry_ConcurrentMixedOperations_AreSafe, whose own comments cover it,
+// every one of those registries provably holds fewer than maxInFlightUploads
+// entries at the call, so the capacity refusal is unreachable by construction.
+// The tests that mean to observe that refusal go through Admit.
 
 func TestRegistry_InsertThenLookup_ReturnsTheSameAccumulator(t *testing.T) {
 	t.Parallel()
@@ -48,7 +55,7 @@ func TestRegistry_InsertThenLookup_ReturnsTheSameAccumulator(t *testing.T) {
 	r := NewRegistry()
 	acc := newTestAccumulator()
 
-	upload, inserted := r.insert(testConnA, testAttachmentID, acc)
+	upload, inserted, _ := r.insert(testConnA, testAttachmentID, acc)
 	if !inserted {
 		t.Fatalf("insert into an empty registry reported a repeat, want fresh")
 	}
@@ -77,10 +84,10 @@ func TestRegistry_SameAttachmentIDOnTwoConns_AreSeparateEntries(t *testing.T) {
 	r := NewRegistry()
 	accA, accB := newTestAccumulator(), newTestAccumulator()
 
-	if _, inserted := r.insert(testConnA, testAttachmentID, accA); !inserted {
+	if _, inserted, _ := r.insert(testConnA, testAttachmentID, accA); !inserted {
 		t.Fatalf("insert on %q reported a repeat, want fresh", testConnA)
 	}
-	if _, inserted := r.insert(testConnB, testAttachmentID, accB); !inserted {
+	if _, inserted, _ := r.insert(testConnB, testAttachmentID, accB); !inserted {
 		t.Fatalf("insert of the same attachment_id on %q reported a repeat, want fresh", testConnB)
 	}
 	if n := r.count(); n != 2 {
@@ -112,7 +119,7 @@ func TestRegistry_SecondInsertUnderAHeldPair_KeepsTheIncumbent(t *testing.T) {
 
 	r := NewRegistry()
 	incumbent := newTestAccumulator()
-	if _, inserted := r.insert(testConnA, testAttachmentID, incumbent); !inserted {
+	if _, inserted, _ := r.insert(testConnA, testAttachmentID, incumbent); !inserted {
 		t.Fatalf("insert into an empty registry reported a repeat, want fresh")
 	}
 	if err := incumbent.Add(testChunk(0, testTotal, testParts[0])); err != nil {
@@ -120,7 +127,7 @@ func TestRegistry_SecondInsertUnderAHeldPair_KeepsTheIncumbent(t *testing.T) {
 	}
 
 	// A second first-chunk for the live pair, carrying its own accumulator.
-	upload, inserted := r.insert(testConnA, testAttachmentID, newTestAccumulator())
+	upload, inserted, _ := r.insert(testConnA, testAttachmentID, newTestAccumulator())
 	if inserted {
 		t.Errorf("insert under a held pair reported a fresh insert, want a repeat")
 	}
@@ -187,16 +194,31 @@ func TestRegistry_ConcurrentMixedOperations_AreSafe(t *testing.T) {
 	start := make(chan struct{})
 	done := make(chan struct{}, workers+readers+1)
 
-	// Each worker drives its own distinct pair from insert to release.
+	// Each worker drives its own distinct pair from insert to release. workers
+	// exceeds maxInFlightUploads by design, so a distinct pair has TWO legal
+	// answers here — inserted, or refused by the capacity gate — and which one
+	// it gets depends on how the fan-out interleaves. Both are safety; the
+	// subject of this test is that mixed concurrent operations are safe, and the
+	// cap is now part of that subject rather than an obstacle to it. What stays
+	// illegal is the third answer: a DISTINCT pair reported as a repeat.
 	for i := 0; i < workers; i++ {
 		attachmentID := fmt.Sprintf("att-%d", i)
 		go func() {
 			<-start
-			if _, inserted := r.insert(testConnA, attachmentID, newTestAccumulator()); !inserted {
+			_, inserted, err := r.insert(testConnA, attachmentID, newTestAccumulator())
+			switch {
+			case err != nil && !errors.Is(err, ErrTooManyUploads):
+				t.Errorf("insert of the distinct pair %q: error = %v, want nil or one wrapping %v", attachmentID, err, ErrTooManyUploads)
+			case err == nil && !inserted:
 				t.Errorf("insert of the distinct pair %q reported a repeat", attachmentID)
 			}
-			if _, ok := r.Lookup(testConnA, attachmentID); !ok {
-				t.Errorf("Lookup of the pair %q this goroutine just inserted reported absent", attachmentID)
+			// Only an insert that happened has an entry to find; a refused one
+			// is absent by definition. Release is unconditional either way —
+			// releasing a pair the registry does not hold is a tested no-op.
+			if inserted {
+				if _, ok := r.Lookup(testConnA, attachmentID); !ok {
+					t.Errorf("Lookup of the pair %q this goroutine just inserted reported absent", attachmentID)
+				}
 			}
 			r.Release(testConnA, attachmentID)
 			done <- struct{}{}
@@ -256,7 +278,7 @@ func TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh(t *testing.T
 		go func() {
 			own := newTestAccumulator()
 			<-start
-			got, inserted := r.insert(testConnA, testAttachmentID, own)
+			got, inserted, _ := r.insert(testConnA, testAttachmentID, own)
 			outcomes <- outcome{own: own, got: got, inserted: inserted}
 		}()
 	}
@@ -564,5 +586,250 @@ func TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent(t *testing.
 				t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(assembled), len(testBoundFixture))
 			}
 		})
+	}
+}
+
+// fillRegistry admits n uploads under ids distinct from testAttachmentID, and
+// through Admit rather than insert so that what it fills is exactly the set of
+// live admitted uploads maxInFlightUploads counts.
+//
+// Each filler declares (total_chunks 1, size 0), the cheapest CONFORMING pair,
+// since max(1, ceil(0 / 45000)) is 1. That is not incidental: the capacity gate
+// is the LATER of three gates, so a filler whose declaration did not conform
+// would be refused by a declaration check and the registry would never reach the
+// bound at all — every row below would then go green having proved nothing.
+func fillRegistry(t *testing.T, r *Registry, n int) {
+	t.Helper()
+
+	for i := 0; i < n; i++ {
+		attachmentID := fmt.Sprintf("filler-%d", i)
+		if _, err := r.Admit(testConnA, attachmentID, 1, 0, testFixtureDigest); err != nil {
+			t.Fatalf("filling the registry: Admit of %q: %v", attachmentID, err)
+		}
+	}
+	if got := r.count(); got != n {
+		t.Fatalf("after filling, count() = %d, want %d", got, n)
+	}
+}
+
+func TestRegistry_AdmitAtTheBound_RefusesANewPair(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	fillRegistry(t, r, maxInFlightUploads)
+
+	upload, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if !errors.Is(err, ErrTooManyUploads) {
+		t.Fatalf("Admit of a new pair at the bound: error = %v, want one wrapping %v", err, ErrTooManyUploads)
+	}
+	// A THIRD sentinel rather than either neighbour reused, and that is an
+	// assertion rather than a naming convention: this bound clears by itself as
+	// other uploads finish, and both neighbours are permanent for what they
+	// refused, so a client that cannot tell them apart backs off from a fault
+	// that will never clear or hot-loops on one that would have.
+	if errors.Is(err, ErrUploadTooLarge) {
+		t.Errorf("the capacity refusal also wraps %v, want a sentinel distinct from it", ErrUploadTooLarge)
+	}
+	if errors.Is(err, ErrInvalidDeclaration) {
+		t.Errorf("the capacity refusal also wraps %v, want a sentinel distinct from it", ErrInvalidDeclaration)
+	}
+	if upload != nil {
+		t.Errorf("Admit returned a non-nil accumulator for a pair refused by the bound")
+	}
+
+	// The refusal took no slot and left no entry: the registry holds exactly
+	// what it held before the chunk arrived.
+	if n := r.count(); n != maxInFlightUploads {
+		t.Errorf("count() after a capacity refusal = %d, want %d", n, maxInFlightUploads)
+	}
+	if _, ok := r.Lookup(testConnA, testAttachmentID); ok {
+		t.Errorf("Lookup after a capacity refusal reported the refused pair present")
+	}
+
+	// The same two prohibitions TestRegistry_AdmitRefusedDeclaration_StoresNothing
+	// asserts, and the same shape of control: the bound must be in the message,
+	// since a refusal that swallowed it would satisfy both prohibitions by
+	// carrying nothing at all.
+	msg := err.Error()
+	if strings.Contains(msg, testAttachmentID) {
+		t.Errorf("refusal message %q carries the attachment_id", msg)
+	}
+	if strings.Contains(msg, testBoundFixtureDigest) {
+		t.Errorf("refusal message %q carries the declared digest", msg)
+	}
+	if bound := strconv.Itoa(maxInFlightUploads); !strings.Contains(msg, bound) {
+		t.Errorf("refusal message %q does not carry the bound %s", msg, bound)
+	}
+
+	// Nothing is blacklisted and nothing was consumed: an immediate retry of the
+	// same id is refused the same way while the bound is still met.
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); !errors.Is(err, ErrTooManyUploads) {
+		t.Errorf("an immediate retry of the refused id: error = %v, want one wrapping %v", err, ErrTooManyUploads)
+	}
+	if n := r.count(); n != maxInFlightUploads {
+		t.Errorf("count() after the retry = %d, want %d", n, maxInFlightUploads)
+	}
+}
+
+// TestRegistry_AdmitAtTheBound_AnswersTheDeclarationSentinelFirst pins the one
+// gate ordering this package makes a contract: the bound is the LAST of the
+// three, behind both declaration checks. At capacity, a first chunk whose
+// declaration is also invalid is told the fault that will NEVER clear ahead of
+// the one that clears by itself. It is the sole red for a gate placed in front
+// of the checks, which satisfies every other row in this file.
+//
+// ONE FAULT PER ROW, for the reason
+// TestRegistry_AdmitRefusedDeclaration_StoresNothing states, and the two
+// declarations are that test's two verbatim: the only thing that differs here is
+// that the registry is full.
+func TestRegistry_AdmitAtTheBound_AnswersTheDeclarationSentinelFirst(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		totalChunks int
+		size        int64
+		want        error
+	}{
+		{
+			// Its own arithmetically-correct count, so CheckDeclaration admits
+			// this one and only the byte bound refuses it.
+			name:        "size one byte above the per-upload bound",
+			totalChunks: testBoundTotal,
+			size:        maxUploadBytes + 1,
+			want:        ErrUploadTooLarge,
+		},
+		{
+			// Well within the byte bound, so CheckDeclaredSize admits this one
+			// and only the arithmetic refuses it: 100000 bytes is 3 chunks.
+			name:        "count disagreeing with the declared size",
+			totalChunks: 4,
+			size:        100000,
+			want:        ErrInvalidDeclaration,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			fillRegistry(t, r, maxInFlightUploads)
+
+			upload, err := r.Admit(testConnA, testAttachmentID, tt.totalChunks, tt.size, testFixtureDigest)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Admit at the bound of a declaration with %s: error = %v, want one wrapping %v", tt.name, err, tt.want)
+			}
+			if errors.Is(err, ErrTooManyUploads) {
+				t.Errorf("Admit at the bound answered %v for a declaration the checks refuse, want the declaration sentinel", ErrTooManyUploads)
+			}
+			if upload != nil {
+				t.Errorf("Admit returned a non-nil accumulator for a refused declaration")
+			}
+			if n := r.count(); n != maxInFlightUploads {
+				t.Errorf("count() after a declaration refusal at the bound = %d, want %d", n, maxInFlightUploads)
+			}
+		})
+	}
+}
+
+// TestRegistry_AdmitAtTheBound_ReleaseReturnsTheSlot makes two statements about
+// slot accounting, both about what does NOT consume a slot and what returns one.
+func TestRegistry_AdmitAtTheBound_ReleaseReturnsTheSlot(t *testing.T) {
+	t.Parallel()
+
+	const nextAttachmentID = "att-next"
+
+	r := NewRegistry()
+	fillRegistry(t, r, maxInFlightUploads-1)
+
+	// (a) One short of the bound, a DECLARATION refusal does not consume the
+	// last free slot — it never took one — so the same id, re-declared
+	// correctly, is admitted into that slot immediately afterwards.
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes+1, testBoundFixtureDigest); !errors.Is(err, ErrUploadTooLarge) {
+		t.Fatalf("Admit of an oversized declaration below the bound: error = %v, want one wrapping %v", err, ErrUploadTooLarge)
+	}
+	if n := r.count(); n != maxInFlightUploads-1 {
+		t.Fatalf("count() after a declaration refusal = %d, want %d", n, maxInFlightUploads-1)
+	}
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of an admissible re-declaration into the last free slot: %v", err)
+	}
+	if n := r.count(); n != maxInFlightUploads {
+		t.Fatalf("count() after the re-declaration = %d, want %d", n, maxInFlightUploads)
+	}
+
+	// (b) At the bound a new pair is refused; releasing an admitted upload
+	// returns its slot and the same new pair is then admitted.
+	if _, err := r.Admit(testConnA, nextAttachmentID, 1, 0, testFixtureDigest); !errors.Is(err, ErrTooManyUploads) {
+		t.Fatalf("Admit of a new pair at the bound: error = %v, want one wrapping %v", err, ErrTooManyUploads)
+	}
+	r.Release(testConnA, testAttachmentID)
+	if n := r.count(); n != maxInFlightUploads-1 {
+		t.Fatalf("count() after Release = %d, want %d", n, maxInFlightUploads-1)
+	}
+	if _, err := r.Admit(testConnA, nextAttachmentID, 1, 0, testFixtureDigest); err != nil {
+		t.Errorf("Admit of the refused pair after a Release freed its slot: %v", err)
+	}
+	if n := r.count(); n != maxInFlightUploads {
+		t.Errorf("count() after the slot was refilled = %d, want %d", n, maxInFlightUploads)
+	}
+}
+
+// TestRegistry_ConcurrentAdmitAtTheBound_AdmitsExactlyTheFreeSlots is the
+// indivisibility pin: count-and-admit is ONE critical section, so with one free
+// slot exactly one of many concurrent first chunks for DISTINCT new pairs is
+// admitted, however they interleave.
+//
+// Its control is a registry that reads the count under one acquisition and
+// admits under another — Admit calling count() before taking mu, deciding on
+// that stale number inside it, and insertLocked losing its gate. That shape is
+// race-free, passes -race, and satisfies every other row in this file. MEASURED
+// against it: 200 rounds × 8 goroutines is red in 5 of 5 iterations of
+// -count=5 -race, against 5 of 5 green on the unmodified tree.
+//
+// ROUNDS ARE THE LEVER, NOT GOROUTINE COUNT.
+// TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh is the pattern
+// for the fan-out mechanics and NOT for its structure: one wide round measured
+// 0 reds in 5 against a split-lock control on an earlier ticket here, because a
+// single fan-out gives the interleaving one chance to happen.
+func TestRegistry_ConcurrentAdmitAtTheBound_AdmitsExactlyTheFreeSlots(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rounds     = 200
+		goroutines = 8
+	)
+
+	for round := 0; round < rounds; round++ {
+		r := NewRegistry()
+		fillRegistry(t, r, maxInFlightUploads-1)
+
+		start := make(chan struct{})
+		errs := make(chan error, goroutines)
+		for i := 0; i < goroutines; i++ {
+			attachmentID := fmt.Sprintf("racer-%d", i)
+			go func() {
+				<-start
+				_, err := r.Admit(testConnA, attachmentID, 1, 0, testFixtureDigest)
+				errs <- err
+			}()
+		}
+		close(start)
+
+		admitted := 0
+		for i := 0; i < goroutines; i++ {
+			switch err := <-errs; {
+			case err == nil:
+				admitted++
+			case !errors.Is(err, ErrTooManyUploads):
+				t.Fatalf("round %d: Admit of a distinct new pair: error = %v, want nil or one wrapping %v", round, err, ErrTooManyUploads)
+			}
+		}
+		if admitted != 1 {
+			t.Fatalf("round %d: goroutines admitted into 1 free slot = %d, want exactly 1", round, admitted)
+		}
+		if n := r.count(); n != maxInFlightUploads {
+			t.Fatalf("round %d: count() = %d, want %d", round, n, maxInFlightUploads)
+		}
 	}
 }

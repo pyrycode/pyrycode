@@ -1,7 +1,7 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
 Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782,
-#1795), ten slices of the family split from #1741/#1766: holds one inbound
+#1795, #1796), eleven slices of the family split from #1741/#1766: holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
 and — once the transfer is complete — checks the assembled bytes against the
@@ -10,9 +10,10 @@ byte (#1770). Bounds the retained bytes of one upload to a
 receiver-configured, unpublished ceiling, refusing at either the declared
 size or the accumulated total (#1777, see § "Per-upload byte bound" below),
 and holds the uploads currently in flight in a conn-keyed `Registry` (#1787),
-whose only exported way in runs both declaration checks and the incumbent
-look-up under one lock acquisition before admitting anything (`Admit`,
-#1788, #1795, see § "In-flight upload registry" below).
+whose only exported way in runs both declaration checks, the incumbent
+look-up, and a daemon-wide entry-count ceiling under one lock acquisition
+before admitting anything (`Admit`, #1788, #1795, #1796, see § "In-flight
+upload registry" below).
 Accumulation and admission stay in-memory — no disk, no wire codes, no
 logger — but the package is no longer in-memory-only end to end: `EnsureDir`
 (#1781, see § "Directory resolution and creation" below) resolves and creates
@@ -148,19 +149,16 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
   same moment. The correct worst-case peak is `N` bounds retained plus up to
   `N` more in flight — 128 MiB at a concurrency of 4, not 80 MiB. The
   *resident* (non-peak) figure the constant's doc states — `bound ×
-  concurrency` — is correct and is what #1796 should inherit as its budget;
-  it is only the peak-during-assembly refinement layered on top that
-  undercounts. **#1796: budget peak as `2N × bound`, not the `(N+1) × bound`
-  the code comment currently states** — this was a code-review SHOULD FIX
-  landed as text-only (no enforcement is wrong, only the doc's peak
-  refinement), so the comment itself was not corrected.
+  concurrency` — is correct and is what `maxInFlightUploads` (#1796) inherits
+  as its budget; it is only the peak-during-assembly refinement layered on
+  top that undercounted. #1796 landed the correction in the code comment
+  itself (128 MiB peak, citing `appFrameWorker` by symbol), closing the gap
+  this entry originally flagged between this doc and the code comment.
 
-Blocked, still: the in-flight-upload count cap (#1796) — this package bounds
-one upload's bytes, not how many uploads may exist at once. The registry that
-holds one accumulator per in-flight upload has since landed; see § "In-flight
-upload registry" below.
+The entry-count cap landed as `maxInFlightUploads` (#1796); see § "In-flight
+upload registry" below for the gate and its shape.
 
-## In-flight upload registry (#1787, #1788, #1795)
+## In-flight upload registry (#1787, #1788, #1795, #1796)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
 chunks: a map from `uploadKey{connID, attachmentID}` to the `*Accumulator` in
@@ -169,19 +167,64 @@ flight for that pair, an unexported `insertLocked` core, a thin lock-taking
 unexported `count`. Still unreachable from production — nothing calls it
 until #1744 wires the dispatch site, and #1744 lands last in the family.
 
-`Admit` is the registry's only exported way in. Through #1788 it ran
-`CheckDeclaration` and `CheckDeclaredSize` off-lock and handed a nil answer
-to the lock-taking `insert`; **#1795 moved the acquisition to cover the whole
-decision** — both checks, the incumbent look-up, construction, and the store
-— so a later capacity bound (#1796) can be part of that one acquisition
-rather than a check racing it. `Admit` now takes `mu` itself and calls the
+`Admit` is the registry's only exported way in, and now runs three checks
+under one acquisition of `mu` before admitting anything: `CheckDeclaration`,
+`CheckDeclaredSize`, and — last, inside `insertLocked`, behind the incumbent
+look-up — a daemon-wide entry-count gate against `maxInFlightUploads` (4,
+`admission.go`, #1796). Through #1788 the two declaration checks ran off-lock
+and handed a nil answer to the lock-taking `insert`; #1795 moved the
+acquisition to cover the whole decision — both checks, the incumbent
+look-up, construction, and the store — specifically so #1796's capacity gate
+could be added as part of that one acquisition rather than a check racing
+it, and #1796 is that addition. `Admit` takes `mu` itself and calls the
 unlocked `insertLocked` directly, never the lock-taking `insert`, whose own
 `Lock` would deadlock under an already-held `mu` (`sync.Mutex` is not
-reentrant — see the `mu`-is-a-leaf paragraph below). A refusal returns the
-check's error verbatim — no wrapping, no added context — which is what keeps
-`attachmentID` and `sha256` (the two banned strings this entry point
-necessarily holds) out of an error string with no format string for either
-to enter, and keeps both sentinels reachable with `errors.Is`.
+reentrant — see the `mu`-is-a-leaf paragraph below). A declaration refusal
+returns the check's error verbatim — no wrapping, no added context. The
+capacity refusal is the first error the admission path *formats*:
+`capacityRefusal(inFlight int)` wraps `ErrTooManyUploads` with the in-flight
+count and the bound, and its int-only signature is what keeps the never-log
+rule structural rather than a discipline at the one place on this path that
+holds the client-chosen `attachmentID` and needs a format string —
+`attachmentID` and `sha256` never enter a message from a function that
+cannot see them, the same argument `CheckDeclaration`'s scalars-only
+signature makes. All three sentinels stay reachable with `errors.Is`.
+
+`ErrTooManyUploads` is deliberately a third sentinel rather than a widening
+of `ErrUploadTooLarge`: retryability inverts across them. The capacity
+refusal clears **by itself** once other uploads finish — `Release` frees a
+slot the moment a held pair's transfer completes or is discarded — while
+`ErrUploadTooLarge` never clears for that file. `internal/protocol`'s
+`CodeAttachmentTooManyUploads` (mapped at #1744's dispatch site, not here)
+carries that transience on the wire; folding the two sentinels together
+would tell a client either to loop-retry an oversized file or to give up on
+a refusal that was about to clear on its own.
+
+**The capacity gate is the *last* of the three refusals, behind both
+declaration checks and the incumbent look-up, and that position is a
+contract.** At capacity, a first chunk whose declaration is also invalid
+answers the declaration sentinel, not the capacity one — the client is told
+the fault that will never clear ahead of the one that clears by itself. And
+because the gate sits behind the incumbent look-up (below), a pair the
+registry already holds reaches its incumbent before the gate ever sees it,
+exempting it from a capacity refusal without short-circuiting the
+declaration checks that run ahead of that look-up.
+
+**A gate that is architecturally guaranteed by the code's shape is not
+covered until a test tries to violate the shape.** Code review measured this
+directly: an overlay mutant that hoists the capacity check ahead of the
+incumbent look-up inside `insertLocked` — so a held pair *would* be refused
+at capacity — passed green across all 134 tests in the package, because no
+fixture exercises a held pair while the registry is at
+`maxInFlightUploads`. The spec's claim that this exemption is "satisfied by
+construction" was true of the code as shipped, but a true-by-construction
+claim about ordering is exactly the kind of property a later one-statement
+reordering can silently invert — construction is not a substitute for a
+test defending it against future edits. This gap shipped as a code-review
+SHOULD FIX, not blocking, with the fix (fill to the bound, `Admit` a filler
+id under a held pair, assert the incumbent comes back with `count()`
+unchanged) pointed at whichever of #1784 or #1744 next touches this
+look-up/gate order.
 
 Both checks run **ahead of** the incumbent look-up, so a repeat under a held
 pair answers the incumbent only when its declaration is admissible; an
@@ -215,16 +258,15 @@ that.
   built accumulator by some other route — the property a caller actually
   depends on only holds if the exported path is tested too, not inherited
   from coverage one layer down.
-- **Sequencing note for the rest of the family, from this ticket's security
-  review:** #1744 (the dispatch site, and this package's first production
-  caller) must not land ahead of #1796 (the in-flight entry-count cap).
-  Nothing calls this package today, so `Admit` changes no live exposure yet
-  — but the moment #1744 wires it up, `Admit` bounds one upload's bytes and
-  places no bound on how many uploads may exist, so N distinct
-  `attachment_id` values on one conn yield N entries. `Admit` is what closes
-  the key-space hole `CheckDeclaredSize`'s doc names (paired, an admitted
-  transfer declares at most 373 chunks); it does nothing about the entry
-  count, which is #1796's bound alone.
+- **Sequencing constraint discharged: #1796 landed the entry-count cap ahead
+  of #1744.** #1787/#1788's security review required #1744 (the dispatch
+  site, and this package's first production caller) not land ahead of the
+  in-flight entry-count cap — wiring the dispatch site first would have gone
+  live with `Admit` bounding one upload's bytes but placing no bound on how
+  many uploads may exist, so N distinct `attachment_id` values on one conn
+  would yield N entries. That gap is closed: `maxInFlightUploads` (#1796) is
+  the entry-count bound, and #1744 remains the package's first production
+  caller once it lands.
 
 - **Keyed by conn-and-attachment_id, not the bare id this doc used to sketch.**
   `docs/protocol-mobile.md` § Attachments documents `attachment_id` as "not a
@@ -238,19 +280,29 @@ that.
 - **One `sync.Mutex`, taken once per operation and held for the whole body —
   never once to read, again to write.** That is what lets the same-pair
   concurrent-insert case tell exactly one caller it got a fresh insert, and
-  it's the shape #1796's count-then-admit gate needs: a registry that locks
+  it's the shape #1796's count-then-admit gate needed: a registry that locks
   its read and its write separately passes `-race` and every other criterion
-  here, but can't support the indivisible look-up-then-count-then-insert
-  #1796 requires. Through #1788, "per operation" covered only the
-  lookup-and-store; `Admit` ran its two declaration checks off-lock and took
-  no lock of its own. #1795 moved the acquisition to cover `Admit`'s whole
-  decision — declaration verdict, incumbent look-up, construction, store —
-  so #1796 can add its count check inside that same acquisition rather than
+  here, but can't support the indivisible look-up-then-count-then-insert AC 4
+  required — this is the mutant #1796's concurrency test (below) is built to
+  catch. Through #1788, "per operation" covered only the lookup-and-store;
+  `Admit` ran its two declaration checks off-lock and took no lock of its
+  own. #1795 moved the acquisition to cover `Admit`'s whole decision —
+  declaration verdict, incumbent look-up, construction, store — so #1796
+  could add its count check inside that same acquisition rather than
   wrapping a second lock around it (`Registry`'s type doc cites `sessions`'
   `Pool.capMu` specifically to reject that wrap). `insertLocked`'s
   never-replace behaviour is a security property, not hygiene — it stops a
   second first-chunk for a live pair from swapping the declared
   `size`/`sha256` out from under the bytes already accumulated.
+- **A lock-contention mutant's detection rate does not transfer between
+  tests, even in the same package.** #1787's split-lock mutant on `insert`
+  needed ~75 rounds of 32 goroutines for ≈99.9% detection (see § "Mutation-
+  testing lessons" below). #1796's count-then-admit mutant — hoisting
+  `Admit`'s capacity read ahead of `mu.Lock()` — measured red 5/5 at
+  `-count=5 -race` with 200 short rounds of 8 goroutines each, under a
+  second of wall clock. Different mutant shape, different fixture, so the
+  round count that works for one is not evidence for the other; each new
+  concurrency pin needs its own measured rate.
 - **Off-lock feeding is sound only because the conn is in the key.** The
   registry hands the `*Accumulator` back and the caller feeds it with the lock
   released; that's safe because `V2SessionManager.appFrameWorker` serialises
@@ -391,6 +443,7 @@ resumable answer a later chunk can turn into bytes.
 | `ErrSizeMismatch` (#1770) | integrity | yes |
 | `ErrDigestMismatch` (#1770) | integrity | yes |
 | `ErrUploadTooLarge` (#1777) | resource | yes (from `Add`); n/a (from `CheckDeclaredSize` — no `Accumulator` exists yet) |
+| `ErrTooManyUploads` (#1796) | resource | n/a — refused before any `Accumulator` exists, by `Registry`'s admission gate rather than `Add`/`Assemble` |
 | `ErrIncomplete` | — | no |
 
 `ErrUploadTooLarge` is the one sentinel not scoped to `accumulator.go`'s var
@@ -405,8 +458,9 @@ deliberately many-to-one within the framing and integrity families: all
 three framing sentinels answer `CodeAttachmentInvalidChunk`, both integrity
 sentinels answer `CodeAttachmentIntegrityFailed`. `ErrUploadTooLarge` is
 one-to-one — `CodeAttachmentTooLarge` — and permanent for that file, in
-contrast to #1796's still-unbuilt `CodeAttachmentTooManyUploads`, which is
-marked transient because it clears once other uploads finish. Distinguishing
+contrast to `ErrTooManyUploads`'s `CodeAttachmentTooManyUploads` (#1796),
+which is marked transient because it clears once other uploads finish; the
+mapping itself is still #1744's to make. Distinguishing
 sentinel from sentinel is wanted in-process, for this package's own tests and
 for the daemon's logs, not on the wire — a single corrupt transfer must still
 resolve to exactly one wire code, which is why `reject` (the shared latch
@@ -454,7 +508,7 @@ attacker-supplied, JSON-decoded string in this codebase — say "bytes" or use
 `nil` `Data` and an empty non-nil slice are legitimate "received" values). The
 zero-byte-attachment criterion exists specifically to catch this class of bug.
 
-## Mutation-testing lessons (measured across #1769, #1770, #1772, and #1787)
+## Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, and #1796)
 
 This package's sole-redness claims are measured with `go test -overlay`
 (mutants applied via an absolute-path JSON manifest, no worktree write), not
@@ -602,6 +656,30 @@ surfaced:
   real coverage with no `_ = a.received` prop needed. The "grep for `build
   failed`" trap is specific to locals and imports; a field-update deletion
   needs no such guard before trusting its verdict.
+- **A property true "by construction" still needs its own mutant, or it
+  ships unpinned** (#1796, code review SHOULD FIX). The spec argued AC 3 —
+  a held pair is never refused by the capacity gate — was satisfied by
+  construction, because the incumbent look-up runs ahead of the gate in
+  `insertLocked`. True of the code as written, but no fixture drove a held
+  pair while the registry was at `maxInFlightUploads`, so an overlay mutant
+  hoisting the gate ahead of the look-up passed **green across all 134**
+  tests in the package. A by-construction argument describes the current
+  shape of the code; it says nothing about whether a later one-line
+  reordering would be caught. Treat every "satisfied by construction" claim
+  in a spec as a mutant to build and run, not as a reason a row can be
+  skipped — this one shipped as a known, tracked gap (see § "In-flight
+  upload registry" above) rather than silently.
+- **A split-lock control has to satisfy every other row, or "sole red"
+  can't be measured.** #1796's first cut of the count-then-admit mutant
+  (`Admit` reads `r.count()` before `mu.Lock()`, decides on the stale
+  number inside the lock) returned `capacityRefusal` without first running
+  `CheckDeclaration`/`CheckDeclaredSize`, so it also reddened the gate-
+  ordering test (AC 1) — two rows red, neither one the sole red the AC 4
+  measurement needed. The fix duplicated the declaration checks into the
+  mutant's capacity branch so it satisfied every row except the
+  indivisibility one. A control mutant built to isolate one property has to
+  be built to pass every *other* property first, or its redness proves
+  nothing about the one row it was meant to isolate.
 
 All three properties #1769 shipped without a test pin are now pinned,
 landed alongside #1770's own checks rather than left for a third mutation
@@ -639,11 +717,8 @@ hash, fetch the blob"), which is a requirement from
   `CheckDeclaredSize` + `Add`'s step 5 (#1777, see § "Per-upload byte bound"
   above), and the conn-keyed registry of in-flight uploads landed as
   `Registry` (#1787, its admission decision moved under one lock acquisition
-  by #1795, see § "In-flight upload registry" above). Still blocked: the
-  entry-count cap on that registry (**#1796**, refiled after #1786 closed
-  without shipping it), which should inherit the `2N × bound` peak / `N ×
-  bound` resident figures from § "Per-upload byte bound" rather than
-  re-deriving them.
+  by #1795, and given its entry-count cap by #1796 — refiled after #1786
+  closed without shipping it — see § "In-flight upload registry" above).
 - **#1742** — expiry/abandonment of a partial upload. Note this covers
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch
@@ -655,6 +730,13 @@ hash, fetch the blob"), which is a requirement from
   into #1772/#1773 earlier in the same wait; #1772 — filename sanitisation —
   landed, see `SanitizeFilename` above.)
 - **#1744** — wires the dispatch site: maps the three framing sentinels to
-  `CodeAttachmentInvalidChunk` and the two integrity sentinels to
-  `CodeAttachmentIntegrityFailed`, both via `errors.Is`, and is the first
-  production caller of this package.
+  `CodeAttachmentInvalidChunk`, the two integrity sentinels to
+  `CodeAttachmentIntegrityFailed`, and `ErrTooManyUploads` to
+  `CodeAttachmentTooManyUploads`, all via `errors.Is`. Now unblocked and free
+  to land — #1796 discharged the family's sequencing constraint that this
+  ticket not go first (see § "In-flight upload registry" above) — and is the
+  first production caller of this package.
+- **#1784** — routes a later chunk into an admitted upload. Also the
+  currently-named place to close the coverage gap code review found in
+  #1796: no test drives a held pair while the registry is at
+  `maxInFlightUploads` (see § "In-flight upload registry" above).
