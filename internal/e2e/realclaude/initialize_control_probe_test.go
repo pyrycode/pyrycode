@@ -533,6 +533,17 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 	}
 	controlSent := json.RawMessage(bytes.TrimRight(controlLine, "\n"))
 	t.Logf("#1688: writing control request: %s", controlSent)
+	// #1762: the send-point anchor, read HERE rather than beside the record literal
+	// below. Nothing claude writes in RESPONSE to the request may fall before it,
+	// and only a read taken before the write guarantees that; reading it afterwards
+	// inverts the residual. The residual that remains runs the safe way — a line
+	// arriving between this read and the write is counted inside the window
+	// although it preceded the request.
+	//
+	// len(rec.snapshotLines()) is the accessor because setModeRecorder has no
+	// cheaper one, and adding one changes a type the set_permission_mode family
+	// shares.
+	sendPointIndex := len(rec.snapshotLines())
 	writeLine("control request", controlLine)
 	// The wait's own RESULT, kept rather than dropped into the log. Snapshotting
 	// ControlResponses happens after cmd.Wait() below, so a response arriving past
@@ -564,6 +575,13 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		t.Fatalf("#1688: claude produced no stdout; there is nothing to capture\nstderr:\n%s\nwaitErr: %v",
 			truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
 	}
+
+	// #1762: ONE anchor and ONE slice expression, so the two window reads cannot
+	// disagree about which window they measured and no line is counted both before
+	// the send point and inside it. Deliberately NOT the difference of two
+	// snapshotInitModes() calls: those take the lock separately, and a line landing
+	// between them is attributed to the wrong side of the anchor.
+	window := initControlReadWindow(lines, sendPointIndex)
 
 	responses := rec.snapshotControlResponses()
 	summary := initControlSummarize(responses)
@@ -599,6 +617,10 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		StdoutEvents:     lines,
 		NonJSONLineCount: rec.nonJSONCount(),
 		TurnBoundaries:   rec.snapshotBoundaries(),
+
+		SendPointIndex:                sendPointIndex,
+		AfterSendPointSystemInitCount: window.systemInitCount,
+		AfterSendPointResultTrailers:  window.resultTrailers,
 
 		StdinWriteErrors: writeErrs,
 		// RAW, deliberately not pre-truncated. writeInitControlFixture applies

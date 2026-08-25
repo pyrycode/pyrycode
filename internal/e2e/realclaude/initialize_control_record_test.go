@@ -222,11 +222,13 @@ type initControlResultTrailer struct {
 // gets a field of its own, and a later slice must not add one.
 //
 // All three are POPULATED, never computed here, exactly as the models fields are.
-// Until #1715 fills them a live re-run leaves all three at their zero values, so
-// an artifact carrying `send_point_index: 0` today is an UNPOPULATED FIELD and
-// not a `before_first_turn` capture — only the ticket that fills them makes the
-// two distinguishable. That is accepted rather than papered over with a presence
-// flag: the committed initialize_control_v2.1.239.json already predates arm and
+// #1762 fills all three at the fill site from initControlReadWindow, which reads
+// the window out of the lines the run recorded; this file computes none of them.
+// The committed initialize_control_v2.1.239.json predates the three fields
+// entirely and carries NONE OF THE THREE KEYS, which is what tells a reader that
+// an artifact from before that slice is still not readable as a
+// `before_first_turn` capture. That residual is accepted rather than papered over
+// with a presence flag: the same file already predates arm and
 // control_response_within_wait.
 //
 // ScannerError is load-bearing for #1688, which caps its reader per line: an

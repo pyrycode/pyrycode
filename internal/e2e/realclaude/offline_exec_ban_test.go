@@ -307,6 +307,38 @@ var finOfflineExecBans = map[string][]string{
 		"os.Getenv", "os.Environ", "os.LookupEnv",
 		"realHome", "os.TempDir",
 	},
+	// #1762. initialize_control_record_test.go's entry, copied whole — the same
+	// seventeen names, for the reason that entry states: like #1696's and #1701's
+	// files, this one performs no I/O in EITHER direction. It builds line literals
+	// and asserts on a returned struct. The first five keep a SKIP out
+	// (resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body,
+	// after `=== RUN` is printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`), the three environment readers are the credential
+	// guard, and the packageDir group is the trio plus writeFixture because the
+	// check is an AST identifier match — a file calling a wrapper reaches
+	// packageDir transitively while never naming it.
+	//
+	// The os read/write group and filepath.Glob are what this entry is most FOR.
+	// The committed testdata/initialize_control_v2.1.239.json is where a window
+	// read is checked BY HAND, and `go test` runs in the package source directory
+	// — so a relative os.ReadFile("testdata/…") reaches that capture without
+	// naming any wrapper, and that read is precisely the shortcut a developer
+	// building this table is tempted by. It would turn a table of literals into a
+	// test that reads the artifact it exists to justify, and the reader's whole
+	// claim is that it touches no filesystem.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: this file writes
+	// nothing and needs no directory. os.Open is deliberately declined — no
+	// sibling entry carries it, the family's five os names are the established
+	// set, and a ban name wants a hazard behind it, on the ground #1732's entry
+	// declines os.TempDir.
+	"initialize_control_window_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
