@@ -16,30 +16,58 @@ import (
 // arrival order instead of addressing by index, both pass on a uniform fixture
 // and fail on this one.
 //
-// The fixture is tens of bytes rather than anything near
-// protocol.MaxAttachmentChunkBytes because this package enforces no byte cap —
-// a bound-sized fixture would only be slow and would imply an enforcement that
-// lives in #1777.
+// The fixture stays tens of bytes even though this package now enforces a byte
+// cap: the properties it exists for — the uneven tail, arrival order, index
+// addressing — are independent of magnitude, so a bound-sized fixture would buy
+// nothing here and cost 16 MiB. The tests that exercise maxUploadBytes use
+// testBoundFixture instead.
 var (
 	testFixture = []byte("0123456789abcdefghijklmn")
 	testParts   = [][]byte{testFixture[0:10], testFixture[10:20], testFixture[20:24]}
 )
 
+// testBoundFixture is exactly maxUploadBytes bytes, all zero except the LAST,
+// which is 'z'. The non-uniform tail is the same trap testFixture's uneven tail
+// covers, applied at the other end of the size range: a uniform buffer cannot
+// falsify a digest taken over a prefix, or an assembly built from the wrong
+// chunk, because every prefix of it hashes to something the fixture also
+// produces.
+//
+// Package-level and SHARED by all three bound-sized tests so the suite pays its
+// 16 MiB once. None of them may mutate it, in the whole or in a slice: a test
+// that scribbles on a shared fixture reddens every other parallel test in this
+// file under some unrelated mutant, and this package has already been bitten by
+// that once (see TestAccumulator_SingleChunk_ReturnsAFreshCopy, which copies for
+// exactly this reason). The cost is 16 MiB resident for the whole test binary,
+// including runs filtered to unrelated tests, which is accepted rather than
+// worked around with lazy-init machinery nothing else here needs.
+var testBoundFixture = newBoundFixture()
+
+// newBoundFixture builds testBoundFixture. It exists because a var declaration
+// cannot set one byte of a make'd slice on its own.
+func newBoundFixture() []byte {
+	b := make([]byte, maxUploadBytes)
+	b[len(b)-1] = 'z'
+	return b
+}
+
 // testTotal is the declared chunk count matching testParts.
 const testTotal = 3
 
-// The two declared digests the fixtures carry: testFixture's, and the empty
-// input's. Both are WRITTEN OUT rather than computed by a test helper. A helper
-// would reach for the same crypto/sha256 and encoding/hex calls Assemble does,
-// so a mutant that changed the algorithm or the encoding would move the
-// expectation along with the code and stay green. These two literals instead
-// trace to a value verifiable outside this package:
+// The three declared digests the fixtures carry: testFixture's, the empty
+// input's, and testBoundFixture's. All are WRITTEN OUT rather than computed by
+// a test helper. A helper would reach for the same crypto/sha256 and
+// encoding/hex calls Assemble does, so a mutant that changed the algorithm or
+// the encoding would move the expectation along with the code and stay green.
+// These literals instead trace to values verifiable outside this package:
 //
 //	printf '0123456789abcdefghijklmn' | shasum -a 256
 //	printf '' | shasum -a 256
+//	{ head -c 16777215 /dev/zero; printf 'z'; } | shasum -a 256
 const (
-	testFixtureDigest = "d5ea2aa9223ac1fa43ccec70b30962690fcfc6686857f99a0c4b2963cf8bee4b"
-	testEmptyDigest   = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	testFixtureDigest      = "d5ea2aa9223ac1fa43ccec70b30962690fcfc6686857f99a0c4b2963cf8bee4b"
+	testEmptyDigest        = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	testBoundFixtureDigest = "1415568bd87f16157ad7572d21f328e0dee83ff58782efde7ab4e7058d0a0d0a"
 )
 
 // testChunk builds a chunk carrying only the three fields Add reads. Leaving
@@ -483,5 +511,110 @@ func TestAccumulator_ZeroByteAttachment(t *testing.T) {
 				t.Errorf("Assemble() = %q, want zero bytes", got)
 			}
 		})
+	}
+}
+
+// TestAccumulator_AccumulatedBytesCrossTheBound_RejectAndDiscard drives the
+// accumulated rung of the per-upload byte bound, in the shape
+// TestAccumulator_IntegrityFaults_RejectAndDiscard established: the chunk that
+// would take the held total past maxUploadBytes is refused, the bytes already
+// held are released, and the refusal latches.
+//
+// The transfer declares 2 chunks and a tiny size, NEITHER of which is ever
+// reached, and that is the case this rung exists for rather than a contrived
+// one: no inbound validator enforces the 45000-byte per-chunk contract — only
+// the transport's 65519-byte envelope cap bounds a frame — so an admitted
+// transfer can deliver far more bytes than it declared, and the declared rung
+// alone would be a ceiling plus a per-chunk fudge factor. The realistic shape is
+// a small declared count delivering oversized chunks, not bound-many honest
+// ones.
+//
+// Crossing by exactly ONE byte is what makes this the off-by-one pin. A single
+// oversized FIRST chunk needs no row of its own: it is the identical branch with
+// the held total still 0.
+func TestAccumulator_AccumulatedBytesCrossTheBound_RejectAndDiscard(t *testing.T) {
+	t.Parallel()
+
+	// Constructed directly: this rung sits on the data path, so it holds even
+	// for a caller that never ran either admission function.
+	a := NewAccumulator(2, int64(len(testFixture)), testFixtureDigest)
+	if err := a.Add(testChunk(0, 2, testBoundFixture)); err != nil {
+		t.Fatalf("Add(a chunk of exactly the bound) = %v, want nil", err)
+	}
+
+	err := a.Add(testChunk(1, 2, []byte("x")))
+	wantOnlyUploadTooLarge(t, err)
+
+	if a.chunks != nil {
+		t.Errorf("chunks after the refusal holds %d entries, want the map dropped", len(a.chunks))
+	}
+
+	// Discarded rather than continued: index 1 never arrived, so this is a
+	// perfectly well-formed chunk and only the latch can refuse it.
+	if later := a.Add(testChunk(1, 2, nil)); later != err {
+		t.Errorf("Add(a well-formed index 1) after the refusal = %v, want the latched %v", later, err)
+	}
+	got, aerr := a.Assemble()
+	if aerr != err {
+		t.Errorf("Assemble() after the refusal error = %v, want the latched %v", aerr, err)
+	}
+	if got != nil {
+		t.Errorf("Assemble() after the refusal = %d bytes, want none", len(got))
+	}
+}
+
+// TestAccumulator_ExactlyTheBound_RoundTrips is the other half of the off-by-one
+// pin: a transfer that declares and delivers exactly maxUploadBytes is admitted
+// and completes, so the bound is a ceiling on what may be held rather than on
+// what may be approached. Written >= at either rung, this test is the red.
+//
+// TWO chunks rather than one, deliberately: a one-chunk fixture cannot falsify a
+// mutant that tracks only the latest chunk's length instead of a running sum.
+func TestAccumulator_ExactlyTheBound_RoundTrips(t *testing.T) {
+	t.Parallel()
+
+	if err := CheckDeclaredSize(maxUploadBytes); err != nil {
+		t.Fatalf("CheckDeclaredSize(the bound) = %v, want nil", err)
+	}
+
+	a := NewAccumulator(2, maxUploadBytes, testBoundFixtureDigest)
+	if err := a.Add(testChunk(0, 2, testBoundFixture[:maxUploadBytes-1])); err != nil {
+		t.Fatalf("Add(index 0) = %v, want nil", err)
+	}
+	if err := a.Add(testChunk(1, 2, testBoundFixture[maxUploadBytes-1:])); err != nil {
+		t.Fatalf("Add(index 1, the byte that lands on the bound) = %v, want nil", err)
+	}
+	got, err := a.Assemble()
+	if err != nil {
+		t.Fatalf("Assemble() error = %v, want nil", err)
+	}
+	if !bytes.Equal(got, testBoundFixture) {
+		t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(got), len(testBoundFixture))
+	}
+}
+
+// TestAccumulator_DuplicateIndexOutranksTheByteBound pins the byte bound's place
+// in Add's fixed check order: it runs LAST, with the store, because the running
+// total counts only bytes the accumulator actually retains.
+//
+// The re-sent chunk carries one byte against a held total already at the bound,
+// so both faults are live at once. Moving the new check above the duplicate
+// check makes 1 > maxUploadBytes - maxUploadBytes true and the wrong sentinel
+// win, which is what this test is the sole red for. It pins the SENTINEL choice
+// only: whether the counter moves for an unstored chunk is unobservable, since
+// every unstored chunk rejects the transfer.
+func TestAccumulator_DuplicateIndexOutranksTheByteBound(t *testing.T) {
+	t.Parallel()
+
+	a := NewAccumulator(2, maxUploadBytes, testBoundFixtureDigest)
+	if err := a.Add(testChunk(0, 2, testBoundFixture)); err != nil {
+		t.Fatalf("Add(a chunk of exactly the bound) = %v, want nil", err)
+	}
+	err := a.Add(testChunk(0, 2, []byte("x")))
+	if !errors.Is(err, ErrDuplicateIndex) {
+		t.Fatalf("Add(a re-sent index 0 that would also cross the bound) = %v, want %v", err, ErrDuplicateIndex)
+	}
+	if errors.Is(err, ErrUploadTooLarge) {
+		t.Errorf("Add(two faults) = %v, want it not to also report %v", err, ErrUploadTooLarge)
 	}
 }
