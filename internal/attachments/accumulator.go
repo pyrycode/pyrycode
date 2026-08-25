@@ -1,12 +1,15 @@
 // Package attachments holds one inbound attachment upload's chunks in memory
-// while its attachment_chunk frames arrive, and refuses a stream whose framing
-// contradicts what the transfer declared.
+// while its attachment_chunk frames arrive, refuses a stream whose framing
+// contradicts what the transfer declared, and yields the assembled bytes only
+// once they match the size and the digest the transfer declared.
 //
 // The receiver's rules are published in docs/protocol-mobile.md § Attachments,
 // "Reassembly & integrity (the receiver's rules)": each chunk's decoded data is
-// stored AT ITS INDEX, so chunks may arrive in ANY ORDER, and the transfer is
-// complete once every index in [0, total_chunks) has arrived exactly once. That
-// is deliberately weaker than the bundle stream's strict succession rule in
+// stored AT ITS INDEX, so chunks may arrive in ANY ORDER, the transfer is
+// complete once every index in [0, total_chunks) has arrived exactly once, and
+// only then is the assembled length compared against the declared size and its
+// lowercase-hex sha256 against the declared digest. That is deliberately weaker
+// than the bundle stream's strict succession rule in
 // relay.ReassembleBundle, which is the neighbouring rule a reader would
 // otherwise copy and which the published contract warns against by name. What
 // this package does copy from ReassembleBundle is its all-or-nothing posture:
@@ -14,9 +17,10 @@
 // corrupted output.
 //
 // In-memory only. Nothing here touches the filesystem, reads a socket, or emits
-// a wire code, and the package makes zero log calls. The three framing refusals
-// are Go sentinels so the daemon's logs and this package's tests can tell them
-// apart; mapping all three to the single attachment.invalid_chunk wire code is
+// a wire code, and the package makes zero log calls. Every refusal is a Go
+// sentinel so the daemon's logs and this package's tests can tell them apart;
+// mapping the three framing refusals to the single attachment.invalid_chunk
+// wire code and the two integrity refusals to attachment.integrity_failed is
 // the dispatch site's job (#1744), which is also the only place that knows the
 // attachment id and conn id worth logging.
 //
@@ -29,6 +33,8 @@
 package attachments
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -40,9 +46,12 @@ import (
 // wrapped with the offending numbers.
 //
 // The first three are framing refusals and all three map to the one wire code
-// protocol.CodeAttachmentInvalidChunk — at #1744's dispatch site, not here. The
-// many-to-one mapping is deliberate: distinguishability is wanted in-process,
-// for these tests and for the daemon's logs, not on the wire.
+// protocol.CodeAttachmentInvalidChunk; the next two are integrity refusals and
+// both map to protocol.CodeAttachmentIntegrityFailed. ErrIncomplete maps to
+// nothing. Every one of those mappings happens at #1744's dispatch site, not
+// here — this package still does not import codes.go. The many-to-one shape is
+// deliberate in both families: distinguishability is wanted in-process, for
+// these tests and for the daemon's logs, not on the wire.
 var (
 	// ErrTotalChunksMismatch reports a chunk whose declared total disagrees
 	// with the count the transfer was admitted under. Discards the transfer.
@@ -55,6 +64,14 @@ var (
 	// ErrDuplicateIndex reports a chunk index that has already arrived, whether
 	// or not it repeats the bytes already held. Discards the transfer.
 	ErrDuplicateIndex = errors.New("attachments: chunk index already received")
+
+	// ErrSizeMismatch reports assembled bytes whose length differs from the
+	// transfer's declared size. Discards the transfer.
+	ErrSizeMismatch = errors.New("attachments: assembled length differs from the declared size")
+
+	// ErrDigestMismatch reports assembled bytes whose lowercase-hex sha256
+	// differs from the transfer's declared digest. Discards the transfer.
+	ErrDigestMismatch = errors.New("attachments: assembled sha256 differs from the declared digest")
 
 	// ErrIncomplete reports that at least one index has not arrived yet. It is
 	// NOT a refusal: it does not discard the transfer, and a later Add can turn
@@ -82,12 +99,15 @@ type Accumulator struct {
 	totalChunks int
 
 	// size is the declared byte length of the whole file. Latched here because
-	// it comes from the admission decision too; unread by this slice, read by
-	// the sibling that checks the assembled bytes against it (#1770).
+	// it comes from the admission decision too, and read by Assemble as the
+	// right operand of one comparison against the assembled length — never as
+	// the size of anything allocated.
 	size int64
 
 	// sha256 is the declared lowercase-hex digest of the whole file. Latched
-	// for the same reason as size, and read by the same sibling (#1770).
+	// for the same reason as size, and read by Assemble as one string operand
+	// of an exact-equality comparison. It is an attacker-supplied claim on the
+	// inbound leg, so it is compared and never inspected, trusted or logged.
 	sha256 string
 
 	// chunks holds each arrived chunk's bytes at its index. PRESENCE IS THE
@@ -96,9 +116,10 @@ type Accumulator struct {
 	// and completion counts entries — neither ever tests a value for nil.
 	chunks map[int][]byte
 
-	// rejected latches the first framing refusal, wrapped with the offending
-	// numbers. Once set, the transfer is discarded: every later Add and every
-	// Assemble answers with this identical error value and never with bytes.
+	// rejected latches the first refusal, framing or integrity, wrapped with
+	// the offending numbers. Once set, the transfer is discarded: every later
+	// Add and every Assemble answers with this identical error value and never
+	// with bytes.
 	rejected error
 }
 
@@ -148,11 +169,12 @@ func NewAccumulator(totalChunks int, size int64, sha256 string) *Accumulator {
 // and Data — and the omissions are deliberate rather than oversights.
 // AttachmentID is not checked because the caller looks this accumulator up BY
 // it, so a foreign chunk cannot reach here and a check would invent a fourth
-// framing sentinel no rule covers. Size and SHA256 are not checked because both
-// are latched from the admitted transfer, so a later chunk restating either one
-// differently changes nothing that is checked — that is the security property,
-// and it is why only a total disagreement is a framing refusal. Filename and
-// MimeType are never read at all.
+// framing sentinel no rule covers. Size and SHA256 are not checked HERE, because
+// Assemble compares the LATCHED declaration against the assembled bytes rather
+// than anything a chunk restates, so a later chunk carrying a different size or
+// digest changes nothing that is checked — that is the security property, and it
+// is why only a total disagreement is a framing refusal. Filename and MimeType
+// are never read at all.
 //
 // PRECONDITION: chunk.Data is retained WITHOUT being copied, so the caller must
 // not mutate it, nor decode into a reused buffer, after Add returns. That holds
@@ -180,18 +202,28 @@ func (a *Accumulator) Add(chunk protocol.AttachmentChunkPayload) error {
 }
 
 // reject latches err as the transfer's refusal, releases the bytes already held
-// and returns err, so a caller reads as `return a.reject(...)`.
+// and returns err, so a caller reads as `return a.reject(...)`. Both Add and
+// Assemble call it: a framing fault and an integrity mismatch discard the
+// transfer identically, and only ErrIncomplete does not.
 //
 // Dropping the map at the moment of refusal is what makes "discarded rather
 // than continued" true of the MEMORY and not only of the answers: without it a
 // hostile client could park held bytes behind a poisoned accumulator until
-// #1742's reaper runs.
+// #1742's reaper runs. For an integrity refusal there is no reaper to fall back
+// on at all — a complete-but-corrupt transfer is not a PARTIAL upload, so
+// #1742 does not cover it, and this line is the only thing that frees it.
 //
-// The wrapped message carries the index and the counts only. Data is a user's
-// private file bytes and Filename is both private in itself and a
-// log-injection shape in a line-oriented log, so neither ever enters an error
-// string — the rules protocol.AttachmentChunkPayload's doc block states, here
-// honoured by its first consumer.
+// The wrapped message carries the index and the counts only, plus — for an
+// integrity refusal — the digest this receiver computed and the CHARACTER COUNT
+// of the declared claim. Data is a user's private file bytes, Filename is both
+// private in itself and a log-injection shape in a line-oriented log, and the
+// declared sha256 is an attacker-chosen string of that same class, so none of
+// the three ever enters an error string — the rules
+// protocol.AttachmentChunkPayload's doc block states, here honoured by its
+// first consumer. The computed digest is safe to carry where the claim is not:
+// it is daemon-authored, fixed in shape, one-way with respect to the content,
+// and not a capability, because retrieval names a conversation and an
+// attachment and never a hash.
 func (a *Accumulator) reject(err error) error {
 	a.rejected = err
 	a.chunks = nil
@@ -199,9 +231,10 @@ func (a *Accumulator) reject(err error) error {
 }
 
 // Assemble returns the transfer's bytes once every index in
-// [0, declared count) has arrived exactly once. It neither consumes nor mutates
-// the accumulator, so an incomplete transfer can be completed by a later Add
-// and assembled then.
+// [0, declared count) has arrived exactly once AND the assembled bytes match
+// both facts the transfer declared. It neither consumes nor mutates the
+// accumulator, so an incomplete transfer can be completed by a later Add and
+// assembled then, and a caller may assemble a complete one repeatedly.
 //
 // A refused transfer never yields bytes, however complete it looks: the latched
 // refusal is returned instead.
@@ -224,11 +257,46 @@ func (a *Accumulator) reject(err error) error {
 // claim is the same attack the constructor's hint-free map avoids. The
 // single-chunk case is deliberately not fast-pathed to the stored slice either:
 // a caller that mutates what it gets back must not be able to corrupt the
-// accumulator or a second caller's copy.
+// accumulator or a second caller's copy, and the fresh copy is also what keeps
+// the two checks below from being a check-then-use over aliased memory — THE
+// BYTES VERIFIED ARE THE BYTES RETURNED.
 //
-// The assembled bytes are returned UNCHECKED against the transfer's declared
-// size and sha256; that comparison is #1770's, and nothing consumes these bytes
-// until #1744 wires the dispatch site.
+// Only once the transfer is complete are those bytes compared against what the
+// transfer declared, per docs/protocol-mobile.md § Attachments, "Reassembly &
+// integrity (the receiver's rules)": the assembled length against the declared
+// size, then its lowercase-hex sha256 against the declared digest. Either
+// mismatch discards the transfer exactly as a framing fault does, and no bytes
+// are yielded — the receiver never emits partial or corrupted output. Both
+// comparisons read the assembled slice itself rather than a proxy computed from
+// the chunk map, so a later regression in the loop above cannot slip past a
+// green check.
+//
+// THE LENGTH IS CHECKED FIRST, and the order is part of the contract rather
+// than a preference. A digest mismatch is observable on its own — same length,
+// different bytes — while every wrong-length stream also fails the digest, so
+// no fixture can reach the digest check by being the wrong length alone.
+// Checking the length first is what makes ErrSizeMismatch the answer a
+// wrong-length stream gets at all; swapping the two is what the wrong-length
+// row of TestAccumulator_IntegrityFaults_RejectAndDiscard exists to catch.
+//
+// The digest comparison is EXACT STRING EQUALITY, and softening it is the one
+// change this method must not accept. internal/update's VerifySHA256 is the
+// repo's nearest "bytes against a declared hex digest" comparison and folds
+// case, which is defensible where it lives and a hole here: the published
+// contract calls a case-insensitive or prefix comparison one, in the same
+// sentence that mandates lowercase hex and answers the availability worry by
+// obliging clients to send that form. There is likewise no well-formedness
+// carve-out — an uppercase, truncated, non-hex or EMPTY claim simply loses the
+// comparison — because the claim is attacker-supplied, so skipping the check
+// for some claim value would hand the sender an opt-out from integrity checking
+// while leaving the reject path looking live.
+//
+// A SUCCESSFUL RETURN IS NOT A SAFETY VERDICT. The same party supplied the
+// bytes and the digest, so a match proves the transfer was not corrupted and
+// proves nothing about whether the content is safe — integrity, not
+// authenticity, as protocol.AttachmentChunkPayload's doc block states. The
+// consumers of these bytes are the readers of that sentence: #1772's filename
+// sanitiser, #1773's storage and #1746's retrieval.
 func (a *Accumulator) Assemble() ([]byte, error) {
 	if a.rejected != nil {
 		return nil, a.rejected
@@ -243,6 +311,15 @@ func (a *Accumulator) Assemble() ([]byte, error) {
 	out := make([]byte, 0, n)
 	for i := 0; i < a.totalChunks; i++ {
 		out = append(out, a.chunks[i]...)
+	}
+	if int64(len(out)) != a.size {
+		return nil, a.reject(fmt.Errorf("attachments: assembled %d bytes, transfer declared %d: %w",
+			len(out), a.size, ErrSizeMismatch))
+	}
+	sum := sha256.Sum256(out)
+	if actual := hex.EncodeToString(sum[:]); actual != a.sha256 {
+		return nil, a.reject(fmt.Errorf("attachments: assembled sha256 %s, declared digest is %d characters: %w",
+			actual, len(a.sha256), ErrDigestMismatch))
 	}
 	return out, nil
 }
