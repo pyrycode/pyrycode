@@ -218,10 +218,14 @@ func CheckDeclaration(totalChunks int, size int64) error {
 // and only TOGETHER do they bound the accumulator's key space: with both run, an
 // admitted transfer declares at most 373 chunks, so its map can hold at most 373
 // entries. Run alone, this one admits a declaration of 2^31-1 ZERO-BYTE chunks,
-// which no byte bound can refuse, because Σ len(Data) stays 0. Neither function
-// can enforce the other's presence — admission runs IN FRONT OF the Accumulator
-// rather than gating it, as CheckDeclaration's own doc records — so the
-// obligation lands on the dispatch site (#1744).
+// which no byte bound can refuse, because Σ len(Data) stays 0. Registry.Admit
+// is where that obligation is discharged: it runs both before constructing an
+// Accumulator, and it is the registry's only exported way in. That is ONE CALLER
+// THAT RUNS BOTH, NOT A GATE. Neither function can enforce the other's presence
+// — admission runs IN FRONT OF the Accumulator rather than gating it, as
+// CheckDeclaration's own doc records — and NewAccumulator stays exported and
+// constructible without passing through Admit, so a second caller could still
+// run one check or neither.
 //
 // PURE and stateless: no filesystem, no socket, no logger, no lock and no
 // goroutine, so it is safe to call concurrently from any goroutine, exactly like

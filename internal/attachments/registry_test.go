@@ -2,8 +2,13 @@ package attachments
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
 // The two conns and the one attachment_id every test here keys on. The same id
@@ -13,6 +18,21 @@ const (
 	testConnB        = "conn-b"
 	testAttachmentID = "att-1"
 )
+
+// testBoundTotal is the count CheckDeclaration requires for a declared size of
+// maxUploadBytes at protocol.MaxAttachmentChunkBytes, which makes
+// (testBoundTotal, maxUploadBytes) the one admissible multi-chunk declaration
+// this package already has both bytes and a written-out digest for.
+const testBoundTotal = 373
+
+// boundChunk returns chunk i of testBoundFixture. It SLICES the fixture rather
+// than copying it, so like every other reader of that package-level buffer it
+// must not mutate what it hands back.
+func boundChunk(i int) protocol.AttachmentChunkPayload {
+	start := i * protocol.MaxAttachmentChunkBytes
+	end := min(start+protocol.MaxAttachmentChunkBytes, len(testBoundFixture))
+	return testChunk(i, testBoundTotal, testBoundFixture[start:end])
+}
 
 // The concurrency tests below coordinate with channels rather than sync
 // primitives: after this slice sync is imported by registry.go and by no other
@@ -267,5 +287,181 @@ func TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh(t *testing.T
 	}
 	if n := r.count(); n != 1 {
 		t.Errorf("count() = %d, want 1", n)
+	}
+}
+
+// TestRegistry_AdmitRefusedDeclaration_StoresNothing carries ONE FAULT PER ROW
+// rather than one doubly-bad declaration, which is what makes each check's
+// removal a sole red: a declaration both checks refuse reddens under either
+// removal and therefore proves neither. It would also pin a cross-check order
+// that nothing has decided, since the two answer different sentinels.
+func TestRegistry_AdmitRefusedDeclaration_StoresNothing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		totalChunks int
+		size        int64
+		want        error
+	}{
+		{
+			// Its own arithmetically-correct count, so CheckDeclaration admits
+			// this one and only the byte bound refuses it.
+			name:        "size one byte above the per-upload bound",
+			totalChunks: testBoundTotal,
+			size:        maxUploadBytes + 1,
+			want:        ErrUploadTooLarge,
+		},
+		{
+			// Well within the byte bound, so CheckDeclaredSize admits this one
+			// and only the arithmetic refuses it: 100000 bytes is 3 chunks.
+			name:        "count disagreeing with the declared size",
+			totalChunks: 4,
+			size:        100000,
+			want:        ErrInvalidDeclaration,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			upload, err := r.Admit(testConnA, testAttachmentID, tt.totalChunks, tt.size, testFixtureDigest)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Admit of a declaration with %s: error = %v, want one wrapping %v", tt.name, err, tt.want)
+			}
+			if upload != nil {
+				t.Errorf("Admit returned a non-nil accumulator for a refused declaration")
+			}
+			if n := r.count(); n != 0 {
+				t.Errorf("count() after a refusal = %d, want 0", n)
+			}
+			if _, ok := r.Lookup(testConnA, testAttachmentID); ok {
+				t.Errorf("Lookup after a refusal reported the pair present")
+			}
+
+			// The two client-supplied strings this entry point necessarily
+			// holds must not reach the message, and the declared size must:
+			// that last one is the control, since an entry point swallowing the
+			// wrapped message would satisfy both prohibitions vacuously.
+			msg := err.Error()
+			if strings.Contains(msg, testAttachmentID) {
+				t.Errorf("refusal message %q carries the attachment_id", msg)
+			}
+			if strings.Contains(msg, testFixtureDigest) {
+				t.Errorf("refusal message %q carries the declared digest", msg)
+			}
+			if size := strconv.FormatInt(tt.size, 10); !strings.Contains(msg, size) {
+				t.Errorf("refusal message %q does not carry the declared size %s", msg, size)
+			}
+		})
+	}
+}
+
+func TestRegistry_AdmitAfterARefusal_AdmitsTheSamePair(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes+1, testFixtureDigest); err == nil {
+		t.Fatalf("Admit of an oversized declaration returned a nil error, want a refusal")
+	}
+
+	// A refusal that stored nothing can blacklist nothing.
+	upload, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of an admissible declaration under a previously refused pair: %v", err)
+	}
+	if upload == nil {
+		t.Fatalf("Admit answered a nil accumulator with a nil error")
+	}
+	if n := r.count(); n != 1 {
+		t.Errorf("count() = %d, want 1", n)
+	}
+	if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != upload {
+		t.Errorf("Lookup after the re-declaration answered (%p, %v), want the admitted accumulator", got, ok)
+	}
+}
+
+func TestRegistry_Admit_HoldsAnAccumulatorLatchedWithTheDeclaration(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	upload, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of an admissible declaration: %v", err)
+	}
+	// Pointer identity, not field equality: an accumulator built from the same
+	// declaration compares equal field by field and holds no chunks.
+	if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != upload {
+		t.Fatalf("Lookup answered (%p, %v), want the accumulator Admit returned", got, ok)
+	}
+	if n := r.count(); n != 1 {
+		t.Errorf("count() = %d, want 1", n)
+	}
+
+	// The end-to-end statement that the declared numbers were latched rather
+	// than zeros: a zero-latched accumulator refuses the first chunk, and one
+	// that dropped the size or the digest gets as far as Assemble.
+	for i := 0; i < testBoundTotal; i++ {
+		if err := upload.Add(boundChunk(i)); err != nil {
+			t.Fatalf("feeding the admitted transfer chunk %d: %v", i, err)
+		}
+	}
+	assembled, err := upload.Assemble()
+	if err != nil {
+		t.Fatalf("Assemble() of the admitted transfer: %v", err)
+	}
+	if !bytes.Equal(assembled, testBoundFixture) {
+		t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(assembled), len(testBoundFixture))
+	}
+}
+
+// TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent re-pins through the
+// exported path what TestRegistry_SecondInsertUnderAHeldPair_KeepsTheIncumbent
+// pins on insert directly: that test stays green against an entry point that
+// releases the pair before inserting, or that installs a freshly built
+// accumulator by some other route. It asserts NOTHING about the second call's
+// error, because whether this entry point answers the incumbent or refuses the
+// repeat is not pinned, and the incumbent must survive either way.
+func TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent(t *testing.T) {
+	t.Parallel()
+
+	const held = 2
+
+	r := NewRegistry()
+	incumbent, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of an admissible declaration: %v", err)
+	}
+	for i := 0; i < held; i++ {
+		if err := incumbent.Add(boundChunk(i)); err != nil {
+			t.Fatalf("feeding the transfer in flight chunk %d: %v", i, err)
+		}
+	}
+
+	// A second first-chunk for the live pair, carrying the same declaration.
+	repeat, _ := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if repeat != nil && repeat != incumbent {
+		t.Errorf("Admit under a held pair answered an accumulator other than the incumbent")
+	}
+	if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != incumbent {
+		t.Errorf("Lookup after a repeat admission answered (%p, %v), want the incumbent", got, ok)
+	}
+	if n := r.count(); n != 1 {
+		t.Errorf("count() = %d, want 1", n)
+	}
+
+	// The chunks the transfer already held survived the repeat.
+	for i := held; i < testBoundTotal; i++ {
+		if err := incumbent.Add(boundChunk(i)); err != nil {
+			t.Fatalf("feeding the transfer in flight chunk %d: %v", i, err)
+		}
+	}
+	assembled, err := incumbent.Assemble()
+	if err != nil {
+		t.Fatalf("Assemble() after a repeat admission: %v", err)
+	}
+	if !bytes.Equal(assembled, testBoundFixture) {
+		t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(assembled), len(testBoundFixture))
 	}
 }
