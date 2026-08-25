@@ -1,0 +1,711 @@
+{
+  "claude_version_raw": "2.1.239 (Claude Code)",
+  "claude_version": "2.1.239",
+  "arm": "control_no_request",
+  "argv": [
+    "$HOME/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-haiku-4-5",
+    "--max-turns",
+    "4"
+  ],
+  "prompts": [
+    "Reply with the single word: ready. Do not use any tools.",
+    "Reply with the single word: done. Do not use any tools."
+  ],
+  "control_request_id": "",
+  "control_request_sent": null,
+  "control_responses": [],
+  "control_response_subtype": "",
+  "control_response_request_id_matched": false,
+  "control_response_within_wait": false,
+  "models_present": false,
+  "models_count": 0,
+  "models_entry_fields": [],
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "$WORKDIR",
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "tools": [
+        "Task",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__blender__execute_blender_code",
+        "mcp__blender__execute_blender_code_for_cli",
+        "mcp__blender__get_blendfile_summary_datablocks",
+        "mcp__blender__get_blendfile_summary_datablocks_for_cli",
+        "mcp__blender__get_blendfile_summary_missing_files",
+        "mcp__blender__get_blendfile_summary_missing_files_for_cli",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli",
+        "mcp__blender__get_blendfile_summary_path_info",
+        "mcp__blender__get_blendfile_summary_path_info_for_cli",
+        "mcp__blender__get_blendfile_summary_usage_guess",
+        "mcp__blender__get_blendfile_summary_usage_guess_for_cli",
+        "mcp__blender__get_object_detail_summary",
+        "mcp__blender__get_objects_summary",
+        "mcp__blender__get_python_api_docs",
+        "mcp__blender__get_screenshot_of_area_as_image",
+        "mcp__blender__get_screenshot_of_window_as_image",
+        "mcp__blender__get_screenshot_of_window_as_json",
+        "mcp__blender__jump_to_tab_by_name",
+        "mcp__blender__jump_to_tab_by_space_type",
+        "mcp__blender__jump_to_view3d_object_by_name",
+        "mcp__blender__jump_to_view3d_object_data_by_name",
+        "mcp__blender__render_thumbnail_to_path",
+        "mcp__blender__render_viewport_to_path",
+        "mcp__blender__search_api_docs",
+        "mcp__blender__search_manual_docs",
+        "mcp__codegraph__codegraph_callees",
+        "mcp__codegraph__codegraph_callers",
+        "mcp__codegraph__codegraph_context",
+        "mcp__codegraph__codegraph_files",
+        "mcp__codegraph__codegraph_impact",
+        "mcp__codegraph__codegraph_node",
+        "mcp__codegraph__codegraph_search",
+        "mcp__codegraph__codegraph_status"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "connected"
+        },
+        {
+          "name": "codegraph",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": true,
+      "uuid": "23568c89-bfb9-4183-a8f3-6bc650c90aed",
+      "memory_paths": {
+        "auto": "$TEMP_HOME/.claude/projects/$WORKDIR/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/45206.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "control_request",
+      "request_id": "1e5bace5-994d-42d6-8dbc-1efbafb05afc",
+      "request": {
+        "subtype": "oauth_token_refresh"
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "api_retry",
+      "attempt": 1,
+      "max_retries": 10,
+      "retry_delay_ms": 559,
+      "error_status": 401,
+      "error": "authentication_failed",
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "uuid": "a38360e7-f627-4617-aff1-bb8c7bc2a0c0"
+    },
+    {
+      "type": "control_cancel_request",
+      "request_id": "1e5bace5-994d-42d6-8dbc-1efbafb05afc"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "diagnostics": null,
+        "id": "dc2269f5-1e79-4ccd-8e80-c05134eb8e7f",
+        "container": null,
+        "model": "\u003csynthetic\u003e",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": "stop_sequence",
+        "stop_sequence": "",
+        "type": "message",
+        "usage": {
+          "output_tokens_details": null,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": null,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": null,
+          "iterations": null,
+          "speed": null
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed to authenticate. API Error: 401 Invalid bearer token"
+          }
+        ],
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "uuid": "c87cdad1-0d0c-419c-b2d3-abfba38607b7",
+      "timestamp": "2026-08-25T09:08:03.466Z",
+      "error": "authentication_failed",
+      "request_id": "req_011CePCi1YQPTA7HAbPQbE6n",
+      "is_api_error_message": true
+    },
+    {
+      "is_error": true,
+      "duration_api_ms": 0,
+      "num_turns": 1,
+      "stop_reason": "stop_sequence",
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "total_cost_usd": 0,
+      "usage": {
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "modelUsage": {},
+      "permission_denials": [],
+      "terminal_reason": "api_error",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": 401,
+      "result": "Failed to authenticate. API Error: 401 Invalid bearer token",
+      "type": "result",
+      "duration_ms": 30253,
+      "uuid": "ca9feafb-a097-463c-b790-c579ad6982d2"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "$WORKDIR",
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "tools": [
+        "Task",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__blender__execute_blender_code",
+        "mcp__blender__execute_blender_code_for_cli",
+        "mcp__blender__get_blendfile_summary_datablocks",
+        "mcp__blender__get_blendfile_summary_datablocks_for_cli",
+        "mcp__blender__get_blendfile_summary_missing_files",
+        "mcp__blender__get_blendfile_summary_missing_files_for_cli",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli",
+        "mcp__blender__get_blendfile_summary_path_info",
+        "mcp__blender__get_blendfile_summary_path_info_for_cli",
+        "mcp__blender__get_blendfile_summary_usage_guess",
+        "mcp__blender__get_blendfile_summary_usage_guess_for_cli",
+        "mcp__blender__get_object_detail_summary",
+        "mcp__blender__get_objects_summary",
+        "mcp__blender__get_python_api_docs",
+        "mcp__blender__get_screenshot_of_area_as_image",
+        "mcp__blender__get_screenshot_of_window_as_image",
+        "mcp__blender__get_screenshot_of_window_as_json",
+        "mcp__blender__jump_to_tab_by_name",
+        "mcp__blender__jump_to_tab_by_space_type",
+        "mcp__blender__jump_to_view3d_object_by_name",
+        "mcp__blender__jump_to_view3d_object_data_by_name",
+        "mcp__blender__render_thumbnail_to_path",
+        "mcp__blender__render_viewport_to_path",
+        "mcp__blender__search_api_docs",
+        "mcp__blender__search_manual_docs",
+        "mcp__codegraph__codegraph_callees",
+        "mcp__codegraph__codegraph_callers",
+        "mcp__codegraph__codegraph_context",
+        "mcp__codegraph__codegraph_files",
+        "mcp__codegraph__codegraph_impact",
+        "mcp__codegraph__codegraph_node",
+        "mcp__codegraph__codegraph_search",
+        "mcp__codegraph__codegraph_status"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "connected"
+        },
+        {
+          "name": "codegraph",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": true,
+      "uuid": "8e174f02-f2ab-4101-822f-438ebb5d0167",
+      "memory_paths": {
+        "auto": "$TEMP_HOME/.claude/projects/$WORKDIR/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/45206.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "api_retry",
+      "attempt": 1,
+      "max_retries": 10,
+      "retry_delay_ms": 520,
+      "error_status": 401,
+      "error": "authentication_failed",
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "uuid": "d087408a-350d-4491-9520-aeddcab09e5a"
+    },
+    {
+      "type": "control_request",
+      "request_id": "7955271e-2324-4ae5-9fb3-63ff8dace03d",
+      "request": {
+        "subtype": "oauth_token_refresh"
+      }
+    },
+    {
+      "type": "control_cancel_request",
+      "request_id": "7955271e-2324-4ae5-9fb3-63ff8dace03d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "diagnostics": null,
+        "id": "cdf80294-9bee-4cdb-93c1-8b92ec1cf10d",
+        "container": null,
+        "model": "\u003csynthetic\u003e",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": "stop_sequence",
+        "stop_sequence": "",
+        "type": "message",
+        "usage": {
+          "output_tokens_details": null,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": null,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": null,
+          "iterations": null,
+          "speed": null
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Failed to authenticate. API Error: 401 Invalid bearer token"
+          }
+        ],
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "uuid": "3bf55ea0-84bc-4868-a860-84138d110c7b",
+      "timestamp": "2026-08-25T09:08:34.231Z",
+      "error": "authentication_failed",
+      "request_id": "req_011CePCkEgEmFqJkfFAGy4FU",
+      "is_api_error_message": true
+    },
+    {
+      "is_error": true,
+      "duration_api_ms": 0,
+      "num_turns": 1,
+      "stop_reason": "stop_sequence",
+      "session_id": "6a074f9a-84d7-4876-85e8-7093fe176646",
+      "total_cost_usd": 0,
+      "usage": {
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "modelUsage": {},
+      "permission_denials": [],
+      "terminal_reason": "api_error",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": 401,
+      "result": "Failed to authenticate. API Error: 401 Invalid bearer token",
+      "type": "result",
+      "duration_ms": 30742,
+      "uuid": "ea219bac-5287-45cc-a25f-4cc8db96a54d"
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    5,
+    11
+  ],
+  "send_point_index": 6,
+  "after_send_point_system_init_count": 1,
+  "after_send_point_result_trailers": [
+    {
+      "num_turns": 1,
+      "total_cost_usd": 0,
+      "total_cost_usd_present": true
+    }
+  ],
+  "stdin_write_errors": [],
+  "stderr_capture": "",
+  "exit_code": 1,
+  "wait_error": "exit status 1",
+  "context_deadline_tripped": false,
+  "duration_ms": 63143,
+  "scanner_error": "",
+  "redaction": [
+    {
+      "class": "operator_home",
+      "replacement": "$HOME",
+      "count": 1
+    },
+    {
+      "class": "temp_home",
+      "replacement": "$TEMP_HOME",
+      "count": 2
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 4
+    }
+  ],
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": false,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  }
+}
