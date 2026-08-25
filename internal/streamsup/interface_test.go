@@ -341,6 +341,100 @@ func TestRunner_RevokeBypass_LiveChildDelivers(t *testing.T) {
 	}
 }
 
+// --- RequestInitialize: AC2 + AC3 --------------------------------------------
+
+// TestRunner_RequestInitialize_NoLiveChild: with no child spawned, Stdin() is nil
+// and RequestInitialize returns ErrNoLiveChild without writing and without
+// panicking — the same safe no-op refusal Interrupt and RevokeBypass give, at the
+// runner level (AC3).
+func TestRunner_RequestInitialize_NoLiveChild(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.RequestInitialize(); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("RequestInitialize with no live child = %v, want ErrNoLiveChild", err)
+	}
+}
+
+// TestRunner_RequestInitialize_LiveChildDelivers: on a live child
+// RequestInitialize writes a single initialize control_request line onto the
+// held-open stdin (AC2); the echo_lines fake child echoes it back as ECHO:<line>,
+// proving the exact envelope reached the child — type control_request,
+// request.subtype initialize, and a non-empty locally-minted request_id.
+//
+// An Interrupt follows in the same test to pin AC2's "same local source" clause:
+// all three control subtypes mint from one counter, so their request_ids must
+// differ. The distinct-id assertion is the SOLE detector for minting the
+// initialize id from a fresh per-subtype counter — every other assertion stays
+// green under that mutant, since the id is still non-empty, the byte-exact
+// marshal test uses a fixed literal id, and the nil-refusal path never mints. The
+// interrupt echo doubles as the FIFO barrier — stdin is a pipe, so once the
+// second line comes back the first already has.
+func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	if err := r.RequestInitialize(); err != nil {
+		t.Fatalf("RequestInitialize on a live child: %v", err)
+	}
+	if err := r.Interrupt(); err != nil {
+		t.Fatalf("Interrupt on a live child: %v", err)
+	}
+	waitForContains(t, out, `"subtype":"interrupt"`, 3*time.Second)
+
+	bySubtype := map[string]decodedControlRequest{}
+	for _, line := range findEchoedLines(out.String()) {
+		var cr decodedControlRequest
+		if err := json.Unmarshal([]byte(line), &cr); err != nil {
+			t.Fatalf("echoed control line did not decode: %v (%q)", err, line)
+		}
+		bySubtype[cr.Request.Subtype] = cr
+	}
+
+	initialize, ok := bySubtype["initialize"]
+	if !ok {
+		t.Fatalf("no initialize line reached the child:\n%s", out.String())
+	}
+	if initialize.Type != "control_request" {
+		t.Errorf("echoed initialize type = %q, want control_request", initialize.Type)
+	}
+	if initialize.RequestID == "" {
+		t.Error("echoed initialize request_id is empty, want a locally-minted id")
+	}
+
+	interrupt, ok := bySubtype["interrupt"]
+	if !ok {
+		t.Fatalf("no interrupt line reached the child:\n%s", out.String())
+	}
+	if initialize.RequestID == interrupt.RequestID {
+		t.Errorf("initialize and interrupt share request_id %q; both subtypes must mint from one control sequence", initialize.RequestID)
+	}
+}
+
 // --- Live Restart: AC3 -------------------------------------------------------
 
 // waitArgvLines polls the argv capture file until it holds at least n complete

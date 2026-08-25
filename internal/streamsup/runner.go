@@ -568,9 +568,43 @@ func (r *Runner) RevokeBypass() error {
 	return WriteBypassRevocation(r.Stdin(), r.nextControlID())
 }
 
+// RequestInitialize writes a single initialize control_request line to the live
+// child's stdin, asking it to report what the session knows about itself — the
+// model list (identifiers, display names, supported reasoning-effort levels) and
+// the slash-command list — without a respawn. The request_id is locally minted
+// from the same counter Interrupt and RevokeBypass draw on. When no child is live
+// Stdin() is nil, so RequestInitialize returns the retryable ErrNoLiveChild
+// without writing and without panicking.
+//
+// It writes the line and stops: the control_response is NOT read here, exactly as
+// RevokeBypass writes without reading its ack. The minted id is deliberately not
+// returned either — the reader slice that correlates the ack is the first thing
+// that needs it, and a return value with no reader is a seam with nothing on the
+// far side of it.
+//
+// The name is RequestInitialize, not Initialize: on a type that already has New, a
+// bare Initialize() reads as "initialize the runner", which is the opposite of what
+// it does — it asks the CHILD to initialize.
+//
+// Like Interrupt and unlike RevokeBypass it is NOT on sessions.Runner, and the
+// placement rule is the same one in both directions: the interface carries a
+// method when its consumer sits inside internal/sessions, where a structural type
+// assertion would fail open (RevokeBypass's does — Pool.UpdateSettings). This
+// subtype has no consumer at all yet — the trigger lands with the publishing slice
+// — so an interface method here would be a seam with nothing on the far side of
+// it, and it would pull every fake runner under internal/sessions into the diff.
+// Stdin() releases r.mu before returning, so the potentially-blocking write never
+// holds it. Safe from any goroutine.
+func (r *Runner) RequestInitialize() error {
+	return WriteInitialize(r.Stdin(), r.nextControlID())
+}
+
 // nextControlID mints the next locally-unique control-request correlation id,
-// shared by Interrupt and RevokeBypass. The atomic counter is unique within the
-// runner's lifetime, which is all a future ack-correlator needs since each runner
+// shared by Interrupt, RevokeBypass and RequestInitialize. The atomic counter is
+// unique within the runner's lifetime — one sequence, not one per subtype, since
+// request_id must be unique across all in-flight control requests on the stream
+// rather than merely within one subtype. That is all a future ack-correlator
+// needs since each runner
 // drives exactly one child stream; this slice does not read the control_response
 // ack, so the id is write-only here.
 func (r *Runner) nextControlID() string {
