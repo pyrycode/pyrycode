@@ -1,6 +1,6 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772), three slices of the family split from
+Package (#1769, #1770, #1772, #1776), four slices of the family split from
 #1741/#1766: holds one inbound attachment upload's chunks in memory, addressed
 by index, refuses a stream whose framing contradicts what the transfer
 declared at admission (#1769), and — once the transfer is complete — checks
@@ -43,6 +43,44 @@ caller. `Accumulator` copies exactly one property from it and diverges on two:
   incomplete is resumable: a later `Add` can turn the same instance into a
   complete one. That difference is why this is a stateful type, not a
   function.
+
+## Admission layer (#1776)
+
+`CheckDeclaration` (`admission.go`) is the first-chunk `total_chunks`/`size`
+cross-check, run before an `Accumulator` exists so a claim is refused before
+either number sizes anything. It is pure and stateless — no lock, no
+goroutine — unlike `Accumulator`, which is fed serially by one session's
+`appFrameWorker`. It lives in this package rather than `internal/protocol`
+because the check is receiver policy: `protocol` ships wire vocabulary with
+no validator, by design.
+
+- **The negative-`size` guard cannot be folded into the equality check** —
+  measured, not assumed: `max(1, ceil(-1 / bound))` is 1 under either natural
+  ceiling form, so the pair `size` −1 / `total_chunks` 1 passes the
+  cross-check unaided. It needs its own guard ahead of the equality, sharing
+  `ErrInvalidDeclaration` but pinned by a separate test row.
+- **The ceiling must be division-then-remainder, never `(size + bound - 1) /
+  bound`.** That numerator wraps for every `size` within `bound`-1 of
+  `math.MaxInt64`, and `max(1, …)` launders the wrapped negative result back
+  to 1 — silently admitting the largest declaration the wire can carry
+  (measured: wraps to −204963823041216 where the correct count is
+  204963823041218). Also compare `int64(totalChunks) != want`, never
+  `int(want) != totalChunks` — narrowing re-introduces the same class of wrap
+  on a platform where `int` is 32 bits.
+- **`ErrInvalidDeclaration` is a distinct sentinel from `ErrTotalChunksMismatch`
+  on purpose.** The latter means a chunk disagrees with the count the
+  transfer was already admitted under; `CheckDeclaration` runs before any
+  count is admitted, so there is nothing yet to disagree with.
+- **Admission runs in front of `Accumulator` and does not replace its own
+  guards.** `NewAccumulator` stays exported and constructible without passing
+  through `CheckDeclaration`, so `Assemble`'s `totalChunks < 1` clause is
+  still load-bearing — it is not dead code made redundant by this layer.
+- **An arithmetically-conforming but enormous declaration is admitted here on
+  purpose** (`size` `math.MaxInt64` with its honest matching count) — this
+  layer checks consistency between the two claimed numbers, not their
+  magnitude. The per-upload byte bound is a separate concern (#1777); adding
+  an absolute size cap here would be scope creep this ticket deliberately
+  declined.
 
 ## Sentinels and discard semantics
 
@@ -119,8 +157,20 @@ zero-byte-attachment criterion exists specifically to catch this class of bug.
 
 This package's sole-redness claims are measured with `go test -overlay`
 (mutants applied via an absolute-path JSON manifest, no worktree write), not
-argued from the table alone. Four traps found that way, in the order they
+argued from the table alone. Five traps found that way, in the order they
 surfaced:
+
+- **A mutant that perturbs a shared constant reddens more rows than a
+  hand-derived table predicts, because moving the constant moves every
+  boundary at once.** #1776's admission-layer table predicted its
+  wrong-bound mutant (reading 32768 in place of `MaxAttachmentChunkBytes`)
+  would redden the three rows placed *at* 45000; measured, it reddened five
+  — the extra two were rows whose *distance* from the boundary changed sign
+  once the bound moved, not rows sitting on it. The predicted set was a
+  subset, so nothing was falsified, but the right way to predict a
+  shared-constant mutant's red set is "every row whose arithmetic reads the
+  constant, re-run under the new value" — not "every row placed at the
+  constant, by inspection".
 
 - **A presence check needs a value indistinguishable from absent.** #1769's
   spec credited the *identical-bytes* duplicate row as the sole red test for
@@ -232,10 +282,13 @@ hash, fetch the blob"), which is a requirement from
 
 ## Blocked family (not landed)
 
-- **#1767** — admission: the first-chunk `total_chunks`/`size` cross-check,
-  the byte bound, the in-flight-upload count, and the registry (`attachment_id`
-  → `*Accumulator`) that needs its own lock — `Accumulator` itself carries
-  none, because it is fed serially by one session's `appFrameWorker` goroutine.
+- **#1767** — closed, split into this family. The first-chunk
+  `total_chunks`/`size` cross-check landed as `CheckDeclaration` (#1776, see
+  § "Admission layer" above). Still blocked: the per-upload byte bound
+  (**#1777**) and the in-flight-upload count plus the registry
+  (`attachment_id` → `*Accumulator`) that needs its own lock (**#1778**) —
+  `Accumulator` itself carries none, because it is fed serially by one
+  session's `appFrameWorker` goroutine.
 - **#1742** — expiry/abandonment of a partial upload. Note this covers
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch
