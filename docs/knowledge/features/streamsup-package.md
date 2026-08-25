@@ -491,6 +491,34 @@ in-band branch (an *enable* still takes `Restart`). The
 See [codebase/1603.md](../codebase/1603.md) and
 [set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md).
 
+**Initialize send primitive (#1689).** `(*Runner).RequestInitialize() error` writes a single
+structured `control_request` line —
+`{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — onto the live
+child's held-open stdin, the third subtype alongside `interrupt` and `set_permission_mode` above.
+`WriteInitialize(w io.Writer, requestID string) error` (`envelope.go`) mirrors
+`WriteBypassRevocation` field-for-field. Unlike `set_permission_mode`, the accepted line carries
+**no subtype-specific field** — three arm captures (#1763, re-captured 2026-08-25 against an
+authenticated child, claude 2.1.239) agree byte for byte that `request` holds only `subtype` — so
+`controlRequestInner` gained no new field and `TestMarshalInterruptEnvelope` /
+`TestMarshalBypassRevocationEnvelope` pass with their `want` literals unmodified. `request_id`
+comes from the same shared `nextControlID` counter as `Interrupt` and `RevokeBypass`. **Not added
+to `sessions.Runner`**, unlike `RevokeBypass`: the interface-placement rule is by consumer
+location, and this subtype has no consumer yet — reading the `control_response` ack and
+publishing the model/slash-command list it carries is a later slice — so an interface method here
+would be a seam with nothing on the far side of it. This slice writes the line and stops; nothing
+reads the ack.
+
+*Mutation-testing note, applicable to any future control-request marshaller added this way:* a
+byte-exact marshal test pinned against a **fixed literal id** cannot distinguish a structured
+`json.Marshal` from a `fmt.Sprintf`-concatenated line, because a plain digit id produces identical
+bytes either way. `TestMarshalBypassRevocationEnvelope`'s existing eight-row `request_id`
+injection table does not cover this for a new marshaller — a concatenation mutant is per-function,
+not inherited across siblings — so `TestMarshalInitializeEnvelope` needed its own single
+hostile-id case (an id carrying a raw newline) to catch it; confirmed as the sole detector under
+`go test -overlay` review. The revocation table's other seven rows exist to guard `mode`, a second
+fixed field `initialize`'s subtype-only inner doesn't have — a new subtype with no such second
+field needs the one hostile-id case, not the full table.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
