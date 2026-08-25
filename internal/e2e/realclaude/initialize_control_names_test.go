@@ -18,12 +18,18 @@ package realclaude
 // request line or the response shape yet. This file mints the name those bytes
 // land under, before the run exists that could trip it.
 //
-// testdata/ is swept by three globs owned by three different probes:
+// testdata/ is swept by three FOREIGN globs owned by three different probes:
 // fixtureGlob, dropcapFixtureGlob and setModeFamilyGlob. A capture whose name
 // joined one of those families would be swept into a regression test asserting
 // findings about a DIFFERENT argv, or overwritten by the next run of the probe
 // that owns the family. Either way durable evidence is lost WITH NO RED
 // ANYWHERE, which is why this gets a lock rather than a convention.
+//
+// #1764 added a fourth, initControlArmFixtureGlob, and it is this family's OWN:
+// every arm-carrying name minted here matches it on purpose. That changes nothing
+// about the argument above — the three foreign heads are still the ones a minted
+// name must avoid, and they are still the only patterns this file's tables
+// anchor against.
 //
 // The initialize_control_v prefix is the entire mechanism. filepath.Match
 // anchors a pattern's literal head at position 0, so a name beginning
@@ -617,10 +623,14 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 	t.Run("no minted name collides with the committed one-arm capture", func(t *testing.T) {
 		t.Parallel()
 
-		// String equality, and a pattern check CANNOT stand in for it: the
-		// initialize_control_v family is matched by no glob in this package — it is
-		// addressed only by exact name — so the family-glob subtest above sweeps
-		// straight past the one collision that is actually reachable today.
+		// String equality, and a pattern check CANNOT stand in for it: the three
+		// FOREIGN family globs the subtest above sweeps are the only patterns it
+		// anchors against, and none of them can match a name beginning
+		// initialize_control_v — so it sweeps straight past the one collision that is
+		// actually reachable today. #1764's initControlArmFixtureGlob is no substitute
+		// either, and in the opposite direction: it matches every arm-carrying name
+		// minted here by design, which is exactly what makes it silent about whether
+		// two of them are the same string.
 		//
 		// The `_` between the two slugs is the whole mechanism, and the empty arm is
 		// where it earns its place: concatenate the slugs without it and an empty arm

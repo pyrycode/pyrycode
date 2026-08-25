@@ -1000,9 +1000,9 @@ func TestRealClaude_InitializeControl_SendPointArms(t *testing.T) {
 		got := paths[arm.id]
 		want := filepath.Join(wantDir, initControlArmFixtureName(versionToken, arm.id))
 		if got != want {
-			t.Errorf("#1763: arm %q wrote %q, want %q; the fixture set is addressed by exact "+
-				"name — no glob in this package matches the initialize_control_v family — so a "+
-				"path the namer did not mint is durable evidence nothing will ever look at",
+			t.Errorf("#1763: arm %q wrote %q, want %q; #1764's initControlArmFixtureGlob is what "+
+				"reads this set back, and it matches only what the namer mints — so a path the "+
+				"namer did not mint is either missed entirely or read under the wrong version",
 				arm.id, got, want)
 		}
 		if prev, dup := seen[got]; dup {

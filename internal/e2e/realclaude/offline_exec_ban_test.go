@@ -339,6 +339,51 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1764. The entry above with three names DROPPED and one added, and the
+	// dropped three are why this comment cannot be short: every sibling entry in
+	// this family bans the route to the real testdata/, and a reader who skims will
+	// take their absence here for an oversight. This is the FIRST offline file in
+	// this package with a legitimate reason to read a committed fixture — its whole
+	// subject is the three committed arm captures — so packageDir, filepath.Glob and
+	// os.ReadFile are the file's own mechanism rather than a hazard. It resolves
+	// packageDir through neither the name nor a wrapper: `go test` runs in the
+	// package source directory, so initControlArmFixtureGlob's relative testdata/
+	// prefix resolves with no wrapper at all, which is why packageDir goes with the
+	// other two rather than staying banned.
+	//
+	// The relative-path hazard the sibling entries close is in the WRITE direction,
+	// and this file reads and must never write — so os.WriteFile, os.Create,
+	// writeFixture, writeSetModeFixture and setModeFixturePath all stay banned, and
+	// writeInitControlFixture is added: it is this family's own writer and the one a
+	// developer in this file is most likely to reach for. It mints its own path
+	// internally from packageDir, so a single call would overwrite a committed
+	// capture from a file whose entire claim is that it only reads.
+	//
+	// os.ReadDir stays banned although this file does not take it: filepath.Glob and
+	// os.ReadDir are two ways to the same listing, and this package's own precedent
+	// — #1732's entry declining os.TempDir, #1762's declining os.Open — is that a
+	// ban name wants a hazard behind it, not that an unused one has to go. The
+	// hazard here is a second, unanchored listing route past AC 4's `_` exclusion,
+	// which is what keeps #1688's one-arm capture out of the read set.
+	//
+	// The first five keep a SKIP out, as everywhere in this family — resolveClaudeBin
+	// and WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is
+	// printed, and a skip exits 0, which reads as a pass under `make e2e-realclaude`.
+	// captureClaudeVersion matters here specifically: it is the shortcut that would
+	// replace this file's version grouping with a live `claude --version`, destroying
+	// the offline property while every check stayed green. The three environment
+	// readers are the credential guard for a process environment carrying
+	// CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: this file writes
+	// nothing and needs no directory of its own.
+	"initialize_control_compare_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"setModeFixturePath", "writeSetModeFixture", "writeFixture", "writeInitControlFixture",
+		"os.WriteFile", "os.Create", "os.ReadDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.
