@@ -2313,12 +2313,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
 
   Zero production files touched.
 
-- `initialize_control_names_test.go` (#1696, extended #1712 and #1722) — **the
+- `initialize_control_names_test.go` (#1696, extended #1712, #1722 and #1763) — **the
   fourth fixture-name lock in this package. #1696 built it for a single-input
   namer; #1712 gave the file a second, arm-carrying one and corrected the
   header section that used to say the family would stay single-input; #1722
   is what finally gives the arm-carrying namer a caller and turns the arm
-  identifier list into a row table.** #1688 spent
+  identifier list into a row table; #1763 grows that row table into its
+  declared two-column shape and retires the single-arm marker #1722 added.**
+  #1688 spent
   live tokens capturing claude's `initialize` `control_request`/`models` round
   trip; #1696 minted the filename those bytes land under —
   `initialize_control_v<slug>.json` via `initControlFixtureName`, reusing
@@ -2353,13 +2355,32 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   #1722 grew `initControlArms` in place from a `[]string` into a
   `[]initControlArm` of `{id string; probed bool}` rows — the growth point
   #1712's own doc comment named, rather than a second table keyed by the same
-  names. `probed` marks the one arm `initialize_control_probe_test.go`'s
-  single-arm run actually sends at; `initControlProbedArm` ranges the table
-  and returns that row's `id`, or `""` when zero or more than one row carries
-  the marker. The identifiers, their order and their meaning are unchanged —
-  this was a shape change, not a vocabulary change — and the field is meant
-  to go away the moment #1715 ranges the table for a real three-arm rig, at
-  which point the arm becomes a parameter and no row is special.
+  names. `probed` marked the one arm `initialize_control_probe_test.go`'s
+  single-arm run actually sent at; `initControlProbedArm` ranged the table
+  and returned that row's `id`, or `""` when zero or more than one row
+  carried the marker. The identifiers, their order and their meaning were
+  unchanged — that was a shape change, not a vocabulary change — and the
+  field was always meant to go away the moment a real three-arm rig ranged
+  the table, at which point the arm becomes a parameter and no row is
+  special. #1763 is that rig.
+
+  #1763 grew `initControlArm` again, from `{id string; probed bool}` into
+  `{id string; sendPointAfterFirstTurn bool; sendsRequest bool}` — two
+  independent columns rather than a single marker, since a live three-arm
+  run needs to know both *where* in the fixed two-turn drive sequence an
+  arm's send point sits and *whether* a control request is actually written
+  there. `control_no_request` carries `sendPointAfterFirstTurn: true` with
+  `sendsRequest: false`: its anchor is read at the same point the other two
+  arms write, which is what keeps the three arms' recorded windows
+  comparable. `probed` and `initControlProbedArm` are deleted with the
+  single-arm selector they existed only to serve, and `runInitControlChild`
+  (`initialize_control_probe_test.go`) now takes `arm initControlArm` as a
+  parameter instead of resolving one internally. The table's own doc bans
+  the two shortcuts a change like this reaches for first — a second table
+  keyed by the ids, or a `switch` on `id` inside the driver — and #1763 uses
+  neither: the send point is one closure called from exactly one of two
+  `if`s, keyed off `sendPointAfterFirstTurn`, with the write itself gated by
+  `sendsRequest` alone.
 
   **Lessons that outlive these tickets:**
   - **Collapsing an input dimension can silently empty the hazard shape a
@@ -2799,10 +2820,10 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   `docs/specs/architecture/1700-initialize-fixture-writer-cap.md` for the
   full design and the five-row mutant matrix.
 
-- `initialize_control_probe_test.go` (#1688, extended #1722) — **the live run
-  that closes the `initialize` fixture family: one real child, one tool-free
-  probe turn, one `control_request` with subtype `initialize` on the
-  held-open stdin, the reply written through #1702's writer into
+- `initialize_control_probe_test.go` (#1688, extended #1722 and #1763) —
+  **the live run family for the `initialize` fixtures: one real child, one
+  tool-free probe turn, one `control_request` with subtype `initialize` on
+  the held-open stdin, the reply written through #1702's writer into
   `testdata/initialize_control_v2.1.239.json` (committed).** Reuses
   `setModeRecorder`, `setModeWaitFor`, `setModeTurnLine` and
   `setModeResponseIDMatches` from `set_permission_mode_probe_test.go`
@@ -2811,22 +2832,74 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   no control. Measured against claude 2.1.239: `subtype:"success"`, 6
   `models` entries, also carrying `commands` (51, for #1683) and `agents` (6).
   The committed fixture predates #1722's `Arm` field and is **not** renamed
-  or reshaped to carry one — the next live run to supersede it is #1715's
-  three-arm rig, not this slice.
+  or reshaped to carry one — #1763's three-arm rig is the live run that
+  supersedes this one-arm capture, and it leaves this file untouched rather
+  than renaming it: nothing mints its filename any more (see below), so
+  byte-identity holds structurally, not by luck.
+
+  **#1763 replaces the single-arm capture with a three-arm one.**
+  `runInitControlChild` takes its `arm` as a parameter (see
+  `initialize_control_names_test.go` above for the table it ranges) and
+  drives one child per row of `initControlArms` through one shared two-turn
+  sequence — the send point placed before turn 1, between the two turns, or
+  (for `control_no_request`) not written at all, with every arm, control
+  included, driving a full second turn afterwards. That "drive a further
+  turn on every arm" requirement is not incidental: claude emits its
+  `system`/`init` line once per turn rather than once at spawn, so "no
+  further `init` line after the request" observed without a following turn
+  is empty by construction rather than a measurement — the same reasoning
+  `set_permission_mode_probe_test.go`'s control arms already state for
+  itself. An unanswered send point (`ControlResponseWithinWait: false`,
+  `ControlRequestSent: null` on the no-request arm) is a recorded, passing
+  outcome rather than a fatal — `TestRealClaude_InitializeControl_Capture`
+  and its `len(rec.ControlResponses) == 0` fatal are deleted along with the
+  one-arm run they gated, which is also what removes the two-live-children
+  filename race that same test had picked up against this run's
+  `after_completed_turn` arm once #1722 pointed both at
+  `initControlArmFixtureName`. `TestRealClaude_InitializeControl_SendPointArms`
+  is the replacement: one `dropcapScanner` shared across all three arms
+  (safe — append-only during construction, read-only after) but a fresh
+  `dropcapRedactor` constructed *inside* the per-arm loop (mandatory —
+  `dropcapRedactor`'s substitution counters are unlocked and its census
+  accumulates across calls, so a shared one would both race under `-race`
+  and misattribute one arm's redactions into another arm's committed
+  artifact). Each arm's write-set is checked against
+  `initControlArmFixtureName(versionToken, arm.id)`, but only when every
+  declared arm actually produced a path — a `-run` filter or a mid-loop
+  fatal reports the check as unavailable rather than asserting a set claim
+  off a partial run, the same `missing`-guard precedent
+  `TestRealClaude_SetPermissionMode_InBandProbe` already established for
+  this package.
+
+  `initControlChildBudget` rises from 3 to 5 minutes in the same ticket,
+  and for a reason that is easy to miss: doubling the drive sequence (two
+  turn waits, plus a control wait on a requesting arm) pushed the worst-case
+  per-step sum to 225s against a 180s outer deadline — already tripping
+  before spawn and startup are even counted. Every per-step wait in this
+  family exists so that an absent response reads as absence rather than
+  impatience; an outer deadline that can fire first defeats that guarantee
+  for exactly the question this run exists to answer (is a pre-turn
+  `initialize` ever answered at all?). `initControlArmWaitSum(arm)` is a
+  pure helper mirroring the driver's own sequence by hand, and
+  `TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum` (offline,
+  `t.Parallel`, spawns nothing) asserts the deadline dominates it — derived
+  entirely from `initControlChildBudget`/`initControlTurnBudget`/
+  `initControlControlBudget`, never a literal duration, and genuinely red
+  against the pre-raise 3-minute constant.
 
   `runInitControlChild` used to call `setModeWaitFor(...)` and drop its
-  result into a `t.Logf` alone; #1722 keeps that log and also records the
-  result as `ControlResponseWithinWait` on the record, and records the send
-  point it targets as `Arm: initControlProbedArm()`. `initControlProbedArm`
-  reads the one row `initialize_control_names_test.go`'s `initControlArms`
-  marks `probed`, so the identifier is declared in exactly one place.
-  `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm`, added beside
-  `TestInitControlSummarize_ReadsAllThreePlacements`, decides offline that
-  the selector's result is non-empty and is one of `initControlArms`'
-  declared ids — without spawning a child — so an unset or mistyped arm
-  reddens before a live run ever runs, deliberately without asserting the
-  literal identifier itself: which arm is probed is fixed by the marked row,
-  not by a second spelling of it in a test.
+  result into a `t.Logf` alone; #1722 kept that log and also recorded the
+  result as `ControlResponseWithinWait` on the record, resolving the single
+  arm it targeted via `initControlProbedArm` — the one row
+  `initControlArms` marked `probed` — rather than a second spelling of the
+  identifier, offline-pinned by
+  `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm`. **Both the
+  selector and its offline test are gone as of #1763**: `arm` is now a
+  parameter the caller supplies directly (see above), so there is no single
+  probed row left to resolve and nothing left for that test to pin.
+  `ControlResponseWithinWait` itself is unchanged in shape — still recorded
+  per arm, still `false` rather than a fourth state when no wait ran at all
+  (the `control_no_request` arm).
 
   **The `control_response` payload nests one level deeper than
   `streamsup/parser.go`'s documented shape accounts for.** That shape records
@@ -2839,6 +2912,45 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   this control-reply's payload — #1690's decoder, #1693's model-list
   producer — reads `response.response`, not `response`. The verbatim capture
   is `initControlFixtureRecord.ControlResponses[0]` in the committed fixture.
+
+  **Lessons #1763 adds, on top of the two below:**
+  - **A doc comment naming another test as precedent is a citation
+    `cite-guard` cannot see, and it goes stale exactly when that precedent
+    is deleted.** `TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath`'s
+    own doc pointed at `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm`
+    as the precedent for an offline test living in this exec-ing file.
+    #1763 deleted that precedent along with `probed` and left the pointer
+    standing — `cite-guard` only resolves `file.go:NNN`-shaped citations, so
+    a bare identifier named in prose passes it clean. What caught it was
+    grepping the deleted identifiers across `internal/` by hand after the
+    edit, not the build. A symbol named in prose as a precedent or a
+    template needs the same sweep a `//`-cited one gets automatically;
+    nothing enforces it for a bare name.
+  - **Nothing couples a hand-derived budget sum to the sequence it
+    describes, so the test proving it needs more than the one subject
+    assertion to mean anything.** `initControlArmWaitSum` mirrors
+    `runInitControlChild`'s drive sequence by hand — two turn waits, plus a
+    control wait on an arm that sends a request — and a future turn added
+    to the driver without a matching edit to the sum would leave
+    `TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum` green over
+    an arithmetic that no longer describes the run. That is why the test
+    carries two independent vacuity controls rather than the subject alone:
+    mutation-tested, each is the *sole* red for a different degenerate
+    helper (one that drops the control term, one that ignores
+    `sendsRequest`) the subject assertion alone would miss.
+  - **A per-step budget raise can silently approach `go test`'s own
+    default per-binary timeout, which produces no recorded outcome at
+    all.** The 3m→5m raise puts this file's worst case at 3×300s = 15
+    minutes; `go test`'s default 10-minute timeout is not overridden by
+    `make e2e-realclaude`, only by the dispatcher's own invocation (`-timeout
+    20m`). A binary killed by that timeout panics and records nothing — no
+    artifact, no `context_deadline_tripped` — which is the one outcome this
+    family's per-arm budget guarantee cannot cover. Not a defect as shipped
+    (#1688's real child completed in 3.3s, and the sibling
+    `set_permission_mode` family already carries a larger worst case — 4
+    arms × 4m — under the same Makefile target), but the next raise to
+    either family's budgets should check the invocation's own timeout, not
+    just the per-step sum.
 
   **Two lessons that outlive this ticket:**
   - **A "check both placements" instruction, derived correctly from one
@@ -2888,14 +3000,17 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   the guard leaves the summariser's test green). Worth a row before #1690
   starts decoding against this shape.
 
-  Zero production files touched. See
+  Zero production files touched by any of the three tickets. See
   `docs/specs/architecture/1688-initialize-control-round-trip-capture.md` for
-  the full design and security review, and
+  the original design and security review,
   `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
-  the arm-recording and wait-result changes. This closes the `initialize`
-  fixture family opened by #1695's split (#1696/#1701/#1702/#1700); the
-  trigger-design questions (send point, session perturbation) are carved out
-  to #1694.
+  the arm-recording and wait-result changes, and
+  `docs/specs/architecture/1763-send-point-arms-live-capture.md` for the
+  three-arm rig. This closes the `initialize` fixture family opened by
+  #1695's split (#1696/#1701/#1702/#1700) and answers the send-point half of
+  the questions #1694 carved out (session perturbation is still open); #1689
+  places its `initialize` trigger on this run's recorded evidence rather
+  than on a guess.
 
 - `initialize_control_redaction_test.go` (#1732) — **the redaction table for
   the `initialize` fixture family, proved over raw bytes with no record
