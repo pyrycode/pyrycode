@@ -36,7 +36,7 @@ package realclaude
 //
 // This file carries two. initControlFixtureName takes ONE input and mints the
 // name of #1688's single committed capture. initControlArmFixtureName takes TWO
-// and mints one name per arm of #1715's three-arm measurement; #1722 migrated
+// and mints one name per arm of #1763's three-arm measurement; #1722 migrated
 // writeInitControlFixture onto it, so it is the namer every fixture on disk is
 // now written under.
 //
@@ -50,7 +50,7 @@ package realclaude
 // and this capture was one probe, so the name was initialize_control_v<slug>.json
 // and the lock table was tokens × 1. That was correct for a one-probe family and
 // it EXPIRED when the family grew arms. Through the one-input namer all three of
-// #1715's arms mint the same path: the last arm wins, the other two vanish, and
+// #1763's arms mint the same path: the last arm wins, the other two vanish, and
 // writeInitControlFixture — which mints its own path internally, on purpose —
 // writes over testdata/initialize_control_v2.1.239.json. Nothing compares a
 // written path against a committed one, so the loss is silent. Do not
@@ -147,89 +147,88 @@ func initControlFixtureName(versionToken string) string {
 // and #1712 brought it back as a []string; #1722 grew that slice into rows, which
 // is what its own doc comment said to do rather than shadowing it with a second
 // list. poolRevokeArm and setModeArm are the two precedents in this package.
+//
+// #1763 replaced #1722's `probed` column with the two behaviour columns below,
+// which is exactly what that column's own doc said to do once a run drove every
+// arm rather than one.
+//
+// THE TWO BEHAVIOUR COLUMNS ARE INDEPENDENT ON PURPOSE, and nothing checks either
+// against id. An arm whose id says one thing and whose columns do another produces
+// an artifact that says so — a `control_no_request` row carrying sendsRequest
+// would commit a non-null control_request_sent under that name. DO NOT ADD A
+// SUBSTRING CHECK ON id to guard it: that is a second spelling of the identifier,
+// which is what the distinctness subtest of
+// TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
+// exists to prevent.
 type initControlArm struct {
 	// id names the arm's SEND POINT, because the send point is the only dimension
 	// the arms vary on. It is the identifier a capture records in its `arm` field
 	// and the one initControlArmFixtureName slugs into the fixture's filename.
 	id string
 
-	// probed marks the arm the ONE live run in initialize_control_probe_test.go
-	// sends at, and it is the first column this table carried beyond the
-	// identifier. It exists because initControlProbedArm has to answer "which arm
-	// does the single-arm run drive?" without a second spelling of the identifier
-	// and without an index into this slice — initControlArms[1] is one insertion
-	// away from silently recording the wrong arm.
+	// sendPointAfterFirstTurn positions this arm's send point inside the one
+	// two-turn drive sequence every arm runs: false places it before turn 1's
+	// line, true between the two turns.
 	//
-	// IT SHOULD NOT SURVIVE #1715. Once that rig ranges this table for all three
-	// arms the arm is a parameter and no row is special, so delete this column and
-	// initControlProbedArm with it rather than working around them.
-	probed bool
+	// IT POSITIONS THE SEND POINT, NOT THE REQUEST. control_no_request carries
+	// true and writes nothing: its anchor is read at the equivalent point its
+	// drive sequence reaches, the one corresponding to where the other two arms
+	// write, and that correspondence is what makes the three arms' windows
+	// comparable. initControlFixtureRecord's SendPointIndex paragraph states that
+	// contract and enforces nothing, which is why the placement lives here.
+	sendPointAfterFirstTurn bool
+
+	// sendsRequest reports whether a control_request is actually written at that
+	// send point. False marks a CONTROL arm — the same role targetMode == "" plays
+	// in setModeArm, spelled as its own column here because this family's request
+	// payload does not vary per arm and so has no empty value to overload.
+	sendsRequest bool
 }
 
-// initControlArms names the three arms of #1715's `initialize` control-request
-// measurement:
+// initControlArms names the three arms of #1763's `initialize` control-request
+// measurement, each one live child driving the identical two-turn sequence:
 //
 //   - before_first_turn — the control request is written before the first user turn
 //   - after_completed_turn — it is written after a turn has completed
 //   - control_no_request — no control request is sent at all
 //
 // The identifiers, their order and their meaning are UNCHANGED across #1722's
-// shape change: this is a table of rows now, not a different vocabulary.
+// shape change and #1763's column change: this is the same vocabulary with
+// behaviour columns beside it, not a different one.
+//
+// THE CONTROL ARM IS NOT OPTIONAL. Claude emits `system`/`init` per turn rather
+// than at spawn, so a measurement arm's window is only readable against an arm
+// that reached the same point and wrote nothing — which is what #1764's cross-arm
+// comparison subtracts. runSetModeChild's control arms exist for the same reason
+// and drive their second turn for it.
 //
 // READ-ONLY: never append to it, never reassign it. It is ranged over from
-// t.Parallel() tests here, from initialize_control_probe_test.go's offline arm
-// test, and from #1715's files once they land; a mutation would race in a way
+// t.Parallel() tests here, from initialize_control_probe_test.go's offline budget
+// test, and from that file's live per-arm loop; a mutation would race in a way
 // -race catches only when the runs happen to overlap. Ranging is the only
 // supported access — nothing hands the slice out, so no defensive copy is needed.
 // poolRevokeArms carries the same contract for the same reason.
 //
-// GROW THIS DECLARATION rather than shadowing it. When #1715 needs more per-arm
-// behaviour — the prompt, the drive sequence — those fields go on initControlArm.
-// A SECOND table keyed by these names is the duplication the distinctness subtest
-// below exists to prevent: two sources of truth for the arm set is how a run
-// reports more arms measured than there are fixtures on disk.
+// GROW THIS DECLARATION rather than shadowing it. More per-arm behaviour — a
+// per-arm prompt, a third turn — goes on initControlArm, the way the send point
+// and the request flag did. A SECOND table keyed by these names is the duplication
+// the distinctness subtest below exists to prevent, and a `switch` on id inside
+// the driver is the same duplication spelled differently: two sources of truth for
+// the arm set is how a run reports more arms measured than there are fixtures on
+// disk.
 //
 // The hostile arms the lock below feeds through the namer are that test's OWN
 // literals and must NOT be appended here, for the reason #1661 gives about
 // poolRevokeArms: this declaration is what other files range.
 var initControlArms = []initControlArm{
-	{id: "before_first_turn"},
-	{id: "after_completed_turn", probed: true},
-	{id: "control_no_request"},
-}
-
-// initControlProbedArm returns the id of the ONE row marked probed, and "" when
-// the count is not exactly one.
-//
-// Collapsing BOTH degenerate shapes — no row marked, and two or more marked — to
-// the empty string is deliberate. It makes
-// TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm's non-emptiness check
-// the sole red for both, instead of needing a separate "exactly one row is marked"
-// count that would then be the only thing catching one of them.
-//
-// It returns "" rather than fataling because it is a pure function with no
-// *testing.T — the same discipline both namers in this file hold. A degenerate
-// table surfaces as that test's red and as an empty `arm` in a live fixture, not
-// as a helper reaching for a `t` it does not have.
-//
-// It ranges initControlArms read-only: no sort, no filter in place, no mutation.
-func initControlProbedArm() string {
-	found := ""
-	for _, arm := range initControlArms {
-		if !arm.probed {
-			continue
-		}
-		if found != "" {
-			return ""
-		}
-		found = arm.id
-	}
-	return found
+	{id: "before_first_turn", sendsRequest: true},
+	{id: "after_completed_turn", sendPointAfterFirstTurn: true, sendsRequest: true},
+	{id: "control_no_request", sendPointAfterFirstTurn: true},
 }
 
 // --- the arm-carrying namer -----------------------------------------------------
 
-// initControlArmFixtureName mints the fixture filename for ONE ARM of #1715's
+// initControlArmFixtureName mints the fixture filename for ONE ARM of #1763's
 // three-arm `initialize` control-request measurement. It is a pure function of its
 // two inputs: no directory parameter, no *testing.T, no I/O in either direction.
 //
@@ -309,10 +308,11 @@ func TestInitControlFixtureName_AvoidsCommittedFamiliesAndStaysContained(t *test
 	//
 	// Function-local although every control here is a literal and it could be a
 	// package-level var: it is used by exactly one test, and keeping it here
-	// holds this file's package-scope surface at seven identifiers —
+	// holds this file's package-scope surface at six identifiers —
 	// initControlFixtureName, initControlArmFixtureName, initControlArm,
-	// initControlArms, initControlProbedArm and the two tests — which is what
-	// keeps concurrent siblings from colliding with it.
+	// initControlArms and the two tests — which is what keeps concurrent siblings
+	// from colliding with it. It was seven until #1763 deleted
+	// initControlProbedArm with the `probed` column.
 	patterns := []poolRevokeNamePattern{
 		{
 			glob:     setModeFamilyGlob,
@@ -497,8 +497,8 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 
 	// The other input dimension. These are this test's OWN literals and must NOT be
 	// added to initControlArms: that table is read-only and is ranged from
-	// t.Parallel() tests, here, in initialize_control_probe_test.go's offline arm
-	// test, and later in #1715's files. #1661's
+	// t.Parallel() tests, here, from initialize_control_probe_test.go's offline
+	// budget test, and from that file's live per-arm loop. #1661's
 	// hostileArms is the precedent and carries the same shapes, for the same reason
 	// — the arm table is where a fourth arm gets added by somebody typing a string.
 	//
@@ -537,7 +537,7 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 			glob:     setModeFamilyGlob,
 			controls: []string{"set_permission_mode_v0.0.0_default.json"},
 			hazard: "that is #1595's committed record of the in-band revocation wire format, and " +
-				"one arm of a live #1715 run writing there overwrites it while every test stays green",
+				"one arm of a live #1763 run writing there overwrites it while every test stays green",
 		},
 		{
 			glob:          fixtureGlob,
@@ -630,7 +630,7 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 			for _, arm := range arms {
 				if got := initControlArmFixtureName(token, arm); got == oneArm {
 					t.Errorf("token %q arm %q mints %q, which is also what initControlFixtureName "+
-						"mints from that token: a live #1715 arm writes straight over #1688's "+
+						"mints from that token: a live #1763 arm writes straight over #1688's "+
 						"committed capture — testdata/initialize_control_v2.1.239.json is the file "+
 						"on disk today — and nothing compares a written path against a committed "+
 						"one, so the loss is silent", token, arm, got)
@@ -664,7 +664,7 @@ func TestInitControlArmFixtureName_AvoidsCommittedNamesStaysDistinctAndContained
 				name := initControlArmFixtureName(token, arm)
 				if prev, dup := seen[name]; dup {
 					t.Errorf("token %q: arms %q and %q both mint %q, so one arm's capture "+
-						"overwrites the other's and #1715 reports three arms measured with two "+
+						"overwrites the other's and #1763 reports three arms measured with two "+
 						"fixtures on disk", token, prev, arm, name)
 				}
 				seen[name] = arm

@@ -20,32 +20,53 @@ package realclaude
 // #1692's fake) decode against it. This file is the live run that fills #1701's
 // record and commits the bytes.
 //
-// # One arrangement, and it is not a guess
+// # Three arms, one drive sequence (#1763)
 //
-// The request is written AFTER a completed turn. runSetModeChild writes its
-// control request at exactly that point and got a control_response back on both
-// of its measurement arms at 2.1.220. Whether the request is ALSO answered
-// before the first user turn, and whether the round trip perturbs the live
-// session, need a three-arm rig with a no-request control and are #1694's.
+// #1688 measured ONE send point — after a completed turn — and committed the
+// bytes. What that could not settle is WHICH send points are answered: the daemon
+// would rather ask once at spawn than pay for a turn first, and #1689's trigger is
+// placed on whichever answer the measurement returns. #1763 drives one child per
+// row of initControlArms:
 //
-// Since #1722 the run RECORDS that arrangement rather than only describing it
-// here: the capture's `arm` field carries after_completed_turn, and the one place
-// that decides it is the row initControlArms marks `probed`. Change the
-// arrangement and that row is what moves — there is deliberately no second
-// spelling of the identifier in this file, and no index into that table.
+//	arm                  | send point                | control request
+//	---------------------+---------------------------+----------------
+//	before_first_turn    | before turn 1's line      | written
+//	after_completed_turn | between the two turns     | written
+//	control_no_request   | between the two turns     | (none)
+//
+// EVERY ARM DRIVES A FULL TURN AFTER ITS SEND POINT, the control included. Claude
+// emits `system`/`init` per turn rather than at spawn, so "no further init line
+// after the request" observed without driving a further turn is empty by
+// construction rather than a measurement — runSetModeChild records this in its own
+// words and drives turn 2 on its control arms for exactly that reason. The control
+// arm writes nothing and still reads an anchor, at the equivalent point its drive
+// sequence reaches, which is what makes the three windows comparable and what
+// #1764's cross-arm comparison subtracts.
+//
+// The send point is placed by the arm's two columns rather than by a switch on its
+// id: initControlArms is the single source of truth for the arm set, and a second
+// spelling of an identifier here is what its distinctness lock exists to prevent.
 //
 // The recorded arm is the send point the run INTENDED. It is not a claim that the
-// turn completed: the probe turn can produce no result line inside its budget, in
-// which case the log below says so and turn_boundaries stays empty in the fixture.
+// turns completed: a probe turn can produce no result line inside its budget, in
+// which case the log below says so and turn_boundaries is what tells a reader
+// which turns closed.
 //
 // # What passes
 //
 // A response carrying subtype:"error" is a refusal, and a recorded refusal is a
-// PASSING outcome — the error text is the input to #1689. The run fails only
-// where there is no artifact to commit: a spawn failure, zero stdout lines, or
-// no control_response at all. Send the minimal request shape and DO NOT ITERATE
-// against a live child; the wall-clock and token risk here is the run, not the
-// typing.
+// PASSING outcome — the error text is the input to #1689. AN ARM THAT GOES
+// UNANSWERED IS ALSO A PASSING OUTCOME, and it is the reading this run exists to
+// take: whether a pre-turn ask is answered at all is the unknown, so an unanswered
+// before_first_turn is the measurement rather than a failed run. #1688's fatal on
+// an absent control_response is deleted for that reason, along with the one-arm
+// test that carried it — which since #1722 also wrote the same filename this run's
+// after_completed_turn arm writes.
+//
+// The run fails only on a broken instrument or a fail-closed refusal: a spawn
+// failure, an arm that captured no stdout at all, or the writer's deny-scan
+// refusing a record. Send the minimal request shape and DO NOT ITERATE against a
+// live child; the wall-clock and token risk here is the run, not the typing.
 //
 // # What this file reuses, and the one thing it must not
 //
@@ -65,12 +86,13 @@ package realclaude
 // # Running it
 //
 //	go test -tags e2e_realclaude -race -v \
-//	  -run 'TestRealClaude_InitializeControl|TestInitControlSummarize_|TestInitControlProbedArm_|TestInitControlScanApplied_' \
+//	  -run 'TestRealClaude_InitializeControl|TestInitControlSummarize_|TestInitControlChildBudget_|TestInitControlScanApplied_' \
 //	  ./internal/e2e/realclaude/
 //
-// The three non-live tests in this file — the summariser's table, the probed arm's
-// and the arming completion's (TestInitControlScanApplied_...) — spawn nothing and
-// must report PASS, not SKIP, on a machine with no claude and no credentials.
+// The three non-live tests in this file — the summariser's table, the child
+// budget's (TestInitControlChildBudget_...) and the arming completion's
+// (TestInitControlScanApplied_...) — spawn nothing and must report PASS, not SKIP,
+// on a machine with no claude and no credentials.
 //
 // Read the count of tests that executed, never the exit code: this package is
 // behind the e2e_realclaude tag, `make check` never compiles it, and the suite
@@ -100,44 +122,88 @@ const (
 	// cheaper.
 	initControlWorkdirName = "initialize-control-work"
 
-	// The one probe turn. It exists only to reach the after-a-completed-turn
-	// arrangement, so it is deliberately TOOL-FREE — unlike runSetModeChild's
-	// Bash probe. A tool-free turn cannot stall on a permission prompt it can
-	// never receive, which is why this run needs no
+	// The two probe turns, shared by all three arms. They exist only to place the
+	// send point inside a drive sequence, so both are deliberately TOOL-FREE —
+	// unlike runSetModeChild's Bash probes. A tool-free turn cannot stall on a
+	// permission prompt it can never receive, which is why this run needs no
 	// --dangerously-skip-permissions and cannot hit the `default`-posture hang
-	// #1595 budgets two minutes for. Do not "make the probe use Bash like
-	// #1595": that reintroduces the flag and hands the child unsandboxed tool
-	// access for no measurement gain.
-	initControlPrompt = "Reply with the single word: ready. Do not use any tools."
+	// #1595 budgets two minutes for. Do not "make the probes use Bash like #1595":
+	// that reintroduces the flag and hands three unsandboxed children tool access
+	// for no measurement gain.
+	//
+	// THEY DIFFER FROM EACH OTHER so turn 2 is a fresh request rather than one
+	// claude can answer with "I already did that" — setModePromptOne and
+	// setModePromptTwo carry the same reason. A turn claude short-circuits is not
+	// the "full turn after the send point" every arm owes its window.
+	initControlPromptOne = "Reply with the single word: ready. Do not use any tools."
+	initControlPromptTwo = "Reply with the single word: done. Do not use any tools."
 
 	// Cost. The model list claude reports is a property of the BINARY, not of
 	// the model answering the probe turn.
 	initControlModel = "claude-haiku-4-5"
 
-	// Cost guard with headroom over the single assistant turn the probe needs. A
-	// result line carrying subtype:"error_max_turns" lands in the fixture
-	// plainly — raise and rerun.
+	// Cost guard with ~2x headroom over the two assistant turns two tool-free
+	// probes need. Unchanged by #1763's second turn, which is what that headroom
+	// was already sized for. A result line carrying subtype:"error_max_turns"
+	// lands in the fixture plainly — raise and rerun.
 	initControlMaxTurns = "4"
 
 	// A correlation token, not a security token — the same reason
 	// (*Runner).Interrupt mints its id from a monotonic counter rather than a
-	// random source. A fixed literal keeps the committed fixture diffable.
+	// random source. A fixed literal keeps the committed fixture diffable, and it
+	// stays ONE literal across #1763's arms rather than becoming per-arm: the two
+	// writing arms are separate children, so there is no correlation ambiguity to
+	// resolve and a per-arm id would only make the artifacts harder to diff.
 	initControlRequestID = "initialize-control-1"
 )
 
 const (
-	// Hard kill for the one child, and the outer bound: the per-step waits below
-	// can sum past it on a fully stalling run, in which case the deadline trips
-	// and context_deadline_tripped records that rather than the run hanging.
-	initControlChildBudget = 3 * time.Minute
+	// Hard kill per child, and the outer bound. IT DOMINATES THE PER-STEP WAITS
+	// BELOW: 300s against the 225s an arm that drives two turns and waits for a
+	// control_response can spend, with 75s of residual for the steps the sum does
+	// not count — cmd.Start, the stdin close, cmd.Wait, the reader join and the
+	// inter-step overhead.
+	//
+	// That ordering is what makes context_deadline_tripped a MEASUREMENT rather
+	// than an artefact of the harness. Every per-step budget exists so an absence
+	// means absence rather than impatience — initControlControlBudget's own doc
+	// says so — and a deadline that can fire first voids that guarantee for exactly
+	// the reading this family takes. Now that it cannot, a trip means a genuinely
+	// stalling claude. #1763 raised it from 3 minutes for the second turn;
+	// TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum is what enforces the
+	// relation, deriving both sides from these constants rather than from literals.
+	initControlChildBudget = 5 * time.Minute
 
-	// The one probe turn. A tool-free turn lands in seconds.
+	// One probe turn, and every arm drives two of them. A tool-free turn lands in
+	// seconds.
 	initControlTurnBudget = 90 * time.Second
 
 	// Long enough that an absent control_response means absence, not impatience.
 	// Same value and same reason as setModeControlBudget.
 	initControlControlBudget = 45 * time.Second
 )
+
+// initControlArmWaitSum returns the largest total arm's drive sequence can spend in
+// PER-STEP WAITS: the two turn waits every arm drives, plus the control wait on an
+// arm that sends a request.
+//
+// IT MIRRORS runInitControlChild's SEQUENCE AND MUST BE GROWN WITH IT. Nothing
+// couples the two — a third turn added to that driver and not to this sum leaves
+// TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum green over an
+// arithmetic that no longer describes the run, which is the one way that test can
+// pass while saying nothing.
+//
+// It counts ONLY the bounded waits. cmd.Start, the stdin close, cmd.Wait, the
+// reader join and the inter-step overhead are uncounted; the residual between this
+// sum and initControlChildBudget is what covers them, and that residual is a
+// judgement rather than something any assertion here demands.
+func initControlArmWaitSum(arm initControlArm) time.Duration {
+	sum := 2 * initControlTurnBudget
+	if arm.sendsRequest {
+		sum += initControlControlBudget
+	}
+	return sum
+}
 
 // --- the request line ---------------------------------------------------------
 
@@ -383,16 +449,30 @@ func initControlScanApplied(s dropcapScanner) map[string]bool {
 // --- the driver ---------------------------------------------------------------
 
 // runInitControlChild spawns one child under pyry's stream-json-in/stream-json-out
-// argv, drives one probe turn to completion, writes the initialize control
-// request on the held-open stdin, reads the reply, writes the fixture and returns
-// the completed record.
+// argv, drives arm's two-turn sequence with the send point placed where that arm's
+// columns say, reads whatever came back, writes the fixture and returns the
+// completed record BESIDE THE PATH IT WAS WRITTEN TO.
 //
-// It t.Fatalf's ONLY for a broken instrument — a pipe or spawn failure, a marshal
-// failure, a credential in the child's stderr, or zero stdout lines captured.
-// Every other outcome is information and lands in a fixture field: a probe turn
-// that never closed, a control_response that never came, one that came with
-// subtype "error", a mismatched request_id, a stdin write error, an over-long
-// line, a non-zero exit, a tripped deadline.
+// The arm arrives as a PARAMETER, positioned after workdir the way runSetModeChild
+// takes its own; the local initControlProbedArm() call it replaced is the change
+// that doc reserved, and both that helper and the `probed` column went with it.
+//
+// THE SECOND RETURN VALUE IS THE WRITTEN PATH, which the writer already mints and
+// returns and which this driver used to drop into a log line.
+// TestRealClaude_InitializeControl_SendPointArms' write-set assertion consumes it.
+// Do NOT put it on initControlFixtureRecord instead: it is an absolute path under
+// the operator's pinned $HOME, so a field would commit an operator path into a
+// public artifact and put a new string-bearing field in front of the redaction pass
+// and the deny-scan for no gain.
+//
+// It t.Fatalf's ONLY for a broken instrument or a fail-closed refusal — a pipe or
+// spawn failure, a marshal failure, a credential in the child's stderr, zero stdout
+// lines captured, or the writer's deny-scan refusing the record. Every other
+// outcome is information and lands in a fixture field: a probe turn that never
+// closed, a control_response that never came, one that came with subtype "error", a
+// mismatched request_id, a stdin write error, an over-long line, a non-zero exit, a
+// tripped deadline. #1688's fatal on an absent control_response is deliberately
+// gone: an unanswered send point is the measurement #1763 exists to take.
 //
 // SINCE #1733 IT TAKES A REDACTOR RATHER THAN THREE MORE PATH STRINGS. The
 // alternative — operatorHome, tempHome and tempDir threaded in beside the workdir
@@ -401,17 +481,18 @@ func initControlScanApplied(s dropcapScanner) map[string]bool {
 // transposition of operatorHome and tempHome is silent (both install rules, both
 // produce a placeholder, just the wrong one) and no offline test can see it,
 // because every offline row builds its own redactor. One construction site is one
-// place to get that order right. It also leaves #1715 free to mint a fresh
-// redactor per arm inside its loop, which it must: dropcapRedactor's counters are
-// unlocked and its census accumulates across every call, so a shared redactor
-// would both race and report one arm's substitutions against another's.
+// place to get that order right. It also leaves the live loop free to mint a fresh
+// redactor per arm, WHICH IT MUST: dropcapRedactor's counters are unlocked and its
+// census accumulates across every call, so a shared redactor would both race and
+// report one arm's substitutions against another's.
 //
 // SINCE #1747 IT TAKES A SCANNER TOO, and it arrives by the same route and for the
 // same reason: one construction site is one place to get newDropcapScanner's
 // parameter order right, and that site is where the pinned $HOME — which plays
 // tempHome — is in hand. Unlike newInitControlRedactor, newDropcapScanner reads
-// realHome and os.Getenv ITSELF, so the call site needs neither in hand. #1715 is
-// free to mint one per arm inside its loop the way it must for the redactor.
+// realHome and os.Getenv ITSELF, so the call site needs neither in hand. The live
+// loop builds ONE and shares it across the three arms; the paragraph below is why
+// that is safe where sharing a redactor is not.
 //
 // A SCANNER IS NOT A REDACTOR, and a reader will otherwise guess this asymmetry the
 // wrong way round. dropcapRedactor accumulates unlocked counters across every call,
@@ -446,15 +527,9 @@ func initControlScanApplied(s dropcapScanner) map[string]bool {
 // keep the credential values out of it entirely, and that is rejected deliberately:
 // #1748 needs the SCANNER here, to scan the bytes the writer produced, and splitting
 // the two would move the parameter twice.
-func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRedactor,
-	scanner dropcapScanner, versionRaw, versionToken string) *initControlFixtureRecord {
+func runInitControlChild(t *testing.T, claudeBin, workdir string, arm initControlArm,
+	red *dropcapRedactor, scanner dropcapScanner, versionRaw, versionToken string) (*initControlFixtureRecord, string) {
 	t.Helper()
-
-	// The send point this run drives, taken from the ONE row initControlArms marks
-	// probed rather than from a literal here or an index into that table. #1715
-	// turns this into a parameter when it ranges the table for three arms; leaving
-	// it a local call keeps that change to the signature.
-	arm := initControlProbedArm()
 
 	// The fixed stream-json prefix is streamsup's buildArgs'; the two cost flags
 	// occupy the `base` slot that function appends after it.
@@ -474,18 +549,18 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		t.Fatalf("#1688: stdin pipe: %v", err)
+		t.Fatalf("#1763[%s]: stdin pipe: %v", arm.id, err)
 	}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		t.Fatalf("#1688: stdout pipe: %v", err)
+		t.Fatalf("#1763[%s]: stdout pipe: %v", arm.id, err)
 	}
 	var stderrBuf bytes.Buffer
 	cmd.Stderr = &stderrBuf
 
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("#1688: start claude: %v", err)
+		t.Fatalf("#1763[%s]: start claude: %v", arm.id, err)
 	}
 
 	// Single reader goroutine over the child's stdout. It exits on EOF — which
@@ -515,45 +590,103 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		}
 	}
 
-	turn, err := setModeTurnLine(initControlPrompt)
+	turnOne, err := setModeTurnLine(initControlPromptOne)
 	if err != nil {
-		t.Fatalf("#1688: %v", err)
+		t.Fatalf("#1763[%s]: %v", arm.id, err)
 	}
-	writeLine("probe turn", turn)
-	if !setModeWaitFor(rec.resultCount, 1, initControlTurnBudget) {
-		t.Logf("#1688: the probe turn produced no result line within %s, so the control request "+
-			"below is NOT written after a completed turn and this capture is OFF the one "+
-			"arrangement the ticket pins. Recorded rather than fatal — turn_boundaries stays "+
-			"empty in the fixture, which is what tells #1694 so. Continuing", initControlTurnBudget)
+	turnTwo, err := setModeTurnLine(initControlPromptTwo)
+	if err != nil {
+		t.Fatalf("#1763[%s]: %v", arm.id, err)
 	}
 
-	controlLine, err := initControlLine(initControlRequestID)
-	if err != nil {
-		t.Fatalf("#1688: %v", err)
+	var (
+		controlSent    json.RawMessage
+		requestID      string
+		sendPointIndex int
+		withinWait     bool
+	)
+
+	// THE SEND POINT: one closure, called from exactly one of the two ifs below, so
+	// the two placements cannot drift apart. It is what arm.sendPointAfterFirstTurn
+	// positions and what arm.sendsRequest decides the content of — never a switch on
+	// arm.id, which would be a second spelling of an identifier initControlArms
+	// already declares.
+	sendPoint := func() {
+		// #1762: the send-point anchor, read HERE rather than beside the record
+		// literal below, and read UNCONDITIONALLY — the control arm reads it too, at
+		// the equivalent point its drive sequence reaches, which is what makes the
+		// three arms' windows comparable. Nothing claude writes in RESPONSE to the
+		// request may fall before it, and only a read taken before the write
+		// guarantees that; reading it afterwards inverts the residual. The residual
+		// that remains runs the safe way — a line arriving between this read and the
+		// write is counted inside the window although it preceded the request.
+		//
+		// len(rec.snapshotLines()) is the accessor because setModeRecorder has no
+		// cheaper one, and adding one changes a type the set_permission_mode family
+		// shares.
+		sendPointIndex = len(rec.snapshotLines())
+		if !arm.sendsRequest {
+			// A control arm stops here: no request id, no line, no wait.
+			// ControlRequestID stays "", ControlRequestSent stays nil,
+			// ControlResponseWithinWait stays false — and false is HONEST rather than
+			// ambiguous, because no wait ran and so none was satisfied. A reader
+			// separates "the wait expired" from "no wait ran" by `arm` and by
+			// control_request_sent: null. DO NOT ADD A PRESENCE FLAG OR A FOURTH
+			// STATE; the record's SendPointIndex paragraph bans exactly this move one
+			// field away, for the same reason.
+			return
+		}
+		requestID = initControlRequestID
+		controlLine, err := initControlLine(requestID)
+		if err != nil {
+			t.Fatalf("#1763[%s]: %v", arm.id, err)
+		}
+		controlSent = json.RawMessage(bytes.TrimRight(controlLine, "\n"))
+		t.Logf("#1763[%s]: writing control request: %s", arm.id, controlSent)
+		writeLine("control request", controlLine)
+		// The wait's own RESULT, kept rather than dropped into the log. Snapshotting
+		// ControlResponses happens after cmd.Wait() below, so a response arriving
+		// past this budget still lands in that field — under a log line that already
+		// claimed absence. control_response_within_wait is the only place that
+		// distinction survives the run; see its paragraph on
+		// initControlFixtureRecord.
+		withinWait = setModeWaitFor(rec.controlResponseCount, 1, initControlControlBudget)
+		if !withinWait {
+			t.Logf("#1763[%s]: no control_response within %s (recorded as absence, continuing) — "+
+				"an unanswered send point is this run's measurement, not its failure",
+				arm.id, initControlControlBudget)
+		}
 	}
-	controlSent := json.RawMessage(bytes.TrimRight(controlLine, "\n"))
-	t.Logf("#1688: writing control request: %s", controlSent)
-	// #1762: the send-point anchor, read HERE rather than beside the record literal
-	// below. Nothing claude writes in RESPONSE to the request may fall before it,
-	// and only a read taken before the write guarantees that; reading it afterwards
-	// inverts the residual. The residual that remains runs the safe way — a line
-	// arriving between this read and the write is counted inside the window
-	// although it preceded the request.
+
+	if !arm.sendPointAfterFirstTurn {
+		sendPoint()
+	}
+	writeLine("turn 1", turnOne)
+	if !setModeWaitFor(rec.resultCount, 1, initControlTurnBudget) {
+		t.Logf("#1763[%s]: turn 1 produced no result line within %s, so whatever this arm's "+
+			"sequence reaches next is NOT reached from a completed turn. Recorded rather than "+
+			"fatal — turn_boundaries is what tells a reader which turns closed. Continuing",
+			arm.id, initControlTurnBudget)
+	}
+	if arm.sendPointAfterFirstTurn {
+		sendPoint()
+	}
+
+	// Turn 2 is driven unconditionally, on the control arm too. It is what makes
+	// recording an absent init line legitimate: claude emits `system`/`init` per turn
+	// rather than at spawn, so a window read without a further turn is empty by
+	// construction rather than measured. runSetModeChild drives its control arms'
+	// turn 2 for the same reason.
 	//
-	// len(rec.snapshotLines()) is the accessor because setModeRecorder has no
-	// cheaper one, and adding one changes a type the set_permission_mode family
-	// shares.
-	sendPointIndex := len(rec.snapshotLines())
-	writeLine("control request", controlLine)
-	// The wait's own RESULT, kept rather than dropped into the log. Snapshotting
-	// ControlResponses happens after cmd.Wait() below, so a response arriving past
-	// this budget still lands in that field — under a log line that already claimed
-	// absence. control_response_within_wait is the only place that distinction
-	// survives the run; see its paragraph on initControlFixtureRecord.
-	withinWait := setModeWaitFor(rec.controlResponseCount, 1, initControlControlBudget)
-	if !withinWait {
-		t.Logf("#1688: no control_response within %s (recorded as absence, continuing)",
-			initControlControlBudget)
+	// The baseline is READ rather than hardcoded to 2, copied from that driver: it is
+	// what keeps this wait correct when turn 1 produced no result line inside its own
+	// budget.
+	baseline := rec.resultCount()
+	writeLine("turn 2", turnTwo)
+	if !setModeWaitFor(rec.resultCount, baseline+1, initControlTurnBudget) {
+		t.Logf("#1763[%s]: turn 2 produced no result line within %s (recorded rather than fatal, "+
+			"continuing) — turn_boundaries is what tells a reader which turns closed",
+			arm.id, initControlTurnBudget)
 	}
 
 	if err := stdinPipe.Close(); err != nil {
@@ -572,8 +705,8 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 
 	lines := rec.snapshotLines()
 	if len(lines) == 0 {
-		t.Fatalf("#1688: claude produced no stdout; there is nothing to capture\nstderr:\n%s\nwaitErr: %v",
-			truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
+		t.Fatalf("#1763[%s]: claude produced no stdout; there is nothing to capture\nstderr:\n%s\nwaitErr: %v",
+			arm.id, truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
 	}
 
 	// #1762: ONE anchor and ONE slice expression, so the two window reads cannot
@@ -598,16 +731,18 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 		ClaudeVersionRaw: versionRaw,
 		ClaudeVersion:    versionToken,
 
-		Arm: arm,
+		Arm: arm.id,
 
 		Argv:    append([]string{claudeBin}, argv...),
-		Prompts: []string{initControlPrompt},
+		Prompts: []string{initControlPromptOne, initControlPromptTwo},
 
-		ControlRequestID:                initControlRequestID,
-		ControlRequestSent:              controlSent,
-		ControlResponses:                responses,
-		ControlResponseSubtype:          summary.subtype,
-		ControlResponseRequestIDMatched: setModeResponseIDMatches(responses, initControlRequestID),
+		ControlRequestID:       requestID,
+		ControlRequestSent:     controlSent,
+		ControlResponses:       responses,
+		ControlResponseSubtype: summary.subtype,
+		// setModeResponseIDMatches already returns false for an empty id without a
+		// branch of its own, which is what the control arm reaches here.
+		ControlResponseRequestIDMatched: setModeResponseIDMatches(responses, requestID),
 		ControlResponseWithinWait:       withinWait,
 
 		ModelsPresent:     summary.modelsPresent,
@@ -683,7 +818,7 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 	// the census is not child output. It reads the record's own field for the
 	// reason the two log sites above do.
 	record.Redaction = redactInitControlRecord(red, record)
-	t.Logf("#1733: redaction applied: %+v", record.Redaction)
+	t.Logf("#1733[%s]: redaction applied: %+v", arm.id, record.Redaction)
 
 	// packageDir is os.Getwd(), which under `go test` is this package's own
 	// source directory — no untrusted component anywhere in it. Choosing dir is
@@ -700,17 +835,23 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 
 	// Never %+v the record into a log or a fatal message: that moves up to
 	// stderrFixtureCap bytes of child output out of the bounded file and into an
-	// unbounded run log, the exact thing the cap exists to prevent.
+	// unbounded run log, the exact thing the cap exists to prevent. NEVER FORMAT THE
+	// SCANNER either — it is two live credentials in a struct, and this driver holds
+	// one; see the paragraph above.
 	//
-	// arm and within_wait are safe to add for the reason claude_version is: neither
-	// is child output. Do not widen this further toward the record's other fields.
-	t.Logf("#1688: arm=%q, %d line(s), %d non-JSON, %d control_response(s), within_wait=%v, "+
+	// arm, within_wait and the two window counts are safe to add for the reason
+	// claude_version is: none is child output. Do not widen this further toward the
+	// record's other fields.
+	t.Logf("#1763[%s]: %d line(s), %d non-JSON, %d control_response(s), within_wait=%v, "+
 		"subtype=%q, models_present=%v models_count=%d models_entry_fields=%v, "+
-		"request_id matched=%v, exit=%d, deadline_tripped=%v, scanner_error=%q, %s",
+		"request_id matched=%v, send_point_index=%d, window init=%d trailers=%d, "+
+		"exit=%d, deadline_tripped=%v, scanner_error=%q, %s",
 		record.Arm, len(lines), record.NonJSONLineCount, len(responses),
 		record.ControlResponseWithinWait, record.ControlResponseSubtype,
 		record.ModelsPresent, record.ModelsCount, record.ModelsEntryFields,
-		record.ControlResponseRequestIDMatched, exitCode, record.ContextDeadlineTripped,
+		record.ControlResponseRequestIDMatched, record.SendPointIndex,
+		record.AfterSendPointSystemInitCount, len(record.AfterSendPointResultTrailers),
+		exitCode, record.ContextDeadlineTripped,
 		record.ScannerError, duration.Round(time.Millisecond))
 	// record.ControlResponses, never the pre-pass local `responses`. The pass
 	// builds a fresh slice of fresh byte slices — initControlRedactRaws allocates
@@ -718,48 +859,50 @@ func runInitControlChild(t *testing.T, claudeBin, workdir string, red *dropcapRe
 	// through the local, and a loop ranging it prints exactly the bytes the
 	// fixture no longer carries. Redacted rather than verbatim since #1733.
 	for i, resp := range record.ControlResponses {
-		t.Logf("#1688: control_response[%d] redacted: %s", i, resp)
+		t.Logf("#1763[%s]: control_response[%d] redacted: %s", arm.id, i, resp)
 	}
-	t.Logf("#1688: fixture written: %s", path)
+	t.Logf("#1763[%s]: fixture written: %s", arm.id, path)
 
-	return record
+	return record, path
 }
 
 // --- the tests ----------------------------------------------------------------
 
-// TestRealClaude_InitializeControl_Capture drives one live child through the
-// arrangement #1595 measured — spawn, one probe turn to completion, one
-// control_request with subtype "initialize" on the held-open stdin — and commits
-// what comes back.
+// TestRealClaude_InitializeControl_SendPointArms drives ONE LIVE CHILD PER ROW of
+// initControlArms through the identical two-turn sequence — the control request
+// written before the first user turn, written after a completed turn, and not
+// written at all — and commits one artifact per arm.
 //
-// A response carrying subtype:"error" is a REFUSAL AND A PASSING OUTCOME: its
-// error text is what #1689 designs the accepted shape against. A reviewer
-// reading control_response_subtype == "error" in a green run is reading the
-// measurement, not a bug. The run fails only where there is no artifact to
-// commit, which is the single assertion below.
-func TestRealClaude_InitializeControl_Capture(t *testing.T) {
+// It PASSES ON EVERY RECORDED OUTCOME. A response carrying subtype:"error" is a
+// refusal and its error text is what #1689 designs the accepted shape against; an
+// arm that goes UNANSWERED is the measurement this run exists to take, since
+// whether a pre-turn `initialize` is answered at all is precisely the unknown. A
+// tripped deadline is likewise recorded rather than fatal: since #1763 raised
+// initControlChildBudget past every arm's per-step wait sum, a trip can only mean a
+// genuinely stalling claude, which is itself a measurement. The run fails only on a
+// broken instrument or a fail-closed refusal.
+//
+// It REPLACES #1688's one-arm TestRealClaude_InitializeControl_Capture, and the
+// deletion is a correctness requirement rather than an economy: since #1722
+// writeInitControlFixture mints its path from
+// initControlArmFixtureName(rec.ClaudeVersion, rec.Arm), so that test and this
+// run's after_completed_turn arm write the SAME filename — two live children racing
+// for one path, last writer wins, nothing red anywhere.
+//
+// NO CROSS-ARM VERDICT IS COMPUTED HERE. Subtracting the control arm's window from
+// the two measurement arms' is #1764's, and a verdict computed in two places is a
+// second source of truth.
+func TestRealClaude_InitializeControl_SendPointArms(t *testing.T) {
 	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
 	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
 
 	workdir := filepath.Join(home, initControlWorkdirName)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
-		t.Fatalf("#1688: create workdir: %v", err)
+		t.Fatalf("#1763: create workdir: %v", err)
 	}
 
 	versionRaw, versionToken := captureClaudeVersion(t)
-	t.Logf("#1688: claude version %q (token %q)", versionRaw, versionToken)
-
-	// #1733's table, built HERE and only here. realHome and os.TempDir() are
-	// legitimate at this site and nowhere else in the family: this file execs and
-	// correctly carries no finOfflineExecBans entry, while the file the
-	// construction lives in bans both by name — and a file that named either could
-	// not honestly carry that ban entry.
-	//
-	// Do NOT re-trim os.TempDir()'s trailing slash: #1732 moved that trim inside
-	// the construction, where it is the one permitted normalisation. realHome may
-	// be empty when HOME was unset at launch; add drops an empty-valued rule, so
-	// this site needs no guard of its own.
-	red := newInitControlRedactor(realHome, home, workdir, os.TempDir())
+	t.Logf("#1763: claude version %q (token %q)", versionRaw, versionToken)
 
 	// #1747's net, built HERE for the redactor's reason: one construction site is one
 	// place to get the parameter order right, and this is where `home` — which plays
@@ -774,69 +917,168 @@ func TestRealClaude_InitializeControl_Capture(t *testing.T) {
 	// happened. initControlScanApplied is what keeps the empty class PRESENT in the
 	// record as armed-nothing instead of missing from it.
 	//
+	// ONE SCANNER, SHARED ACROSS THE THREE ARMS, and built OUTSIDE the loop. That is
+	// safe for the reason runInitControlChild's doc gives — a scanner is append-only
+	// during construction and read-only afterwards — and it is deliberately NOT the
+	// rule the redactor below follows. Do not read either one as licence for the
+	// other.
+	//
 	// The value carries the two credentials os.Getenv returned. Never %v it — see
 	// runInitControlChild's doc.
 	scanner := newDropcapScanner(home, "", workdir)
 
-	// No t.Parallel and no subtests: one child, one reader goroutine, one pinned
-	// $HOME. The fixture is on disk before this returns, so the assertion below
-	// runs against an artifact a human can already read.
-	rec := runInitControlChild(t, claudeBin, workdir, red, scanner, versionRaw, versionToken)
+	// Sequential t.Run, no t.Parallel at any level: one child, one reader goroutine
+	// and one pinned $HOME at a time, exactly as runSetModeChild's four arms already
+	// share theirs. Each arm's fixture is on disk before its subtest returns, so the
+	// write-set check below runs against artifacts a human can already read.
+	paths := make(map[string]string, len(initControlArms))
+	for _, arm := range initControlArms {
+		t.Run(arm.id, func(t *testing.T) {
+			// #1733's table, built HERE — INSIDE the loop, FRESH PER ARM, and that is
+			// mandatory rather than tidy: dropcapRedactor's counters are unlocked and
+			// its census accumulates across every call, so one shared across three
+			// arms would both race under -race and commit one arm's substitution
+			// counts into another arm's artifact. A census that misreports which
+			// classes fired is an audit trail that lies.
+			//
+			// realHome and os.TempDir() are legitimate at this site and nowhere else
+			// in the family: this file execs and correctly carries no
+			// finOfflineExecBans entry, while the file the construction lives in bans
+			// both by name — and a file that named either could not honestly carry
+			// that ban entry.
+			//
+			// Do NOT re-trim os.TempDir()'s trailing slash: #1732 moved that trim
+			// inside the construction, where it is the one permitted normalisation.
+			// realHome may be empty when HOME was unset at launch; add drops an
+			// empty-valued rule, so this site needs no guard of its own.
+			red := newInitControlRedactor(realHome, home, workdir, os.TempDir())
 
-	if len(rec.ControlResponses) == 0 {
-		t.Fatalf("#1688: no control_response arrived within %s, so the round trip this ticket "+
-			"exists to record did not happen and there is no shape for #1689/#1690/#1692 to "+
-			"decode against. The written fixture holds %d stdout line(s) and is the evidence "+
-			"for why; do NOT commit it", initControlControlBudget, len(rec.StdoutEvents))
+			record, path := runInitControlChild(t, claudeBin, workdir, arm, red, scanner,
+				versionRaw, versionToken)
+			paths[arm.id] = path
+
+			// One per-arm summary line at the top level; the driver already logs the
+			// rest. It names the arm's two behaviour columns so a reader can check the
+			// artifact against the sequence that produced it without reading the
+			// table. Nothing here is child output, and nothing here formats the
+			// scanner.
+			t.Logf("#1763[%s]: send point after first turn=%v, request written=%v, "+
+				"within_wait=%v, send_point_index=%d",
+				arm.id, arm.sendPointAfterFirstTurn, arm.sendsRequest,
+				record.ControlResponseWithinWait, record.SendPointIndex)
+		})
+	}
+
+	// AC 5's write-set check, over the paths the run ACTUALLY wrote.
+	//
+	// A partial run cannot answer a set claim, so it reports UNAVAILABLE instead of
+	// asserting one: a -run filter or an instrument fatal in one subtest leaves that
+	// arm with no path, and a filtered run is not "one suite run".
+	// TestRealClaude_SetPermissionMode_InBandProbe's `missing` guard is the
+	// precedent, and computing a set claim from a partial run is how a green run
+	// comes to mean nothing.
+	var missing []string
+	for _, arm := range initControlArms {
+		if paths[arm.id] == "" {
+			missing = append(missing, arm.id)
+		}
+	}
+	if len(missing) > 0 {
+		t.Logf("#1763: write-set check UNAVAILABLE — arm(s) %v produced no written path (a -run "+
+			"filter, or an instrument fatal in a subtest above). Not computing a set claim "+
+			"from a partial run", missing)
+		return
+	}
+
+	// The claim is the three checks together: the guard above says every declared arm
+	// produced a path, the equality says each path is the one the namer mints for
+	// THAT arm, and the distinctness says no two arms landed on one file. That is
+	// exactly len(initControlArms) files, one per arm, and no other.
+	wantDir := filepath.Join(packageDir(t), "testdata")
+	seen := make(map[string]string, len(initControlArms))
+	for _, arm := range initControlArms {
+		got := paths[arm.id]
+		want := filepath.Join(wantDir, initControlArmFixtureName(versionToken, arm.id))
+		if got != want {
+			t.Errorf("#1763: arm %q wrote %q, want %q; the fixture set is addressed by exact "+
+				"name — no glob in this package matches the initialize_control_v family — so a "+
+				"path the namer did not mint is durable evidence nothing will ever look at",
+				arm.id, got, want)
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("#1763: arms %q and %q both wrote %q; one live child wrote straight over "+
+				"the other's capture, last writer wins, and the run reports three arms measured "+
+				"with two fixtures on disk", prev, arm.id, got)
+		}
+		seen[got] = arm.id
 	}
 }
 
-// TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm is #1722's AC 4: the
-// arm runInitControlChild records is non-empty and is one initControlArms
-// declares, decided WITHOUT spawning a child.
+// TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum is #1763's AC 3: the
+// outer child deadline strictly exceeds the largest total any declared arm's drive
+// sequence can spend in per-step waits.
 //
-// The live capture is the only thing that fills the record's `arm` field, so
-// without this the first evidence of an unset or mistyped arm is a fixture at the
-// end of a run that spent tokens. This test spawns nothing, reads nothing off
-// disk, and passes on a machine with no claude and no credentials —
-// TestInitControlSummarize_ReadsAllThreePlacements is the precedent for an offline
-// test living in this exec-ing file.
+// BOTH SIDES ARE DERIVED FROM THE BUDGET CONSTANTS, never from literal durations.
+// That is what keeps it true when a per-step budget moves — and it has to, because
+// the set_permission_mode family carries the identical arithmetic unfixed (a 240s
+// outer against a 285s sum) and a literal bound here would say nothing when this
+// family's own budgets are next retuned.
 //
-// IT DELIBERATELY DOES NOT ASSERT THE LITERAL "after_completed_turn". That is a
-// second spelling of an identifier the table already declares, and it is exactly
-// what the probed column exists to avoid. Which arm is probed is fixed by the
-// marked row and by this file's header; a test restating it would pin the copy.
-func TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm(t *testing.T) {
+// It spawns nothing, reads nothing off disk and passes on a machine with no claude
+// and no credentials. TestInitControlSummarize_ReadsAllThreePlacements is the
+// precedent for an offline test living in this exec-ing file.
+func TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum(t *testing.T) {
 	t.Parallel()
 
-	got := initControlProbedArm()
-
-	// SOLE red for both degenerate tables, which initControlProbedArm collapses to
-	// one value on purpose: no row marked probed, and two or more marked. The
-	// message names both because the selector cannot tell a reader which it was.
-	if got == "" {
-		t.Fatalf("#1722: initControlProbedArm returns the empty string, so runInitControlChild " +
-			"records an empty arm and the capture cannot say which measurement produced it. " +
-			"Either NO row of initControlArms carries probed, or MORE THAN ONE does — the " +
-			"selector collapses both, and this is the assertion for both")
-	}
-
-	// SOLE red for a selector returning a string the table does not declare: a
-	// hardcoded fallback, a typo'd literal, a mangled return. Ranged rather than
-	// indexed, so it stays true when a fourth arm arrives.
+	var (
+		worst    time.Duration
+		worstArm string
+	)
 	for _, arm := range initControlArms {
-		if arm.id == got {
-			return
+		if sum := initControlArmWaitSum(arm); sum > worst {
+			worst, worstArm = sum, arm.id
 		}
 	}
-	ids := make([]string, 0, len(initControlArms))
-	for _, arm := range initControlArms {
-		ids = append(ids, arm.id)
+
+	// The subject.
+	if initControlChildBudget <= worst {
+		t.Errorf("#1763: initControlChildBudget is %s while arm %q's per-step waits can spend "+
+			"%s, so the outer deadline can fire before the waits it contains have expired. "+
+			"Every per-step budget exists so that an ABSENCE means absence rather than "+
+			"impatience — initControlControlBudget's own doc says so — and a deadline that "+
+			"trips first voids that guarantee for exactly the reading this family takes: "+
+			"whether a send point goes unanswered. Nothing else reddens when it happens, "+
+			"because context_deadline_tripped is a PASSING recorded outcome on purpose",
+			initControlChildBudget, worstArm, worst)
 	}
-	t.Errorf("#1722: initControlProbedArm returns %q, which initControlArms does not declare "+
-		"(it declares %q); the arm a live capture records must come from that table rather "+
-		"than from a literal, or a mistyped arm reaches the fixture's `arm` field and its "+
-		"filename with nothing red until somebody reads the artifact", got, ids)
+
+	// Vacuity control A, and the sole red for a helper that returns zero, counts one
+	// turn, or drops the control term — each of which makes the subject above pass
+	// for the wrong reason.
+	if want := 2*initControlTurnBudget + initControlControlBudget; worst != want {
+		t.Errorf("#1763: the largest per-step wait sum over initControlArms is %s, want %s — "+
+			"two turn waits plus the control wait, which is what a writing arm's drive "+
+			"sequence spends. A sum smaller than the run's real waits makes the subject check "+
+			"above pass against a deadline that still cannot dominate them", worst, want)
+	}
+
+	// Vacuity control B, and the sole red both for a helper that ignores sendsRequest
+	// and for a table that has lost its control arm — the arm whose window #1764
+	// subtracts, and the one whose sequence still drives two full turns.
+	control := 2 * initControlTurnBudget
+	found := false
+	for _, arm := range initControlArms {
+		if initControlArmWaitSum(arm) == control {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("#1763: no declared arm sums to %s — two turn waits and no control wait. Either "+
+			"initControlArmWaitSum ignores sendsRequest and charges every arm the control "+
+			"budget, or initControlArms no longer declares a no-request control arm at all; "+
+			"without one there is nothing for a cross-arm comparison to subtract", control)
+	}
 }
 
 // TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath is #1747's
@@ -850,8 +1092,10 @@ func TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm(t *testing.T) {
 // os.LookupEnv BY AST NAME IN THAT FILE, so a test calling newDropcapScanner from
 // one of them would leave the ban green while reading the environment one hop away
 // — the "different fabric" caveat those entries already state. Green-but-dishonest
-// is not where this belongs. TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm
-// is the precedent for an offline test living here.
+// is not where this belongs. TestInitControlSummarize_ReadsAllThreePlacements and
+// TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum are the precedents for
+// an offline test living here; the cite this replaced named
+// TestInitControlProbedArm_..., which #1763 deleted with the `probed` column.
 //
 // The scanner is built over the family's existing synthetic path constants rather
 // than fresh literals. Both are comfortably longer than dropcapMinNeedle, and
