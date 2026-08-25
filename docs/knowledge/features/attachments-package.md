@@ -1,7 +1,7 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777, #1787), six slices of the family
-split from #1741/#1766: holds one inbound attachment upload's chunks in
+Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781), seven slices of the
+family split from #1741/#1766: holds one inbound attachment upload's chunks in
 memory, addressed by index, refuses a stream whose framing contradicts what
 the transfer declared at admission (#1769), and — once the transfer is
 complete — checks the assembled bytes against the transfer's declared length
@@ -9,8 +9,12 @@ and lowercase-hex sha256 before yielding a single byte (#1770). Bounds the
 retained bytes of one upload to a receiver-configured, unpublished ceiling,
 refusing at either the declared size or the accumulated total (#1777, see
 § "Per-upload byte bound" below), and holds the uploads currently in flight in
-a conn-keyed `Registry` (#1787, see § "In-flight upload registry" below). In-memory
-only — no disk, no wire codes, no logger. `Accumulator` itself still carries no
+a conn-keyed `Registry` (#1787, see § "In-flight upload registry" below).
+Accumulation and admission stay in-memory — no disk, no wire codes, no
+logger — but the package is no longer in-memory-only end to end: `EnsureDir`
+(#1781, see § "Directory resolution and creation" below) resolves and creates
+the on-host directory one attachment is filed under, the sole function in the
+package that touches a filesystem. `Accumulator` itself still carries no
 lock; synchronisation lives in `Registry` alone.
 
 `SanitizeFilename` (#1772, `filename.go`) is unrelated in shape but shares the
@@ -19,9 +23,10 @@ package: a pure, stateless function turning a client-supplied
 never called on `AttachmentID`, whose contract is a canonical-shape check that
 *rejects* rather than this treatment. **The returned component is not
 unique** — `a/b` and `a_b` both answer `a_b`, every unusable name answers the
-fixed fallback, and APFS folds case — so #1773 must key stored files by
-`attachment_id`, not by this component, and #1773's path-construction code
-should be the only caller that reads `Filename` at all. Sanitising also does
+fixed fallback, and APFS folds case — so #1782 must key stored files by
+`attachment_id`, not by this component (`EnsureDir`, #1781, already keys the
+directory that way), and #1782's file-write code should be the only caller
+that reads `Filename` at all. Sanitising also does
 not make a name loggable: it removes the log-injection shape but not the
 independent privacy reason § Attachments already bans logging a filename for.
 
@@ -186,6 +191,60 @@ lands last in the family.
   (`CheckDeclaration` + `CheckDeclaredSize`, run before construction) as the
   only way in; exporting it now would ship a bypass #1788 would have to
   un-ship.
+
+## Directory resolution and creation (#1781)
+
+`EnsureDir` (`storage.go`) resolves and creates the on-host directory one
+attachment of one conversation is filed under —
+`conversations/<conversation-id>/attachments/<attachment-id>` beneath the
+daemon instance directory, every level `0o700` — and returns its
+`EvalSymlinks`-resolved path. Writing bytes into it is #1782's; dispatching to
+it and mapping refusals to wire codes is #1744's. It carries two sentinels of
+its own, `ErrInvalidID` and `ErrNotContained`, structurally unlike the seven
+below: `EnsureDir` has no accumulator state to latch or discard, so the
+discard-semantics table doesn't apply to it.
+
+Both ids are validated against `conversations.ValidID` before any filesystem
+call — `attachment_id` is client-chosen and its 64-byte wire ceiling is
+explicitly not a defence, so containment comes entirely from the resolution
+check, never from the id being hard to guess. The check itself is
+`candidate == want` (full-path equality against a destination built textually
+beneath the `EvalSymlinks`-resolved instance directory), not a
+`filepath.Rel`-style "is it under the root" test — equality is what refuses a
+conversation directory symlinked to a *sibling* conversation, which a
+containment-only test would pass.
+
+- **A precedent's ordering rationale doesn't transfer unchanged when a caller
+  strengthens the comparison it protects — measured, not assumed.**
+  `confineWorkdirToHomeCreating` (`cmd/pyry/main.go`) is this design's
+  precedent, and its ancestor walk probes with `os.Lstat` rather than
+  `os.Stat` so a symlink is resolved instead of stepped over. `EnsureDir`
+  copied that probe, but re-measuring it under the *stronger* comparison this
+  design uses (equality, not the precedent's `filepath.Rel` containment test)
+  found the swap reddens **nothing** in the suite: the two probes diverge only
+  for a *dangling* link, and on one, `Stat` steps over it so the pre-creation
+  check passes vacuously, but `MkdirAll` then fails `EEXIST` on the symlink
+  name — landing in the same wrapped-OS-error class the `Lstat` build reaches
+  by failing to resolve it. `Lstat` was kept anyway (refusal should come from
+  the resolution step rather than incidentally from directory creation, and
+  the precedent's weaker containment test genuinely does depend on the probe),
+  with the code comment rewritten to state the measured fact rather than the
+  inherited one. Anyone copying a piece of `confineWorkdirToHomeCreating` into
+  a design that changes the comparison it was written for should re-measure
+  that piece, not inherit its justification.
+- **A spec's own fixture rule can make its own predicted sole-red row
+  unsatisfiable.** The `os.Stat` mutant above was predicted (in the
+  architect's mutant table) to redden the escaping- and sibling-conversation
+  symlink tests. Both of those fixtures are required to use targets that
+  *exist* — `EvalSymlinks` on a dangling link errors, so a dangling-target
+  fixture would assert the wrong sentinel for a right-looking reason — which
+  is exactly the fixture the `Stat`/`Lstat` divergence needs to be visible at
+  all. No test satisfying those two criteria can ever be the mutant's sole
+  red. When a mutant table names a row its own fixture constraints forbid,
+  treat the row as unsatisfiable rather than an unwritten test to chase; a
+  dangling-symlink case still deserves its own test (`EnsureDir` returns a
+  wrapped OS error and neither sentinel for one — broken host state is not a
+  containment breach), just not as that mutant's proof.
 
 ## Sentinels and discard semantics
 
@@ -415,7 +474,7 @@ client) supplies both the bytes and the declared digest, so a match proves
 the transfer wasn't corrupted in transit and proves nothing about whether the
 content is safe. `protocol.AttachmentChunkPayload`'s doc block states this
 directly; it matters here because the consumers of a successful `Assemble`
-— #1772's filename sanitiser, #1773's storage, #1746's retrieval — are the
+— #1772's filename sanitiser, #1781/#1782's storage, #1746's retrieval — are the
 ones who'd otherwise read a green `Assemble` as a safety verdict rather than
 a corruption check.
 
@@ -439,9 +498,12 @@ hash, fetch the blob"), which is a requirement from
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch
   (not #1742's reaper) that frees those held bytes.
-- **#1773** — storage, and resolving `attachment_id` to a path. (#1743 split
-  into #1772/#1773 while this family waited; #1772 — filename sanitisation —
-  landed, see `SanitizeFilename` above.)
+- **#1773** — split into #1781 and #1782 while this family waited. Resolving
+  and creating the attachment directory landed as `EnsureDir` (#1781, see
+  § "Directory resolution and creation" above); writing bytes into it is
+  still blocked, at #1782. (#1743 split into #1772/#1773 earlier in the same
+  wait; #1772 — filename sanitisation — landed, see `SanitizeFilename`
+  above.)
 - **#1744** — wires the dispatch site: maps the three framing sentinels to
   `CodeAttachmentInvalidChunk` and the two integrity sentinels to
   `CodeAttachmentIntegrityFailed`, both via `errors.Is`, and is the first
