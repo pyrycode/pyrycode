@@ -1,12 +1,24 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770), two slices of the family split from #1741/#1766:
-holds one inbound attachment upload's chunks in memory, addressed by index,
-refuses a stream whose framing contradicts what the transfer declared at
-admission (#1769), and — once the transfer is complete — checks the
-assembled bytes against the transfer's declared length and lowercase-hex
+Package (#1769, #1770, #1772), three slices of the family split from
+#1741/#1766: holds one inbound attachment upload's chunks in memory, addressed
+by index, refuses a stream whose framing contradicts what the transfer
+declared at admission (#1769), and — once the transfer is complete — checks
+the assembled bytes against the transfer's declared length and lowercase-hex
 sha256 before yielding a single byte (#1770). In-memory only — no disk, no
 wire codes, no logger, no lock.
+
+`SanitizeFilename` (#1772, `filename.go`) is unrelated in shape but shares the
+package: a pure, stateless function turning a client-supplied
+`AttachmentChunkPayload.Filename` into one safe host-side path component —
+never called on `AttachmentID`, whose contract is a canonical-shape check that
+*rejects* rather than this treatment. **The returned component is not
+unique** — `a/b` and `a_b` both answer `a_b`, every unusable name answers the
+fixed fallback, and APFS folds case — so #1773 must key stored files by
+`attachment_id`, not by this component, and #1773's path-construction code
+should be the only caller that reads `Filename` at all. Sanitising also does
+not make a name loggable: it removes the log-injection shape but not the
+independent privacy reason § Attachments already bans logging a filename for.
 
 - Wire contract: [`protocol-package.md`](protocol-package.md) § "v2 attachment-chunk vocabulary" (`AttachmentChunkPayload`, `MaxAttachmentChunkBytes`).
 - Design reference this package deliberately diverges from: [`v2-session-manager.md`](v2-session-manager.md) § "Debug-bundle streaming" — `ReassembleBundle`.
@@ -103,7 +115,7 @@ attacker-supplied, JSON-decoded string in this codebase — say "bytes" or use
 `nil` `Data` and an empty non-nil slice are legitimate "received" values). The
 zero-byte-attachment criterion exists specifically to catch this class of bug.
 
-## Mutation-testing lessons (measured across #1769 and #1770)
+## Mutation-testing lessons (measured across #1769, #1770, and #1772)
 
 This package's sole-redness claims are measured with `go test -overlay`
 (mutants applied via an absolute-path JSON manifest, no worktree write), not
@@ -140,7 +152,46 @@ surfaced:
   hex.EncodeToString(sum[:])` with the comparison itself removed), and grep
   the overlay run's output for `"build failed"` before trusting any verdict —
   a passing `go test` on a broken build looks identical to a passing one on
-  working code from the exit code alone.
+  working code from the exit code alone. The same trap has a second shape,
+  found in #1772: a mutant that removes the sole **read** of a local variable
+  (not just an import) breaks the build the same way — replacing an
+  input-derived `if !kept` with a result-derived check left `kept` assigned
+  and unread. Go's unused-variable rule makes a local at least as likely a
+  casualty as an import, so grep the overlay run's output for both
+  `"build failed"` and `"declared and not used"` before trusting a verdict,
+  and give a mutant that deletes a read somewhere to keep it alive (`_ =
+  kept`) so the measurement is honest.
+- **A subtest name built from raw attacker-shaped input can contain a NUL,
+  and that turns `go test -v | grep` output into "binary" data** (#1772,
+  `t.Run(tt.in, …)` fed a row whose input was `"a\x00b"`). `grep` without
+  `-a` collapses the per-row red-line output to a single `Binary file
+  (standard input) matches`, which reads as "one red row" rather than as a
+  tooling failure — silently weakening every sole-redness measurement taken
+  against that suite. The naming convention itself (subtest name = raw input)
+  is worth keeping, since it's what makes the classic `report.txt\x00.exe`
+  row legible in test output at all; the fix is `grep -a`, not a different
+  naming scheme.
+- **The mutant that only reddens a helper's own direct test, and nothing
+  reached through the public surface, is the one that justifies the direct
+  test's existence rather than merely adding to its coverage** (#1772: a
+  plain `s[:maxBytes]` in place of `truncateToBytes`'s rune-safe loop
+  reddened `TestTruncateToBytes` alone — nothing in `SanitizeFilename`'s own
+  table went red). When an earlier pipeline step structurally constrains a
+  later one (here: the allowlist step leaves the string pure ASCII before
+  truncation ever runs), no fixture driven through the public function can
+  falsify the later step's more careful implementation — only a test calling
+  the unexported helper directly can. Treat that as a signal to add the
+  direct test, not as a reason to skip it as redundant.
+- **An unbounded caller-supplied parameter can still be a fine tradeoff
+  purely because nothing can reach it** — flagged, not fixed, in #1772's code
+  review: `truncateToBytes` with a negative `maxBytes` doesn't panic or
+  return early, it spins forever (`utf8.DecodeLastRuneInString("")` returns
+  `size == 0`, so the shrink-by-`size` loop stops shrinking while its `len(s)
+  > maxBytes` guard stays true). Left as an informational NIT because the
+  helper is unexported with one caller passing a positive constant — but the
+  failure mode if that ever changes is a hang, not a crash, which is the
+  detail worth carrying forward to whoever next gives this helper a
+  caller-supplied bound.
 - **A "returns a fresh copy" test must mutate its own copy of the fixture,
   not the shared package-level one.** `TestAccumulator_SingleChunk_ReturnsAFreshCopy`
   has to feed the accumulator a copy of `testFixture`, then mutate the
@@ -189,9 +240,9 @@ hash, fetch the blob"), which is a requirement from
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch
   (not #1742's reaper) that frees those held bytes.
-- **#1772** — filename sanitisation.
 - **#1773** — storage, and resolving `attachment_id` to a path. (#1743 split
-  into #1772/#1773 while this family waited.)
+  into #1772/#1773 while this family waited; #1772 — filename sanitisation —
+  landed, see `SanitizeFilename` above.)
 - **#1744** — wires the dispatch site: maps the three framing sentinels to
   `CodeAttachmentInvalidChunk` and the two integrity sentinels to
   `CodeAttachmentIntegrityFailed`, both via `errors.Is`, and is the first
