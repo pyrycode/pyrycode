@@ -42,6 +42,119 @@ var ErrInvalidID = errors.New("attachments: identifier is not of canonical shape
 // enforces that. This package emits no wire code and makes no log call.
 var ErrNotContained = errors.New("attachments: attachment directory resolves outside the destination it was built for")
 
+// ErrWriteFailed reports that an attachment's verified bytes could not be
+// written into the directory they were destined for. Every refusal wraps it
+// alongside the underlying filesystem error, so errors.Is reaches this sentinel
+// for #1744's wire mapping and the fs error for the operator.
+//
+// It is deliberately NOT named ErrStorageFailed. All three of this file's
+// sentinels map to attachment.storage_failed at #1744, so a Go name matching the
+// wire code would falsely suggest this one is THE storage-failure sentinel. It
+// names what failed — the write — not the code it becomes.
+//
+// Like ErrInvalidID and ErrNotContained, and unlike the six latching sentinels
+// in accumulator.go, it carries no discard semantics: there is no accumulator
+// state here to latch or drop.
+var ErrWriteFailed = errors.New("attachments: attachment file could not be written")
+
+// Store writes verified attachment bytes into dir under a name derived from the
+// client-supplied filename, atomically, and returns the path it wrote. The
+// bytes are expected to have already matched their declared size and digest —
+// that comparison is Accumulator.Assemble's and is not repeated here.
+//
+// PRECONDITION: dir must be a path EnsureDir returned. Store TRUSTS it and
+// resolves nothing — every containment guarantee already happened above
+// EnsureDir, and re-deriving the path here would fork the check EnsureDir exists
+// to own. It would also break the same-filename property below, since the
+// per-attachment-id component of that directory is the entire reason two
+// attachments in one conversation can carry one client filename.
+//
+// The returned path is dir joined with SanitizeFilename's single-component form
+// of filename — which is NOT unique across conversations or attachments, since
+// distinct client names collide and every unusable name answers one fallback.
+// It is safe as a leaf beneath dir precisely because dir is keyed by attachment
+// id; nothing may name a stored file by that component alone.
+//
+// Idempotent: a second call with the same dir and filename overwrites with no
+// error, so a phone that drops mid-upload and re-sends is not a storage failure.
+// There is deliberately no O_EXCL and no existence pre-check — either would turn
+// an ordinary reconnect into attachment.storage_failed at #1744, which the wire
+// contract marks retryable and which the client would then hot-loop against.
+//
+// Safe for concurrent use on distinct dir values, which is the only way #1744
+// can reach it. Two concurrent calls sharing a dir and a filename are
+// last-writer-wins, atomically: each writes its own uniquely named temp file and
+// the renames serialise in the kernel, so a reader sees one complete file or the
+// other, never a mixture.
+//
+// On any failure it returns ("", err) and leaves no temporary file behind.
+//
+// LOGGING OBLIGATION on the consumer. The error text names dir, never the
+// sanitised filename — except on the rename path, where os.Rename returns an
+// *os.LinkError whose Error() prints its destination and therefore the sanitised
+// component. docs/protocol-mobile.md § Attachments bans logging a filename for a
+// privacy reason that sanitising does not lift, so #1744 must map this to
+// attachment.storage_failed's STATIC wire message and, if it logs, log the
+// sentinel and the ids rather than the error text. This is ErrNotContained's
+// "safe only because they never reach the wire" note plus that one clause.
+func Store(dir, filename string, data []byte) (string, error) {
+	name := SanitizeFilename(filename)
+	path := filepath.Join(dir, name)
+
+	// keys.writeStaticKey's recipe, step for step; conversations and devices
+	// hand-roll the same one. Copied rather than extracted: ten packages carry
+	// it today and none imports another's, so factoring it out is a
+	// cross-package refactor this slice is not.
+	//
+	// The temp file goes in dir ITSELF, which is what makes the rename below
+	// intra-filesystem and therefore atomic. Its dot-prefixed pattern cannot
+	// collide with a stored attachment: SanitizeFilename never returns a
+	// component beginning with '.', so ".attachment-*.tmp" is unreachable as an
+	// attachment's name — which is what makes "the directory holds exactly this
+	// one file" a clean assertion rather than a fragile one.
+	//
+	// The format string names dir and NOTHING else on every path below. path and
+	// name embed the sanitised client filename, and sanitising removes the
+	// log-injection half of the hazard but not the independent privacy reason
+	// docs/protocol-mobile.md § Attachments bans logging a filename for. dir is
+	// built entirely from two canonical-shape-checked ids and carries no client
+	// text. Same discipline ErrDigestMismatch follows carrying the COMPUTED
+	// digest and never the declared one.
+	f, err := os.CreateTemp(dir, ".attachment-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("%w: create temp in %q: %w", ErrWriteFailed, dir, err)
+	}
+	tmp := f.Name()
+	// What makes "no temporary file is left behind" hold on every failure path.
+	// After a successful rename it fails ENOENT and that error is deliberately
+	// discarded.
+	defer func() { _ = os.Remove(tmp) }()
+
+	// Belt-and-suspenders, and measured as such: os.CreateTemp already opens at
+	// 0600 and umask can only clear bits, so dropping this line reddens nothing.
+	// It stays because it is the house recipe and because it makes the mode
+	// explicit rather than inherited from a default invisible at the call site.
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("%w: chmod temp in %q: %w", ErrWriteFailed, dir, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("%w: write temp in %q: %w", ErrWriteFailed, dir, err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("%w: fsync temp in %q: %w", ErrWriteFailed, dir, err)
+	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("%w: close temp in %q: %w", ErrWriteFailed, dir, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return "", fmt.Errorf("%w: rename into %q: %w", ErrWriteFailed, dir, err)
+	}
+	return path, nil
+}
+
 // EnsureDir resolves and creates the directory one attachment of one
 // conversation is filed under, returning its symlink-resolved absolute path.
 // Writing bytes into it is #1782's; dispatching to it and mapping the two
