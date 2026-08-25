@@ -95,8 +95,8 @@ var (
 // it arrive on relay's appFrameWorker, exactly one goroutine per session with
 // strict FIFO ordering and no two handlers for one conn running concurrently.
 // That is a CALLER OBLIGATION rather than a happy accident. Synchronising the
-// registry of in-flight uploads belongs to the slices that build it (#1778,
-// #1744) and to the release path (#1742), never to this type.
+// registry of in-flight uploads belongs to Registry, which holds its own mutex
+// across each whole operation, the release path included — never to this type.
 type Accumulator struct {
 	// totalChunks is the transfer's declared chunk count. Latched at
 	// construction from the admission decision rather than learned from the

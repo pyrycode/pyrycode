@@ -1,15 +1,17 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777), five slices of the family split
-from #1741/#1766: holds one inbound attachment upload's chunks in memory,
-addressed by index, refuses a stream whose framing contradicts what the
-transfer declared at admission (#1769), and — once the transfer is complete —
-checks the assembled bytes against the transfer's declared length and
-lowercase-hex sha256 before yielding a single byte (#1770). Bounds the
+Package (#1769, #1770, #1772, #1776, #1777, #1787), six slices of the family
+split from #1741/#1766: holds one inbound attachment upload's chunks in
+memory, addressed by index, refuses a stream whose framing contradicts what
+the transfer declared at admission (#1769), and — once the transfer is
+complete — checks the assembled bytes against the transfer's declared length
+and lowercase-hex sha256 before yielding a single byte (#1770). Bounds the
 retained bytes of one upload to a receiver-configured, unpublished ceiling,
 refusing at either the declared size or the accumulated total (#1777, see
-§ "Per-upload byte bound" below). In-memory only — no disk, no wire codes, no
-logger, no lock.
+§ "Per-upload byte bound" below), and holds the uploads currently in flight in
+a conn-keyed `Registry` (#1787, see § "In-flight upload registry" below). In-memory
+only — no disk, no wire codes, no logger. `Accumulator` itself still carries no
+lock; synchronisation lives in `Registry` alone.
 
 `SanitizeFilename` (#1772, `filename.go`) is unrelated in shape but shares the
 package: a pure, stateless function turning a client-supplied
@@ -135,15 +137,55 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
   same moment. The correct worst-case peak is `N` bounds retained plus up to
   `N` more in flight — 128 MiB at a concurrency of 4, not 80 MiB. The
   *resident* (non-peak) figure the constant's doc states — `bound ×
-  concurrency` — is correct and is what #1778 should inherit as its budget;
+  concurrency` — is correct and is what #1786 should inherit as its budget;
   it is only the peak-during-assembly refinement layered on top that
-  undercounts. **#1778: budget peak as `2N × bound`, not the `(N+1) × bound`
+  undercounts. **#1786: budget peak as `2N × bound`, not the `(N+1) × bound`
   the code comment currently states** — this was a code-review SHOULD FIX
   landed as text-only (no enforcement is wrong, only the doc's peak
   refinement), so the comment itself was not corrected.
 
-Blocked, still: the in-flight-upload count and the registry (#1778) — this
-package bounds one upload's bytes, not how many uploads may exist at once.
+Blocked, still: the in-flight-upload count cap (#1786) — this package bounds
+one upload's bytes, not how many uploads may exist at once. The registry that
+holds one accumulator per in-flight upload has since landed; see § "In-flight
+upload registry" below.
+
+## In-flight upload registry (#1787)
+
+`Registry` (`registry.go`) gives `Accumulator` somewhere to live between
+chunks: a map from `uploadKey{connID, attachmentID}` to the `*Accumulator` in
+flight for that pair, an unexported never-replacing `insert`, comma-ok
+`Lookup`, `Release`, and an unexported `count`. Still unreachable from
+production — nothing calls it until #1744 wires the dispatch site, and #1744
+lands last in the family.
+
+- **Keyed by conn-and-attachment_id, not the bare id this doc used to sketch.**
+  `docs/protocol-mobile.md` § Attachments documents `attachment_id` as "not a
+  capability" — not secret, not unguessable. Keyed alone, a phone that drops
+  mid-upload and reconnects re-sends the same id while its old session may not
+  have torn down, colliding two conns onto one `*Accumulator`, which carries no
+  mutex by design: a data race and a path for one conn's bytes into another's
+  file. A concatenated string key (`connID+attachmentID`) reintroduces the same
+  collision (`"ab"+"c"` and `"a"+"bc"` are one key); only a struct key forecloses
+  it structurally.
+- **One `sync.Mutex`, taken once per operation and held for the whole body —
+  never once to read, again to write.** That is what lets the same-pair
+  concurrent-insert case tell exactly one caller it got a fresh insert, and it's
+  the shape #1786's count-then-admit gate needs: a registry that locks its read
+  and its write separately passes `-race` and every other criterion here, but
+  can't support the indivisible look-up-then-count-then-insert #1786 requires.
+  `insert`'s never-replace behaviour is a security property, not hygiene — it
+  stops a second first-chunk for a live pair from swapping the declared
+  `size`/`sha256` out from under the bytes already accumulated.
+- **Off-lock feeding is sound only because the conn is in the key.** The
+  registry hands the `*Accumulator` back and the caller feeds it with the lock
+  released; that's safe because `V2SessionManager.appFrameWorker` serialises
+  every frame for one conn, so exactly one goroutine can ever reach one
+  accumulator. #1784 (routing a later chunk into an admitted upload) inherits
+  this posture rather than re-deriving it.
+- `insert` stays unexported until #1788 adds the admission entry point
+  (`CheckDeclaration` + `CheckDeclaredSize`, run before construction) as the
+  only way in; exporting it now would ship a bypass #1788 would have to
+  un-ship.
 
 ## Sentinels and discard semantics
 
@@ -177,7 +219,7 @@ deliberately many-to-one within the framing and integrity families: all
 three framing sentinels answer `CodeAttachmentInvalidChunk`, both integrity
 sentinels answer `CodeAttachmentIntegrityFailed`. `ErrUploadTooLarge` is
 one-to-one — `CodeAttachmentTooLarge` — and permanent for that file, in
-contrast to #1778's still-unbuilt `CodeAttachmentTooManyUploads`, which is
+contrast to #1786's still-unbuilt `CodeAttachmentTooManyUploads`, which is
 marked transient because it clears once other uploads finish. Distinguishing
 sentinel from sentinel is wanted in-process, for this package's own tests and
 for the daemon's logs, not on the wire — a single corrupt transfer must still
@@ -226,7 +268,7 @@ attacker-supplied, JSON-decoded string in this codebase — say "bytes" or use
 `nil` `Data` and an empty non-nil slice are legitimate "received" values). The
 zero-byte-attachment criterion exists specifically to catch this class of bug.
 
-## Mutation-testing lessons (measured across #1769, #1770, and #1772)
+## Mutation-testing lessons (measured across #1769, #1770, #1772, and #1787)
 
 This package's sole-redness claims are measured with `go test -overlay`
 (mutants applied via an absolute-path JSON manifest, no worktree write), not
@@ -315,6 +357,27 @@ surfaced:
   failure mode if that ever changes is a hang, not a crash, which is the
   detail worth carrying forward to whoever next gives this helper a
   caller-supplied bound.
+- **A lock-contention mutant can be probabilistic, and the fix is more
+  rounds, not more goroutines.** #1787's split-lock mutant on
+  `Registry.insert` (look the pair up under one acquisition of `mu`, unlock,
+  reacquire to store) reddens the spec's own same-pair concurrent-insert test
+  at only ~9% per iteration; run at the spec's own prescribed `-count=5`, that
+  recipe is a false green roughly 62% of the time (measured at `-count=500`:
+  45/500 red). Raising the fan-out from 32 to 256 goroutines barely moved
+  detection (9% → 13.8%) — the collision window exists only during the first
+  insert burst, so more contenders barely widen it. What worked was more
+  *rounds*: a fresh `Registry` per round inside a loop, ~75 rounds for ≈99.9%
+  detection. Before trusting a `-count=N` recipe on a lock-contention pin,
+  measure its actual per-iteration hit rate rather than assuming N repeats
+  compounds toward certainty — and prefer scaling round count over goroutine
+  count when it doesn't.
+- **An injected split-lock mutant has to replace the whole critical section,
+  not prepend an extra check ahead of it.** The first attempt at #1787's
+  split-lock mutant added an unlocked-then-relocked pre-check before the
+  original lookup-then-store body; the original body's own atomic check still
+  ran underneath it, so the mutant stayed green — which looks like "the
+  criterion can't be pinned" but is actually an under-built mutant. Delete and
+  replace the section, don't layer around it.
 - **A "returns a fresh copy" test must mutate its own copy of the fixture,
   not the shared package-level one.** `TestAccumulator_SingleChunk_ReturnsAFreshCopy`
   has to feed the accumulator a copy of `testFixture`, then mutate the
@@ -365,14 +428,13 @@ hash, fetch the blob"), which is a requirement from
 
 - **#1767** — closed, split into this family. The first-chunk
   `total_chunks`/`size` cross-check landed as `CheckDeclaration` (#1776, see
-  § "Admission layer" above), and the per-upload byte bound landed as
+  § "Admission layer" above), the per-upload byte bound landed as
   `CheckDeclaredSize` + `Add`'s step 5 (#1777, see § "Per-upload byte bound"
-  above). Still blocked: the in-flight-upload count and the registry
-  (`attachment_id` → `*Accumulator`) that needs its own lock (**#1778**) —
-  `Accumulator` itself carries none, because it is fed serially by one
-  session's `appFrameWorker` goroutine, and should inherit the `2N × bound`
-  peak / `N × bound` resident figures from § "Per-upload byte bound" rather
-  than re-deriving them.
+  above), and the conn-keyed registry of in-flight uploads landed as
+  `Registry` (#1787, see § "In-flight upload registry" above). Still blocked:
+  the entry-count cap on that registry (**#1786**), which should inherit the
+  `2N × bound` peak / `N × bound` resident figures from § "Per-upload byte
+  bound" rather than re-deriving them.
 - **#1742** — expiry/abandonment of a partial upload. Note this covers
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch
