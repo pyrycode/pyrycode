@@ -2468,10 +2468,14 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   record's same-typed-distinctness property, so it carries its own
   hand-written listing (`initControlTrailerFields`) and its own three
   subtests rather than riding the record's existing ones. Nothing computes
-  these fields yet — #1715 is the live run that populates them; until then
-  every field in this group reads at its zero value, and a zero
-  `SendPointIndex` in an artifact predating #1715 is an unpopulated field,
-  not a `before_first_turn` capture. #1731 added a fourth, one-field group:
+  these fields directly: #1762 fills all three at the fill site
+  (`runInitControlChild`) from `initControlReadWindow`, a pure reader over
+  the recorded lines described in `initialize_control_window_test.go`
+  below. The committed `initialize_control_v2.1.239.json` predates the
+  fields entirely and carries none of the three keys, which is why an
+  artifact from before that ticket is still not readable as a
+  `before_first_turn` capture — it is simply missing the fields, not
+  zero-valued in them. #1731 added a fourth, one-field group:
   `Redaction []dropcapSubstitution` (tag `redaction`, no `omitempty`) — the
   census of which redaction classes fired and how often, populated at the
   fill site (`runInitControlChild`) from what #1733's
@@ -2612,6 +2616,77 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   for the anchor and window-observable fields. The write half —
   the writer and the round trip that reuses this file's record and listing —
   is `initialize_control_writer_test.go` (#1702), described next.
+
+- `initialize_control_window_test.go` (#1762) — **the reader for the
+  send-point window #1723 defined and left unpopulated: a pure, total
+  function over `[]json.RawMessage` and one anchor, returning the window's
+  `system`/`init` count and one `initControlResultTrailer` per `result`
+  line, in arrival order.** `initControlReadWindow` decodes each line in
+  `lines[anchor:]` into `map[string]json.RawMessage` through
+  `initControlWindowField`, which looks a key up and, only if present, runs
+  `json.Unmarshal` into the destination and reports presence independently
+  of whether that decode succeeded — the mechanism #1723's security review
+  asked this ticket to build: `TotalCostUSDPresent` reads the raw key,
+  never `TotalCostUSD != 0`, so a `result` line carrying a string cost
+  still reads present with a zero value instead of being indistinguishable
+  from a line with no cost key at all. A line that fails to decode as a
+  JSON object at all (the shape `setModeRecorder.add` stores for non-JSON
+  child output) is skipped, not aborted — one bad line costs its own entry,
+  never the lines after it. The `system`/`init` count is keyed on both
+  `type` and `subtype`; the committed
+  `testdata/initialize_control_v2.1.239.json` carries six `system` lines
+  that are not `init`, so a `type`-only count reads 7 over a fixture where
+  1 is right. The empty window returns a non-nil, empty
+  `[]initControlResultTrailer{}` rather than `nil` — the only way a
+  committed `[]` can be told apart from a field that was never filled.
+
+  The live fill site (`runInitControlChild`, in
+  `initialize_control_probe_test.go`) reads the anchor as
+  `len(rec.snapshotLines())` immediately before the control line is
+  written, then computes both window reads from that one anchor after the
+  post-join snapshot — one anchor, so the two reads cannot disagree about
+  which window they measured, and nothing claude wrote in response to the
+  request can land before it. The rejected alternative — the `system`/`init`
+  count as a difference of two `snapshotInitModes()` calls taken before and
+  after the send point — is a real race: the two calls take the lock
+  separately, so a line landing in the gap between them is attributed to
+  the wrong side of the anchor and the window under-reports by one.
+  Registered in `finOfflineExecBans` with the same seventeen names
+  `initialize_control_record_test.go` carries — this file performs no I/O
+  in either direction, and the ban entry is what makes that claim
+  mechanical rather than reviewed.
+
+  **Two lessons that outlive this ticket, both about what a mutation table
+  actually proves in this family:**
+  - **Two rows that look like they test the same edge can be non-redundant
+    for a reason invisible without running the mutant.** The offline table
+    has one row at `anchor == 0` and one at `anchor == len(lines)`, sharing
+    one line list. An "ignore the anchor" mutant (`lines[0:]` regardless of
+    `anchor`) reddens **only** the `len(lines)` row — at `anchor == 0` the
+    correct and mutated readers produce the same answer, so that row alone
+    cannot catch it. The `anchor == 0` row's job is the opposite one: it
+    proves the `len(lines)` row's empty result came from the anchor and not
+    from a line list that had nothing to find in it. Neither row is
+    redundant, but the table has to state which mutant each one is *sole
+    red* for, not just assert both — code review caught one such claim that
+    was correct as a purpose statement but not literally sole (a `subtype`
+    check widened to `true` reddens both the subtype row and the
+    `anchor == 0` row, since that row's shared list carries a non-`init`
+    `system` line by construction).
+  - **`reflect.DeepEqual` treats `nil` and `[]T{}` as different, and that is
+    the *only* instrument for a non-nil-empty contract — a `want` literal
+    that omits the slice field defeats it silently.** A `want` written as
+    `initControlWindow{systemInitCount: 1}` carries a **nil**
+    `resultTrailers` and passes equally for a reader that returns `nil` on
+    an empty window and one that returns `[]initControlResultTrailer{}`.
+    Both empty-window rows have to spell the field out explicitly
+    (`resultTrailers: []initControlResultTrailer{}`) for the comparison to
+    mean anything; the shorter, more natural-looking literal is the one
+    that silently inverts the AC.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1762-send-point-window-reads.md` for the full
+  design, per-mutant table and security review.
 
 - `initialize_control_writer_test.go` (#1702, extended #1700 and #1722) —
   **the write half of the `initialize` fixture family: the
