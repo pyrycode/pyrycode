@@ -1,17 +1,18 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782), nine
-slices of the family split from #1741/#1766: holds one inbound attachment
-upload's chunks in memory, addressed by index, refuses a stream whose framing
-contradicts what the transfer declared at admission (#1769), and — once the
-transfer is complete — checks the assembled bytes against the transfer's
-declared length and lowercase-hex sha256 before yielding a single byte
-(#1770). Bounds the retained bytes of one upload to a receiver-configured,
-unpublished ceiling, refusing at either the declared size or the accumulated
-total (#1777, see § "Per-upload byte bound" below), and holds the uploads
-currently in flight in a conn-keyed `Registry` (#1787), whose only exported
-way in runs both declaration checks before admitting anything (`Admit`,
-#1788, see § "In-flight upload registry" below).
+Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782,
+#1795), ten slices of the family split from #1741/#1766: holds one inbound
+attachment upload's chunks in memory, addressed by index, refuses a stream
+whose framing contradicts what the transfer declared at admission (#1769),
+and — once the transfer is complete — checks the assembled bytes against the
+transfer's declared length and lowercase-hex sha256 before yielding a single
+byte (#1770). Bounds the retained bytes of one upload to a
+receiver-configured, unpublished ceiling, refusing at either the declared
+size or the accumulated total (#1777, see § "Per-upload byte bound" below),
+and holds the uploads currently in flight in a conn-keyed `Registry` (#1787),
+whose only exported way in runs both declaration checks and the incumbent
+look-up under one lock acquisition before admitting anything (`Admit`,
+#1788, #1795, see § "In-flight upload registry" below).
 Accumulation and admission stay in-memory — no disk, no wire codes, no
 logger — but the package is no longer in-memory-only end to end: `EnsureDir`
 (#1781, see § "Directory resolution and creation" below) resolves and creates
@@ -147,38 +148,53 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
   same moment. The correct worst-case peak is `N` bounds retained plus up to
   `N` more in flight — 128 MiB at a concurrency of 4, not 80 MiB. The
   *resident* (non-peak) figure the constant's doc states — `bound ×
-  concurrency` — is correct and is what #1786 should inherit as its budget;
+  concurrency` — is correct and is what #1796 should inherit as its budget;
   it is only the peak-during-assembly refinement layered on top that
-  undercounts. **#1786: budget peak as `2N × bound`, not the `(N+1) × bound`
+  undercounts. **#1796: budget peak as `2N × bound`, not the `(N+1) × bound`
   the code comment currently states** — this was a code-review SHOULD FIX
   landed as text-only (no enforcement is wrong, only the doc's peak
   refinement), so the comment itself was not corrected.
 
-Blocked, still: the in-flight-upload count cap (#1786) — this package bounds
+Blocked, still: the in-flight-upload count cap (#1796) — this package bounds
 one upload's bytes, not how many uploads may exist at once. The registry that
 holds one accumulator per in-flight upload has since landed; see § "In-flight
 upload registry" below.
 
-## In-flight upload registry (#1787, #1788)
+## In-flight upload registry (#1787, #1788, #1795)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
 chunks: a map from `uploadKey{connID, attachmentID}` to the `*Accumulator` in
-flight for that pair, an unexported never-replacing `insert`, comma-ok
-`Lookup`, `Release`, and an unexported `count`. Still unreachable from
-production — nothing calls it until #1744 wires the dispatch site, and #1744
-lands last in the family.
+flight for that pair, an unexported `insertLocked` core, a thin lock-taking
+`insert` wrapper kept for tests, comma-ok `Lookup`, `Release`, and an
+unexported `count`. Still unreachable from production — nothing calls it
+until #1744 wires the dispatch site, and #1744 lands last in the family.
 
-`Admit` (#1788) is the registry's only exported way in: it runs
-`CheckDeclaration` then `CheckDeclaredSize` on a first chunk and, only on a
-nil answer from both, constructs the `Accumulator` and hands it to `insert`.
-A refusal returns the check's error verbatim — no wrapping, no added context
-— which is what keeps `attachmentID` and `sha256` (the two banned strings
-this entry point necessarily holds) out of an error string with no format
-string for either to enter, and keeps both sentinels reachable with
-`errors.Is`. A repeat under a held pair answers the incumbent with a nil
-error and discards the accumulator it had just built. Which check runs first
-is deliberately not a contract — a doubly-bad declaration gets whichever
-sentinel runs first, and no test may read an order out of that.
+`Admit` is the registry's only exported way in. Through #1788 it ran
+`CheckDeclaration` and `CheckDeclaredSize` off-lock and handed a nil answer
+to the lock-taking `insert`; **#1795 moved the acquisition to cover the whole
+decision** — both checks, the incumbent look-up, construction, and the store
+— so a later capacity bound (#1796) can be part of that one acquisition
+rather than a check racing it. `Admit` now takes `mu` itself and calls the
+unlocked `insertLocked` directly, never the lock-taking `insert`, whose own
+`Lock` would deadlock under an already-held `mu` (`sync.Mutex` is not
+reentrant — see the `mu`-is-a-leaf paragraph below). A refusal returns the
+check's error verbatim — no wrapping, no added context — which is what keeps
+`attachmentID` and `sha256` (the two banned strings this entry point
+necessarily holds) out of an error string with no format string for either
+to enter, and keeps both sentinels reachable with `errors.Is`.
+
+Both checks run **ahead of** the incumbent look-up, so a repeat under a held
+pair answers the incumbent only when its declaration is admissible; an
+invalid repeat answers its own declaration sentinel instead, and the
+incumbent is left untouched
+(`TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent`). Through
+#1788 that was an accident of statement order — no landed test read anything
+into it either way, by design — and #1795 turned it into a decision, because
+the obvious restructure (look the incumbent up first, return early) would
+have flipped it silently and nothing would have caught the flip. Which check
+runs first is still deliberately not a contract — a doubly-bad declaration
+gets whichever sentinel runs first, and no test may read an order out of
+that.
 
 - **Pairing two checks that answer different sentinels into one entry point
   needs one fixture per check, never a doubly-bad one.** A declaration both
@@ -188,7 +204,10 @@ sentinel runs first, and no test may read an order out of that.
   sentinels differ, so an order asserted here would be an accident promoted
   to a contract). The fix used here: one row that's admissible by
   arithmetic but oversized, one that's within the byte bound but
-  arithmetically wrong — each is a sole red for exactly one guard.
+  arithmetically wrong — each is a sole red for exactly one guard. #1795
+  reused the same two declarations verbatim for a second test guarding the
+  held-pair repeat path, rather than deriving a fresh pair — one fewer place
+  for the discrimination property to drift out of sync.
 - **`insert`'s never-replace behaviour was pinned once at the unexported
   layer (#1787) and had to be re-pinned through the exported one.** The
   #1787 test drives `insert` directly, so it stays green against an `Admit`
@@ -198,14 +217,14 @@ sentinel runs first, and no test may read an order out of that.
   from coverage one layer down.
 - **Sequencing note for the rest of the family, from this ticket's security
   review:** #1744 (the dispatch site, and this package's first production
-  caller) must not land ahead of #1786 (the in-flight entry-count cap).
+  caller) must not land ahead of #1796 (the in-flight entry-count cap).
   Nothing calls this package today, so `Admit` changes no live exposure yet
   — but the moment #1744 wires it up, `Admit` bounds one upload's bytes and
   places no bound on how many uploads may exist, so N distinct
   `attachment_id` values on one conn yield N entries. `Admit` is what closes
   the key-space hole `CheckDeclaredSize`'s doc names (paired, an admitted
   transfer declares at most 373 chunks); it does nothing about the entry
-  count, which is #1786's bound alone.
+  count, which is #1796's bound alone.
 
 - **Keyed by conn-and-attachment_id, not the bare id this doc used to sketch.**
   `docs/protocol-mobile.md` § Attachments documents `attachment_id` as "not a
@@ -218,12 +237,19 @@ sentinel runs first, and no test may read an order out of that.
   it structurally.
 - **One `sync.Mutex`, taken once per operation and held for the whole body —
   never once to read, again to write.** That is what lets the same-pair
-  concurrent-insert case tell exactly one caller it got a fresh insert, and it's
-  the shape #1786's count-then-admit gate needs: a registry that locks its read
-  and its write separately passes `-race` and every other criterion here, but
-  can't support the indivisible look-up-then-count-then-insert #1786 requires.
-  `insert`'s never-replace behaviour is a security property, not hygiene — it
-  stops a second first-chunk for a live pair from swapping the declared
+  concurrent-insert case tell exactly one caller it got a fresh insert, and
+  it's the shape #1796's count-then-admit gate needs: a registry that locks
+  its read and its write separately passes `-race` and every other criterion
+  here, but can't support the indivisible look-up-then-count-then-insert
+  #1796 requires. Through #1788, "per operation" covered only the
+  lookup-and-store; `Admit` ran its two declaration checks off-lock and took
+  no lock of its own. #1795 moved the acquisition to cover `Admit`'s whole
+  decision — declaration verdict, incumbent look-up, construction, store —
+  so #1796 can add its count check inside that same acquisition rather than
+  wrapping a second lock around it (`Registry`'s type doc cites `sessions`'
+  `Pool.capMu` specifically to reject that wrap). `insertLocked`'s
+  never-replace behaviour is a security property, not hygiene — it stops a
+  second first-chunk for a live pair from swapping the declared
   `size`/`sha256` out from under the bytes already accumulated.
 - **Off-lock feeding is sound only because the conn is in the key.** The
   registry hands the `*Accumulator` back and the caller feeds it with the lock
@@ -231,16 +257,20 @@ sentinel runs first, and no test may read an order out of that.
   every frame for one conn, so exactly one goroutine can ever reach one
   accumulator. #1784 (routing a later chunk into an admitted upload) inherits
   this posture rather than re-deriving it.
-- `insert` stays unexported; `Admit` (#1788, above) is now the only way in,
-  running `CheckDeclaration` + `CheckDeclaredSize` before construction. After
-  #1787 landed with no policy on what may enter, the property this closes is
-  a fact about the package's exported surface rather than something an
-  in-package test can assert — a test can still call `insert` directly — so
-  no acceptance criterion claims it. `Registry`'s type doc's "no method of
-  `Registry` calls another" also needed correcting once `Admit` composes with
-  `insert`: the rule was re-scoped to "no method takes `mu` and then calls
-  another that takes `mu`" — `Admit` takes no lock of its own, so it doesn't
-  engage the rule, and the four locked methods still never call one another.
+- `insert` stays unexported and, since #1795, test-only; `Admit` is the only
+  production way in. Through #1788, `Registry`'s type doc read "no method of
+  `Registry` calls another," re-scoped once `Admit` started composing with
+  `insert` to "no method takes `mu` and then calls another that takes `mu`"
+  — because `Admit` took no lock of its own at the time. #1795 removed that
+  composition entirely: `Admit` now takes `mu` itself and calls the unlocked
+  `insertLocked` directly, never `insert`. The rule is back to its simpler,
+  original form — five locked methods (`Admit`, `insert`, `Lookup`,
+  `Release`, `count`), none calling another — with `insertLocked` as the one
+  shared, lock-free core that two of them wrap. A rule correction chasing a
+  composition that the next slice would go on to remove is why the type doc
+  now states the rule in the form least likely to need re-scoping again:
+  "no method takes `mu` and then calls another that takes it," which is true
+  whether or not any method currently composes with another.
 
 ## Directory resolution and creation (#1781)
 
@@ -375,7 +405,7 @@ deliberately many-to-one within the framing and integrity families: all
 three framing sentinels answer `CodeAttachmentInvalidChunk`, both integrity
 sentinels answer `CodeAttachmentIntegrityFailed`. `ErrUploadTooLarge` is
 one-to-one — `CodeAttachmentTooLarge` — and permanent for that file, in
-contrast to #1786's still-unbuilt `CodeAttachmentTooManyUploads`, which is
+contrast to #1796's still-unbuilt `CodeAttachmentTooManyUploads`, which is
 marked transient because it clears once other uploads finish. Distinguishing
 sentinel from sentinel is wanted in-process, for this package's own tests and
 for the daemon's logs, not on the wire — a single corrupt transfer must still
@@ -491,7 +521,28 @@ surfaced:
   against that suite. The naming convention itself (subtest name = raw input)
   is worth keeping, since it's what makes the classic `report.txt\x00.exe`
   row legible in test output at all; the fix is `grep -a`, not a different
-  naming scheme.
+  naming scheme. #1795 hit the same failure mode through a different door —
+  non-UTF8 fixture bytes landing directly in `go test -v` output rather than
+  in a subtest name — which is why `grep -a` belongs in the overlay-mutant
+  recipe unconditionally, not only when a subtest name is attacker-shaped.
+- **A behaviour-preserving refactor's characterization test is green before
+  and after the change, so the diff alone can't show the test is
+  load-bearing — only a mutant that would have broken the old code can**
+  (#1795, `TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent`).
+  The new test passed against unmodified `registry.go`, correctly, since the
+  ticket preserved the pinned behaviour rather than changing it; the only
+  evidence the test caught anything came from the mutant that hoists the
+  incumbent look-up ahead of both checks, red on exactly the two new rows and
+  green on the rest of the package. Where a refactor's spec asks a new test
+  to guard against one specific silent flip, running that flip as a mutant is
+  the RED half of red-green, not an optional extra.
+- **A mutant run filtered with `-run` can't support a "nothing else reddens"
+  claim — the filter is exactly what would make the claim look true
+  regardless of whether it is.** #1795's first pass scoped the run to
+  `-run 'TestRegistry_|TestAccumulator_|TestCheck'`, which happened to cover
+  the whole package but was never checked to. The unfiltered re-run (128
+  tests) is what actually backs the mutant table's "also reddens: nothing
+  else" column — any claim of that shape needs the filter off.
 - **The mutant that only reddens a helper's own direct test, and nothing
   reached through the public surface, is the one that justifies the direct
   test's existence rather than merely adding to its coverage** (#1772: a
@@ -587,10 +638,12 @@ hash, fetch the blob"), which is a requirement from
   § "Admission layer" above), the per-upload byte bound landed as
   `CheckDeclaredSize` + `Add`'s step 5 (#1777, see § "Per-upload byte bound"
   above), and the conn-keyed registry of in-flight uploads landed as
-  `Registry` (#1787, see § "In-flight upload registry" above). Still blocked:
-  the entry-count cap on that registry (**#1786**), which should inherit the
-  `2N × bound` peak / `N × bound` resident figures from § "Per-upload byte
-  bound" rather than re-deriving them.
+  `Registry` (#1787, its admission decision moved under one lock acquisition
+  by #1795, see § "In-flight upload registry" above). Still blocked: the
+  entry-count cap on that registry (**#1796**, refiled after #1786 closed
+  without shipping it), which should inherit the `2N × bound` peak / `N ×
+  bound` resident figures from § "Per-upload byte bound" rather than
+  re-deriving them.
 - **#1742** — expiry/abandonment of a partial upload. Note this covers
   *partial* uploads only — a complete-but-corrupt transfer that fails one of
   #1770's integrity checks is not partial, so it's #1770's own `reject` latch

@@ -33,22 +33,27 @@ type uploadKey struct {
 // mu is taken once per operation and held for that whole operation, never once
 // to look up and again to write. That is more than race-freedom: a registry
 // splitting the two still tells two concurrent inserts of one pair that both
-// were fresh, and it is the exact shape the count-then-admit gate (#1786) cannot
+// were fresh, and it is the exact shape the count-then-admit gate (#1796) cannot
 // be built on, whose "the registry holds exactly the uploads it held before the
 // chunk arrived" needs look-up-then-count-then-insert to be indivisible. The
 // precedent is sessions' Pool.capMu, whose doc names the sequence it serializes
 // so a later caller re-uses it rather than wrapping it; the sequence this one
-// serializes is check-the-pair-then-write-the-map.
+// serializes is check-the-declaration-then-check-the-pair-then-write-the-map,
+// and #1796 re-uses that one acquisition rather than wrapping it in a second
+// lock of its own.
 //
 // mu is a LEAF: never held across a call into Accumulator — not Add, not
 // Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
-// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the four
-// locked methods take mu for their whole body and never call one another. Admit
-// is the composing method and takes no lock of its own — its one locked step is
-// insert's single acquisition — so the rule is not engaged by it. #1786's gate
-// is what must keep it that way: a count read under one acquisition followed by
-// an insert under another does not deadlock, it is the split lock above, which
-// is why the enforcing check belongs inside the section insert already holds.
+// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the five
+// locked methods — Admit, insert, Lookup, Release and count — take mu for their
+// whole body and never call one another. insertLocked is the one method here
+// that takes no lock, which is what lets Admit and insert run ONE critical
+// section rather than two copies free to drift; the Locked suffix is this
+// repo's signal for a caller-holds-the-lock body, as in sessions' saveLocked.
+// #1796's gate is what must keep it that way: a count read under one
+// acquisition followed by an insert under another does not deadlock, it is the
+// split lock above, which is why the enforcing check belongs inside the section
+// Admit already holds.
 //
 // Feeding happens OFF-LOCK: the caller takes the *Accumulator back and feeds it
 // with mu released. That is sound BECAUSE the key carries the conn — relay
@@ -66,26 +71,31 @@ func NewRegistry() *Registry {
 	return &Registry{uploads: make(map[uploadKey]*Accumulator)}
 }
 
-// insert stores a as the upload in flight for the pair and answers (a, true),
-// or — when the pair is already held — stores NOTHING and answers the incumbent
-// with false. Never replacing is a security property rather than hygiene: a
-// second first-chunk for a live pair, declaring a different size or sha256, has
-// its freshly built accumulator dropped instead of installed, so the numbers a
+// insertLocked stores a as the upload in flight for the pair and answers
+// (a, true), or — when the pair is already held — stores NOTHING and answers
+// the incumbent with false. Caller MUST hold r.mu. It takes no lock itself and
+// is the one method here callable with mu held, which is what keeps mu a leaf
+// while two methods share this body.
+//
+// Never replacing is a security property rather than hygiene: a second
+// first-chunk for a live pair, declaring a different size or sha256, has its
+// freshly built accumulator dropped instead of installed, so the numbers a
 // transfer was admitted under cannot be swapped underneath the bytes it already
 // holds, and the chunks in flight are not dropped on the floor.
 //
 // inserted is the INVERSE of sync.Map.LoadOrStore's loaded: true means FRESH. A
 // caller that ports the intuition and inverts the branch double-admits.
 //
-// PRECONDITION: a is non-nil, unguarded. insert is unexported because #1788's
-// admission entry point, which runs CheckDeclaration and CheckDeclaredSize
-// before constructing an Accumulator, is meant to be the only exported way an
-// upload enters — exporting the raw insert would ship a bypass around admission
-// that #1788 then has to un-ship. That one caller constructs the value it
-// passes.
-func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// PRECONDITION: a is non-nil, unguarded.
+//
+// It is a shared core rather than one method's body copied into the other so
+// that TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh, which
+// drives insert, pins the exact critical section Admit executes. It is also the
+// cheaper seam for #1796's entry cap: a gate placed HERE, between the look-up
+// and the store, bounds both callers at once for the price of an error return
+// on an unexported helper, where a gate in Admit's body alone leaves insert
+// ungated.
+func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool) {
 	key := uploadKey{connID: connID, attachmentID: attachmentID}
 	if held, ok := r.uploads[key]; ok {
 		return held, false
@@ -94,12 +104,44 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 	return a, true
 }
 
+// insert takes mu for the whole of insertLocked and is otherwise that function:
+// the same never-replace answer, the same inverted inserted, the same non-nil
+// precondition on a.
+//
+// Its callers are this package's tests. Admit does not call it — it holds mu
+// across a decision wider than one insert and reaches insertLocked directly, and
+// calling this one under mu would deadlock rather than race — so this wrapper is
+// an in-package insertion path that runs no declaration check. It stays
+// unexported for that reason: #1788's admission entry point, which runs
+// CheckDeclaration and CheckDeclaredSize before constructing an Accumulator, is
+// meant to be the only exported way an upload enters, and exporting the raw
+// insert would ship the bypass around admission that Admit exists to close.
+func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.insertLocked(connID, attachmentID, a)
+}
+
 // Admit is the registry's only exported way in: it runs BOTH declaration checks
 // on a first chunk and, only on a nil answer from both, constructs the
-// Accumulator from the declared numbers and hands it to insert. A refusal
-// constructs nothing and stores nothing, so the registry is left exactly as it
-// was and nothing about the refused pair is remembered — the same
-// attachment_id, re-declared correctly, is admitted immediately afterwards.
+// Accumulator from the declared numbers and stores it. A refusal constructs
+// nothing and stores nothing, so the registry is left exactly as it was and
+// nothing about the refused pair is remembered — the same attachment_id,
+// re-declared correctly, is admitted immediately afterwards.
+//
+// THE WHOLE DECISION RUNS UNDER ONE ACQUISITION of mu — declaration verdict,
+// incumbent look-up, construction, store — so that #1796's entry cap can read
+// the count and admit without releasing it in between, which is what a cap needs
+// and what a split acquisition cannot give it. mu stays a LEAF: both checks are
+// pure and stateless per their own docs, insertLocked takes no lock, and
+// NewAccumulator allocates and returns. That last one is bounded work only
+// BECAUSE its chunk map takes no capacity hint — a rule stated there on
+// independent grounds that this critical section now depends on, since a hint
+// read from the attacker-chosen totalChunks would put an attacker-scaled
+// allocation inside this package's only mutex. All three return paths release mu
+// through the one defer: two of them are refusals a client triggers at will with
+// a single malformed declaration, and an explicit unlock missed on either would
+// wedge the registry for every conn rather than race.
 //
 // It CONSTRUCTS NO ERROR OF ITS OWN. Each refusal is the check's error
 // verbatim, neither wrapped nor annotated, which is the strongest available form
@@ -116,39 +158,55 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 // whichever sentinel runs first, and nothing has decided which that should be;
 // CheckDeclaration runs first because it mirrors the file order, so no caller
 // and no test may read an order out of it. The two are written as independent
-// guard statements rather than chained, so #1786's concurrency bound can go in
-// front of both as a pure addition.
+// guard statements rather than chained, so #1796's concurrency bound can go
+// BEHIND both of them, and behind the incumbent look-up, as a pure addition: a
+// pair already held is exempt from a capacity refusal because it occupies an
+// entry it already occupies.
 //
 // A NIL ERROR CERTIFIES THE TWO NUMBERS AND NOTHING ELSE. Not the
 // attachment_id, whose canonical-shape check before it may become a path
 // component is EnsureDir's (#1781), and not the declared digest, which is
 // copied into the accumulator uninspected and compared only by Assemble.
 //
-// A REPEAT under a pair already held answers the INCUMBENT with a nil error and
-// drops the accumulator just built, because insert never replaces. The caller
-// then feeds the repeat's first chunk into an accumulator latched with the FIRST
+// BOTH CHECKS RUN ON A REPEAT under a pair already held, ahead of the look-up
+// that finds the incumbent, and that is a DECISION rather than an accident of
+// statement order. A repeat whose declaration disagrees with the live transfer
+// is a client error worth naming, so it answers its own sentinel and the
+// incumbent is left untouched; handing back the incumbent instead would answer
+// an accumulator latched with the FIRST declaration's numbers, which that
+// client's next chunk fails to feed anyway. It also keeps #1796's gate honest —
+// exempting a held pair from a capacity REFUSAL is not the same thing as
+// short-circuiting the checks.
+// TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent pins it.
+//
+// AN ADMISSIBLE REPEAT answers the INCUMBENT with a nil error and drops the
+// accumulator just built, because insertLocked never replaces. The caller then
+// feeds the repeat's first chunk into an accumulator latched with the FIRST
 // declaration's numbers, so Add refuses it — ErrTotalChunksMismatch when the two
 // declarations disagree on the count, ErrDuplicateIndex when they agree — and
 // that transfer is rejected. Which is the point: the numbers a transfer was
 // admitted under can never be swapped underneath bytes it already holds.
 //
 // PRECONDITION on what comes back: the accumulator is fed by ONE GOROUTINE AT A
-// TIME. Admit takes no lock of its own and hands the accumulator back off-lock,
-// and Accumulator carries no mutex by design; that is sound because the conn is
-// in the key and relay spawns exactly one appFrameWorker per session. Two Admit
-// calls for one pair hand back the SAME POINTER, so two goroutines feeding one
-// pair is a data race rather than two transfers.
+// TIME. Admit releases mu before returning and hands the accumulator back
+// off-lock, and Accumulator carries no mutex by design; that is sound because
+// the conn is in the key and relay spawns exactly one appFrameWorker per
+// session. Two Admit calls for one pair hand back the SAME POINTER, so two
+// goroutines feeding one pair is a data race rather than two transfers.
 func (r *Registry) Admit(connID, attachmentID string, totalChunks int, size int64, sha256 string) (*Accumulator, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if err := CheckDeclaration(totalChunks, size); err != nil {
 		return nil, err
 	}
 	if err := CheckDeclaredSize(size); err != nil {
 		return nil, err
 	}
-	// insert's answer, never the accumulator just constructed: on a fresh pair
-	// they are the same pointer, and on a repeat returning the constructed one
-	// double-admits.
-	upload, _ := r.insert(connID, attachmentID, NewAccumulator(totalChunks, size, sha256))
+	// insertLocked's answer, never the accumulator just constructed: on a fresh
+	// pair they are the same pointer, and on a repeat returning the constructed
+	// one double-admits. insertLocked and not insert, which takes mu.
+	upload, _ := r.insertLocked(connID, attachmentID, NewAccumulator(totalChunks, size, sha256))
 	return upload, nil
 }
 
@@ -175,7 +233,7 @@ func (r *Registry) Release(connID, attachmentID string) {
 
 // count is how many uploads are in flight. Unexported because in-package tests
 // are its only reader: an exported one would publish exactly the TOCTOU shape
-// #1786 must not be built on, a cap check reading the count under one
+// #1796 must not be built on, a cap check reading the count under one
 // acquisition and admitting under another.
 func (r *Registry) count() int {
 	r.mu.Lock()

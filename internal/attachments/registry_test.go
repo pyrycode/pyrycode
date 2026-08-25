@@ -292,9 +292,10 @@ func TestRegistry_ConcurrentSamePairInsert_TellsExactlyOneItIsFresh(t *testing.T
 
 // TestRegistry_AdmitRefusedDeclaration_StoresNothing carries ONE FAULT PER ROW
 // rather than one doubly-bad declaration, which is what makes each check's
-// removal a sole red: a declaration both checks refuse reddens under either
-// removal and therefore proves neither. It would also pin a cross-check order
-// that nothing has decided, since the two answer different sentinels.
+// removal a sole red: a declaration both checks refuse stays GREEN under either
+// removal, because the check that survives refuses it anyway, and therefore
+// proves neither. It would also pin a cross-check order that nothing has
+// decided, since the two answer different sentinels.
 func TestRegistry_AdmitRefusedDeclaration_StoresNothing(t *testing.T) {
 	t.Parallel()
 
@@ -421,8 +422,12 @@ func TestRegistry_Admit_HoldsAnAccumulatorLatchedWithTheDeclaration(t *testing.T
 // pins on insert directly: that test stays green against an entry point that
 // releases the pair before inserting, or that installs a freshly built
 // accumulator by some other route. It asserts NOTHING about the second call's
-// error, because whether this entry point answers the incumbent or refuses the
-// repeat is not pinned, and the incumbent must survive either way.
+// error, and does not need to: this test's repeat carries the SAME, ADMISSIBLE
+// declaration, the case Admit's doc commits to answering with the incumbent, and
+// the incumbent must survive whatever error comes back. The repeat whose
+// declaration is refused answers that sentinel instead of the incumbent, and
+// TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent is what pins
+// it.
 func TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent(t *testing.T) {
 	t.Parallel()
 
@@ -463,5 +468,101 @@ func TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent(t *testing.T) {
 	}
 	if !bytes.Equal(assembled, testBoundFixture) {
 		t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(assembled), len(testBoundFixture))
+	}
+}
+
+// TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent pins the one
+// behaviour a careless restructure flips: BOTH declaration checks run on a
+// repeat, ahead of the look-up that would find the incumbent, so a repeat
+// carrying an invalid declaration answers that declaration's sentinel rather
+// than being handed the live transfer. Every other test in this file stays green
+// against an Admit that looks the incumbent up first and returns early — the
+// sibling refusal rows admit on a fresh registry, so the look-up misses and the
+// checks run either way, and TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent
+// repeats the SAME, admissible declaration, so it reaches the incumbent by
+// either route.
+//
+// ONE FAULT PER ROW, for the reason
+// TestRegistry_AdmitRefusedDeclaration_StoresNothing states, and the two
+// declarations are that test's two verbatim: the only thing that differs here is
+// that the pair is already held.
+func TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent(t *testing.T) {
+	t.Parallel()
+
+	const held = 2
+
+	tests := []struct {
+		name        string
+		totalChunks int
+		size        int64
+		want        error
+	}{
+		{
+			// Its own arithmetically-correct count, so CheckDeclaration admits
+			// this one and only the byte bound refuses it.
+			name:        "size one byte above the per-upload bound",
+			totalChunks: testBoundTotal,
+			size:        maxUploadBytes + 1,
+			want:        ErrUploadTooLarge,
+		},
+		{
+			// Well within the byte bound, so CheckDeclaredSize admits this one
+			// and only the arithmetic refuses it: 100000 bytes is 3 chunks.
+			name:        "count disagreeing with the declared size",
+			totalChunks: 4,
+			size:        100000,
+			want:        ErrInvalidDeclaration,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			incumbent, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+			if err != nil {
+				t.Fatalf("Admit of an admissible declaration: %v", err)
+			}
+			for i := 0; i < held; i++ {
+				if err := incumbent.Add(boundChunk(i)); err != nil {
+					t.Fatalf("feeding the transfer in flight chunk %d: %v", i, err)
+				}
+			}
+
+			// A second first-chunk for the live pair, differing from the
+			// incumbent's declaration only in the two declared numbers.
+			repeat, err := r.Admit(testConnA, testAttachmentID, tt.totalChunks, tt.size, testBoundFixtureDigest)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Admit of a repeat declaring %s: error = %v, want one wrapping %v", tt.name, err, tt.want)
+			}
+			if repeat != nil {
+				t.Errorf("Admit returned a non-nil accumulator for a refused repeat")
+			}
+
+			// The refusal disturbed nothing. Pointer identity, not field
+			// equality: an accumulator built from the same declaration compares
+			// equal field by field and holds none of the chunks in flight.
+			if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != incumbent {
+				t.Errorf("Lookup after a refused repeat answered (%p, %v), want the incumbent", got, ok)
+			}
+			if n := r.count(); n != 1 {
+				t.Errorf("count() = %d, want 1", n)
+			}
+
+			// The chunks the transfer already held survived the refusal, and it
+			// still assembles.
+			for i := held; i < testBoundTotal; i++ {
+				if err := incumbent.Add(boundChunk(i)); err != nil {
+					t.Fatalf("feeding the transfer in flight chunk %d: %v", i, err)
+				}
+			}
+			assembled, err := incumbent.Assemble()
+			if err != nil {
+				t.Fatalf("Assemble() after a refused repeat: %v", err)
+			}
+			if !bytes.Equal(assembled, testBoundFixture) {
+				t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(assembled), len(testBoundFixture))
+			}
+		})
 	}
 }
