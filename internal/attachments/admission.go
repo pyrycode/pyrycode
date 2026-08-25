@@ -26,16 +26,21 @@ import (
 // chunk constant rather than of this one.
 //
 // WORST-CASE RESIDENT attachment bytes is this bound MULTIPLIED BY the
-// concurrent-upload bound #1778 sets — 64 MiB at a concurrency of 4, 128 MiB at
-// 8. The budget #1778 inherits rather than re-derives is to hold that PRODUCT at
-// or under roughly 64 MiB, so four concurrent uploads at this number; wanting
-// more concurrency moves one of the two numbers.
+// concurrent-upload bound maxInFlightUploads sets — 64 MiB at its 4. The budget
+// that constant inherits rather than re-derives is to hold that PRODUCT at or
+// under roughly 64 MiB, so four concurrent uploads at this number; wanting more
+// concurrency moves one of the two numbers.
 //
-// Retained is not peak. Assemble allocates a fresh slice of the assembled
-// length, so one upload peaks at 2× its retained bytes for the duration of that
-// call, and the worst case above gains one more bound while an assembly is in
-// flight. Add's refusal to copy each chunk is what keeps retained at 1× rather
-// than 2×, which is the arithmetic its no-copy PRECONDITION cites.
+// Retained is not peak, and the peak is TWICE the resident figure rather than
+// one bound above it. Assemble allocates a fresh slice of the assembled length,
+// so one upload peaks at 2× its retained bytes for the duration of that call —
+// and every concurrent upload can be inside its own Assemble at that moment,
+// because relay's appFrameWorker serialises the frames of ONE CONN, which is a
+// per-session guarantee and not a daemon-wide one. Worst-case peak is therefore
+// 2 × maxInFlightUploads × this bound: 128 MiB at that concurrency, not the 80
+// MiB a single extra bound would give. Add's refusal to copy each chunk is what
+// keeps retained at 1× rather than 2×, which is the arithmetic its no-copy
+// PRECONDITION cites.
 //
 // The crossing chunk's bytes are the one slack that is not slack: they already
 // exist in the caller's decoded frame when Add measures them, so the transient
@@ -57,6 +62,38 @@ import (
 // comparisons, int in a test's make. A later ticket that publishes the number so
 // a client can pre-flight a large file can export it then.
 const maxUploadBytes = 16 << 20 // 16 MiB
+
+// maxInFlightUploads is the hard ceiling on how many attachment uploads may be
+// in flight at once — how many entries a Registry may hold. Registry's
+// admission gate is the one rung, and it refuses a first chunk for a NEW pair
+// with ErrTooManyUploads once the count already meets this number. It bounds
+// what maxUploadBytes cannot: attachment_id is client-chosen, so without it a
+// client holds unbounded state by opening one transfer per id and finishing
+// none.
+//
+// DAEMON-WIDE, NOT PER SESSION. One Registry serves the daemon and this bound
+// counts its entries across every conn. Per session there is no finiteness
+// story to tell: sessions' Config.ActiveCap caps concurrently ACTIVE claude
+// processes rather than pool entries, and is uncapped by default, so a
+// per-session bound multiplies the byte product below by a session count
+// nothing bounds. The known cost is that one conn can occupy every slot and
+// starve its peers, accepted here because the peers are the user's own paired
+// devices, the refusal clears as other uploads finish, and #1742's reaper
+// reclaims abandoned slots. A per-conn sub-cap UNDER this ceiling is a later
+// refinement rather than this family's.
+//
+// The byte arithmetic is INHERITED from maxUploadBytes rather than re-derived
+// here, which is also where 4 comes from: worst-case RESIDENT attachment bytes
+// is this bound × that one, 64 MiB, which is exactly the product that
+// constant's doc fixes the budget at, and worst-case PEAK is twice that, 128
+// MiB. Both derivations are stated there and neither is repeated here; moving
+// either number is a decision about that product rather than about this
+// constant alone.
+//
+// Unexported and untyped for maxUploadBytes' own reasons: receiver policy that
+// docs/protocol-mobile.md § Attachments deliberately leaves unpublished, so "a
+// client learns them by being rejected", and readers that want different types.
+const maxInFlightUploads = 4
 
 // ErrInvalidDeclaration reports a transfer declaration this receiver refuses
 // before an Accumulator exists. Every refusal CheckDeclaration returns wraps it
@@ -91,9 +128,9 @@ var ErrInvalidDeclaration = errors.New("attachments: transfer declaration is not
 // client — it would send it to RE-CHUNK an oversized file, which fails
 // identically, forever, rather than to shrink it.
 //
-// Nor is it a general resource-limit sentinel #1778 could share for its
-// concurrency refusal, and that is why the name is specific to the byte bound.
-// Retryability itself inverts across the two: internal/protocol's
+// Nor is it a general resource-limit sentinel shared with ErrTooManyUploads,
+// the concurrency refusal below, and that is why the name is specific to the
+// byte bound. Retryability itself inverts across the two: internal/protocol's
 // CodeAttachmentTooManyUploads is marked transient, because it clears when other
 // uploads finish, while this one never clears for that file. Collapsing them
 // would tell a client either to re-upload an oversized file in a loop or to
@@ -103,6 +140,50 @@ var ErrInvalidDeclaration = errors.New("attachments: transfer declaration is not
 // scopes it to Add and Assemble: this one is returned by Add AND by an admission
 // function that runs before an Accumulator exists.
 var ErrUploadTooLarge = errors.New("attachments: upload exceeds the per-upload byte bound")
+
+// ErrTooManyUploads reports a first chunk for a NEW pair refused because this
+// receiver already holds maxInFlightUploads uploads in flight. Registry's
+// admission gate is the one place that raises it, wrapped by capacityRefusal
+// with the in-flight count and the bound, and callers distinguish it with
+// errors.Is rather than by comparing error strings.
+//
+// It is the third sentinel this file publishes and the sibling
+// ErrUploadTooLarge's doc argues for by name, rather than a widening of either
+// neighbour. RETRYABILITY IS WHY: this one clears BY ITSELF as other uploads
+// finish — internal/protocol's CodeAttachmentTooManyUploads is marked transient
+// for exactly that, with a documented obligation to back off rather than resend
+// at once — while ErrInvalidDeclaration never clears for that declaration and
+// ErrUploadTooLarge never clears for that file. Mapping it to its wire code is
+// the dispatch site's job (#1744); this file emits no wire code and imports no
+// codes.
+//
+// It is not in accumulator.go's var block, whose own opening sentence scopes it
+// to Add and Assemble: neither raises this one, which refuses a transfer before
+// its Accumulator is stored.
+var ErrTooManyUploads = errors.New("attachments: too many uploads in flight")
+
+// capacityRefusal wraps ErrTooManyUploads with the numbers. It is a function
+// taking ONE int so that the never-log rule protocol.AttachmentChunkPayload's
+// SECURITY block states stays STRUCTURAL at the one place on the admission path
+// that would otherwise degrade it to a discipline. Admit constructs no error of
+// its own and both declaration checks take scalars, so this is the first error
+// that path formats, and the function that raises it — Registry's gate —
+// necessarily holds the attacker-chosen attachmentID, because it is the map
+// key. A format string in a function that cannot see that string cannot leak
+// it, which is the same argument CheckDeclaration's scalars-only signature
+// makes.
+//
+// It carries BOTH the in-flight count and the bound, and they are the SAME
+// NUMBER at every refusal today, because the gate runs ahead of every store so
+// the count can never pass the bound. Neither is redundant and no test may try
+// to tell them apart: the count is what a reader wants if a later path can ever
+// overshoot, and the bound's presence is the control that makes the two
+// prohibitions above non-vacuous, since a refusal that swallowed its message
+// would satisfy them by carrying nothing at all.
+func capacityRefusal(inFlight int) error {
+	return fmt.Errorf("attachments: %d uploads already in flight, at the bound of %d: %w",
+		inFlight, maxInFlightUploads, ErrTooManyUploads)
+}
 
 // CheckDeclaration answers whether a first chunk's declared total_chunks and
 // size can both be true. A nil error admits the transfer, and the same two
