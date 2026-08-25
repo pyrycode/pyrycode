@@ -63,13 +63,20 @@ const (
 	// the EQUALITY form bounds TotalChunks from above. A maximum chunk size
 	// yields a LOWER bound on the honest chunk count, so softening the rule to
 	// TotalChunks >= ceil(Size / bound) for tolerance caps nothing and leaves
-	// the make([][]byte, TotalChunks) allocation attack open. The equality has a
-	// price of its own: it mandates that every chunk but the last carry exactly
-	// this many raw bytes, so a client chunking at its own buffer size sends a
-	// conforming-looking transfer a strict guard rejects. And it is already
-	// false at Size == 0, where ceil(0 / bound) == 0 against the documented
-	// TotalChunks >= 1. Both consequences are #1741's to decide; this constant
-	// fixes the units and states the direction, and enforces neither.
+	// the make([][]byte, TotalChunks) allocation attack open.
+	//
+	// So the receiver requires TotalChunks == max(1, ceil(Size / bound)) — the
+	// form docs/protocol-mobile.md § Attachments, "Chunking (the sender's
+	// obligation)", already publishes as the sender's own, adopted here rather
+	// than invented. The max(1, …) is what resolves Size == 0, where a bare
+	// ceil(0 / bound) is 0 against the documented TotalChunks >= 1. The
+	// equality's price is accepted rather than softened away: it mandates that
+	// every chunk but the last carry exactly this many raw bytes, so a client
+	// chunking at its own buffer size sends a conforming-looking transfer this
+	// receiver refuses — and since the published contract already obliges that
+	// stride, no client that reads the contract is broken by it.
+	// attachments.CheckDeclaration is the enforcement point; this constant fixes
+	// the units and enforces nothing itself.
 	MaxAttachmentChunkBytes = 45000
 
 	// MaxAttachmentIDBytes bounds AttachmentID. It is a CEILING FOR THE CAP
@@ -189,10 +196,11 @@ const (
 // frame, and it is the cheapest attack this frame offers. A receiver
 // range-checks both BEFORE sizing anything, and the two numbers cross-check each
 // other for free: given #1753's published per-chunk raw bound, TotalChunks must
-// equal ceil(Size / bound), and both must be within the receiver's own limits.
-// That check is available from the FIRST chunk, before a single byte is
-// accumulated. #1741 owns the enforcement; this block is what tells #1741 the
-// check exists and is cheap.
+// equal max(1, ceil(Size / bound)), and both must be within the receiver's own
+// limits. The max(1, …) is not decoration — a bare ceil(Size / bound) is WRONG
+// at Size == 0, where it demands 0 chunks against the documented
+// TotalChunks >= 1. That check is available from the FIRST chunk, before a
+// single byte is accumulated, and attachments.CheckDeclaration is where it runs.
 //
 // AttachmentID is validated for canonical shape BEFORE it is used as a path
 // component. It resolves to a file on the host in #1743 and #1746, and a

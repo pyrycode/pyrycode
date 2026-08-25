@@ -24,12 +24,14 @@
 // the dispatch site's job (#1744), which is also the only place that knows the
 // attachment id and conn id worth logging.
 //
-// The receiver's resource bounds — how many uploads may be in flight, how many
-// bytes one may accumulate, and the first-chunk total_chunks/size cross-check
-// that refuses before allocating — are #1767's, and admission runs before an
-// Accumulator exists. What this slice bounds on its own is the KEY SPACE: the
-// range check means no accumulator ever holds more entries than the count it
-// was constructed with, and nothing here is ever sized from a claim.
+// The receiver's resource bounds are owned three separate ways, and admission
+// runs before an Accumulator exists: how many uploads may be in flight is
+// #1778's, how many bytes one may accumulate is #1777's, and the first-chunk
+// total_chunks/size cross-check that refuses before allocating is
+// CheckDeclaration, in this package. What this slice bounds on its own is the
+// KEY SPACE: the range check means no accumulator ever holds more entries than
+// the count it was constructed with, and nothing here is ever sized from a
+// claim.
 package attachments
 
 import (
@@ -89,7 +91,7 @@ var (
 // it arrive on relay's appFrameWorker, exactly one goroutine per session with
 // strict FIFO ordering and no two handlers for one conn running concurrently.
 // That is a CALLER OBLIGATION rather than a happy accident. Synchronising the
-// registry of in-flight uploads belongs to the slices that build it (#1767,
+// registry of in-flight uploads belongs to the slices that build it (#1778,
 // #1744) and to the release path (#1742), never to this type.
 type Accumulator struct {
 	// totalChunks is the transfer's declared chunk count. Latched at
@@ -124,8 +126,14 @@ type Accumulator struct {
 }
 
 // NewAccumulator latches the transfer's three declared facts and returns an
-// empty accumulator. It cannot fail: refusing an implausible declaration is the
-// admission layer's job (#1767), which runs before this type exists.
+// empty accumulator. It cannot fail: refusing an implausible declaration is
+// CheckDeclaration's job, which runs before this type exists.
+//
+// Admission runs IN FRONT OF this constructor and does not replace its own
+// safety. This function stays exported and constructible without passing
+// through CheckDeclaration — the error return is the only signal, and no
+// validated type carries the decision here — so nothing below may assume the
+// declaration was ever checked.
 //
 // The chunk map is created WITHOUT a capacity hint. On the inbound leg
 // totalChunks is an attacker-chosen integer — see the NEVER ALLOCATE FROM A
@@ -133,7 +141,8 @@ type Accumulator struct {
 // make(map[int][]byte, totalChunks) on a claimed 2^31-1 pre-allocates the
 // bucket array from a single ~60 KB frame, which is that attack wearing a shape
 // the block does not literally spell out. Storage grows with what actually
-// arrives, which is what makes this slice safe standing alone, before #1767.
+// arrives, which is what makes the hint-free map safe standing alone —
+// independently of whether the caller ran CheckDeclaration first.
 func NewAccumulator(totalChunks int, size int64, sha256 string) *Accumulator {
 	return &Accumulator{
 		totalChunks: totalChunks,
@@ -180,7 +189,7 @@ func NewAccumulator(totalChunks int, size int64, sha256 string) *Accumulator {
 // not mutate it, nor decode into a reused buffer, after Add returns. That holds
 // for today's caller because encoding/json allocates a fresh slice for each
 // base64 field. A defensive copy is deliberately not made: it would double peak
-// memory for every upload against the byte bound #1767 introduces.
+// memory for every upload against the byte bound #1777 introduces.
 func (a *Accumulator) Add(chunk protocol.AttachmentChunkPayload) error {
 	if a.rejected != nil {
 		return a.rejected
@@ -249,8 +258,11 @@ func (a *Accumulator) reject(err error) error {
 // transfer would assemble to empty bytes — a success from a declaration the
 // published contract forbids (total_chunks >= 1). It is not a fourth sentinel:
 // no index is admissible for such a transfer, so permanently incomplete is the
-// honest answer, and refusing the declaration itself is #1767's decision to
-// make once, at admission.
+// honest answer, and CheckDeclaration refuses such a declaration once, at
+// admission. That does NOT make this clause newly dead: admission runs in front
+// of this type rather than gating it, and NewAccumulator stays constructible
+// without passing through CheckDeclaration, so this clause is still the only
+// thing standing between such a caller and a vacuous success.
 //
 // The returned slice is freshly allocated on every call and sized from the SUM
 // OF THE ARRIVED CHUNK LENGTHS, never from the declared size — sizing from a
