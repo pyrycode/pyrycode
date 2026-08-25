@@ -1,15 +1,17 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781), seven slices of the
-family split from #1741/#1766: holds one inbound attachment upload's chunks in
-memory, addressed by index, refuses a stream whose framing contradicts what
-the transfer declared at admission (#1769), and — once the transfer is
-complete — checks the assembled bytes against the transfer's declared length
-and lowercase-hex sha256 before yielding a single byte (#1770). Bounds the
-retained bytes of one upload to a receiver-configured, unpublished ceiling,
-refusing at either the declared size or the accumulated total (#1777, see
-§ "Per-upload byte bound" below), and holds the uploads currently in flight in
-a conn-keyed `Registry` (#1787, see § "In-flight upload registry" below).
+Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788), eight slices
+of the family split from #1741/#1766: holds one inbound attachment upload's
+chunks in memory, addressed by index, refuses a stream whose framing
+contradicts what the transfer declared at admission (#1769), and — once the
+transfer is complete — checks the assembled bytes against the transfer's
+declared length and lowercase-hex sha256 before yielding a single byte
+(#1770). Bounds the retained bytes of one upload to a receiver-configured,
+unpublished ceiling, refusing at either the declared size or the accumulated
+total (#1777, see § "Per-upload byte bound" below), and holds the uploads
+currently in flight in a conn-keyed `Registry` (#1787), whose only exported
+way in runs both declaration checks before admitting anything (`Admit`,
+#1788, see § "In-flight upload registry" below).
 Accumulation and admission stay in-memory — no disk, no wire codes, no
 logger — but the package is no longer in-memory-only end to end: `EnsureDir`
 (#1781, see § "Directory resolution and creation" below) resolves and creates
@@ -115,8 +117,10 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
   its whole subject; `CheckDeclaration` already owns the negative-`size`
   refusal, and a second owner would make which sentinel a caller sees depend
   on call order. Both checks must run, on the first chunk, before
-  `NewAccumulator` — #1744's obligation, not either function's, since neither
-  can enforce the other's presence.
+  `NewAccumulator` — `Registry.Admit`'s obligation (#1788), not either
+  function's, since neither can enforce the other's presence: `NewAccumulator`
+  stays exported and constructible without passing through `Admit`, so a
+  second caller could still run one check or neither.
 - **The pairing is what bounds the key space, not either check alone.**
   `CheckDeclaration` bounds `total_chunks` from above, `CheckDeclaredSize`
   bounds `size` from above; together an admitted transfer declares at most
@@ -154,7 +158,7 @@ one upload's bytes, not how many uploads may exist at once. The registry that
 holds one accumulator per in-flight upload has since landed; see § "In-flight
 upload registry" below.
 
-## In-flight upload registry (#1787)
+## In-flight upload registry (#1787, #1788)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
 chunks: a map from `uploadKey{connID, attachmentID}` to the `*Accumulator` in
@@ -162,6 +166,45 @@ flight for that pair, an unexported never-replacing `insert`, comma-ok
 `Lookup`, `Release`, and an unexported `count`. Still unreachable from
 production — nothing calls it until #1744 wires the dispatch site, and #1744
 lands last in the family.
+
+`Admit` (#1788) is the registry's only exported way in: it runs
+`CheckDeclaration` then `CheckDeclaredSize` on a first chunk and, only on a
+nil answer from both, constructs the `Accumulator` and hands it to `insert`.
+A refusal returns the check's error verbatim — no wrapping, no added context
+— which is what keeps `attachmentID` and `sha256` (the two banned strings
+this entry point necessarily holds) out of an error string with no format
+string for either to enter, and keeps both sentinels reachable with
+`errors.Is`. A repeat under a held pair answers the incumbent with a nil
+error and discards the accumulator it had just built. Which check runs first
+is deliberately not a contract — a doubly-bad declaration gets whichever
+sentinel runs first, and no test may read an order out of that.
+
+- **Pairing two checks that answer different sentinels into one entry point
+  needs one fixture per check, never a doubly-bad one.** A declaration both
+  `CheckDeclaration` and `CheckDeclaredSize` would refuse reddens under
+  dropping either guard and so proves neither is load-bearing, and it would
+  additionally pin a cross-check order nothing has decided (the two
+  sentinels differ, so an order asserted here would be an accident promoted
+  to a contract). The fix used here: one row that's admissible by
+  arithmetic but oversized, one that's within the byte bound but
+  arithmetically wrong — each is a sole red for exactly one guard.
+- **`insert`'s never-replace behaviour was pinned once at the unexported
+  layer (#1787) and had to be re-pinned through the exported one.** The
+  #1787 test drives `insert` directly, so it stays green against an `Admit`
+  that released the pair before inserting, or that installed a freshly
+  built accumulator by some other route — the property a caller actually
+  depends on only holds if the exported path is tested too, not inherited
+  from coverage one layer down.
+- **Sequencing note for the rest of the family, from this ticket's security
+  review:** #1744 (the dispatch site, and this package's first production
+  caller) must not land ahead of #1786 (the in-flight entry-count cap).
+  Nothing calls this package today, so `Admit` changes no live exposure yet
+  — but the moment #1744 wires it up, `Admit` bounds one upload's bytes and
+  places no bound on how many uploads may exist, so N distinct
+  `attachment_id` values on one conn yield N entries. `Admit` is what closes
+  the key-space hole `CheckDeclaredSize`'s doc names (paired, an admitted
+  transfer declares at most 373 chunks); it does nothing about the entry
+  count, which is #1786's bound alone.
 
 - **Keyed by conn-and-attachment_id, not the bare id this doc used to sketch.**
   `docs/protocol-mobile.md` § Attachments documents `attachment_id` as "not a
@@ -187,10 +230,16 @@ lands last in the family.
   every frame for one conn, so exactly one goroutine can ever reach one
   accumulator. #1784 (routing a later chunk into an admitted upload) inherits
   this posture rather than re-deriving it.
-- `insert` stays unexported until #1788 adds the admission entry point
-  (`CheckDeclaration` + `CheckDeclaredSize`, run before construction) as the
-  only way in; exporting it now would ship a bypass #1788 would have to
-  un-ship.
+- `insert` stays unexported; `Admit` (#1788, above) is now the only way in,
+  running `CheckDeclaration` + `CheckDeclaredSize` before construction. After
+  #1787 landed with no policy on what may enter, the property this closes is
+  a fact about the package's exported surface rather than something an
+  in-package test can assert — a test can still call `insert` directly — so
+  no acceptance criterion claims it. `Registry`'s type doc's "no method of
+  `Registry` calls another" also needed correcting once `Admit` composes with
+  `insert`: the rule was re-scoped to "no method takes `mu` and then calls
+  another that takes `mu`" — `Admit` takes no lock of its own, so it doesn't
+  engage the rule, and the four locked methods still never call one another.
 
 ## Directory resolution and creation (#1781)
 

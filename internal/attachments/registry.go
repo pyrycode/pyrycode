@@ -41,12 +41,14 @@ type uploadKey struct {
 // serializes is check-the-pair-then-write-the-map.
 //
 // mu is a LEAF: never held across a call into Accumulator — not Add, not
-// Assemble — and never nested with another lock. NO METHOD OF Registry CALLS
-// ANOTHER, because sync.Mutex is not reentrant and all four take mu for their
-// whole body; a composing method inlines what it needs under one acquisition
-// instead. #1786's gate is the concrete case — count followed by insert
-// deadlocks, and "fixing" that by unlocking between them is the split lock
-// above.
+// Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
+// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the four
+// locked methods take mu for their whole body and never call one another. Admit
+// is the composing method and takes no lock of its own — its one locked step is
+// insert's single acquisition — so the rule is not engaged by it. #1786's gate
+// is what must keep it that way: a count read under one acquisition followed by
+// an insert under another does not deadlock, it is the split lock above, which
+// is why the enforcing check belongs inside the section insert already holds.
 //
 // Feeding happens OFF-LOCK: the caller takes the *Accumulator back and feeds it
 // with mu released. That is sound BECAUSE the key carries the conn — relay
@@ -90,6 +92,64 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 	}
 	r.uploads[key] = a
 	return a, true
+}
+
+// Admit is the registry's only exported way in: it runs BOTH declaration checks
+// on a first chunk and, only on a nil answer from both, constructs the
+// Accumulator from the declared numbers and hands it to insert. A refusal
+// constructs nothing and stores nothing, so the registry is left exactly as it
+// was and nothing about the refused pair is remembered — the same
+// attachment_id, re-declared correctly, is admitted immediately afterwards.
+//
+// It CONSTRUCTS NO ERROR OF ITS OWN. Each refusal is the check's error
+// verbatim, neither wrapped nor annotated, which is the strongest available form
+// of the never-log rule protocol.AttachmentChunkPayload's SECURITY block states
+// at a function that necessarily holds two of the four strings that rule bans:
+// there is no format string for attachmentID or sha256 to enter. The other two,
+// Filename and Data, are excluded structurally instead, by taking the
+// declaration as scalars the way NewAccumulator and CheckDeclaration do —
+// decoding a payload into them is the dispatch site's job (#1744). errors.Is
+// therefore reaches ErrInvalidDeclaration and ErrUploadTooLarge unchanged
+// through here, and the numbers each check wrapped survive verbatim.
+//
+// WHICH CHECK RUNS FIRST IS NOT A CONTRACT. A doubly-bad declaration gets
+// whichever sentinel runs first, and nothing has decided which that should be;
+// CheckDeclaration runs first because it mirrors the file order, so no caller
+// and no test may read an order out of it. The two are written as independent
+// guard statements rather than chained, so #1786's concurrency bound can go in
+// front of both as a pure addition.
+//
+// A NIL ERROR CERTIFIES THE TWO NUMBERS AND NOTHING ELSE. Not the
+// attachment_id, whose canonical-shape check before it may become a path
+// component is EnsureDir's (#1781), and not the declared digest, which is
+// copied into the accumulator uninspected and compared only by Assemble.
+//
+// A REPEAT under a pair already held answers the INCUMBENT with a nil error and
+// drops the accumulator just built, because insert never replaces. The caller
+// then feeds the repeat's first chunk into an accumulator latched with the FIRST
+// declaration's numbers, so Add refuses it — ErrTotalChunksMismatch when the two
+// declarations disagree on the count, ErrDuplicateIndex when they agree — and
+// that transfer is rejected. Which is the point: the numbers a transfer was
+// admitted under can never be swapped underneath bytes it already holds.
+//
+// PRECONDITION on what comes back: the accumulator is fed by ONE GOROUTINE AT A
+// TIME. Admit takes no lock of its own and hands the accumulator back off-lock,
+// and Accumulator carries no mutex by design; that is sound because the conn is
+// in the key and relay spawns exactly one appFrameWorker per session. Two Admit
+// calls for one pair hand back the SAME POINTER, so two goroutines feeding one
+// pair is a data race rather than two transfers.
+func (r *Registry) Admit(connID, attachmentID string, totalChunks int, size int64, sha256 string) (*Accumulator, error) {
+	if err := CheckDeclaration(totalChunks, size); err != nil {
+		return nil, err
+	}
+	if err := CheckDeclaredSize(size); err != nil {
+		return nil, err
+	}
+	// insert's answer, never the accumulator just constructed: on a fresh pair
+	// they are the same pointer, and on a repeat returning the constructed one
+	// double-admits.
+	upload, _ := r.insert(connID, attachmentID, NewAccumulator(totalChunks, size, sha256))
+	return upload, nil
 }
 
 // Lookup answers the transfer in flight under the pair, comma-ok. Presence comes
