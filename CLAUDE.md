@@ -133,6 +133,29 @@ Update `docs/knowledge/INDEX.md` when adding new knowledge docs.
 
 Do **not** write to `docs/lessons.md` (frozen 2026-05-11) or `docs/PROJECT-MEMORY.md` (read-only for agents). Lessons and status land in the ticket's `docs/knowledge/codebase/<N>.md` via the documentation phase.
 
+## Memory index entries
+
+The Claude Code memory index is the discovery map every dispatched agent reads at
+startup. The dispatcher keeps it small on its own, but it is only allowed to drop
+an entry whose title starts with a ticket number. Every other entry is protected
+for good, and once the protected part grows past the watermark it forces a slow,
+expensive curation pass that blocks the next dispatch.
+
+So the title decides the entry's lifetime. Pick by what the note is:
+
+- **A note about one ticket's work.** Start the title with the ticket number, as
+  in `#784 unrecognized-message arm widening`. Stars, bold and status text go
+  after the number, never in front of it. The dispatcher retires these for free
+  once they age out, and the note file itself stays on disk either way.
+- **A lesson that outlives its ticket.** Start the title with a word, as in
+  `structured clone preserves an undefined property`. These stay indexed until a
+  curation pass relocates them by hand.
+
+A star or an emoji in front of the number is what breaks this, because it stops
+the title starting with a digit and the entry is read as a permanent lesson.
+Measured on 2026-08-25: six finished ticket notes were holding 11 KB of this
+index that way, and curation fired 30 times in a single day as a result.
+
 ## Testing
 
 Tiers, cheapest first — `docs/release-tooling.md` is the runbook:
