@@ -558,17 +558,41 @@ claude's own claim about itself, bounded by the same three caps, retained by not
 nobody until #1693 — so the trade is worth revisiting when a client can first read the value and
 provenance starts to matter, not before.
 
-Each `turnevent.ModelOption` entry keeps exactly three of claude's payload keys —
-`ResolvedModel`/`Value`/`DisplayName` — mirroring `protocol.ModelOption`'s wire row (#1704)
-field-for-field, taken verbatim per #1600's rule (no lowercasing, alias expansion, date-stamping, or
-family mapping). **`description` and `supportsFastMode` are decoded nowhere**, on purpose: a field
-decoded here that nothing publishes is untrusted prose bounded, retained and carried for nothing, and
-absence from the decode target is a stronger guarantee than any test sweep — `systemInitLine`'s
-argument (#1600) carried over unchanged. Each string is bounded by its own named cap
-(`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`, all 256, per-entry worst case 768 bytes).
+Each `turnevent.ModelOption` entry keeps four of claude's payload keys —
+`ResolvedModel`/`Value`/`DisplayName` plus, since #1819, `SupportsAutoMode` — mirroring
+`protocol.ModelOption`'s wire row (#1704) field-for-field (minus `EffortLevels`, #1820's slice), taken
+verbatim per #1600's rule (no lowercasing, alias expansion, date-stamping, or family mapping).
+**`description`, `supportsEffort`, `supportsAdaptiveThinking` and `supportsFastMode` are decoded
+nowhere**, on purpose: a field decoded here that nothing publishes is untrusted prose bounded, retained
+and carried for nothing, and absence from the decode target is a stronger guarantee than any test sweep
+— `systemInitLine`'s argument (#1600) carried over unchanged. Each string is bounded by its own named
+cap (`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`, all 256, per-entry worst case 768 bytes);
+the bool needs no cap and is never named in `TruncatedFields`, since it carries none of claude's bytes.
 An empty or absent `models` array is the safe-failure direction (rung 3, no event) rather than an empty
 `ModelList` — `emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose
 the variant exists for.
+
+**`SupportsAutoMode` collapses absent, JSON `null` and an explicit `false` into one reading — `false`
+— and the reason is that this field describes a withheld permission grant, not a general-purpose
+optional bool (#1819).** "claude refused auto for this model" and "claude said nothing about auto for
+this model" drive the identical client behaviour (grey the option out), so no distinction was lost by
+choosing a plain `bool` over a `*bool`; the unsafe collapse would have been the inverse, granting on
+silence, which nothing here does. claude has never sent `false` at all — every capture arm shows four
+`true` entries and two carrying no capability key whatsoever — and `protocol.ModelOption` already made
+the same collapse (#1704), so a pointer here would have preserved a distinction only long enough for
+the mapping (#1693) to discard it. **The next field facing this question must re-derive its own
+answer rather than inherit this one**: `supportedEffortLevels` (#1820) is an empty-menu question, not a
+withheld-grant question, and those two failure shapes are not interchangeable.
+
+*Test-writing lesson: a collapse design's test can't stop at asserting the decoded value.* With absent
+and present-`false` deliberately indistinguishable downstream, a table test that only checks
+`SupportsAutoMode`'s decoded value is satisfied by a fixture builder that quietly drops the `false` key
+— proving one wire shape twice and calling it two. The fix is a guard that asserts what the built
+fixture's line *actually carries* (read back with literal key strings, `capturedModelEntries`' idiom)
+before the decoded value is inspected at all. Also worth knowing before reaching for live capture: the
+present-`false` shape exists nowhere in the tree (not the committed capture, not `fakeclaude`'s canned
+list) and has to be hand-built — a design that keeps two shapes apart can never be shown to do so by a
+fixture transcribed from real bytes when one of the two shapes has never been observed.
 
 **The entry count is capped too (#1812) — `maxModelListEntries` (10), the family's second cardinality
 bound after `maxTaskRosterEntries`.** A per-entry text cap alone leaves the list's total size a

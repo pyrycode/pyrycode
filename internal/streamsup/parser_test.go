@@ -3907,6 +3907,25 @@ func capturedModelString(t *testing.T, entry map[string]any, key string) string 
 	return value
 }
 
+// capturedModelBool pulls one claude-authored bool off a captured entry, reporting
+// separately whether the key was THERE AT ALL — the two four-key entries carry no
+// capability key, and (false, false) is how that reads. Fatal when the key is
+// present but not a bool: a capture that changed that is a capture this decode was
+// never proven against, and an expectation that quietly became false would make the
+// comparison below hold for a decode that dropped the field.
+func capturedModelBool(t *testing.T, entry map[string]any, key string) (value, present bool) {
+	t.Helper()
+	raw, ok := entry[key]
+	if !ok {
+		return false, false
+	}
+	value, ok = raw.(bool)
+	if !ok {
+		t.Fatalf("captured entry's %q is %#v, not a bool: %#v", key, raw, entry)
+	}
+	return value, true
+}
+
 // TestParser_InitializeControlResponseDecodesTheCapturedModels is #1811's capture
 // pin (AC 4). It replays each responding arm's REAL control_response line through
 // the parser and checks the emitted ModelList against the capture's own bytes, so
@@ -3949,6 +3968,26 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 				t.Fatalf("captured entries carry key counts %v, want %v (the three key sets: the eight-key "+
 					"entries, the nine-key opus, and the two four-key entries)", keyCounts, wantCounts)
 			}
+			// The same coverage half for #1819's bool: the per-entry comparison proves the
+			// TRUE reading only if some captured entry carries supportsAutoMode: true, and
+			// the ABSENT reading only if some entry carries no capability key at all. sonnet
+			// supplies the first today and haiku the second. Without this guard a re-capture
+			// in which every entry carried the key would silently narrow what the loop
+			// proves while the loop stayed green.
+			var sawAutoModeTrue, sawAutoModeAbsent bool
+			for _, entry := range want {
+				switch value, present := capturedModelBool(t, entry, "supportsAutoMode"); {
+				case present && value:
+					sawAutoModeTrue = true
+				case !present:
+					sawAutoModeAbsent = true
+				}
+			}
+			if !sawAutoModeTrue || !sawAutoModeAbsent {
+				t.Fatalf("captured entries supply supportsAutoMode: true on some entry = %v and an entry "+
+					"carrying no capability key = %v; both are needed for the comparison below to prove "+
+					"both readings (sonnet and haiku are today's suppliers)", sawAutoModeTrue, sawAutoModeAbsent)
+			}
 
 			events := collectEvents(capturedInitializeLine(t, arm))
 			if len(events) != 1 {
@@ -3982,6 +4021,14 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 				}
 				if wantDisplay := capturedModelString(t, want[i], "displayName"); got.DisplayName != wantDisplay {
 					t.Errorf("entry %d DisplayName: got %q, want %q (verbatim, no repair)", i, got.DisplayName, wantDisplay)
+				}
+				// Derived from the capture's bytes, never transcribed: an entry carrying no
+				// capability key at all reads false, which is the same reading a present
+				// false would get — see turnevent.ModelOption.SupportsAutoMode for why that
+				// collapse is deliberate.
+				if wantAuto, _ := capturedModelBool(t, want[i], "supportsAutoMode"); got.SupportsAutoMode != wantAuto {
+					t.Errorf("entry %d SupportsAutoMode: got %v, want %v (claude's key verbatim; absent reads false)",
+						i, got.SupportsAutoMode, wantAuto)
 				}
 				// nil rather than an empty non-nil slice, and this arm proves the UNTRUNCATED
 				// path: no captured field is anywhere near 256 bytes, so a report here would
@@ -4054,6 +4101,151 @@ func modelEntryFixture(resolvedModel, value, displayName string) map[string]any 
 	}
 }
 
+// modelEntryWithFixture returns a COPY of one entry carrying an extra claude key.
+// modelEntryFixture's three-parameter signature is deliberately not widened — it
+// has many call sites and none of them wants a fourth argument. The value is `any`
+// so a row can put a non-bool where a bool belongs, which is the undecodable rung's
+// input.
+func modelEntryWithFixture(entry map[string]any, key string, value any) map[string]any {
+	out := make(map[string]any, len(entry)+1)
+	for k, v := range entry {
+		out[k] = v
+	}
+	out[key] = value
+	return out
+}
+
+// fixtureAutoMode reports what entry i of a BUILT line actually carries under the
+// literal supportsAutoMode key, read back out of that line's own bytes.
+//
+// It decodes with literal key strings rather than through modelOptionLine, for
+// capturedModelEntries' reason: an expectation read through the production decode
+// target would follow a wrong json tag green. Here it does a second job — with a
+// plain bool on the daemon's type, an absent key and a present false are
+// indistinguishable BY DESIGN downstream, so a table that only inspected the
+// decoded value would be satisfied by a fixture builder that quietly dropped the
+// false key, proving one shape twice and calling it two.
+func fixtureAutoMode(t *testing.T, line string, i int) (raw json.RawMessage, present bool) {
+	t.Helper()
+	var decoded struct {
+		Response struct {
+			Response struct {
+				Models []map[string]json.RawMessage `json:"models"`
+			} `json:"response"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+		t.Fatalf("decoding the built line with literal keys: %v", err)
+	}
+	entries := decoded.Response.Response.Models
+	if i >= len(entries) {
+		t.Fatalf("the built line carries %d entries, want one at index %d", len(entries), i)
+	}
+	raw, present = entries[i]["supportsAutoMode"]
+	return raw, present
+}
+
+// TestParser_ModelListSupportsAutoModeReadsClaudesKey is #1819's AC 2: an absent
+// key, a JSON null and an explicit false all read as false, and a present true
+// reads as true. The choice is stated at turnevent.ModelOption.SupportsAutoMode;
+// this is the test that makes it non-vacuous.
+//
+// The present-FALSE row is HAND-BUILT because claude never sends that shape — the
+// committed capture carries four true entries and two carrying no capability key,
+// and internal/e2e/internal/fakeclaude's canned list cans exactly those same two.
+// So a design keeping absent and false apart could not be shown to keep them apart
+// by any fixture in the tree, which is half of why the collapse is the answer.
+//
+// Non-vacuity comes from the wantWire assertion, which checks what the built line
+// ACTUALLY carries before the decode is inspected: absent and present-false differ
+// only on the wire under this design, so a builder that dropped the key would
+// otherwise turn two rows into one.
+//
+// Do NOT go looking for a mutant that separates absent from present-false. None
+// exists under a plain bool, and that is the design's content rather than a
+// coverage gap. The true row is the one with sole redness under a json-tag typo or
+// an always-false assignment; the other three pin the collapse.
+func TestParser_ModelListSupportsAutoModeReadsClaudesKey(t *testing.T) {
+	t.Parallel()
+
+	base := modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")
+	tests := []struct {
+		name  string
+		entry map[string]any
+		// wantWire is the raw JSON the built line must carry under the literal key,
+		// "" meaning the entry must not carry the key at all.
+		wantWire string
+		want     bool
+	}{
+		{
+			name:     "present and true",
+			entry:    modelEntryWithFixture(base, "supportsAutoMode", true),
+			wantWire: "true",
+			want:     true,
+		},
+		{
+			name:     "present and FALSE — hand-built, claude sends this nowhere",
+			entry:    modelEntryWithFixture(base, "supportsAutoMode", false),
+			wantWire: "false",
+			want:     false,
+		},
+		{
+			// The capture's four-key shape: the entry stops after the mapped strings.
+			name:     "absent",
+			entry:    base,
+			wantWire: "",
+			want:     false,
+		},
+		{
+			// encoding/json documents unmarshalling a null into a non-pointer Go value as
+			// a no-op producing no error, so this decodes cleanly rather than taking the
+			// undecodable rung — a third spelling of the same reading.
+			name:     "present and null",
+			entry:    modelEntryWithFixture(base, "supportsAutoMode", nil),
+			wantWire: "null",
+			want:     false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			line := modelListLineFixture(t, "success", []map[string]any{tt.entry})
+
+			raw, present := fixtureAutoMode(t, line, 0)
+			switch {
+			case tt.wantWire == "" && present:
+				t.Fatalf("the row declares an ABSENT key but the built line carries %s; the fixture is "+
+					"proving a shape the row is not about", raw)
+			case tt.wantWire != "" && !present:
+				t.Fatalf("the row declares supportsAutoMode: %s but the built line carries no such key",
+					tt.wantWire)
+			case tt.wantWire != "" && string(raw) != tt.wantWire:
+				t.Fatalf("the built line carries supportsAutoMode: %s, want %s", raw, tt.wantWire)
+			}
+
+			events := collectEvents(line)
+			if len(events) != 1 {
+				t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+			}
+			list, ok := events[0].(turnevent.ModelList)
+			if !ok {
+				t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+			}
+			if len(list.Models) != 1 {
+				t.Fatalf("ModelList carries %d entries, want 1", len(list.Models))
+			}
+			if got := list.Models[0].SupportsAutoMode; got != tt.want {
+				t.Errorf("SupportsAutoMode: got %v, want %v for a wire value of %q", got, tt.want, tt.wantWire)
+			}
+			// A bool is never cut, so it is never named here — asserted rather than left
+			// to the capture pin, since this is the only test that feeds the key at all.
+			if got := list.Models[0].TruncatedFields; got != nil {
+				t.Errorf("TruncatedFields: got %v, want nil — a bool has no length to cut", got)
+			}
+		})
+	}
+}
+
 // modelEntriesFixture builds n entries, each identifiable by its resolvedModel so
 // tail-truncation is PINNED rather than assumed. rosterEntriesFixture's shape.
 func modelEntriesFixture(n int) []map[string]any {
@@ -4077,6 +4269,12 @@ func modelEntriesFixture(n int) []map[string]any {
 // the subtype half of the gate is decorative: every other rejected row is already
 // excluded by having no usable array, so that row alone fails when the subtype
 // comparison is deleted.
+//
+// The wantAttrs comparison below is also what covers #1819's "no log line carries
+// decoded content": it is an EXACT map equality, so any attribute added to
+// logControlResponse — supportsAutoMode included — turns every row here red. That
+// half needs no assertion of its own, and this note exists so the coverage is
+// visible rather than assumed.
 func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 	t.Parallel()
 
@@ -4099,6 +4297,25 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 		{
 			name:       "an entry's value is not a string",
 			line:       modelListLineFixture(t, "success", []map[string]any{{"value": 5}}),
+			wantReason: "undecodable",
+		},
+		{
+			// #1819: the bool fails the WHOLE-LINE decode exactly as a non-string value
+			// does, by the same *json.UnmarshalTypeError, so no partial list is emitted.
+			// "true" is the load-bearing shape here — a hand-written client or a future
+			// claude sending the bool as a string is the realistic way this arrives.
+			name:       "an entry's supportsAutoMode is a string",
+			line:       modelListLineFixture(t, "success", []map[string]any{modelEntryWithFixture(entry, "supportsAutoMode", "true")}),
+			wantReason: "undecodable",
+		},
+		{
+			name:       "an entry's supportsAutoMode is a number",
+			line:       modelListLineFixture(t, "success", []map[string]any{modelEntryWithFixture(entry, "supportsAutoMode", 1)}),
+			wantReason: "undecodable",
+		},
+		{
+			name:       "an entry's supportsAutoMode is an object",
+			line:       modelListLineFixture(t, "success", []map[string]any{modelEntryWithFixture(entry, "supportsAutoMode", map[string]any{})}),
 			wantReason: "undecodable",
 		},
 		{
