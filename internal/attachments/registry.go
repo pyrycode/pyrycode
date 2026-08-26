@@ -1,6 +1,11 @@
 package attachments
 
-import "sync"
+import (
+	"errors"
+	"sync"
+
+	"github.com/pyrycode/pyrycode/internal/protocol"
+)
 
 // uploadKey identifies one in-flight upload by the conn its chunks arrived on
 // TOGETHER WITH the attachment_id the transfer declared, never by the id alone.
@@ -47,10 +52,16 @@ type uploadKey struct {
 // Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
 // CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the five
 // locked methods — Admit, insert, Lookup, Release and count — take mu for their
-// whole body and never call one another. insertLocked is the one method here
-// that takes no lock, which is what lets Admit and insert run ONE critical
-// section rather than two copies free to drift; the Locked suffix is this
-// repo's signal for a caller-holds-the-lock body, as in sessions' saveLocked.
+// whole body and never call one another. TWO methods here take no lock, for
+// OPPOSITE reasons. insertLocked runs with mu held BY ITS CALLER, which is what
+// lets Admit and insert run ONE critical section rather than two copies free to
+// drift; the Locked suffix is this repo's signal for a caller-holds-the-lock
+// body, as in sessions' saveLocked. Deliver holds mu at NO POINT: it composes
+// Lookup and Release, each of which takes it for its own whole body, and feeds
+// the accumulator between them off-lock. That composer breaches nothing above —
+// "no method takes mu and then calls another that takes it" is satisfied by a
+// method that takes it never — and it is what keeps the feed off-lock while the
+// entry accounting stays inside this type.
 // The maxInFlightUploads gate keeps it that way: a count read under one
 // acquisition followed by an insert under another does not deadlock, it is the
 // split lock above, which is why the enforcing check lives inside the section
@@ -250,7 +261,7 @@ func (r *Registry) Admit(connID, attachmentID string, totalChunks int, size int6
 
 // Lookup answers the transfer in flight under the pair, comma-ok. Presence comes
 // from map-key membership and never from the stored value, and the bool is what
-// #1784 turns into "chunk for an unknown transfer".
+// Deliver turns into "chunk for an unknown transfer", ErrUnknownUpload.
 func (r *Registry) Lookup(connID, attachmentID string) (*Accumulator, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -260,13 +271,141 @@ func (r *Registry) Lookup(connID, attachmentID string) (*Accumulator, bool) {
 
 // Release removes exactly the pair's entry, leaving another conn's transfer of
 // the same attachment_id untouched; releasing a pair the registry does not hold
-// is a no-op. It returns nothing because #1784 releases what it just looked up
+// is a no-op. It returns nothing because Deliver releases what it just looked up
 // and #1742 decides only when to call it, so a presence answer would invite a
 // caller to branch on it outside the lock.
 func (r *Registry) Release(connID, attachmentID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.uploads, uploadKey{connID: connID, attachmentID: attachmentID})
+}
+
+// ErrUnknownUpload reports a chunk for a conn-and-attachment_id pair the
+// registry does not hold — never admitted, or admitted and already over.
+// Deliver is the one place that raises it, BARE rather than wrapped, and callers
+// distinguish it with errors.Is rather than by comparing error strings.
+//
+// It lives HERE, beside the method that raises it, rather than in either
+// package-wide var block: accumulator.go's opens "Sentinel errors returned by
+// Add and Assemble" and this one is returned by neither, and admission.go's
+// three all refuse a DECLARATION at admission, where this one refuses a chunk
+// for a transfer that was never admitted or is already released. storage.go is
+// the precedent for a sentinel living with its raiser.
+//
+// ErrIncomplete is the near miss a reader might reach for and is its OPPOSITE:
+// that one says a live transfer is waiting for more chunks, this one says there
+// is no transfer at all. It is distinct from every other sentinel this package
+// publishes, which is a property TestRegistry_DeliverUnheldPair_RefusesAndCreatesNothing
+// asserts over the whole set rather than over a sample of it.
+//
+// WHICH WIRE CODE IT MAPS TO IS #1744's, and no candidate is named here. None of
+// the attachment.* codes internal/protocol publishes today means "no live
+// transfer under this pair" — CodeAttachmentNotFound is the retrieval leg's, and
+// its message is deliberately static — so whether this folds into an existing
+// code or wants one of its own is that ticket's decision, and pre-empting it
+// here would publish a mapping this package deliberately does not own.
+var ErrUnknownUpload = errors.New("attachments: no upload in flight for this conn and attachment_id")
+
+// Deliver routes one chunk to the transfer in flight for its pair and answers
+// the transfer's assembled bytes once they are complete and verified. It is the
+// counterpart to Admit: Admit takes the slot, this gives it back, so
+// maxInFlightUploads bounds LIVE transfers rather than counting a lifetime
+// quota. Named for the custodial register the rest of this type uses (Admit,
+// Lookup, Release) rather than Add, which is Accumulator's and would be
+// ambiguous at every call site across two types in one package.
+//
+// The steps, in the order the body runs them:
+//
+//  1. look the pair up. On a miss, ErrUnknownUpload and NOTHING IS STORED —
+//     Lookup creates no entry and neither does this path.
+//  2. feed the accumulator off-lock. On ANY non-nil answer from Add, release the
+//     pair and return that error verbatim.
+//  3. assemble. Keep the entry when — and ONLY when — the answer is
+//     ErrIncomplete, and return it verbatim.
+//  4. every other outcome releases, the nil-error one included: the assembled
+//     bytes on success, the latched refusal on an integrity mismatch.
+//
+// THE KEEP CASE IS THE ALLOW-LIST AND THAT POLARITY IS THE CONTRACT. Written
+// the other way — enumerate the refusals that release — a further latching
+// answer added to Assemble later would silently leak a slot per corrupt
+// transfer, which is exactly the lockout this method exists to remove. Same
+// polarity on the Add leg: every non-nil answer from Add latches, so err != nil
+// is the release condition rather than a list of four sentinels.
+//
+// THE KEY COMES OUT OF THE CHUNK, not from a second parameter beside it. Two ids
+// in one call can disagree, and a caller passing the wrong one would route this
+// chunk's bytes into a DIFFERENT transfer's accumulator with nothing downstream
+// to catch it, since Add reads neither the id nor the declared size or digest.
+// One id in play forecloses that structurally, and it is what turns Add's claim
+// that a foreign chunk cannot reach it from a caller obligation into a property
+// of this package. connID stays a scalar because it is not on the wire: it is
+// the receiver's own name for the conn the frame arrived on, and it is the half
+// of the key that makes a client-chosen attachment_id safe to key on at all.
+//
+// ASSEMBLE RUNS AFTER EVERY ACCEPTED CHUNK, not only the last, and that is cheap
+// by construction: its completion check answers ErrIncomplete before allocating
+// or hashing anything, so only the completing chunk pays for the copy and the
+// digest.
+//
+// It TAKES mu AT NO POINT. Lookup and Release each take it for their own whole
+// body and the accumulator is fed between them with the lock released, so three
+// acquisitions per delivered chunk and mu stays a LEAF — never held across Add
+// or Assemble, which is the rule Registry's type doc states and which this
+// method must not be the first to break. The gap between the look-up and the
+// release is not a TOCTOU hole: the conn is in the key and relay spawns exactly
+// one appFrameWorker per session, so exactly one goroutine can reach any one
+// accumulator. That is the same precondition Admit already hands its accumulator
+// back under, inherited here rather than re-derived.
+//
+// It CONSTRUCTS NO ERROR OF ITS OWN: ErrUnknownUpload bare, everything else
+// another function's verbatim. There is no format string in this body, which is
+// how the never-log rule protocol.AttachmentChunkPayload's SECURITY block states
+// stays structural at the one function in this package that holds ALL FOUR of
+// the strings that rule bans — AttachmentID, Filename, SHA256 and Data. There is
+// nothing to add anyway: the pair is the caller's own two values.
+//
+// Three consequences worth stating, because each is a question a reader would
+// otherwise have to re-derive:
+//
+//   - reject's LATCH STAYS LOAD-BEARING and must not be touched. Release
+//     recovers the ENTRY; reject recovers the MEMORY, at the moment of refusal,
+//     and is the only thing that does. A refused accumulator is simply no longer
+//     reachable through the registry once this method has released it.
+//   - A CHUNK ARRIVING AFTER A REFUSAL ANSWERS ErrUnknownUpload, not the latched
+//     sentinel, and that is correct: the latch exists so one LIVE transfer
+//     cannot produce two contradictory diagnoses of its own bytes, and after
+//     release there is no transfer left to diagnose. "No such transfer" is a
+//     statement about the registry, not a second verdict on the bytes.
+//   - A RE-ADMITTED PAIR IS A NEW TRANSFER and a straggler from the old one
+//     cannot corrupt it. The same attachment_id may be admitted again the moment
+//     its slot is free — no blacklist — so a late chunk can land in the
+//     successor's accumulator, and because Assemble compares the declared size
+//     and digest against the WHOLE assembled slice, the only reachable outcome
+//     is that the client's own new transfer fails its own integrity check.
+//     Cross-client contamination is foreclosed a level up, by the conn being in
+//     the key.
+//
+// Expiry of a stalled upload is #1742's and nothing here anticipates it: until
+// it lands, a client that admits a transfer and then stops holds its slot. When
+// it does land, an entry can vanish between this method's look-up and its
+// release, and both halves are already safe — Release on a pair the registry no
+// longer holds is a documented no-op, and a look-up that misses answers
+// ErrUnknownUpload, the honest answer for a transfer that has been reaped.
+func (r *Registry) Deliver(connID string, chunk protocol.AttachmentChunkPayload) ([]byte, error) {
+	upload, ok := r.Lookup(connID, chunk.AttachmentID)
+	if !ok {
+		return nil, ErrUnknownUpload
+	}
+	if err := upload.Add(chunk); err != nil {
+		r.Release(connID, chunk.AttachmentID)
+		return nil, err
+	}
+	out, err := upload.Assemble()
+	if errors.Is(err, ErrIncomplete) {
+		return nil, err
+	}
+	r.Release(connID, chunk.AttachmentID)
+	return out, err
 }
 
 // count is how many uploads are in flight, which is exactly the set of live

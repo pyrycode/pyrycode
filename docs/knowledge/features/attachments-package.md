@@ -1,7 +1,8 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
 Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782,
-#1795, #1796), eleven slices of the family split from #1741/#1766: holds one inbound
+#1795, #1796, #1784), twelve slices of the family split from #1741/#1766:
+holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
 and — once the transfer is complete — checks the assembled bytes against the
@@ -13,7 +14,10 @@ and holds the uploads currently in flight in a conn-keyed `Registry` (#1787),
 whose only exported way in runs both declaration checks, the incumbent
 look-up, and a daemon-wide entry-count ceiling under one lock acquisition
 before admitting anything (`Admit`, #1788, #1795, #1796, see § "In-flight
-upload registry" below).
+upload registry" below). `Registry.Deliver` (#1784) is the other half of that
+mechanism: it routes a later chunk to the admitted entry and gives the slot
+back on completion or refusal, so `maxInFlightUploads` bounds *live* transfers
+rather than a lifetime quota.
 Accumulation and admission stay in-memory — no disk, no wire codes, no
 logger — but the package is no longer in-memory-only end to end: `EnsureDir`
 (#1781, see § "Directory resolution and creation" below) resolves and creates
@@ -220,11 +224,45 @@ fixture exercises a held pair while the registry is at
 construction" was true of the code as shipped, but a true-by-construction
 claim about ordering is exactly the kind of property a later one-statement
 reordering can silently invert — construction is not a substitute for a
-test defending it against future edits. This gap shipped as a code-review
-SHOULD FIX, not blocking, with the fix (fill to the bound, `Admit` a filler
-id under a held pair, assert the incumbent comes back with `count()`
-unchanged) pointed at whichever of #1784 or #1744 next touches this
-look-up/gate order.
+test defending it against future edits. **#1784 discharged this gap**: the
+same mutant, re-run unfiltered against the same package, now reddens exactly
+one assertion — the repeat-`Admit`-under-a-held-pair clause of
+`TestRegistry_DeliverAtTheBound_ChargesAHeldPairOnlyOnce` — and nothing else,
+confirming the fix landed as a sole red rather than incidentally alongside
+other coverage.
+
+**`Registry.Deliver` (#1784)** is the routing half `Lookup` and `Release`
+were primitives for: given a conn and a chunk, it looks the `{conn,
+attachment_id}` pair up, feeds the chunk to the accumulator's `Add` off-lock,
+then asks `Assemble` — releasing the entry on every outcome except
+`ErrIncomplete`, which is the one answer that keeps it. A miss refuses with
+`ErrUnknownUpload` (below) and creates nothing. Three separate acquisitions
+of `mu` per delivered chunk (look up, release), never one held across `Add`
+or `Assemble` — the same off-lock-feed posture `Admit` already hands its
+accumulator back under, safe for the same reason: the conn is in the key and
+`appFrameWorker` serialises one conn's frames, so exactly one goroutine can
+ever reach one accumulator. `Deliver` still has no production caller;
+#1744 is expected to call it with the same chunk it just fed to `Admit`,
+looking the pair back up rather than feeding `Admit`'s returned accumulator
+directly — the latter would bypass every release this ticket added and
+re-open the lockout for single-chunk transfers.
+
+**A structural no-format-string claim still needs a test that puts a format
+string back.** Code review's one SHOULD FIX on #1784 (not blocking): `Deliver`
+is the only function in this package holding all four strings
+`AttachmentChunkPayload`'s SECURITY block bans from messages — `AttachmentID`,
+`Filename`, `SHA256`, `Data` — and its doc block argues the never-log rule is
+*structural* because it formats nothing. Measured, that argument is unpinned:
+wrapping the unknown-pair miss or the `Add` refusal in a `fmt.Errorf` that
+interpolates the client's `attachment_id` (and, on the `Add` leg, the declared
+digest) is **green across all 147 tests**, because the AC 5 fixture asserts
+sentinel identity via `errors.Is`, which a wrap still satisfies. Same shape as
+the gate-ordering gap just above: a property guaranteed by the current code is
+not covered until a fixture tries to violate it. Parked for whichever of #1744
+or the documentation phase next touches `Deliver` — the fix is three lines,
+asserting `err.Error()` carries neither the id nor the digest, the idiom
+`TestRegistry_AdmitAtTheBound_RefusesANewPair` already uses for the capacity
+refusal.
 
 Both checks run **ahead of** the incumbent look-up, so a repeat under a held
 pair answers the incumbent only when its declaration is admissible; an
@@ -427,8 +465,8 @@ production caller yet; #1744 wires the dispatch site.
 
 ## Sentinels and discard semantics
 
-Seven exported sentinels, `errors.New("attachments: …")` house style, in
-three families plus one non-discarding outlier. Six discard the transfer
+Eight exported sentinels, `errors.New("attachments: …")` house style, in
+three families plus two non-discarding outliers. Six discard the transfer
 (latched on first refusal — every later `Add` and `Assemble` returns the
 identical wrapped error, and the held chunk bytes are dropped at the moment
 of refusal so a poisoned accumulator holds no memory past that point).
@@ -445,6 +483,7 @@ resumable answer a later chunk can turn into bytes.
 | `ErrUploadTooLarge` (#1777) | resource | yes (from `Add`); n/a (from `CheckDeclaredSize` — no `Accumulator` exists yet) |
 | `ErrTooManyUploads` (#1796) | resource | n/a — refused before any `Accumulator` exists, by `Registry`'s admission gate rather than `Add`/`Assemble` |
 | `ErrIncomplete` | — | no |
+| `ErrUnknownUpload` (#1784) | — | n/a — no `Accumulator` is looked up for the pair; refused by `Registry.Deliver` itself before either `Add` or `Assemble` runs |
 
 `ErrUploadTooLarge` is the one sentinel not scoped to `accumulator.go`'s var
 block, whose opening sentence reads "Sentinel errors returned by `Add` and
@@ -681,6 +720,28 @@ surfaced:
   be built to pass every *other* property first, or its redness proves
   nothing about the one row it was meant to isolate.
 
+- **A mutant that drops a release can redden a test whose *subject* is
+  something else, if that test happens to end its fixture through the
+  dropped path** (#1784). The mutant that skips `Release` after an `Add`
+  refusal was predicted to redden only the four `Add`-refusal table rows;
+  measured, it also reddened the held-pair-at-the-bound test, whose closing
+  assertion re-delivers a chunk to prove the first one landed in the
+  incumbent and, as scaffolding rather than as its point, ends that transfer
+  through an `Add` refusal. The prediction was a subset, so nothing was
+  falsified, but a sole-redness claim written from a test's *name* will
+  understate itself wherever the test's fixture walks through the mutated
+  path on its way to proving something else. Predict a mutant's red set from
+  what each test *executes*, not from what it is named after.
+- **A "distinct from every other sentinel in the package" claim needs the
+  package's sentinel list to be a fixture, not a hand-picked sample of near
+  misses** (#1784, `packageSentinels` in `registry_test.go`, all eight across
+  `accumulator.go`/`admission.go`/`storage.go`). Three chosen-by-eye
+  candidates would leave the quantifier ("every") unproved while reading as
+  coverage; looping `!errors.Is(err, s)` over the actual declared set is what
+  proves it. The cost is real and one-directional: a sentinel added later and
+  not appended to that slice weakens the claim silently, with no test going
+  red to flag the drift.
+
 All three properties #1769 shipped without a test pin are now pinned,
 landed alongside #1770's own checks rather than left for a third mutation
 pass to rediscover: `Assemble` on a declared `total_chunks == 0` answering
@@ -734,9 +795,10 @@ hash, fetch the blob"), which is a requirement from
   `CodeAttachmentIntegrityFailed`, and `ErrTooManyUploads` to
   `CodeAttachmentTooManyUploads`, all via `errors.Is`. Now unblocked and free
   to land — #1796 discharged the family's sequencing constraint that this
-  ticket not go first (see § "In-flight upload registry" above) — and is the
-  first production caller of this package.
-- **#1784** — routes a later chunk into an admitted upload. Also the
-  currently-named place to close the coverage gap code review found in
-  #1796: no test drives a held pair while the registry is at
-  `maxInFlightUploads` (see § "In-flight upload registry" above).
+  ticket not go first, and #1784 shipped the routing surface (`Registry.Deliver`)
+  it is expected to call (see § "In-flight upload registry" above) — and is the
+  first production caller of this package. Two things are parked for whichever
+  of #1744 or the documentation phase next touches `Deliver`: which wire code
+  `ErrUnknownUpload` maps to (#1784 deliberately named no candidate), and the
+  never-log claim on `Deliver`'s doc block, which code review found unpinned
+  by any fixture (see § "In-flight upload registry" above).

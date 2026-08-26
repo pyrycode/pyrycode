@@ -34,6 +34,40 @@ func boundChunk(i int) protocol.AttachmentChunkPayload {
 	return testChunk(i, testBoundTotal, testBoundFixture[start:end])
 }
 
+// withAttachmentID returns the chunk with its AttachmentID set, leaving the
+// caller's copy untouched — the parameter is a value, so the shared fixtures
+// testChunk and boundChunk build are not disturbed by it. It is the ONE place
+// an attachment_id enters a chunk in this file, which is what lets testChunk go
+// on leaving that field zero: that absence is testChunk's own statement that Add
+// reads none of those fields, and Deliver is the only surface here that reads
+// this one.
+func withAttachmentID(chunk protocol.AttachmentChunkPayload, attachmentID string) protocol.AttachmentChunkPayload {
+	chunk.AttachmentID = attachmentID
+	return chunk
+}
+
+// packageSentinels names every sentinel this package exports — accumulator.go's
+// var block, admission.go's three and storage.go's three. AC 5 asks that the
+// unknown-pair refusal be distinct from every existing sentinel, which is a
+// claim over a SET and is asserted over that set rather than over a sample of
+// it: three hand-picked near misses would leave the quantifier unproved while
+// looking like coverage. A sentinel added later and not listed here weakens the
+// claim silently, which is the one maintenance cost this shape carries.
+var packageSentinels = []error{
+	ErrTotalChunksMismatch,
+	ErrIndexOutOfRange,
+	ErrDuplicateIndex,
+	ErrSizeMismatch,
+	ErrDigestMismatch,
+	ErrIncomplete,
+	ErrInvalidDeclaration,
+	ErrUploadTooLarge,
+	ErrTooManyUploads,
+	ErrInvalidID,
+	ErrNotContained,
+	ErrWriteFailed,
+}
+
 // The concurrency tests below coordinate with channels rather than sync
 // primitives: after this slice sync is imported by registry.go and by no other
 // file in this package, which is what makes that an absence check with a live
@@ -831,5 +865,354 @@ func TestRegistry_ConcurrentAdmitAtTheBound_AdmitsExactlyTheFreeSlots(t *testing
 		if n := r.count(); n != maxInFlightUploads {
 			t.Fatalf("round %d: count() = %d, want %d", round, n, maxInFlightUploads)
 		}
+	}
+}
+
+// TestRegistry_DeliverAtTheBound_ChargesAHeldPairOnlyOnce is AC 1, and both its
+// clauses run against a registry sitting EXACTLY at maxInFlightUploads with the
+// subject pair among the held entries — which is the whole point, since a bound
+// that a held pair is charged against a second time is a bound that locks a live
+// transfer out of its own accumulator.
+//
+// Clause (b) is also the coverage gap #1796 shipped with and code review
+// measured: an overlay mutant hoisting the capacity check ahead of the incumbent
+// look-up in insertLocked passed green across the whole package, because no
+// fixture drove a held pair while the registry was full. A gate guaranteed by the
+// code's shape is not covered until a test tries to violate the shape, and this
+// is that test. The repeat's declaration is the incumbent's VERBATIM and must
+// stay admissible: a refused repeat answers its own declaration sentinel, which
+// TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent pins and which
+// would prove nothing about the gate order.
+func TestRegistry_DeliverAtTheBound_ChargesAHeldPairOnlyOnce(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	fillRegistry(t, r, maxInFlightUploads-1)
+
+	// The bound declaration, so the subject's transfer cannot finish in one
+	// chunk and the pair is still held when clause (b) runs.
+	incumbent, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of the subject pair into the last free slot: %v", err)
+	}
+	if n := r.count(); n != maxInFlightUploads {
+		t.Fatalf("count() with the subject admitted = %d, want %d", n, maxInFlightUploads)
+	}
+
+	// (a) A chunk for the held pair reaches that pair's accumulator rather than
+	// meeting the bound: the transfer is 373 chunks, so one chunk answers the
+	// resumable sentinel and not the concurrency one.
+	out, err := r.Deliver(testConnA, withAttachmentID(boundChunk(0), testAttachmentID))
+	if !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of a chunk for a held pair at the bound: error = %v, want one wrapping %v", err, ErrIncomplete)
+	}
+	if errors.Is(err, ErrTooManyUploads) {
+		t.Errorf("Deliver of a chunk for a HELD pair answered %v, want the held pair's own transfer", ErrTooManyUploads)
+	}
+	if out != nil {
+		t.Errorf("Deliver of an incomplete transfer returned %d bytes, want none", len(out))
+	}
+	if n := r.count(); n != maxInFlightUploads {
+		t.Errorf("count() after delivering to a held pair = %d, want %d", n, maxInFlightUploads)
+	}
+
+	// (b) A repeat declaration for the held pair answers the incumbent rather
+	// than the bound, and takes no second slot.
+	repeat, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of a repeat declaration for a held pair at the bound: %v", err)
+	}
+	if repeat != incumbent {
+		t.Errorf("Admit of a repeat for a held pair at the bound answered an accumulator other than the incumbent")
+	}
+	if n := r.count(); n != maxInFlightUploads {
+		t.Errorf("count() after the repeat = %d, want %d", n, maxInFlightUploads)
+	}
+
+	// The chunk clause (a) delivered went into the incumbent and survived the
+	// repeat: a second delivery of index 0 is a duplicate rather than a fresh
+	// chunk. It also ends the transfer, which the closing count assertion reads.
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(0), testAttachmentID)); !errors.Is(err, ErrDuplicateIndex) {
+		t.Fatalf("Deliver of index 0 a second time: error = %v, want one wrapping %v", err, ErrDuplicateIndex)
+	}
+	if n := r.count(); n != maxInFlightUploads-1 {
+		t.Errorf("count() after the refusal ended the subject's transfer = %d, want %d", n, maxInFlightUploads-1)
+	}
+}
+
+// TestRegistry_Deliver_EndOfAnUploadReturnsTheSlot is AC 2 and AC 3 in one
+// table: every way an upload ENDS here, and the identical slot accounting after
+// each. Every row runs with the registry at the bound, so "the slot came back"
+// is asserted the way a client observes it — a fresh attachment_id admitted
+// immediately afterwards, which is refused outright when nothing was released.
+//
+// The six latching sentinels are one table rather than six tests because the
+// assertion after the refusal is the same for all of them: reject latches and
+// drops the bytes wherever it is called from, and this surface's job is only to
+// stop holding the entry. The ErrUploadTooLarge row is the Add form of that
+// sentinel; the CheckDeclaredSize form is refused inside Admit before an
+// Accumulator exists and never reaches here.
+func TestRegistry_Deliver_EndOfAnUploadReturnsTheSlot(t *testing.T) {
+	t.Parallel()
+
+	const freshAttachmentID = "att-fresh"
+
+	tests := []struct {
+		name        string
+		totalChunks int
+		size        int64
+		sha256      string
+		chunks      []protocol.AttachmentChunkPayload
+		want        error  // nil for the completing row
+		wantBytes   []byte // non-nil only for the completing row
+	}{
+		{
+			name:        "completes",
+			totalChunks: 1,
+			size:        int64(len(testFixture)),
+			sha256:      testFixtureDigest,
+			chunks:      []protocol.AttachmentChunkPayload{testChunk(0, 1, testFixture)},
+			wantBytes:   testFixture,
+		},
+		{
+			// The chunk's own total disagrees with the count the transfer was
+			// admitted under, which Add refuses ahead of the range check.
+			name:        "total_chunks disagrees",
+			totalChunks: 1,
+			size:        int64(len(testFixture)),
+			sha256:      testFixtureDigest,
+			chunks:      []protocol.AttachmentChunkPayload{testChunk(0, 2, testFixture)},
+			want:        ErrTotalChunksMismatch,
+		},
+		{
+			// The chunk carries the DECLARED total, so the total check ahead of
+			// the range check passes and the range check is what refuses it.
+			name:        "index out of range",
+			totalChunks: 1,
+			size:        int64(len(testFixture)),
+			sha256:      testFixtureDigest,
+			chunks:      []protocol.AttachmentChunkPayload{testChunk(1, 1, testFixture)},
+			want:        ErrIndexOutOfRange,
+		},
+		{
+			// The bound declaration, and it cannot be shrunk: a duplicate index
+			// is only reachable on a transfer a first chunk does not complete.
+			name:        "duplicate index",
+			totalChunks: testBoundTotal,
+			size:        maxUploadBytes,
+			sha256:      testBoundFixtureDigest,
+			chunks:      []protocol.AttachmentChunkPayload{boundChunk(0), boundChunk(0)},
+			want:        ErrDuplicateIndex,
+		},
+		{
+			// The bound declaration for the same reason: the byte bound is only
+			// crossable by a transfer declared large enough to be admitted at
+			// all. The first chunk carries the whole fixture, which Add ACCEPTS
+			// — its rung is > and not >= — and the one-byte second chunk is what
+			// crosses.
+			name:        "chunk crosses the byte bound",
+			totalChunks: testBoundTotal,
+			size:        maxUploadBytes,
+			sha256:      testBoundFixtureDigest,
+			chunks: []protocol.AttachmentChunkPayload{
+				testChunk(0, testBoundTotal, testBoundFixture),
+				testChunk(1, testBoundTotal, []byte("z")),
+			},
+			want: ErrUploadTooLarge,
+		},
+		{
+			// A size testFixture does not have, and one CheckDeclaration still
+			// admits at a count of 1, so the refusal comes from Assemble's
+			// length comparison rather than from admission.
+			name:        "assembled length wrong",
+			totalChunks: 1,
+			size:        int64(len(testFixture)) + 1,
+			sha256:      testFixtureDigest,
+			chunks:      []protocol.AttachmentChunkPayload{testChunk(0, 1, testFixture)},
+			want:        ErrSizeMismatch,
+		},
+		{
+			// The declared LENGTH is right, so the length comparison passes and
+			// the digest comparison is what refuses it.
+			name:        "digest wrong",
+			totalChunks: 1,
+			size:        int64(len(testFixture)),
+			sha256:      testEmptyDigest,
+			chunks:      []protocol.AttachmentChunkPayload{testChunk(0, 1, testFixture)},
+			want:        ErrDigestMismatch,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			fillRegistry(t, r, maxInFlightUploads-1)
+			if _, err := r.Admit(testConnA, testAttachmentID, tt.totalChunks, tt.size, tt.sha256); err != nil {
+				t.Fatalf("Admit of the subject pair into the last free slot: %v", err)
+			}
+			if n := r.count(); n != maxInFlightUploads {
+				t.Fatalf("count() with the subject admitted = %d, want %d", n, maxInFlightUploads)
+			}
+
+			// Every chunk but the last must be ACCEPTED — nil or the resumable
+			// sentinel — so the row's verdict is the last delivery's alone.
+			for i, chunk := range tt.chunks[:len(tt.chunks)-1] {
+				_, err := r.Deliver(testConnA, withAttachmentID(chunk, testAttachmentID))
+				if err != nil && !errors.Is(err, ErrIncomplete) {
+					t.Fatalf("Deliver of chunk %d, which the row expects to be accepted: %v", i, err)
+				}
+			}
+
+			out, err := r.Deliver(testConnA, withAttachmentID(tt.chunks[len(tt.chunks)-1], testAttachmentID))
+			switch {
+			case tt.want == nil && err != nil:
+				t.Fatalf("Deliver of the completing chunk: %v", err)
+			case tt.want != nil && !errors.Is(err, tt.want):
+				t.Fatalf("Deliver of the ending chunk: error = %v, want one wrapping %v", err, tt.want)
+			}
+			if tt.wantBytes == nil {
+				if out != nil {
+					t.Errorf("Deliver of a refused transfer returned %d bytes, want none", len(out))
+				}
+			} else if !bytes.Equal(out, tt.wantBytes) {
+				t.Errorf("Deliver of the completing chunk returned %q, want %q", out, tt.wantBytes)
+			}
+
+			// The slot came back, asserted three ways: the count, the pair's
+			// absence, and the client-observable one — a FRESH attachment_id
+			// admitted into the freed slot, using the filler declaration.
+			if n := r.count(); n != maxInFlightUploads-1 {
+				t.Fatalf("count() after the upload ended = %d, want %d", n, maxInFlightUploads-1)
+			}
+			if _, ok := r.Lookup(testConnA, testAttachmentID); ok {
+				t.Errorf("Lookup after the upload ended reported the pair present")
+			}
+			if _, err := r.Admit(testConnA, freshAttachmentID, 1, 0, testFixtureDigest); err != nil {
+				t.Fatalf("Admit of a fresh attachment_id into the freed slot: %v", err)
+			}
+			if n := r.count(); n != maxInFlightUploads {
+				t.Errorf("count() after the freed slot was refilled = %d, want %d", n, maxInFlightUploads)
+			}
+		})
+	}
+}
+
+// TestRegistry_DeliverIncomplete_KeepsTheEntry is AC 4, and it is the suite's
+// only end-to-end statement through Deliver — which is why it earns the 16 MiB
+// fixture the ends-an-upload table's completing row deliberately does not spend.
+// The completing round trip is what proves all 373 chunks reached ONE
+// accumulator rather than 373 fresh ones, and the pointer identity is what
+// proves the registry did not swap it mid-transfer.
+func TestRegistry_DeliverIncomplete_KeepsTheEntry(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	admitted, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(0), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of chunk 0 of %d: error = %v, want one wrapping %v", testBoundTotal, err, ErrIncomplete)
+	}
+	if n := r.count(); n != 1 {
+		t.Fatalf("count() after an incomplete delivery = %d, want 1", n)
+	}
+	// Pointer identity, not field equality: an accumulator built from the same
+	// declaration compares equal field by field and holds no chunks.
+	if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != admitted {
+		t.Fatalf("Lookup after an incomplete delivery answered (%p, %v), want the accumulator Admit returned", got, ok)
+	}
+
+	// A later chunk still reaches the same accumulator.
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(1), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of chunk 1 of %d: error = %v, want one wrapping %v", testBoundTotal, err, ErrIncomplete)
+	}
+	if n := r.count(); n != 1 {
+		t.Fatalf("count() after a second incomplete delivery = %d, want 1", n)
+	}
+
+	var out []byte
+	for i := 2; i < testBoundTotal; i++ {
+		got, err := r.Deliver(testConnA, withAttachmentID(boundChunk(i), testAttachmentID))
+		if i < testBoundTotal-1 {
+			if !errors.Is(err, ErrIncomplete) {
+				t.Fatalf("Deliver of chunk %d of %d: error = %v, want one wrapping %v", i, testBoundTotal, err, ErrIncomplete)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Deliver of the completing chunk %d of %d: %v", i, testBoundTotal, err)
+		}
+		out = got
+	}
+	if !bytes.Equal(out, testBoundFixture) {
+		t.Errorf("Deliver of the completing chunk returned %d bytes that differ from the fixture, want its %d bytes", len(out), len(testBoundFixture))
+	}
+	if n := r.count(); n != 0 {
+		t.Errorf("count() after the transfer completed = %d, want 0", n)
+	}
+}
+
+// TestRegistry_DeliverUnheldPair_RefusesAndCreatesNothing is AC 5. The
+// cross-conn row is the only place this method exercises the conn half of the
+// key, and it is what makes the presence answer safe to give at all: a caller
+// can only ever probe transfers on its own conn.
+func TestRegistry_DeliverUnheldPair_RefusesAndCreatesNothing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		connID       string
+		attachmentID string
+	}{
+		{
+			name:         "attachment_id never admitted on this conn",
+			connID:       testConnA,
+			attachmentID: "att-never-admitted",
+		},
+		{
+			// Held, but by the other conn.
+			name:         "held attachment_id delivered on another conn",
+			connID:       testConnB,
+			attachmentID: testAttachmentID,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r := NewRegistry()
+			if _, err := r.Admit(testConnA, testAttachmentID, 1, int64(len(testFixture)), testFixtureDigest); err != nil {
+				t.Fatalf("Admit of the subject pair: %v", err)
+			}
+
+			out, err := r.Deliver(tt.connID, withAttachmentID(testChunk(0, 1, testFixture), tt.attachmentID))
+			if !errors.Is(err, ErrUnknownUpload) {
+				t.Fatalf("Deliver for a pair the registry does not hold: error = %v, want one wrapping %v", err, ErrUnknownUpload)
+			}
+			if out != nil {
+				t.Errorf("Deliver for an unheld pair returned %d bytes, want none", len(out))
+			}
+
+			// The refusal is distinct from every sentinel this package already
+			// publishes — the claim is over the SET, so it is asserted over the
+			// set rather than over a sample of it.
+			for _, sentinel := range packageSentinels {
+				if errors.Is(err, sentinel) {
+					t.Errorf("the unknown-pair refusal also wraps %v, want a sentinel distinct from every existing one", sentinel)
+				}
+			}
+
+			// Nothing was created: the delivered pair is still absent and the
+			// registry holds exactly the one entry it held before.
+			if _, ok := r.Lookup(tt.connID, tt.attachmentID); ok {
+				t.Errorf("Lookup after an unknown-pair refusal reported the delivered pair present")
+			}
+			if n := r.count(); n != 1 {
+				t.Errorf("count() after an unknown-pair refusal = %d, want 1", n)
+			}
+		})
 	}
 }
