@@ -524,6 +524,101 @@ type ModelAnnounced struct {
 	Truncated bool
 }
 
+// ModelOption is one entry of a ModelList: the list's element type, NOT an
+// Event, so it carries no marker — BackgroundTask's shape, for BackgroundTask's
+// reason. Its three claude-authored strings are exactly the three
+// protocol.ModelOption carries (#1704), in that type's declaration order, and
+// nothing invented.
+//
+// Two per-entry keys the captured reply also carries are deliberately absent, and
+// the ABSENCE is the guarantee: description — the longest string in the capture at
+// 66 bytes, and the most tempting to carry — and supportsFastMode, which only one
+// of the six entries has. Neither has a named consumer and protocol.ModelOption
+// carries neither at all, so decoding either would be untrusted prose bounded,
+// retained and carried for nothing. That is the argument streamsup's
+// systemInitLine makes about its own twenty-one omissions, and a field never
+// declared on the producer's decode target cannot leak whatever a later sweep
+// forgets to check. The two capability keys the richer entries do carry
+// (supportedEffortLevels, supportsAutoMode) are #1809's slice, not an omission.
+type ModelOption struct {
+	// ResolvedModel is what Value resolves to RIGHT NOW: the concrete identifier,
+	// and the field a consumer wanting a dated one wants. VERBATIM, per
+	// ModelAnnounced.Model's rule — no lowercasing, no alias expansion, no
+	// date-stamping, no family mapping, and no lookup against any published model
+	// list.
+	//
+	// It need not be dated and need not appear in any published list: the capture's
+	// six entries resolve to claude-sonnet-5, claude-opus-5, claude-fable-5 and
+	// claude-haiku-4-5-20251001, only the last of which carries a date.
+	ResolvedModel string
+	// Value is the argument you PASS to select this model, and it is NOT a dated
+	// identifier: an alias (sonnet), a bracketed variant (claude-fable-5[1m]), or
+	// default. A consumer cannot derive a family by splitting it on "-", and cannot
+	// assume it round-trips — see protocol.ModelOption.Value for the inbound gap and
+	// for why internal/relay's validModel is not to be widened to close it.
+	Value string
+	// DisplayName is claude's human LABEL for the entry ("Default (recommended)",
+	// "Haiku 4.5"). PROSE, not an identifier: safe to RENDER as inert text, never a
+	// key to match on. The daemon bounds it and does not sanitize it — no
+	// control-character or terminal-escape stripping happens on this path — so it
+	// stays untrusted, model-influenced text and the render boundary owing the
+	// sanitization is the CLIENT's, exactly as protocol.ModelOption's SECURITY
+	// paragraph states for the same three strings.
+	DisplayName string
+	// TruncatedFields names THIS entry's fields the producer cut to fit their caps,
+	// in declaration order, using the DAEMON's snake_case names: "resolved_model",
+	// "value", "display_name". No name is translated — claude's camelCase keys and
+	// these fields agree on which field they mean. nil when nothing was cut, never
+	// an empty non-nil slice; BackgroundTask.TruncatedFields is the convention's
+	// single source.
+	TruncatedFields []string
+}
+
+// ModelList is claude's inventory of selectable models: the models array of the
+// initialize reply (#1811), which the daemon solicits once per child with
+// streamsup's WriteInitialize and claude answers on a control_response line.
+//
+// It exists because it is the only thing that answers WHAT CAN BE RUN, and it
+// answers it BEFORE the first turn — where ModelAnnounced reports what one turn
+// got, this reports the whole set a client may choose from, with each alias's
+// current resolution alongside it.
+//
+// An Event rather than parser-held session state, and the deciding fact is
+// protocol.ModelListPayload's own doc: its ConversationID is supplied at MAPPING
+// time, and mapping time is turnbridge.MapEvent, whose input is an Event. Session
+// state would oblige the publishing slice (#1693) to build a second parser→relay
+// path beside the one every other interactive payload already uses.
+//
+// NOTHING PUBLISHES IT YET. turnbridge.MapEvent's default drops the variant until
+// #1693, so no client can read a false zero in the window — which is also why the
+// producer takes the false NEGATIVE on every ambiguous line rather than emitting a
+// list it did not observe.
+//
+// It opens and closes no turn, exactly as the background-task variants do not, and
+// it is not even per-turn: one initialize exchange per child produces one of
+// these. cmd/pyry's turnMarkFor answers it correctly by construction — its opener
+// set is a whitelist and its default is turnMarkNone.
+//
+// claude's session_id is deliberately not a field, for BackgroundTaskStarted's
+// reason: claude's session identity is NOT the daemon's conversation identity, and
+// like every variant here this one carries no conversation identity at all — the
+// bridge injects that.
+type ModelList struct {
+	// Models is the inventory in claude's own order, unchanged: no ranking is
+	// invented, its ordering semantics being unobserved. Never empty — the
+	// producer's gate does not emit on an empty array, because a ModelList naming no
+	// model cannot serve the purpose this variant exists for.
+	//
+	// Each entry's three strings are bounded by the producer AT CONSTRUCTION
+	// (streamsup's maxModelResolved / maxModelValue / maxModelDisplayName), so an
+	// oversized payload never enters the event stream, a queue, or a log. The COUNT
+	// is NOT bounded in this slice, and that is a statement rather than an omission:
+	// a per-entry text cap alone leaves the total a function of a number claude
+	// chooses, and the cardinality cap plus the count of what it drops are #1812's
+	// deliverable. Until it lands, len(Models) is claude's to choose.
+	Models []ModelOption
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -631,6 +726,7 @@ func (BackgroundTaskRoster) isTurnEvent()  {}
 func (ThinkingProgress) isTurnEvent()      {}
 func (RateLimited) isTurnEvent()           {}
 func (ModelAnnounced) isTurnEvent()        {}
+func (ModelList) isTurnEvent()             {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}

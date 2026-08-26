@@ -1,12 +1,14 @@
 package streamsup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -3705,6 +3707,13 @@ const controlResponseRequestIDFixture = "interrupt-1500-fixture-id"
 // control channel's ENVELOPE; the inner response payload is request-specific and
 // unmeasured for interrupt, which is why one row carries none and one carries a
 // plausible one and both must be answered identically.
+//
+// CORRECTED 2026-08-26 (#1811): the rows still assert that no ack produces an
+// EVENT, which is the property #1500 bought and this ticket does not touch. What
+// changed is the record: each row now names the daemon-authored `reason` its rung
+// logs, and the NAK row is no longer "consumed indistinguishably" — it is consumed
+// with no event, and distinguished in the log. The rows keep asserting the ATTRS
+// EXACTLY, so the content-free rule still fails here the day a value is appended.
 func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 	t.Parallel()
 	const ackID = controlResponseRequestIDFixture
@@ -3712,34 +3721,35 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 		name string
 		line string
 		// wantKind empty means the line must produce NO event at all and exactly one
-		// consume record; non-empty means exactly one Unrecognized carrying it, and
-		// NO consume record.
-		wantKind string
-		why      string
+		// consume record carrying wantReason; non-empty means exactly one Unrecognized
+		// carrying it, and NO consume record.
+		wantKind   string
+		wantReason string
+		why        string
 	}{
 		{
-			name:     "the interrupt ack, in the captured envelope",
-			line:     `{"type":"control_response","response":{"subtype":"success","request_id":"` + ackID + `"}}`,
-			wantKind: "",
-			why:      "the daemon solicited this line itself; surfacing it puts a false parser-gap alarm on every interrupt",
+			name:       "the interrupt ack, in the captured envelope",
+			line:       `{"type":"control_response","response":{"subtype":"success","request_id":"` + ackID + `"}}`,
+			wantReason: "ack",
+			why:        "the daemon solicited this line itself; surfacing it puts a false parser-gap alarm on every interrupt",
 		},
 		{
-			name:     "an ack carrying an inner response payload",
-			line:     `{"type":"control_response","response":{"subtype":"success","request_id":"` + ackID + `","response":{"mode":"default"}}}`,
-			wantKind: "",
-			why:      "nothing below the top-level type is read, so an ack with an inner payload and one without are the same line to this arm",
+			name:       "an ack carrying an inner response payload",
+			line:       `{"type":"control_response","response":{"subtype":"success","request_id":"` + ackID + `","response":{"mode":"default"}}}`,
+			wantReason: "ack",
+			why:        "the set_permission_mode success, verbatim from the probe capture: an inner payload carrying no models array is still an ack",
 		},
 		{
-			name:     "a NAK, consumed indistinguishably (#1500, deliberate)",
-			line:     `{"type":"control_response","response":{"subtype":"error","request_id":"` + ackID + `","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"}}`,
-			wantKind: "",
-			why:      "only success has ever been observed for an interrupt; no branch is built for a failure that does not exist, and this row pins that the arm keys on the top-level type ALONE",
+			name:       "a NAK, consumed with no event and named in the log (#1811)",
+			line:       `{"type":"control_response","response":{"subtype":"error","request_id":"` + ackID + `","error":"Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"}}`,
+			wantReason: "nak",
+			why:        "a response reporting failure carries no payload the daemon reads, and #1500's gap — a NAK logged identically to a success — closed when the decode target it was traded against arrived",
 		},
 		{
-			name:     "an ack with no response object at all",
-			line:     `{"type":"control_response"}`,
-			wantKind: "",
-			why:      "the arm performs no decode beyond the whole-line one that already ran, so there is nothing here to fail",
+			name:       "an ack with no response object at all",
+			line:       `{"type":"control_response"}`,
+			wantReason: "nak",
+			why:        "an absent wrapper leaves the subtype empty, which is not success, so the total classification lands it on the nak rung rather than falling through",
 		},
 		{
 			name:     "THE DISCRIMINATOR: a genuinely new top-level type still surfaces",
@@ -3767,10 +3777,15 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 					t.Fatalf("records with message %q: got %d, want 1 (%s) — all records: %+v",
 						controlResponseConsumeMsgFixture, len(consumes), tt.why, rec.all())
 				}
-				// Type only. Never the line, never the request_id — the package's
-				// standing content-free logging rule, held here by the same
-				// exactly-these-attrs shape the harness-nudge and rate-limit drops use.
-				wantAttrs := map[string]string{"type": "control_response"}
+				// Type, a daemon keyword and a count. Never the line, never the
+				// request_id, never the NAK's error string — the package's standing
+				// content-free logging rule, held here by the same exactly-these-attrs
+				// shape the harness-nudge and rate-limit drops use.
+				wantAttrs := map[string]string{
+					"type":   "control_response",
+					"reason": tt.wantReason,
+					"models": "0",
+				}
 				if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 					t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
 				}
@@ -3812,5 +3827,527 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// modelFieldCapFixtures record the three model-entry caps as LITERALS,
+// deliberately not as maxModelResolved / maxModelValue / maxModelDisplayName. Same
+// rule as taskStartedCapCheat: a fixture built from the constant it validates
+// asserts nothing about the number — halve the constant and every row below would
+// follow it green. These literals are what make such an edit go RED.
+//
+// Three literals for three constants even though all three are 256, mirroring the
+// production split: they bound different fields for different reasons, and sharing
+// one fixture would let a change to one silently retarget the others' proof.
+const (
+	modelResolvedCapFixture    = 256
+	modelValueCapFixture       = 256
+	modelDisplayNameCapFixture = 256
+)
+
+// capturedInitializeLine returns one arm's control_response line exactly as claude
+// put it on the wire, compacted onto a single line for the parser's line-oriented
+// input. Nothing is synthesized: the bytes are the capture's own
+// control_responses[0], so the wrapper's subtype, its request_id and the whole
+// fourteen-key initialize payload reach consumeLine as claude wrote them.
+//
+// Compaction is the only transformation, and it is a property of the FILE rather
+// than of the wire: the capture is stored pretty-printed, and claude's own line
+// carried no interior newline (a stream-json line cannot).
+func capturedInitializeLine(t *testing.T, arm string) string {
+	t.Helper()
+	rec, payload := capturedInitialize(t, arm)
+	if payload == nil {
+		t.Fatalf("arm %q captured no initialize response, so there is no line to replay", arm)
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, rec.ControlResponses[0]); err != nil {
+		t.Fatalf("compacting the captured control_response line: %v", err)
+	}
+	return compact.String()
+}
+
+// capturedModelEntries reads one arm's models array as claude's own key/value maps.
+//
+// It decodes with LITERAL key strings rather than through modelOptionLine, and that
+// is the point: an expectation read through the production decode target would
+// follow a wrong json tag green, and one transcribed into the test as string
+// literals would pin the transcription instead of the decode. These maps are the
+// capture's own bytes, keyed by the names claude actually sends.
+func capturedModelEntries(t *testing.T, arm string) []map[string]any {
+	t.Helper()
+	var decoded struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(capturedInitializePayload(t, arm), &decoded); err != nil {
+		t.Fatalf("decoding models out of arm %q's initialize payload: %v", arm, err)
+	}
+	return decoded.Models
+}
+
+// capturedModelString pulls one claude-authored string off a captured entry,
+// failing when the key is absent or not a string — an expectation that quietly
+// became "" would make the comparison below hold for a decode that dropped the
+// field.
+func capturedModelString(t *testing.T, entry map[string]any, key string) string {
+	t.Helper()
+	value, ok := entry[key].(string)
+	if !ok {
+		t.Fatalf("captured entry has no string %q: %#v", key, entry)
+	}
+	return value
+}
+
+// TestParser_InitializeControlResponseDecodesTheCapturedModels is #1811's capture
+// pin (AC 4). It replays each responding arm's REAL control_response line through
+// the parser and checks the emitted ModelList against the capture's own bytes, so
+// what turns it red is a claude-side shape change rather than a drifting fixture.
+//
+// It runs inside `make check`: the e2e_realclaude build tag governs that package's
+// Go FILES, not its testdata, which is #1810's whole reason for existing.
+//
+// The key-count assertion is the coverage half. claude sends three distinct key
+// sets — eight keys, nine for opus (its extra supportsFastMode, which this decode
+// must IGNORE rather than trip on), and four for the two entries carrying no
+// capability keys at all — and all three must produce a complete ModelOption. A
+// four-key entry decoding to a dropped or empty row is the realistic failure, and
+// counting the keys is what makes the row's provenance visible instead of assumed.
+func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) {
+	t.Parallel()
+
+	for _, arm := range initCaptureArms {
+		if arm == initCaptureArmNoRequest {
+			continue
+		}
+		t.Run(initCaptureArmLabel(arm), func(t *testing.T) {
+			t.Parallel()
+
+			want := capturedModelEntries(t, arm)
+			// The capture's own shape, asserted before it is used as an expectation: six
+			// entries whose key counts are exactly the three sets. A re-capture that
+			// changed either fails HERE, naming the arm, instead of silently narrowing
+			// what the comparison below proves.
+			if len(want) != 6 {
+				t.Fatalf("the capture carries %d model entries, want 6; a re-capture changed claude's "+
+					"reply and this decode was proven against the six-entry shape", len(want))
+			}
+			keyCounts := make([]int, 0, len(want))
+			for _, entry := range want {
+				keyCounts = append(keyCounts, len(entry))
+			}
+			slices.Sort(keyCounts)
+			if wantCounts := []int{4, 4, 8, 8, 8, 9}; !slices.Equal(keyCounts, wantCounts) {
+				t.Fatalf("captured entries carry key counts %v, want %v (the three key sets: the eight-key "+
+					"entries, the nine-key opus, and the two four-key entries)", keyCounts, wantCounts)
+			}
+
+			events := collectEvents(capturedInitializeLine(t, arm))
+			if len(events) != 1 {
+				t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+			}
+			list, ok := events[0].(turnevent.ModelList)
+			if !ok {
+				t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+			}
+			if len(list.Models) != len(want) {
+				t.Fatalf("ModelList carries %d entries, want %d — one per array element, in claude's own order",
+					len(list.Models), len(want))
+			}
+
+			for i, got := range list.Models {
+				// Byte-for-byte against the capture, in claude's own order: index i on both
+				// sides is what pins the order as well as the values.
+				if wantResolved := capturedModelString(t, want[i], "resolvedModel"); got.ResolvedModel != wantResolved {
+					t.Errorf("entry %d ResolvedModel: got %q, want %q (verbatim, no repair)", i, got.ResolvedModel, wantResolved)
+				}
+				if wantValue := capturedModelString(t, want[i], "value"); got.Value != wantValue {
+					t.Errorf("entry %d Value: got %q, want %q (verbatim, no repair)", i, got.Value, wantValue)
+				}
+				if wantDisplay := capturedModelString(t, want[i], "displayName"); got.DisplayName != wantDisplay {
+					t.Errorf("entry %d DisplayName: got %q, want %q (verbatim, no repair)", i, got.DisplayName, wantDisplay)
+				}
+				// nil rather than an empty non-nil slice, and this arm proves the UNTRUNCATED
+				// path: no captured field is anywhere near 256 bytes, so a report here would
+				// mean the cap fired on a value that fits.
+				if got.TruncatedFields != nil {
+					t.Errorf("entry %d TruncatedFields: got %v, want nil — no captured field approaches a cap",
+						i, got.TruncatedFields)
+				}
+			}
+		})
+	}
+}
+
+// TestParser_InitializeControlResponseAbsentPayloadEmitsNothing is AC 3's absent
+// case, and its fixture is COMMITTED rather than synthetic: initCaptureArmNoRequest
+// is the arm of #1763's measurement that sent no initialize request, so its record
+// reads back as an absent payload.
+//
+// The two halves are asserted separately because neither implies the other: the
+// reader handing back nil is a fact about the capture, and a control_response
+// carrying no inner response emitting nothing is a fact about the parser.
+func TestParser_InitializeControlResponseAbsentPayloadEmitsNothing(t *testing.T) {
+	t.Parallel()
+
+	rec, payload := capturedInitialize(t, initCaptureArmNoRequest)
+	if payload != nil {
+		t.Fatalf("arm %q is the committed absent-payload fixture; the reader returned %d bytes",
+			initCaptureArmNoRequest, len(payload))
+	}
+	if len(rec.ControlResponses) != 0 {
+		t.Fatalf("arm %q carries %d control_responses, so it is no longer the absent fixture",
+			initCaptureArmNoRequest, len(rec.ControlResponses))
+	}
+
+	if events := collectEvents(`{"type":"control_response","response":{"subtype":"success","request_id":"` +
+		controlResponseRequestIDFixture + `"}}`); events != nil {
+		t.Errorf("a control_response with no inner response emitted %#v, want nothing", events)
+	}
+}
+
+// modelListLineFixture builds a control_response line around one models array. It
+// invents NO field structure — the wrapper is the probe capture's and the entry
+// keys are the initialize capture's — and exists only to vary what the capture
+// cannot supply: a malformed shape, and values long enough to reach a cap.
+//
+// models is `any` rather than []map[string]string so a row can put a number or an
+// object where the array belongs, which is exactly what the undecodable rung needs.
+func modelListLineFixture(t *testing.T, subtype string, models any) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    subtype,
+			"request_id": controlResponseRequestIDFixture,
+			"response":   map[string]any{"models": models},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshalling the control_response fixture: %v", err)
+	}
+	return string(line)
+}
+
+// modelEntryFixture builds one entry of that array from the three mapped keys.
+func modelEntryFixture(resolvedModel, value, displayName string) map[string]any {
+	return map[string]any{
+		"resolvedModel": resolvedModel,
+		"value":         value,
+		"displayName":   displayName,
+	}
+}
+
+// TestParser_InitializeControlResponseRejectBranches is AC 3: every malformed or
+// non-initialize control_response is dropped with one debug record and produces
+// NOTHING — never an event, and in particular never an Unrecognized, which would
+// put a line the daemon does recognise in front of the live zero-unrecognized gate.
+//
+// The load-bearing row is "a NAK carrying a well-formed models array". Without it
+// the subtype half of the gate is decorative: every other rejected row is already
+// excluded by having no usable array, so that row alone fails when the subtype
+// comparison is deleted.
+func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
+	t.Parallel()
+
+	entry := modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")
+	tests := []struct {
+		name       string
+		line       string
+		wantReason string
+	}{
+		{
+			name:       "models is a number",
+			line:       modelListLineFixture(t, "success", 5),
+			wantReason: "undecodable",
+		},
+		{
+			name:       "models is an object",
+			line:       modelListLineFixture(t, "success", map[string]any{}),
+			wantReason: "undecodable",
+		},
+		{
+			name:       "an entry's value is not a string",
+			line:       modelListLineFixture(t, "success", []map[string]any{{"value": 5}}),
+			wantReason: "undecodable",
+		},
+		{
+			name:       "the inner response is a string",
+			line:       `{"type":"control_response","response":{"subtype":"success","response":"text"}}`,
+			wantReason: "undecodable",
+		},
+		{
+			name:       "the outer response is a string",
+			line:       `{"type":"control_response","response":"text"}`,
+			wantReason: "undecodable",
+		},
+		{
+			name:       "THE SUBTYPE HALF: a NAK carrying a well-formed models array",
+			line:       modelListLineFixture(t, "error", []map[string]any{entry}),
+			wantReason: "nak",
+		},
+		{
+			name:       "a subtype claude invents next year",
+			line:       modelListLineFixture(t, "a_subtype_invented_next_year", []map[string]any{entry}),
+			wantReason: "nak",
+		},
+		{
+			name:       "models is null",
+			line:       modelListLineFixture(t, "success", nil),
+			wantReason: "ack",
+		},
+		{
+			name:       "models is an empty array",
+			line:       modelListLineFixture(t, "success", []map[string]any{}),
+			wantReason: "ack",
+		},
+		{
+			name:       "models is absent",
+			line:       `{"type":"control_response","response":{"subtype":"success","response":{"mode":"default"}}}`,
+			wantReason: "ack",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &logRecorder{}
+			var events []turnevent.Event
+			p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+			if _, err := p.Write([]byte(tt.line + "\n")); err != nil {
+				t.Fatalf("Write err = %v, want nil", err)
+			}
+
+			if len(events) != 0 {
+				t.Errorf("event count: got %d, want 0 — %#v", len(events), events)
+			}
+			consumes := rec.withMessage(controlResponseConsumeMsgFixture)
+			if len(consumes) != 1 {
+				t.Fatalf("records with message %q: got %d, want 1 — all records: %+v",
+					controlResponseConsumeMsgFixture, len(consumes), rec.all())
+			}
+			wantAttrs := map[string]string{
+				"type":   "control_response",
+				"reason": tt.wantReason,
+				"models": "0",
+			}
+			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
+				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
+			}
+		})
+	}
+}
+
+// TestParser_ModelListFieldsAreCapped is AC 2: each of the three strings is bounded
+// by its OWN named cap, and the report names the fields that were cut on the entry
+// they were cut on.
+//
+// The fixtures are synthesized because the capture cannot supply them: its longest
+// values are 25, 18 and 21 bytes, so nothing in it comes within an order of
+// magnitude of a cap.
+func TestParser_ModelListFieldsAreCapped(t *testing.T) {
+	t.Parallel()
+
+	// A rune whose UTF-8 encoding is two bytes, so a cut landing inside it deletes a
+	// partial rune. Five of the capture's six descriptions carry non-ASCII, which is
+	// what makes this a live path rather than a corner case.
+	const twoByteRune = "é"
+	overCap := func(limit int) string { return strings.Repeat("a", limit+1) }
+
+	tests := []struct {
+		name string
+		// entries are claude's per-entry maps, in the order the line carries them.
+		entries []map[string]any
+		// wantCut is the expected TruncatedFields per entry, index for index.
+		wantCut [][]string
+		// wantLen, when non-zero for an index/field, pins the cut value's byte length.
+		check func(t *testing.T, models []turnevent.ModelOption)
+	}{
+		{
+			name:    "resolved_model alone",
+			entries: []map[string]any{modelEntryFixture(overCap(modelResolvedCapFixture), "sonnet", "Sonnet")},
+			wantCut: [][]string{{"resolved_model"}},
+		},
+		{
+			name:    "value alone",
+			entries: []map[string]any{modelEntryFixture("claude-sonnet-5", overCap(modelValueCapFixture), "Sonnet")},
+			wantCut: [][]string{{"value"}},
+		},
+		{
+			name:    "display_name alone",
+			entries: []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", overCap(modelDisplayNameCapFixture))},
+			wantCut: [][]string{{"display_name"}},
+		},
+		{
+			name: "two fields on one entry, reported in DECLARATION order",
+			entries: []map[string]any{modelEntryFixture(
+				overCap(modelResolvedCapFixture), "sonnet", overCap(modelDisplayNameCapFixture))},
+			// resolved_model before display_name whatever order the JSON carries them in:
+			// the order is fixed by the producer's sequential bound calls, not by the line.
+			wantCut: [][]string{{"resolved_model", "display_name"}},
+		},
+		{
+			name:    "nothing cut reports nil, not an empty slice",
+			entries: []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")},
+			wantCut: [][]string{nil},
+		},
+		{
+			name: "exactly at the cap is NOT truncated",
+			entries: []map[string]any{modelEntryFixture(
+				strings.Repeat("a", modelResolvedCapFixture),
+				strings.Repeat("b", modelValueCapFixture),
+				strings.Repeat("c", modelDisplayNameCapFixture))},
+			wantCut: [][]string{nil},
+			check: func(t *testing.T, models []turnevent.ModelOption) {
+				if got := len(models[0].ResolvedModel); got != modelResolvedCapFixture {
+					t.Errorf("a value of exactly the cap came back %d bytes, want %d — truncateField's boundary is <=",
+						got, modelResolvedCapFixture)
+				}
+			},
+		},
+		{
+			name: "a cut landing mid-rune deletes the partial rune",
+			entries: []map[string]any{modelEntryFixture(
+				strings.Repeat("a", modelResolvedCapFixture-1)+twoByteRune, "sonnet", "Sonnet")},
+			wantCut: [][]string{{"resolved_model"}},
+			check: func(t *testing.T, models []turnevent.ModelOption) {
+				got := models[0].ResolvedModel
+				// 255, not 256: the cut lands inside the two-byte rune and the partial rune
+				// is DELETED rather than replaced, so a cut value can come out 1-3 bytes
+				// under the limit — and the report still names the field.
+				if len(got) != modelResolvedCapFixture-1 {
+					t.Errorf("mid-rune cut came back %d bytes, want %d", len(got), modelResolvedCapFixture-1)
+				}
+				if !utf8.ValidString(got) {
+					t.Errorf("mid-rune cut left invalid UTF-8: %q", got)
+				}
+			},
+		},
+		{
+			name: "a cut on one entry does not appear on the entries AFTER it",
+			entries: []map[string]any{
+				modelEntryFixture(overCap(modelResolvedCapFixture), "sonnet", "Sonnet"),
+				modelEntryFixture("claude-opus-5", "opus", "Opus"),
+				modelEntryFixture("claude-haiku-4-5", overCap(modelValueCapFixture), "Haiku"),
+			},
+			// Per-entry accumulation, not a shared slice — and the order is what makes
+			// this row load-bearing. A `cut` hoisted out of the loop leaks FORWARD, never
+			// backward: the entry that was cut is built before the next one appends, so a
+			// clean entry placed AFTER a cut one is the only arrangement that catches it.
+			// Entry 3 then also names entry 1's field, which is the second half.
+			wantCut: [][]string{{"resolved_model"}, nil, {"value"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			events := collectEvents(modelListLineFixture(t, "success", tt.entries))
+			if len(events) != 1 {
+				t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+			}
+			list, ok := events[0].(turnevent.ModelList)
+			if !ok {
+				t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+			}
+			if len(list.Models) != len(tt.entries) {
+				t.Fatalf("ModelList carries %d entries, want %d", len(list.Models), len(tt.entries))
+			}
+			for i, got := range list.Models {
+				// DeepEqual rather than a length or a contains check: nil and []string{}
+				// disagree here and only one of them is the contract.
+				if !reflect.DeepEqual(got.TruncatedFields, tt.wantCut[i]) {
+					t.Errorf("entry %d TruncatedFields: got %#v, want %#v", i, got.TruncatedFields, tt.wantCut[i])
+				}
+			}
+			if tt.check != nil {
+				tt.check(t, list.Models)
+			}
+		})
+	}
+}
+
+// TestParser_ModelListIsLoggedContentFree is AC 5: no record on this path carries
+// decoded content, on any of the four rungs. The constraint is #833's posture,
+// restated across internal/relay's v2session_settings.go and internal/sessions'
+// pool.go as "model / effort / YOLO values are NEVER logged at any level".
+//
+// The sentinels are what stop the sweep passing vacuously: each is planted in a
+// synthetic line and then searched for across EVERY record the parser produced, not
+// only the expected one — the realistic way this rule breaks is someone appending
+// "value", entry.Value to a drop site. The captured line is fed in beside them so
+// the emit rung is swept with claude's real strings too.
+func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+
+	const (
+		resolvedSentinel = "resolved-sentinel-181101"
+		valueSentinel    = "value-sentinel-181102"
+		displaySentinel  = "display-sentinel-181103"
+		nakSentinel      = "nak-error-sentinel-181104"
+	)
+	captured := capturedModelEntries(t, initCaptureArmBase)
+	capturedValue := capturedModelString(t, captured[0], "value")
+	capturedResolved := capturedModelString(t, captured[0], "resolvedModel")
+	capturedDisplay := capturedModelString(t, captured[0], "displayName")
+
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	lines := []string{
+		// The emit rung, twice: the sentinel-carrying synthetic line, then the real
+		// captured one with all fourteen payload keys intact.
+		modelListLineFixture(t, "success", []map[string]any{
+			modelEntryFixture(resolvedSentinel, valueSentinel, displaySentinel)}),
+		capturedInitializeLine(t, initCaptureArmBase),
+		// The three non-emitting rungs.
+		`{"type":"control_response","response":{"subtype":"error","error":"` + nakSentinel + `"}}`,
+		modelListLineFixture(t, "success", 5),
+		modelListLineFixture(t, "success", []map[string]any{}),
+	}
+	for _, line := range lines {
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("event count: got %d, want 2 (the two model-carrying lines) — %#v", len(events), events)
+	}
+	// One record per line, and every one of them this arm's: the count is the half
+	// the per-record assertions cannot see.
+	all := rec.all()
+	if len(all) != len(lines) {
+		t.Fatalf("records: got %d, want %d (one per control_response): %+v", len(all), len(lines), all)
+	}
+
+	wantReasons := []string{"model_list", "model_list", "nak", "undecodable", "ack"}
+	wantCounts := []string{"1", "6", "0", "0", "0"}
+	for i, r := range all {
+		if r.msg != controlResponseConsumeMsgFixture {
+			t.Errorf("record %d message: got %q, want %q", i, r.msg, controlResponseConsumeMsgFixture)
+			continue
+		}
+		wantAttrs := map[string]string{
+			"type":   "control_response",
+			"reason": wantReasons[i],
+			"models": wantCounts[i],
+		}
+		if !reflect.DeepEqual(r.attrs, wantAttrs) {
+			t.Errorf("record %d attrs: got %v, want exactly %v", i, r.attrs, wantAttrs)
+		}
+	}
+
+	leaks := []string{resolvedSentinel, valueSentinel, displaySentinel, nakSentinel,
+		capturedValue, capturedResolved, capturedDisplay}
+	for _, r := range all {
+		for _, leak := range leaks {
+			if strings.Contains(r.msg, leak) {
+				t.Errorf("record message carries claude-derived content (%q): %q", leak, r.msg)
+			}
+			for k, v := range r.attrs {
+				if strings.Contains(v, leak) {
+					t.Errorf("record %q attr %q carries claude-derived content (%q); this path logs a "+
+						"daemon-authored keyword and a count only", r.msg, k, leak)
+				}
+			}
+		}
 	}
 }

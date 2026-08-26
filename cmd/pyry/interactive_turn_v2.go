@@ -658,6 +658,20 @@ func eventKind(ev turnevent.Event) string {
 		// stream_turn_busy.go, stream_turn_drain.go — would read kind=unknown for a
 		// variant the daemon does recognize.
 		return "model_announced"
+	case turnevent.ModelList:
+		// The variant NAME only, for the arms above's reason — and here the
+		// temptation is multiplied rather than merely present: every entry carries a
+		// Value, a ResolvedModel and a DisplayName, which are exactly the fields the
+		// arm above names #833's posture as existing to keep out of a log. None of
+		// them is returned, and neither is the entry count.
+		//
+		// Unlike the three arms above this variant is NOT claimed by a Handle case on
+		// this lane: turnbridge.MapEvent's default drops it until #1693, so it reaches
+		// this file's `interactive_turn.unknown` Debug. The arm exists for that call
+		// site and for the others (acp_turn_stream.go, stream_turn_busy.go,
+		// stream_turn_drain.go), all of which would otherwise read kind=unknown for a
+		// variant the daemon does recognize.
+		return "model_list"
 	default:
 		return "unknown"
 	}
