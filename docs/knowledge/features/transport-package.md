@@ -165,12 +165,12 @@ A non-101 HTTP response to the WS upgrade (e.g. a `404` because the relay URL ha
 `internal/transport/wssclient_test.go` (~520 LOC, stdlib + `coder/websocket`):
 
 - `newClientForTest(t, cfg, testOpts)` — shorter cadence constants + deterministic seed for sub-second tests.
-- `newTestRelay(t)` — `httptest.NewServer` with a `coder/websocket.Accept` upgrader, ping counter, pong suppression, force-close, optional echo loop.
+- `newTestRelay(t)` — `httptest.NewServer` with a `coder/websocket.Accept` upgrader, ping counter, pong suppression, force-close, optional echo loop. `relayCtrl` registers a conn (and signals `connectedCh`) only *after* `Accept` returns — later than the client's own dial, which unblocks as soon as the 101 response is written. A test that force-closes immediately after seeing the client connect must wait on `relayCtrl.connectedCh` too, or it can race `ForceClose` against an empty conn slice.
 
 Pinned behaviour:
 
 - `TestBackoff_Sequence` — attempts 1..10, base in `[base*0.8, base*1.2]`. Caps at 30s from attempt 6.
-- `TestBackoff_ResetAfterStableConnection` — uptime ≥ `stabilityReset` resets attempt counter to 1.
+- `TestBackoff_ResetAfterStableConnection` — table-driven, two rows (stable uptime resets the counter to 1 / brief uptime keeps it climbing). Verified off the `"transport: connected"` log record (`connectedAttempt`/`waitConnectedAttempt` helpers), not a dial-interval bound: the post-serve path redials immediately with no backoff sleep, so no wall-clock gap between a healthy disconnect and the next dial carries a term the attempt counter controls. A flaky duration bound on this path is a sign to trace which sleep it actually contributes, not to widen the bound.
 - `TestPing_FiredAt30s` — ping cadence (skipped under `-short`; uses 50ms test interval).
 - `TestPongTimeout_TriggersReconnect` — pong-suppressed relay → second dial within ~80ms test pong timeout.
 - `TestClose_OnContextCancel` — `cancel(ctx)` returns `Connect` with `context.Canceled` within 1s.
