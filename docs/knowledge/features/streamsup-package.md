@@ -197,7 +197,7 @@ forge a turn boundary:
 | `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
 | `system/init` | one `ModelAnnounced` **unless** `model` is absent, empty, or undecodable (#1600, below) — the family's only variant naming what claude is actually running, once per **turn** |
 | `rate_limit_event` | one `turnevent.RateLimited` **unless** `rate_limit_info.status` is the one measured-benign value or the line carries no decodable `rate_limit_info` (#1404, below) — the family's **first non-`system` mapping**, and the one whose gate suppresses the common case rather than the rare one |
-| `control_response` | nothing — consumed **content-free** from its own arm, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500). This is the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. A `subtype:"error"` NAK is consumed indistinguishably; deliberate, no such failure has been observed |
+| `control_response` | nothing, for every shape but one — consumed **content-free**, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500) — **except** a `success`-subtype response whose `response.response.models` decodes to a non-empty array, which emits one `turnevent.ModelList` (#1811, below). This is still the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority for the two content-free sibling shapes is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. CORRECTED 2026-08-27 (#1811): this used to say a `subtype:"error"` NAK is consumed indistinguishably from a success, deliberately, because discriminating it would cost a decode target for the nested object. #1811 built that decode target for an unrelated reason (publishing the model list) and the NAK gap closed as a side effect — the arm's one Debug record now carries a `reason` that names `nak` distinctly from `ack`/`model_list`/`undecodable` |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -543,6 +543,47 @@ need it (`capturedInitializePayload` had no callers at the time — #1811/#1812/
 yet) should get a real call site in its own test rather than ship unexercised on the promise of a later
 caller: nothing in the build flagged the gap, and giving it one also pinned that the wide and narrow
 readers agree byte for byte.
+
+**Decoding the initialize ack into `turnevent.ModelList` (#1811).** `emitModelList` reaches the
+capture's `models` array through a **shape discriminant**, not through correlating
+`Runner.nextControlID`'s minted `request_id`: the writer discards its id inline
+(`WriteInitialize(r.Stdin(), r.nextControlID())`, exactly as `Interrupt`/`RevokeBypass` discard theirs
+above), and the parser holds no link to it, so correlation would cost new cross-object state between
+the writer and the parser that today share none. The gate is conjunctive —
+`response.subtype == controlResponseSuccess` AND a non-empty decoded `models` array — and its own doc
+names the limit this buys: it recognises a **shape**, not a **correlated reply**. A future claude
+putting a `models` array inside some other successful control response would have that response read
+as an inventory too. The consequence is bounded rather than a defect to fix here — the value is still
+claude's own claim about itself, bounded by the same three caps, retained by nothing, and published to
+nobody until #1693 — so the trade is worth revisiting when a client can first read the value and
+provenance starts to matter, not before.
+
+Each `turnevent.ModelOption` entry keeps exactly three of claude's payload keys —
+`ResolvedModel`/`Value`/`DisplayName` — mirroring `protocol.ModelOption`'s wire row (#1704)
+field-for-field, taken verbatim per #1600's rule (no lowercasing, alias expansion, date-stamping, or
+family mapping). **`description` and `supportsFastMode` are decoded nowhere**, on purpose: a field
+decoded here that nothing publishes is untrusted prose bounded, retained and carried for nothing, and
+absence from the decode target is a stronger guarantee than any test sweep — `systemInitLine`'s
+argument (#1600) carried over unchanged. Each string is bounded by its own named cap
+(`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`, all 256, per-entry worst case 768 bytes);
+the **entry count is not capped in this slice** — that bound and the drop count it produces are
+#1812's, and the 768-byte per-entry figure is written into `maxModelResolved`'s doc so #1812 inherits
+the multiplicand instead of re-deriving it. An empty or absent `models` array is the safe-failure
+direction (rung 3, no event) rather than an empty `ModelList` — `emitRateLimit`'s rung 3 is the
+precedent: a list naming no model can't serve the purpose the variant exists for.
+
+`ModelList` is a `turnevent.Event` (not parser-held session state) precisely because
+`protocol.ModelListPayload`'s own doc names mapping time — `turnbridge.MapEvent` — as the seam every
+v2 interactive payload supplies its `ConversationID` through; session state would have obliged a
+second parser→relay path beside the one every other interactive payload already uses. `MapEvent`'s
+`default` drops the event until #1693, so no client can read a false zero in the meantime.
+
+*Test-writing lesson for the next per-entry accumulator built on `emitBackgroundTaskRoster`'s idiom
+(the `cut` closure declared inside the per-entry loop).* An isolation row asserting "a cut on one
+entry does not appear on a later entry" only reddens under a shared-accumulator mutant (`cut` hoisted
+out of the loop) if the **clean** entry is placed *after* the cut one in the fixture: the cut entry's
+report is appended to the shared slice before the next entry starts accumulating, so a clean-then-cut
+ordering proves nothing about cross-entry leakage — only cut-then-clean does.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
