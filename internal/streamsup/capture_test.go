@@ -37,12 +37,21 @@ type droppedLineCapture struct {
 // subtype, in stream order, as the bytes claude put on the wire. A type that
 // carries no subtype at all — rate_limit_event — is read with subtype "".
 //
-// This is the package's one capture reader; capturedLine wraps it with the
-// exactly-one rule, and capturedSystemLines / capturedSystemLine fix the type to
-// `system`. The provenance checks live HERE, at the reader, rather than at the
-// callers — the is_capture assertion means a hand-built payload file swapped in
-// for this one fails before any mapping is read, and putting it in one place is
-// what stops a second reader from growing a second, weaker copy of it.
+// This is the reader for the DROPPED-LINE record shape, and since #1810 it is no
+// longer the package's only capture reader: capturedInitialize reads the
+// initialize-control captures, a record of a control exchange whose payload is a
+// nested object rather than a JSON string holding a line. CORRECTED 2026-08-26 —
+// this doc said "the package's one capture reader" until then. Nothing below is
+// shared with it and nothing should be: none of these helpers can decode a
+// control record, and reaching for them on one yields zero values rather than a
+// failure. capturedLine wraps THIS one with the exactly-one rule, and
+// capturedSystemLines / capturedSystemLine fix the type to `system`.
+//
+// The provenance checks live HERE, at the reader, rather than at the callers —
+// the is_capture assertion means a hand-built payload file swapped in for this
+// one fails before any mapping is read, and putting it in one place is what stops
+// a second reader from growing a second, weaker copy of it. That discipline is
+// what #1810 restated at its own reader rather than importing.
 //
 // GENERALIZED 2026-08-09 (#1404) on the TYPE axis, and on that axis only. The
 // sentence this doc has always carried is repeated here VERBATIM, because
@@ -52,6 +61,14 @@ type droppedLineCapture struct {
 // plural reader is exactly the shape someone later generalizes into "read any
 // capture file", and that generalization is what would put an unchecked file
 // behind these assertions.
+//
+// #1810's reader necessarily DOES take a parameter, because four files must be
+// readable there, so the guarantee that sentence states is held differently on
+// that side and had to be stated rather than dropped: its parameter is an ARM
+// SELECTOR from a closed set, never a path, and the reader mints the path from
+// package constants. Read this paragraph as the shape of the exemption, not as
+// permission to grow one here — the argument above is unchanged for THIS reader,
+// whose one file remains a package constant.
 //
 // Every failure is t.Fatalf, never a skip: the capture is committed, so a missing
 // record is a broken premise rather than an unavailable resource. Zero matches

@@ -519,6 +519,31 @@ hostile-id case (an id carrying a raw newline) to catch it; confirmed as the sol
 fixed field `initialize`'s subtype-only inner doesn't have — a new subtype with no such second
 field needs the one hostile-id case, not the full table.
 
+**Reading the `initialize` ack's committed captures, in-package (#1810).** `capturedInitialize`/
+`capturedInitializePayload` (`initialize_capture_test.go`) read the four committed
+`internal/e2e/realclaude/testdata/initialize_control_*.json` captures of what claude actually sent
+back for the request above, selecting a capture by an **arm** (a closed set of identifiers), never a
+path — the reader mints the path from package constants and rejects any other string. This is a
+second, narrower struct over the same record `internal/e2e/realclaude`'s `initControlFixtureRecord`
+already decodes (that type sits behind the `e2e_realclaude` build tag and cannot be imported), so it
+inherits none of that package's live-run scaffolding — the whole point is that this proof now runs
+inside `make check` instead of behind the opt-in gate that exits 0 with zero tests run when there is
+no claude login. `capturedInitializePayload` fatals on the one arm that recorded no response
+(`control_no_request`); the wide reader hands that case back as a nil payload instead, so an
+absent-payload capture is a distinguishable *fact*, not a read failure — #1811/#1812/#1719/#1809 are
+the decodes meant to call the wrapper.
+
+Two things worth keeping in mind for any reader built the same way: first, a reader must not itself
+check the invariant its own test exists to pin — `capturedInitialize` deliberately never compares the
+decoded payload's model-entry count against the record's own `models_count` summary, precisely because
+`TestCapturedInitialize_ModelCountsMatchEachRecordsSummary` checks exactly that; had the reader also
+enforced it, that assertion would be satisfied by construction and a mutant substituting the outer
+wrapper for the inner payload would stay green. Second, a helper added only because future tickets will
+need it (`capturedInitializePayload` had no callers at the time — #1811/#1812/#1719/#1809 hadn't landed
+yet) should get a real call site in its own test rather than ship unexercised on the promise of a later
+caller: nothing in the build flagged the gap, and giving it one also pinned that the wide and narrow
+readers agree byte for byte.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
@@ -1443,6 +1468,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1385.md`](../codebase/1385.md) — the fourth arm, `system/thinking_tokens` → `turnevent.ThinkingProgress`, and the parser's first rate-bounded mapping / first piece of cross-line state.
 - [`codebase/1404.md`](../codebase/1404.md) — the fifth arm and the first non-`system` mapping, `rate_limit_event` → `turnevent.RateLimited`, gated on `status` so a once-per-run report doesn't become a per-turn noise row; `ignoredLineTypes` is down to `{"system": true}`.
 - [`codebase/1240.md`](../codebase/1240.md) — the symptom #1380 fixes the cause of: `turn_end`/`end_turn` and state `idle` while a backgrounded command claude started is provably still alive.
+- [`codebase/1810.md`](../codebase/1810.md) — the in-package reader over the four committed `initialize` ack captures (`capturedInitialize`/`capturedInitializePayload`), moving that proof inside `make check`.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
