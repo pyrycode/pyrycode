@@ -299,3 +299,47 @@ None blocking. Two judgement calls are settled above and recorded so review does
 them: the guard goes above `lcMu` rather than inside the `select` (§ Design), and AC 2 is pinned
 on `len(activateCh)` against a goroutine-free literal rather than on a timed "still evicted"
 poll (§ Testing strategy).
+
+## Verification log
+
+Recorded by the implementation run, 2026-08-26. `go version` = go1.26.2 darwin/arm64.
+
+**Pre-change RED** (`go test -race -count=1 -run 'TestSession_ActivateCancelledCtx' ./internal/sessions/`,
+tests present, guard not yet written):
+
+- `TestSession_ActivateCancelledCtx_ActiveFailsFast` — *leaked 203 of 400 calls*. That is the
+  ~1-in-2 production rate the ticket predicted, not the ~1-in-4 the `lifecycleRunner` fixture
+  would have shown — confirming `fakeRunner` is the right double.
+- `TestSession_ActivateCancelledCtx_EvictedRequestsNothing` — `len(activateCh) = 1`.
+
+**Mutant, 10 consecutive runs.** Mutant = the committed `internal/sessions/session.go` with the
+entry guard in `Activate` deleted, supplied via `go test -overlay=<abs overlay.json> -race
+-count=1 ./internal/sessions/`. No worktree write: `git status --short` listed only the two
+intended files throughout.
+
+| Run | `--- FAIL` count | `…_ActiveFailsFast` in FAIL list | `…_EvictedRequestsNothing` in FAIL list |
+|---|---|---|---|
+| 1 | 2 | yes | yes |
+| 2 | 2 | yes | yes |
+| 3 | 2 | yes | yes |
+| 4 | 2 | yes | yes |
+| 5 | 2 | yes | yes |
+| 6 | 2 | yes | yes |
+| 7 | 2 | yes | yes |
+| 8 | 2 | yes | yes |
+| 9 | 2 | yes | yes |
+| 10 | 2 | yes | yes |
+
+10 of 10 runs FAILED, both new tests present in every run. The per-run `--- FAIL` count is
+exactly 2 in all ten, so the verdict is read off the FAIL list and not the exit code: the
+package's known unrelated flake (`TestPool_Run_StartsWatcher`) did not fire in any run, and
+nothing else reddened under the mutant.
+
+**Clean tree, no false red:**
+
+- `go test -race -count=1 ./internal/sessions/` — ok, 7.8 s.
+- `go test -race -count=10 -run 'TestSession_Activate' ./internal/sessions/` — ok, 2.4 s. Both
+  new tests are sleep-free and poll-free.
+- `go vet ./...` — clean. `go build ./cmd/pyry` — ok. `make cite-guard` — clean.
+
+The whole-module `go test -race ./...` gate is QA's, and is not duplicated here.
