@@ -526,20 +526,22 @@ type ModelAnnounced struct {
 
 // ModelOption is one entry of a ModelList: the list's element type, NOT an
 // Event, so it carries no marker — BackgroundTask's shape, for BackgroundTask's
-// reason. Its three claude-authored strings are exactly the three
-// protocol.ModelOption carries (#1704), in that type's declaration order, and
-// nothing invented.
+// reason. Its four claude-authored fields — three strings and one bool — are
+// exactly what protocol.ModelOption carries (#1704) minus EffortLevels, which is
+// #1820's slice, in that type's declaration order and nothing invented.
 //
-// Two per-entry keys the captured reply also carries are deliberately absent, and
+// Four per-entry keys the captured reply also carries are deliberately absent, and
 // the ABSENCE is the guarantee: description — the longest string in the capture at
-// 66 bytes, and the most tempting to carry — and supportsFastMode, which only one
-// of the six entries has. Neither has a named consumer and protocol.ModelOption
-// carries neither at all, so decoding either would be untrusted prose bounded,
-// retained and carried for nothing. That is the argument streamsup's
-// systemInitLine makes about its own twenty-one omissions, and a field never
-// declared on the producer's decode target cannot leak whatever a later sweep
-// forgets to check. The two capability keys the richer entries do carry
-// (supportedEffortLevels, supportsAutoMode) are #1809's slice, not an omission.
+// 66 bytes, and the most tempting to carry — supportsFastMode, which only one of
+// the six entries has, and supportsEffort and supportsAdaptiveThinking, which the
+// four richer entries carry beside the key this type does decode. None has a named
+// consumer and protocol.ModelOption carries none of them at all, so decoding any
+// would be untrusted prose bounded, retained and carried for nothing. That is the
+// argument streamsup's systemInitLine makes about its own twenty-one omissions,
+// and a field never declared on the producer's decode target cannot leak whatever
+// a later sweep forgets to check. Of the two capability keys the richer entries do
+// carry, supportsAutoMode is decoded here (#1819) and supportedEffortLevels is
+// #1820's slice, not an omission.
 type ModelOption struct {
 	// ResolvedModel is what Value resolves to RIGHT NOW: the concrete identifier,
 	// and the field a consumer wanting a dated one wants. VERBATIM, per
@@ -565,6 +567,46 @@ type ModelOption struct {
 	// sanitization is the CLIENT's, exactly as protocol.ModelOption's SECURITY
 	// paragraph states for the same three strings.
 	DisplayName string
+	// SupportsAutoMode is claude's own answer to whether it accepts AUTO permission
+	// mode for this model, so a client's permission-mode menu can grey the option out
+	// where claude refuses it. VERBATIM, per ModelAnnounced.Model's rule: the key's
+	// value as claude sent it, with no daemon policy folded in and no inference from
+	// any other field of the entry.
+	//
+	// AN ABSENT KEY, A JSON null AND AN EXPLICIT false ARE ONE READING — false. The
+	// collapse is deliberate rather than fallen into: in Go the choice IS the field's
+	// shape, and a *bool is the answer that keeps them apart. What decides it is that
+	// the safe direction here is asymmetric and points at false. This field describes
+	// a permission GRANT, so "claude refused auto for this model" and "claude said
+	// nothing about auto for this model" drive the SAME client behaviour — grey the
+	// option out — and no decision hangs between them. The unsafe collapse is the
+	// inverse, granting on silence, which a claude that merely stopped sending the
+	// key would walk into; nothing here does that.
+	//
+	// Three facts support it. protocol.ModelOption.SupportsAutoMode is already a
+	// plain bool whose doc calls absent-decodes-to-false "the correct reading"
+	// (#1704), so a pointer here would preserve a distinction only long enough for
+	// the mapping (#1693) to discard it. claude has never sent false at all — in the
+	// committed capture four entries carry true and two carry no capability key
+	// whatsoever, identically in all three of #1763's arms — so a pointer would
+	// defend a shape observed nowhere. And this file declares no pointer field of
+	// this kind today; a field with no consumer asking for the third state is not
+	// where the event vocabulary grows its first one.
+	//
+	// Never named in TruncatedFields, because a bool is never cut: it has no length,
+	// truncateField never sees it, and it carries none of claude's bytes into any
+	// per-entry budget.
+	//
+	// It is a REPORT to a client's menu and NEVER an authorization input. Nothing in
+	// the daemon may branch on it to decide what it may SEND claude — claude decides
+	// that when asked — because a daemon reading its own subprocess's claim as
+	// permission is a subprocess authorizing itself.
+	//
+	// #1820 faces the same absent-versus-empty question for supportedEffortLevels and
+	// must RE-DERIVE its answer rather than inherit this one: the argument above is
+	// about a withheld grant, and an empty effort menu is a different failure than a
+	// greyed checkbox.
+	SupportsAutoMode bool
 	// TruncatedFields names THIS entry's fields the producer cut to fit their caps,
 	// in declaration order, using the DAEMON's snake_case names: "resolved_model",
 	// "value", "display_name". No name is translated — claude's camelCase keys and
@@ -616,7 +658,9 @@ type ModelList struct {
 	// cap alone cannot supply: the array's length is claude's to choose, and a
 	// per-entry cap alone would leave the total a function of that number. Both
 	// dimensions bounded, the list truncated FROM THE TAIL when the count cap fires,
-	// and the true size recoverable as len(Models) + DroppedModels.
+	// and the true size recoverable as len(Models) + DroppedModels. The bool beside
+	// those strings is bounded by nothing and needs no cap: it carries none of
+	// claude's bytes.
 	Models []ModelOption
 	// DroppedModels is how many entries claude sent beyond the producer's cap that
 	// this event does NOT carry; 0 when nothing was dropped. The list's true size is

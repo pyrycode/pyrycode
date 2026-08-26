@@ -910,10 +910,11 @@ type controlResponseLine struct {
 	} `json:"response"`
 }
 
-// modelOptionLine is one element of that array, reduced to the three keys the
+// modelOptionLine is one element of that array, reduced to the four keys the
 // mapping reads. The field set is exactly what turnevent.ModelOption carries and
-// nothing invented: description and supportsFastMode are absent by decision, not
-// by oversight — see that type's doc — and the capability keys are #1809's.
+// nothing invented: description, supportsEffort, supportsAdaptiveThinking and
+// supportsFastMode are all absent by decision, not by oversight — see that type's
+// doc — and the one remaining capability key, supportedEffortLevels, is #1820's.
 //
 // A plain []modelOptionLine on the container above, not a pointer to one, and no
 // distinction is kept between an absent `models`, a null one and an empty array:
@@ -921,19 +922,28 @@ type controlResponseLine struct {
 // present-but-empty, and a line carrying no such key all land in the same rung and
 // are answered identically, which is what makes a plain decode target sufficient.
 //
-// All three are plain strings, which is why truncateField's json.RawMessage
+// The first three are plain strings, which is why truncateField's json.RawMessage
 // exception does not reach this shape: encoding/json has already U+FFFD-replaced
 // invalid input on decode, so our own cut is the only mid-rune hazard. A
-// non-string value for any of them — or a `models` that is a number, an object or
-// a string, or a non-object `response` at either level — fails the WHOLE-LINE
-// decode and takes emitModelList's undecodable rung, exactly as
+// non-string value for any of them — or a supportsAutoMode that is a string, a
+// number, an object or an array, or a `models` that is a number, an object or a
+// string, or a non-object `response` at either level — fails the WHOLE-LINE decode
+// and takes emitModelList's undecodable rung, exactly as
 // systemTaskUpdatedLine.TaskID does for a numeric task id. That type mismatch is
 // the ONLY reachable failure there: consumeLine has already decoded this line into
 // streamLine, so malformed JSON never reaches the function at all.
+//
+// JSON null is the one carve-out, and it has always applied to the three strings
+// as much as to the bool: encoding/json documents unmarshalling a null into a
+// non-pointer Go value as a NO-OP producing no error, so a null-valued key decodes
+// cleanly and lands as the zero value rather than on the undecodable rung. For
+// supportsAutoMode that is the same reading an absent key gets, which is what
+// turnevent.ModelOption.SupportsAutoMode's doc argues is deliberate.
 type modelOptionLine struct {
-	ResolvedModel string `json:"resolvedModel"`
-	Value         string `json:"value"`
-	DisplayName   string `json:"displayName"`
+	ResolvedModel    string `json:"resolvedModel"`
+	Value            string `json:"value"`
+	DisplayName      string `json:"displayName"`
+	SupportsAutoMode bool   `json:"supportsAutoMode"`
 }
 
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
@@ -1734,7 +1744,10 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // doc is the standing answer — the field lands empty rather than inventing a
 // validation rule. The capture's two four-key entries are the committed proof that
 // a partial key set is claude's NORMAL output rather than a malformation. The gate
-// that suppresses the event lives at the LIST level, not the entry level.
+// that suppresses the event lives at the LIST level, not the entry level. That
+// extends to the bool with one difference: what an absent supportsAutoMode READS AS
+// is decided at turnevent.ModelOption's type rather than here, because the field's
+// shape is the decision — there is no daemon code below implementing the collapse.
 //
 // NOTHING FROM THE PAYLOAD IS LOGGED, on any path — see logControlResponse, which
 // is the one place that is decided.
@@ -1799,6 +1812,12 @@ func (p *Parser) emitModelList(line []byte) {
 			ResolvedModel: resolvedModel,
 			Value:         value,
 			DisplayName:   displayName,
+			// Not through `bound`: a bool has no length to cut, carries none of claude's
+			// bytes into the per-entry budget, and is therefore never named in
+			// TruncatedFields. Absent, null and false arrive here already collapsed by
+			// encoding/json — see turnevent.ModelOption.SupportsAutoMode for why that is
+			// the intended reading rather than a distinction lost.
+			SupportsAutoMode: entry.SupportsAutoMode,
 			// nil when nothing was cut: append never ran.
 			TruncatedFields: cut,
 		})
