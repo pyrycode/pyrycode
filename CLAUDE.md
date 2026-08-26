@@ -135,27 +135,15 @@ Do **not** write to `docs/lessons.md` (frozen 2026-05-11) or `docs/PROJECT-MEMOR
 
 ## Memory index entries
 
-The Claude Code memory index is the discovery map every dispatched agent reads at
-startup. The dispatcher keeps it small on its own, but it is only allowed to drop
-an entry whose title starts with a ticket number. Every other entry is protected
-for good, and once the protected part grows past the watermark it forces a slow,
-expensive curation pass that blocks the next dispatch.
+The Claude Code memory index is injected into every agent run and it is capped. Keep tickets out of it entirely.
 
-So the title decides the entry's lifetime. Pick by what the note is:
+**Never name a ticket in a memory index entry.** No ticket number in the title, none in the note filename. A ticket's knowledge belongs in the repo, where it is committed, reviewed and unbounded. The documentation phase folds each ticket's lessons into the package overview at `docs/knowledge/features/<package>.md`. A refinement, split or prerequisite decision belongs on the ticket itself as a comment, which the dispatcher already feeds to every later agent on that ticket.
 
-- **A note about one ticket's work.** Start the title with the ticket number, as
-  in `#784 unrecognized-message arm widening`. Stars, bold and status text go
-  after the number, never in front of it. The dispatcher retires these for free
-  once they age out, and the note file itself stays on disk either way.
-- **A lesson that outlives its ticket.** Start the title with a word, as in
-  `structured clone preserves an undefined property`. These stay indexed until a
-  curation pass relocates them by hand.
+**The index is only for a lesson that outlives its ticket.** Title it with what was learned and no number at all, as in `structured clone preserves an undefined property`. Cite the ticket in the summary if that helps, never in the title and never in the filename.
 
-A star or an emoji in front of the number is what breaks this, because it stops
-the title starting with a digit and the entry is read as a permanent lesson.
-Measured on 2026-08-25: six finished ticket notes were holding 11 KB of this
-index that way, and curation fired 30 times in a single day as a result.
+The dispatcher enforces this deterministically. Between cycles it strips every entry whose title or note filename carries a ticket number, so an entry that names one disappears on its own. The note file stays on disk; only the pointer goes. Writing one is not dangerous, it is just wasted.
 
+Why this rule exists, measured 2026-08-25: the old classifier keyed on the title's first character, ticket entries titled with a decoration in front of the number were read as permanent lessons, and 216 curation passes and about 34 hours of blocked dispatch went into hand-trimming a file that should never have held them.
 ## Testing
 
 Tiers, cheapest first — `docs/release-tooling.md` is the runbook:
