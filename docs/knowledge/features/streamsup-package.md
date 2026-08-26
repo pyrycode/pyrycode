@@ -565,12 +565,25 @@ family mapping). **`description` and `supportsFastMode` are decoded nowhere**, o
 decoded here that nothing publishes is untrusted prose bounded, retained and carried for nothing, and
 absence from the decode target is a stronger guarantee than any test sweep — `systemInitLine`'s
 argument (#1600) carried over unchanged. Each string is bounded by its own named cap
-(`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`, all 256, per-entry worst case 768 bytes);
-the **entry count is not capped in this slice** — that bound and the drop count it produces are
-#1812's, and the 768-byte per-entry figure is written into `maxModelResolved`'s doc so #1812 inherits
-the multiplicand instead of re-deriving it. An empty or absent `models` array is the safe-failure
-direction (rung 3, no event) rather than an empty `ModelList` — `emitRateLimit`'s rung 3 is the
-precedent: a list naming no model can't serve the purpose the variant exists for.
+(`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`, all 256, per-entry worst case 768 bytes).
+An empty or absent `models` array is the safe-failure direction (rung 3, no event) rather than an empty
+`ModelList` — `emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose
+the variant exists for.
+
+**The entry count is capped too (#1812) — `maxModelListEntries` (10), the family's second cardinality
+bound after `maxTaskRosterEntries`.** A per-entry text cap alone leaves the list's total size a
+function of a number claude chooses; the count bound supplies the missing factor, applied after rung 3
+and before the entry loop, truncating **from the tail** so claude's order is preserved (the same
+ordering rule `Tasks`/`Models` both state). 10 is derived, not chosen: the 768-byte per-entry
+multiplicand against `maxTaskRosterEntries`' 8192-byte product (itself half of `maxUnrecognizedRaw`'s
+16 KiB, the package's one-level-up ordering) puts the ceiling at 10 (8192/768 = 10.67); the observed
+six-entry capture sets the floor with four slots of headroom — not the roster's 8, which would leave
+only two. `turnevent.ModelList.DroppedModels` carries what was cut (`0` when nothing was), so
+`len(Models) + DroppedModels` is the list's true size and a client can render "6 of 40" rather than
+presenting a short menu as complete. `logControlResponse`'s record grew a fourth attribute, `dropped`,
+for the reason the wire field's own doc argues about a permanent zero, one layer down: until #1693
+publishes the event, that Debug record is the only observable the cap has, and `models=N` with no drop
+count reads as "claude offers N models" even when it offered more.
 
 `ModelList` is a `turnevent.Event` (not parser-held session state) precisely because
 `protocol.ModelListPayload`'s own doc names mapping time — `turnbridge.MapEvent` — as the seam every
@@ -584,6 +597,19 @@ entry does not appear on a later entry" only reddens under a shared-accumulator 
 out of the loop) if the **clean** entry is placed *after* the cut one in the fixture: the cut entry's
 report is appended to the shared slice before the next entry starts accumulating, so a clean-then-cut
 ordering proves nothing about cross-entry leakage — only cut-then-clean does.
+
+*Test-writing lesson for `maxModelListEntries`' boundary row (#1812), and for any future cardinality
+cap shaped `if len(entries) > cap`.* At `len(entries) == cap` the block computes `dropped = 0` and
+slices to identity either way, so `>` vs `>=` is an **equivalent mutant** there — no fixture can tell
+them apart, and a boundary-row comment claiming otherwise (the phrasing `emitBackgroundTaskRoster`'s
+own equivalent row inherited) overstates what the row proves. What the "exactly at the cap" row
+actually pins is a cap that fires **one entry early** (`cap - 1`), verified live by overlaying
+`maxModelListEntries = 9`, which reddens that row while `>` → `>=` does not. Also: a shared record's
+attribute-set change (here, `logControlResponse` gaining `dropped`) can reach a `wantAttrs`-comparison
+test the spec's own amendment list didn't enumerate — `TestParser_ControlResponseAckIsConsumedSilently`
+compares with `reflect.DeepEqual` too and lives ~200 lines from the model-list block, so it only
+surfaced at the first green run. Any future attribute on that record needs every `wantAttrs` map in the
+file, not just the ones naming the feature that grew it.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
