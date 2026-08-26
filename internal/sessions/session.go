@@ -270,7 +270,26 @@ func (s *Session) LifecycleState() lifecycleState {
 // Activate with WriteUserTurn/Resize observe a live PTY rather than the
 // silent-drop-on-nil branch. The relay-routed send_message path depends
 // on this guarantee (#396).
+//
+// Cancellation, in two cases that differ (#1805):
+//
+//   - A ctx already cancelled or expired at the call returns ctx.Err()
+//     immediately, before anything else happens: no signal on activateCh, no
+//     supervisor start, no child. That guarantee is hard.
+//   - A cancellation arriving while the call is waiting also returns
+//     ctx.Err(), except that a transition completing at the same instant may
+//     win the race and return nil — both select arms are then ready. Callers
+//     that need certainty must not rely on this half.
 func (s *Session) Activate(ctx context.Context) error {
+	// Fail fast rather than fall into the select below, where a closed
+	// activeCh makes both arms ready and Go's uniform pick returns nil to a
+	// cancelled caller roughly half the time. Above the lcMu block on
+	// purpose: below it, the activateCh send would already have driven a
+	// re-activation for a caller that had given up.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.lcMu.Lock()
 	ch := s.activeCh
 	if s.lcState != stateActive {
