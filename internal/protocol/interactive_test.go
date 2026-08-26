@@ -1068,9 +1068,9 @@ func TestModelListType_IsNotClaudesVocabulary(t *testing.T) {
 //     the field, and a cut `value` is the sharpest pairing available, being doubly
 //     un-sendable.
 //   - dropped_models. 2, non-zero so this fixture pins the value rather than the
-//     zero encoding (background_task_roster.json's dropped_tasks: 3). Nothing
-//     counts it yet: #1690 owns making the decode record it, #1693 is where the
-//     field and a counter meet.
+//     zero encoding (background_task_roster.json's dropped_tasks: 3). The decode
+//     counts it since #1812 (turnevent.ModelList.DroppedModels); #1693 is where the
+//     field and that counter meet.
 func TestModelListPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "model_list.json")
 
@@ -1140,8 +1140,9 @@ func TestModelListPayload_RoundTrip(t *testing.T) {
 	}
 
 	// The count dimension, decided at the menu level and distinct from any row's
-	// text cut. Nothing counts it yet, so a client must not read
-	// len(models) + dropped_models as the menu's true size today.
+	// text cut. Nothing fills this field on a real frame yet — no producer builds
+	// this type until #1693 — so a client cannot read len(models) + dropped_models
+	// as the menu's true size today, even though the decode already counts it.
 	if payload.DroppedModels != 2 {
 		t.Errorf("DroppedModels: got %d, want 2", payload.DroppedModels)
 	}

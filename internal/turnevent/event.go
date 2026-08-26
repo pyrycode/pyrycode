@@ -611,12 +611,29 @@ type ModelList struct {
 	//
 	// Each entry's three strings are bounded by the producer AT CONSTRUCTION
 	// (streamsup's maxModelResolved / maxModelValue / maxModelDisplayName), so an
-	// oversized payload never enters the event stream, a queue, or a log. The COUNT
-	// is NOT bounded in this slice, and that is a statement rather than an omission:
-	// a per-entry text cap alone leaves the total a function of a number claude
-	// chooses, and the cardinality cap plus the count of what it drops are #1812's
-	// deliverable. Until it lands, len(Models) is claude's to choose.
+	// oversized payload never enters the event stream, a queue, or a log. So is the
+	// entry COUNT (streamsup's maxModelListEntries), which is what a per-entry text
+	// cap alone cannot supply: the array's length is claude's to choose, and a
+	// per-entry cap alone would leave the total a function of that number. Both
+	// dimensions bounded, the list truncated FROM THE TAIL when the count cap fires,
+	// and the true size recoverable as len(Models) + DroppedModels.
 	Models []ModelOption
+	// DroppedModels is how many entries claude sent beyond the producer's cap that
+	// this event does NOT carry; 0 when nothing was dropped. The list's true size is
+	// len(Models) + DroppedModels.
+	//
+	// The count dimension reports HERE rather than in a top-level TruncatedFields
+	// naming "models", and that is why this variant has no top-level
+	// TruncatedFields at all — BackgroundTaskRoster.DroppedTasks' stated reason,
+	// unchanged: a name-only report loses how many were lost, and the count is the
+	// strictly more informative signal. Each dimension reports at the level where it
+	// happens — a text cut is a property of one entry and rides that entry as
+	// ModelOption.TruncatedFields.
+	//
+	// It is the first field on this variant that is DAEMON-derived rather than
+	// claude-derived: an int computed from a slice length, carrying none of claude's
+	// bytes.
+	DroppedModels int
 }
 
 // Stall is an internal-only onset marker: tui-driver raised a one-shot

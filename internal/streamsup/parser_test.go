@@ -3777,14 +3777,17 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 					t.Fatalf("records with message %q: got %d, want 1 (%s) — all records: %+v",
 						controlResponseConsumeMsgFixture, len(consumes), tt.why, rec.all())
 				}
-				// Type, a daemon keyword and a count. Never the line, never the
+				// Type, a daemon keyword and two counts. Never the line, never the
 				// request_id, never the NAK's error string — the package's standing
 				// content-free logging rule, held here by the same exactly-these-attrs
-				// shape the harness-nudge and rate-limit drops use.
+				// shape the harness-nudge and rate-limit drops use. Both counts are 0
+				// on every row here: none of them reaches the emit rung, and the
+				// attribute set is fixed rather than per-rung.
 				wantAttrs := map[string]string{
-					"type":   "control_response",
-					"reason": tt.wantReason,
-					"models": "0",
+					"type":    "control_response",
+					"reason":  tt.wantReason,
+					"models":  "0",
+					"dropped": "0",
 				}
 				if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 					t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -3839,10 +3842,16 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // Three literals for three constants even though all three are 256, mirroring the
 // production split: they bound different fields for different reasons, and sharing
 // one fixture would let a change to one silently retarget the others' proof.
+//
+// modelListEntriesCapFixture pins a CARDINALITY rather than a byte length, and
+// taskRosterEntriesCapFixture's reasoning carries over unchanged: a count fixture
+// written as maxModelListEntries would follow the constant green if someone halved
+// it, which is exactly the edit worth catching.
 const (
 	modelResolvedCapFixture    = 256
 	modelValueCapFixture       = 256
 	modelDisplayNameCapFixture = 256
+	modelListEntriesCapFixture = 10
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -3953,6 +3962,14 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 				t.Fatalf("ModelList carries %d entries, want %d — one per array element, in claude's own order",
 					len(list.Models), len(want))
 			}
+			// The zero-drop path, which is the only one the LIVE shape exercises: six
+			// entries sit under maxModelListEntries. A re-capture that pushed claude's
+			// list past the cap fails at the six-entry guard above first, so a non-zero
+			// here can only mean the cap fired on a list that fits.
+			if list.DroppedModels != 0 {
+				t.Errorf("DroppedModels: got %d, want 0 — the captured list is under the entry cap",
+					list.DroppedModels)
+			}
 
 			for i, got := range list.Models {
 				// Byte-for-byte against the capture, in claude's own order: index i on both
@@ -4035,6 +4052,20 @@ func modelEntryFixture(resolvedModel, value, displayName string) map[string]any 
 		"value":         value,
 		"displayName":   displayName,
 	}
+}
+
+// modelEntriesFixture builds n entries, each identifiable by its resolvedModel so
+// tail-truncation is PINNED rather than assumed. rosterEntriesFixture's shape.
+func modelEntriesFixture(n int) []map[string]any {
+	out := make([]map[string]any, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, modelEntryFixture(
+			fmt.Sprintf("claude-model-%03d", i),
+			fmt.Sprintf("alias-%03d", i),
+			fmt.Sprintf("Model %03d", i),
+		))
+	}
+	return out
 }
 
 // TestParser_InitializeControlResponseRejectBranches is AC 3: every malformed or
@@ -4125,9 +4156,10 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 					controlResponseConsumeMsgFixture, len(consumes), rec.all())
 			}
 			wantAttrs := map[string]string{
-				"type":   "control_response",
-				"reason": tt.wantReason,
-				"models": "0",
+				"type":    "control_response",
+				"reason":  tt.wantReason,
+				"models":  "0",
+				"dropped": "0",
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -4264,6 +4296,120 @@ func TestParser_ModelListFieldsAreCapped(t *testing.T) {
 	}
 }
 
+// TestParser_ModelListEntryCountIsBounded is #1812's central pin: the number of
+// entries is bounded AT CONSTRUCTION and the overflow is reported as a COUNT, so
+// the list's true size stays recoverable as len(Models) + DroppedModels.
+//
+// The capture proves neither half and cannot: claude sends six entries, under the
+// cap, which is exactly the zero-drop path the capture test pins. So these lines
+// are SYNTHESIZED, which invents no field structure — the keys are the capture's,
+// only the count varies.
+//
+// Empty and absent arrays are deliberately NOT rows here. They return at the ack
+// rung before the cap ever runs, and TestParser_InitializeControlResponseRejectBranches
+// already covers them; a row here would assert the cap against an input it never sees.
+func TestParser_ModelListEntryCountIsBounded(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the entry count is bounded and the overflow is reported", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name        string
+			entries     []map[string]any
+			wantLen     int
+			wantDropped int
+		}{
+			{
+				name:    "one over the cap drops one",
+				entries: modelEntriesFixture(modelListEntriesCapFixture + 1),
+				wantLen: modelListEntriesCapFixture, wantDropped: 1,
+			},
+			{
+				// The <= boundary, matching truncateField's convention and the roster's.
+				// What it discriminates is a cap that fires one entry EARLY: > and >= are
+				// indistinguishable here by construction, since at len == cap the block
+				// computes a 0 drop and slices to identity either way.
+				name:    "exactly at the cap carries every entry",
+				entries: modelEntriesFixture(modelListEntriesCapFixture),
+				wantLen: modelListEntriesCapFixture, wantDropped: 0,
+			},
+			{
+				// The row that makes the report a COUNT rather than a flag: a flag cannot
+				// tell 1 lost from 90, and the list's true size is only recoverable as
+				// len(Models) + DroppedModels.
+				name:    "a large array reports how many were lost",
+				entries: modelEntriesFixture(100),
+				wantLen: modelListEntriesCapFixture, wantDropped: 100 - modelListEntriesCapFixture,
+			},
+			{
+				// Under the cap, so the bound is not proven only at its own boundary.
+				name:    "one under the cap is untouched",
+				entries: modelEntriesFixture(modelListEntriesCapFixture - 1),
+				wantLen: modelListEntriesCapFixture - 1, wantDropped: 0,
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				events := collectEvents(modelListLineFixture(t, "success", tt.entries))
+				if len(events) != 1 {
+					t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+				}
+				list, ok := events[0].(turnevent.ModelList)
+				if !ok {
+					t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+				}
+
+				if len(list.Models) != tt.wantLen {
+					t.Fatalf("len(Models): got %d, want %d", len(list.Models), tt.wantLen)
+				}
+				if list.DroppedModels != tt.wantDropped {
+					t.Errorf("DroppedModels: got %d, want %d", list.DroppedModels, tt.wantDropped)
+				}
+				// Truncation is from the TAIL, preserving claude's order: no ranking is
+				// invented, because claude's ordering semantics are unobserved. Pinned per
+				// entry rather than assumed from the count, which is what a head-truncating
+				// entries[len(entries)-cap:] would otherwise pass.
+				for i, got := range list.Models {
+					want := tt.entries[i]["resolvedModel"]
+					if got.ResolvedModel != want {
+						t.Errorf("Models[%d].ResolvedModel: got %q, want %q — the survivors are claude's first %d, in order",
+							i, got.ResolvedModel, want, tt.wantLen)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("the record names both numbers", func(t *testing.T) {
+		t.Parallel()
+		// The ONLY place `dropped` is non-zero. Without it the attribute is decorative:
+		// a producer hard-coding 0 would stay green in every other record assertion on
+		// this path, and this record is the only observable the cap has until #1693.
+		rec := &logRecorder{}
+		p := NewParser(func(turnevent.Event) {}, slog.New(rec))
+		line := modelListLineFixture(t, "success", modelEntriesFixture(100))
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+
+		consumes := rec.withMessage(controlResponseConsumeMsgFixture)
+		if len(consumes) != 1 {
+			t.Fatalf("records with message %q: got %d, want 1 — all records: %+v",
+				controlResponseConsumeMsgFixture, len(consumes), rec.all())
+		}
+		wantAttrs := map[string]string{
+			"type":    "control_response",
+			"reason":  "model_list",
+			"models":  strconv.Itoa(modelListEntriesCapFixture),
+			"dropped": strconv.Itoa(100 - modelListEntriesCapFixture),
+		}
+		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
+			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
+		}
+	})
+}
+
 // TestParser_ModelListIsLoggedContentFree is AC 5: no record on this path carries
 // decoded content, on any of the four rungs. The constraint is #833's posture,
 // restated across internal/relay's v2session_settings.go and internal/sessions'
@@ -4325,10 +4471,14 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 			t.Errorf("record %d message: got %q, want %q", i, r.msg, controlResponseConsumeMsgFixture)
 			continue
 		}
+		// Every line here is under the cap, so `dropped` is 0 on all five — the
+		// non-zero case is TestParser_ModelListEntryCountIsBounded's. What this sweep
+		// adds is that the new attribute is swept for leaks like the other three.
 		wantAttrs := map[string]string{
-			"type":   "control_response",
-			"reason": wantReasons[i],
-			"models": wantCounts[i],
+			"type":    "control_response",
+			"reason":  wantReasons[i],
+			"models":  wantCounts[i],
+			"dropped": "0",
 		}
 		if !reflect.DeepEqual(r.attrs, wantAttrs) {
 			t.Errorf("record %d attrs: got %v, want exactly %v", i, r.attrs, wantAttrs)

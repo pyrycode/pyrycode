@@ -354,29 +354,28 @@ const maxModelField = 256
 // verbatim — they bound different fields for different reasons, and folding them
 // into one would make a future change to one budget silently move this one.
 //
-// THE ENVELOPE ARITHMETIC IS PARTIAL, and the gap is named rather than left
-// implicit. Per ENTRY the worst case is maxModelResolved + maxModelValue +
-// maxModelDisplayName = 768 bytes of claude-derived text, 1.2% of the v2
-// application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
-// Application-envelope size cap). The AGGREGATE has no term to compute here: a
-// per-entry text cap alone leaves a list's total size a function of a number
-// claude chooses, which is maxTaskRosterEntries' doctrine, and the cardinality cap
-// that supplies the missing factor is #1812's deliverable rather than this slice's.
-// 768 is written here as the multiplicand that ticket inherits instead of
-// re-deriving — with one constraint on it: the observed list is already SIX
-// entries, so maxTaskRosterEntries' 8 cannot be reached for by analogy without
-// checking that six fits under it with room left.
+// THE ENVELOPE ARITHMETIC IS COMPLETE, in two terms stated in two places. Per
+// ENTRY the worst case is maxModelResolved + maxModelValue + maxModelDisplayName =
+// 768 bytes of claude-derived text, 1.2% of the v2 application-envelope cap of
+// 65519 bytes (docs/protocol-mobile.md § Application-envelope size cap). 768 is
+// written here as the MULTIPLICAND, and the factor it is multiplied by is
+// maxModelListEntries — which carries the aggregate arithmetic rather than
+// restating it here, exactly as maxTaskRosterEntries carries the roster's. A
+// per-entry text cap alone would leave a list's total a function of a number claude
+// chooses, which is maxTaskRosterEntries' doctrine; the count bound supplies the
+// missing factor, and the one constraint it had to satisfy is checked there: the
+// observed list is already SIX entries, so maxTaskRosterEntries' 8 could not be
+// reached for by analogy without checking that six fits with room left.
 //
 // Amplification from input to retained bytes is bounded but NOT near 1 the way the
 // scalar targets' is, and this is the one place that difference shows. The cap is
 // applied AFTER json.Unmarshal, so a hostile array is materialised in transient
 // memory before any of it is bounded — maxTaskRosterEntries' transient paragraph,
-// minus the count bound that shortens it there. Three facts bound the exposure:
-// defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees it and
-// the densest legal entry is `{}`, so one pathological line is order 100 MB of
-// transient; it is TRANSIENT, not retained, because turnbridge.MapEvent's default
-// drops the event and frees it, one in flight at a time; and nothing puts it in the
-// eventring or on the wire until #1693, which lands after #1812.
+// verbatim. Three facts bound the exposure: defaultMaxParseBuf caps the whole line
+// at 4 MiB before the decoder sees it and the densest legal entry is `{}`, so one
+// pathological line is order 100 MB of transient; it is TRANSIENT, not retained,
+// because turnbridge.MapEvent's default drops the event and frees it, one in flight
+// at a time; and nothing puts it in the eventring or on the wire until #1693.
 const maxModelResolved = 256
 
 // maxModelValue caps turnevent.ModelOption.Value. maxModelResolved's paragraph
@@ -401,6 +400,62 @@ const maxModelValue = 256
 // legitimate one first while saving 0.x% of an envelope this list does not reach.
 const maxModelDisplayName = 256
 
+// maxModelListEntries caps how many entries a turnevent.ModelList carries. It is
+// the second application of maxTaskRosterEntries' doctrine and the constant that
+// supplies the factor maxModelResolved's per-entry budget was missing: a per-entry
+// text cap alone leaves a list's total size a function of a number claude chooses.
+// Applied at CONSTRUCTION like every cap above, so an oversized payload never
+// enters the event stream, the push queue, or any log. Overflow is REPORTED
+// (turnevent.ModelList.DroppedModels), not silent — the one property that makes a
+// cardinality bound honest, because a client showing six of claude's forty models
+// as a complete menu is a lie rather than a gap.
+//
+// The number is DERIVED, and the derivation is written out because it is decimal
+// rather than a power of two and a reader will ask why:
+//
+//   - Multiplicand: 768 bytes per entry (maxModelResolved + maxModelValue +
+//     maxModelDisplayName), inherited from maxModelResolved's doc, which states it
+//     for this constant rather than leaving it to be re-derived.
+//   - Ceiling: 8192 bytes, maxTaskRosterEntries' product, which is exactly HALF of
+//     maxUnrecognizedRaw's whole-line 16 KiB and is how the package keeps its
+//     ordering one level up — a whole KNOWN event must not approach the cap on an
+//     entire UNKNOWN line. 8192 / 768 = 10.67, so 10 is the largest count whose
+//     product stays under that landmark.
+//   - Floor: the observed list is SIX entries (the committed capture, claude
+//     2.1.239), the check maxModelResolved's doc requires. 10 leaves four slots.
+//   - Product: 10 * 768 = 7680 bytes, 11.7% of the v2 application-envelope cap of
+//     65519 bytes (docs/protocol-mobile.md § Application-envelope size cap) and
+//     46.9% of maxUnrecognizedRaw — just under the roster's half, so the ordering
+//     holds with the roster's own margin. Escaping is mild for maxUnrecognizedRaw's
+//     reason verbatim: these are JSON string values, so the growth is quotes and
+//     backslashes rather than a \u00XX expansion of every byte. Pathological
+//     all-quote content roughly doubles it — ~15 KB, ~23% of the envelope.
+//
+// NOT 8, borrowed from maxTaskRosterEntries by analogy. Two slots above an
+// observation of six is not room, and the failure that buys is a cap firing on
+// claude's ORDINARY output — the menu everyone sees, cut, on every child.
+//
+// NOT a power of two, unlike every other constant in this family, because 768 =
+// 3 * 256 puts none of them near the ceiling: 8 is the too-tight case above and 16
+// lands the product at 12 KiB, 75% of the whole-line UNKNOWN budget. The decimal is
+// what satisfies both binding constraints at once.
+//
+// The multiple over the observation is thinner than the text caps' 10x, and that is
+// deliberate: a text cap's overflow mangles an identifier in place, while this one
+// shortens a list and says BY HOW MANY, so a client can render "6 of 40" rather
+// than a wrong menu. The reported failure mode is what buys the thinner margin.
+//
+// 768 counts claude-derived text only. An entry can also carry up to three
+// DAEMON-authored names in TruncatedFields (~40 bytes), which claude cannot inflate
+// and which maxTaskRosterEntries' arithmetic likewise excludes.
+//
+// The cap is applied AFTER json.Unmarshal, so a hostile array is materialised in
+// transient memory before it is shortened — maxTaskRosterEntries' accepted trade,
+// with maxModelResolved's amplification paragraph bounding the exposure. This cap
+// bounds what is RETAINED and what crosses the wire, which is the property that
+// matters.
+const maxModelListEntries = 10
+
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
 // or a prefix: it is half of emitModelList's conjunctive gate, and the half that
@@ -416,8 +471,10 @@ const controlResponseSuccess = "success"
 //
 // The message is UNCHANGED from #1500 and every control_response still produces
 // exactly one record; what #1811 added is `reason` and a `models` count on records
-// that previously carried the type alone. Both are daemon-authored — a keyword from
-// this set and an integer — so the content-free discipline is intact, and the side
+// that previously carried the type alone, and what #1812 added beside them is a
+// `dropped` count, so a shortened list is not read as a whole one. All three are
+// daemon-authored — a keyword from this set and two integers — so the content-free
+// discipline is intact, and the side
 // benefit is the gap consumeLine's own arm recorded as accepted: a NAK is no longer
 // indistinguishable from a success in the log.
 const (
@@ -1688,24 +1745,32 @@ func (p *Parser) emitModelList(line []byte) {
 		// is where that rule is argued at length: encoding/json QUOTES the offending
 		// input bytes into its error text, so `"err", err` would route claude's own
 		// strings into the daemon log through a channel no per-attribute check can see.
-		p.logControlResponse(controlResponseUndecodable, 0)
+		p.logControlResponse(controlResponseUndecodable, 0, 0)
 		return
 	}
 	if cr.Response.Subtype != controlResponseSuccess {
-		p.logControlResponse(controlResponseNAK, 0)
+		p.logControlResponse(controlResponseNAK, 0, 0)
 		return
 	}
 	entries := cr.Response.Response.Models
 	if len(entries) == 0 {
 		// Rung 3. An absent `models`, a null one, an empty array, and a response
 		// object carrying no such key all land here and are answered identically.
-		p.logControlResponse(controlResponseAck, 0)
+		p.logControlResponse(controlResponseAck, 0, 0)
 		return
 	}
 
-	// Never nil and never empty: the rung above returned on both. No count bound
-	// runs before this loop, unlike emitBackgroundTaskRoster's — see maxModelResolved
-	// for the arithmetic that leaves and for whose slice supplies it.
+	// Never nil and never empty: the rung above returned on both. The COUNT bound
+	// runs before the loop, and truncation is FROM THE TAIL: claude's order is
+	// preserved because no ranking is invented, its ordering semantics being
+	// unobserved. It sits BELOW rung 3 and cannot move a rung's classification —
+	// the cap is >= 1, so capping can neither create an empty list nor rescue one.
+	var dropped int
+	if len(entries) > maxModelListEntries {
+		dropped = len(entries) - maxModelListEntries
+		entries = entries[:maxModelListEntries]
+	}
+
 	models := make([]turnevent.ModelOption, 0, len(entries))
 	for _, entry := range entries {
 		// The TEXT bound is per entry, so `cut` is per entry — which is the whole
@@ -1739,8 +1804,8 @@ func (p *Parser) emitModelList(line []byte) {
 		})
 	}
 
-	p.logControlResponse(controlResponseModelList, len(models))
-	p.emit(turnevent.ModelList{Models: models})
+	p.logControlResponse(controlResponseModelList, len(models), dropped)
+	p.emit(turnevent.ModelList{Models: models, DroppedModels: dropped})
 }
 
 // logControlResponse writes emitModelList's ONE record, and it exists so the
@@ -1748,17 +1813,32 @@ func (p *Parser) emitModelList(line []byte) {
 // rungs. Every control_response produces exactly one of these, whatever it was a
 // reply to.
 //
-// Three attributes and NOTHING else. `type` is a constant here rather than
+// Four attributes and NOTHING else. `type` is a constant here rather than
 // sl.Type, which the case arm's match makes byte-identical; `reason` comes from the
-// closed keyword set at controlResponseMsg; `models` is the emitted entry count,
-// 0 on the three non-emitting rungs. No value, no resolvedModel, no displayName, no
-// request_id, no error string, no unmarshal err, no line bytes. The three strings
-// are precisely what #833's posture — restated across internal/relay's
-// v2session_settings.go and internal/sessions' pool.go as "model / effort / YOLO
-// values are NEVER logged at any level" — exists to keep out of a log, and a drop
-// site explaining itself with the value it dropped is how that rule usually breaks.
-func (p *Parser) logControlResponse(reason string, models int) {
-	p.log.Debug(controlResponseMsg, "type", "control_response", "reason", reason, "models", models)
+// closed keyword set at controlResponseMsg; `models` is the emitted entry count and
+// `dropped` how many maxModelListEntries cut, both 0 on the three non-emitting
+// rungs. No value, no resolvedModel, no displayName, no request_id, no error string,
+// no unmarshal err, no line bytes. The three strings are precisely what #833's
+// posture — restated across internal/relay's v2session_settings.go and
+// internal/sessions' pool.go as "model / effort / YOLO values are NEVER logged at
+// any level" — exists to keep out of a log, and a drop site explaining itself with
+// the value it dropped is how that rule usually breaks. Both integers are
+// DAEMON-computed and carry none of claude's bytes, which is what admits them where
+// no string from the payload is admitted.
+//
+// `dropped` is here rather than omitted (#1812) for the reason the wire field's own
+// doc argues about a permanent zero, one layer down: `models=6` on a reply that
+// carried forty reads as "claude offers six models". emitBackgroundTaskRoster logs
+// no count and does not oppose this — its only record is the UNDECODABLE drop, so it
+// has no success record to complete, while this path has one and completing it is
+// consistent. Until #1693 publishes the event, this record is the ONLY observable
+// the cap has: without it, a cap firing in production is a cap nobody can know
+// fired, and the first evidence that 10 is the wrong number would arrive as a user's
+// short menu. The attribute set is FIXED at four on every rung, which is why the
+// non-emitting ones pass 0 rather than omitting the key.
+func (p *Parser) logControlResponse(reason string, models, dropped int) {
+	p.log.Debug(controlResponseMsg,
+		"type", "control_response", "reason", reason, "models", models, "dropped", dropped)
 }
 
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors

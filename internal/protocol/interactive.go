@@ -548,12 +548,13 @@ type ModelAnnouncedPayload struct {
 //
 // DroppedModels is how many entries the producer cut beyond its entry cap that
 // this frame does NOT carry; 0 when nothing was dropped, so the list's true size
-// is len(Models) + DroppedModels. NOTHING COUNTS IT YET, and that is worth saying
-// out loud: the field is declared ahead of any producer and is only honest once
-// something upstream counts. It is declared now anyway because a wire with
+// is len(Models) + DroppedModels. The decode now COUNTS IT (#1812): streamsup's
+// maxModelListEntries bounds the entry count and turnevent.ModelList.DroppedModels
+// carries what it cut, which is this field's honest source. Nothing joins the two
+// yet — #1693 is where the field and that counter meet, this type still having no
+// constructor. The field was declared ahead of both (#1704) because a wire with
 // nowhere to put a drop discards it silently, and a permanent 0 reads as "nothing
-// was dropped", which is a lie rather than a gap. #1690 owns making the decode
-// record it; #1693 is where the field and a counter meet. The count reports here
+// was dropped", which is a lie rather than a gap. The count reports here
 // rather than as a name in a top-level truncated_fields — which is why this
 // payload has none, BackgroundTaskRosterPayload's stated reason — because a
 // name-only report loses HOW MANY were lost, and each dimension reports where it
