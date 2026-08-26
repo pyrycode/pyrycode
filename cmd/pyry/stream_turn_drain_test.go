@@ -170,17 +170,45 @@ func decodeDelta(t *testing.T, env protocol.Envelope) protocol.AssistantDeltaPay
 	return d
 }
 
+// dropKindWaitTimeout is waitDropKind's give-up budget. Measured 2026-08-25 under
+// synthetic contention (the compiled -race binary at GOMAXPROCS=2 alongside 8
+// busy-loop CPU hogs, 15 runs): every run passed, but the slowest wait took 1.53s
+// against the then-budget of 2s — a headroom multiple of 1.3×, under a load
+// lighter than a real full-suite fan-out, so that tail is an underestimate. 10s
+// buys 6.5× and turns a red here back into evidence of a regression in the exit
+// lane rather than of a busy machine.
+//
+// 10s rather than something smaller because it is not an invented number:
+// TestStreamRunnerFactory_ChildExitClearsTurnBusy — the call site that actually
+// reddened the gate — already arms a 10s WaitIdle on the same spawned-child
+// fixture, so 10s is already this package's stated tolerance for that lane. The
+// larger value costs nothing on the green path: the helper returns the instant the
+// wanted kind arrives, so the budget is paid only on a genuine red. It stays far
+// under Go's default package timeout, which is what keeps a genuine hang surfacing
+// as a named failure here rather than as a whole-package panic dump.
+const dropKindWaitTimeout = 10 * time.Second
+
 func waitDropKind(t *testing.T, kinds <-chan string, want string) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
+	start := time.Now()
+	deadline := time.After(dropKindWaitTimeout)
+	// seen is best-effort and in arrival order, duplicates kept: dropWatcher's send
+	// is non-blocking, so a kind can be discarded on a full channel and never reach
+	// here. At the deadline an empty slice says the wanted kind never arrived, a
+	// non-empty one says the wrong kinds kept coming — which is the whole point of
+	// reporting it. The elapsed is not redundant with the budget either: ~10s means
+	// the budget bound, far more means this goroutine was starved out of its select.
+	var seen []string
 	for {
 		select {
 		case k := <-kinds:
+			seen = append(seen, k)
 			if k == want {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("timed out waiting for a not-active drop of kind %q", want)
+			t.Fatalf("timed out after %v waiting for a not-active drop of kind %q; kinds seen: %v",
+				time.Since(start).Round(time.Millisecond), want, seen)
 		}
 	}
 }
