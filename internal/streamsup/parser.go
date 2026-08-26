@@ -354,11 +354,13 @@ const maxModelField = 256
 // verbatim — they bound different fields for different reasons, and folding them
 // into one would make a future change to one budget silently move this one.
 //
-// THE ENVELOPE ARITHMETIC IS COMPLETE, in two terms stated in two places. Per
-// ENTRY the worst case is maxModelResolved + maxModelValue + maxModelDisplayName =
-// 768 bytes of claude-derived text, 1.2% of the v2 application-envelope cap of
-// 65519 bytes (docs/protocol-mobile.md § Application-envelope size cap). 768 is
-// written here as the MULTIPLICAND, and the factor it is multiplied by is
+// THE ENVELOPE ARITHMETIC IS NO LONGER COMPLETE, and this commit (#1827) is what
+// opened the gap: there are THREE terms now and only two of them are bounded. Per
+// ENTRY the THREE-STRING worst case is maxModelResolved + maxModelValue +
+// maxModelDisplayName = 768 bytes of claude-derived text, 1.2% of the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap). 768 is written here as the MULTIPLICAND FOR THOSE
+// THREE rather than as the per-entry total, and the factor it is multiplied by is
 // maxModelListEntries — which carries the aggregate arithmetic rather than
 // restating it here, exactly as maxTaskRosterEntries carries the roster's. A
 // per-entry text cap alone would leave a list's total a function of a number claude
@@ -366,6 +368,15 @@ const maxModelField = 256
 // missing factor, and the one constraint it had to satisfy is checked there: the
 // observed list is already SIX entries, so maxTaskRosterEntries' 8 could not be
 // reached for by analogy without checking that six fits with room left.
+//
+// The THIRD term is maxModelEffortLevel multiplied by a level count claude chooses,
+// so the honest per-entry figure is 768 + 32N. Nothing bounds N: the element cap
+// bounds each level STRING and no cap bounds how many levels arrive. Closing it is
+// #1821's, and maxModelListEntries' derivation carries the arithmetic showing that a
+// count cap alone cannot do it. Stated here rather than left to be re-derived,
+// because this is the paragraph a reader lands on to learn what the per-entry budget
+// IS, and inheriting the old completeness sentence would be inheriting a product the
+// numbers no longer support.
 //
 // Amplification from input to retained bytes is bounded but NOT near 1 the way the
 // scalar targets' is, and this is the one place that difference shows. The cap is
@@ -400,6 +411,34 @@ const maxModelValue = 256
 // legitimate one first while saving 0.x% of an envelope this list does not reach.
 const maxModelDisplayName = 256
 
+// maxModelEffortLevel caps ONE ELEMENT of turnevent.ModelOption.EffortLevels, not
+// the list. maxModelResolved's paragraph applies verbatim for maxModelValue's
+// reason — the separate-constant rule and the construction-time application are one
+// argument covering all four fields, stated once there rather than transcribed a
+// fourth time. A power of two, matching the family.
+//
+// MEASURED against the same capture: the longest level is 6 bytes (medium), so 32
+// is roughly 5x the observation — a THINNER multiple than the three strings' 10x,
+// for two reasons of which the second is the real one. A level is the most
+// constrained shape in the family, a token from a menu claude publishes and a client
+// renders as a control's options, not prose like DisplayName. And this cap is paid
+// PER ELEMENT against a count claude chooses, so generosity here multiplies where
+// the siblings' does not. 32 still admits every plausible future spelling —
+// ultrathink is 10 bytes, extended-thinking 17 — which is the property that matters:
+// a level claude adds later must DECODE, not arrive mangled.
+//
+// NOT sized to internal/relay's validEffort, whose CLOSED enum's longest member is
+// the same 6 bytes. That enum bounds a PHONE-supplied override on an INBOUND path
+// and is deliberately a different rule; sizing this cap to it would be applying the
+// inbound rule outbound by the back door, and the level claude adds next is what
+// both mistakes lose. See turnevent.ModelOption.EffortLevels, where the same
+// separation is stated for the consumer.
+//
+// It bounds the ELEMENT and nothing bounds the COUNT — the gap maxModelResolved's
+// envelope paragraph states and maxModelListEntries' derivation quantifies, and
+// which #1821 closes.
+const maxModelEffortLevel = 32
+
 // maxModelListEntries caps how many entries a turnevent.ModelList carries. It is
 // the second application of maxTaskRosterEntries' doctrine and the constant that
 // supplies the factor maxModelResolved's per-entry budget was missing: a per-entry
@@ -415,21 +454,37 @@ const maxModelDisplayName = 256
 //
 //   - Multiplicand: 768 bytes per entry (maxModelResolved + maxModelValue +
 //     maxModelDisplayName), inherited from maxModelResolved's doc, which states it
-//     for this constant rather than leaving it to be re-derived.
+//     for this constant rather than leaving it to be re-derived. Since #1827 it is a
+//     FLOOR on per-entry bytes rather than the total — see the third-term paragraph
+//     under this list.
 //   - Ceiling: 8192 bytes, maxTaskRosterEntries' product, which is exactly HALF of
 //     maxUnrecognizedRaw's whole-line 16 KiB and is how the package keeps its
 //     ordering one level up — a whole KNOWN event must not approach the cap on an
 //     entire UNKNOWN line. 8192 / 768 = 10.67, so 10 is the largest count whose
-//     product stays under that landmark.
+//     THREE-STRING product stays under that landmark.
 //   - Floor: the observed list is SIX entries (the committed capture, claude
 //     2.1.239), the check maxModelResolved's doc requires. 10 leaves four slots.
-//   - Product: 10 * 768 = 7680 bytes, 11.7% of the v2 application-envelope cap of
-//     65519 bytes (docs/protocol-mobile.md § Application-envelope size cap) and
-//     46.9% of maxUnrecognizedRaw — just under the roster's half, so the ordering
-//     holds with the roster's own margin. Escaping is mild for maxUnrecognizedRaw's
-//     reason verbatim: these are JSON string values, so the growth is quotes and
-//     backslashes rather than a \u00XX expansion of every byte. Pathological
-//     all-quote content roughly doubles it — ~15 KB, ~23% of the envelope.
+//   - Product: 10 * 768 = 7680 bytes OF THE THREE STRINGS, 11.7% of the v2
+//     application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+//     Application-envelope size cap) and 46.9% of maxUnrecognizedRaw — just under
+//     the roster's half, so the ordering holds with the roster's own margin.
+//     Escaping is mild for maxUnrecognizedRaw's reason verbatim: these are JSON
+//     string values, so the growth is quotes and backslashes rather than a \u00XX
+//     expansion of every byte. Pathological all-quote content roughly doubles it —
+//     ~15 KB, ~23% of the envelope.
+//
+// THAT PRODUCT BOUNDS THE THREE STRINGS AND NOTHING ELSE since #1827 added
+// maxModelEffortLevel: an entry also carries a level LIST whose ELEMENTS are capped
+// at 32 bytes and whose LENGTH is capped by nothing, so the real per-entry figure is
+// 768 + 32N. The arithmetic is worth writing out because it shows the gap cannot be
+// closed by adding a count bound alone: 10 * (768 + 32N) <= 8192 requires N <= 1.6,
+// so ANY level-count cap of 2 or more breaks the product above. #1821 must therefore
+// move this constant, or the 8192 ceiling, or both, in addition to bounding N — and
+// which of those levers is right is #1821's decision, deliberately not made here.
+// Nor does a thinner per-level cap avoid it: keeping 10 entries under 8192 with the
+// five levels claude actually sends would need a level cap of 10 bytes, which would
+// cut a level claude has not shipped yet and would fire on ORDINARY output, the
+// failure the NOT 8 paragraph rejects for the count.
 //
 // NOT 8, borrowed from maxTaskRosterEntries by analogy. Two slots above an
 // observation of six is not room, and the failure that buys is a cap firing on
@@ -910,11 +965,12 @@ type controlResponseLine struct {
 	} `json:"response"`
 }
 
-// modelOptionLine is one element of that array, reduced to the four keys the
+// modelOptionLine is one element of that array, reduced to the five keys the
 // mapping reads. The field set is exactly what turnevent.ModelOption carries and
 // nothing invented: description, supportsEffort, supportsAdaptiveThinking and
 // supportsFastMode are all absent by decision, not by oversight — see that type's
-// doc — and the one remaining capability key, supportedEffortLevels, is #1820's.
+// doc. supportedEffortLevels is decoded HERE (#1827), which leaves no capability key
+// claude sends unaccounted for.
 //
 // A plain []modelOptionLine on the container above, not a pointer to one, and no
 // distinction is kept between an absent `models`, a null one and an empty array:
@@ -922,28 +978,41 @@ type controlResponseLine struct {
 // present-but-empty, and a line carrying no such key all land in the same rung and
 // are answered identically, which is what makes a plain decode target sufficient.
 //
-// The first three are plain strings, which is why truncateField's json.RawMessage
-// exception does not reach this shape: encoding/json has already U+FFFD-replaced
-// invalid input on decode, so our own cut is the only mid-rune hazard. A
-// non-string value for any of them — or a supportsAutoMode that is a string, a
-// number, an object or an array, or a `models` that is a number, an object or a
-// string, or a non-object `response` at either level — fails the WHOLE-LINE decode
-// and takes emitModelList's undecodable rung, exactly as
+// The first three are plain strings, and so is every ELEMENT of EffortLevels,
+// which is why truncateField's json.RawMessage exception does not reach this shape:
+// encoding/json has already U+FFFD-replaced invalid input on decode, so our own cut
+// is the only mid-rune hazard. A non-string value for any of the three — or a
+// supportsAutoMode that is a string, a number, an object or an array, or a
+// supportedEffortLevels that is a string, a number or an object, or a `models` that
+// is a number, an object or a string, or a non-object `response` at either level —
+// fails the WHOLE-LINE decode and takes emitModelList's undecodable rung, exactly as
 // systemTaskUpdatedLine.TaskID does for a numeric task id. That type mismatch is
 // the ONLY reachable failure there: consumeLine has already decoded this line into
 // streamLine, so malformed JSON never reaches the function at all.
+//
+// A supportedEffortLevels ARRAY carrying a non-string element fails the same way,
+// and it is named here rather than left to be inferred because it is the family's
+// first ELEMENT-level mismatch and "the array decoded but one element was wrong" is
+// the shape a reader would otherwise assume is tolerated. The decode is
+// all-or-nothing at the LINE: there is no path that keeps an array's good elements
+// and drops the bad one, which is the behaviour this field wants, since a menu that
+// silently lost an element would be published as claude's complete one.
 //
 // JSON null is the one carve-out, and it has always applied to the three strings
 // as much as to the bool: encoding/json documents unmarshalling a null into a
 // non-pointer Go value as a NO-OP producing no error, so a null-valued key decodes
 // cleanly and lands as the zero value rather than on the undecodable rung. For
 // supportsAutoMode that is the same reading an absent key gets, which is what
-// turnevent.ModelOption.SupportsAutoMode's doc argues is deliberate.
+// turnevent.ModelOption.SupportsAutoMode's doc argues is deliberate. For
+// supportedEffortLevels it lands as nil, which is the same ZERO-LENGTH shape an
+// absent key gets — without that being a claim that the two MEAN the same thing,
+// which is #1828's to settle and turnevent.ModelOption.EffortLevels' to state.
 type modelOptionLine struct {
-	ResolvedModel    string `json:"resolvedModel"`
-	Value            string `json:"value"`
-	DisplayName      string `json:"displayName"`
-	SupportsAutoMode bool   `json:"supportsAutoMode"`
+	ResolvedModel    string   `json:"resolvedModel"`
+	Value            string   `json:"value"`
+	DisplayName      string   `json:"displayName"`
+	EffortLevels     []string `json:"supportedEffortLevels"`
+	SupportsAutoMode bool     `json:"supportsAutoMode"`
 }
 
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
@@ -1749,6 +1818,14 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // is decided at turnevent.ModelOption's type rather than here, because the field's
 // shape is the decision — there is no daemon code below implementing the collapse.
 //
+// The level LIST goes through a cap like the three strings and reports like none of
+// them: ONE name in TruncatedFields per entry however many of that entry's levels
+// were cut, because the report names FIELDS and a list is one field. What an absent
+// supportedEffortLevels READS AS is likewise turnevent.ModelOption.EffortLevels' to
+// say rather than this function's, and it is OPEN (#1828) — which is why nothing
+// below turns an absent key's nil into an empty slice or a published empty array
+// into nil. Either would be this function answering a question it does not own.
+//
 // NOTHING FROM THE PAYLOAD IS LOGGED, on any path — see logControlResponse, which
 // is the one place that is decided.
 func (p *Parser) emitModelList(line []byte) {
@@ -1796,6 +1873,42 @@ func (p *Parser) emitModelList(line []byte) {
 			}
 			return out
 		}
+		// boundEach is bound's sibling for the one field of this entry that is a LIST,
+		// and it exists rather than a fourth bound call because a list is where ONE
+		// name has to cover MANY values. Three properties, each load-bearing:
+		//
+		//   - An empty input is returned UNCHANGED and appends nothing, so nil stays nil
+		//     and empty stays empty. That is the no-normalisation rule expressed as the
+		//     absence of code: which of the two an absent key should read as is #1828's
+		//     (turnevent.ModelOption.EffortLevels), and allocating either shape here
+		//     would be answering it.
+		//   - Every element goes through truncateField into a slice of the SAME length,
+		//     so cutting an element neither drops it nor disturbs claude's order.
+		//   - The name is appended AT MOST ONCE, after the loop, and only if some
+		//     element was cut. Appending inside the loop would name the field once per
+		//     cut level, which is the realistic mistake and the one the three-over-long
+		//     row of TestParser_ModelListFieldsAreCapped exists to catch.
+		//
+		// It is named for the ELEMENT the cap applies to, because what bounds the list's
+		// LENGTH is nothing yet — see maxModelEffortLevel and #1821. It closes over the
+		// same per-entry `cut` slice bound does and cannot be hoisted for the same
+		// reason.
+		boundEach := func(values []string, name string, limit int) []string {
+			if len(values) == 0 {
+				return values
+			}
+			out := make([]string, len(values))
+			var cutAny bool
+			for i, level := range values {
+				var truncated bool
+				out[i], truncated = truncateField(level, limit)
+				cutAny = cutAny || truncated
+			}
+			if cutAny {
+				cut = append(cut, name)
+			}
+			return out
+		}
 		// Sequential statements rather than a composite literal, for
 		// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these
 		// calls, and inside a literal that order would rest on the left-to-right
@@ -1804,6 +1917,7 @@ func (p *Parser) emitModelList(line []byte) {
 		resolvedModel := bound(entry.ResolvedModel, "resolved_model", maxModelResolved)
 		value := bound(entry.Value, "value", maxModelValue)
 		displayName := bound(entry.DisplayName, "display_name", maxModelDisplayName)
+		effortLevels := boundEach(entry.EffortLevels, "effort_levels", maxModelEffortLevel)
 
 		models = append(models, turnevent.ModelOption{
 			// claude's values VERBATIM: no lowercasing, no alias expansion, no
@@ -1812,6 +1926,13 @@ func (p *Parser) emitModelList(line []byte) {
 			ResolvedModel: resolvedModel,
 			Value:         value,
 			DisplayName:   displayName,
+			// Through `boundEach` rather than `bound`: the cap is per ELEMENT and the
+			// report is per FIELD. claude's order and the list's cardinality survive a cut
+			// untouched, and #1600's verbatim rule covers the elements exactly as it covers
+			// the three strings — no lowercasing and no canonicalisation into any effort
+			// vocabulary of the daemon's own. internal/relay's validEffort is a CLOSED enum
+			// on an INBOUND path and is deliberately not consulted here.
+			EffortLevels: effortLevels,
 			// Not through `bound`: a bool has no length to cut, carries none of claude's
 			// bytes into the per-entry budget, and is therefore never named in
 			// TruncatedFields. Absent, null and false arrive here already collapsed by
