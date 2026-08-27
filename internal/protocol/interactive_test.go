@@ -866,9 +866,10 @@ func TestModelAnnouncedType_IsNotClaudesSubtype(t *testing.T) {
 // and here that is the ONLY path there is. Unmarshalling "models":[] always
 // yields a non-nil empty slice, so the nil branch is reachable only by
 // constructing the value directly, and this slice (#1704) ships no fixture at all
-// (internal/protocol/testdata/ is #1705's). A producer (#1693) mapping an empty
-// or absent claude models array would hand this type a nil slice and, without
-// normalisation, would ship "models":null to a phone.
+// (internal/protocol/testdata/ is #1705's). The producer (#1848) builds its outer
+// slice by appending into a nil one, so an empty or absent claude models array
+// hands this type a nil slice and, without normalisation, would ship
+// "models":null to a phone.
 //
 // Both the value and pointer forms are checked because a pointer-receiver
 // marshaller would silently miss the value path roundTripEnvelope takes. This is
@@ -1059,8 +1060,11 @@ func TestModelListType_IsNotClaudesVocabulary(t *testing.T) {
 //     brackets double as the pin on Go's HTML escaping. Row 5 carries the
 //     resolution of the `haiku` alias measured on the SAME claude version in the
 //     committed capture internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json,
-//     which is a turn announcement rather than an initialize reply. #1693 measures
-//     the initialize reply's own per-entry keys and replaces the four sentinels.
+//     which is a turn announcement rather than an initialize reply. The initialize
+//     reply's own per-entry keys have not been measured, and no shipped slice owns
+//     doing it — the four sentinels still stand in the fixture, where Go's encoder
+//     stores their angle brackets \u-escaped, so grep them as unmeasured rather
+//     than as <unmeasured>.
 //   - truncated_fields. Populated on row 3 and null on the other four —
 //     background_task_roster.json's two-entry pattern. No measured value is
 //     anywhere near a producer cap, so no real frame carries this row with this
@@ -1069,8 +1073,9 @@ func TestModelListType_IsNotClaudesVocabulary(t *testing.T) {
 //     un-sendable.
 //   - dropped_models. 2, non-zero so this fixture pins the value rather than the
 //     zero encoding (background_task_roster.json's dropped_tasks: 3). The decode
-//     counts it since #1812 (turnevent.ModelList.DroppedModels); #1693 is where the
-//     field and that counter meet.
+//     counts it since #1812 (turnevent.ModelList.DroppedModels), and #1848 is where
+//     the field and that counter meet — MapEvent's arm carries the count through
+//     verbatim rather than recomputing it.
 func TestModelListPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "model_list.json")
 
@@ -1140,9 +1145,9 @@ func TestModelListPayload_RoundTrip(t *testing.T) {
 	}
 
 	// The count dimension, decided at the menu level and distinct from any row's
-	// text cut. Nothing fills this field on a real frame yet — no producer builds
-	// this type until #1693 — so a client cannot read len(models) + dropped_models
-	// as the menu's true size today, even though the decode already counts it.
+	// text cut. #1848 fills this field from what the decode counted and #1849 puts
+	// the frame on the wire, so len(models) + dropped_models IS the menu's true
+	// size on a real frame today.
 	if payload.DroppedModels != 2 {
 		t.Errorf("DroppedModels: got %d, want 2", payload.DroppedModels)
 	}

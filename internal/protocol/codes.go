@@ -433,15 +433,20 @@ const (
 // wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
 // dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
 // here would be red by construction, and filing it under excludedTypes to dodge
-// that would be a lie to the guard. If #1693 picks request/reply it declares the
-// verb together with its handler and moves this constant from push to reply; a
-// client's decode path is the same frame either way, which is what declaring the
-// shape now exists to freeze.
+// that would be a lie to the guard. It shipped as a PUSH: #1849 emits it from
+// interactiveTurnEmitterV2.Handle on the interactive turn lane, no inbound
+// request verb was ever declared for it, and neither surface named above carries
+// a model_list entry — so this constant's excludedTypes classification stays
+// push. A later ticket picking request/reply would still have to declare the verb
+// together with its handler; a client's decode path is the same frame whatever it
+// picks, which is what declaring the shape ahead of the producer bought.
 //
-// The declaring ticket (#1704) is wire vocabulary only: #1693 produces and emits
-// the frame, and #1705 adds the encoding fixtures and the docs/protocol-mobile.md
-// § model_list section. Same declare-then-emit sequencing as #1405→#1410 and
-// #1616→#1638.
+// The declaring ticket (#1704) was wire vocabulary only; #1848 added
+// internal/turnbridge's MapEvent arm for turnevent.ModelList and #1849 added
+// cmd/pyry's emitting Handle case, so this frame now reaches an interactive v2
+// mobile client, and #1705 added the encoding fixtures and the
+// docs/protocol-mobile.md § model_list section. Same declare-then-emit sequencing
+// as #1405→#1410 and #1616→#1638.
 const (
 	TypeModelList = "model_list" // binary → phone, outbound v2 model-list report
 )
@@ -519,7 +524,7 @@ const (
 // payload and its entry type, #1720 produces and emits the frame, and #1718 adds
 // the encoding fixtures and the docs/protocol-mobile.md § slash_command_list
 // section. Same declare-then-emit sequencing as #1405→#1410, #1616→#1638 and
-// #1704→#1693.
+// #1704→#1848.
 const (
 	TypeSlashCommandList = "slash_command_list" // binary → phone, outbound v2 slash-command-list report
 )
@@ -911,7 +916,7 @@ const (
 // client-facing contract and the attachment.* reject codes, #1741 reassembles
 // and checks the claims, #1743 stores, #1744 dispatches the inbound leg, and
 // #1746 serves retrieval. Same declare-then-emit sequencing as #1616→#1638 and
-// #1704→#1693.
+// #1704→#1848.
 const (
 	TypeAttachmentChunk = "attachment_chunk" // phone ↔ binary, one chunk of an attachment's bytes (both directions)
 )
