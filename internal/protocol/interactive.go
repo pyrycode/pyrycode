@@ -623,17 +623,17 @@ func (p ModelListPayload) MarshalJSON() ([]byte, error) {
 // (sonnet), a bracketed variant (opus[1m]), or default. A client cannot derive a
 // family by splitting it on "-".
 //
-// Value does not round-trip today, and a client author reading only this struct
-// has to be told so. The only inbound path that accepts a model is
-// set_session_settings, gated by internal/relay's validModel: "" is accepted,
-// otherwise the value is 1..64 bytes whose first byte is alphanumeric and whose
-// every byte is in [A-Za-z0-9._-]. Run against the five values claude returned on
-// 2026-08-21 that rule accepts default, sonnet and haiku and REJECTS opus[1m] and
-// claude-fable-5[1m] — the bracket is not in the charset. Do NOT widen validModel
-// to close that gap, here or as a drive-by: its charset is #845's argv-injection
-// defense, and admitting [ and ] is a security decision about an untrusted
-// phone-supplied string rather than a typo fix. It belongs to whichever slice
-// first makes a client send one (#1693), with its own review.
+// Value round-trips, and a client author reading only this struct has to be told
+// what shape does. The only inbound path that accepts a model is
+// set_session_settings, gated by internal/relay's validModel, whose rule (widened
+// at #1838 for exactly these rows) accepts "" or, within a 64-byte bound, a value
+// whose first byte is alphanumeric, whose remaining bytes are in [A-Za-z0-9._-],
+// and which may carry ONE trailing bracket group — non-empty, balanced, unnested,
+// the value's final element, and drawn from that same closed byte class. Every
+// value claude has been measured to publish satisfies it, the bracketed variant
+// rows included. The group is bounded that way rather than by adding two bytes to
+// the charset because the rule is #845's argv-injection defense: read validModel
+// for what each clause buys and for the two sinks that depend on it.
 //
 // DisplayName is claude's human label, carried because it is the cleanest way to
 // match a per-turn model_announced identifier to a client's alias-family row
@@ -644,8 +644,10 @@ func (p ModelListPayload) MarshalJSON() ([]byte, error) {
 // rationale, which is NOT ModelListPayload.MarshalJSON's. Measured 2026-08-22,
 // all five levels claude returns (low, medium, high, xhigh, max) are accepted by
 // internal/relay's validEffort, whose enum is CLOSED — so a level claude adds in
-// future would be published here and refused inbound, the same direction hazard
-// Value carries today.
+// future would be published here and refused inbound. Since #1838 widened
+// validModel this is the ONLY field in the struct carrying that direction hazard;
+// Value carried the same one until then, and validEffort is deliberately not
+// widened alongside it because no level claude publishes is refused today.
 //
 // SupportsAutoMode is whether claude accepts auto permission mode for this model:
 // claude refuses the request per model, so a client greys the option out when
@@ -679,9 +681,7 @@ func (p ModelListPayload) MarshalJSON() ([]byte, error) {
 // internal/relay's validModel rather than trusting that it came from a list the
 // daemon itself published.
 type ModelOption struct {
-	ResolvedModel string `json:"resolved_model"`
-	// Does not round-trip today — internal/relay's validModel rejects the
-	// bracketed forms. See the Value paragraph above.
+	ResolvedModel    string   `json:"resolved_model"`
 	Value            string   `json:"value"`
 	DisplayName      string   `json:"display_name"`
 	EffortLevels     []string `json:"effort_levels"`

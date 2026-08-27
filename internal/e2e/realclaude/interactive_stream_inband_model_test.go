@@ -117,6 +117,37 @@ package realclaude
 // result for the /model turn, so the tolerated settle wait below burns its full
 // budget. That is the wait working, not a hang.
 //
+// # Two phases since #1838, and the second one pins no model string
+//
+// The function now drives the live child TWICE. Phase 1 is everything described
+// above: an ALIAS change (haiku / sonnet), assertions A1-A4, #1582's evidence. It
+// is unchanged byte-for-byte, and structurally cannot be moved by what follows —
+// A1-A4 read a `models` slice snapshotted before phase 2 exists.
+//
+// Phase 2 is #1838's AC 4: a BRACKETED value (claude-fable-5[1m]) delivered to the
+// same running child, asserted by B1-B3. #1838 widened internal/relay's validModel
+// to accept the trailing bracket group claude publishes for a variant row; that
+// widening is proven hermetically in internal/relay, which is where the validator
+// lives. What a hermetic test cannot answer is whether claude's own `/model`
+// accepts the form claude's own menu publishes as "the argument you pass to select
+// this model" — so the split is deliberate: the hermetic tests prove THE DAEMON
+// ACCEPTS THE VALUE, this phase proves CLAUDE APPLIES IT TO A RUNNING CHILD, and
+// together they close the user story. Driving the relay handler end to end would
+// need a Noise handshake and a V2SessionManager wrapped around a live claude,
+// out of all proportion to what it would add.
+//
+// The bracketed value is READ FROM CLAUDE'S OWN REPLY, never pinned — do not go
+// looking for an inbandModelTargets-style table for it, because deliberately none
+// was written. The measurement is why: on 2.1.220 (2026-08-21) the bracketed rows
+// were `opus[1m]` and `claude-fable-5[1m]`; on 2.1.239 (the committed capture
+// initialize_control_v2.1.239.json) `opus[1m]` is GONE — the Opus row is plain
+// `opus` — and `claude-fable-5[1m]` is the only bracketed value left. A pinned
+// string would go red on a menu change that has nothing to do with the mechanism.
+// So the phase asks the child for its own menu with RequestInitialize, taps the
+// control_response off the same stdout, and sends back a value that child just
+// published. Phase 1 keeps its pinned table because an ALIAS is stable across
+// versions in a way a variant row is not.
+//
 // # Running it
 //
 //	go test -tags e2e_realclaude -race -v \
@@ -134,6 +165,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -147,8 +179,9 @@ const (
 	// repo: less project context for claude to load, so the turns are cheaper.
 	inbandWorkdirName = "inband-model-work"
 
-	inbandPromptOne = "Reply with the single word: one."
-	inbandPromptTwo = "Reply with the single word: two."
+	inbandPromptOne   = "Reply with the single word: one."
+	inbandPromptTwo   = "Reply with the single word: two."
+	inbandPromptThree = "Reply with the single word: three."
 )
 
 // inbandBaseArgs is everything this test adds to the bootstrap spawn; buildArgs
@@ -213,6 +246,12 @@ const (
 	inbandSettleBudget = 60 * time.Second
 
 	inbandRunExitWait = 30 * time.Second
+
+	// How long phase 2 waits for the initialize control_response carrying the
+	// model menu. It is one line off a child that is already up and idle — no
+	// turn, no model call — so this is orders of magnitude of headroom, and a
+	// timeout here means the ask never landed rather than that claude was slow.
+	inbandMenuBudget = 30 * time.Second
 )
 
 // inbandMaxPartial caps the partial-line accumulator — same value and same reason
@@ -236,11 +275,24 @@ const inbandMaxPartial = 4 << 20
 // 8 MB for a committed fixture and exposes a one-shot resultSeen channel, where
 // this test needs three turn boundaries and retains nothing. Reusing it would
 // couple a forensic capture instrument to an assertion instrument.
+// inbandMenuRow is one row of the model menu claude returns from an initialize
+// control_request — two keys of the many each entry carries. encoding/json
+// discards the rest during decode, which is what keeps the ~14 KB commands array
+// riding on the same reply out of this process's memory.
+type inbandMenuRow struct {
+	Value         string `json:"value"`
+	ResolvedModel string `json:"resolvedModel"`
+}
+
 type inbandTapRecorder struct {
 	mu      sync.Mutex
 	partial []byte
 	models  []string
 	results int
+	// menu is the model list off the most recent initialize control_response
+	// (#1838), empty until one arrives. Under the same mutex as models and
+	// results, for the same reason.
+	menu []inbandMenuRow
 	// dropped counts accumulator discards at maxPartial. Reported via t.Logf; a
 	// non-zero value does not fail the test but tells a reader the record of init
 	// lines has a hole.
@@ -296,6 +348,16 @@ func (r *inbandTapRecorder) consume(line []byte) {
 		Type    string `json:"type"`
 		Subtype string `json:"subtype"`
 		Model   string `json:"model"`
+		// The initialize reply's models array, at the nesting the committed
+		// capture initialize_control_v2.1.239.json shows: control_response →
+		// response → response → models. The reply's other thirteen top-level
+		// keys, the ~14 KB commands array included, are dropped here because
+		// they are not declared.
+		Response struct {
+			Response struct {
+				Models []inbandMenuRow `json:"models"`
+			} `json:"response"`
+		} `json:"response"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(line), &env); err != nil {
 		return
@@ -303,6 +365,11 @@ func (r *inbandTapRecorder) consume(line []byte) {
 	switch {
 	case env.Type == "system" && env.Subtype == "init":
 		r.models = append(r.models, env.Model)
+	case env.Type == "control_response" && len(env.Response.Response.Models) > 0:
+		// Non-empty guard, not a subtype check: every control_response this
+		// runner can receive decodes into the struct above, and only an
+		// initialize success fills the array.
+		r.menu = append([]inbandMenuRow(nil), env.Response.Response.Models...)
 	case env.Type == "result":
 		r.results++
 	}
@@ -314,6 +381,14 @@ func (r *inbandTapRecorder) initModels() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.models...)
+}
+
+// initMenu returns a snapshot copy of the model menu off the most recent
+// initialize control_response, nil until one has arrived. Mirrors initModels.
+func (r *inbandTapRecorder) initMenu() []inbandMenuRow {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]inbandMenuRow(nil), r.menu...)
 }
 
 func (r *inbandTapRecorder) resultCount() int {
@@ -567,6 +642,118 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 	if spawnCount != 1 {
 		t.Errorf("A4: %d spawns over the whole run, want exactly 1; "+
 			"the settings change respawned the child", spawnCount)
+	}
+
+	// --- phase 2 (#1838 AC 4): the same running child, a BRACKETED value ------
+	//
+	// A1-A4 above read `models`, snapshotted before this phase exists, so nothing
+	// below can move their verdict.
+
+	// Ask the child for its own menu. Done here rather than by setting
+	// streamsup.Config.RequestInitializeOnSpawn in the shared factory: that field
+	// would change the child's behaviour for phase 1 too, and phase 1 carries
+	// #1582's measured evidence. RequestInitialize is promoted through
+	// inbandRunner's embedded *streamsup.Runner.
+	if err := tap.RequestInitialize(); err != nil {
+		t.Fatalf("#1838: RequestInitialize on the live child: %v", err)
+	}
+	menu := inbandWaitMenu(rec, inbandMenuBudget)
+	if len(menu) == 0 {
+		t.Fatalf("#1838: no initialize model menu on the tapped stdout within %s; "+
+			"the ask was written but no control_response carrying models came back", inbandMenuBudget)
+	}
+
+	// `last` is phase 1's final announced model and so is this phase's baseline:
+	// B1 asks that the bracketed change moves it AGAIN.
+	baseline := last
+	row := inbandPickBracketedValue(t, menu, baseline)
+	t.Logf("#1838: menu %+v", menu)
+	t.Logf("#1838: baseline model %q, changing to bracketed value %q (expecting %q)",
+		baseline, row.Value, row.ResolvedModel)
+
+	// Model ONLY, for the identical reason phase 1 states: a non-nil YOLO or a
+	// present-but-empty Model routes onto the restart path via inBandDeliverable,
+	// which would make B3 measure the mechanism it exists to rule out.
+	bracketed := row.Value
+	settleFrom := rec.resultCount()
+	if err := pool.UpdateSettings(pool.Default().ID(), sessions.SettingsUpdate{Model: &bracketed}); err != nil {
+		t.Fatalf("#1838: UpdateSettings(model=%q): %v", bracketed, err)
+	}
+	// Tolerated exactly as phase 1's settle wait is, and for the same reason.
+	if !inbandWaitResults(rec, settleFrom+1, inbandSettleBudget) {
+		t.Logf("#1838: no result for the `/model %s` turn within %s; continuing to the assertions",
+			bracketed, inbandSettleBudget)
+	}
+
+	inbandSendTurn(t, sup, rec, inbandPromptThree)
+
+	bModels := rec.initModels()
+	pidEnd := tap.State().ChildPID
+	t.Logf("#1838: init models %q, spawns %d, pid %d -> %d, results %d",
+		bModels, spawns(), pidAfter, pidEnd, rec.resultCount())
+	bLast := bModels[len(bModels)-1]
+
+	if bLast == baseline {
+		t.Errorf("B1: the child reported model %q both before and after `/model %s`; "+
+			"claude publishes that value in its own menu as the argument you pass to select "+
+			"the model, and did not apply it to the running child. The daemon now ACCEPTS the "+
+			"bracketed form (internal/relay's validModel, #1838) and delivered it in band, so a "+
+			"red here means the defect moved to claude rather than closing — route it back "+
+			"rather than weakening this assertion", baseline, bracketed)
+	}
+	if bLast != row.ResolvedModel {
+		t.Errorf("B2: the child reported model %q after `/model %s`, want %q — the "+
+			"resolvedModel claude's OWN menu gave for that row in this same session. "+
+			"If B1 passed, the bracketed value applied and claude's announcement disagrees "+
+			"with its own menu: that is a claude-side inconsistency to record, not a defect "+
+			"in the daemon's widened validator", bLast, bracketed, row.ResolvedModel)
+	}
+	if pidEnd != pidAfter {
+		t.Errorf("B3: child pid %d served the turn before the bracketed change but %d served "+
+			"the one after; AC 4 asks for a value delivered to a RUNNING child, and a respawn "+
+			"would produce B1's evidence through the recomposed argv instead", pidAfter, pidEnd)
+	}
+}
+
+// inbandPickBracketedValue returns the first menu row carrying a bracketed value
+// whose resolvedModel differs from start. Both conditions are load-bearing: the
+// bracket is what #1838 widened the validator for, and the differing resolution is
+// what stops the phase asserting a change that was already true.
+//
+// It FAILS rather than skips when no row qualifies, for two reasons. A skip is
+// indistinguishable from this package's absent-credentials skip in a run count,
+// which is the one number a reader is told to trust. And a claude that publishes
+// no bracketed value at all retires this ticket's premise — somebody should be
+// told that, not have it pass quietly.
+func inbandPickBracketedValue(t *testing.T, menu []inbandMenuRow, start string) inbandMenuRow {
+	t.Helper()
+	for _, row := range menu {
+		if strings.Contains(row.Value, "[") && row.ResolvedModel != start {
+			return row
+		}
+	}
+	values := make([]string, 0, len(menu))
+	for _, row := range menu {
+		values = append(values, row.Value)
+	}
+	t.Fatalf("#1838: claude's menu offers no bracketed value resolving away from %q; "+
+		"values %q. If claude has stopped publishing a bracketed variant row entirely, this "+
+		"ticket's premise is retired and the phase should be too", start, values)
+	return inbandMenuRow{}
+}
+
+// inbandWaitMenu polls until the recorder has decoded a non-empty model menu off
+// an initialize control_response, returning it or nil at the deadline.
+func inbandWaitMenu(rec *inbandTapRecorder, budget time.Duration) []inbandMenuRow {
+	deadline := time.Now().Add(budget)
+	for {
+		if menu := rec.initMenu(); len(menu) > 0 {
+			return menu
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		time.Sleep(inbandPoll)
 	}
 }
 

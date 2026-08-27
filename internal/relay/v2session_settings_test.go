@@ -422,8 +422,19 @@ func TestV2Session_SetSessionSettings_InterceptedNotRouted(t *testing.T) {
 // TestValidModel unit-tests the relay-local model shape validator: "" (clear) and
 // well-formed names pass; a leading dash (flag-injection), whitespace, a control
 // byte, and an over-length value are rejected.
+//
+// #1838 added the bracket rows. The grammar admits ONE trailing bracket group
+// drawn from the same closed byte class as the base, so the accept rows carry the
+// two values claude publishes and the reject rows carry every other bracket shape
+// — leading, unbalanced, empty, nested, doubled, or followed by a suffix — plus
+// each argv-injection shape re-checked WITH a bracket present, so the widening
+// cannot have opened a side door through the group's interior.
 func TestValidModel(t *testing.T) {
 	t.Parallel()
+
+	// A value at exactly the bound whose tail is a bracket group: the bound is
+	// measured over the WHOLE value, group included.
+	atBound := strings.Repeat("a", 60) + "[1m]"
 
 	cases := []struct {
 		in   string
@@ -445,10 +456,128 @@ func TestValidModel(t *testing.T) {
 		{"claude\x00opus", false},
 		{"opus/plan", false},
 		{"café", false}, // multi-byte UTF-8 continuation bytes are >= 0x80
+
+		// The two values claude publishes in its own model menu (#1704's
+		// vocabulary, committed in internal/protocol/testdata/model_list.json),
+		// plus the minimal well-formed variant and the bound.
+		{"opus[1m]", true},
+		{"claude-fable-5[1m]", true},
+		{"a[b]", true},
+		{atBound, true},
+		{atBound + "x", false},
+
+		// Bracket shapes the grammar rejects.
+		{"[1m]", false},         // leading: base is empty
+		{"[1m]opus", false},     // leading, and the group is not final
+		{"opus[1m", false},      // unbalanced: last byte is not ]
+		{"opus1m]", false},      // unbalanced: ] outside any group
+		{"opus]1m[", false},     // inverted
+		{"opus[]", false},       // empty group
+		{"opus[[1m]]", false},   // nested: the interior holds [
+		{"opus[a[b]c]", false},  // nested
+		{"opus[1m][2m]", false}, // second group: the interior holds ]
+		{"a[b]c[d]", false},     // second group
+		{"opus[1m]x", false},    // not final
+		{"opus[1m]-beta", false},
+
+		// Every argv-injection shape AC 2 names, re-checked with a bracket
+		// present so the group's interior is held to the base's byte class.
+		{"-foo[1m]", false},
+		{"opus[1;rm]", false},
+		{"opus[$x]", false},
+		{"opus[`x`]", false},
+		{"opus[a|b]", false},
+		{"opus[1 m]", false},
+		{"opus[1\tm]", false},
+		{"opus[1\x00m]", false},
+		{"opus[café]", false},
+		{"opus[a/b]", false},
 	}
 	for _, tc := range cases {
 		if got := validModel(tc.in); got != tc.want {
 			t.Errorf("validModel(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestValidModel_ByteSetIsClosed proves the byte class is CLOSED, which the table
+// above can only exemplify. Three loops, each walking all 256 byte values in one
+// position of the grammar and asserting an iff — so a byte admitted anywhere it
+// should not be fails here even if no example row names it.
+//
+// Each loop is the sole red for a distinct mutant: adding [ and ] to the flat
+// byte class reddens loop 2 (the widening is NOT two extra charset bytes),
+// dropping the first-byte-alphanumeric rule reddens loop 1, admitting a byte
+// >= 0x80 inside the group reddens loop 3. The empty-group and unbalanced
+// rejections are covered by the table above and not here — every probe below uses
+// a non-empty, balanced group — which is why both tests exist.
+//
+// Every probe is built with string([]byte{...}), never string(rune(b)): the
+// latter UTF-8-encodes any b >= 0x80 into two bytes and would silently test a
+// different input than the one named.
+func TestValidModel_ByteSetIsClosed(t *testing.T) {
+	t.Parallel()
+
+	alnum := func(b byte) bool {
+		return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+	}
+	word := func(b byte) bool {
+		return alnum(b) || b == '.' || b == '_' || b == '-'
+	}
+
+	// Loop 1 — the value's FIRST byte. This is the leading-dash bar, and it is
+	// also why a leading [ cannot pass.
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+		in := string([]byte{b})
+		if got, want := validModel(in), alnum(b); got != want {
+			t.Errorf("first byte 0x%02x: validModel(%q) = %v, want %v (only [A-Za-z0-9] may lead)", b, in, got, want)
+		}
+	}
+
+	// Loop 2 — the BASE's byte class. Both brackets are rejected here (a[ is
+	// unbalanced, a] has ] outside any group), which is the positive statement
+	// that #1838 did not simply add two bytes to the charset.
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+		in := string([]byte{'a', b})
+		if got, want := validModel(in), word(b); got != want {
+			t.Errorf("base byte 0x%02x: validModel(%q) = %v, want %v (base admits only [A-Za-z0-9._-])", b, in, got, want)
+		}
+	}
+
+	// Loop 3 — the GROUP INTERIOR's byte class, which must be the base's.
+	for i := 0; i < 256; i++ {
+		b := byte(i)
+		in := "a[" + string([]byte{b}) + "]"
+		if got, want := validModel(in), word(b); got != want {
+			t.Errorf("group byte 0x%02x: validModel(%q) = %v, want %v (the group admits nothing the base does not)", b, in, got, want)
+		}
+	}
+
+	// The property the two sinks depend on, derived from the three loops and
+	// asserted by name rather than by code: an accepted value is a single
+	// whitespace-free token, so internal/sessions' deliverSettingsInBand can
+	// interpolate "/model " + value onto the live child's stdin as ONE line
+	// carrying ONE word, and claudeSettingsArgs' argv element cannot be split.
+	for _, tc := range []struct {
+		name string
+		b    byte
+	}{
+		{"newline", '\n'},
+		{"carriage return", '\r'},
+		{"tab", '\t'},
+		{"space", ' '},
+		{"slash", '/'},
+	} {
+		for _, in := range []string{
+			string([]byte{tc.b}),
+			string([]byte{'a', tc.b}),
+			"a[" + string([]byte{tc.b}) + "]",
+		} {
+			if validModel(in) {
+				t.Errorf("validModel(%q) accepted a %s; `/model `+value would no longer be one line carrying one token", in, tc.name)
+			}
 		}
 	}
 }
