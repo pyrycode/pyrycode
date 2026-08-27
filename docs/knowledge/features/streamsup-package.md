@@ -593,9 +593,9 @@ the writer and the parser that today share none. The gate is conjunctive —
 names the limit this buys: it recognises a **shape**, not a **correlated reply**. A future claude
 putting a `models` array inside some other successful control response would have that response read
 as an inventory too. The consequence is bounded rather than a defect to fix here — the value is still
-claude's own claim about itself, bounded by the same three caps, retained by nothing, and published to
-nobody until #1693 — so the trade is worth revisiting when a client can first read the value and
-provenance starts to matter, not before.
+claude's own claim about itself, bounded by the same three caps, retained for the session's life since
+#1840 (below), and published to nobody yet — so the trade is worth revisiting when a client can first
+read the value and provenance starts to matter, not before.
 
 Each `turnevent.ModelOption` entry keeps five of claude's payload keys —
 `ResolvedModel`/`Value`/`DisplayName`, `SupportsAutoMode` (#1819) and, since #1827, `EffortLevels` —
@@ -980,10 +980,10 @@ delivered the constructor (as the bare `streamRunnerFactory` func, the first `st
 tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
 to send turnevents, and #1168 added the `mcpApprovePath` param to inject the permission-approval flags.
 Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
-withApprovalArgs(scfg.Args, mcpApprovePath)`; `scfg.Stdout =
-streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)`; `streamsup.New(scfg)`; on error,
-`fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
-`streamRunner{r: r}`.
+withApprovalArgs(scfg.Args, mcpApprovePath)`; `parser, held :=
+newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
+`streamsup.New(scfg)`; on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil
+`sessions.Runner`; on success, `streamRunner{r: r, models: held}`.
 
 **`withApprovalArgs(args []string, mcpApprovePath string) []string` (#1168)** is the interactive-stream
 twin of `agent_run.go`'s non-yolo `permissionArgs` wiring (#1106) — the first live consumer of
@@ -1072,6 +1072,52 @@ itself, so an un-stripped id flag in `Args` would double-inject. Required at the
 
 Neither #1109 nor #1098 wired the factory into production on their own — that was #1081's scope (below).
 See [codebase/1109.md](../codebase/1109.md).
+
+## Retaining the decoded model list for the session (#1840)
+
+`emitModelList` (above) mints one `turnevent.ModelList` per child and hands it to the parser's sink —
+but that sink is `sink.sinkFor(cfg.SessionID)`, the droppable-class send into the turn-busy fan-in
+(`turnMarkFor`'s default arm answers `turnMarkNone` for `ModelList`), and one `initialize` reply per
+child means no later event ever replaces a copy lost there. `newSessionParser` (`cmd/pyry`) closes that
+gap by minting the parser and a `sessionModelHold` together from one call, so the two halves can't be
+wired to different holds: the hold's `Sink` method decorates `sink.sinkFor`, storing a `ModelList`
+**before** forwarding every event unchanged downstream. Storing happens inside the decorator, which sits
+on the parser's side of the channel entirely — the hold is never a candidate for the `droppableCap`
+refusal, whatever it does internally. `streamRunner` carries the hold and exposes `ModelList()
+(turnevent.ModelList, bool)` as a concrete method, off `sessions.Runner` (the fourth, after
+`Interrupt`/`RestartFresh`/`BeginRotation` — consumer is `cmd/pyry`, not `internal/sessions`, so the
+interface-placement rule argues against widening here too). `have` (a bool, not `len(Models) == 0`)
+represents "nothing reported yet" as its own state, because the producer's `Models` is documented never
+empty and no fixture can construct the state any other way. The hold has no logger field and no
+constructor parameter for one, so `Value`/`ResolvedModel`/`DisplayName`/effort levels have no path to a
+log record — the #833 posture enforced by construction, not by review. `Session.sup` is assigned once
+and never reassigned, so the hold's lifetime is the session's; there is no session-keyed registry to grow
+or prune. #1837 is the intended reader, via `Session.Runner()` and a type assertion.
+
+**`Sink`'s shipped doc justifies its mutex with a writer-overlap race that doesn't happen — code review
+flagged it as a SHOULD FIX and it shipped uncorrected anyway, since the finding didn't block merge.** The
+claim is that a respawn's new stdout-forwarder goroutine can briefly overlap the outgoing one during
+teardown. It can't: `spawnAndWait`'s single call site blocks on `cmd.Wait()`, which `os/exec` documents
+as joining the goroutine copying the child's stdout into a non-`*os.File` `Stdout`, before
+`spawnAndWait` returns — so forwarder N+1 cannot start until forwarder N has already finished. Were it
+true, `streamsup.Parser`'s own doc ("`Write`ing — hence `buf` and the sink calls — is only ever invoked
+serially from that one goroutine, across every respawn") would be describing a live data race in a file
+this ticket never touched. The mutex is still genuinely required — for the *reader* (#1837's publisher,
+concurrent with the sole writer), not for two writers that Go's own stdlib already serializes. Whoever
+next edits `sessionModelHold`'s doc comment should fix the justification, not just trust that a passed
+review means the prose is accurate. The general shape, for any future doc claiming "goroutine A can
+overlap goroutine B": check what actually joins A before B starts — `cmd.Wait()` is one such join point
+in this codebase, and it silently falsifies any respawn-overlap claim built on top of it.
+
+**Store-before-forward inside `Sink` is not what keeps the retention off the droppable send — being a
+decorator upstream of the channel at all is what does it, and a test can tell the difference.** A mutant
+that swaps the two statements (forward first, store second) still passes every test in the suite,
+`TestSessionModelHold_RetainsPastASaturatedSink` included: a refused channel send consumes nothing, so
+storing "after" a refusal still runs. What that test actually pins is that retention doesn't depend on
+the fan-in *admitting* the event — which is what rules out a retention point downstream of the channel —
+and no finer. A decorator whose store step can itself block or panic before reaching `next` would be a
+real ordering bug; statement order within an already-synchronous `Sink` is not the property to write the
+test's name around.
 
 ## Draining turnevents into the interactive emitter (#1098)
 
