@@ -556,14 +556,13 @@ type ModelAnnouncedPayload struct {
 // carries what it cut, which is this field's honest source. #1848 joined the two:
 // MapEvent's arm carries turnevent.ModelList.DroppedModels through verbatim and
 // never recomputes it from len(Models). The field was declared ahead of both
-// (#1704) because a wire with
-// nowhere to put a drop discards it silently, and a permanent 0 reads as "nothing
-// was dropped", which is a lie rather than a gap. The count reports here
-// rather than as a name in a top-level truncated_fields — which is why this
-// payload has none, BackgroundTaskRosterPayload's stated reason — because a
-// name-only report loses HOW MANY were lost, and each dimension reports where it
-// is decided: a text cut is a property of one entry and rides that entry as
-// ModelOption.TruncatedFields.
+// (#1704) because a wire with nowhere to put a drop discards it silently, and a
+// permanent 0 reads as "nothing was dropped", which is a lie rather than a gap.
+// The count reports here rather than as a name in a top-level truncated_fields —
+// which is why this payload has none, BackgroundTaskRosterPayload's stated
+// reason — because a name-only report loses HOW MANY were lost, and each
+// dimension reports where it is decided: a text cut is a property of one entry
+// and rides that entry as ModelOption.TruncatedFields.
 //
 // A lookup can MISS, and that is ordinary rather than an error. claude announces
 // an identifier at least as specific as the one it was given

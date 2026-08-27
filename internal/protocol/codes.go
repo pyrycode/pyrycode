@@ -394,13 +394,15 @@ const (
 	TypeModelAnnounced = "model_announced" // binary → phone, outbound v2 announced-model report
 )
 
-// Mobile Protocol v2 model-list report. The daemon can already ask claude which
-// models it will accept — a control_request with subtype initialize, written on
-// the child's held-open stdin, returns a models array — but that inventory stops
-// at the daemon boundary, so no client can build a model menu, know which
+// Mobile Protocol v2 model-list report. The daemon can ask claude which models it
+// will accept — a control_request with subtype initialize, written on the child's
+// held-open stdin, returns a models array — and that inventory used to stop at the
+// daemon boundary, so no client could build a model menu, know which
 // reasoning-effort levels a model supports, or know which models accept auto
-// permission mode (pyrycode-desktop#561, blocked since 2026-08-19; #682 is the
-// same defect for the permission-mode menu).
+// permission mode. #1848 added the turnbridge arm and #1849 the emitting case, so
+// a client can read the inventory now (docs/protocol-mobile.md § model_list); the
+// menus built on it are client-side work still outstanding (pyrycode-desktop#561,
+// blocked since 2026-08-19; #682 is the same defect for the permission-mode menu).
 //
 // Grouped alone rather than with any block above: it is not a turn sub-state with
 // two edges, not turn-independent work, not a periodic reading, not a condition
@@ -433,13 +435,12 @@ const (
 // wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
 // dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
 // here would be red by construction, and filing it under excludedTypes to dodge
-// that would be a lie to the guard. It shipped as a PUSH: #1849 emits it from
-// interactiveTurnEmitterV2.Handle on the interactive turn lane, no inbound
-// request verb was ever declared for it, and neither surface named above carries
-// a model_list entry — so this constant's excludedTypes classification stays
-// push. A later ticket picking request/reply would still have to declare the verb
-// together with its handler; a client's decode path is the same frame whatever it
-// picks, which is what declaring the shape ahead of the producer bought.
+// that would be a lie to the guard. It shipped as a PUSH rather than a reply:
+// #1849 emits it from interactiveTurnEmitterV2.Handle on the interactive turn
+// lane, so this constant's excludedTypes classification stays push. A later
+// ticket picking request/reply would still have to declare the verb together with
+// its handler; a client's decode path is the same frame whatever it picks, which
+// is what declaring the shape ahead of the producer bought.
 //
 // The declaring ticket (#1704) was wire vocabulary only; #1848 added
 // internal/turnbridge's MapEvent arm for turnevent.ModelList and #1849 added

@@ -165,12 +165,10 @@ var excludedTypes = map[string]string{
 	// unemitted one. It is a push and not a reply because this slice declares no
 	// inbound request verb: an inbound type needs a handler in Handlers or
 	// dispatchAppFrame or Assertion #1 fails, and filing a handler-less verb here
-	// to dodge that would be a lie to the guard. It shipped as a PUSH: #1849 emits
-	// it from interactiveTurnEmitterV2.Handle on the interactive turn lane, no
-	// inbound request verb was ever declared for it, and neither Handlers nor
-	// dispatchAppFrame carries a model_list entry — so this entry stays "push". A
-	// later ticket picking request/reply would still have to declare the verb
-	// together with its handler.
+	// to dodge that would be a lie to the guard. It shipped as a PUSH rather than a
+	// reply: #1849 emits it from interactiveTurnEmitterV2.Handle on the interactive
+	// turn lane, so this entry stays "push". A later ticket picking request/reply
+	// would still have to declare the verb together with its handler.
 	"TypeModelList": "push",
 
 	// outbound push — the v2 slash-command-list report (#1726). Outbound-only like
