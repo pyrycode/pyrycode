@@ -11,6 +11,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // TestMapStreamState asserts the covariant-return adapter maps every streamsup
@@ -414,9 +415,71 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 			if sr.r == nil {
 				t.Errorf("streamRunner.r is nil, want a constructed *streamsup.Runner")
 			}
+			// #1840: the factory carries the per-session model hold, and a runner with
+			// no child yet reports the unreported state rather than a zero list.
+			if sr.models == nil {
+				t.Errorf("streamRunner.models is nil, want the hold newSessionParser minted")
+			}
+			if _, reported := sr.ModelList(); reported {
+				t.Errorf("ModelList() ok = true on a freshly constructed runner, want false — no child has reported")
+			}
 		})
 	}
 }
+
+// TestNewSessionParser_DecodesAndRetains drives the exact production composition:
+// newSessionParser's parser consumes one real control_response initialize line and
+// the hold it returned holds the decoded list, with the downstream sink still
+// seeing the event. It is the only test in this suite that touches JSON, and what
+// it proves is the WIRING — that the parser and the hold are two halves of one
+// call — rather than the hold's own contract, which session_model_hold_test.go
+// covers. The line's shape is streamsup's modelListLineFixture, copied rather than
+// called: that helper is unexported in another package.
+func TestNewSessionParser_DecodesAndRetains(t *testing.T) {
+	t.Parallel()
+
+	var next recordingSink
+	parser, hold := newSessionParser(next.sink, discardLogger())
+
+	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-1840",` +
+		`"response":{"models":[` +
+		`{"resolvedModel":"claude-opus-5","value":"opus","displayName":"Opus"},` +
+		`{"resolvedModel":"claude-sonnet-5","value":"sonnet","displayName":"Sonnet"}]}}}`
+	if _, err := parser.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("parser.Write(initialize reply) error = %v, want nil", err)
+	}
+
+	got, ok := hold.ModelList()
+	if !ok {
+		t.Fatalf("ModelList() ok = false after the initialize reply, want true")
+	}
+	if len(got.Models) != 2 {
+		t.Fatalf("retained list carries %d entries, want the line's 2 — %#v", len(got.Models), got.Models)
+	}
+	if got.Models[0].Value != "opus" || got.Models[1].Value != "sonnet" {
+		t.Errorf("retained values = %q, %q; want %q, %q",
+			got.Models[0].Value, got.Models[1].Value, "opus", "sonnet")
+	}
+	if got.Models[0].ResolvedModel != "claude-opus-5" {
+		t.Errorf("Models[0].ResolvedModel = %q, want %q", got.Models[0].ResolvedModel, "claude-opus-5")
+	}
+
+	seen := next.events()
+	if len(seen) != 1 {
+		t.Fatalf("downstream saw %d events, want the 1 ModelList forwarded through the hold", len(seen))
+	}
+	if _, isList := seen[0].(turnevent.ModelList); !isList {
+		t.Errorf("downstream saw %T, want turnevent.ModelList", seen[0])
+	}
+}
+
+// Assert at compile time that streamRunner carries the shape #1837 will reach by
+// type assertion. ModelList is deliberately NOT on sessions.Runner — see the
+// method's own doc — so this is the only compile-time statement of its existence,
+// and the var _ sessions.Runner assertion in streamsup_runner.go is untouched.
+var _ interface {
+	ModelList() (turnevent.ModelList, bool)
+} = streamRunner{}
 
 // TestStreamRunnerFactory_ErrorPropagation proves AC-3: a streamsup.New failure
 // surfaces as (nil runner, non-nil error) with no silent PTY fallback. A missing
