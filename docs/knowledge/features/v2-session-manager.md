@@ -1651,12 +1651,33 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
 - **`validModel(m string) bool`** — a **shape check, not an allowlist** (model
   names churn per release; a fixed allowlist would force a code edit per
   launch). `""` accepted (clears to template default — `claudeSettingsArgs`
-  emits no `--model` for it); otherwise 1–64 bytes, first byte alphanumeric,
-  every byte in `[A-Za-z0-9._-]`. This is the **argv-injection defense** for
-  the threat #833 deferred: values reach claude as separate argv tokens
-  (`--model <value>`) under `exec.CommandContext` with no shell, so the
-  residual risk is a leading-dash value confusing claude's own flag parser —
-  closed by the first-byte-alphanumeric rule.
+  emits no `--model` for it); otherwise a value within the unchanged 64-byte
+  bound whose first byte is alphanumeric, whose remaining bytes are in
+  `[A-Za-z0-9._-]`, and which may carry **one trailing bracket group** —
+  non-empty, balanced, unnested, the value's final element, drawn from that
+  same closed byte class (`modelWordByte`) — widened at **#1838** so the
+  variant rows claude's own model menu publishes (`opus[1m]`,
+  `claude-fable-5[1m]`) reach a session instead of failing on click. Stated as
+  a grammar rather than a byte-set diff because an accepted value reaches
+  **two** sinks: the claude argv (`--model <value>`, two separate `execve`
+  elements under `exec.CommandContext` with no shell — the
+  first-byte-alphanumeric rule is what stops a value posing as a flag, #833's
+  argv-injection defense), and — since #1581 stopped restarting a live child
+  for a model change — the child's turn text
+  (`internal/sessions/pool.go`'s `deliverSettingsInBand` writes
+  `"/model " + value` as one stdin line), which additionally requires an
+  accepted value to stay a single whitespace-free token. The trailing-group
+  grammar collapses to three conditions checked on the value's *first* `[`
+  (last byte closes it, the interior is non-empty, every interior byte is a
+  `modelWordByte`), which together rule out nesting, a second group and a
+  trailing suffix without a separate check for any of the three — because the
+  interior excludes both brackets, nothing inside can open or close another
+  group. `TestValidModel_ByteSetIsClosed` checks the whitespace-free
+  guarantee across all 256 byte values in each of the three grammar positions
+  rather than by example. `validEffort` below carries the identical direction
+  hazard and is deliberately **not** widened — there is no bracketed effort
+  level to admit yet, and widening against a hypothetical is not
+  evidence-based.
 - **`validEffort(e string) bool`** — `""` (clear) or the closed enum `{low,
   medium, high, xhigh, max}`, matching `cmd/pyry/agent_run.go`'s
   `validEfforts` but defined relay-local since `internal/relay` cannot import

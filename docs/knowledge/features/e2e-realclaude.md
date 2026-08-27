@@ -1994,6 +1994,30 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   result count is hardcoded rather than captured relative to the count at that
   moment — a low-probability false-red path on a >45s first turn, left as a
   follow-up rather than fixed on this branch). See [`codebase/1582.md`](../codebase/1582.md).
+  **EXTENDED #1838** (bracketed model values, e.g. `opus[1m]`): a second phase,
+  appended after A1–A4 in the same test function rather than a new one, proves
+  that a *bracketed* value delivered in-band takes effect on a running child —
+  the piece `internal/relay`'s hermetic `TestValidModel` /
+  `TestValidModel_ByteSetIsClosed` cannot reach, since `validModel` is
+  unexported and this package cannot call it. The phase never pins a
+  bracketed string: the ticket named `opus[1m]`, measured against claude
+  2.1.220, and the capture this repo now carries (2.1.239) no longer publishes
+  that row at all, so a hardcoded target would fail on menu churn unrelated to
+  the mechanism. It instead calls `RequestInitialize` on the same live child,
+  reads the model menu claude just published off the tap, and picks the first
+  row whose `value` contains `[` and whose `resolvedModel` differs from the
+  model this phase's own baseline turn announced — the second condition is
+  what stops the phase from asserting a change that was already true. Finding
+  none, it `t.Fatalf`s and lists every `value` offered, deliberately not
+  `t.Skip`: a skip would be indistinguishable from this package's
+  absent-credentials skip in the run count, and a claude that stops publishing
+  any bracketed row retires the ticket's premise, which is worth surfacing
+  rather than swallowing. Three assertions mirror A1–A4 for the new baseline
+  (model changed; the announced model matches the chosen row's
+  `resolvedModel`, with a message distinguishing a claude-side inconsistency
+  from a defect in this change if the two disagree; one child pid across the
+  phase). See [`v2-session-manager.md`](v2-session-manager.md)'s `validModel`
+  entry for the grammar the hermetic tests pin.
 
 - `set_permission_mode_probe_test.go` (#1595) — **does the bypass posture have
   an in-band form, the way #1581/#1582 proved the model does?** Four direct
