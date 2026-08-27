@@ -4088,17 +4088,23 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 				// key the list must come back element for element in claude's own order —
 				// which (low, medium, high, xhigh, max) is neither alphabetical nor sorted,
 				// so this is the no-reordering pin as well as the verbatim one. Where claude
-				// sent no key at all only the ZERO LENGTH is asserted: not == nil and not
-				// []string{}, because which of those an absent key should read as is open
-				// (#1828, per turnevent.ModelOption.EffortLevels) and length is the only
-				// thing both readings share. The weaker assertion is deliberate, not sloppy.
+				// sent no key at all the expectation names the SETTLED spelling, nil, rather
+				// than the zero length both readings once shared (#1828, argued at
+				// turnevent.ModelOption.EffortLevels).
+				//
+				// Note this arm reads the same under EITHER branch of that decision: the
+				// capture carries absent entries and full-five entries and never a published
+				// [], so it never had the shape that discriminates the two readings. What
+				// proves the collapse is TestParser_ModelListEffortLevelsReadClaudesKey's
+				// published-empty row; this pin says only that the daemon's spelling holds
+				// against claude's real bytes.
 				if wantLevels, present := capturedModelStrings(t, want[i], "supportedEffortLevels"); present {
 					if !slices.Equal(got.EffortLevels, wantLevels) {
 						t.Errorf("entry %d EffortLevels: got %q, want %q (verbatim, in claude's own order)",
 							i, got.EffortLevels, wantLevels)
 					}
-				} else if len(got.EffortLevels) != 0 {
-					t.Errorf("entry %d carries no supportedEffortLevels key but decoded to %q, want zero length",
+				} else if got.EffortLevels != nil {
+					t.Errorf("entry %d carries no supportedEffortLevels key but decoded to %#v, want nil",
 						i, got.EffortLevels)
 				}
 				// Derived from the capture's bytes, never transcribed: an entry carrying no
@@ -4330,18 +4336,33 @@ func TestParser_ModelListSupportsAutoModeReadsClaudesKey(t *testing.T) {
 	}
 }
 
-// TestParser_ModelListEffortLevelsReadClaudesKey is #1827's decode pin: claude's
-// list arrives verbatim and IN CLAUDE'S ORDER, and an absent key, a published empty
-// array and a JSON null all decode to a ZERO-LENGTH list.
+// TestParser_ModelListEffortLevelsReadClaudesKey is #1827's decode pin, tightened by
+// #1828: claude's list arrives verbatim and IN CLAUDE'S ORDER, and an absent key, a
+// published empty array and a JSON null all decode to nil.
 //
-// The three zero-length rows assert len(...) == 0 and never == nil or []string{}.
-// Which of those an absent key should read as is exactly the question this slice
-// declines to answer — it is #1828's, per turnevent.ModelOption.EffortLevels — so
-// asserting either spelling here would pin a reading this slice does not own.
+// The three zero-length rows assert == nil rather than len(...) == 0, because the
+// reading is now settled and the SPELLING is what carries it: one reading of a
+// zero-length effort menu, spelled nil, argued at
+// turnevent.ModelOption.EffortLevels. A length-only assertion would leave the half
+// this slice decided unpinned, and it is why those rows keep their own switch arm —
+// slices.Equal(nil, []string{}) reports true, so folding them into the equality arm
+// would make the assertion blind to the thing it exists to pin.
 //
-// Do NOT go looking for a mutant that separates absent from published-empty. None
-// is expected to redden anything here, because the producer normalises in neither
-// direction; that is the design's content rather than a coverage gap.
+// A separating mutant now EXISTS, which inverts what this doc said while the
+// question was open. Both mutants below were RUN against internal/streamsup rather
+// than predicted, per this package's own lesson that a sole-redness claim is a
+// measurable claim and is usually wrong until measured:
+//
+//   - Reverting the decision — boundEach's zero-length arm returning its input
+//     unchanged — reddens `published empty` ALONE, package-wide. Nothing else in the
+//     tree feeds a published [], so this row is the whole of the decision's coverage.
+//   - Collapsing the other way — that arm returning []string{} — reddens all THREE
+//     zero-length rows, not the two the shape suggests: `published empty` goes red
+//     with `absent` and `present and null` because the assertion is == nil and the
+//     mutant returns non-nil on every one of them. It also reddens all three arms of
+//     TestParser_InitializeControlResponseDecodesTheCapturedModels, whose haiku
+//     entries carry no key. So it is NOT sole-red anywhere, and this comment says so
+//     rather than telling the tidier story the row names invite.
 //
 // The scrambled-order row is the only red under a producer that CANONICALISED into
 // claude's published order, which is the reordering a five-level row cannot catch
@@ -4349,10 +4370,15 @@ func TestParser_ModelListSupportsAutoModeReadsClaudesKey(t *testing.T) {
 // the scrambled one earns its place against the narrower mutant rather than the
 // obvious one.
 //
-// Non-vacuity comes from the wantWire assertion, which checks what the built line
-// ACTUALLY carries before the decode is inspected: three of the five rows differ
-// only on the wire, so a builder that quietly dropped the key would otherwise turn
-// them into one shape proved three times.
+// The wantWire assertion is the ROW-DISTINCTNESS pin, not decoration, and it binds
+// harder after the collapse than before: with all three zero-length rows now
+// decoding to the identical nil, what the built line ACTUALLY carries is the only
+// thing making them three rows rather than one shape proved three times. A fixture
+// builder that quietly dropped the key would otherwise be invisible. Do not merge
+// the rows on the grounds that they share an expectation — that merge is what this
+// guard exists to prevent. Measured, not assumed: dropping the key from the
+// published-empty row's fixture reddens that row on the wire assertion alone, while
+// its decoded-value assertion passes, nil being what both shapes now produce.
 func TestParser_ModelListEffortLevelsReadClaudesKey(t *testing.T) {
 	t.Parallel()
 
@@ -4363,8 +4389,9 @@ func TestParser_ModelListEffortLevelsReadClaudesKey(t *testing.T) {
 		// wantWire is the raw JSON the built line must carry under the literal key,
 		// "" meaning the entry must not carry the key at all.
 		wantWire string
-		// want is nil on every row whose expectation is ZERO LENGTH rather than a
-		// particular list — see this test's doc.
+		// want is nil on every row whose expectation is the SETTLED zero-length
+		// spelling rather than a particular list, and those rows assert == nil — see
+		// this test's doc.
 		want []string
 	}{
 		{
@@ -4390,6 +4417,9 @@ func TestParser_ModelListEffortLevelsReadClaudesKey(t *testing.T) {
 			want:     nil,
 		},
 		{
+			// The one row the producer actually normalises: encoding/json lands a []
+			// on an empty NON-NIL slice, and boundEach's zero-length arm turns it into
+			// nil so all three zero-length wire shapes read alike.
 			name:     "published empty",
 			entry:    modelEntryWithFixture(base, "supportedEffortLevels", []any{}),
 			wantWire: "[]",
@@ -4435,10 +4465,13 @@ func TestParser_ModelListEffortLevelsReadClaudesKey(t *testing.T) {
 			}
 			got := list.Models[0].EffortLevels
 			switch {
-			case len(tt.want) == 0:
-				if len(got) != 0 {
-					t.Errorf("EffortLevels: got %q, want a ZERO-LENGTH list for a wire value of %q",
-						got, tt.wantWire)
+			case tt.want == nil:
+				// == nil rather than len(...) == 0, and its OWN arm rather than a
+				// slices.Equal against a nil want: slices.Equal(nil, []string{}) reports
+				// true, so the equality arm is blind to exactly the spelling this row pins.
+				if got != nil {
+					t.Errorf("EffortLevels: got %#v, want nil for a wire value of %q — a zero-length "+
+						"menu is spelled nil, per turnevent.ModelOption.EffortLevels", got, tt.wantWire)
 				}
 			case !slices.Equal(got, tt.want):
 				t.Errorf("EffortLevels: got %q, want %q (verbatim, in claude's own order)", got, tt.want)

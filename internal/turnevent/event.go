@@ -542,8 +542,14 @@ type ModelAnnounced struct {
 // a later sweep forgets to check. Of the two capability keys the richer entries do
 // carry, BOTH are decoded here — supportsAutoMode by #1819 and supportedEffortLevels
 // by #1827 — so neither is an omission. supportsEffort stays out with the other
-// three: EffortLevels subsumes it, completely once #1828 settles what an empty list
-// means.
+// three: EffortLevels subsumes it completely, now that a zero-length effort menu has
+// ONE reading (#1828). A nil EffortLevels says exactly what supportsEffort: false or
+// an absent supportsEffort would say, so the key would add a second spelling of an
+// answer this type already carries. The capture's six entries show the two co-varying
+// perfectly — supportsEffort: true with five levels, both absent together — which is
+// evidence for the subsumption rather than a guarantee of it; claude could publish
+// them apart tomorrow and the omission would still hold, because nothing consumes
+// supportsEffort.
 type ModelOption struct {
 	// ResolvedModel is what Value resolves to RIGHT NOW: the concrete identifier,
 	// and the field a consumer wanting a dated one wants. VERBATIM, per
@@ -584,15 +590,63 @@ type ModelOption struct {
 	// budget whose other two are bounded, and #1821 closes it — see ModelList.Models,
 	// which states the same gap for the list as a whole.
 	//
-	// WHETHER AN ABSENT KEY READS THE SAME AS A PUBLISHED EMPTY LIST IS NOT SETTLED
-	// HERE. It is #1828's, and that answer is owed rather than inherited:
-	// SupportsAutoMode's collapse rests on a withheld GRANT being safe to read as a
-	// refusal, and an empty effort menu is a different failure than a greyed
-	// checkbox. So the producer normalises in NEITHER direction — nothing turns an
-	// absent key's nil into a []string{} and nothing nils out a published empty
-	// array, because each of those IS an answer. Do not read the Go shape as a
-	// position: a nil here says only that claude's key was absent or null, and what
-	// that MEANS is open.
+	// AN ABSENT KEY, A JSON null AND A PUBLISHED EMPTY ARRAY ARE ONE READING, AND IT
+	// IS SPELLED nil (#1828). The producer normalises a zero-length list at
+	// construction — streamsup's emitModelList, in its boundEach closure's
+	// zero-length arm — so nothing downstream has to ask which of the three it is
+	// holding. That was a real fork rather than a shape Go forced: a nil slice and an
+	// empty non-nil one are distinguishable at no cost, and encoding/json lands an
+	// absent key and a null on the first and a [] on the second. Keeping them apart
+	// was available and was deliberately not taken.
+	//
+	// THE ARGUMENT IS ABOUT AN EMPTY MENU, AND IT IS NOT SupportsAutoMode'S. That
+	// field collapses because both of its readings drive the same client CONTROL and
+	// the safe direction is asymmetric — the unsafe inverse being to grant on silence.
+	// This one collapses because both readings leave the daemon holding the same EMPTY
+	// HAND. The only reading under which absent and [] could differ is "absent means
+	// UNKNOWN, [] means AFFIRMATIVELY NONE", and UNKNOWN is actionable only if there is
+	// a fallback menu to offer instead. There is none: the daemon's one effort
+	// vocabulary is internal/relay's validEffort, which the paragraph below forbids
+	// applying to this list in either direction, for two separate reasons. So the two
+	// readings issue the identical instruction to every consumer that can exist — THIS
+	// IS NOT A MENU YOU MAY OFFER — not because they mean the same thing in the
+	// abstract, but because the daemon holds no vocabulary in which they could differ
+	// and has twice decided it never will.
+	//
+	// Three facts close it. First, claude's observed absence is not "declined to answer
+	// this one question": in the committed capture the two entries omitting
+	// supportedEffortLevels omit the ENTIRE capability block with it — no
+	// supportsAutoMode, no supportsEffort, no supportsAdaptiveThinking — while the four
+	// answering any capability question answer all of them and publish the full five
+	// levels. The shape a genuine per-question refusal would take is exactly the shape
+	// claude does not send. Second, a kept distinction would have a lifetime of one
+	// call: nothing publishes ModelList yet, and its first consumer maps into
+	// protocol.ModelOption, whose MarshalJSON already normalises nil to [] and states
+	// at its own type that an empty effort list on the wire is a COLLAPSE rather than a
+	// positive statement (#1704). Third, a kept distinction is one this house's own
+	// comparison idiom cannot see: slices.Equal(nil, []string{}) reports TRUE where
+	// reflect.DeepEqual reports false, so the next assertion written against this field
+	// with the idiom every existing one uses would drop the distinction silently, with
+	// nothing going red. That is a trap, and it is a fact about SLICES rather than
+	// anything inherited from the bool.
+	//
+	// nil rather than []string{} because nil is this struct's own spelling for a
+	// zero-length list — TruncatedFields below names the convention and its single
+	// source. The other direction would leave two list fields of one struct disagreeing
+	// about how "nothing" is spelled, and would allocate on a shape a third of the
+	// capture's entries have.
+	//
+	// IT NORMALISES HOW GO SPELLS ZERO, AND NOTHING ELSE. The verbatim rule above
+	// governs the ELEMENTS and their ORDER, and a list with no elements has exactly the
+	// elements claude sent, in exactly claude's order. Said rather than left to be
+	// noticed, because this field's doc opens by calling it VERBATIM and the collapse
+	// would otherwise read as the first exception to that.
+	//
+	// WHAT IT GIVES UP is real and is accepted rather than waved away: the decode now
+	// discards the evidence that claude sent [] rather than nothing at all. Should
+	// claude one day send [] deliberately AND mean by it something that omitting the key
+	// does not, this reading is wrong, and reopening it costs a ticket plus a *[]string
+	// or a companion bool. That is the price of one reading, paid knowingly.
 	//
 	// A CUT LEVEL IS NOT A LEVEL CLAUDE PUBLISHED. When TruncatedFields names
 	// "effort_levels" at least one element is the daemon's prefix of a string claude
@@ -649,11 +703,16 @@ type ModelOption struct {
 	// that when asked — because a daemon reading its own subprocess's claim as
 	// permission is a subprocess authorizing itself.
 	//
-	// EffortLevels faces the same absent-versus-empty question and its answer is still
-	// owed. The levels themselves SHIPPED (#1827); what an absent
-	// supportedEffortLevels MEANS is open, and #1828 must RE-DERIVE it rather than
-	// inherit this one: the argument above is about a withheld grant, and an empty
-	// effort menu is a different failure than a greyed checkbox.
+	// EffortLevels faced the same absent-versus-empty question, RE-DERIVED its answer
+	// rather than inheriting this one, and landed on a collapse too — BY A DIFFERENT
+	// ARGUMENT, which is why the coincidence must not be read as this paragraph having
+	// set a precedent. The bool collapses because the safe direction is ASYMMETRIC:
+	// silence and refusal drive the same control, and the unsafe inverse is granting on
+	// silence. The list collapses because both of its readings leave the daemon holding
+	// the same EMPTY HAND, there being no effort vocabulary of its own to fall back on
+	// and a standing decision never to author one. A withheld grant is settled by asking
+	// which direction is safe; an empty menu is settled by asking what there is to
+	// offer. See EffortLevels for that argument in full (#1828).
 	SupportsAutoMode bool
 	// TruncatedFields names THIS entry's fields the producer cut to fit their caps,
 	// in declaration order, using the DAEMON's snake_case names: "resolved_model",

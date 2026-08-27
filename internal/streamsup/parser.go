@@ -1004,9 +1004,11 @@ type controlResponseLine struct {
 // cleanly and lands as the zero value rather than on the undecodable rung. For
 // supportsAutoMode that is the same reading an absent key gets, which is what
 // turnevent.ModelOption.SupportsAutoMode's doc argues is deliberate. For
-// supportedEffortLevels it lands as nil, which is the same ZERO-LENGTH shape an
-// absent key gets — without that being a claim that the two MEAN the same thing,
-// which is #1828's to settle and turnevent.ModelOption.EffortLevels' to state.
+// supportedEffortLevels it lands as nil, which is the same reading an absent key
+// gets — and, since #1828, the same one a published [] gets too, the producer
+// normalising that third shape onto this nil in emitModelList's boundEach. There is
+// no branch in which a null reads as its own thing; the argument for the single
+// reading is turnevent.ModelOption.EffortLevels'.
 type modelOptionLine struct {
 	ResolvedModel    string   `json:"resolvedModel"`
 	Value            string   `json:"value"`
@@ -1822,9 +1824,11 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // them: ONE name in TruncatedFields per entry however many of that entry's levels
 // were cut, because the report names FIELDS and a list is one field. What an absent
 // supportedEffortLevels READS AS is likewise turnevent.ModelOption.EffortLevels' to
-// say rather than this function's, and it is OPEN (#1828) — which is why nothing
-// below turns an absent key's nil into an empty slice or a published empty array
-// into nil. Either would be this function answering a question it does not own.
+// say rather than this function's, and it SAYS that an absent key, a null and a
+// published empty array are ONE reading, spelled nil (#1828). Unlike the bool that
+// reading needs code, because encoding/json keeps the two shapes apart for free:
+// boundEach's zero-length arm is where it lands, and it is the only normalisation
+// anything below performs.
 //
 // NOTHING FROM THE PAYLOAD IS LOGGED, on any path — see logControlResponse, which
 // is the one place that is decided.
@@ -1877,11 +1881,14 @@ func (p *Parser) emitModelList(line []byte) {
 		// and it exists rather than a fourth bound call because a list is where ONE
 		// name has to cover MANY values. Three properties, each load-bearing:
 		//
-		//   - An empty input is returned UNCHANGED and appends nothing, so nil stays nil
-		//     and empty stays empty. That is the no-normalisation rule expressed as the
-		//     absence of code: which of the two an absent key should read as is #1828's
-		//     (turnevent.ModelOption.EffortLevels), and allocating either shape here
-		//     would be answering it.
+		//   - A ZERO-LENGTH input returns nil and appends nothing, so a published []
+		//     reads as an absent key does. That is #1828's collapse implemented, and
+		//     nil is the direction because it is this struct's own spelling for an
+		//     empty list — see turnevent.ModelOption.TruncatedFields for the convention
+		//     and ModelOption.EffortLevels for the argument. It normalises how Go
+		//     spells ZERO and no element or position, so #1600's verbatim rule is
+		//     untouched. The arm returns BEFORE the loop below, so a zero-length list
+		//     still names nothing in TruncatedFields.
 		//   - Every element goes through truncateField into a slice of the SAME length,
 		//     so cutting an element neither drops it nor disturbs claude's order.
 		//   - The name is appended AT MOST ONCE, after the loop, and only if some
@@ -1895,7 +1902,7 @@ func (p *Parser) emitModelList(line []byte) {
 		// reason.
 		boundEach := func(values []string, name string, limit int) []string {
 			if len(values) == 0 {
-				return values
+				return nil
 			}
 			out := make([]string, len(values))
 			var cutAny bool
