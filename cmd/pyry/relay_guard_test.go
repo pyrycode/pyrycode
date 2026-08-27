@@ -160,13 +160,15 @@ var excludedTypes = map[string]string{
 
 	// outbound push — the v2 model-list report (#1704). Outbound-only like the six
 	// above, and mandatory here from the moment the constant exists rather than
-	// from the moment something emits it (the producer is #1693) — Assertion #3
-	// reports an unclassified constant, not an unemitted one. It is a push and not
-	// a reply because this slice declares no inbound request verb: an inbound type
-	// needs a handler in Handlers or dispatchAppFrame or Assertion #1 fails, and
-	// filing a handler-less verb here to dodge that would be a lie to the guard. If
-	// #1693 picks request/reply, the verb and its handler land together and this
-	// entry becomes "reply".
+	// from the moment something emits it (the turnbridge mapping is #1848, the
+	// emission #1849) — Assertion #3 reports an unclassified constant, not an
+	// unemitted one. It is a push and not a reply because this slice declares no
+	// inbound request verb: an inbound type needs a handler in Handlers or
+	// dispatchAppFrame or Assertion #1 fails, and filing a handler-less verb here
+	// to dodge that would be a lie to the guard. It shipped as a PUSH rather than a
+	// reply: #1849 emits it from interactiveTurnEmitterV2.Handle on the interactive
+	// turn lane, so this entry stays "push". A later ticket picking request/reply
+	// would still have to declare the verb together with its handler.
 	"TypeModelList": "push",
 
 	// outbound push — the v2 slash-command-list report (#1726). Outbound-only like

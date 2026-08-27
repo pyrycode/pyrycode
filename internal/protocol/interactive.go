@@ -536,7 +536,10 @@ type ModelAnnouncedPayload struct {
 //
 // Declared here (#1704) ahead of its producer so a client can be written against
 // the shape — the sequencing #1405 used ahead of #1410 and #1616 ahead of #1638.
-// Nothing in the tree constructs this type yet; #1693 is what will.
+// The producer has since landed: turnbridge.MapEvent's turnevent.ModelList arm
+// constructs it (#1848), and cmd/pyry's resolveBoundModelList (#1857) is a second
+// production path that routes a session's retained list back through that same
+// arm rather than filling the fields itself.
 //
 // ConversationID is present and unfilled by this ticket — the producer supplies
 // it at mapping time, the seam every v2 interactive payload uses. claude's own
@@ -550,16 +553,16 @@ type ModelAnnouncedPayload struct {
 // this frame does NOT carry; 0 when nothing was dropped, so the list's true size
 // is len(Models) + DroppedModels. The decode now COUNTS IT (#1812): streamsup's
 // maxModelListEntries bounds the entry count and turnevent.ModelList.DroppedModels
-// carries what it cut, which is this field's honest source. Nothing joins the two
-// yet — #1693 is where the field and that counter meet, this type still having no
-// constructor. The field was declared ahead of both (#1704) because a wire with
-// nowhere to put a drop discards it silently, and a permanent 0 reads as "nothing
-// was dropped", which is a lie rather than a gap. The count reports here
-// rather than as a name in a top-level truncated_fields — which is why this
-// payload has none, BackgroundTaskRosterPayload's stated reason — because a
-// name-only report loses HOW MANY were lost, and each dimension reports where it
-// is decided: a text cut is a property of one entry and rides that entry as
-// ModelOption.TruncatedFields.
+// carries what it cut, which is this field's honest source. #1848 joined the two:
+// MapEvent's arm carries turnevent.ModelList.DroppedModels through verbatim and
+// never recomputes it from len(Models). The field was declared ahead of both
+// (#1704) because a wire with nowhere to put a drop discards it silently, and a
+// permanent 0 reads as "nothing was dropped", which is a lie rather than a gap.
+// The count reports here rather than as a name in a top-level truncated_fields —
+// which is why this payload has none, BackgroundTaskRosterPayload's stated
+// reason — because a name-only report loses HOW MANY were lost, and each
+// dimension reports where it is decided: a text cut is a property of one entry
+// and rides that entry as ModelOption.TruncatedFields.
 //
 // A lookup can MISS, and that is ordinary rather than an error. claude announces
 // an identifier at least as specific as the one it was given
@@ -709,8 +712,9 @@ type ModelOption struct {
 // absent/empty distinction either: turnevent.ModelOption.EffortLevels reads an
 // absent key, a JSON null and a published empty array as ONE reading, spelled nil
 // (#1828). The wire's position is stated here independently of that spelling,
-// because an undeclared position is one #1693 would have to invent — and, the two
-// having landed on the same collapse, #1693's mapping has no fork to bridge.
+// because an undeclared position is one #1848 would have had to invent — and, the
+// two having landed on the same collapse, #1848's mapping needed no fork to
+// bridge.
 //
 // TruncatedFields is exempt for BackgroundTaskRosterPayload.MarshalJSON's own
 // carve-out reason, unchanged: nil and [] say the identical thing there ("nothing
@@ -741,7 +745,7 @@ func (o ModelOption) MarshalJSON() ([]byte, error) {
 //
 // Declared here (#1727) ahead of its producer so a client can be written against
 // the shape — the sequencing #1405 used ahead of #1410, #1616 ahead of #1638 and
-// #1704 ahead of #1693. Nothing in the tree constructs this type yet; #1720 is
+// #1704 ahead of #1848. Nothing in the tree constructs this type yet; #1720 is
 // what will. Two consumers are blocked on the shape today: pyrycode-desktop#681,
 // the Actions-menu grey-out that matches its menu entries against this list, and
 // pyrycode-desktop#694, a type-ahead that filters the whole list live and renders
