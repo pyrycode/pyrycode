@@ -699,9 +699,12 @@ type ModelOption struct {
 // it is a COLLAPSE: Haiku's entry omits supportedEffortLevels entirely, and a
 // client's behaviour is identical for absent and empty (no effort control). The
 // wire therefore states ONE position for both, and [] is the one that spares every
-// row an optional-array branch. #1690 decides whether the daemon-internal value
-// keeps the absent/empty distinction; the wire's position is stated here either
-// way, because an undeclared position is one #1693 would have to invent.
+// row an optional-array branch. The daemon-internal value does NOT keep the
+// absent/empty distinction either: turnevent.ModelOption.EffortLevels reads an
+// absent key, a JSON null and a published empty array as ONE reading, spelled nil
+// (#1828). The wire's position is stated here independently of that spelling,
+// because an undeclared position is one #1693 would have to invent — and, the two
+// having landed on the same collapse, #1693's mapping has no fork to bridge.
 //
 // TruncatedFields is exempt for BackgroundTaskRosterPayload.MarshalJSON's own
 // carve-out reason, unchanged: nil and [] say the identical thing there ("nothing
@@ -908,10 +911,16 @@ type SlashCommand struct {
 // wire states ONE position for both and [] is the position that spares every row
 // an optional-array branch. This is exactly ModelOption.MarshalJSON's
 // EffortLevels collapse with the frequency INVERTED: the majority case here, the
-// single exception (Haiku) there. Whether the daemon-internal value keeps the
-// absent/empty distinction is #1719's call, as #1690 owns it for the model list;
-// the wire's position is stated here either way, because an undeclared position
-// is one #1720 would have to invent.
+// single exception (Haiku) there. Whether the daemon-internal ALIAS value keeps
+// the absent/empty distinction is #1825's call, and its own acceptance criteria
+// read this comment to decide it. The model list has since settled its half:
+// turnevent.ModelOption.EffortLevels reads an absent key, a JSON null and a
+// published empty array as ONE reading, spelled nil (#1828). That is offered to
+// #1825 as a precedent to WEIGH, not a conclusion to adopt — EffortLevels
+// re-derived its own answer rather than inheriting the one
+// turnevent.ModelOption.SupportsAutoMode had reached, and this list's frequencies
+// are inverted from the levels' anyway. The wire's position is stated here either
+// way, because an undeclared position is one #1720 would have to invent.
 //
 // TruncatedFields is exempt for BackgroundTaskRosterPayload.MarshalJSON's own
 // carve-out reason, unchanged: nil and [] say the identical thing there ("nothing

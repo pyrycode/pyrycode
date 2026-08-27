@@ -318,8 +318,10 @@ func TestRunStreamJSON_InitializeControlAnswer(t *testing.T) {
 		}
 		if minimal == 0 {
 			t.Error("no canned entry omits BOTH supportedEffortLevels and supportsAutoMode as JSON " +
-				"keys: present-and-empty or present-and-false is a different fact from absent, and " +
-				"emitting one destroys the distinction #1690 has yet to decide")
+				"keys: present-and-empty or present-and-false is a different INPUT from absent, and " +
+				"emitting one hands the decode an already-collapsed value, so the absent-key arm — " +
+				"which turnevent.ModelOption.EffortLevels reads as nil (#1828) and " +
+				"turnevent.ModelOption.SupportsAutoMode reads as false (#1819) — goes unexercised")
 		}
 	})
 
