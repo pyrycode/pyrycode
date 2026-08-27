@@ -2939,8 +2939,8 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   level, under `response.response`. `internal/streamsup` never parses past
   `subtype`, so its own documented shape was never wrong; it was just not the
   whole shape a payload-reading caller needs. Any future code that decodes
-  this control-reply's payload — #1690's decoder, #1693's model-list
-  producer — reads `response.response`, not `response`. The verbatim capture
+  this control-reply's payload — #1690's decoder, #1848's model-list
+  mapper — reads `response.response`, not `response`. The verbatim capture
   is `initControlFixtureRecord.ControlResponses[0]` in the committed fixture.
 
   **Lessons #1763 adds, on top of the two below:**
