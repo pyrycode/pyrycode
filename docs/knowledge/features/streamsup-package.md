@@ -503,10 +503,49 @@ authenticated child, claude 2.1.239) agree byte for byte that `request` holds on
 `TestMarshalBypassRevocationEnvelope` pass with their `want` literals unmodified. `request_id`
 comes from the same shared `nextControlID` counter as `Interrupt` and `RevokeBypass`. **Not added
 to `sessions.Runner`**, unlike `RevokeBypass`: the interface-placement rule is by consumer
-location, and this subtype has no consumer yet — reading the `control_response` ack and
-publishing the model/slash-command list it carries is a later slice — so an interface method here
-would be a seam with nothing on the far side of it. This slice writes the line and stops; nothing
-reads the ack.
+location, and #1839 (below) put the consumer inside this same file rather than inside
+`internal/sessions` — so the rule still argues against an interface method, now for the ordinary
+reason (in-package caller, no cross-package dispatch to satisfy) rather than for having no caller
+at all. This slice writes the line and stops; nothing reads the ack.
+
+**Firing the ask at spawn time (#1839).** A new `Config.RequestInitializeOnSpawn bool` gates one
+call to `RequestInitialize()` inside `spawnAndWait`, between `updateState` and the `onSpawn` seam.
+Cardinality is per **spawn**, which is per child by construction — there is no counter and no
+per-child bookkeeping, because `spawnAndWait` itself runs exactly once per child. The trap this
+design exists to avoid is triggering off the child's own `system`/`init` line instead:
+`emitModelAnnounced`'s doc measures that line as firing once per **turn**, so a trigger there would
+ask on every turn a child serves and only a multi-turn test would catch it. `mapStreamsupConfig`
+sets the field `true`, making the ask the interactive daemon's policy rather than every runner's
+behaviour; the zero value leaves every other `streamsup.Config` construction site — the three
+`internal/e2e/realclaude` runners included — unchanged with no edit, the same shipped-unwired
+property #1206's `OnChildExit` established. The ask's error (only a write-time EPIPE is reachable
+here in practice; see the test-writing lesson below) is absorbed into one `Debug` record and never
+reaches `waitErr`, so it cannot restart a child or fail a spawn. Because `RequestInitialize` reads
+`Stdin()` rather than the rotation-gated `turnTarget`, a `RestartFresh` can leave both the outgoing
+child and its successor asked — deliberate, not a gap: gating the ask on the rotation window would
+leave a child permanently unasked on the `BeginRotation` abort path, which costs more than one
+harmless extra line on a child already being killed.
+
+*Test-writing lesson, from the two multi-step assertions this ticket needed.* The `echo_lines` fake
+child gives tests a FIFO barrier, but only for lines the child lives long enough to read: waiting on
+`onSpawn`'s signal proves the daemon **wrote** the initialize line, not that the child **read** it,
+so a restart test that kills child 1 as soon as child 2's `onSpawn` fires can beat the read and lose
+child 1's ask from the transcript — the count reads 1 where 2 was expected, intermittently. The fix
+is to wait for the first ask's own echo before restarting. Separately, a single-turn test cannot
+distinguish "once per spawn" from "once per turn" — the two cardinalities agree until a second turn
+is delivered, so the second turn is the assertion, not padding, for the exact `system`/`init`
+mistake this design avoids.
+
+*Test-writing lesson, from code review: an "undeliverable ask is absorbed" test needs the reachable
+arm named correctly, or it proves nothing.* A test built around a `crash`-mode child (exits ~20ms
+after spawn) intends to exercise the absorbed-error path, but `go test -race -coverprofile` showed
+the absorb body at 0 executions against 7 successful asks: the write always lands in a pipe buffer
+created microseconds earlier, so only a microsecond-wide EPIPE race is reachable at this call site —
+`ErrNoLiveChild` is not, because that arm requires `takeStdin` to have already run, and `takeStdin`'s
+one call site sits below `cmd.Wait`, later in the very spawn `RequestInitialize` fires within. There
+is no race-free way to force the reachable arm from a child's behaviour, so the honest claim for such
+a test is "the flag doesn't perturb the crash/backoff ladder," not "the absorb branch is covered" —
+label it as what it measures rather than the AC it was written to satisfy.
 
 *Mutation-testing note, applicable to any future control-request marshaller added this way:* a
 byte-exact marshal test pinned against a **fixed literal id** cannot distinguish a structured
