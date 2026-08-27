@@ -774,6 +774,38 @@ report** — `"effort_levels"` gets named on a list nothing happened to. Measure
 whether the new guarded block reports anything the prior one didn't; folding a report into the same
 block turns a boundary that used to prove nothing into one that does.
 
+**Declaring `commands` alongside `models` (#1853).** `controlResponseLine`'s decode target grew a
+second array, `commandEntryLine{ Name string }`, for claude's slash-command inventory — one field,
+same reasoning as `modelOptionLine` and `systemInitLine`: absence from the decode target is a
+stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stay undeclared.
+Declaring the array turns a `commands` that arrives as a number, a string or an object from
+*silently ignored* into a whole-line decode failure on the undecodable rung — the same shape
+guarantee `models` already had, extended to a second field. `logControlResponse` grew a sixth
+attribute, `commands`, the **decoded** count (not the emitted count `models` reports): taken below
+the success gate and above rung 3's early return, so undecodable and nak report 0 and ack/model_list
+report it — making a payload carrying `commands` and no `models` distinguishable in the log from one
+carrying neither, without touching the four-rung classification itself.
+
+*Testing lesson: a gate-placement claim needs a fixture where the two placements disagree.* The row
+pinning "count taken below the subtype check, not above" only works because it pairs a
+`subtype:"error"` NAK with a **non-empty** `commands` array — every other nak-rung row carries an
+absent or empty array and reads 0 under either placement, so a mutant moving the count above the
+gate survives all of them silently. The general form: when a design decision is "compute X after
+check Y, not before," the pinning fixture must make X differ depending on which side of Y it's
+computed on — an X that reads the same either way (because the fixture is empty/absent on the
+inputs the reordering would affect) proves nothing about the ordering.
+
+*Known future collision, not yet resolved: `commandEntryLine`'s doc absolutism versus #1720.* Its
+comment reads "a later reader must not 'complete' this struct" — but `protocol.SlashCommand`
+already declares all four keys today, and `protocol.SlashCommandListPayload`'s doc states outright
+that shape "adopts all four... unlike ModelOption it drops nothing," with **#1720** open to publish
+it. Code review flagged this as a SHOULD FIX (the comment borrows `systemInitLine`'s register — keys
+the daemon must *never* hold — for three keys the wire type is already committed to carrying) and it
+was left unfixed, deliberately non-blocking. Whoever picks up #1720 will read a production comment
+forbidding exactly what their ticket requires; the fix, when someone gets there, is scoping the
+completeness claim to *today* — nothing reads the other three keys yet, and widening is #1720's
+decision to take together with a cap, not a violation of this one.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
