@@ -526,22 +526,24 @@ type ModelAnnounced struct {
 
 // ModelOption is one entry of a ModelList: the list's element type, NOT an
 // Event, so it carries no marker — BackgroundTask's shape, for BackgroundTask's
-// reason. Its four claude-authored fields — three strings and one bool — are
-// exactly what protocol.ModelOption carries (#1704) minus EffortLevels, which is
-// #1820's slice, in that type's declaration order and nothing invented.
+// reason. Its five claude-authored fields — three strings, one string LIST and one
+// bool — are exactly what protocol.ModelOption carries (#1704), in that type's
+// declaration order, with nothing missing and nothing invented.
 //
 // Four per-entry keys the captured reply also carries are deliberately absent, and
 // the ABSENCE is the guarantee: description — the longest string in the capture at
 // 66 bytes, and the most tempting to carry — supportsFastMode, which only one of
 // the six entries has, and supportsEffort and supportsAdaptiveThinking, which the
-// four richer entries carry beside the key this type does decode. None has a named
+// four richer entries carry beside the keys this type does decode. None has a named
 // consumer and protocol.ModelOption carries none of them at all, so decoding any
 // would be untrusted prose bounded, retained and carried for nothing. That is the
 // argument streamsup's systemInitLine makes about its own twenty-one omissions,
 // and a field never declared on the producer's decode target cannot leak whatever
 // a later sweep forgets to check. Of the two capability keys the richer entries do
-// carry, supportsAutoMode is decoded here (#1819) and supportedEffortLevels is
-// #1820's slice, not an omission.
+// carry, BOTH are decoded here — supportsAutoMode by #1819 and supportedEffortLevels
+// by #1827 — so neither is an omission. supportsEffort stays out with the other
+// three: EffortLevels subsumes it, completely once #1828 settles what an empty list
+// means.
 type ModelOption struct {
 	// ResolvedModel is what Value resolves to RIGHT NOW: the concrete identifier,
 	// and the field a consumer wanting a dated one wants. VERBATIM, per
@@ -567,6 +569,51 @@ type ModelOption struct {
 	// sanitization is the CLIENT's, exactly as protocol.ModelOption's SECURITY
 	// paragraph states for the same three strings.
 	DisplayName string
+	// EffortLevels are the reasoning-effort levels claude published for THIS model,
+	// so a client's effort control can offer exactly the levels claude accepts.
+	// VERBATIM, per ModelAnnounced.Model's rule: claude's own strings in claude's own
+	// order, with no lowercasing, no canonicalisation into any effort vocabulary of
+	// the daemon's own, and no reordering — the capture's order (low, medium, high,
+	// xhigh, max) is neither alphabetical nor sorted, and preserving it is what
+	// carries claude's answer rather than the daemon's opinion of it.
+	//
+	// EACH ELEMENT IS BOUNDED AND THE COUNT IS NOT. The producer caps every level
+	// string AT CONSTRUCTION (streamsup's maxModelEffortLevel), so no oversized level
+	// enters the event stream, a queue, or a log; how MANY levels arrive is claude's
+	// to choose and nothing bounds it yet. That is the third dimension of a per-entry
+	// budget whose other two are bounded, and #1821 closes it — see ModelList.Models,
+	// which states the same gap for the list as a whole.
+	//
+	// WHETHER AN ABSENT KEY READS THE SAME AS A PUBLISHED EMPTY LIST IS NOT SETTLED
+	// HERE. It is #1828's, and that answer is owed rather than inherited:
+	// SupportsAutoMode's collapse rests on a withheld GRANT being safe to read as a
+	// refusal, and an empty effort menu is a different failure than a greyed
+	// checkbox. So the producer normalises in NEITHER direction — nothing turns an
+	// absent key's nil into a []string{} and nothing nils out a published empty
+	// array, because each of those IS an answer. Do not read the Go shape as a
+	// position: a nil here says only that claude's key was absent or null, and what
+	// that MEANS is open.
+	//
+	// A CUT LEVEL IS NOT A LEVEL CLAUDE PUBLISHED. When TruncatedFields names
+	// "effort_levels" at least one element is the daemon's prefix of a string claude
+	// sent, so this list is no longer claude's menu and must not be offered as one.
+	//
+	// internal/relay's validEffort is NOT applied to this list, and is not to be
+	// widened or narrowed to match it. It is a CLOSED enum bounding a phone-supplied
+	// override on an INBOUND path: running claude's outbound list through it would
+	// silently drop a level claude adds next, making the daemon's menu a lie, and
+	// widening it to whatever claude published would let the subprocess extend what an
+	// untrusted inbound frame may set. The two rules look interchangeable and are
+	// deliberately not, which is why the separation is stated rather than left to be
+	// noticed.
+	//
+	// BOUNDED AND UTF-8-VALID IS ALL THEY ARE, exactly as DisplayName is: these are
+	// claude-authored strings that crossed the subprocess trust boundary, and nothing
+	// on this path strips control characters or terminal escape sequences, so they
+	// stay untrusted, model-influenced text and the render boundary owing the
+	// sanitization is the CLIENT's — which is what protocol.ModelOption's SECURITY
+	// paragraph already states for these same strings.
+	EffortLevels []string
 	// SupportsAutoMode is claude's own answer to whether it accepts AUTO permission
 	// mode for this model, so a client's permission-mode menu can grey the option out
 	// where claude refuses it. VERBATIM, per ModelAnnounced.Model's rule: the key's
@@ -602,17 +649,24 @@ type ModelOption struct {
 	// that when asked — because a daemon reading its own subprocess's claim as
 	// permission is a subprocess authorizing itself.
 	//
-	// #1820 faces the same absent-versus-empty question for supportedEffortLevels and
-	// must RE-DERIVE its answer rather than inherit this one: the argument above is
-	// about a withheld grant, and an empty effort menu is a different failure than a
-	// greyed checkbox.
+	// EffortLevels faces the same absent-versus-empty question and its answer is still
+	// owed. The levels themselves SHIPPED (#1827); what an absent
+	// supportedEffortLevels MEANS is open, and #1828 must RE-DERIVE it rather than
+	// inherit this one: the argument above is about a withheld grant, and an empty
+	// effort menu is a different failure than a greyed checkbox.
 	SupportsAutoMode bool
 	// TruncatedFields names THIS entry's fields the producer cut to fit their caps,
 	// in declaration order, using the DAEMON's snake_case names: "resolved_model",
-	// "value", "display_name". No name is translated — claude's camelCase keys and
-	// these fields agree on which field they mean. nil when nothing was cut, never
-	// an empty non-nil slice; BackgroundTask.TruncatedFields is the convention's
-	// single source.
+	// "value", "display_name", "effort_levels". No name is translated — claude's
+	// camelCase keys and these fields agree on which field they mean. nil when
+	// nothing was cut, never an empty non-nil slice; BackgroundTask.TruncatedFields
+	// is the convention's single source.
+	//
+	// "effort_levels" is the one name reporting a cut on ONE OR MORE VALUES: it
+	// appears at most once per entry however many of that entry's levels were cut,
+	// because this report names FIELDS and a list is one field. It is last for the
+	// declaration-order reason and no other — the producer's per-element bound runs
+	// after the three strings'.
 	TruncatedFields []string
 }
 
@@ -656,10 +710,16 @@ type ModelList struct {
 	// oversized payload never enters the event stream, a queue, or a log. So is the
 	// entry COUNT (streamsup's maxModelListEntries), which is what a per-entry text
 	// cap alone cannot supply: the array's length is claude's to choose, and a
-	// per-entry cap alone would leave the total a function of that number. Both
-	// dimensions bounded, the list truncated FROM THE TAIL when the count cap fires,
-	// and the true size recoverable as len(Models) + DroppedModels. The bool beside
-	// those strings is bounded by nothing and needs no cap: it carries none of
+	// per-entry cap alone would leave the total a function of that number. The list is
+	// truncated FROM THE TAIL when the count cap fires, and the true size stays
+	// recoverable as len(Models) + DroppedModels.
+	//
+	// THERE ARE THREE DIMENSIONS SINCE #1827 AND ONLY TWO OF THEM ARE BOUNDED. Each
+	// level STRING in an entry's EffortLevels is bounded at construction (streamsup's
+	// maxModelEffortLevel); how MANY levels an entry carries is bounded by nothing, so
+	// a per-entry size is still a function of a number claude chooses, which is the
+	// property the entry count supplied for the other two. #1821 closes it. The bool
+	// beside those strings is bounded by nothing and needs no cap: it carries none of
 	// claude's bytes.
 	Models []ModelOption
 	// DroppedModels is how many entries claude sent beyond the producer's cap that

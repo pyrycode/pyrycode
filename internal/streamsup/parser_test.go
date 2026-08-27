@@ -3843,6 +3843,10 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // production split: they bound different fields for different reasons, and sharing
 // one fixture would let a change to one silently retarget the others' proof.
 //
+// modelEffortLevelCapFixture is the same literal rule for a PER-ELEMENT length: it
+// bounds one level string of an entry's list, not the list, so it is the number a
+// row asserting a cut level's byte count has to be written against.
+//
 // modelListEntriesCapFixture pins a CARDINALITY rather than a byte length, and
 // taskRosterEntriesCapFixture's reasoning carries over unchanged: a count fixture
 // written as maxModelListEntries would follow the constant green if someone halved
@@ -3851,6 +3855,7 @@ const (
 	modelResolvedCapFixture    = 256
 	modelValueCapFixture       = 256
 	modelDisplayNameCapFixture = 256
+	modelEffortLevelCapFixture = 32
 	modelListEntriesCapFixture = 10
 )
 
@@ -3926,6 +3931,35 @@ func capturedModelBool(t *testing.T, entry map[string]any, key string) (value, p
 	return value, true
 }
 
+// capturedModelStrings pulls one claude-authored string LIST off a captured entry,
+// reporting separately whether the key was THERE AT ALL — the two four-key entries
+// carry no capability key, and (nil, false) is how that reads.
+//
+// Fatal when the key is present but not an array, or when any element is not a
+// string: a capture that changed either is a capture this decode was never proven
+// against, and an expectation that quietly became empty would make the comparison
+// below hold for a decode that dropped the field.
+func capturedModelStrings(t *testing.T, entry map[string]any, key string) (values []string, present bool) {
+	t.Helper()
+	raw, ok := entry[key]
+	if !ok {
+		return nil, false
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("captured entry's %q is %#v, not an array: %#v", key, raw, entry)
+	}
+	values = make([]string, 0, len(items))
+	for i, item := range items {
+		s, ok := item.(string)
+		if !ok {
+			t.Fatalf("captured entry's %q[%d] is %#v, not a string: %#v", key, i, item, entry)
+		}
+		values = append(values, s)
+	}
+	return values, true
+}
+
 // TestParser_InitializeControlResponseDecodesTheCapturedModels is #1811's capture
 // pin (AC 4). It replays each responding arm's REAL control_response line through
 // the parser and checks the emitted ModelList against the capture's own bytes, so
@@ -3940,6 +3974,10 @@ func capturedModelBool(t *testing.T, entry map[string]any, key string) (value, p
 // capability keys at all — and all three must produce a complete ModelOption. A
 // four-key entry decoding to a dropped or empty row is the realistic failure, and
 // counting the keys is what makes the row's provenance visible instead of assumed.
+//
+// It is also #1827's AC 1: the same capture proves the level LIST over an entry
+// carrying the full five levels and one carrying no capability key at all, against
+// claude's own bytes rather than a transcription.
 func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) {
 	t.Parallel()
 
@@ -3988,6 +4026,29 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 					"carrying no capability key = %v; both are needed for the comparison below to prove "+
 					"both readings (sonnet and haiku are today's suppliers)", sawAutoModeTrue, sawAutoModeAbsent)
 			}
+			// A third of the same shape for #1827's level LIST: the comparison proves the
+			// PUBLISHED reading only if some captured entry carries the full five levels,
+			// and the ZERO-LENGTH one only if some entry carries no capability key at all.
+			// sonnet supplies the first today and haiku the second. Five is asserted rather
+			// than "non-empty" because the count is part of the shape this decode was
+			// proven against: a re-capture in which claude published a sixth level, or in
+			// which every entry carried the key, fails HERE rather than silently narrowing
+			// what the loop proves while the loop stays green.
+			var sawFiveEffortLevels, sawEffortLevelsAbsent bool
+			for _, entry := range want {
+				switch levels, present := capturedModelStrings(t, entry, "supportedEffortLevels"); {
+				case present && len(levels) == 5:
+					sawFiveEffortLevels = true
+				case !present:
+					sawEffortLevelsAbsent = true
+				}
+			}
+			if !sawFiveEffortLevels || !sawEffortLevelsAbsent {
+				t.Fatalf("captured entries supply the full five supportedEffortLevels on some entry = %v and "+
+					"an entry carrying no capability key = %v; both are needed for the comparison below to "+
+					"prove both shapes (sonnet and haiku are today's suppliers)",
+					sawFiveEffortLevels, sawEffortLevelsAbsent)
+			}
 
 			events := collectEvents(capturedInitializeLine(t, arm))
 			if len(events) != 1 {
@@ -4021,6 +4082,24 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 				}
 				if wantDisplay := capturedModelString(t, want[i], "displayName"); got.DisplayName != wantDisplay {
 					t.Errorf("entry %d DisplayName: got %q, want %q (verbatim, no repair)", i, got.DisplayName, wantDisplay)
+				}
+				// Derived from the capture's bytes, never transcribed, and SPLIT BY PRESENCE
+				// because the two halves assert different things. Where claude published the
+				// key the list must come back element for element in claude's own order —
+				// which (low, medium, high, xhigh, max) is neither alphabetical nor sorted,
+				// so this is the no-reordering pin as well as the verbatim one. Where claude
+				// sent no key at all only the ZERO LENGTH is asserted: not == nil and not
+				// []string{}, because which of those an absent key should read as is open
+				// (#1828, per turnevent.ModelOption.EffortLevels) and length is the only
+				// thing both readings share. The weaker assertion is deliberate, not sloppy.
+				if wantLevels, present := capturedModelStrings(t, want[i], "supportedEffortLevels"); present {
+					if !slices.Equal(got.EffortLevels, wantLevels) {
+						t.Errorf("entry %d EffortLevels: got %q, want %q (verbatim, in claude's own order)",
+							i, got.EffortLevels, wantLevels)
+					}
+				} else if len(got.EffortLevels) != 0 {
+					t.Errorf("entry %d carries no supportedEffortLevels key but decoded to %q, want zero length",
+						i, got.EffortLevels)
 				}
 				// Derived from the capture's bytes, never transcribed: an entry carrying no
 				// capability key at all reads false, which is the same reading a present
@@ -4115,17 +4194,22 @@ func modelEntryWithFixture(entry map[string]any, key string, value any) map[stri
 	return out
 }
 
-// fixtureAutoMode reports what entry i of a BUILT line actually carries under the
-// literal supportsAutoMode key, read back out of that line's own bytes.
+// fixtureEntryRaw reports what entry i of a BUILT line actually carries under one
+// literal claude key, read back out of that line's own bytes.
 //
 // It decodes with literal key strings rather than through modelOptionLine, for
 // capturedModelEntries' reason: an expectation read through the production decode
-// target would follow a wrong json tag green. Here it does a second job — with a
-// plain bool on the daemon's type, an absent key and a present false are
-// indistinguishable BY DESIGN downstream, so a table that only inspected the
-// decoded value would be satisfied by a fixture builder that quietly dropped the
-// false key, proving one shape twice and calling it two.
-func fixtureAutoMode(t *testing.T, line string, i int) (raw json.RawMessage, present bool) {
+// target would follow a wrong json tag green. Here it does a second job, and it does
+// it for two tables — with a plain bool on the daemon's type an absent
+// supportsAutoMode and a present false are indistinguishable BY DESIGN downstream,
+// and an absent supportedEffortLevels, a published [] and a null are all
+// zero-length, so a table that only inspected the decoded value would be satisfied
+// by a fixture builder that quietly dropped the key, proving one shape twice or
+// three times and calling it two or three.
+//
+// The key is a PARAMETER rather than one copy of this helper per field (#1827): the
+// two callers differ only in which literal they read back.
+func fixtureEntryRaw(t *testing.T, line string, i int, key string) (raw json.RawMessage, present bool) {
 	t.Helper()
 	var decoded struct {
 		Response struct {
@@ -4141,7 +4225,7 @@ func fixtureAutoMode(t *testing.T, line string, i int) (raw json.RawMessage, pre
 	if i >= len(entries) {
 		t.Fatalf("the built line carries %d entries, want one at index %d", len(entries), i)
 	}
-	raw, present = entries[i]["supportsAutoMode"]
+	raw, present = entries[i][key]
 	return raw, present
 }
 
@@ -4211,7 +4295,7 @@ func TestParser_ModelListSupportsAutoModeReadsClaudesKey(t *testing.T) {
 			t.Parallel()
 			line := modelListLineFixture(t, "success", []map[string]any{tt.entry})
 
-			raw, present := fixtureAutoMode(t, line, 0)
+			raw, present := fixtureEntryRaw(t, line, 0, "supportsAutoMode")
 			switch {
 			case tt.wantWire == "" && present:
 				t.Fatalf("the row declares an ABSENT key but the built line carries %s; the fixture is "+
@@ -4246,6 +4330,128 @@ func TestParser_ModelListSupportsAutoModeReadsClaudesKey(t *testing.T) {
 	}
 }
 
+// TestParser_ModelListEffortLevelsReadClaudesKey is #1827's decode pin: claude's
+// list arrives verbatim and IN CLAUDE'S ORDER, and an absent key, a published empty
+// array and a JSON null all decode to a ZERO-LENGTH list.
+//
+// The three zero-length rows assert len(...) == 0 and never == nil or []string{}.
+// Which of those an absent key should read as is exactly the question this slice
+// declines to answer — it is #1828's, per turnevent.ModelOption.EffortLevels — so
+// asserting either spelling here would pin a reading this slice does not own.
+//
+// Do NOT go looking for a mutant that separates absent from published-empty. None
+// is expected to redden anything here, because the producer normalises in neither
+// direction; that is the design's content rather than a coverage gap.
+//
+// The scrambled-order row is the only red under a producer that CANONICALISED into
+// claude's published order, which is the reordering a five-level row cannot catch
+// because it is already in that order. A producer that SORTED reddens both rows, so
+// the scrambled one earns its place against the narrower mutant rather than the
+// obvious one.
+//
+// Non-vacuity comes from the wantWire assertion, which checks what the built line
+// ACTUALLY carries before the decode is inspected: three of the five rows differ
+// only on the wire, so a builder that quietly dropped the key would otherwise turn
+// them into one shape proved three times.
+func TestParser_ModelListEffortLevelsReadClaudesKey(t *testing.T) {
+	t.Parallel()
+
+	base := modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")
+	tests := []struct {
+		name  string
+		entry map[string]any
+		// wantWire is the raw JSON the built line must carry under the literal key,
+		// "" meaning the entry must not carry the key at all.
+		wantWire string
+		// want is nil on every row whose expectation is ZERO LENGTH rather than a
+		// particular list — see this test's doc.
+		want []string
+	}{
+		{
+			name: "claude's five levels, in claude's order",
+			entry: modelEntryWithFixture(base, "supportedEffortLevels",
+				[]any{"low", "medium", "high", "xhigh", "max"}),
+			wantWire: `["low","medium","high","xhigh","max"]`,
+			want:     []string{"low", "medium", "high", "xhigh", "max"},
+		},
+		{
+			// Neither claude's published order nor a sorted one, which is what makes this
+			// the row a producer that sorted or de-duplicated fails on alone.
+			name:     "a scrambled order is carried, not sorted",
+			entry:    modelEntryWithFixture(base, "supportedEffortLevels", []any{"max", "low", "high"}),
+			wantWire: `["max","low","high"]`,
+			want:     []string{"max", "low", "high"},
+		},
+		{
+			// The capture's four-key shape: the entry stops after the mapped strings.
+			name:     "absent",
+			entry:    base,
+			wantWire: "",
+			want:     nil,
+		},
+		{
+			name:     "published empty",
+			entry:    modelEntryWithFixture(base, "supportedEffortLevels", []any{}),
+			wantWire: "[]",
+			want:     nil,
+		},
+		{
+			// encoding/json documents unmarshalling a null into a non-pointer Go value as
+			// a no-op producing no error, so this decodes cleanly rather than taking the
+			// undecodable rung — a third spelling of the same zero-length shape.
+			name:     "present and null",
+			entry:    modelEntryWithFixture(base, "supportedEffortLevels", nil),
+			wantWire: "null",
+			want:     nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			line := modelListLineFixture(t, "success", []map[string]any{tt.entry})
+
+			raw, present := fixtureEntryRaw(t, line, 0, "supportedEffortLevels")
+			switch {
+			case tt.wantWire == "" && present:
+				t.Fatalf("the row declares an ABSENT key but the built line carries %s; the fixture is "+
+					"proving a shape the row is not about", raw)
+			case tt.wantWire != "" && !present:
+				t.Fatalf("the row declares supportedEffortLevels: %s but the built line carries no such key",
+					tt.wantWire)
+			case tt.wantWire != "" && string(raw) != tt.wantWire:
+				t.Fatalf("the built line carries supportedEffortLevels: %s, want %s", raw, tt.wantWire)
+			}
+
+			events := collectEvents(line)
+			if len(events) != 1 {
+				t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+			}
+			list, ok := events[0].(turnevent.ModelList)
+			if !ok {
+				t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+			}
+			if len(list.Models) != 1 {
+				t.Fatalf("ModelList carries %d entries, want 1", len(list.Models))
+			}
+			got := list.Models[0].EffortLevels
+			switch {
+			case len(tt.want) == 0:
+				if len(got) != 0 {
+					t.Errorf("EffortLevels: got %q, want a ZERO-LENGTH list for a wire value of %q",
+						got, tt.wantWire)
+				}
+			case !slices.Equal(got, tt.want):
+				t.Errorf("EffortLevels: got %q, want %q (verbatim, in claude's own order)", got, tt.want)
+			}
+			// Nothing here is near the element cap, so nothing is named — the cut report
+			// has its own table.
+			if cut := list.Models[0].TruncatedFields; cut != nil {
+				t.Errorf("TruncatedFields: got %v, want nil — no level here approaches its cap", cut)
+			}
+		})
+	}
+}
+
 // modelEntriesFixture builds n entries, each identifiable by its resolvedModel so
 // tail-truncation is PINNED rather than assumed. rosterEntriesFixture's shape.
 func modelEntriesFixture(n int) []map[string]any {
@@ -4270,11 +4476,14 @@ func modelEntriesFixture(n int) []map[string]any {
 // excluded by having no usable array, so that row alone fails when the subtype
 // comparison is deleted.
 //
-// The wantAttrs comparison below is also what covers #1819's "no log line carries
-// decoded content": it is an EXACT map equality, so any attribute added to
-// logControlResponse — supportsAutoMode included — turns every row here red. That
-// half needs no assertion of its own, and this note exists so the coverage is
-// visible rather than assumed.
+// The wantAttrs comparison below is also what covers #1819's and #1827's "no log
+// line carries decoded content": it is an EXACT map equality, so any attribute added
+// to logControlResponse — supportsAutoMode and supportedEffortLevels included —
+// turns every row here red. That half needs no assertion of its own, and this note
+// exists so the coverage is visible rather than assumed. It matters most for the
+// level list: an element-level type error quotes the offending array element, so an
+// undecodable arm that logged its err would route claude's own level strings into
+// the daemon log, which is the field #833's "effort values are NEVER logged" names.
 func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 	t.Parallel()
 
@@ -4316,6 +4525,22 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 		{
 			name:       "an entry's supportsAutoMode is an object",
 			line:       modelListLineFixture(t, "success", []map[string]any{modelEntryWithFixture(entry, "supportsAutoMode", map[string]any{})}),
+			wantReason: "undecodable",
+		},
+		{
+			// #1827: a supportedEffortLevels that is a scalar where an array belongs is
+			// the shape a hand-written client or a future claude is most likely to send.
+			name:       "an entry's supportedEffortLevels is a string",
+			line:       modelListLineFixture(t, "success", []map[string]any{modelEntryWithFixture(entry, "supportedEffortLevels", "low")}),
+			wantReason: "undecodable",
+		},
+		{
+			// The family's first ELEMENT-level mismatch: the WHOLE LINE fails, so no
+			// partial list is emitted carrying only the elements that happened to decode.
+			// A menu that silently lost an element would be published as claude's
+			// complete one.
+			name:       "an entry's supportedEffortLevels carries a non-string element",
+			line:       modelListLineFixture(t, "success", []map[string]any{modelEntryWithFixture(entry, "supportedEffortLevels", []any{"low", 5})}),
 			wantReason: "undecodable",
 		},
 		{
@@ -4389,9 +4614,17 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 // by its OWN named cap, and the report names the fields that were cut on the entry
 // they were cut on.
 //
+// It is also #1827's AC 2 for the level LIST, where the report has to AGGREGATE: an
+// entry whose levels were cut names "effort_levels" once however many of them were
+// over-long, and an entry that lost nothing does not name it at all. The
+// three-over-long row is that pin and the only row with sole redness against the
+// realistic mutant, a per-element append inside boundEach's loop rather than after
+// it; the one-level row stays green under that mutant, which is why it cannot carry
+// the AC.
+//
 // The fixtures are synthesized because the capture cannot supply them: its longest
-// values are 25, 18 and 21 bytes, so nothing in it comes within an order of
-// magnitude of a cap.
+// values are 25, 18 and 21 bytes and its longest level is 6, so nothing in it comes
+// within an order of magnitude of a cap.
 func TestParser_ModelListFieldsAreCapped(t *testing.T) {
 	t.Parallel()
 
@@ -4469,6 +4702,80 @@ func TestParser_ModelListFieldsAreCapped(t *testing.T) {
 					t.Errorf("mid-rune cut left invalid UTF-8: %q", got)
 				}
 			},
+		},
+		{
+			name: "one over-long level names effort_levels",
+			entries: []map[string]any{modelEntryWithFixture(
+				modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet"),
+				"supportedEffortLevels", []any{overCap(modelEffortLevelCapFixture)})},
+			wantCut: [][]string{{"effort_levels"}},
+			check: func(t *testing.T, models []turnevent.ModelOption) {
+				// Length first so a decode that dropped the list FAILS here rather than
+				// panicking on the index and taking the parallel siblings' reports with it.
+				if len(models[0].EffortLevels) != 1 {
+					t.Fatalf("EffortLevels came back %q, want the one level the entry carried",
+						models[0].EffortLevels)
+				}
+				// The cap's VALUE, pinned on the ELEMENT, which is the only place it applies:
+				// halve maxModelEffortLevel and this is what goes red.
+				if got := len(models[0].EffortLevels[0]); got != modelEffortLevelCapFixture {
+					t.Errorf("a cut level came back %d bytes, want %d", got, modelEffortLevelCapFixture)
+				}
+			},
+		},
+		{
+			// THE aggregation pin. ONE name, not three: the report names FIELDS and a
+			// list is one field however many of its elements were cut.
+			name: "THREE over-long levels on one entry name effort_levels ONCE",
+			entries: []map[string]any{modelEntryWithFixture(
+				modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet"),
+				"supportedEffortLevels", []any{
+					overCap(modelEffortLevelCapFixture),
+					overCap(modelEffortLevelCapFixture),
+					overCap(modelEffortLevelCapFixture),
+				})},
+			wantCut: [][]string{{"effort_levels"}},
+		},
+		{
+			name: "one over-long level among two that fit keeps all three, in order",
+			entries: []map[string]any{modelEntryWithFixture(
+				modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet"),
+				"supportedEffortLevels", []any{"low", overCap(modelEffortLevelCapFixture), "max"})},
+			wantCut: [][]string{{"effort_levels"}},
+			check: func(t *testing.T, models []turnevent.ModelOption) {
+				got := models[0].EffortLevels
+				// The cap bounds the ELEMENT: cutting one level neither drops it nor
+				// disturbs its neighbours, so the cardinality and claude's order survive.
+				if len(got) != 3 {
+					t.Fatalf("EffortLevels came back %d long, want 3 — an element cap must not change the count",
+						len(got))
+				}
+				if got[0] != "low" || got[2] != "max" {
+					t.Errorf("the levels that fit came back %q and %q, want \"low\" and \"max\" verbatim",
+						got[0], got[2])
+				}
+			},
+		},
+		{
+			// The only row in this table that reddens under an append made unconditional:
+			// five levels, none near the cap, so the name must not appear at all. Rows
+			// whose list is empty cannot carry that — boundEach returns before the append
+			// on an empty input, so they stay green under the same mutant.
+			name: "levels that all fit report nothing",
+			entries: []map[string]any{modelEntryWithFixture(
+				modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet"),
+				"supportedEffortLevels", []any{"low", "medium", "high", "xhigh", "max"})},
+			wantCut: [][]string{nil},
+		},
+		{
+			// effort_levels LAST, whatever order the JSON carries the keys in: the order
+			// is fixed by the producer's sequential calls, and this row is the sole red
+			// against a boundEach call placed before the three bound calls.
+			name: "a string cut AND a level cut, reported in DECLARATION order",
+			entries: []map[string]any{modelEntryWithFixture(
+				modelEntryFixture(overCap(modelResolvedCapFixture), "sonnet", "Sonnet"),
+				"supportedEffortLevels", []any{overCap(modelEffortLevelCapFixture)})},
+			wantCut: [][]string{{"resolved_model", "effort_levels"}},
 		},
 		{
 			name: "a cut on one entry does not appear on the entries AFTER it",
