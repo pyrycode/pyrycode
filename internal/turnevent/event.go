@@ -621,11 +621,16 @@ type ModelOption struct {
 	// supportsAutoMode, no supportsEffort, no supportsAdaptiveThinking — while the four
 	// answering any capability question answer all of them and publish the full five
 	// levels. The shape a genuine per-question refusal would take is exactly the shape
-	// claude does not send. Second, a kept distinction would have a lifetime of one
-	// call: nothing publishes ModelList yet, and its first consumer maps into
-	// protocol.ModelOption, whose MarshalJSON already normalises nil to [] and states
-	// at its own type that an empty effort list on the wire is a COLLAPSE rather than a
-	// positive statement (#1704). Third, a kept distinction is one this house's own
+	// claude does not send. Second, a kept distinction is one NO CLIENT COULD EVER
+	// OBSERVE, however long the daemon held it. It is not short-lived: cmd/pyry's
+	// sessionModelHold keeps this value for the session's life (#1840), and
+	// turnbridge.MapEvent's ModelList arm crosses this field as the slice it is, nil
+	// left nil (#1848), so the distinction even survives the mapping. It dies at the
+	// WIRE, because every path to a client ends at protocol.ModelOption.MarshalJSON,
+	// which normalises nil to [] and states at its own type that an empty effort list
+	// on the wire is a COLLAPSE rather than a positive statement (#1704). The two
+	// sides having landed on the same collapse independently is why #1848's mapping
+	// needed no fork to bridge them. Third, a kept distinction is one this house's own
 	// comparison idiom cannot see: slices.Equal(nil, []string{}) reports TRUE where
 	// reflect.DeepEqual reports false, so the next assertion written against this field
 	// with the idiom every existing one uses would drop the distinction silently, with
@@ -663,7 +668,7 @@ type ModelOption struct {
 	// recoverable from this event, where ModelList's true entry count is recoverable as
 	// len(Models) + DroppedModels. A per-entry dropped-level integer is what would
 	// recover it, and protocol.ModelOption has no field to carry one, so it would be
-	// preserved only long enough for the mapping (#1693) to discard it — the argument
+	// preserved only long enough for the mapping (#1848) to discard it — the argument
 	// SupportsAutoMode makes against a *bool, one field over. Reopening it costs a
 	// ticket plus a wire field. The daemon's own operational signal for the bound is
 	// streamsup's control_response record, not this event.
@@ -703,7 +708,7 @@ type ModelOption struct {
 	// Three facts support it. protocol.ModelOption.SupportsAutoMode is already a
 	// plain bool whose doc calls absent-decodes-to-false "the correct reading"
 	// (#1704), so a pointer here would preserve a distinction only long enough for
-	// the mapping (#1693) to discard it. claude has never sent false at all — in the
+	// the mapping (#1848) to discard it. claude has never sent false at all — in the
 	// committed capture four entries carry true and two carry no capability key
 	// whatsoever, identically in all three of #1763's arms — so a pointer would
 	// defend a shape observed nowhere. And this file declares no pointer field of
@@ -758,13 +763,39 @@ type ModelOption struct {
 // An Event rather than parser-held session state, and the deciding fact is
 // protocol.ModelListPayload's own doc: its ConversationID is supplied at MAPPING
 // time, and mapping time is turnbridge.MapEvent, whose input is an Event. Session
-// state would oblige the publishing slice (#1693) to build a second parser→relay
-// path beside the one every other interactive payload already uses.
+// state would have obliged the publishing slice to build a second parser→relay path
+// beside the one every other interactive payload already uses. It did not: #1849
+// publishes through cmd/pyry's interactiveTurnEmitterV2.Handle, the same emitter
+// every other interactive payload goes through, so the prediction held.
 //
-// NOTHING PUBLISHES IT YET. turnbridge.MapEvent's default drops the variant until
-// #1693, so no client can read a false zero in the window — which is also why the
-// producer takes the false NEGATIVE on every ambiguous line rather than emitting a
-// list it did not observe.
+// IT IS PUBLISHED ON ONE DELIVERY PATH OF TWO, and the two have different answers,
+// so a claim about where this value goes has to say which one it means.
+//
+// THE LIVE LANE, SHIPPED. turnbridge.MapEvent's ModelList arm maps this variant
+// onto protocol.ModelListPayload, DroppedModels included (#1848), and cmd/pyry's
+// interactiveTurnEmitterV2.Handle emits the mapped frame on the interactive turn
+// lane (#1849); #1845 proves it reaches a connected client end to end. It is
+// BEST-EFFORT rather than guaranteed: cmd/pyry's turnMarkFor answers turnMarkNone,
+// so the fan-in classes the event droppable and can refuse it at droppableCap under
+// load — so a client on that lane receives it as a property of the PATH, not a
+// guarantee about any one exchange. Two holders retain it. cmd/pyry's
+// sessionModelHold keeps this decoded value for the session's life, sitting ABOVE
+// that droppable send (#1840); and #1849's emit appends the MAPPED payload to the
+// eventring, retaining it per conversation as the replay source for a phone that
+// reconnects.
+//
+// CONNECT-TIME DELIVERY, NOT SHIPPED. A client that connects AFTER the initialize
+// exchange receives this today by no path at all. The eventring does not close
+// that: replay is a RECONNECT mechanism driven by a last_event_id the client must
+// already hold, and a client never connected for the exchange has none to
+// advertise. #1863 landed the relay-side connect seam — internal/relay's
+// V2SessionConfig.RetainedModelLists, drained by reconcileModelLists — but nothing
+// in the tree fills it, and #1867 is the outstanding slice that will.
+//
+// A client can therefore read this producer's output, which is why the producer
+// takes the false NEGATIVE on every ambiguous line rather than emitting a list it
+// did not observe: a missing menu beats a wrong one, and that choice matters more
+// now that either outcome is visible than it did when neither was.
 //
 // It opens and closes no turn, exactly as the background-task variants do not, and
 // it is not even per-turn: one initialize exchange per child produces one of

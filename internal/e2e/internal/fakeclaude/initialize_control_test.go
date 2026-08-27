@@ -1,7 +1,7 @@
 package main
 
 // #1692 — the fake's answer to an `initialize` control_request: the canned model
-// list the hermetic tier needs so #1693's publishing path and #1683's command list
+// list the hermetic tier needs so #1849's publishing path and #1683's command list
 // can be proven with no credentials, no tokens and no network.
 //
 // Untagged on purpose, exactly like stream_detect_test.go: `make check` runs this

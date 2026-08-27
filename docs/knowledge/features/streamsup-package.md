@@ -594,8 +594,11 @@ names the limit this buys: it recognises a **shape**, not a **correlated reply**
 putting a `models` array inside some other successful control response would have that response read
 as an inventory too. The consequence is bounded rather than a defect to fix here — the value is still
 claude's own claim about itself, bounded by the same three caps, retained for the session's life since
-#1840 (below), and published to nobody yet — so the trade is worth revisiting when a client can first
-read the value and provenance starts to matter, not before.
+#1840 (below), and published on the live interactive turn lane since #1849 (below). **The trade was
+revisited at that point (#1862) and re-taken unchanged**: correlating `Runner.nextControlID`'s minted
+`request_id` would prove **which reply** the bytes answered, not make the **content** any more
+trustworthy, since the same subprocess authors every control response including the one this arm
+reads — a correlated inventory is claude's own claim about itself exactly as an uncorrelated one is.
 
 Each `turnevent.ModelOption` entry keeps five of claude's payload keys —
 `ResolvedModel`/`Value`/`DisplayName`, `SupportsAutoMode` (#1819) and, since #1827, `EffortLevels` —
@@ -727,7 +730,8 @@ second parser→relay path beside the one every other interactive payload alread
 a `turnevent.ModelList` arm in #1848 (previously falling to `default`, which dropped the event) and
 `cmd/pyry`'s `Handle` has carried the emitting case since #1849, so a client does read a real count
 today — best-effort on the live interactive turn lane, still with no connect-time snapshot for one it
-missed (#1864, open). See [protocol-package.md](protocol-package.md)'s Model-list payload section.
+missed: #1863 shipped the relay-side seam nil in production, and **#1867** (open) is the daemon-side
+producer that fills it. See [protocol-package.md](protocol-package.md)'s Model-list payload section.
 
 *Test-writing lesson for the next per-entry accumulator built on `emitBackgroundTaskRoster`'s idiom
 (the `cut` closure declared inside the per-entry loop).* An isolation row asserting "a cut on one
@@ -1129,9 +1133,10 @@ mutation, no read of the hold. That closes the routed-conversation case only: a 
 start still drops the frame at the no-cursor guard (cursor is `""` until a message routes), and the
 fan-in can still refuse the frame under load since `turnMarkFor` answers `turnMarkNone` for it. Both are
 exactly the losses this retention exists to survive; reading `streamRunner.ModelList()` back for a client
-that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864). #1863
-shipped the relay-side seam nil in production; #1864 (open) is what wires a real read of the hold into
-it — not this ticket, and not a second read of the hold from the live lane.
+that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864 →
+#1867/#1868). #1863 shipped the relay-side seam nil in production; **#1867** (open) is what wires a real
+read of the hold into it, **#1868** (open) proves it — not this ticket, and not a second read of the hold
+from the live lane.
 
 **Test-writing lesson: a `cmd/pyry` fixture-builder name collides silently across files in the same
 package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function;
