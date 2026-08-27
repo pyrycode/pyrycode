@@ -2778,6 +2778,38 @@ carrying the **echoed** prompt (the non-vacuity guard — proves the full
 round-trip, not just "some text"), then a terminal `turn_state{idle}`. Details
 and the full wire diagram: [codebase/1141.md](../codebase/1141.md).
 
+### `relay_v2_stream_model_list_test.go` — `TestRelayV2_StreamModelListReachesConnectedPhone` (#1845)
+
+A spawn-time frame (here, `model_list`) can't be observed by simply
+connecting and waiting: the live lane emits once per child spawn, and the
+daemon's bootstrap child spawns eagerly at startup — before any test can
+pair, dial and handshake. Proving delivery means making a *second* spawn
+happen while a client is already connected.
+
+Two routes force that second spawn and only one delivers. A child kill +
+respawn keeps the runner's construction-time session id, so the drain's
+active-session gate (`boundSessionIDForActive` in `cmd/pyry/relay.go`,
+feeding `startStreamTurnDrainV2`) still matches and lets the fresh child's
+events through. A `new_session` rotation does not: the rotation rebinds the
+conversation to a new id while the runner's sink tag stays on the outgoing
+one, so the gate drops every event the fresh child produces (see
+`relay_v2_stream_new_session_test.go`, which for exactly this reason asserts
+the post-rotation child's stdin rather than a phone-side frame). Building a
+frame observation on the rotation route asserts into a lane that is
+dropping. `driveModelListRespawn` is built on `killChild` +
+`waitForRunnerStatus` instead — the first helper in this package to combine
+a phone-side frame observation with a kill.
+
+The gate also has nothing to compare against until a turn has been driven —
+`activeConversation.set` is stamped only from `sessionRouter.Route`'s success
+path — so the helper drives one `send_message` and waits for `turn_end`
+*before* killing the child. That pre-kill turn isn't incidental scaffolding;
+it's what makes the post-kill respawn observable at all, and any e2e that
+needs a spawn-time frame after the bootstrap child should expect to pay the
+same "drive a turn, then force a respawn that keeps the session id" shape.
+See § Build Helper for the mutation-testing methodology this spec's AC
+required (`PYRY_E2E_BIN` + a control run, not `-overlay` alone).
+
 ## Concurrency Model
 
 | Goroutine | Owns | Lifetime |
@@ -2870,6 +2902,15 @@ mutant against the spawned daemon, build it separately
 (`go build -overlay=<path> -o <bin> ./cmd/pyry`) and inject it via `PYRY_E2E_BIN`
 (#1512). A mutation run that skips this reads as "the assertion under test is
 vacuous" when the real cause is "the mutant never shipped".
+
+**A green run under `PYRY_E2E_BIN` still needs a control (#1845).** A mutant
+built and injected this way can be green for two indistinguishable reasons:
+the assertion is genuinely dead weight, or the injection silently didn't take
+(stale cached binary, a build that failed in a way that still left a binary
+on disk). Pair every `PYRY_E2E_BIN` mutant run with a control run of the
+*clean* binary through the identical `PYRY_E2E_BIN` invocation — only a
+clean-PASS / mutant-FAIL pair proves the mutant actually reached the spawned
+daemon.
 
 **A test-local `t.Setenv("HOME", …)` must come after `ensurePyryBuilt`/
 `ensureFakeClaudeBuilt`, not before (#1631).** Both are `sync.Once`-guarded, so
