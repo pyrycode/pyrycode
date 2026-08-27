@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -22,6 +23,23 @@ func TestMapEventOutbound(t *testing.T) {
 	// the short row so that row's failure output stays legible.
 	const modelSentinel = "QQ-Model-Sentinel-ZZ"
 	overCapModel := "QQ-OverCap-Model-" + strings.Repeat("M", 300)
+
+	// The model-list over-cap fixtures. Each is longer than EVERY bound a developer
+	// could reach for — the producer's own (streamsup's maxModelResolved /
+	// maxModelValue / maxModelDisplayName at 256, maxModelEffortLevel at 32) and
+	// this file's maxSummaryLen (200) and maxResultSummaryRunes, neither of which is
+	// applicable here — so a re-cap mutant at any of them goes red.
+	overCapLevel := "QQ-OverCap-Level-" + strings.Repeat("L", 300)
+	overCapValue := "QQ-OverCap-Value-" + strings.Repeat("V", 300)
+	overCapDisplay := "QQ-OverCap-Display-" + strings.Repeat("D", 300)
+
+	// One over-cap result fixture, used by a failed row and a completed row that
+	// differ ONLY in Status, so the pair pins the bound rather than the flag:
+	// is_error does not change how much of a result reaches the wire (#1680 AC 3).
+	// resultSummary cannot see is_error — the flag is derived here at the MapEvent
+	// level — which is why this belongs in this table and not in TestResultSummary.
+	overCapResult := strings.Repeat("r", maxResultSummaryRunes+100)
+	cutResult := strings.Repeat("r", maxResultSummaryRunes) + "…"
 
 	tests := []struct {
 		name        string
@@ -64,6 +82,7 @@ func TestMapEventOutbound(t *testing.T) {
 			wantPayload: protocol.ToolUsePayload{
 				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-1",
 				Name: "Bash", InputSummary: `{"command":"ls"}`,
+				Input: map[string]string{"command": "ls"},
 			},
 			wantOK: true,
 		},
@@ -94,6 +113,36 @@ func TestMapEventOutbound(t *testing.T) {
 			wantPayload: protocol.ToolResultPayload{
 				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-2",
 				IsError: false, ResultSummary: "all good",
+			},
+			wantOK: true,
+		},
+		{
+			name: "ToolUpdate failed -> over-cap error result truncated",
+			ev: turnevent.ToolUpdate{
+				ToolCallID: "tool-5",
+				Status:     turnevent.ToolStatusFailed,
+				Content:    turnevent.TextContent{Text: overCapResult},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-5",
+				IsError: true, ResultSummary: cutResult,
+			},
+			wantOK: true,
+		},
+		{
+			name: "ToolUpdate completed -> over-cap result truncated at the same bound",
+			ev: turnevent.ToolUpdate{
+				ToolCallID: "tool-6",
+				Status:     turnevent.ToolStatusCompleted,
+				Content:    turnevent.TextContent{Text: overCapResult},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-6",
+				IsError: false, ResultSummary: cutResult,
 			},
 			wantOK: true,
 		},
@@ -522,6 +571,169 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// Every field of every row, 1:1. Mixed-case sentinels on all three
+			// strings for the ModelAnnounced verbatim row's reason — an
+			// all-lowercase sentinel survives a mapper that ran strings.ToLower.
+			// The effort levels are claude's MEASURED order (low, medium, high,
+			// xhigh, max), which is neither alphabetical nor sorted, so a sort or a
+			// canonicalisation goes red. SupportsAutoMode is true on one entry and
+			// false on the other, so a flag defaulted in EITHER direction goes red.
+			// DroppedModels is neither 0 nor len(Models), so a constant and a
+			// recomputation from the payload's own row count are both caught. The
+			// two entries differ, so a reversal or a re-sort of the outer slice is
+			// caught as well.
+			//
+			// ev and wantPayload carry SEPARATE slice literals on purpose. Sharing
+			// one backing array would let a mapper that sorted, deduped or filtered
+			// IN PLACE mutate the expectation alongside the input and stay green —
+			// and in production that same mutation would corrupt the model list
+			// cmd/pyry's sessionModelHold retains, across two goroutines.
+			name: "ModelList -> model_list, every field verbatim",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{
+					{
+						ResolvedModel:    "QQ-Resolved-Alpha-ZZ",
+						Value:            "QQ-Value-Alpha-ZZ",
+						DisplayName:      "QQ-Display-Alpha-ZZ",
+						EffortLevels:     []string{"low", "medium", "high", "xhigh", "max"},
+						SupportsAutoMode: true,
+						TruncatedFields:  []string{"resolved_model", "effort_levels"},
+					},
+					{
+						ResolvedModel:    "QQ-Resolved-Beta-ZZ",
+						Value:            "QQ-Value-Beta-ZZ",
+						DisplayName:      "QQ-Display-Beta-ZZ",
+						EffortLevels:     []string{"max", "low"},
+						SupportsAutoMode: false,
+						TruncatedFields:  []string{"display_name"},
+					},
+				},
+				DroppedModels: 3,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelList,
+			wantPayload: protocol.ModelListPayload{
+				ConversationID: "c1",
+				Models: []protocol.ModelOption{
+					{
+						ResolvedModel:    "QQ-Resolved-Alpha-ZZ",
+						Value:            "QQ-Value-Alpha-ZZ",
+						DisplayName:      "QQ-Display-Alpha-ZZ",
+						EffortLevels:     []string{"low", "medium", "high", "xhigh", "max"},
+						SupportsAutoMode: true,
+						TruncatedFields:  []string{"resolved_model", "effort_levels"},
+					},
+					{
+						ResolvedModel:    "QQ-Resolved-Beta-ZZ",
+						Value:            "QQ-Value-Beta-ZZ",
+						DisplayName:      "QQ-Display-Beta-ZZ",
+						EffortLevels:     []string{"max", "low"},
+						SupportsAutoMode: false,
+						TruncatedFields:  []string{"display_name"},
+					},
+				},
+				DroppedModels: 3,
+			},
+			wantOK: true,
+		},
+		{
+			// A row that had nothing cut keeps a NIL TruncatedFields, and a row
+			// whose effort menu claude omitted keeps a nil EffortLevels: an
+			// allocating mapper goes red here because reflect.DeepEqual reports
+			// false for nil against []string{}, whatever slices.Equal would say for
+			// the same pair. The byte test below pins the same two nils where a
+			// phone sees them — and there they mean OPPOSITE things.
+			name: "ModelList row with nothing cut keeps nil slices",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{
+					{
+						ResolvedModel: "QQ-Resolved-Bare-ZZ",
+						Value:         "QQ-Value-Bare-ZZ",
+						DisplayName:   "QQ-Display-Bare-ZZ",
+					},
+				},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelList,
+			wantPayload: protocol.ModelListPayload{
+				ConversationID: "c1",
+				Models: []protocol.ModelOption{
+					{
+						ResolvedModel: "QQ-Resolved-Bare-ZZ",
+						Value:         "QQ-Value-Bare-ZZ",
+						DisplayName:   "QQ-Display-Bare-ZZ",
+					},
+				},
+			},
+			wantOK: true,
+		},
+		{
+			// The re-cap mutant's row, the ModelAnnounced over-cap row's discipline
+			// applied to all four of this variant's bounded text dimensions at once.
+			// The producer bounded every one of them AT CONSTRUCTION, so a second
+			// cap here — at the producer's bound or at either of this file's own,
+			// which are not applicable — goes red rather than shipping.
+			name: "ModelList over-cap strings and levels cross uncut",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{
+					{
+						ResolvedModel:   overCapModel,
+						Value:           overCapValue,
+						DisplayName:     overCapDisplay,
+						EffortLevels:    []string{overCapLevel},
+						TruncatedFields: []string{"resolved_model", "value", "display_name", "effort_levels"},
+					},
+				},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeModelList,
+			wantPayload: protocol.ModelListPayload{
+				ConversationID: "c1",
+				Models: []protocol.ModelOption{
+					{
+						ResolvedModel:   overCapModel,
+						Value:           overCapValue,
+						DisplayName:     overCapDisplay,
+						EffortLevels:    []string{overCapLevel},
+						TruncatedFields: []string{"resolved_model", "value", "display_name", "effort_levels"},
+					},
+				},
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under test: tc carries a conspicuous
+			// TurnID and a non-zero Seq, and the expected payload has no field
+			// either could land in. Mirrors the ModelAnnounced row above.
+			name: "ModelList ignores turn addressing (not turn-scoped)",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{Value: "QQ-Value-Alpha-ZZ"}},
+			},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeModelList,
+			wantPayload: protocol.ModelListPayload{
+				ConversationID: "c1",
+				Models:         []protocol.ModelOption{{Value: "QQ-Value-Alpha-ZZ"}},
+			},
+			wantOK: true,
+		},
+		{
+			// Zero value maps rather than dropping — the absence of an empty-Models
+			// suppression branch, under test. The gate that decides whether the
+			// event exists at all is the producer's (turnevent.ModelList's Models
+			// documents it as never empty); a second, differently-shaped filter here
+			// would silently diverge from it. The nil Models stays nil at the struct
+			// level, ModelListPayload.MarshalJSON owning nil→[] on the wire.
+			name:    "ModelList zero value maps rather than dropping",
+			ev:      turnevent.ModelList{},
+			tc:      tc,
+			wantTyp: protocol.TypeModelList,
+			wantPayload: protocol.ModelListPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{
@@ -725,6 +937,214 @@ func TestMapEventRateLimitedTruncatedFieldsOnTheWire(t *testing.T) {
 	}
 }
 
+// model_list carries BOTH nil polarities, in adjacent rows of one table, and
+// copying either onto the other is the realistic mistake this test exists to
+// catch:
+//
+//   - "models" and "effort_levels" want [] and forbid null. ModelListPayload and
+//     ModelOption each own a MarshalJSON that normalises its own nil, for two
+//     DIFFERENT reasons (read them there) — the mapping's job is only to reach
+//     them with the nil intact.
+//   - "truncated_fields" wants null and forbids []. ModelOption.MarshalJSON
+//     deliberately EXEMPTS it, so nothing normalises it afterwards:
+//     nothing-was-cut is an ABSENCE, and a mapper that allocated an empty slice —
+//     or appended into a fresh one — would emit [] and tell a phone that claude's
+//     cut text is complete.
+//
+// So the polarity is per FIELD here, not per test, and the neighbouring rows of
+// this table disagree on purpose. TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire
+// and TestMapEventRateLimitedTruncatedFieldsOnTheWire are the two halves of that
+// split living in separate tests; this one holds both at once.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, never on a
+// test-built payload. With TWO MarshalJSON methods in play, a hand-built payload
+// would prove the marshallers work and say nothing whatever about whether the
+// mapping reached them with the nils intact.
+//
+// Needles are always the full "key":"value" or "key":[…] pair, never a bare
+// value — a bare-value needle passes against a mapping that swapped two
+// same-typed neighbours, and five of this row's six fields are strings, so that
+// hazard is acute. No sentinel here contains a digit, so the turn-addressing row
+// can forbid a bare seq without a false positive.
+func TestMapEventModelListOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	const convSentinel = "cc-conv-sentinel"
+	tc := TurnContext{ConversationID: convSentinel, TurnID: "t-alpha", Seq: 7}
+
+	// claude's MEASURED order, neither alphabetical nor sorted (#1827), beside what
+	// sorting it would produce — so the ordering row forbids the exact bytes a
+	// canonicalising mapper would emit.
+	claudeOrder := `"effort_levels":["low","medium","high","xhigh","max"]`
+	sortedOrder := `"effort_levels":["high","low","max","medium","xhigh"]`
+
+	tests := []struct {
+		name    string
+		ev      turnevent.ModelList
+		tc      TurnContext
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "nil models reaches the wire as []",
+			ev:   turnevent.ModelList{},
+			want: []string{
+				`"models":[]`,
+				`"dropped_models":0`,
+				`"conversation_id":"` + convSentinel + `"`,
+			},
+			notWant: []string{`"models":null`},
+		},
+		{
+			// The control: [] is not what the mapping emits for everything, so the
+			// nil row above passes for the right reason.
+			name: "populated list carries the entry",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{
+					ResolvedModel: "qq-resolved-sentinel",
+					Value:         "qq-value-sentinel",
+					DisplayName:   "qq-display-sentinel",
+				}},
+			},
+			want: []string{
+				`"resolved_model":"qq-resolved-sentinel"`,
+				`"value":"qq-value-sentinel"`,
+				`"display_name":"qq-display-sentinel"`,
+				`"supports_auto_mode":false`,
+			},
+			notWant: []string{`"models":[]`},
+		},
+		{
+			// AC 4. A row that had nothing cut reaches the wire as null, never [].
+			name: "row with nothing cut reaches the wire as null",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{Value: "qq-value-sentinel"}},
+			},
+			want:    []string{`"truncated_fields":null`},
+			notWant: []string{`"truncated_fields":[]`},
+		},
+		{
+			// AC 3, first isolating row: EXACTLY ONE name, and it is one of the two
+			// the type's doc used to omit. A row carrying a second name would pin
+			// neither — a whitelist mutant keeping only ("value", "display_name")
+			// would stay green against an over-determined fixture.
+			name: "only resolved_model cut survives the mapping",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{
+					Value:           "qq-value-sentinel",
+					TruncatedFields: []string{"resolved_model"},
+				}},
+			},
+			want:    []string{`"truncated_fields":["resolved_model"]`},
+			notWant: []string{`"truncated_fields":null`, `"truncated_fields":[]`},
+		},
+		{
+			// AC 3, second isolating row: the other name the doc omitted, alone.
+			name: "only effort_levels cut survives the mapping",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{
+					Value:           "qq-value-sentinel",
+					TruncatedFields: []string{"effort_levels"},
+				}},
+			},
+			want:    []string{`"truncated_fields":["effort_levels"]`},
+			notWant: []string{`"truncated_fields":null`, `"truncated_fields":[]`},
+		},
+		{
+			// All four the producer can record, in ITS order, as ONE needle — so
+			// member ORDER is pinned and not merely membership.
+			name: "all four cut names cross in producer order",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{
+					Value:           "qq-value-sentinel",
+					TruncatedFields: []string{"resolved_model", "value", "display_name", "effort_levels"},
+				}},
+			},
+			want:    []string{`"truncated_fields":["resolved_model","value","display_name","effort_levels"]`},
+			notWant: []string{`"truncated_fields":null`},
+		},
+		{
+			// The OTHER polarity, one field up: a nil effort menu is a COLLAPSE, not
+			// an absence, so it reaches the wire as [].
+			name: "nil effort levels reach the wire as []",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{Value: "qq-value-sentinel"}},
+			},
+			want:    []string{`"effort_levels":[]`},
+			notWant: []string{`"effort_levels":null`},
+		},
+		{
+			name: "effort levels cross in claude's own order",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{
+					Value:        "qq-value-sentinel",
+					EffortLevels: []string{"low", "medium", "high", "xhigh", "max"},
+				}},
+			},
+			want:    []string{claudeOrder},
+			notWant: []string{sortedOrder},
+		},
+		{
+			// AC 2. The drop count is the decode's, so the fixture's row count and
+			// drop count differ: a constant 0 and a recomputation from len(models)
+			// are each a separate notWant.
+			name: "dropped_models is the decode's count, not the row count",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{
+					{Value: "qq-value-alpha"},
+					{Value: "qq-value-beta"},
+				},
+				DroppedModels: 3,
+			},
+			want:    []string{`"dropped_models":3`},
+			notWant: []string{`"dropped_models":0`, `"dropped_models":2`},
+		},
+		{
+			// AC 1's addressing half, checked where a phone would see it: a struct
+			// comparison cannot see a turn id that arrived through an embedded field
+			// or a marshaller. Both halves of the turn context are conspicuous.
+			name: "no turn addressing reaches the wire",
+			ev: turnevent.ModelList{
+				Models: []turnevent.ModelOption{{Value: "qq-value-sentinel"}},
+			},
+			tc:      TurnContext{ConversationID: convSentinel, TurnID: "t-must-not-appear", Seq: 42},
+			want:    []string{`"conversation_id":"` + convSentinel + `"`},
+			notWant: []string{"t-must-not-appear", "42"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			evTC := tt.tc
+			if evTC.ConversationID == "" {
+				evTC = tc
+			}
+			typ, payload, ok := MapEvent(tt.ev, evTC)
+			if !ok {
+				t.Fatal("the mapping suppressed a model list; it must be forwarded")
+			}
+			if typ != protocol.TypeModelList {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeModelList)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
+			}
+		})
+	}
+}
+
 // The frame is conversation-scoped, and the assertion runs on the BYTES
 // json.Marshal produces from the value MapEvent returned — not on a struct
 // comparison. A struct comparison cannot see a turn id that arrived through an
@@ -825,10 +1245,206 @@ func TestInputSummary(t *testing.T) {
 	}
 }
 
+// TestInputFields pins the extraction #1678 exists for. The rows are chosen,
+// not padded: an empty json.RawMessage{} is deliberately absent because the nil
+// row already covers the len(raw)==0 branch, a bare JSON number is absent
+// because the array row already covers "does not unmarshal into a map", and a
+// >maxInputFields input is absent because a 17-entry literal costs more to read
+// than it proves — protocol's TestToolUsePayload_FitV2EnvelopeCap fills to
+// exactly that many.
+func TestInputFields(t *testing.T) {
+	t.Parallel()
+
+	// Over the per-value cap, so the truncation rows exercise the cut rather
+	// than the pass-through.
+	bulk := strings.Repeat("a", maxInputValueRunes+500)
+	cappedBulk := strings.Repeat("a", maxInputValueRunes) + "…"
+	longKey := strings.Repeat("k", maxInputKeyRunes+1)
+
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want map[string]string
+	}{
+		{"nil yields no fields", nil, nil},
+		{"empty object yields no fields", json.RawMessage(`{}`), nil},
+		{"non-object yields no fields", json.RawMessage(`["a","b"]`), nil},
+		{"invalid json yields no fields", json.RawMessage(`{not json`), nil},
+		{
+			name: "plain object crosses verbatim",
+			raw:  json.RawMessage(`{"command":"ls -la","description":"list files"}`),
+			want: map[string]string{"command": "ls -la", "description": "list files"},
+		},
+		{
+			// A string value arrives DECODED, not re-quoted: the newline is a
+			// newline and the quote is a quote, which is what makes a path a path.
+			name: "string value arrives decoded",
+			raw:  json.RawMessage(`{"text":"a\nb\"c"}`),
+			want: map[string]string{"text": "a\nb\"c"},
+		},
+		{
+			name: "non-string values arrive as compact json",
+			raw:  json.RawMessage(`{"n":1.5,"b":true,"arr":[1, 2],"obj":{ "x" : 1 },"nul":null}`),
+			want: map[string]string{
+				"n": "1.5", "b": "true", "arr": "[1,2]", "obj": `{"x":1}`, "nul": "null",
+			},
+		},
+		{
+			name: "oversized value cut at the cap with an ellipsis",
+			raw:  json.RawMessage(`{"content":"` + bulk + `"}`),
+			want: map[string]string{"content": cappedBulk},
+		},
+		{
+			name: "multibyte value cut on a rune boundary",
+			raw:  json.RawMessage(`{"content":"` + strings.Repeat("日", maxInputValueRunes+100) + `"}`),
+			want: map[string]string{"content": strings.Repeat("日", maxInputValueRunes) + "…"},
+		},
+		{
+			// The key is DROPPED, never truncated: a cut key is a false claim
+			// about the input's field name. Its siblings are unaffected.
+			name: "over-long key drops its entry only",
+			raw:  json.RawMessage(`{"` + longKey + `":"v","file_path":"/tmp/x.go"}`),
+			want: map[string]string{"file_path": "/tmp/x.go"},
+		},
+		{
+			// The regression this ticket exists for, and the row that proves
+			// shortest-first: three bulk values exhaust maxInputTotalRunes, and
+			// file_path survives INTACT because it is admitted before them.
+			// Sorted-key order would spend the budget on a_bulk and b_bulk and
+			// never reach file_path at all.
+			name: "budget binds: short identifying field survives, bulk tail drops",
+			raw: json.RawMessage(`{"a_bulk":"` + bulk + `","b_bulk":"` + bulk +
+				`","c_bulk":"` + bulk + `","file_path":"/tmp/x.go"}`),
+			want: map[string]string{
+				"file_path": "/tmp/x.go",
+				"a_bulk":    cappedBulk,
+				"b_bulk":    cappedBulk,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := inputFields(tt.raw)
+			// The nil is load-bearing, not cosmetic: the bridge must hand
+			// protocol a nil so ToolUsePayload.MarshalJSON owns the {} rather
+			// than the bridge pre-allocating one and hiding the decision.
+			if tt.want == nil && got != nil {
+				t.Fatalf("inputFields: got %#v, want a nil map", got)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("inputFields:\n got %#v\nwant %#v", got, tt.want)
+			}
+			for k, v := range got {
+				if n := utf8.RuneCountInString(k); n > maxInputKeyRunes {
+					t.Fatalf("key %q is %d runes, over the %d cap", k, n, maxInputKeyRunes)
+				}
+				if !utf8.ValidString(v) {
+					t.Fatalf("value for %q is not valid UTF-8: %q", k, v)
+				}
+			}
+		})
+	}
+}
+
+// An input with nothing to send reaches the wire as "input":{}, never
+// "input":null — the polarity is decided in protocol
+// (ToolUsePayload.MarshalJSON) and this test proves the bridge reaches it with
+// the nil intact.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, not on a
+// payload the test built, for TestMapEventBackgroundTaskRosterEmptyTasksOnTheWire's
+// reason: a test-constructed payload would only prove protocol's MarshalJSON
+// works, not that the mapping reached it without pre-allocating an empty map of
+// its own.
+//
+// Pinning the marshalled BYTES rather than the decoded value is the point of the
+// test: decoding "input":{} and decoding "input":null both yield an empty map to
+// a Go caller, so a value-level assertion would pass in both polarities.
+func TestMapEventToolUseEmptyInputOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	tc := TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7}
+
+	tests := []struct {
+		name    string
+		raw     json.RawMessage
+		want    []string
+		notWant []string
+	}{
+		{
+			name:    "absent input",
+			raw:     nil,
+			want:    []string{`"input":{}`},
+			notWant: []string{`"input":null`},
+		},
+		{
+			name:    "empty object input",
+			raw:     json.RawMessage(`{}`),
+			want:    []string{`"input":{}`},
+			notWant: []string{`"input":null`},
+		},
+		{
+			name:    "non-object input",
+			raw:     json.RawMessage(`["a","b"]`),
+			want:    []string{`"input":{}`},
+			notWant: []string{`"input":null`},
+		},
+		{
+			// The control: {} is not what the marshaller emits for everything, so
+			// the three empty rows above pass for the right reason. input_summary
+			// rides along in the same needle set because AC 1 keeps it populated
+			// and unchanged beside the new map.
+			name: "populated input carries its fields",
+			raw:  json.RawMessage(`{"command":"ls"}`),
+			want: []string{
+				`"input":{"command":"ls"}`,
+				`"input_summary":"{\"command\":\"ls\"}"`,
+			},
+			notWant: []string{`"input":{}`, `"input":null`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			typ, payload, ok := MapEvent(turnevent.ToolStart{
+				ToolCallID: "tool-1", Title: "Bash", RawInput: tt.raw,
+			}, tc)
+			if !ok {
+				t.Fatal("ToolStart was suppressed by the mapping; it must be forwarded")
+			}
+			if typ != protocol.TypeToolUse {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeToolUse)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
+			}
+		})
+	}
+}
+
 func TestResultSummary(t *testing.T) {
 	t.Parallel()
 
-	long := strings.Repeat("b", 300)
+	// Expressed against the constant, never a bare literal: the row exercises the
+	// cut, so it has to move with the bound rather than pin a number (#1680). The
+	// multibyte fixture is the rune-safety guard on the COMPOSITION at the new
+	// bound — truncate is unmodified and TestTruncate already covers it directly.
+	long := strings.Repeat("b", maxResultSummaryRunes+300)
+	longMultibyte := strings.Repeat("日", maxResultSummaryRunes+10)
 
 	tests := []struct {
 		name string
@@ -837,18 +1453,108 @@ func TestResultSummary(t *testing.T) {
 	}{
 		{"nil -> empty", nil, ""},
 		{"text verbatim", turnevent.TextContent{Text: "done"}, "done"},
-		{"text truncated", turnevent.TextContent{Text: long}, strings.Repeat("b", maxSummaryLen) + "…"},
+		{"text truncated", turnevent.TextContent{Text: long}, strings.Repeat("b", maxResultSummaryRunes) + "…"},
+		{"multibyte text cut on a rune boundary", turnevent.TextContent{Text: longMultibyte}, strings.Repeat("日", maxResultSummaryRunes) + "…"},
 		{"diff -> path", turnevent.DiffContent{Path: "/tmp/x.go"}, "/tmp/x.go"},
 		{"terminal -> reference", turnevent.TerminalContent{TerminalID: "term-9"}, "terminal term-9"},
+	}
+
+	// head keeps a failure legible: the over-cap fixtures are 10000+ runes and
+	// dumping two of them whole buries the mismatch it is meant to show.
+	head := func(s string) string {
+		r := []rune(s)
+		if len(r) <= 40 {
+			return string(r)
+		}
+		return string(r[:40]) + "…"
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			if got := resultSummary(tt.in); got != tt.want {
-				t.Fatalf("resultSummary(%#v): got %q, want %q", tt.in, got, tt.want)
+			got := resultSummary(tt.in)
+			if got != tt.want {
+				t.Fatalf("resultSummary: got %d runes %q, want %d runes %q",
+					utf8.RuneCountInString(got), head(got), utf8.RuneCountInString(tt.want), head(tt.want))
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("resultSummary produced invalid UTF-8: %q", head(got))
 			}
 		})
+	}
+}
+
+// maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
+// (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
+// purpose, for the reason protocol's constant of the same name states: nothing in
+// internal/turnbridge enforces the cap — the transport does — so a package-level
+// constant here would imply an enforcement this package does not perform.
+const maxV2AppEnvelope = 65519
+
+// TestToolResultPayload_FitV2EnvelopeCap drives the REAL resultSummary with the
+// largest result in the measured corpus and proves the serialised envelope fits
+// under the v2 application-envelope cap. Per-field caps do not compose into an
+// envelope guarantee on their own, so this is measured rather than argued — the
+// statement protocol's TestToolUsePayload_FitV2EnvelopeCap makes, and this is
+// that test's shape with one deliberate difference: it lives HERE, in the
+// producer's package, so that maxResultSummaryRunes is what the measurement
+// stands on. A hand-built payload over in protocol cannot call the unexported
+// resultSummary at all and would stay green with the constant raised to 16000 —
+// the exact shape that let #1678's maxInputFields ship with no test standing on
+// it (docs/knowledge/features/turnbridge-package.md).
+//
+// The fill is '<', not 'a': encoding/json has SetEscapeHTML on by default, so one
+// such rune costs six bytes on the wire and an 'a' fill measures 10309 B where
+// this measures 60000-odd — it would pass a cap that is 47% over. Here '<' is the
+// REALISTIC case rather than the contrived one, which is more than the precedent
+// tests can say: a tool result is raw command output or file contents, and
+// reading a TSX or HTML file is an ordinary '<'-dense result.
+//
+// The three identity fields are filled hostilely because nothing bounds them —
+// conversation_id and turn_id are daemon-supplied, tool_use_id is claude's value
+// verbatim — so the guarantee is an assumption worth stating rather than an
+// enforced cap. 64 runes is roughly 11x the longest observed.
+func TestToolResultPayload_FitV2EnvelopeCap(t *testing.T) {
+	t.Parallel()
+
+	fill := func(n int) string { return strings.Repeat("<", n) }
+
+	// 64525 is the largest tool result in the measured corpus (#1680). The
+	// producer applies no cap of its own, so resultSummary is what cuts it.
+	summary := resultSummary(turnevent.TextContent{Text: fill(64525)})
+	if n := utf8.RuneCountInString(summary); n != maxResultSummaryRunes+1 {
+		t.Fatalf("precondition: summary is %d runes, want %d (the cap plus one ellipsis)", n, maxResultSummaryRunes+1)
+	}
+
+	// IsError is explicitly false because that is the worst case: "false" costs
+	// one byte more on the wire than "true", and the field is never omitted.
+	body, err := json.Marshal(protocol.ToolResultPayload{
+		ConversationID: fill(64),
+		TurnID:         fill(64),
+		ToolUseID:      fill(64),
+		IsError:        false,
+		ResultSummary:  summary,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	// Worst-case envelope too: max-uint64 ids and a populated EventID, so the
+	// outer frame costs as much as it ever can.
+	eventID := ^uint64(0)
+	out, err := json.Marshal(protocol.Envelope{
+		ID:      ^uint64(0),
+		Type:    protocol.TypeToolResult,
+		TS:      time.Date(2026, 8, 21, 10, 33, 18, 0, time.UTC),
+		Payload: body,
+		EventID: &eventID,
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	t.Logf("tool_result at the result cap: %d B, %.1f%% of the %d-byte v2 application-envelope cap",
+		len(out), float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope)
+	if len(out) >= maxV2AppEnvelope {
+		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
 	}
 }
 

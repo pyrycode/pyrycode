@@ -9,6 +9,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/agentrun"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // streamRunner adapts *streamsup.Runner to sessions.Runner. The shapes differ in
@@ -24,7 +25,14 @@ import (
 // newStreamRunnerFactory below (#1109 delivered the constructor; #1098 gave it
 // the turnevent sink) — the interactive_runner selection that injects it on
 // sessions.Config.RunnerFactory is #1081.
-type streamRunner struct{ r *streamsup.Runner }
+//
+// models is the per-session retention added by #1840. It is a pointer, so the
+// adapter stays a value type and the compile-time sessions.Runner assertion below
+// is unaffected.
+type streamRunner struct {
+	r      *streamsup.Runner
+	models *sessionModelHold
+}
 
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
 
@@ -80,6 +88,22 @@ func (a streamRunner) RestartFresh(newID string) { a.r.RestartFresh(newID) }
 // that exposes RestartFresh without a gate keeps today's dispatch exactly.
 func (a streamRunner) BeginRotation() func() { return a.r.BeginRotation() }
 
+// ModelList reports the model list this session's child last named in its
+// initialize reply (#1840), or ok == false when no child has reported one. It
+// reads the hold the factory bound to this runner's parser, so it answers outside
+// a turn, on any goroutine, with no turn in flight.
+//
+// It is the FOURTH concrete method OFF the sessions.Runner interface (un-widened,
+// #1077), after Interrupt (#1120), RestartFresh (#1124) and BeginRotation (#1330),
+// and it is off for Interrupt's reason exactly: the rule those docs state is that
+// the interface carries a method when its consumer sits INSIDE internal/sessions,
+// where a structural assertion would fail open. This one's consumer is #1837's
+// publisher in cmd/pyry, which reaches it by type assertion off Session.Runner the
+// way interruptRunner already does — so widening the interface would buy no
+// compile-time guarantee and would drag every fake runner under internal/sessions
+// and cmd/pyry into the diff.
+func (a streamRunner) ModelList() (turnevent.ModelList, bool) { return a.models.ModelList() }
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
@@ -116,6 +140,14 @@ func mapStreamState(s streamsup.State) sessions.State {
 // must-not-block / must-not-panic contract requires, so a hand-rolled func() here
 // would duplicate that contract instead of consuming it.
 //
+// #1840 puts the per-session model-list retention INSIDE that install: the Parser
+// and its sessionModelHold come from one newSessionParser call, so the parser's
+// sink is the hold's decorator and the hold reaches the returned adapter on the
+// next line. The two halves are minted together precisely so they cannot be bound
+// to different holds, and the decorator stores BEFORE forwarding to sinkFor —
+// which is what keeps the retention upstream of the droppable send that can
+// otherwise discard the one initialize reply a child ever sends.
+//
 // #1109 constructed the runner via streamsup.New (the first caller tree-wide) and
 // deliberately left Config.Stdout nil for this ticket to fill. It is the arm the
 // #1081 interactive_runner selection assigns to sessions.Config.RunnerFactory;
@@ -141,13 +173,14 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath)
-		scfg.Stdout = streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		parser, held := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
 		r, err := streamsup.New(scfg)
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
-		return streamRunner{r: r}, nil
+		return streamRunner{r: r, models: held}, nil
 	}
 }
 
@@ -218,6 +251,12 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 		BackoffInitial:    cfg.BackoffInitial,
 		BackoffMax:        cfg.BackoffMax,
 		BackoffReset:      cfg.BackoffReset,
+		// The interactive daemon asks every child, once, what the session knows
+		// about itself (#1839). Set HERE rather than in newStreamRunnerFactory
+		// because it is a plain bool constant, not a runtime object — the same
+		// dividing line ClaudeSessionsDir sits on — and setting it in the pure
+		// mapper makes the policy directly assertable with no new scaffolding.
+		RequestInitializeOnSpawn: true,
 	}
 }
 

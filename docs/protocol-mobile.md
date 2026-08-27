@@ -41,7 +41,7 @@ In scope:
 
 Out of scope (v2):
 
-- **Attachments.** v2 is the encryption layer; first attachment release rides on top.
+- **Attachments — the daemon-side implementation.** The *wire contract* is published in this document ([Attachments](#attachments)): the shared `attachment_chunk` frame, its chunking and reassembly rules, and the `attachment.*` reject vocabulary. What is still out of scope is everything behind it — nothing in the daemon emits, accepts, stores or enforces any of it yet.
 - **Voice / WebRTC.** Phase 6 concern; signalling channel will be added later as new envelope types inside the AEAD channel.
 - **Multi-device key sharing.** Each paired phone has its own Noise session and its own device-static keypair. No cross-device key sync.
 - **Per-message-counter rotation.** Noise's 2⁶⁴ transport-message counter is not a practical limit; time-based + explicit-rekey is sufficient.
@@ -301,7 +301,7 @@ Envelope-level fields beyond the v1 set:
 
 Encoding: line-delimited JSON over WS text frames. One outer envelope per frame. UTF-8.
 
-**Application-envelope size cap.** Because every transport frame fits inside a single Noise transport message (65535 bytes including 16-byte AEAD tag), the decrypted application envelope is capped at **65519 bytes**. v1's 1 MiB `message.too_long` cap is **superseded** in v2; v2 implementations enforce the 65519-byte cap and emit `message.too_long` for any application envelope that, after JSON serialisation, exceeds it. Large payloads (e.g. attachments, deferred to a later v2 feature release) require an envelope-level chunking scheme that is out of scope for this spec.
+**Application-envelope size cap.** Because every transport frame fits inside a single Noise transport message (65535 bytes including 16-byte AEAD tag), the decrypted application envelope is capped at **65519 bytes**. v1's 1 MiB `message.too_long` cap is **superseded** in v2; v2 implementations enforce the 65519-byte cap and emit `message.too_long` for any application envelope that, after JSON serialisation, exceeds it. Large payloads are carried by an **envelope-level chunking scheme**, not by a bigger envelope: a file is split into `attachment_chunk` frames each carrying at most **45000 raw bytes** of file data before base64, which is what keeps a chunk's serialised envelope under this cap — see [Attachments](#attachments). That per-chunk bound is a **producer-side contract with no validator**; an application envelope that exceeds 65519 bytes after serialisation is rejected by the transport with `message.too_long`, never with an `attachment.*` code.
 
 ## Identifiers
 
@@ -451,6 +451,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`screen_snapshot`** | binary → phone | no | **New in v2.** See [Screen snapshot](#screen-snapshot-v2). |
 | **`resync`** | binary → phone | no | **New in v2.** Mid-turn-reconnect resync marker — the advertised `last_event_id` aged out of the ring; phone must full-reload (#647). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`session_transition`** | binary → phone | no | **New in v2** (interactive, capability-gated). Session-boundary marker for `pyrycode-mobile#336` (#656). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`model_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The menu of models claude will accept for a conversation, from its `initialize` control reply — identifiers, labels, per-model effort levels and auto-mode support (#1704). **Not** the per-turn announcement [`model_announced`](#model_announced) carries. Shape declared by #1704, fixtures and section by #1705, the mapping onto this wire shape by #1848 and the **producer** by #1849, proven end to end by #1845 — it is emitted on the live interactive turn lane, once per child spawn to whatever clients are connected at that instant, and **best-effort rather than guaranteed**: several loss points mean a client may see none at all, so never block a model menu on it. See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`slash_command_list`** | binary → phone | no | **New in v2** (interactive, capability-gated). The slash commands this session's working directory will accept, from the `commands` array of the same `initialize` control reply — names, argument hints, descriptions and aliases (#1727). The sibling [`model_list`](#model_list) inventories *identities* from that reply; this one inventories *verbs*. Consumers are pyrycode-desktop#681 (Actions-menu grey-out) and pyrycode-desktop#694 (slash-command type-ahead). Type declared by #1726, shape by #1727, fixtures and section by #1718; nothing emits it yet (#1720). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`modal_shown`** | binary → phone | no | **New in v2** (interactive, capability-gated). Modal surfaced to the phone (#597 Phase 3). See [Modal](#modal-v2). |
 | **`modal_answer`** | phone → binary | no | **New in v2.** Inbound control — phone answers a modal. See [Modal](#modal-v2). |
 | **`modal_cancel`** | phone → binary | no | **New in v2.** Inbound control — phone cancels a modal. See [Modal](#modal-v2). |
@@ -467,6 +469,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
 | **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
+| **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. Nothing emits, accepts or enforces it yet. See [Attachments](#attachments). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -550,6 +553,17 @@ These fifteen envelope types form the structured live-session stream. They are s
 | `tool_use_id` | string | Correlates this call with its later `tool_result`. |
 | `name` | string | Tool name. |
 | `input_summary` | string | Human-readable précis of the tool input (not the raw input). |
+| `input` | object (string → string) | The tool input's own top-level fields, each value the input's value verbatim. Always present, never `null`. |
+
+`input` is what a client shows to say what a call *acts on* — an `Edit`'s `file_path` beside its replaced text rather than buried inside it — where `input_summary` is the whole input compacted onto one line and cut short. Both are sent; `input_summary` keeps its exact meaning and value.
+
+Each value is the input's own value: a JSON string arrives decoded (a path is a path, an embedded newline is a newline), any other JSON type arrives as its compact JSON form (so `null`, `true`, `[1,2]` and `{"x":1}` are those literal strings). Nothing is normalised — no path is rewritten to a workspace-relative form.
+
+**Bounds.** Each value is capped at **4000 runes** (runes, not bytes), and the map as a whole at **8500 runes** of keys plus values across at most **16 fields**. A value the daemon shortened ends in `…`; a value that legitimately ends in `…` is indistinguishable from a cut one, which is an accepted cost of the marker. A field may be **absent** because the total bound dropped it — dropped fields are not listed anywhere, and `input_summary` remains the whole-input fallback. Key order on the wire is alphabetical, a marshalling artefact rather than the input's own order, so display order is the client's choice.
+
+**Empty cases.** An input that is absent, an empty object, or not a JSON object at all all yield `"input":{}` — never `null`, and never an error. The frame does not distinguish the three.
+
+**Values are display strings, not capabilities.** They are model-authored text the daemon neither resolved nor validated: a `file_path` is not canonicalised and may be relative or traversing, and a `Bash` `command` value is a literal shell command line. Render them as inert text. Never open one as a path on your own filesystem, execute or re-shell one, or feed one to an HTML sink, an attribute, or a URL.
 
 #### `tool_result`
 
@@ -560,6 +574,12 @@ These fifteen envelope types form the structured live-session stream. They are s
 | `tool_use_id` | string | Matches the `tool_use` this result completes. |
 | `is_error` | bool | Whether the tool invocation failed. |
 | `result_summary` | string | Human-readable précis of the result (not the raw output). |
+
+**Bounds.** `result_summary` is capped at **10000 runes** (runes, not bytes). A result the daemon shortened ends in `…`; a result that legitimately ends in `…` is indistinguishable from a cut one, which is an accepted cost of the marker. **`is_error` does not change the bound** — an error result is truncated at exactly the same 10000 runes a success result is, so a client must not expect a failing tool's output to arrive whole.
+
+The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML by default, so `<`, `>`, `&` and every control byte without a short escape each cost **six bytes** on the wire, while a multi-byte rune is emitted raw at 4 bytes or fewer — six bytes per rune is therefore the ceiling for any rune count. 10000 × 6 = 60000 B of escaped content, measured at a worst case of **61363 B** against the 65519-byte application-envelope cap (§ Application-envelope size cap) with hostile identity fields. A frame over that cap is **lost, not truncated**, and `tool_result` is never-droppable control class (§ Error codes, `4413`), so the operator would see an empty row rather than a shortened one. Do not read `unrecognized.raw`'s "escaping is mild in practice" argument onto this field: that one rests on the payload already being JSON text with pre-escaped control characters, where a tool result is raw command output or file contents, and reading a TSX or HTML file is an ordinary `<`-dense result.
+
+**`result_summary` is a display string, not a capability.** It is model-authored text the daemon neither resolved nor validated — `Bash` output is a command's stdout verbatim, a file read is a file's contents. Render it as inert text. Never feed it to an HTML sink, an attribute, or a URL, and never execute or re-shell any of it. This is the hazard § `tool_use` states for its input values, and here the `<`-dense case is the ordinary one rather than the contrived one.
 
 #### `turn_end`
 
@@ -923,8 +943,8 @@ both directions.
 | Field | Type | Meaning |
 |---|---|---|
 | `conversation_id` | string | Conversation whose turn observed the usage-limit report. |
-| `status` | string | **Why** the frame fired: claude's own status for the usage-limit window, verbatim. An **open string with a mostly unmeasured value set** — see below. |
-| `limit_type` | string | **Which** limit is in force (`five_hour` is the only observed value). An open string, not a closed set — one observed value does not earn one. |
+| `status` | string | **Why** the frame fired: claude's own status for the usage-limit window, verbatim. An **open string with a mostly unmeasured value set**, and **it does not imply the turn was blocked** — see below. |
+| `limit_type` | string | **Which** limit the report concerns (`five_hour` and `seven_day` are the observed values). An open string, not a closed set — two observed values do not earn one. |
 | `resets_at` | int | When claude says the limit lifts, as **unix seconds**. `0` means claude did not report it — **not** the epoch. Unvalidated in both directions; see below. |
 | `truncated_fields` | array of string \| null | Names of the fields the daemon cut to fit its cap, using the field names in this table: `status`, `limit_type`. `null` when nothing was cut. |
 
@@ -946,12 +966,26 @@ status emits**. That direction is deliberate — an unrecognised status surfaces
 and a human looks, rather than a real limit vanishing.
 
 **`status` is an open string, and what a client may do with it is bounded.** Its
-value set beyond the benign one is **unmeasured**: no capture of a limit actually
-in force exists, on any claude version on record. It is claude's raw string,
-carried precisely so the set gets measured the first time a real limit fires.
-Render it as an **opaque label**. A client **MUST NOT branch security-relevant
-behaviour on it**, and must not treat it as a closed set — doing so is a bug
-waiting for claude's next release.
+value set beyond the benign one is **almost entirely unmeasured**: exactly one
+non-benign value is on record, and **no capture of a limit actually in force
+exists** on any claude version. It is claude's raw string, carried precisely so
+the set gets measured the first time a real limit fires. Render it as an **opaque
+label**. A client **MUST NOT branch security-relevant behaviour on it**, and must
+not treat it as a closed set — doing so is a bug waiting for claude's next
+release.
+
+**A frame is not proof that anything was blocked, and this is the realistic
+client bug.** The one measured non-benign value is `allowed_warning`, seen
+2026-08-22 on claude 2.1.239 against `limit_type` `seven_day`: the account was
+inside its weekly warning band and **every turn still ran normally**. So the
+frame's plain reading is "claude said something about the usage window worth
+repeating", not "you are rate limited", and a client that renders it as the
+latter will tell the user they are blocked while their turns keep working.
+Warning ahead of the wall is the frame's most useful moment — it is the only one
+where the user can still act — so the fix is wording that does not overclaim, not
+suppression. Both the daemon and the live drain
+(`internal/e2e/realclaude`'s `warnRateLimitStatus`) treat this value as expected
+rather than as a fault.
 
 **`resets_at` is claude's number, not the daemon's clock**, and it is unvalidated
 in **both** directions. A consumer must not assume it lies in the future, and must
@@ -1017,9 +1051,13 @@ concrete model. A client that merges them into one value shows the wrong one.
 least as specific as the one it was given**: it dates a bare family alias
 (`haiku` → `claude-haiku-4-5-20251001`) and passes through anything already fully
 formed (`claude-haiku-4-5`; `claude-sonnet-5` for a machine default). So the value
-is **not reliably dated**, and it **need not appear in any published model list** —
-`claude-haiku-4-5` does not. Treat a miss against any list as normal, render the
-string as given, and do not repair it: the daemon does not, deliberately.
+is **not reliably dated**, and it **need not appear in any published
+[model list](#model_list)** — `claude-haiku-4-5` does not. That frame is the
+**menu** of what claude will accept for the conversation; this one is the
+**per-turn announcement** of what it actually ran, so the two are joined on
+`display_name` rather than assumed equal. Treat a miss against any list as normal,
+render the string as given, and do not repair it: the daemon does not,
+deliberately.
 
 **Once per turn, not once per session.** claude emits `system/init` on every turn,
 so one session produces several of these and they need not agree — a `/model` turn
@@ -1065,6 +1103,89 @@ Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1T
 **Invariant:** `workspace_cwd` is non-null **if and only if** `reason` is `workspace_change`. The field is always present on the wire (literal `null`, never absent) so the invariant is decodable directly.
 
 The **producer** is **#657**. Until a server-side workspace-change source exists, the producer emits only `clear` and `idle_evict` — yet the type admits `workspace_change` so the mobile decoder stays exhaustive and the invariant above is expressible. This ticket (#656) defines the wire shape only.
+
+#### `model_list`
+
+Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the fifteen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation the menu belongs to (routing key, matching every other interactive event). |
+| `models` | array of object | The models claude will accept for this conversation, in claude's own order. **Always present, never `null`** — an empty `[]` is a positive statement that claude offered nothing, so a client decoding into a non-optional array type never has to branch. |
+| `dropped_models` | int | How many entries the producer cut that this frame does **not** carry; `0` when nothing was dropped. **The count is real**: the producer bounds the entry count and reports what it cut — see below. |
+
+Each element of `models`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `resolved_model` | string | What `value` resolves to **right now**: the concrete identifier. Published *before* the first turn, so a client can show which model a family currently means instead of inferring it from an announcement after the fact. |
+| `value` | string | The argument you pass to select this model. **Not a dated identifier** — below. Sendable back on [`set_session_settings`](#set_session_settings), bracketed variant rows included (#1838); a published value is still re-validated there rather than trusted, and `effort_levels` is the field that still gets refused — below. |
+| `display_name` | string | claude's human label for the row, and the intended join key against [`model_announced`](#model_announced). |
+| `effort_levels` | array of string | The reasoning-effort levels this model supports. **Always present, never `null`**; `[]` means the model exposes no effort control, which is the one position this wire states for both claude's *absent* and *empty* list. |
+| `supports_auto_mode` | bool | Whether claude accepts `auto` permission mode for this model. claude refuses the request per model, so a client greys the option out when this is `false` (pyrycode-desktop#682). Absent in claude's reply decodes to `false`, which is the correct reading. |
+| `truncated_fields` | array of string \| null | Names of **this row's** cut fields, in producer order: `resolved_model`, `value`, `display_name`, `effort_levels`. `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. `effort_levels` is the one name reporting on a list rather than a scalar — it covers an element cut to fit, the list itself shortened, or both, appearing at most once per row in every case. |
+
+**`dropped_models` means what its name promises, and `len(models) + dropped_models` is the menu's true size.** The producer bounds the entry count at **ten** (#1812) and reports here how many entries it cut, so a client can render "10 of 40" rather than presenting a shortened menu as complete. The producer cuts only the overflow, so a non-zero `dropped_models` always arrives beside exactly ten entries; a shorter list is always a complete one. The count reaches the wire intact: the decode records the overflow where the cut happens, the mapping onto this frame carries the number **verbatim rather than recomputing it from `len(models)`** (#1848), and the producer passes it through (#1849). Two properties bound how a client may use it. The list is truncated **from the tail**, so the entries you receive are claude's first ten in claude's own order. And ten is a **daemon-side producer cap, not a wire constant** — it may change without any change to this contract, so a client must never hardcode it, treat a list of exactly ten as a signal, or derive the cap from anything but the number in this field.
+
+**This frame is emitted.** The shape was declared by **#1704**, the committed fixtures and this section by **#1705**, the mapping onto this wire shape by **#1848**, and the **producer** by **#1849**; **#1845** proves it reaches a connected client end to end. This is the same declare-then-emit sequencing `rate_limited` used (#1405 declared, #1410 emitted) and `model_announced` used (#1616 declared, #1638 emitted), and this frame has now completed it.
+
+**The delivery window is narrower than "emitted" suggests, and a client must build for the narrow one.** What the daemon performs on a schedule is an **ask, not a delivery**: it runs **one `initialize` exchange per claude child spawn** and emits whatever comes back on the **live interactive turn lane**, arriving on a `control_response` as above, to whatever interactive connections exist **at that instant**. Nothing bounds the rate on either side. Delivery is **best-effort rather than guaranteed**, and **the losses are not limited to load** — three sit between that emit and a client:
+
+- **No conversation is routed yet.** The daemon spawns its first child eagerly at startup, before any conversation has been routed, and an event the daemon has no conversation to address is dropped. That child's menu is lost **unconditionally**, so a client attaching to an already-running daemon has not merely missed the frame — it was never sent one.
+- **The session is busy.** The frame is classed droppable at the daemon's fan-in, so a loaded session can refuse it. **Missing it is not an error**: nothing is retried, and no error frame says a menu was lost.
+- **The emitting child is not the active conversation's bound session.** After a session rotation the fresh child's events no longer match the lane's session binding, so **a rotation does not deliver a fresh menu** — even though it does start a new child, and therefore a new ask.
+
+What reliably arrives is the case #1845 proves end to end: a child spawned **while a conversation is already routed and a client is connected** — a respawn after the child died, for instance.
+
+**A client that missed the frame has no snapshot to ask for.** There is **no connect-time snapshot today**: a client **attaching** — a fresh connection, or one whose menu was lost at any of the three points above — has **no way to ask for one** and will not be sent one, which is why `model_list` is deliberately absent from [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)' Mode B list. One narrower case does recover, and only one: because the frame carries an `event_id` like every other event on this lane, a **reconnecting** client whose `hello` advertises a `last_event_id` predating it is replayed it along with everything else it missed — Mode A, a cursor backfill rather than a snapshot. That path needs both a cursor from a previous connection and a frame that was actually emitted, so it recovers nothing for a first attach and nothing for a menu that was never sent. The consequence is the actionable part: **never block a model menu on this frame**, and render a usable UI without one rather than waiting for a frame that may never arrive.
+
+Four things a client will otherwise get wrong:
+
+**1. `value` is not a dated identifier.** It is what you *pass*: an alias (`sonnet`), a bracketed variant (`opus[1m]`), or `default`. A client cannot derive a family by splitting it on `-`, and must not present it as a version. `resolved_model` is the dated one — what the alias resolves to right now.
+
+**2. A lookup against this list can miss, and that is ordinary rather than an error.** claude announces an identifier **at least as specific** as the one it was given, so a [`model_announced`](#model_announced) value need not appear here at all (`claude-haiku-4-5` does not). `display_name` is the intended join, **not** `resolved_model` — the announcement names a concrete dated identifier while a client's rows are alias families. That frame is the per-turn announcement of what claude ran; this one is the menu of what it will accept.
+
+**3. A published value is not automatically sendable back, and `effort_levels` is where that still bites.** The only inbound path that accepts a model is [`set_session_settings`](#set_session_settings), whose rule — widened at #1838 for exactly the rows below — accepts `""` or, within a 64-byte bound, a value whose first byte is alphanumeric, whose remaining bytes are in `[A-Za-z0-9._-]`, and which may carry **one trailing bracket group**: `[`…`]` as the value's final element, non-empty, and drawn from that same closed byte class. Every `value` claude has been measured to publish now passes, the bracketed variant rows (`opus[1m]`, `claude-fable-5[1m]`) included. The group is bounded that way rather than by adding two bytes to the charset because the rule is #845's argv-injection defense: a leading, unbalanced, empty or nested bracket is still rejected, as is a second group or any suffix after one, and so is a leading dash, a shell metachar, whitespace, a control byte and any byte at or above `0x80`. That closure matters **twice**, because an accepted value reaches two sinks — the claude argv, where `--model` and the value are separate `execve` elements no shell parses, and the **live child's turn text**, since a model change on a running session is written as `/model <value>` on one line and an accepted value must therefore stay a single whitespace-free token. **`effort_levels` carries the identical hazard in the same direction and is deliberately not widened**: the inbound effort enum is **closed** and accepts all five levels claude returns today, so a level claude adds later would be published here and refused inbound. So a client must still read a published value as a candidate rather than a guarantee, and must handle the refusal.
+
+**4. `truncated_fields` is load-bearing, not decoration.** A client that ignores it presents claude's cut text — or a cut list — as complete, and would offer back a `value` it was never told was truncated.
+
+**SECURITY.** `resolved_model`, `value`, `display_name` and **every string in `effort_levels`** are claude-authored strings that crossed the subprocess trust boundary. They are safe to **render as inert text** and must never be fed to an HTML sink, an attribute, or a URL. The daemon **bounds them but does not sanitize them** — nothing on this path strips control characters or terminal escape sequences — so they stay untrusted, model-influenced text all the way to the client, and **the render boundary that owes the sanitization is the client's, not the daemon's**. The frame is a **report, never a control input**, with one amendment the sibling frames do not need: `value` is the first field in this family a client is meant to send **back**, and publishing it does not make it trusted. It is still claude's text arriving on an inbound path, and the daemon re-validates it (property 3 above) rather than trusting that it came from a list the daemon itself published.
+
+#### `slash_command_list`
+
+Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the fifteen turn-stream events above** — it is not a `turnevent` variant and does not belong to the structured live-session stream. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation the menu belongs to (routing key, matching every other interactive event). |
+| `commands` | array of object | The slash commands claude will accept for this conversation, in claude's own order. **Always present, never `null`** — an empty `[]` is a positive statement that claude offered nothing, so a client decoding into a non-optional array type never has to branch. |
+| `dropped_commands` | int | How many entries the producer cut that this frame does **not** carry; `0` when nothing was dropped. **Nothing counts it yet** — see below. |
+
+Each element of `commands`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `name` | string | The command's name, without the leading `/`. **Not an identifier** — one name in the measured capture is `__remote-workflow`, so no charset assumption belongs in a client. |
+| `argument_hint` | string | What the command expects after it (`[name]`, `key=value`, `<model>`). **Always present**, and **empty on 33 of the capture's 51 entries** — an empty hint is the ordinary case rather than missing data. |
+| `description` | string | The command's one-line summary, except when it is not one line — see property 3. |
+| `aliases` | array of string | Other names that invoke this command. **Always present, never `null`**; `[]` is the one position this wire states for both claude's *absent* and *empty* list, so a client never branches on absent-vs-empty to match an alias. |
+| `truncated_fields` | array of string \| null | Names of **this row's** cut fields (`name`, `argument_hint`, `description`, `aliases` — the wire names), `null` when nothing was cut. Each row reports its own; there is no hoisted or flattened list. |
+
+**`dropped_commands` does not yet mean what its name promises, and a client must read that before using it.** **Nothing counts it.** The field is declared ahead of any producer — #1719 owns making the decode record it, and #1720 is where the field and a counter meet — and it is declared now anyway because a wire with nowhere to put a drop discards it silently, while a permanent `0` reads as "nothing was dropped", which is a lie rather than a gap. So **do not read `len(commands) + dropped_commands` as the menu's true size today**, and do not infer from the field's presence that an entry cap is enforced: no producer enforces one yet.
+
+**Nothing emits this frame yet.** The wire type was declared by **#1726**, the shape by **#1727**, the committed fixtures and this section by **#1718**, and the **producer** is **#1720**. This is the same declare-then-emit sequencing `rate_limited` used (#1405 declared, #1410 emitted), `model_announced` used (#1616 declared, #1638 emitted) and `model_list` used (#1704 declared, #1848 mapped and #1849 emitted); this is the fourth instance.
+
+Four things a client will otherwise get wrong:
+
+**1. A name-only match misses aliases, and the cheaper source cannot repair it.** Nine of the capture's 51 entries carry aliases — **11 aliases in all**: `code-review` → `review`; `doctor` → `checkup`; `loop` → `proactive`; `schedule` → `routines`; `clear` → `reset`, `new`; `config` → `settings`; `rename` → `name`; `usage` → `cost`, `stats`; `list-agents` → `peers`. The desktop Actions menu's own **reset** entry is *that alias* — `reset` is not a command name — so a client matching against `name` alone greys out a command that works. **The same capture carries a names-only twin, and a client will meet it first:** the `system`/`init` stdout line's `slash_commands` holds the identical 51 names in the identical order as bare strings, with no descriptions, no argument hints and **not one of the 11 aliases**. That is the measured reason a client cannot be told to just read the init line. (`terminal_slash_commands` on that same line — 2 entries, `doctor` and `color` — is a third array again and is neither of these.) One blind spot follows from `aliases` collapsing absent and empty into the same `[]`: a `truncated_fields` naming `aliases` is the **only** thing distinguishing "cut to nothing" from "none", and a client must read it as *unknown*, never as *no aliases*.
+
+**2. The count is workspace- and version-dependent, so a client may not cache one.** 51 entries against claude 2.1.239 in this repository; an earlier hand count against 2.1.220 in a different working directory reported **74**. A client may not cache a count across working directories, assume a floor, or treat a small list as an error. That variation is the feature's whole point — the list is per session and per working directory precisely because a repository defines its own commands.
+
+**3. The strings are workspace-authored: bounded, but not sanitized.** A command defined in a repository was written by whoever wrote that repository, which is a **lower-trust origin** than the claude-authored strings [`model_list`](#model_list) warns about. `claude-api`'s description in the capture carries **embedded newlines**, and `0x0a` is the **only** sub-`0x20` byte anywhere across the 51 entries' four string fields — so newlines are *the* control character on this path rather than one class among several, and a type-ahead row that assumes one line per description will not get one. 14 of the 51 descriptions contain non-ASCII, and one name is `__remote-workflow`, outside any obvious identifier charset. Render them as **inert text**; feeding them to an HTML sink, an attribute or a URL is not safe.
+
+**4. A cut is reportable and must be read, and the size has to be quoted with its unit.** The capture's 51 entries serialise to **14,277 bytes of compact UTF-8**; the same array with its non-ASCII `\u`-escaped is **14,371**, and the two disagree precisely because 14 of the 51 descriptions carry non-ASCII. The wire is neither number exactly: Go's encoder escapes `<`, `>`, `&` and U+2028/U+2029 (of which the capture contains none) and passes every other non-ASCII rune through as raw UTF-8, so a real frame is the UTF-8 form plus 6 bytes per escaped `<`/`>`/`&`. The committed fixture shows both behaviours side by side — `model`'s `<model>` hint against `claude-api`'s raw em dashes — which is why the unit is named rather than implied. The longest single description is **1,145 bytes / 1,135 runes**, the longest argument hint 121 B / 115 runes, the longest name 24 B; the mean description is 207 B, the median 69, and **10 of 51 exceed 256** in both units. A per-field bound will therefore cut real rows, and a client that ignores `truncated_fields` presents cut text as complete.
+
+**SECURITY.** `name`, `argument_hint`, `description` and **every string in `aliases`** are **workspace-authored** strings that crossed the subprocess trust boundary. That strengthens `model_list`'s claude-authored warning rather than restating it: the author is whoever wrote the repository, not claude. They are safe to **render as inert text** and must never be fed to an HTML sink, an attribute, or a URL. The daemon **bounds them but does not sanitize them** — nothing on this path strips control characters or terminal escape sequences, and property 3 names the one that actually occurs — so they stay untrusted text all the way to the client, and **the render boundary that owes the sanitization is the client's, not the daemon's**. The frame is a **report, never a control input**, with one amendment: a client is meant to send a `name` **back**, as the text of an ordinary message, because sending the slash command *is* the feature. Publishing a name does not make it trusted. It arrives inbound as ordinary message text, on a path that does not treat it as a command vocabulary and does not consult this list, and no field here reaches a child process as an argv element. This frame declares **no inbound verb**.
 
 #### Reconnect replay & resync (consumer, #647)
 
@@ -1301,6 +1422,164 @@ settled by [`request_debug_bundle`](#request_debug_bundle) above (pairing);
 the streaming transport faithfully seals whatever blob it is handed to an
 already-authenticated, open conn.
 
+### Attachments
+
+A client uploads a file to the daemon, and retrieves one back, as a stream of
+**`attachment_chunk`** frames. A file crossing the encrypted mobile channel
+routinely exceeds one AEAD frame, so the sender splits it and the receiver
+reassembles it; the relay stays transport-only, with no blob endpoint. Split from
+#1740 — the frame and its payload are #1752, the per-chunk byte bound is #1753,
+and this section plus the `attachment.*` reject vocabulary is #1751.
+
+**One frame carries both directions.** Upload (phone → binary) and retrieval
+(binary → phone) ride the same `attachment_chunk`, and declaring exactly one
+shape is what stops the two legs drifting as they are built months apart: there
+is no second shape to keep in step. What differs between the legs is not the
+shape but the **trust** — see **Trust and content hygiene** below.
+
+**Nothing emits, accepts or enforces any of this yet.** The contract is published
+ahead of its implementation, the same declare-then-publish sequencing
+[`model_list`](#model_list) and [`slash_command_list`](#slash_command_list) used:
+reassembly and claim-checking are #1741, storage is #1743, the inbound dispatch
+is #1744, and retrieval is #1746. Two things this section deliberately does
+**not** publish: the **retrieval request verb**, which #1746 declares (no such
+type exists in the daemon today), and the **upload success reply**, which is
+#1744's. No success frame is declared here, and a client must not invent one.
+
+#### `attachment_chunk`
+
+Direction **phone ↔ binary**. One slice of one attachment's bytes, plus the whole
+transfer's metadata repeated on every chunk. **Every field is always present in
+both directions** — no field is ever elided, so a decoder may rely on all eight.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `attachment_id` | string | The transfer this chunk belongs to, repeated identically on every chunk: the key a receiver accumulates under, and the identifier that later resolves to a file. At most 64 bytes. **Not a capability** — not secret, not unguessable, and never the only thing standing between a caller and a file. |
+| `index` | integer | 0-based position of this chunk within the attachment, in `[0, total_chunks)`. It **decides where the bytes land**: a receiver addresses by it and never appends. |
+| `total_chunks` | integer | How many chunks the whole attachment splits into: ≥ 1, and identical on every chunk of one transfer. Because it rides every chunk, this stream needs **no completion frame**. |
+| `filename` | string | The client's own name for the file: a display string and a sanitiser input, **never a path**. At most 255 bytes (POSIX `NAME_MAX` — one path component). |
+| `mime_type` | string | The client's declared media type: a display and dispatch hint, **not a verified property of the bytes**. At most 255 bytes (RFC 6838 § 4.2's two 127-character halves). |
+| `size` | integer | Declared byte length of the **whole file**, not of this chunk. |
+| `sha256` | string | Lowercase hex sha256 of the **whole file**, not of this chunk; always 64 characters. |
+| `data` | string (base64) | This chunk's raw bytes, standard-base64 (`base64.StdEncoding`, padded). At most **45000 raw bytes before encoding** — see **Chunking** below. |
+
+The three metadata bounds (64 / 255 / 255) count **bytes, not runes**, and a
+client must obey them for its own frames to fit the envelope cap. A length
+ceiling on `attachment_id` is **not** a safety property: 64 bytes accommodates
+`../../../../etc/passwd` several times over, so containment is the receiver's
+resolution check and never the bound.
+
+There is **no `conversation_id`**, and the omission is a security property rather
+than an oversight. An upload lands in the conversation the authenticated session
+is already on, decided daemon-side from session context, so a client cannot steer
+bytes into another conversation's directory by naming one. Retrieval's request
+verb does name a conversation, but that is a different frame and #1746's to
+declare.
+
+**Chunking (the sender's obligation).** The per-chunk bound is **45000 raw bytes
+of `data` before base64** — not base64 characters, not payload bytes, not
+envelope bytes. A sender that mistakes it for base64 characters produces frames
+that fit but wastes a quarter of every one. The rule is arithmetic a client can
+implement directly:
+
+- every chunk but the last carries **exactly 45000** raw bytes; the last carries
+  the remainder;
+- `total_chunks = max(1, ceil(size / 45000))`. The `max(1, …)` is what defines
+  the **zero-byte file**: one chunk carrying zero bytes, consistent with
+  `total_chunks ≥ 1`.
+
+45000 is chosen so that a chunk's serialised envelope — base64 ×4/3, plus every
+metadata field at its bound with worst-case JSON escaping — stays under the
+[65519-byte application-envelope cap](#wire-shapes). That is a
+**producer-side contract with no validator**: an envelope exceeding 65519 bytes
+after serialisation is rejected by the transport with **`message.too_long`**,
+never with an `attachment.*` code. The two size codes say different things —
+`message.too_long` means **one envelope** was too big, `attachment.too_large`
+means the **whole transfer** exceeds the receiver's per-upload bound.
+
+**Reassembly & integrity (the receiver's rules).** The receiver stores each
+chunk's decoded `data` **at its `index`**, so **chunks may arrive in any order**.
+That is deliberately weaker than [`debug_bundle_chunk`](#debug_bundle_chunk)'s
+`seq`, which demands strict succession — the neighbouring rule is the obvious
+thing to copy and it is the wrong one here.
+
+- A **duplicate `index`**, an `index` outside `[0, total_chunks)`, or a
+  `total_chunks` disagreeing with the stream's earlier chunks: the stream is
+  discarded and the receiver answers `attachment.invalid_chunk`.
+- The transfer is **complete** when every index in `[0, total_chunks)` has
+  arrived exactly once. Only then does the receiver compare the assembled length
+  against `size`, and `sha256(assembled)` against `sha256`, as **lowercase hex
+  for exact equality**. A case-insensitive or prefix comparison is a hole, while
+  a comparison that rejects an uppercase-sending client is an availability bug —
+  so the canonical form is lowercase and clients send it that way.
+- Either mismatch → `attachment.integrity_failed`. A receiver **never emits
+  partial or corrupted output**.
+- `sha256` is **integrity, not authenticity**. The same party supplies the bytes
+  and the digest, so a match proves the transfer was not corrupted and proves
+  nothing about whether the content is safe. It is also **not a fetch key**:
+  content-addressed retrieval ("know the hash, fetch the blob") would promote a
+  non-secret claim into a capability, and retrieval names a conversation and an
+  attachment, never a hash.
+- **Never allocate from a claim.** On the inbound leg `total_chunks` and `size`
+  are attacker-chosen integers: sizing a buffer from a claimed `total_chunks` of
+  2³¹−1 is a multi-gigabyte allocation driven by a single ~60 KB frame. A
+  receiver range-checks both, and cross-checks them against each other through
+  the 45000-byte bound, **before** anything is sized — a check available from the
+  **first** chunk, before one byte is accumulated. A transfer over the receiver's
+  per-upload byte bound is refused with `attachment.too_large`; one arriving
+  while too many uploads are already in flight is refused with
+  `attachment.too_many_uploads`. Both of those bounds are **receiver-configured
+  and unpublished** — a client learns them by being rejected, not by reading this
+  document.
+
+**Retrieval, and its two terminal signals.** Retrieval is the same frame,
+daemon-authored, flowing binary → phone in reply to the request verb #1746
+declares.
+
+- **Completion** is `total_chunks` distinct indices received. There is **no
+  completion frame**, and none is coming:
+  [`debug_bundle_done`](#debug_bundle_done) exists because bundle chunks carry
+  only `seq` and the count is unknowable until the end, whereas here the count
+  rides frame one — so a truncated stream is detectable *earlier* rather than
+  later.
+- **Abandonment** is `attachment.stream_aborted`, an `error` envelope correlated
+  by `in_reply_to` — not a second attachment frame. On receiving it a client
+  **MUST discard everything accumulated for that transfer** and MUST NOT present
+  the partial bytes as the file. With no completion frame this is the stream's
+  only negative signal, and a client that keeps its buffer renders a truncated
+  file as a whole one.
+- A stream that simply **stops**, with no abort frame (the session died), is
+  detected by the client's own timeout. The protocol offers no frame for it.
+- A request that yields no bytes at all is `attachment.not_found` — one code for
+  every such outcome; see [Error codes](#error-codes).
+
+**Trust and content hygiene.** **Inbound, every field is a claim, not a fact**,
+and the daemon validates each before use. **Outbound the fields are
+daemon-authored — but two of them are laundered client input.** `filename` and
+`mime_type` arrive attacker-chosen at upload time, are stored, and are echoed
+back verbatim on the retrieval leg, so "daemon-authored" must not be read as
+"trustworthy" for those two. A client **MUST** sanitise `filename` before
+rendering it, **MUST NOT** use it as a path or a filesystem name unsanitised, and
+**MUST NOT** dispatch on `mime_type` in any way that grants the content
+privileges — no rendering an attacker-declared `text/html` as markup. A client
+should also **bound what it allocates** from an outbound `size` / `total_chunks`
+against its own memory budget and refuse a transfer larger than it can hold
+rather than attempt it: the daemon is trusted here, but a fixed-budget client
+still has a budget.
+
+`data` is **content-bearing and never logged** — a stronger rule than the debug
+bundle's, because those are daemon-authored diagnostics and these are a user's
+own private file bytes. `filename` gets the same treatment for two independent
+reasons: a filename is often private in itself, and a client-supplied string in a
+line-oriented log is a log-injection shape. Log the attachment id, the index and
+the total; never the bytes, and never a raw filename. The rule binds both ends of
+the channel, not just the daemon.
+
+**Authorization is pairing**, enforced structurally at the Noise IK handshake,
+exactly as [`request_debug_bundle`](#request_debug_bundle) records: an unpaired
+device is refused at the handshake (WS `4401`) and never reaches these paths.
+There is no per-verb authorization gate on either leg, and none is invented here.
+
 ### Session settings (v2)
 
 A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
@@ -1431,6 +1710,13 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `noise.rekey_failed` | yes | The peer's `rekey_request` was rejected (e.g. rate-limited) or the subsequent handshake didn't complete; sender may retry after a backoff. |
 | `session.not_found` | no | The `set_session_settings` target `session_id` names no live session. Returned by the handler (#845). |
 | `session.blocked` | no | Terminal — the daemon gave up delivering a conversation's queued backlog after repeated failures (msgqueue give-up, #1000). Carried in a `session_error` frame, not an `error` envelope; the emitting producer is #1008. A client attaches it to the `conversation_id` and MUST NOT retry (contrast the transient `server.binary_busy`). |
+| `attachment.invalid_chunk` | no | An `attachment_chunk`'s framing claims are inconsistent or out of range: a duplicate `index`, an `index` outside `[0, total_chunks)`, or a `total_chunks` disagreeing with the stream's earlier chunks (#1741). The receiver discards the whole in-flight stream; resending the same frames reproduces it, so the repair is to re-chunk. See [Attachments](#attachments). |
+| `attachment.integrity_failed` | no | The assembled bytes do not match the declared `sha256`, **or** the assembled length does not match the declared `size` (#1741). One code for both mismatches: a client's repair for either is to re-derive the metadata from the file and re-upload, never to retry the same bytes against the same claims. |
+| `attachment.too_many_uploads` | yes, after a backoff | The receiver's bound on **concurrent in-flight uploads** is hit (#1741). The one bound in this family that clears on its own — it clears when *other* uploads finish, so a client MUST back off rather than resend immediately: an immediate retry both fails and consumes the capacity it is waiting for. Contrast the permanent `attachment.too_large`. |
+| `attachment.too_large` | no | **One upload** exceeds the receiver's per-upload byte bound, detected either from the declared `size` on the first chunk or from accumulated bytes later (#1741). Permanent for that file — the same bytes fail the same way every time, so a client shrinks the file rather than retrying. Not `message.too_long`, which says one **envelope** was oversized. |
+| `attachment.storage_failed` | yes, after a backoff | A verified attachment could not be written to the host (#1743, surfaced by #1744). Carries a **static** message — never the host path and never the underlying filesystem error, either of which discloses the daemon's layout. The host condition may not clear at all, so a client MUST back off and MUST NOT hot-loop the re-upload. |
+| `attachment.not_found` | no | A retrieval request did not resolve to a file inside the named conversation's directory (#1746). **Deliberately indistinguishable** across an unknown id, an id whose canonical shape is invalid, and an id resolving outside that directory — a disclosure decision, not an imprecision: two codes would make the retrieval verb a path-existence oracle for a traversal probe. Nothing is lost by the merge, because all of those outcomes mean the same thing to a client — re-list the conversation's attachments — so there are no sub-cases to branch on. The message is static and never echoes the requested id or the resolved path. |
+| `attachment.stream_aborted` | yes, after a backoff | The daemon abandoned a retrieval **mid-stream** (#1746). An `error` envelope correlated via `in_reply_to`, never a second attachment frame. The client **MUST discard everything accumulated for that transfer** and MUST NOT present the partial bytes as the file — with no completion frame this is the only negative signal the stream has. A re-request re-runs the same resolution work, so retry after a backoff, never immediately. |
 
 WS close codes used at the transport layer:
 
@@ -1725,6 +2011,12 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-08-27`: **Corrected § `model_list`'s published claim that nothing emits the frame** (#1860). Three statements in this file's live prose had gone false and the file carried no record of it. **The frame is emitted**: #1848 added the mapping onto this wire shape, #1849 added the producer on `cmd/pyry`'s interactive turn lane, and #1845 proves it reaches a connected client end to end — so the application-message-types row, § `model_list`'s own paragraph and § `slash_command_list`'s precedent citation now name those slices instead of **#1693**, a ticket that was split and no longer exists as work (#1690, which the `dropped_models` paragraph credited, is the same). **`dropped_models` counts**: #1812 landed a ten-entry producer cap, the mapping carries the number **verbatim rather than recomputing it**, and the producer passes it through, so the sentence that forbade `len(models) + dropped_models` is **inverted** — that arithmetic now yields the menu's true size, which is the correction most likely to change what a client does, since the old text told a client not to do the one thing that now works. And the **delivery window** is stated for the first time, because "emitted" on its own promises more than a client gets. What runs on a schedule is an **ask, not a delivery** — one `initialize` exchange per child spawn, emitted on the live interactive turn lane to whatever clients are connected at that instant — and delivery is **best-effort rather than guaranteed** at **three** loss points, only one of which is load: the bootstrap child's menu is lost **unconditionally**, since the daemon spawns that child before any conversation is routed and drops an event it cannot address; a busy session can refuse the frame at the fan-in, and that is not an error; and a **session rotation delivers no fresh menu**, because the new child's events no longer match the lane's session binding. Naming only the load point would have re-published a promise the daemon does not keep in the two cases a client most naturally expects it — attaching to a running daemon, and refreshing the menu after a rotation — which is the second half of this ticket's own user story. There is **no connect-time snapshot today** for a client that missed it, with the one narrower recovery named rather than elided: the frame carries an `event_id`, so a **reconnecting** client with a `last_event_id` predating it is replayed it (Mode A, a cursor backfill), which does nothing for a first attach or for a frame that was never emitted. A client must never block its model menu on the frame's arrival. `model_list` is therefore **deliberately not added** to [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)' Mode B list: that absence is a decision rather than an oversight, and the list gains a third bullet only when a connect-time reconcile becomes observable to a client. The section's opening no longer says the frame *"does not belong to the structured live-session stream"* — a client read that as *carries no `event_id`*, which is exactly what hid the Mode A recovery above; the frame is not one of the fifteen turn-stream events, but it rides their lane and carries their id. Left standing on purpose: § `slash_command_list`'s and § `attachment_chunk`'s own "nothing emits it yet" statements, since those frames genuinely have no producer (#1720; #1741/#1743/#1744/#1746), and § `slash_command_list`'s `dropped_commands` qualification, which remains true for the sibling frame — nothing counts it. **No live count moved**: this frame is not a `turnevent` variant, so every sentence reading **fifteen** and § `unrecognized_message`'s **five** are untouched, and § `slash_command_list` still reads **fourth instance**, because re-pointing a precedent's ticket numbers adds no precedent. Documentation only — no behaviour, no fixture and no test changed.
+- `2026-08-27`: **Superseded by the `2026-08-27` (#1860) entry above** in its closing claim that *"nothing emits this frame yet remains true"* — that sentence was correct when written, in the window between #1848 landing and #1849 landing, and #1849 closed the window the same day. The rest of this entry still holds: the `truncated_fields` enumeration in producer order and the pure, verbatim 1:1 carry with `dropped_models` sourced from the decode. § `model_list`'s `truncated_fields` row now enumerates the four cut-field names in producer order (`resolved_model`, `value`, `display_name`, `effort_levels`) instead of leaving them unstated (#1848). `internal/turnbridge`'s `MapEvent` gained the arm mapping `turnevent.ModelList` onto this wire shape in the same ticket — a pure, verbatim 1:1 carry with `dropped_models` sourced from the decode — but `Handle` still has no arm routing a decoded model list to it, so **nothing emits this frame yet** remains true; that's the sibling transport slice.
+- `2026-08-27`: [`set_session_settings`](#set_session_settings) now accepts the **bracketed variant values** claude publishes in its own model menu (#1838). [`model_list`](#model_list) offers a row per identity claude will run as, and two of the five values measured on 2026-08-21 — `opus[1m]` and `claude-fable-5[1m]` — were refused by the daemon's inbound validator, so a client menu built from the frame had rows that failed on click: the same defect class pyrycode-desktop#682 reports for permission modes. The rule is now published as a **grammar** rather than as a byte set, because a widening is only reviewable if what it still refuses is as legible as what it newly admits: `""`, or a value within the unchanged 64-byte bound whose first byte is alphanumeric, whose remaining bytes are in `[A-Za-z0-9._-]`, and which may carry **one trailing bracket group** — non-empty, balanced, unnested, the value's final element, and drawn from that same closed byte class. That is deliberately **narrower than adding `[` and `]` to the charset**: a leading, unbalanced, empty or nested bracket is rejected, as is a second group or any suffix after one, and every shape the old rule existed to reject still is — a leading dash, a shell metachar, whitespace, a control byte, a byte at or above `0x80`, and anything past the bound. The closure is **machine-checked across all 256 byte values in each of the three positions** rather than exemplified, because the accepted value reaches **two** sinks and each depends on a different half of it: the claude argv, where `--model` and the value are two separate `execve` elements and no shell parses either, so the bar that matters there is the first-byte-alphanumeric rule that stops a value posing as a flag; and the **live child's turn text**, which is the branch a menu click actually travels since #1581 stopped restarting the child for a model change — the daemon writes `/model <value>` onto the running child's stdin as one line, so an accepted value must stay a single whitespace-free token that can neither end that line nor open a second word or a second slash command. Neither bracket is a line terminator, a separator or a command sigil, which is why the group can be admitted without weakening either sink. `effort_levels` is **not** widened alongside it, and § `model_list`'s numbered property is **rewritten rather than deleted** for exactly that reason: the inbound effort enum is closed, accepts all five levels claude returns today, and would refuse a level claude adds later, so the general caution that a published value need not be sendable back survives the correction and now points at the field that still carries it. The `value` row of the per-model field table and the `2026-08-22` entry below are corrected in the same direction; the entry is marked superseded in its two inbound-validator claims rather than rewritten, following the `2026-08-19` entry's convention for a dated record that has become partly false.
+- `2026-08-25`: Published [Attachments](#attachments) and the seven `attachment.*` reject codes (#1751). #1752 landed the shared `attachment_chunk` frame and #1753 its 45000-raw-byte per-chunk bound with **nothing published here**, so a client author had to reverse-engineer both legs from Go struct comments — and this document actively contradicted the landed code in two places, **both corrected**: § Application-envelope size cap claimed large payloads "require an envelope-level chunking scheme that is out of scope for this spec", and § Scope listed attachments as out of scope outright (now narrowed to the daemon-side implementation, which really is unbuilt). The section publishes the one frame carrying **both** directions — upload phone → binary, retrieval binary → phone — with its eight always-present fields, the sender's chunking arithmetic (`total_chunks = max(1, ceil(size / 45000))`, every chunk but the last exactly at the bound, the `max(1, …)` defining a zero-byte file as one empty chunk), the receiver's **index-addressed** reassembly where chunks may arrive in **any order** — deliberately weaker than `debug_bundle_chunk`'s strict `seq` succession, which is the neighbouring rule a reader would otherwise copy — exact-lowercase-hex `sha256` compared as **integrity, not authenticity** and explicitly not a fetch key, and the **never allocate from a claim** rule with its first-chunk cross-check. The reject vocabulary is declared in one place so #1741, #1743, #1744 and #1746 answer from a shared list instead of each inventing a name months apart, and two of its decisions are published as contracts rather than left to those implementations. `attachment.not_found` is **one code for every retrieval that yields no bytes** — unknown id, non-canonical id, and an id resolving outside the named conversation's directory alike, with a static message that never echoes the id or the resolved path — because two distinguishable codes would make the retrieval verb a path-existence oracle for a traversal probe; nothing is lost, since all of those outcomes mean the same thing to a client. And the receiver's resource bound **splits into two codes on retryability**: "too many concurrent uploads" clears when *other* uploads finish, while "this upload is over the byte bound" is permanent for that file, so a single code would tell a client either to re-upload an oversized file in a loop or to give up on a bound that clears in seconds. All three retryable rows carry an explicit **back off, never resend immediately** obligation, matching the `4429` row's existing language, because `retryable: yes` alone turns a conforming client into a hot loop. Neither the per-upload byte bound nor the concurrency bound is given a **number** — those are #1741's to pick, and publishing a figure ahead of the code that enforces it is what #1752 existed to prevent; a client learns them by being rejected. **Nothing emits, accepts or enforces any of this yet** (reassembly #1741, storage #1743, inbound dispatch #1744, retrieval #1746), the same declare-then-publish sequencing #1704→#1705 and #1726→#1718 used. `attachment_chunk` also gains the application-message-types table's first genuinely **bidirectional** row.
+- `2026-08-24`: **Superseded by the `2026-08-27` (#1860) entry above** in its `model_list` precedent citation only — "#1704 ahead of #1693" is now #1704 ahead of #1848 and #1849, both landed. The rest of this entry still holds, including its own **Nothing emits the frame yet** for `slash_command_list`, whose producer is still #1720, and its `dropped_commands` clause, which is about the sibling frame and remains true. Added `slash_command_list` (binary → phone, interactive-capability-gated, #1718). The wire type — `TypeSlashCommandList` — was declared by #1726 and the shape — `SlashCommandListPayload`, `SlashCommand` and their two `MarshalJSON` normalisers — by #1727, both with no fixtures and no section here, so a client author had to write a decoder by reading Go structs; this entry lands the committed bytes and the prose together, exactly as #1705 did for `model_list` and #1405 and #1616 each did before it. Two consumers are blocked on the shape rather than on the producer: pyrycode-desktop#681, the Actions-menu grey-out that matches its menu entries against the list, and pyrycode-desktop#694, a slash-command type-ahead that renders each row as a name, an argument hint and a description. **Nothing emits the frame yet**: the producer is #1720, the fourth instance of the declare-then-emit sequencing #1405 used ahead of #1410, #1616 ahead of #1638 and #1704 ahead of #1693. Three fixtures pin the encoding — a **populated** frame carrying five rows drawn in claude's own order from the committed capture `internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` (claude 2.1.239, re-measured 2026-08-24), covering both of the capture's key sets, an empty argument hint, a multi-element and a single-element alias array, the `<model>` hint that pins Go's HTML escaping, `claude-api`'s two embedded newlines beside raw non-ASCII, and one row reporting a cut `description` beside four reporting `null`; an **empty** frame carrying no commands at all, where `commands` is present as `[]` rather than elided; and a **zero-value** payload whose single all-zero entry is the only route to five of the eight wire keys, since a frame carrying no entries cannot reach `SlashCommand`'s keys at all. Adding `omitempty` to any one of those eight keys, one at a time, was **run** rather than reasoned about — each mutant scoped to one struct over a scratch overlay, since `json:"conversation_id"` alone appears 17 times in the file — and all eight turn at least one test red, with the five that reach no other assertion in the tree (`conversation_id`, `dropped_commands`, `name`, `argument_hint`, `description`) reddened by the fixtures this entry commits. Four client-facing properties are stated because a client gets each wrong by default: **a name-only match misses aliases** (11 across 9 of the 51 entries, and the desktop Actions menu's own `reset` is an alias of `clear`, not a name), and the cheaper source cannot repair it because the same capture's `system`/`init` line carries a names-only `slash_commands` twin — identical 51 names, identical order, not one of the 11 aliases; **the count is workspace- and version-dependent** (51 here against 2.1.239, an earlier hand count against 2.1.220 in a different working directory reported 74), so no client may cache it, assume a floor, or treat a small list as an error; **the strings are workspace-authored, bounded but not sanitized**, a lower-trust origin than claude's own, with `0x0a` the only sub-`0x20` byte anywhere across the 51 entries' four string fields, so a type-ahead row assuming one line per description will not get one; and **a cut is reportable and must be read**, with the size quoted with its unit named (14,277 bytes of compact UTF-8 against 14,371 `\u`-escaped, and the wire exactly neither because Go escapes only `<`, `>`, `&` and U+2028/U+2029). Because `aliases` collapses absent and empty into the same `[]`, a `truncated_fields` naming `aliases` is the only signal separating "cut to nothing" from "none", and the section says a client must read it as *unknown*. `dropped_commands` is documented with `model_list`'s honest qualification copied: nothing counts it yet, so `len(commands) + dropped_commands` is not the menu's true size today and no entry cap is enforced — #1719 and #1720 own the bound. § `model_list` gains one sentence and a link so the two frames reach each other from either arrival point: both publish a per-conversation menu from the same `initialize` reply, one inventorying identities and the other verbs. **No live count moved**: this frame is not a `turnevent` variant and is not one of the turn-stream events, so all three sentences carrying that count — § Interactive events, `session_transition` and `model_list` — still read **fifteen**, and landing the subsection **after** § `model_list` is what keeps every one of them checkable by counting `####` headings. § `unrecognized_message`'s count of five is likewise untouched — it counts `system` subtypes the parser maps internally, and this frame arrives on a `control_response`. Apart from that single added sentence in § `model_list`, the whole diff to this file is additive.
+- `2026-08-22`: **Superseded twice.** By the `2026-08-27` (#1838) entry above in its two inbound-validator claims — the two bracketed values are no longer rejected, and the charset is no longer left un-widened. And by the `2026-08-27` (#1860) entry above in its two `model_list` claims: **"the producer is #1693"**, which names a ticket that was split and no longer exists as work — the frame is emitted, by #1848 and #1849 — and **"nothing counts it yet"** about `dropped_models`, which #1812's ten-entry producer cap made false, so `len(models) + dropped_models` **is** the menu's true size today. The rest of this entry still holds: the shape, the three fixtures and what each pins, the nine-key `omitempty` mutation sweep, the other three client-facing properties, and the unmoved live counts. Added `model_list` (binary → phone, interactive-capability-gated, #1705). The shape — `TypeModelList`, `ModelListPayload`, `ModelOption` — was declared by #1704 with no fixtures and no section here, so a client author had to write a decoder by reading Go structs; this entry lands the committed bytes and the prose together, as #1405 and #1616 each did. The consumer is pyrycode-desktop#561, blocked since 2026-08-19, which derives its model menu from the identifiers and its effort segments from the per-model levels; pyrycode-desktop#682 is the second consumer, for `supports_auto_mode` — claude refuses `auto` permission mode per model, so a permission-mode menu needs the flag to grey the option out. **Nothing emits the frame yet**: the producer is #1693, the same declare-then-emit sequencing #1405 used ahead of #1410 and #1616 ahead of #1638. Three fixtures pin the encoding — a **populated** menu carrying the five rows measured live against claude 2.1.220 on 2026-08-21 (including Haiku's, whose effort list is empty because claude's reply omits the key entirely, and one row reporting a cut `value` beside four reporting `null`); an **empty** frame carrying no models at all, where `models` is present as `[]` rather than elided; and a **zero-value** payload whose single all-zero entry is the only route to five of the nine wire keys, since a frame carrying no entries cannot reach `ModelOption`'s keys at all. Adding `omitempty` to any one of those nine keys, one at a time, was **run** rather than reasoned about, and each of the nine turns at least one test red. Four client-facing properties are stated because a client gets each wrong by default: `value` is **not a dated identifier** (an alias, a bracketed variant, or `default`), so it cannot be split on `-` to derive a family; a lookup against this list **can miss and that is ordinary**, since claude announces an identifier at least as specific as the one it was given, and `display_name` rather than `resolved_model` is the intended join back to `model_announced`; **two of the five measured values are rejected by the daemon's own inbound validator** (`opus[1m]` and `claude-fable-5[1m]` — the bracket is outside the charset), so a menu row is not necessarily sendable back, and the charset is **not** widened to close the gap because it is #845's argv-injection defense; and the strings are claude-authored, **bounded but not sanitized**, a report and never a control input, with the amendment that `value` is the first field in this family a client is meant to send back and publishing it does not make it trusted. `dropped_models` is documented with its honest qualification: nothing counts it yet, so `len(models) + dropped_models` is not the menu's true size today and no entry cap is enforced. `model_announced` gains one sentence and a link so the two frames reach each other from either arrival point. **No live count moved**: this frame is not a `turnevent` variant and is not one of the turn-stream events, so § Interactive events and `session_transition` both still read **fifteen**, and landing the subsection **after** `session_transition` is what keeps both sentences checkable by counting `####` headings. § `unrecognized_message`'s count of five is likewise untouched — it counts `system` subtypes the parser maps internally, and this frame arrives on a `control_response`. The three existing rows carrying a wire field named `model` are **not** re-pointed: unlike #1616's collision the name is not literally shared here (this payload has `models`, `value` and `resolved_model`), and the distinction that needed drawing is the one between the two frames that publish model identity.
 - `2026-08-20`: `request_session_settings` now answers for the conversation the client **named** (#1610). The reply's `session_id` and its five reported values all describe the session bound to that conversation; before this they described the shared **bootstrap** session whichever conversation was named, and the client then put that bootstrap id on its `set_session_settings` — so an operator changing the model, effort or **bypass-permissions** posture from a sheet was silently reconfiguring a background session they were not looking at. The id and the values move as one because the daemon resolves them together, which is the property the previous shape could only assert in prose. **An absent or empty `conversation_id` now gets the all-zero reply**, inverting the `2026-08-19` entry below: a request that names no conversation names no session, and the only alternative would be to hand-build an explicit fallback to the shared session, which is the route the multi-session work forbids. Still never an error frame, and still no failure branch — the all-zero `session_settings` is the answer for every unresolvable case, and an unknown conversation is indistinguishable from an unbound one. **Client companion change, not lock-step:** an un-updated client that sends the older bare frame now gets a visibly inert sheet until it puts `{"conversation_id": "<the conversation the sheet is for>"}` on the payload. That is the accepted trade in this direction — an inert sheet beats one that silently writes a bypass-permissions choice into someone else's session — and the field has existed since #1586, so a client that starts sending it **today**, before this lands, is answered identically. The reply's `session_id` then already addresses the right session, so the existing `set_session_settings` write path needs no change. `screen_snapshot`'s side-loaded copies of these values are untouched and remain bootstrap-scoped; they were already deprecated in favour of this route.
 - `2026-08-19`: Added `model_announced` (binary → phone, interactive-capability-gated, #1616). The daemon has parsed claude's `system/init` line into a `turnevent` variant since #1600, but that variant is internal — `turnbridge.MapEvent`'s `default` drops it — so no client could see which model claude actually ran. The shape is declared **ahead of its producer**: nothing emits this frame until #1617, the same sequencing #1405 used ahead of #1410 and #1393 ahead of #1394. It is conversation-scoped, carries no `turn_id` and drives no turn lifecycle. The hazard the section spends most of its words on is the **name collision**: three payloads already carry a wire field called `model` (`screen_snapshot`, `session_settings`, `set_session_settings`) and all three mean the per-session **override**, where `""` is "inherited default"; this one means **what claude announced for the turn**, and in the ordinary case they disagree because the override is `""` while claude has named a concrete model. Each of those three rows now points here, so reading any one of the four is enough to learn the other meaning exists. Three further properties are stated because a client gets each wrong by default: claude echoes an identifier **at least as specific** as the one it was given, so the value is **not reliably dated** and **need not appear in any published model list** (`claude-haiku-4-5` does not) — a lookup miss is **ordinary**, not an error; the announcement is **once per turn, not once per session**, so latching the first one shows a stale value; and `truncated` is load-bearing, since a client ignoring it presents claude's cut text as complete. The value is **never the empty string**, and the daemon does not repair it. It is bounded but **not sanitized** — no control-character or terminal-escape stripping on this path — so the render boundary owing the sanitization is the **client's**, and the frame is a **report, never a control input**. Also **corrected three stale counts**: § Interactive events and `session_transition` both said "fourteen" turn-stream events; both now read fifteen. And § `unrecognized_message` said the parser maps **four** `system` subtypes internally, which had been **wrong since #1600** — that ticket added the `init` arm and never touched this file, so `init` was neither counted nor listed while the surrounding prose still read as though it were silently dropped. That count now reads **five** and attributes #1600. The sentence about how many reach the wire deliberately **stays four**: `init` is declared here and emitted in #1617, so it is documented below without reaching the wire yet. The #1404 clause's back-reference is re-anchored to five; `rate_limit_event` remains a top-level line type rather than a `system` subtype, so the claim itself is unchanged.
 - `2026-08-19`: **Superseded by the `2026-08-20` entry above** in its scoping claims — the reported values no longer stay bootstrap-scoped, and an absent or empty `conversation_id` is no longer answered as it was. The rest of this entry (why the field exists, and that an unhosted conversation is answered with zeros rather than an error) still holds. `request_session_settings` gained a `conversation_id` (#1586). The frame used to be bare, and this document said so in as many words, justifying it with "the reported values are daemon-wide, so there is no field a client could use to select another session's data". Both halves are now gone: the field exists, and the daemon reads it. It matters because this verb's reply carries the `session_id` a client must put on every `set_session_settings`, so the read verb decides which session each client write lands on and a client had no way to say which conversation it meant. **The change is additive on the wire and no reported value moved with it.** A named conversation the daemon hosts is answered exactly as before; one it does not host is answered with an all-zero `session_settings` rather than an error, because `session_id: ""` is already the defined "no session to address" answer and a verb documented as always answering should not grow a failure branch; and an **empty or absent** field is answered as it always was, which is what keeps un-updated clients working and what keeps the sheet alive on a freshly started daemon, where the registry seeds nothing and there is no conversation id in existence to send. The field therefore gates **whether** the answer is populated, not **which** session it describes — the reported values stay bootstrap-scoped, and making them follow the named conversation is #1587, where the values and `session_id` must move in one step.

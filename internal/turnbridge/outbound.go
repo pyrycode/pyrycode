@@ -13,6 +13,7 @@ package turnbridge
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -42,10 +43,138 @@ const (
 	StateIdle       TurnState = "idle"
 )
 
-// maxSummaryLen bounds the input/result précis to a single line of at most this
-// many runes. A phone-display bound, not a wire constraint (the envelope cap is
-// far larger); tunable if the mobile view wants a different cap.
+// maxSummaryLen bounds the INPUT précis to a single line of at most this many
+// runes. A phone-display bound, not a wire constraint (the envelope cap is far
+// larger); tunable if the mobile view wants a different cap. It stopped bounding
+// the RESULT précis in #1680 — that side has its own, much larger cap in
+// maxResultSummaryRunes below, which IS a wire constraint.
 const maxSummaryLen = 200
+
+// The bounds on the per-field tool input inputFields extracts (#1678). These
+// are WIRE constraints and deliberately invert maxSummaryLen's framing above:
+// the whole point of sending fields rather than one précis is that the values
+// are large, so together they are what keeps a tool_use inside the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md
+// § Application-envelope size cap). Separate from maxSummaryLen because
+// input_summary keeps its meaning, its value and its own cap unchanged.
+//
+// The arithmetic, in maxDeltaTextBytes's form (cmd/pyry). encoding/json has
+// SetEscapeHTML on by default, so '<', '>', '&' and every control byte without
+// a short escape each cost six bytes on the wire. The cut here is a RUNE cut
+// and six bytes per rune is still the ceiling: a 1-byte rune escapes to at most
+// 6, a multi-byte rune is emitted RAW at 4 bytes or fewer, U+2028/U+2029 escape
+// to 6 from 3 input bytes, and an invalid byte becomes U+FFFD (6 bytes on the
+// wire) while utf8.RuneCountInString counts it as one rune. So
+// maxInputTotalRunes x 6 = 51000 B is the map's content ceiling. The bound is
+// on PRE-ellipsis content: each admitted value may add one "…" beyond its cap,
+// exactly as inputSummary's does, so at most maxInputFields further runes ride
+// on top.
+//
+// Measured worst case, filling every value with '<' and the fields the producer
+// does NOT bound as hostilely as they could plausibly arrive: 56618 B, 86.4% of
+// the cap, with roughly 8.9 KB of headroom. The invariant is ENFORCED by
+// protocol's TestToolUsePayload_FitV2EnvelopeCap; if that ever fails, LOWER
+// these constants — never raise them. The conservative constants are the belt;
+// the deterministic per-frame cap test is the suspenders (different fabric).
+//
+// tool_use and tool_result are separate envelopes, so #1680's result cap does
+// not ride this frame and the two budgets do not sum.
+const (
+	// maxInputValueRunes bounds ONE input value. 4000 is measured, not guessed:
+	// across 11336 claude tool calls carrying a structured input, 97% arrive
+	// completely intact at this cap and the average call carries 547 characters
+	// against the hard 200 input_summary carries. 8000 buys one further
+	// percentage point and doubles the worst case (#1678).
+	maxInputValueRunes = 4000
+
+	// maxInputKeyRunes bounds one input KEY. Real keys are file_path, command,
+	// pattern — this is generous and exists only so one pathological key cannot
+	// eat the whole budget. An over-long key drops its entry rather than being
+	// truncated: a cut key is a false claim about the input's field NAME, where a
+	// cut value is honestly marked with "…".
+	maxInputKeyRunes = 128
+
+	// maxInputFields bounds the ENTRY COUNT. The observed maximum is 6 (mean
+	// 2.3). Not redundant with the rune budget below: per-entry JSON structure
+	// (the quotes, colon and comma of `"":"",`) is bytes a CONTENT budget cannot
+	// see, so without this a map of many tiny entries could out-cost its own
+	// content.
+	maxInputFields = 16
+
+	// maxInputTotalRunes bounds keys and values SUMMED, because per-value caps do
+	// not compose into an envelope guarantee on their own — three full 4000-rune
+	// values on one Edit would reach 72000 B escaped, over the cap before the
+	// payload's other fields are counted. 8500 does not bind on measured traffic:
+	// the worst call in the whole corpus is 8147 characters, which the per-value
+	// cap reduces to roughly 8090 before this bound is consulted. That margin is
+	// why it is not lower.
+	//
+	// It is a MEMORY knob as well as a wire knob, which is the second reason for
+	// the never-raise rule above: internal/eventring retains up to
+	// MaxEventsPerConversation events per conversation and preferentially keeps
+	// control-class events, of which tool_use is one, so this constant multiplies
+	// the ring's worst-case per-conversation footprint (#1678 § Security review).
+	maxInputTotalRunes = 8500
+)
+
+// maxResultSummaryRunes bounds the tool-result précis resultSummary derives
+// (#1680). Like the input-field caps above and unlike maxSummaryLen, this is a
+// WIRE constraint: the live producer (internal/streamsup's toolResultContent)
+// returns claude's result text VERBATIM with no cap of its own, so this constant
+// is the only thing standing between an arbitrarily large tool result and the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md
+// § Application-envelope size cap). Separate from maxSummaryLen because
+// input_summary keeps its meaning, its value and its own cap unchanged, and
+// because results are an order of magnitude bigger than inputs: measured across
+// 11379 local tool results, mean 2959 characters and median 721, of which only
+// 22% survive a 200-rune cap whole.
+//
+// 10000 is maxDeltaTextBytes's number (cmd/pyry) on purpose. That is the one
+// other free-text field on a v2 envelope and it solved this same problem, so a
+// different number for the same envelope would invite the two to drift. It
+// carries at least 90% of measured results whole, against 22% today. 16000 was
+// MEASURED at 96309 B — 47% over the cap — and must not be re-proposed: exceeding
+// the cap does not truncate a frame, it LOSES it (nothing on relay's push path
+// bounds the plaintext, so an oversized frame fails at the AEAD or is rejected by
+// the phone's own decode cap), and tool_result is never-droppable control class,
+// so the operator would see an empty row rather than a shortened one.
+//
+// The arithmetic, in maxDeltaTextBytes's form. encoding/json has SetEscapeHTML on
+// by default, so '<', '>', '&' and every control byte without a short escape each
+// cost six bytes on the wire. The cut here is a RUNE cut and six bytes per rune is
+// still the ceiling: a 1-byte rune escapes to at most 6, a multi-byte rune is
+// emitted RAW at 4 bytes or fewer, U+2028/U+2029 escape to 6 from 3 input bytes,
+// and an invalid byte becomes U+FFFD (6 bytes on the wire) while
+// utf8.RuneCountInString counts it as one rune. So 10000 x 6 = 60000 B is the
+// content ceiling. The bound is on PRE-ellipsis content, exactly as the input caps
+// above are: one "…" rides on top, costing 3 raw bytes rather than 6 because
+// U+2026 is emitted unescaped.
+//
+// Measured worst case: 61363 B, 93.7% of the cap, with roughly 4.2 KB of headroom
+// (the cap test's number, one byte above the spec's 61362 because "is_error":false
+// costs one more than true and the field is never omitted).
+// That headroom rests on an ASSUMPTION rather than on an enforced cap, which is
+// worth saying out loud — nothing bounds the three identity fields.
+// conversation_id and turn_id are daemon-supplied; tool_use_id is claude's
+// block.ToolUseID passed through verbatim by streamsup's emitUser, as name and
+// block.ID are on the tool_use side. The measurement therefore fills all three at
+// 64 runes, roughly 11x the longest observed. Capping them upstream is a separate
+// ticket (#1678 § Open questions, inherited by #1680).
+//
+// The invariant is ENFORCED by TestToolResultPayload_FitV2EnvelopeCap, which
+// drives this helper rather than a hand-built payload so the constant is what the
+// measurement stands on; if it ever fails, LOWER this constant — never raise it.
+// The conservative constant is the belt; the deterministic per-frame cap test is
+// the suspenders (different fabric). The second reason for the never-raise rule is
+// MEMORY: internal/eventring retains up to MaxEventsPerConversation (1024) events
+// per conversation and preferentially keeps control-class events, of which
+// tool_result is one, holding the marshalled payload bytes — so this constant
+// multiplies the ring's worst-case per-conversation footprint, from ~1.4 MiB at
+// the old bound to ~59 MiB at this one (#1680 § Security review).
+//
+// tool_use and tool_result are separate envelopes, so the input budget above does
+// not ride this frame and the two do not sum.
+const maxResultSummaryRunes = 10000
 
 // MapEvent maps one neutral turnevent.Event plus explicit turn context to the
 // matching v2 interactive wire payload and its envelope type discriminant.
@@ -70,12 +199,29 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Text:           e.Text,
 		}, true
 	case turnevent.ToolStart:
+		// RawInput is read TWICE and the two readings are independent by design.
+		// InputSummary keeps its exact meaning, value and cap (#1678 AC 1) — it is
+		// what mobile parses today and the whole-input fallback when the field map
+		// drops something — while Input is the same blob's own top-level fields,
+		// each bounded on its own so an Edit's file_path survives beside the
+		// replaced text instead of being buried inside it. Neither derives from
+		// the other: a summary computed FROM the capped fields would silently
+		// change input_summary's value, which is the one thing this ticket must
+		// not do.
+		//
+		// A nil Input is FORWARDED, not pre-allocated: absent, empty and
+		// not-an-object inputs all yield nil here and
+		// ToolUsePayload.MarshalJSON (#1678) normalises it to "input":{} on the
+		// wire. Allocating an empty map here would produce the same bytes while
+		// hiding which layer owns the decision — the BackgroundTaskRoster arm
+		// below states the same rule for the same reason.
 		return protocol.TypeToolUse, protocol.ToolUsePayload{
 			ConversationID: tc.ConversationID,
 			TurnID:         tc.TurnID,
 			ToolUseID:      e.ToolCallID,
 			Name:           e.Title,
 			InputSummary:   inputSummary(e.RawInput),
+			Input:          inputFields(e.RawInput),
 		}, true
 	case turnevent.ToolUpdate:
 		return protocol.TypeToolResult, protocol.ToolResultPayload{
@@ -289,6 +435,98 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Model:          e.Model,
 			Truncated:      e.Truncated,
 		}, true
+	case turnevent.ModelList:
+		// Conversation identity only, like the status peers above: tc.TurnID and
+		// tc.Seq are ignored and the payload has no field for either. It is not even
+		// per-turn, let alone turn-scoped — one initialize exchange per child
+		// produces one of these — and it opens and closes no turn: cmd/pyry's
+		// turnMarkFor answers turnMarkNone by construction (whitelist opener set,
+		// turnMarkNone default) and TestTurnMarkFor_TotalOverEveryVariant pins that
+		// independently.
+		//
+		// Every field crosses 1:1 and VERBATIM. This is translation, not policy, and
+		// nothing here is derived, defaulted or synthesised — ConversationID is the
+		// only value the mapping supplies. Specifically:
+		//
+		//   - A nil Models is FORWARDED, not pre-allocated. ModelListPayload's
+		//     MarshalJSON owns nil→[], and allocating here would produce the same
+		//     bytes while hiding which layer owns the normalisation — the rule the
+		//     ToolStart and BackgroundTaskRoster arms above both state.
+		//   - EffortLevels crosses as the SLICE IT IS, nil left nil, and
+		//     ModelOption's MarshalJSON normalises it to []. Same reason as Models,
+		//     and note the hazard here is ONLY the layer-ownership one: an allocation
+		//     would produce identical bytes.
+		//   - TruncatedFields crosses as the slice it is too, and HERE the nil is
+		//     load-bearing. ModelOption's MarshalJSON deliberately EXEMPTS this
+		//     field, so nothing normalises it afterwards: nothing-was-cut is an
+		//     ABSENCE and must reach the wire as null. A mapper that helpfully
+		//     allocated an empty slice — or appended into a fresh one — would emit []
+		//     and tell a phone that claude's cut text is complete. That is the
+		//     RateLimited arm's rule above, unchanged. THE ASYMMETRY WITH
+		//     EffortLevels ONE FIELD UP IS THE POINT, in both directions: two list
+		//     fields of one struct, one normalised and one not, and a reader who
+		//     takes that for an accident will "fix" whichever of them they meet
+		//     second.
+		//   - DroppedModels is CARRIED, never recomputed from len(models) and never a
+		//     constant. It is the count the decode recorded when streamsup's
+		//     maxModelListEntries fired: recomputing it from the payload's own rows
+		//     yields the wrong number by construction, and shipping 0 tells a phone
+		//     that a capped menu is the whole menu. BackgroundTaskRoster's
+		//     DroppedTasks states the reason, unchanged.
+		//   - SupportsAutoMode crosses verbatim, including a false. Absent, JSON null
+		//     and an explicit false were already collapsed to false upstream by
+		//     encoding/json and by turnevent.ModelOption's SupportsAutoMode, and it
+		//     is a REPORT to a client's menu that nothing in the daemon may read as
+		//     authorization.
+		//
+		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED. The
+		// producer bounded all three of the list's dimensions at construction —
+		// turnevent.ModelList's Models names them together — so a second cap here
+		// would be a second place the limit is decided and the two could disagree
+		// silently. maxSummaryLen and maxResultSummaryRunes live in THIS file and are
+		// NOT applicable bounds; reaching for either is the specific mistake to
+		// avoid. Entry order is claude's and so is effort-level order, the latter
+		// measured non-alphabetical, so a sort is observable rather than harmless.
+		// internal/relay's validModel and validEffort bound a PHONE-supplied inbound
+		// value and are deliberately not applied here in either direction:
+		// validEffort's enum is closed, so running claude's outbound list through it
+		// would drop a level claude legitimately publishes.
+		//
+		// CARRY, NEVER MUTATE THROUGH. The loop copies slice HEADERS, so the payload
+		// shares backing arrays with the event it was handed, and two facts make that
+		// sharing safe only under this rule: cmd/pyry's sessionModelHold.Sink retains
+		// the ModelList WITHOUT copying and forwards the same value, and
+		// sessionModelHold.ModelList() is read on a relay-leg goroutine while the
+		// parser's forwarder writes the hold. A sort, an in-place dedupe, a filter,
+		// or an append into a slice the event owns would therefore corrupt the
+		// session's retained menu across two goroutines — a data race, not merely a
+		// correctness bug. ModelListPayload's MarshalJSON refuses to reach through
+		// into p.Models[i] for exactly this reason and says so; this arm inherits the
+		// rule one layer up, and a read-only loop building a fresh OUTER slice holds
+		// it by construction.
+		//
+		// No suppression branch, not even on an empty Models. The gate that decides
+		// whether the event exists at all is the producer's, and turnevent.ModelList's
+		// Models documents it ("Never empty"), so a second, differently-shaped filter
+		// here would silently diverge from it — the hazard the ThinkingProgress,
+		// RateLimited and ModelAnnounced arms above each name. A zero-value ModelList
+		// therefore maps, exactly as a zero-value ModelAnnounced does.
+		var models []protocol.ModelOption
+		for _, m := range e.Models {
+			models = append(models, protocol.ModelOption{
+				ResolvedModel:    m.ResolvedModel,
+				Value:            m.Value,
+				DisplayName:      m.DisplayName,
+				EffortLevels:     m.EffortLevels,
+				SupportsAutoMode: m.SupportsAutoMode,
+				TruncatedFields:  m.TruncatedFields,
+			})
+		}
+		return protocol.TypeModelList, protocol.ModelListPayload{
+			ConversationID: tc.ConversationID,
+			Models:         models,
+			DroppedModels:  e.DroppedModels,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false
@@ -323,9 +561,141 @@ func inputSummary(raw json.RawMessage) string {
 	return truncate(buf.String(), maxSummaryLen)
 }
 
+// inputFields extracts a tool's opaque RawInput as a bounded name-to-string map
+// of its own top-level fields (#1678), and returns nil when there is nothing to
+// send. Every value is the input's value VERBATIM — a JSON string decoded (so a
+// path is a path and an embedded newline is a newline, not a re-quoted JSON
+// literal), any other JSON type in its compact JSON form — with no path
+// rewritten to a workspace-relative form and no other normalisation.
+//
+// nil is the answer for an absent input, an input that is not a JSON object,
+// and an empty object alike: RawInput is best-effort and opaque (#606), so a
+// malformed blob is a field-less tool_use, not an error — inputSummary's
+// posture above, for its reasons. That is also why there is no error return and
+// no logging on any of these paths: internal/turnbridge has no logger and its
+// package doc commits to "no I/O", tool inputs are USER CONTENT, and an error
+// value would tempt a caller to log the blob.
+//
+// Entries are admitted SHORTEST VALUE FIRST (ties broken by key, so the result
+// is deterministic), each spending runeLen(key) + runeLen(capped value) from
+// maxInputTotalRunes. That order is the policy the bound needs and is what
+// actually fixes the reported bug: for a Write{content, file_path} or an
+// Edit{file_path, new_string, old_string}, the short identifying field is
+// admitted before the bulk text can spend the budget, where sorted-key order
+// would put content ahead of file_path and reproduce the original complaint.
+//
+// An entry that does not fit WHOLE is dropped and the walk stops; it is never
+// shortened to fit. That buys the invariant that every value on the wire is
+// either the input's value verbatim or that value cut at exactly
+// maxInputValueRunes, which is one reject branch fewer and a cleaner client
+// contract. It costs nothing measurable — the peak observed Edit reduces to
+// roughly file_path plus two capped values, inside the budget — so do not
+// "improve" this into a shorten-to-fit path.
+//
+// A dropped field is simply ABSENT: this payload deliberately carries no
+// truncated_fields list (#1678), the "…" marker is this wire's value-level
+// convention, and input_summary remains the whole-input fallback.
+func inputFields(raw json.RawMessage) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	// The decode is what makes "not a JSON object" free: an array, number,
+	// string or bool all fail to unmarshal into a map, and so does a malformed
+	// blob. A literal null succeeds and leaves obj nil, which the length check
+	// then catches.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil
+	}
+
+	type field struct {
+		key   string
+		value string
+		// runes is the value's length charged against the budget: PRE-ellipsis
+		// content, which is what the constants' arithmetic bounds, so it is the
+		// capped length rather than len(value) whenever value carries a "…".
+		runes int
+	}
+	fields := make([]field, 0, len(obj))
+	for k, v := range obj {
+		if utf8.RuneCountInString(k) > maxInputKeyRunes {
+			continue
+		}
+		s := inputValue(v)
+		n := utf8.RuneCountInString(s)
+		if n > maxInputValueRunes {
+			n = maxInputValueRunes
+		}
+		fields = append(fields, field{key: k, value: truncate(s, maxInputValueRunes), runes: n})
+	}
+	sort.Slice(fields, func(i, j int) bool {
+		if fields[i].runes != fields[j].runes {
+			return fields[i].runes < fields[j].runes
+		}
+		return fields[i].key < fields[j].key
+	})
+
+	var out map[string]string
+	budget := maxInputTotalRunes
+	for _, f := range fields {
+		cost := utf8.RuneCountInString(f.key) + f.runes
+		if len(out) >= maxInputFields || cost > budget {
+			break
+		}
+		budget -= cost
+		if out == nil {
+			out = make(map[string]string, len(fields))
+		}
+		out[f.key] = f.value
+	}
+	return out
+}
+
+// inputValue renders one decoded input value as the string the wire carries: a
+// JSON string arrives DECODED, every other JSON type as its compact JSON form
+// (interior whitespace stripped, as inputSummary does for the whole blob).
+//
+// The string case is selected on the leading quote rather than on whether an
+// unmarshal into a string SUCCEEDS, and the difference is not stylistic: a JSON
+// null unmarshals into a string without error and leaves it "", so the
+// success-based form would render null as an empty value instead of as the
+// literal "null" its non-string siblings get.
+//
+// The compaction cannot fail for a value that came out of a successful decode,
+// so the guard returns the bytes unchanged rather than inventing a rejection —
+// handing back what was handed in is the honest answer for an opaque blob.
+func inputValue(raw json.RawMessage) string {
+	if v := bytes.TrimLeft(raw, " \t\r\n"); len(v) > 0 && v[0] == '"' {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			return s
+		}
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return string(raw)
+	}
+	return buf.String()
+}
+
 // resultSummary derives a human-readable précis of a tool result's content,
 // exhaustive over the sealed ToolContent sum type so a future producer variant
 // cannot silently vanish. nil (the legal status-only ToolUpdate) yields "".
+//
+// Every arm is bounded by the one maxResultSummaryRunes, not by a per-arm
+// exception. The cap is inert for two of them — a DiffContent carries a path and
+// a TerminalContent carries "terminal " + id, neither of which approaches it —
+// so the behavioural change is scoped to the TextContent arm, the only one the
+// live producer emits; one rule is cheaper to read and to test than three.
+//
+// is_error is deliberately NOT visible here. The flag is derived at the MapEvent
+// call site, and an error result is truncated at exactly this bound: uncapped is
+// unavailable (a failing build dumps as much as it likes, and an unbounded field
+// on a frame with a hard 65519-byte cap is a lost control frame waiting to
+// happen), and giving errors the envelope's own ~10693-rune headroom instead
+// would be a distinction with no behavioural difference on any content that
+// exists (#1680). Keeping the flag out is what keeps this signature and arm
+// count unchanged.
 //
 // The live inbound producer (internal/streamsup's toolResultContent) only ever
 // emits TextContent or nil; the Diff/Terminal renderings are unreachable today
@@ -335,11 +705,11 @@ func inputSummary(raw json.RawMessage) string {
 func resultSummary(c turnevent.ToolContent) string {
 	switch v := c.(type) {
 	case turnevent.TextContent:
-		return truncate(v.Text, maxSummaryLen)
+		return truncate(v.Text, maxResultSummaryRunes)
 	case turnevent.DiffContent:
-		return truncate(v.Path, maxSummaryLen)
+		return truncate(v.Path, maxResultSummaryRunes)
 	case turnevent.TerminalContent:
-		return truncate("terminal "+v.TerminalID, maxSummaryLen)
+		return truncate("terminal "+v.TerminalID, maxResultSummaryRunes)
 	default:
 		return ""
 	}

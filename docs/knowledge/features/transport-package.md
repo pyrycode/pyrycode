@@ -165,12 +165,12 @@ A non-101 HTTP response to the WS upgrade (e.g. a `404` because the relay URL ha
 `internal/transport/wssclient_test.go` (~520 LOC, stdlib + `coder/websocket`):
 
 - `newClientForTest(t, cfg, testOpts)` — shorter cadence constants + deterministic seed for sub-second tests.
-- `newTestRelay(t)` — `httptest.NewServer` with a `coder/websocket.Accept` upgrader, ping counter, pong suppression, force-close, optional echo loop.
+- `newTestRelay(t)` — `httptest.NewServer` with a `coder/websocket.Accept` upgrader, ping counter, pong suppression, force-close, optional echo loop. `relayCtrl` registers a conn (and signals `connectedCh`) only *after* `Accept` returns — later than the client's own dial, which unblocks as soon as the 101 response is written. A test that force-closes immediately after seeing the client connect must wait on `relayCtrl.connectedCh` too, or it can race `ForceClose` against an empty conn slice. Waiting on `relayCtrl.connectedCh` is necessary but not sufficient for a *second* drop in the same test: `Client.Connected` is buffer-1 drop-on-full, so the client-side gate must also drain before the drop — otherwise the post-drop read can consume the stale first-conn token and pass vacuously instead of observing the reconnect. Three call sites now apply this ordering (`TestConnected_DropsWhenObserverSlow`, `TestBackoff_ResetAfterStableConnection`, `TestConnected_FiresOnEveryConnect`); a fourth is the point at which a shared `relayCtrl` wait helper stops being premature.
 
 Pinned behaviour:
 
 - `TestBackoff_Sequence` — attempts 1..10, base in `[base*0.8, base*1.2]`. Caps at 30s from attempt 6.
-- `TestBackoff_ResetAfterStableConnection` — uptime ≥ `stabilityReset` resets attempt counter to 1.
+- `TestBackoff_ResetAfterStableConnection` — table-driven, two rows (stable uptime resets the counter to 1 / brief uptime keeps it climbing). Verified off the `"transport: connected"` log record (`connectedAttempt`/`waitConnectedAttempt` helpers), not a dial-interval bound: the post-serve path redials immediately with no backoff sleep, so no wall-clock gap between a healthy disconnect and the next dial carries a term the attempt counter controls. A flaky duration bound on this path is a sign to trace which sleep it actually contributes, not to widen the bound.
 - `TestPing_FiredAt30s` — ping cadence (skipped under `-short`; uses 50ms test interval).
 - `TestPongTimeout_TriggersReconnect` — pong-suppressed relay → second dial within ~80ms test pong timeout.
 - `TestClose_OnContextCancel` — `cancel(ctx)` returns `Connect` with `context.Canceled` within 1s.
@@ -184,6 +184,7 @@ Pinned behaviour:
 - `TestRealDial_NetworkFailureNotUpgradeRejected` (#631) — `realDial` against a reserved-then-released port (refused, `resp == nil`) → plain `"dial:"` error, **not** `ErrUpgradeRejected`. Together these pin the coder/websocket `resp != nil ⟺ non-101 response` classification.
 - `TestConnect_LoudOnFirstUpgradeReject` (#631) — `dialFn` returns an `ErrUpgradeRejected`-wrapped error every attempt; a recording `slog.Handler` asserts exactly **one** WARN (carrying the actionable path hint) on the first attempt with subsequent attempts demoted to INFO — pins AC#1's "loud on the first failed upgrade, not buried".
 - `TestClient_IsConnected` (#874) — `false` before `Connect`; `true` once a live conn is established (agrees with `Send` no longer returning `ErrNotConnected`); `false` after `Close` (the `closeCh` gate, despite `c.conn` staying non-nil).
+- `TestConnected_FiresOnEveryConnect` (#1803) — four ordered gates, not two: wait for the relay to register conn #1, drain `Connected()`, force-close, then wait for the relay to register conn #2 *before* re-checking `Connected()`. Splitting the reconnect wait from the signal check gives a red run a single cause — `client never reconnected to the relay` (harness/dial fault) is now unreachable from the same assertion as `Connected did not fire after reconnect` (a real signal regression), where before both collapsed into one message. Confirmed non-vacuous by mutant: a `sync.Once`-gated `connectedCh` push (fires once, never again) reddens this test at the signal gate specifically, not the reconnect gate.
 
 ## Consumers and roadmap
 

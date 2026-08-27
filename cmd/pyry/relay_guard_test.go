@@ -157,6 +157,45 @@ var excludedTypes = map[string]string{
 	// #1638) — Assertion #3 reports an unclassified constant, not an unemitted
 	// one.
 	"TypeModelAnnounced": "push",
+
+	// outbound push — the v2 model-list report (#1704). Outbound-only like the six
+	// above, and mandatory here from the moment the constant exists rather than
+	// from the moment something emits it (the turnbridge mapping is #1848, the
+	// emission #1849) — Assertion #3 reports an unclassified constant, not an
+	// unemitted one. It is a push and not a reply because this slice declares no
+	// inbound request verb: an inbound type needs a handler in Handlers or
+	// dispatchAppFrame or Assertion #1 fails, and filing a handler-less verb here
+	// to dodge that would be a lie to the guard. It shipped as a PUSH rather than a
+	// reply: #1849 emits it from interactiveTurnEmitterV2.Handle on the interactive
+	// turn lane, so this entry stays "push". A later ticket picking request/reply
+	// would still have to declare the verb together with its handler.
+	"TypeModelList": "push",
+
+	// outbound push — the v2 slash-command-list report (#1726). Outbound-only like
+	// the seven above, and mandatory here from the moment the constant exists
+	// rather than from the moment something emits it (the producer is #1720) —
+	// Assertion #3 reports an unclassified constant, not an unemitted one. It is a
+	// push and not a reply because this slice declares no inbound request verb: an
+	// inbound type needs a handler in Handlers or dispatchAppFrame or Assertion #1
+	// fails, and filing a handler-less verb here to dodge that would be a lie to
+	// the guard. If #1720 picks request/reply, the verb and its handler land
+	// together and this entry becomes "reply".
+	"TypeSlashCommandList": "push",
+
+	// pending handler — the v2 attachment chunk (#1752). Its own label rather
+	// than one of the eight pushes above, because the frame is BIDIRECTIONAL:
+	// upload rides it client→daemon and retrieval rides it daemon→client, so
+	// "push" and the reason its neighbours give for it ("this slice declares no
+	// inbound request verb") would both be false here. inboundTypes is wrong
+	// too — this slice ships no dispatch, so Assertion #1 would fail it by
+	// construction. Excluded under the reason that is actually true: the inbound
+	// leg has no handler YET. #1744 adds the dispatchAppFrame case, at which
+	// point this entry moves to inboundTypes as "switch-intercepted". TypeHello
+	// above is the precedent — a borderline phone→binary type deliberately not
+	// filed inbound, carrying its own label. Mandatory here from the moment the
+	// constant exists: Assertion #3 reports an unclassified constant, not an
+	// unemitted one.
+	"TypeAttachmentChunk": "pending handler (#1744)",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

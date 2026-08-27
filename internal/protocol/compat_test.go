@@ -72,6 +72,16 @@ func TestIsKnownAppType(t *testing.T) {
 		// also what keeps the type off the inbound path — a phone must never be
 		// able to send a model_announced frame into dispatch.Route.
 		{"model_announced-rejected", TypeModelAnnounced, false, ErrUnknownType},
+		// the v2-only model-list report: an outbound binary → phone report an old
+		// phone never receives, so IsKnownAppType must reject it. Rejection is also
+		// what keeps the type off the inbound path — a phone must never be able to
+		// send a model_list frame into dispatch.Route.
+		{"model_list-rejected", TypeModelList, false, ErrUnknownType},
+		// the v2-only slash-command-list report: an outbound binary → phone report
+		// an old phone never receives, so IsKnownAppType must reject it. Rejection
+		// is also what keeps the type off the inbound path — a phone must never be
+		// able to send a slash_command_list frame into dispatch.Route.
+		{"slash_command_list-rejected", TypeSlashCommandList, false, ErrUnknownType},
 		// v2-only screen-snapshot types are likewise not v1-compatible.
 		{"request_snapshot-rejected", TypeRequestSnapshot, false, ErrUnknownType},
 		{"screen_snapshot-rejected", TypeScreenSnapshot, false, ErrUnknownType},
@@ -116,6 +126,12 @@ func TestIsKnownAppType(t *testing.T) {
 		// the v2-only session-error frame is binary → phone; an old phone must
 		// never receive it, so IsKnownAppType must reject it.
 		{"session_error-rejected", TypeSessionError, false, ErrUnknownType},
+		// the v2-only attachment chunk: an old phone must never receive one, so
+		// IsKnownAppType must reject it. Rejection is also what keeps the type off
+		// the v1 inbound path, and here that half is the load-bearing one — the
+		// upload leg really is inbound, so this is the structural bar against a v1
+		// client sending an attachment_chunk frame into dispatch.Route.
+		{"attachment_chunk-rejected", TypeAttachmentChunk, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -215,6 +231,12 @@ var v2OnlyTypes = map[string]bool{
 	TypeRateLimited: true,
 	// v2 announced-model report.
 	TypeModelAnnounced: true,
+	// v2 model-list report.
+	TypeModelList: true,
+	// v2 slash-command-list report.
+	TypeSlashCommandList: true,
+	// v2 attachment vocabulary.
+	TypeAttachmentChunk: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -280,6 +302,12 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRateLimited,
 		// v2 announced-model report.
 		TypeModelAnnounced,
+		// v2 model-list report.
+		TypeModelList,
+		// v2 slash-command-list report.
+		TypeSlashCommandList,
+		// v2 attachment vocabulary.
+		TypeAttachmentChunk,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
@@ -314,6 +342,13 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeRelayServerIDConflict":       CodeRelayServerIDConflict,
 		"CodeSessionNotFound":             CodeSessionNotFound,
 		"CodeSessionBlocked":              CodeSessionBlocked,
+		"CodeAttachmentInvalidChunk":      CodeAttachmentInvalidChunk,
+		"CodeAttachmentIntegrityFailed":   CodeAttachmentIntegrityFailed,
+		"CodeAttachmentTooManyUploads":    CodeAttachmentTooManyUploads,
+		"CodeAttachmentTooLarge":          CodeAttachmentTooLarge,
+		"CodeAttachmentStorageFailed":     CodeAttachmentStorageFailed,
+		"CodeAttachmentNotFound":          CodeAttachmentNotFound,
+		"CodeAttachmentStreamAborted":     CodeAttachmentStreamAborted,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -330,6 +365,13 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeRelayServerIDConflict":       "relay.server_id_conflict",
 		"CodeSessionNotFound":             "session.not_found",
 		"CodeSessionBlocked":              "session.blocked",
+		"CodeAttachmentInvalidChunk":      "attachment.invalid_chunk",
+		"CodeAttachmentIntegrityFailed":   "attachment.integrity_failed",
+		"CodeAttachmentTooManyUploads":    "attachment.too_many_uploads",
+		"CodeAttachmentTooLarge":          "attachment.too_large",
+		"CodeAttachmentStorageFailed":     "attachment.storage_failed",
+		"CodeAttachmentNotFound":          "attachment.not_found",
+		"CodeAttachmentStreamAborted":     "attachment.stream_aborted",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))

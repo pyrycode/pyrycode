@@ -72,7 +72,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `ev` concrete type | `typ` | `payload` | `ok` |
 |---|---|---|---|
 | `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
-| `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput)}` | true |
+| `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678) | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content)}` | true |
 | `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
@@ -85,6 +85,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `ThinkingProgress` (#1386) | `TypeThinkingProgress` | `ThinkingProgressPayload{tc.ConversationID, ev.EstimatedTokens, ev.EstimatedTokensDelta}` (`tc.TurnID`/`tc.Seq` ignored — a periodic reading of an inference request in flight, not a turn-scoped fact) | true |
 | `RateLimited` (#1410) | `TypeRateLimited` | `RateLimitedPayload{tc.ConversationID, ev.Status, ev.LimitType, ev.ResetsAt, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored — a usage-limit window is a condition of the account, orthogonal to whichever turn observed it). Nil `TruncatedFields` left nil, and here that nil is what reaches the wire as `null`: unlike `BackgroundTaskRosterPayload` two rows up, `RateLimitedPayload` deliberately has **no** `MarshalJSON`, because nothing-was-cut is an absence. `ResetsAt` crosses unclamped and unvalidated in both directions; neither string is re-capped (the producer bounded both at construction) | true |
 | `ModelAnnounced` (#1638) | `TypeModelAnnounced` | `ModelAnnouncedPayload{tc.ConversationID, ev.Model, ev.Truncated}` (`tc.TurnID`/`tc.Seq` ignored — an announced model is a property of the turn's configuration, not a turn boundary: claude emits its `init` line once per turn, and `TestTurnMarkFor_TotalOverEveryVariant` pins the lifecycle answer as `turnMarkNone`). `Model` crosses byte-for-byte — no lowercasing, no re-cap, no charset check: the producer already bounds it at `streamsup`'s `maxModelField`, and `internal/relay`'s `validModel` is a deliberately different rule (it bounds a phone-supplied override, not a claude-supplied report). No suppression branch — a zero-value `ModelAnnounced` maps rather than dropping, the same posture `ThinkingProgress` and `RateLimited` both state. `ModelAnnouncedPayload` has no slice field and, unlike `RateLimitedPayload` one row up, no `MarshalJSON`, so the nil-vs-`[]` hazard does not arise here | true |
+| `ModelList` (#1848) | `TypeModelList` | `ModelListPayload{tc.ConversationID, models, ev.DroppedModels}` (`tc.TurnID`/`tc.Seq` ignored — one `initialize` exchange per child, not even per-turn, opens and closes no turn; `turnMarkFor` answers `turnMarkNone` by construction). `ev.Models` looped into `[]protocol.ModelOption`, nil left nil (`ModelListPayload.MarshalJSON` owns nil→`[]`, the `ToolStart`/`BackgroundTaskRoster` rule); each row's six fields cross verbatim, including `EffortLevels` (nil→`[]` via `ModelOption.MarshalJSON`) and `TruncatedFields` (nil stays nil — that field is deliberately exempt from normalisation, so an absence reaches the wire as `null`, the opposite polarity from `EffortLevels` one field over). `DroppedModels` is carried from the decode, never recomputed from `len(models)` and never a constant. No re-cap, re-order or charset check of any field — the producer already bounds all three dimensions (`streamsup`'s `maxModelListEntries`/`maxModelResolved`/`maxModelEffortLevel*`), and `internal/relay`'s `validModel`/`validEffort` bound a phone-supplied *inbound* value, not this outbound report. No suppression branch — a zero-value `ModelList` maps, `ModelAnnounced`'s posture unchanged | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
@@ -120,6 +121,31 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   with a decoded-payload presence assertion on the recorded push; the payload half is
   what actually caught the arm dropping the event silently — the log-absence half
   alone stayed green throughout.
+- **Pinning "entry order is preserved" needs a non-monotonic fixture, not just two
+  distinguishable entries.** `ModelList`'s outbound row (#1848) uses two entries
+  whose `ResolvedModel`/`Value`/`DisplayName` all happen to sort ascending; the
+  row's own comment claims a reversal *or a re-sort* is caught, but an ascending
+  canonicalising sort is a no-op against an already-ascending fixture — only the
+  reversal is. Code review found this by running the sort mutant, not by reading
+  the comment. Two entries can only ever be monotonic or reversed; three
+  non-monotonic entries (e.g. Beta, Alpha, Gamma) are the minimum that catches a
+  sort in either direction. Unfixed as of #1848 (a single SHOULD FIX, below the
+  review's three-finding action threshold) — the fixture and its overclaiming
+  comment still stand; correct both the next time this row is touched.
+- **A row pinning a mutate-through mapper needs its `ev` and `wantPayload` built
+  from two separate slice literals, not one shared between them.** If the
+  expected payload is built by re-slicing the same backing array as the input
+  event, an in-place sort or dedupe inside the mapper's loop mutates both sides
+  together and `reflect.DeepEqual` stays green. `ModelList`'s rows (#1848) spell
+  the same effort-level and truncated-field slices out twice on purpose. This is
+  more than a test nicety here: `sessionModelHold` (#1840) retains the same
+  `turnevent.ModelList` without copying and is read on a relay-leg goroutine, so a
+  mapper that mutated through would be a data race in production, not merely a
+  wrong test result. The same asymmetric-nil hazard applies to a byte-level wire
+  test: `ModelOption.EffortLevels` (nil→`[]`) and `TruncatedFields` (nil stays
+  `null`) sit on adjacent fields with opposite rules, and copying either row's
+  `want`/`notWant` pair onto the other passes against exactly the allocating
+  mapper the test exists to catch.
 
 ### `BuildTurnState` — the lifecycle payload builder
 
@@ -140,18 +166,127 @@ pure helpers derive a bounded, single-line summary:
 - **`resultSummary(turnevent.ToolContent)`** — **exhaustive** over the sealed
   `ToolContent` sum type so a future producer variant cannot silently vanish:
   `nil`→`""` (the legal status-only `ToolUpdate`), `TextContent`→its text,
-  `DiffContent`→`Path`, `TerminalContent`→`"terminal <id>"` — each truncated. The
-  live inbound producer (`internal/streamsup`'s `toolResultContent`) only ever
-  emits `TextContent` or `nil`; the Diff/Terminal arms are unreachable today but
-  handled (kept deliberately minimal) until a producer (the ACP adapter #600, or
-  a refinement) emits them.
+  `DiffContent`→`Path`, `TerminalContent`→`"terminal <id>"` — each truncated at
+  `maxResultSummaryRunes` (10000, #1680), not `maxSummaryLen`. The cap is inert
+  for the Diff/Terminal arms (neither approaches it) and applies to all three
+  anyway — one rule is cheaper to read and test than a per-arm exception. `is_error`
+  does not change the bound: the flag is derived at the `MapEvent` call site and
+  never reaches `resultSummary`, so a failed tool's result is truncated exactly as
+  a successful one's is. The live inbound producer (`internal/streamsup`'s
+  `toolResultContent`) only ever emits `TextContent` or `nil`; the Diff/Terminal
+  arms are unreachable today but handled (kept deliberately minimal) until a
+  producer (the ACP adapter #600, or a refinement) emits them.
 - **`truncate(s, max)`** — returns `s` unchanged at ≤ `max` runes; otherwise cuts at
   `max` runes (`[]rune`, not bytes) and appends `"…"`. Rune-aware so multibyte text
   never splits mid-rune.
 
-`const maxSummaryLen = 200` bounds the précis to one line of ≤ 200 runes — a
-**phone-display** bound, not a wire constraint (the envelope cap is far larger);
-tunable if the mobile view wants a different cap.
+`const maxSummaryLen = 200` bounds the **input** précis to one line of ≤ 200
+runes — a **phone-display** bound, not a wire constraint (the envelope cap is far
+larger); tunable if the mobile view wants a different cap. It stopped bounding the
+result précis in #1680: results are an order of magnitude bigger than inputs
+(11379 measured local tool results, mean 2959 characters, median 721; only 22%
+survived the 200-rune cap whole) and the producer applies no cap of its own, so
+the result side needed its own **wire** constraint rather than a display one.
+
+`const maxResultSummaryRunes = 10000` is that constraint — deliberately
+`maxDeltaTextBytes`'s number (`cmd/pyry`, the other free-text field on a v2
+envelope), so the two don't drift apart for no reason. Its doc comment carries
+the full six-bytes-per-rune arithmetic (`encoding/json`'s `SetEscapeHTML`
+default makes `'<'`/`'>'`/`'&'`/control bytes cost 6 wire bytes each, a multibyte
+rune is emitted raw so it never gets worse) and a never-raise rule with two
+reasons: the measured worst case (a `'<'`-filled 64525-rune result with hostile
+64-rune identity fields) is 61363 B against the 65519-byte envelope cap — 93.7%,
+~4.2 KB of headroom — and `tool_result` is control-class in `internal/eventring`,
+preferentially retained up to `MaxEventsPerConversation` (1024) per conversation
+holding the marshalled bytes, so raising the rune cap also multiplies the ring's
+worst-case per-conversation footprint (~1.4 MiB → ~59 MiB at 10000). 16000 was
+measured and rejected at 96309 B, 47% over the cap — exceeding it doesn't
+truncate the frame, it **loses** it, and `tool_result` is never-droppable, so the
+operator would see an empty row rather than a shortened one.
+
+**A worst-case envelope measurement has to pick the worst case of its `bool`
+fields too.** `TestToolResultPayload_FitV2EnvelopeCap` (`internal/turnbridge`,
+not `internal/protocol` — see the `maxInputFields` lesson below on why a test
+that can't call the unexported helper doesn't stand on the constant) drives the
+real `resultSummary` and logs 61363 B, one byte over the spec's hand-computed
+61362: `"is_error":false` costs one more wire byte than `true`, and the field is
+never `omitempty`. The test's two mutants (`maxResultSummaryRunes` → 16000; the
+`TextContent` arm returns `v.Text` uncapped) die at different rungs — the
+uncapped arm is caught by the test's rune-count precondition before anything is
+marshalled, while only the raised-cap mutant reaches the `< 65519` byte
+assertion. That split means the precondition is load-bearing coverage, not a
+courtesy guard: deleting it as "redundant" would leave the uncapped-arm mutant to
+die on a byte-count failure instead of a legible message naming the arm.
+
+`docs/protocol-mobile.md` § `tool_result` documents the wire shape (the
+10000-rune cap, the `…` marker, that `is_error` does not change the bound, and
+the six-bytes-per-rune arithmetic) and states the same **display string, not a
+capability** hazard § `tool_use` states for `Input` — a tool result is raw
+command output or file contents, so a `'<'`-dense result is the ordinary case,
+not the contrived one.
+
+### Per-field input extraction (`inputFields` / `inputValue`, #1678)
+
+`inputSummary` flattens the whole tool input to one 200-rune line, which buries
+the field an operator actually wants (an `Edit`'s `file_path`) inside the bulk
+text it precedes. `inputFields(ev.RawInput)` sends the input's own top-level
+fields instead, each bounded independently, and populates `ToolUsePayload.Input`
+alongside — not instead of — the unchanged `inputSummary`. `RawInput` is read
+twice on the same `ToolStart` arm and the two readings are deliberately
+independent: a summary derived *from* the capped fields would silently change
+`inputSummary`'s value, which this ticket must not do.
+
+Behaviour: `len(raw) == 0`, a non-object (array/number/string/malformed), or an
+empty object all yield `nil` — `inputSummary`'s existing "malformed blob is a
+field-less tool_use, not an error" posture, extended to the map. Every value is
+the input's own value **verbatim**: a JSON string is *decoded* (so an embedded
+newline is a newline, not a re-quoted JSON literal), any other JSON type is its
+compact JSON form. Entries are admitted **shortest value first**, ties broken by
+key, against `maxInputTotalRunes`; an entry that does not fit whole is dropped,
+never shortened, and the walk stops there. Shortest-first is what actually fixes
+the reported bug — for a `Write{content, file_path}` or an `Edit{file_path,
+new_string, old_string}`, the short identifying field is admitted before the
+bulk text can spend the budget. **Sorted-key order silently reproduces the
+original complaint**: `content` sorts before `file_path` and the budget is spent
+before the identifying field is ever considered — this is a real trap, not a
+hypothetical one, and any future rework of the admission order needs a
+regression case shaped like it (`TestInputFields`'s `Write`-shaped row pins it).
+
+**A `json.Unmarshal` trap that shipped correct only because a test happened to
+catch it:** deciding "is this value a JSON string" by *trying* `json.Unmarshal(v,
+&s)` and checking the error is wrong — a JSON `null` unmarshals into a string
+successfully and leaves `""`, silently rendering `null` as an empty value instead
+of the literal `"null"` its non-string sibling values get. `inputValue`
+discriminates on the value's **leading `"` byte** instead, which is the only form
+immune to this. The bug was caught in code review, not by design — the one table
+row in `TestInputFields` covering non-string values happened to include a `null`
+alongside a number, bool, array and nested object. A future edit to that row that
+drops the `null` case would let a regression back in unnoticed.
+
+Four new constants beside `maxSummaryLen`, each carrying its escaped-byte
+arithmetic in its own doc comment in `maxDeltaTextBytes`'s form (`cmd/pyry`):
+`maxInputValueRunes` (4000, per-value), `maxInputKeyRunes` (128, drops rather
+than truncates an over-long key — a cut key would misname the field, where a
+cut value is honestly marked with `…`), `maxInputFields` (16, an entry-count
+cap the rune budget alone cannot substitute for, since per-entry JSON
+structure costs bytes a content budget cannot see), and `maxInputTotalRunes`
+(8500, keys and values summed, measured against the 65519-byte envelope cap by
+`protocol.TestToolUsePayload_FitV2EnvelopeCap`). **`maxInputFields` shipped
+correct but with no test standing on it**: code review found that deleting its
+guard leaves both `internal/turnbridge` and `internal/protocol` fully green —
+`TestToolUsePayload_FitV2EnvelopeCap` lives in `protocol`, builds its map by
+hand, and cannot call the unexported `inputFields` at all, so it measures the
+*envelope*, not the *producer's* entry-count guard. Not fixed as part of #1678
+(non-blocking); a future touch of `inputFields` should add the missing
+`TestInputFields` row (an input with more than `maxInputFields` entries,
+asserting exactly `maxInputFields` survive) rather than assume the envelope test
+already covers it.
+
+`docs/protocol-mobile.md` § `tool_use` documents the wire shape (per-value cap,
+total bound, `…` marker, empty-map polarity, and that `Input` values are
+**display strings, not capabilities** — a `file_path` is model-authored text the
+daemon neither resolved nor validated, and a client must not open or execute one
+on its own).
 
 ### What the outbound adapter does NOT do (the seam)
 

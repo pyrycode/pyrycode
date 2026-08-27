@@ -133,6 +133,17 @@ Update `docs/knowledge/INDEX.md` when adding new knowledge docs.
 
 Do **not** write to `docs/lessons.md` (frozen 2026-05-11) or `docs/PROJECT-MEMORY.md` (read-only for agents). Lessons and status land in the ticket's `docs/knowledge/codebase/<N>.md` via the documentation phase.
 
+## Memory index entries
+
+The Claude Code memory index is injected into every agent run and it is capped. Keep tickets out of it entirely.
+
+**Never name a ticket in a memory index entry.** No ticket number in the title, none in the note filename. A ticket's knowledge belongs in the repo, where it is committed, reviewed and unbounded. The documentation phase folds each ticket's lessons into the package overview at `docs/knowledge/features/<package>.md`. A refinement, split or prerequisite decision belongs on the ticket itself as a comment, which the dispatcher already feeds to every later agent on that ticket.
+
+**The index is only for a lesson that outlives its ticket.** Title it with what was learned and no number at all, as in `structured clone preserves an undefined property`. Cite the ticket in the summary if that helps, never in the title and never in the filename.
+
+The dispatcher enforces this deterministically. Between cycles it strips every entry whose title or note filename carries a ticket number, so an entry that names one disappears on its own. The note file stays on disk; only the pointer goes. Writing one is not dangerous, it is just wasted.
+
+Why this rule exists, measured 2026-08-25: the old classifier keyed on the title's first character, ticket entries titled with a decoration in front of the number were read as permanent lessons, and 216 curation passes and about 34 hours of blocked dispatch went into hand-trimming a file that should never have held them.
 ## Testing
 
 Tiers, cheapest first — `docs/release-tooling.md` is the runbook:
@@ -152,6 +163,8 @@ Tiers, cheapest first — `docs/release-tooling.md` is the runbook:
 - The package fails to build: zero tests run, exit 0 through any shell wrapper.
 
 Count the `=== RUN` lines. A healthy full run is in the 700s as of August 2026 and reads zero when the build is broken. Roughly a dozen tests skip by design on every run — opt-in evidence probes behind their own environment flags, plus MCP smoke tests needing `ANTHROPIC_API_KEY`, which is a different credential from the subscription login. Read the skip reasons; the skip count alone cannot tell design from breakage.
+
+**A test that writes a fixture does not commit it, and a pipeline run throws the file away.** Agent runs happen in a detached worktree that is removed when the run ends, so anything a test writes under `testdata/` goes out with it. Only what reaches a commit survives. On 2026-08-25 #1763's live gate ran its three-arm `initialize` capture green — 749 checks executed, 0 failed, real tokens spent — and landed zero of the three artifacts its acceptance criteria asked for. That blocked #1764, which reads them, until the capture was re-run by hand from the main checkout and committed. **A ticket that asks for a captured artifact must have the agent `git add` what the run wrote**; #1688's PR is the pattern to copy. A green gate and a spent budget look identical whether the bytes landed or not.
 
 Conventions:
 

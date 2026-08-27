@@ -1994,6 +1994,30 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
   result count is hardcoded rather than captured relative to the count at that
   moment — a low-probability false-red path on a >45s first turn, left as a
   follow-up rather than fixed on this branch). See [`codebase/1582.md`](../codebase/1582.md).
+  **EXTENDED #1838** (bracketed model values, e.g. `opus[1m]`): a second phase,
+  appended after A1–A4 in the same test function rather than a new one, proves
+  that a *bracketed* value delivered in-band takes effect on a running child —
+  the piece `internal/relay`'s hermetic `TestValidModel` /
+  `TestValidModel_ByteSetIsClosed` cannot reach, since `validModel` is
+  unexported and this package cannot call it. The phase never pins a
+  bracketed string: the ticket named `opus[1m]`, measured against claude
+  2.1.220, and the capture this repo now carries (2.1.239) no longer publishes
+  that row at all, so a hardcoded target would fail on menu churn unrelated to
+  the mechanism. It instead calls `RequestInitialize` on the same live child,
+  reads the model menu claude just published off the tap, and picks the first
+  row whose `value` contains `[` and whose `resolvedModel` differs from the
+  model this phase's own baseline turn announced — the second condition is
+  what stops the phase from asserting a change that was already true. Finding
+  none, it `t.Fatalf`s and lists every `value` offered, deliberately not
+  `t.Skip`: a skip would be indistinguishable from this package's
+  absent-credentials skip in the run count, and a claude that stops publishing
+  any bracketed row retires the ticket's premise, which is worth surfacing
+  rather than swallowing. Three assertions mirror A1–A4 for the new baseline
+  (model changed; the announced model matches the chosen row's
+  `resolvedModel`, with a message distinguishing a claude-side inconsistency
+  from a defect in this change if the two disagree; one child pid across the
+  phase). See [`v2-session-manager.md`](v2-session-manager.md)'s `validModel`
+  entry for the grammar the hermetic tests pin.
 
 - `set_permission_mode_probe_test.go` (#1595) — **does the bypass posture have
   an in-band form, the way #1581/#1582 proved the model does?** Four direct
@@ -2312,6 +2336,1115 @@ The composition pattern downstream tests use: `WithWorktree` → `RunPyryAgentRu
     been signalled.
 
   Zero production files touched.
+
+- `initialize_control_names_test.go` (#1696, extended #1712, #1722 and #1763) — **the
+  fourth fixture-name lock in this package. #1696 built it for a single-input
+  namer; #1712 gave the file a second, arm-carrying one and corrected the
+  header section that used to say the family would stay single-input; #1722
+  is what finally gives the arm-carrying namer a caller and turns the arm
+  identifier list into a row table; #1763 grows that row table into its
+  declared two-column shape and retires the single-arm marker #1722 added.**
+  #1688 spent
+  live tokens capturing claude's `initialize` `control_request`/`models` round
+  trip; #1696 minted the filename those bytes land under —
+  `initialize_control_v<slug>.json` via `initControlFixtureName`, reusing
+  #1661's `poolRevokeNamePattern` row type and `anchorFixtureName` — and proved,
+  with no claude binary and no disk I/O, that no minted name can join
+  `fixtureGlob`, `dropcapFixtureGlob`, or #1595's `setModeFamilyGlob`. At the
+  time, `poolRevokeFixtureName` (#1661) carried an arm parameter because #1643
+  had three arms and this capture had one, so #1696 deliberately collapsed the
+  arm dimension: one input, lock table tokens × 1. That was correct for a
+  one-probe family and expired the moment #1715 gave the same capture three
+  arms — through the one-input namer alone, all three arms mint the same path,
+  the last write wins, and the other two vanish with nothing red anywhere.
+  #1712 added `initControlArmFixtureName(versionToken, arm string)` alongside
+  it (never replacing it — every current caller of the one-input namer stayed
+  unchanged until #1722 migrated `writeInitControlFixture` onto the
+  arm-carrying one) plus the read-only `initControlArms` declaration naming
+  #1715's three send-point arms (`before_first_turn`, `after_completed_turn`,
+  `control_no_request`), and a five-subtest lock proving: no minted name joins
+  a committed family; every pattern's control still matches; no minted name
+  collides with what `initControlFixtureName` mints from the same token
+  (string equality, since `testdata/initialize_control_v*` is addressed by no
+  glob at all); distinct declared arms mint distinct names; and every name is
+  one clean path component for hostile inputs in both the token and arm
+  columns. Registered in `finOfflineExecBans` with #1661's list plus
+  `writeFixture`, `captureClaudeVersion`, and `os.LookupEnv` — the middle one
+  because it is the package's own `claude --version` exec and returns exactly
+  this namer's input, making it the exec a developer touching version tokens
+  is likeliest to reach for. #1712 added no new banned names: the second
+  namer performs no I/O either, so the existing seventeen-name entry already
+  covered it.
+
+  #1722 grew `initControlArms` in place from a `[]string` into a
+  `[]initControlArm` of `{id string; probed bool}` rows — the growth point
+  #1712's own doc comment named, rather than a second table keyed by the same
+  names. `probed` marked the one arm `initialize_control_probe_test.go`'s
+  single-arm run actually sent at; `initControlProbedArm` ranged the table
+  and returned that row's `id`, or `""` when zero or more than one row
+  carried the marker. The identifiers, their order and their meaning were
+  unchanged — that was a shape change, not a vocabulary change — and the
+  field was always meant to go away the moment a real three-arm rig ranged
+  the table, at which point the arm becomes a parameter and no row is
+  special. #1763 is that rig.
+
+  #1763 grew `initControlArm` again, from `{id string; probed bool}` into
+  `{id string; sendPointAfterFirstTurn bool; sendsRequest bool}` — two
+  independent columns rather than a single marker, since a live three-arm
+  run needs to know both *where* in the fixed two-turn drive sequence an
+  arm's send point sits and *whether* a control request is actually written
+  there. `control_no_request` carries `sendPointAfterFirstTurn: true` with
+  `sendsRequest: false`: its anchor is read at the same point the other two
+  arms write, which is what keeps the three arms' recorded windows
+  comparable. `probed` and `initControlProbedArm` are deleted with the
+  single-arm selector they existed only to serve, and `runInitControlChild`
+  (`initialize_control_probe_test.go`) now takes `arm initControlArm` as a
+  parameter instead of resolving one internally. The table's own doc bans
+  the two shortcuts a change like this reaches for first — a second table
+  keyed by the ids, or a `switch` on `id` inside the driver — and #1763 uses
+  neither: the send point is one closure called from exactly one of two
+  `if`s, keyed off `sendPointAfterFirstTurn`, with the write itself gated by
+  `sendsRequest` alone.
+
+  **Lessons that outlive these tickets:**
+  - **Collapsing an input dimension can silently empty the hazard shape a
+    lock measures — the collapse itself needs a recorded reason, because the
+    fix is to re-expand it later, not to leave it collapsed.** #1661 covered
+    path-separator escape through its `hostileArms` list, not its token list;
+    #1643's arm names were the separator-bearing inputs, not its version
+    tokens. Dropping the arm parameter in #1696 was correct for that ticket
+    and it also removed nearly every `/`-bearing input from the table — a
+    token list of plausible `claude --version` strings plus `..` and `""`
+    leaves the whole file green against a namer that never calls
+    `versionSlug`. When #1712 put the arm dimension back for a second namer,
+    the separator-bearing shapes came back too, in both the token *and* the
+    arm columns, because both inputs now reach the name. The general form:
+    when a split drops a dimension a predecessor used to cover a property,
+    record *why* the collapse is currently safe — the next reader needs that
+    reason to know when it stops being safe, not just the fact that it was
+    collapsed.
+  - **A token table inherited across a namer whose glob-anchoring shape
+    changed can silently stop exercising the mutant it exists for.** #1712's
+    family-glob subtest needs tokens that smuggle a *different* fixture
+    family's name past the new namer's literal prefix — but #1696's own
+    smuggle tokens were the bare family heads (`permission_protocol`,
+    `set_permission_mode`, `dropped_lines`), and those mint nothing that
+    matches e.g. `set_permission_mode_v*_*.json`: the pattern needs a literal
+    `v` immediately after the head, and the bare head never supplies one.
+    Measured by substitution: swap #1712's `_v1`-suffixed smuggle tokens back
+    for #1696's bare heads and the whole file goes green, all five subtests —
+    the one mutant the family-glob subtest exists to catch stops existing.
+    Any future addition to a family-glob token table must re-check the
+    pattern's exact anchoring, not just reuse the vocabulary of a working
+    table from a sibling lock.
+  - **A pattern-based lock cannot cover a committed family that no glob
+    describes.** True through #1763: `testdata/initialize_control_v*` was
+    matched by no pattern in this package — it was addressed only by exact
+    filename — so the family-glob subtest sweeps straight past the one
+    collision that is actually reachable by a live #1715 run. (#1764 later
+    gave the arm-carrying half of this family its own glob,
+    `initControlArmFixtureGlob`, once a comparison test needed discovery
+    that didn't hard-code a version token — see that entry below. The one
+    legacy unarmed capture, `initialize_control_v2.1.239.json`, still has
+    no glob: `filepath.Match` needs a literal `_` after the version
+    segment, and that file has none.) That gap needed its own
+    string-equality subtest (`initControlArmFixtureName(token, arm) !=
+    initControlFixtureName(token)`) rather than a fourth glob; the empty-arm
+    token/arm pairing is the only row that reddens its mutant (drop the
+    separator between the two slugs and an empty arm makes the two namers
+    agree). Before assuming three globs plus a pairwise-distinctness check
+    cover a fixture family end to end, check whether the family is matched by
+    a glob at all — a committed capture addressed by exact name only needs an
+    equality check, and no amount of pattern coverage substitutes for it.
+  - **`-overlay` cannot verify a check that parses source at run time**, and
+    this is a different reason than #1634's daemon-side overlay gap above.
+    `TestFinOfflineFilesReachNoExecHelper` calls `parser.ParseFile` with a
+    `nil` source, so it reads the registered file off disk at test run time;
+    `-overlay` is a build-time mapping consumed by the `go` command and
+    never interposes on the test binary's own reads. A banned call injected
+    via overlay compiles cleanly while the check parses the unmodified file
+    and stays green — a misleading pass reading as "the ban does not bite."
+    Verifying a ban entry in this file needs a real edit and a real revert,
+    confirmed byte-identical against the pristine file before committing;
+    `-overlay` stays correct for the ordinary compiled-code namer mutants
+    (both files' worth, as of #1712).
+  - **A degenerate-table selector can collapse its distinct failure modes on
+    purpose, if the collapse buys one sole-red instrument instead of two
+    partial ones.** #1722's `initControlProbedArm` returns `""` for both a
+    zero-marked and a multi-marked `initControlArms`, so one non-emptiness
+    assertion is the sole red for both shapes instead of needing a second
+    "exactly one row is marked" count that would otherwise be the only thing
+    catching one of them. The cost lands in the failure message, which has
+    to name both possible causes since the selector itself cannot tell the
+    reader which one produced the empty string — worth the trade whenever a
+    selector's callers only need "did this resolve", not "how did it fail to
+    resolve."
+
+  Zero production files touched by either ticket. See
+  `docs/specs/architecture/1696-initialize-capture-fixture-name-lock.md` for
+  #1696's full design and per-mutant table, and
+  `docs/specs/architecture/1712-arm-carrying-initialize-fixture-name.md` for
+  #1712's. The write half is #1702
+  (#1697, named here at the time, was superseded and closed before it was
+  built); #1713 closed as a split and #1722 is what performs the migration
+  onto `initControlArmFixtureName`, described in the writer entry below.
+
+- `initialize_control_record_test.go` (#1701, extended #1722, #1723, #1731) —
+  **the record half of the `initialize` fixture family: fixes the JSON
+  contract #1688's live capture, #1690's decoder and #1692's fake all read,
+  and pins the fixture standing in for it against the two ways it could
+  degenerate silently.** `initControlFixtureRecord` carries 29 fields (no
+  `env` field; nineteen of them carry `setModeFixtureRecord`'s
+  JSON tags and Go types unchanged). #1722 added the two fields past
+  eighteen: `Arm` — the send point the run *intended*, not a claim that the
+  turn completed; `turn_boundaries` is what tells a reader whether the turn
+  actually did — copied from `setModeFixtureRecord.Arm` at the same tag and
+  the same relative position, and `ControlResponseWithinWait`, a fact that
+  is measured and not derivable. Unlike `ControlResponseRequestIDMatched`,
+  which is a function of two verbatim fields recorded beside it, this one is
+  a function of a bounded wait that has already expired by the time the
+  record is built, and no other field — not even the verbatim response
+  bytes — can reconstruct it, because a `control_response` carries no
+  arrival time relative to the budget the harness chose. #1723 added a third
+  group past those two: `SendPointIndex`, one positional anchor into
+  `stdout_events` (same index units `turn_boundaries` uses — `0` and
+  `len(stdout_events)` are both legitimate readings, not sentinels, and
+  carry no presence flag), plus two reads scoped to the window
+  `stdout_events[anchor:]` it defines — a `system`/`init` line count, and
+  `AfterSendPointResultTrailers`, one `initControlResultTrailer` per
+  `result` line in that window pairing its turn count with its cost and a
+  `TotalCostUSDPresent` flag populated from the trailer's raw bytes, never
+  derived from the decoded value. The nested type is invisible to
+  `reflect.TypeOf(initControlFixtureRecord{}).NumField()` and to the
+  record's same-typed-distinctness property, so it carries its own
+  hand-written listing (`initControlTrailerFields`) and its own three
+  subtests rather than riding the record's existing ones. Nothing computes
+  these fields directly: #1762 fills all three at the fill site
+  (`runInitControlChild`) from `initControlReadWindow`, a pure reader over
+  the recorded lines described in `initialize_control_window_test.go`
+  below. The committed `initialize_control_v2.1.239.json` predates the
+  fields entirely and carries none of the three keys, which is why an
+  artifact from before that ticket is still not readable as a
+  `before_first_turn` capture — it is simply missing the fields, not
+  zero-valued in them. #1731 added a fourth, one-field group:
+  `Redaction []dropcapSubstitution` (tag `redaction`, no `omitempty`) — the
+  census of which redaction classes fired and how often, populated at the
+  fill site (`runInitControlChild`) from what #1733's
+  `redactInitControlRecord` returns, never inside the pass and never inside
+  `writeInitControlFixture`. `[]` versus `null` is deliberate and is the
+  entire distinction: a non-nil empty census means the redactor ran and
+  found nothing, and `null` means it never ran — a reader of a committed
+  fixture could otherwise not tell those apart. That census is an audit
+  trail over the redactor, not a clean bill of health over the artifact: an
+  empty or wrongly-armed class in `newInitControlRedactor`'s table would
+  match nothing and still report `[]` while the file kept the real path
+  under an unarmed class. #1729's deny-scan is the fail-closed net that
+  makes the clean-artifact claim; this field does not. The record's standing
+  instruction — every string-bearing field added here must be visited by
+  `redactInitControlRecord` — now names `Redaction` as its one exception,
+  since its strings are the redactor's own vocabulary (the four
+  `dropcapClass*` identifiers and the `$`-prefixed placeholders
+  `newInitControlRedactor` mints), never child output or an environment
+  value, and since the field is assigned *from* the pass's return, so
+  visiting it would be circular. #1747 added a fifth, one-field group past
+  those four: `CredentialScanApplied map[string]bool` (tag
+  `credential_scan_applied`, no `omitempty`) — `dropcapRecord`'s own field
+  name and Go type reused rather than re-derived, per the shared-field rule
+  above. It is the other half of `Redaction`'s story: not which classes the
+  redaction table rewrote, but which classes a `dropcapScanner`'s needles
+  were **armed** for, populated at the fill site from the scanner the
+  capture built — never computed here. **`dropcapScanner`'s two arming
+  paths disagree about "absent."** `addDynamic` (the two credential
+  classes) appends a needle unconditionally, so an unset
+  `ANTHROPIC_API_KEY` still lands as a `false` key; `addDynamicPath` (the
+  four path classes) calls `dropcapPathSpellings`, which returns `nil` for
+  an empty path, so no needle is appended and `applied()` — which builds
+  its map by iterating `s.needles` — carries **no key at all** for that
+  class. The capture hands `newDropcapScanner` no artifact directory (and
+  `operator_home`'s `realHome` can be empty too, whenever HOME is unset at
+  launch), so `scanner.applied()` alone would have **omitted** those
+  classes rather than recording them as armed-nothing — indistinguishable
+  from a class that scanned and found nothing. `initControlScanApplied`
+  closes the gap at the fill site by adding `false` for any class in its
+  own hand-written `initControlScanPathClasses` list that `applied()`
+  doesn't already carry, touching no existing key; `dropcapScanner` itself
+  is unchanged, since it is shared with the `dropcapRecord` family whose
+  shape is already committed. The field takes `Redaction`'s exception to
+  the visit-every-string-field rule for the same reason: its keys are the
+  scanner's own declared vocabulary (`dropcapClass*` identifiers, the deny-
+  class names, the two credential env-var names), never a matched value —
+  `applied` keys by `n.class`, never `n.value`. **Until #1748 lands, the
+  classes are armed and nothing scans the written bytes with them** — same
+  caveat `Redaction`'s doc already carries, for the same reason: a reader
+  must not mistake a populated field for evidence the artifact was
+  checked.
+  `initControlFullRecord` returns a
+  **fresh pointer per call** rather than a package-level `var`, so #1700's
+  parallel subtests mutating the record are not a `-race` data race. The
+  hand-written `initControlFixtureFields` listing is what #1702 zips against
+  both sides of its round trip instead of restating the field set; its
+  length is asserted against the struct's `reflect` field count, so a field
+  added later with no row reddens instead of going silently unchecked.
+  Registered in `finOfflineExecBans` with #1696's seventeen names copied
+  whole — this file performs no I/O in either direction, unlike #1702's
+  writer, which is why the two files need separate, differently-scoped
+  entries rather than one shared one.
+
+  **Lessons that outlive this ticket:**
+  - **A duplicate-name row in a hand-written listing reddens more than the
+    property it was written to test, so a mutant table has to be checked by
+    failure *message*, not by which subtest went red.** Listing `argv` twice
+    while dropping `prompts` was predicted to redden only the
+    listing-covers-every-field subtest's uniqueness pass. It also puts two
+    identical `[]string` rows into the same-typed-fields-distinct
+    comparison, so that subtest fires as collateral — while the length check
+    inside the first subtest stays green the whole time, still counting the
+    field total. Two subtests firing where one was predicted is invisible if
+    you only read red/green; it shows up only in what each failure message
+    says caused it. Any future mutant table in this family that predicts
+    "exactly one subtest reds" needs its message read, not just its count.
+  - **A fixture literal that is deliberately not a real value needs its own
+    slugging property pinned, or two unrelated writer mutants both go dead
+    without the round trip noticing.** #1722's `initControlFullRecord` needed
+    a synthetic `after_completed_turn-FIXTURE` arm for the same reason
+    `claude_version` is `2.1.220-FIXTURE`: every declared arm in
+    `initControlArms` is already inside `versionSlug`'s clean character
+    class, so a "tidied" literal reading a real arm would let the round
+    trip's name assertion pass against *both* a writer that interpolates the
+    arm raw and one that hardcodes an arm entirely. Measured by running
+    those two mutants against a clean literal: both went 0-red, and only a
+    widened does-not-survive-slugging subtest caught the difference. A
+    single-mutant matrix would have credited the round trip with coverage it
+    did not have; the pairwise run is what showed one subtest was carrying
+    the weight of two.
+  - **A bool field's non-zero property can forbid the very pair the field
+    exists to express, and the fix is a second record instance, not a
+    weaker property.** `ControlResponseWithinWait` exists to state "bytes
+    captured, wait not satisfied" — but non-zero for a bool means `true`, so
+    the fully-populated fixture, which must carry every field non-zero,
+    necessarily carries the *coherent* pair (`true` beside captured bytes)
+    and cannot demonstrate the discriminating one. #1722 put that pair in a
+    second record instance inside its own round-trip test instead, guarded
+    by a vacuity check that the fixture's response bytes are non-empty
+    before the write. The mutant this catches — the field derived from
+    `len(ControlResponses) > 0` instead of the wait's own result — is
+    invisible to the main round trip, which only ever sees the coherent
+    pair.
+  - **The write-half's touched-name canary selects by the row's Go type, not
+    by field, so it cannot see raw JSON hidden inside a struct-slice row.**
+    #1723's spec predicted that wrapping `TotalCostUSD` in a
+    `json.RawMessage` "to be safe" would trip
+    `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry`'s
+    `wantTouched` assertion — the same canary that catches it on the record's
+    three top-level raw-JSON fields. Measured via `go test -overlay`: it
+    doesn't. `compactInitControlRawRows` matches on the *row's* declared Go
+    type (`json.RawMessage` / `[]json.RawMessage`), and the row here is
+    `[]initControlResultTrailer`, so the touched set never changes; the round
+    trip holds too, because `MarshalIndent` has no interior to indent inside
+    a scalar. The canary only guards a fourth raw-JSON field added directly
+    to the record — a raw-JSON field nested inside a struct-slice element is
+    unenforced by any test in the family and has to stay a doc-comment-and-
+    review rule (`initControlResultTrailer`'s own comment states this
+    outright rather than citing a test that never runs over the value).
+  - **A listing subtest that indexes a fixture's slice panics on an emptied
+    list instead of reddening, which is the wrong failure mode when a sibling
+    subtest's vacuity check exists to report exactly that mutant.** The
+    "trailer listing covers every field" property is a claim about the
+    *type*, not about any one entry, so it has to run over the zero value of
+    `initControlResultTrailer{}` rather than over `entries[0]` — indexing the
+    fixture's `AfterSendPointResultTrailers` would crash the whole test
+    binary against an emptied list, stepping on the non-zero subtest's
+    `t.Fatalf` vacuity control, which is where that mutant is meant to surface
+    cleanly. Any future per-field-listing subtest added to this family should
+    default to the zero value unless it specifically needs a populated entry.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1701-initialize-capture-fixture-record.md` for
+  the full design and the per-field distinctness-group table,
+  `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
+  the arm and wait-result fields, and
+  `docs/specs/architecture/1723-send-point-anchor-and-window-observables.md`
+  for the anchor and window-observable fields. The write half —
+  the writer and the round trip that reuses this file's record and listing —
+  is `initialize_control_writer_test.go` (#1702), described next.
+
+- `initialize_control_window_test.go` (#1762) — **the reader for the
+  send-point window #1723 defined and left unpopulated: a pure, total
+  function over `[]json.RawMessage` and one anchor, returning the window's
+  `system`/`init` count and one `initControlResultTrailer` per `result`
+  line, in arrival order.** `initControlReadWindow` decodes each line in
+  `lines[anchor:]` into `map[string]json.RawMessage` through
+  `initControlWindowField`, which looks a key up and, only if present, runs
+  `json.Unmarshal` into the destination and reports presence independently
+  of whether that decode succeeded — the mechanism #1723's security review
+  asked this ticket to build: `TotalCostUSDPresent` reads the raw key,
+  never `TotalCostUSD != 0`, so a `result` line carrying a string cost
+  still reads present with a zero value instead of being indistinguishable
+  from a line with no cost key at all. A line that fails to decode as a
+  JSON object at all (the shape `setModeRecorder.add` stores for non-JSON
+  child output) is skipped, not aborted — one bad line costs its own entry,
+  never the lines after it. The `system`/`init` count is keyed on both
+  `type` and `subtype`; the committed
+  `testdata/initialize_control_v2.1.239.json` carries six `system` lines
+  that are not `init`, so a `type`-only count reads 7 over a fixture where
+  1 is right. The empty window returns a non-nil, empty
+  `[]initControlResultTrailer{}` rather than `nil` — the only way a
+  committed `[]` can be told apart from a field that was never filled.
+
+  The live fill site (`runInitControlChild`, in
+  `initialize_control_probe_test.go`) reads the anchor as
+  `len(rec.snapshotLines())` immediately before the control line is
+  written, then computes both window reads from that one anchor after the
+  post-join snapshot — one anchor, so the two reads cannot disagree about
+  which window they measured, and nothing claude wrote in response to the
+  request can land before it. The rejected alternative — the `system`/`init`
+  count as a difference of two `snapshotInitModes()` calls taken before and
+  after the send point — is a real race: the two calls take the lock
+  separately, so a line landing in the gap between them is attributed to
+  the wrong side of the anchor and the window under-reports by one.
+  Registered in `finOfflineExecBans` with the same seventeen names
+  `initialize_control_record_test.go` carries — this file performs no I/O
+  in either direction, and the ban entry is what makes that claim
+  mechanical rather than reviewed.
+
+  **Two lessons that outlive this ticket, both about what a mutation table
+  actually proves in this family:**
+  - **Two rows that look like they test the same edge can be non-redundant
+    for a reason invisible without running the mutant.** The offline table
+    has one row at `anchor == 0` and one at `anchor == len(lines)`, sharing
+    one line list. An "ignore the anchor" mutant (`lines[0:]` regardless of
+    `anchor`) reddens **only** the `len(lines)` row — at `anchor == 0` the
+    correct and mutated readers produce the same answer, so that row alone
+    cannot catch it. The `anchor == 0` row's job is the opposite one: it
+    proves the `len(lines)` row's empty result came from the anchor and not
+    from a line list that had nothing to find in it. Neither row is
+    redundant, but the table has to state which mutant each one is *sole
+    red* for, not just assert both — code review caught one such claim that
+    was correct as a purpose statement but not literally sole (a `subtype`
+    check widened to `true` reddens both the subtype row and the
+    `anchor == 0` row, since that row's shared list carries a non-`init`
+    `system` line by construction).
+  - **`reflect.DeepEqual` treats `nil` and `[]T{}` as different, and that is
+    the *only* instrument for a non-nil-empty contract — a `want` literal
+    that omits the slice field defeats it silently.** A `want` written as
+    `initControlWindow{systemInitCount: 1}` carries a **nil**
+    `resultTrailers` and passes equally for a reader that returns `nil` on
+    an empty window and one that returns `[]initControlResultTrailer{}`.
+    Both empty-window rows have to spell the field out explicitly
+    (`resultTrailers: []initControlResultTrailer{}`) for the comparison to
+    mean anything; the shorter, more natural-looking literal is the one
+    that silently inverts the AC.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1762-send-point-window-reads.md` for the full
+  design, per-mutant table and security review.
+
+- `initialize_control_writer_test.go` (#1702, extended #1700 and #1722) —
+  **the write half of the `initialize` fixture family: the
+  directory-injectable, atomic writer for #1701's record, and the offline
+  round trip proving no field is dropped on the way.** `writeInitControlFixture`
+  mirrors #1662's `writePoolRevokeFixture` step for step — `dir` parameter,
+  `os.MkdirAll`, name minted from `out.ClaudeVersion` and `out.Arm` (never
+  `ClaudeVersionRaw`, and never self-formatted) through #1712's
+  `initControlArmFixtureName` — both columns passed through unmodified, so
+  the writer itself formats no filename and slugs nothing — `MarshalIndent`,
+  `.tmp` write, `os.Rename` — and caps `stderr_capture` on a shallow copy
+  (`out := *rec`), whose doc comment states the caveat explicitly: the copy
+  shares every slice header with the caller, so it is safe only because the
+  sole capped field is a `string`; a future writer that caps a slice-valued
+  field would be mutating the caller's backing array through a copy that
+  looks defensive. `compactInitControlRawRows` normalises the record's three
+  raw-JSON-bearing rows (`control_request_sent`, `control_responses`,
+  `stdout_events`) by **Go type**, not by name — a `json.RawMessage` case and
+  a `[]json.RawMessage` case — so a fourth raw-JSON field added later to
+  #1701's record is picked up automatically; the round trip pins that
+  type-scoped selection separately, asserting the touched-name set equals
+  exactly those three, so a normaliser silently widened or narrowed still
+  reddens even though the type switch itself never needs editing. Registered
+  in `finOfflineExecBans` with the same twelve names as #1696 and #1701 carry
+  minus their five I/O names (`filepath.Glob`, `os.ReadFile`, `os.WriteFile`,
+  `os.Create`, `os.ReadDir`) — this file, unlike its two siblings, performs
+  real directory I/O (a write, a read-back, a directory listing), so those
+  five stay available rather than banned; the relative-path hazard that
+  leaves closed for the siblings is closed here instead by the exactly-one-
+  entry assertion, which goes to zero entries if a write escapes to the real
+  `testdata/`.
+
+  **Two lessons that outlive this ticket:**
+  - **The zero-entry arm of an exactly-one-entry assertion doesn't require
+    writing into the committed `testdata/`.** The spec's prescribed mutant
+    for "writer ignores `dir`" was to join a relative `testdata/` path,
+    which lands a real file in the repo and needs a manual delete plus a
+    `git status` check to verify cleanly afterward. Redirecting the writer
+    to a *second* `t.TempDir()` instead hits the identical
+    `len(names) != 1` branch and leaves the worktree untouched — worth
+    reaching for whenever a mutant's only hazard is where its bytes land,
+    not what they are.
+  - **`%v` over a `json.RawMessage` row prints a decimal byte dump, not
+    JSON.** `json.RawMessage` implements `MarshalJSON` but not `String`, so
+    `%v` in the round trip's mismatch message renders a ~300-byte envelope
+    as `[123 34 116 ...]`. Kept for consistency with #1662's sibling, and
+    the row *name* still carries the diagnosis so the test isn't weakened —
+    but a future file in this family that wants a readable raw-JSON diff has
+    to type-switch at the print site; the row's `any` type can't use `%s`
+    without mangling the int and bool rows alongside it.
+
+  Code review flagged, non-blocking: the touched-set guard's failure message
+  names two causes (normaliser widened, normaliser narrowed) but not the
+  third the type-switch design itself predicts — #1701 grows a fourth
+  raw-JSON field, the switch picks it up correctly and automatically, and
+  the hardcoded three-name `wantTouched` reddens against an honest writer
+  and an honest normaliser. The fix is one more clause in the message, not a
+  design change, and was not applied in this ticket.
+
+  #1722 re-pointed `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry`'s
+  `wantName` onto `initControlArmFixtureName(rec.ClaudeVersion, rec.Arm)` and
+  added `TestInitControlFixture_RoundTripsAnUnansweredWaitBesideCapturedBytes`
+  alongside it — the incoherent-pair test described in the record entry
+  above (bytes captured, wait not satisfied), placed in this file because it
+  is the only one in the family whose `finOfflineExecBans` entry permits
+  `os.WriteFile`/`os.ReadFile`. Its vacuity control (`t.Fatalf` if the
+  fixture's `ControlResponses` is empty) follows this file's own
+  `TestInitControlFixture_WriterCapsStderrCapture` precedent below rather
+  than a skip, on the same reasoning: a row that cannot discriminate is a
+  broken instrument, not a passing test.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1702-initialize-capture-fixture-writer-and-round-trip.md`
+  for the full design and the twelve-mutant table, and
+  `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
+  the arm-namer migration and the incoherent-pair test. This closed the
+  `initialize` fixture family's complete/atomic half; bounded closed in #1700,
+  below, which adds a fourth test to this same file and updates the file's own
+  COMPLETE/ATOMIC/BOUNDED self-description and in-file pointers accordingly.
+
+- **`initialize_control_writer_test.go` (#1700 — bounded, same file as
+  above)** — `TestInitControlFixture_WriterCapsStderrCapture` proves the
+  `capFixtureCapture` call on the bytes the writer actually leaves **on
+  disk**: an over-cap ASCII row asserted exactly at `stderrFixtureCap`, and an
+  over-cap multi-byte row (its byte at the cap is a UTF-8 continuation byte,
+  enforced by a `t.Fatalf` vacuity control on the literal itself) asserted as
+  a range plus a prefix check. Each row also confirms the caller's record
+  came back unmutated. Mutation-verified via `go test -overlay` (no worktree
+  writes): the cap-omitted, direct-`truncateString`, over-trim, and
+  caps-the-caller's-record mutants each have exactly one sole-red instrument
+  among the two rows and the no-mutation check.
+
+  **Two lessons that outlive this ticket:**
+  - **A "sole red" claim from the spec is still worth re-measuring, not
+    trusting.** Re-running the mutant matrix surfaced that the multi-byte
+    row's *prefix* clause reddens alongside its *range* clause on the
+    direct-`truncateString` mutant — the substituted U+FFFD is not in the
+    original capture, so both clauses fire together. The row carries two
+    independent discriminators, not one; a future simplification to a single
+    length check would silently drop one of them.
+  - **A hand-rolled `perl -pe 'script' -0777 file` mutation one-liner can
+    silently no-op.** Perl only consumes flags that appear *before* the
+    script argument, so `-0777` placed after it is read as a filename
+    instead, and the "mutated" file comes back byte-identical to its source
+    — a false negative indistinguishable from a dead assertion once the test
+    still passes. `diff -q` each generated mutant against its source and fail
+    loudly on a match; that check is what caught it here.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1700-initialize-fixture-writer-cap.md` for the
+  full design and the five-row mutant matrix.
+
+- `initialize_control_probe_test.go` (#1688, extended #1722 and #1763) —
+  **the live run family for the `initialize` fixtures: one real child, one
+  tool-free probe turn, one `control_request` with subtype `initialize` on
+  the held-open stdin, the reply written through #1702's writer into
+  `testdata/initialize_control_v2.1.239.json` (committed).** Reuses
+  `setModeRecorder`, `setModeWaitFor`, `setModeTurnLine` and
+  `setModeResponseIDMatches` from `set_permission_mode_probe_test.go`
+  wholesale; ports none of that file's arm/verdict machinery (`probeOutcome`,
+  `setModeFieldMatches`, `setModeDirections`) since this run has one arm and
+  no control. Measured against claude 2.1.239: `subtype:"success"`, 6
+  `models` entries, also carrying `commands` (51, for #1683) and `agents` (6).
+  The committed fixture predates #1722's `Arm` field and is **not** renamed
+  or reshaped to carry one — #1763's three-arm rig is the live run that
+  supersedes this one-arm capture, and it leaves this file untouched rather
+  than renaming it: nothing mints its filename any more (see below), so
+  byte-identity holds structurally, not by luck.
+
+  **#1763 replaces the single-arm capture with a three-arm one.**
+  `runInitControlChild` takes its `arm` as a parameter (see
+  `initialize_control_names_test.go` above for the table it ranges) and
+  drives one child per row of `initControlArms` through one shared two-turn
+  sequence — the send point placed before turn 1, between the two turns, or
+  (for `control_no_request`) not written at all, with every arm, control
+  included, driving a full second turn afterwards. That "drive a further
+  turn on every arm" requirement is not incidental: claude emits its
+  `system`/`init` line once per turn rather than once at spawn, so "no
+  further `init` line after the request" observed without a following turn
+  is empty by construction rather than a measurement — the same reasoning
+  `set_permission_mode_probe_test.go`'s control arms already state for
+  itself. An unanswered send point (`ControlResponseWithinWait: false`,
+  `ControlRequestSent: null` on the no-request arm) is a recorded, passing
+  outcome rather than a fatal — `TestRealClaude_InitializeControl_Capture`
+  and its `len(rec.ControlResponses) == 0` fatal are deleted along with the
+  one-arm run they gated, which is also what removes the two-live-children
+  filename race that same test had picked up against this run's
+  `after_completed_turn` arm once #1722 pointed both at
+  `initControlArmFixtureName`. `TestRealClaude_InitializeControl_SendPointArms`
+  is the replacement: one `dropcapScanner` shared across all three arms
+  (safe — append-only during construction, read-only after) but a fresh
+  `dropcapRedactor` constructed *inside* the per-arm loop (mandatory —
+  `dropcapRedactor`'s substitution counters are unlocked and its census
+  accumulates across calls, so a shared one would both race under `-race`
+  and misattribute one arm's redactions into another arm's committed
+  artifact). Each arm's write-set is checked against
+  `initControlArmFixtureName(versionToken, arm.id)`, but only when every
+  declared arm actually produced a path — a `-run` filter or a mid-loop
+  fatal reports the check as unavailable rather than asserting a set claim
+  off a partial run, the same `missing`-guard precedent
+  `TestRealClaude_SetPermissionMode_InBandProbe` already established for
+  this package.
+
+  `initControlChildBudget` rises from 3 to 5 minutes in the same ticket,
+  and for a reason that is easy to miss: doubling the drive sequence (two
+  turn waits, plus a control wait on a requesting arm) pushed the worst-case
+  per-step sum to 225s against a 180s outer deadline — already tripping
+  before spawn and startup are even counted. Every per-step wait in this
+  family exists so that an absent response reads as absence rather than
+  impatience; an outer deadline that can fire first defeats that guarantee
+  for exactly the question this run exists to answer (is a pre-turn
+  `initialize` ever answered at all?). `initControlArmWaitSum(arm)` is a
+  pure helper mirroring the driver's own sequence by hand, and
+  `TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum` (offline,
+  `t.Parallel`, spawns nothing) asserts the deadline dominates it — derived
+  entirely from `initControlChildBudget`/`initControlTurnBudget`/
+  `initControlControlBudget`, never a literal duration, and genuinely red
+  against the pre-raise 3-minute constant.
+
+  `runInitControlChild` used to call `setModeWaitFor(...)` and drop its
+  result into a `t.Logf` alone; #1722 kept that log and also recorded the
+  result as `ControlResponseWithinWait` on the record, resolving the single
+  arm it targeted via `initControlProbedArm` — the one row
+  `initControlArms` marked `probed` — rather than a second spelling of the
+  identifier, offline-pinned by
+  `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm`. **Both the
+  selector and its offline test are gone as of #1763**: `arm` is now a
+  parameter the caller supplies directly (see above), so there is no single
+  probed row left to resolve and nothing left for that test to pin.
+  `ControlResponseWithinWait` itself is unchanged in shape — still recorded
+  per arm, still `false` rather than a fourth state when no wait ran at all
+  (the `control_no_request` arm).
+
+  **The `control_response` payload nests one level deeper than
+  `streamsup/parser.go`'s documented shape accounts for.** That shape records
+  `subtype`/`request_id` inverted under `response` relative to the request —
+  true, and `initControlSummarize` reads it there — but the actual payload
+  (`models`, `commands`, `agents`, `account`, `pid`, …) is nested a further
+  level, under `response.response`. `internal/streamsup` never parses past
+  `subtype`, so its own documented shape was never wrong; it was just not the
+  whole shape a payload-reading caller needs. Any future code that decodes
+  this control-reply's payload — #1690's decoder, #1848's model-list
+  mapper — reads `response.response`, not `response`. The verbatim capture
+  is `initControlFixtureRecord.ControlResponses[0]` in the committed fixture.
+
+  **Lessons #1763 adds, on top of the two below:**
+  - **A doc comment naming another test as precedent is a citation
+    `cite-guard` cannot see, and it goes stale exactly when that precedent
+    is deleted.** `TestInitControlScanApplied_RecordsAnArmedNothingClassForAnAbsentPath`'s
+    own doc pointed at `TestInitControlProbedArm_IsExactlyOneDeclaredNonEmptyArm`
+    as the precedent for an offline test living in this exec-ing file.
+    #1763 deleted that precedent along with `probed` and left the pointer
+    standing — `cite-guard` only resolves `file.go:NNN`-shaped citations, so
+    a bare identifier named in prose passes it clean. What caught it was
+    grepping the deleted identifiers across `internal/` by hand after the
+    edit, not the build. A symbol named in prose as a precedent or a
+    template needs the same sweep a `//`-cited one gets automatically;
+    nothing enforces it for a bare name.
+  - **Nothing couples a hand-derived budget sum to the sequence it
+    describes, so the test proving it needs more than the one subject
+    assertion to mean anything.** `initControlArmWaitSum` mirrors
+    `runInitControlChild`'s drive sequence by hand — two turn waits, plus a
+    control wait on an arm that sends a request — and a future turn added
+    to the driver without a matching edit to the sum would leave
+    `TestInitControlChildBudget_ExceedsEveryArmsPerStepWaitSum` green over
+    an arithmetic that no longer describes the run. That is why the test
+    carries two independent vacuity controls rather than the subject alone:
+    mutation-tested, each is the *sole* red for a different degenerate
+    helper (one that drops the control term, one that ignores
+    `sendsRequest`) the subject assertion alone would miss.
+  - **A per-step budget raise can silently approach `go test`'s own
+    default per-binary timeout, which produces no recorded outcome at
+    all.** The 3m→5m raise puts this file's worst case at 3×300s = 15
+    minutes; `go test`'s default 10-minute timeout is not overridden by
+    `make e2e-realclaude`, only by the dispatcher's own invocation (`-timeout
+    20m`). A binary killed by that timeout panics and records nothing — no
+    artifact, no `context_deadline_tripped` — which is the one outcome this
+    family's per-arm budget guarantee cannot cover. Not a defect as shipped
+    (#1688's real child completed in 3.3s, and the sibling
+    `set_permission_mode` family already carries a larger worst case — 4
+    arms × 4m — under the same Makefile target), but the next raise to
+    either family's budgets should check the invocation's own timeout, not
+    just the per-step sum.
+
+  **Two lessons that outlive this ticket:**
+  - **A "check both placements" instruction, derived correctly from one
+    known fact, can still be one level short — and the computed field built
+    on top of it will report the wrong answer while looking internally
+    consistent.** The spec derived two placements (top level, under
+    `response`) from `streamsup`'s documented `subtype`/`request_id` shape.
+    The first live run of this file read only those two, and recorded
+    `models_present:false` against a reply that carried six models — a
+    `false` that had nothing pointing back at it, because the run had
+    otherwise passed cleanly (a `control_response` arrived, stdout was
+    non-empty). What caught it was reading the produced fixture's raw
+    `control_responses` bytes rather than trusting the summary field they
+    were supposed to justify. For any field a summariser computes by walking
+    a shape nobody has fully decoded yet, diff the summary against the raw
+    bytes it summarises before trusting a green run — a green run only
+    proves the gates it checks, not the fields it computes.
+  - **A credential guard scoped to the surface named in the design is not
+    the same as a credential guard scoped to the surface the ticket
+    commits.** The spec's security review enumerated argv, env and stderr as
+    the credential-bearing surfaces and closed the first two by construction;
+    `initControlScrubbed` guards the third. But every byte this family
+    commits is claude's **stdout**, and no deterministic check runs over it —
+    the PR's clean bill came from two independent human reads of the
+    committed JSON, not from code. `dropped_line_capture_test.go`'s
+    `dropcapScanner` already exists in this package for exactly this (scans
+    arbitrary bytes for credential values and operator-path classes, and
+    records which classes it checked so "no hits" stays distinguishable from
+    "never ran") — a live-capture test that writes stdout-derived bytes to a
+    committed fixture should run it over the marshalled record before the
+    write, not rely on a human `grep`. This was re-measured true on
+    2026-08-24, against the same committed fixture, for `argv[0]`, `cwd` and
+    `memory_paths.auto`: two independent human reads had already passed it.
+    The fix landed as four tickets, not the #1694 this entry originally
+    pointed at (#1694 turned out to be the send-point/session-perturbation
+    ticket, unrelated) — #1732 (below) builds the redaction table; #1733
+    (below) applies it at the fill site; #1747 (below) records which classes
+    a scan armed; #1748 (below) is the fail-closed deny-scan itself, wired in
+    on the write path. #1749 (open) proves the scan refuses one planted
+    record per armed class, not only the `/Users/` class #1748 shipped a row
+    for.
+
+  Code review also flagged, non-blocking: the `!= "null"` guard in
+  `initControlSummarize` — the one thing distinguishing `"models":null` from
+  `"models":[]`, which the function's own doc comment says is exactly what
+  #1690 needs — has no test row pinning it (confirmed by mutation: dropping
+  the guard leaves the summariser's test green). Worth a row before #1690
+  starts decoding against this shape.
+
+  Zero production files touched by any of the three tickets. See
+  `docs/specs/architecture/1688-initialize-control-round-trip-capture.md` for
+  the original design and security review,
+  `docs/specs/architecture/1722-arm-named-initialize-capture-record.md` for
+  the arm-recording and wait-result changes, and
+  `docs/specs/architecture/1763-send-point-arms-live-capture.md` for the
+  three-arm rig. This closes the `initialize` fixture family opened by
+  #1695's split (#1696/#1701/#1702/#1700) and answers the send-point half of
+  the questions #1694 carved out (session perturbation is still open); #1689
+  places its `initialize` trigger on this run's recorded evidence rather
+  than on a guess.
+
+- `initialize_control_redaction_test.go` (#1732) — **the redaction table for
+  the `initialize` fixture family, proved over raw bytes with no record
+  involved.** `newInitControlRedactor(operatorHome, tempHome, workdir,
+  tempDir string) *dropcapRedactor` reuses `dropped_line_capture_test.go`'s
+  `dropcapRedactor` mechanism (`add`, `redact`, `dropcapPathSpellings`,
+  `dropcapSlug`, the four path class constants) unchanged and replaces only
+  its constructor. `newDropcapRedactor` was not reusable as-is: it reads
+  `realHome` and `os.TempDir()` on its own, so a redactor "constructed from
+  synthetic values" still carried two machine-dependent rules, and it
+  formats a `nonce int64` with `strconv.FormatInt`, which never returns
+  `""` — the empty-value guard in `add` can't stop it, so every `int64`
+  including `0` installs a rule that rewrites every `0` byte. The new
+  constructor takes every path value as a parameter and takes no nonce, no
+  session id, no FIFO path, which makes both failures impossible rather
+  than guarded against, and reads nothing ambient — a rule exists if and
+  only if a caller handed a value for it. `strings.TrimSuffix(v, "/")` is
+  the one normalisation applied to each parameter (`os.TempDir()` returns a
+  trailing `/` on macOS); the trim lives in the constructor rather than at
+  the caller so #1733's call site can't forget it. Also ships
+  `initControlDivergentDir(t) (handed, resolved string)`, a real directory
+  under `t.TempDir()` reached through a symlink the test also creates —
+  needed because a path that does not exist has no `filepath.EvalSymlinks`
+  form (`lstat: no such file or directory`), so a row built only from
+  invented paths can't exercise the resolved-spelling rule at all, and
+  `t.TempDir()` alone diverges from its resolved form on macOS but not on
+  Linux, so a row resting on that alone is green-and-vacuous on Linux.
+  Ordering is longest-value-first (inherited from `dropcapRedactor`'s own
+  sort): re-verified 2026-08-24 that this is load-bearing only when the
+  handed values nest (workdir under temp home under system temp), because
+  that's what makes one class's slug spelling a substring of the next —
+  over unrelated values both orderings agree and the row proves nothing.
+  This ticket ships the table only; #1733 (below) applies it to the capture
+  record at the fill site, and #1729 (open) is the fail-closed deny-scan
+  behind it — redaction and scanning are deliberately different fabric (see
+  the #1260 entry above).
+
+  **Two lessons from review:**
+  - **A test helper that reimplements the construction's own logic to
+    compute its expected values looks like duplication, but the duplication
+    is what makes the row non-vacuous.** `initControlExpectedRules` calls
+    the same `dropcapPathSpellings` and writes the same `TrimSuffix` as
+    `newInitControlRedactor`. Collapsing that into one shared helper both
+    functions call would make the trailing-slash-trim mutant (drop the trim
+    in the constructor) green, because the expectation and the table under
+    test would then always agree on whether the trim happened. The
+    independence — two call sites, not one — is the thing actually under
+    test.
+  - **A mutant that reddens more rows than the design predicted isn't
+    automatically a problem; check whether the rows still isolate different
+    defects.** The nonce-parameter mutant was expected to redden only the
+    unrelated-bytes row; it also reddens both armed-values rows, because an
+    extra `prompt_nonce` triple is exactly "a rule the caller's values can't
+    explain" from that row's own perspective. Code review separately found
+    a sixth mutant the written spec's table hadn't listed (fall back to
+    `realHome`/`os.TempDir()` only when the parameter is absent, rather than
+    unconditionally) — the spec's own prose already named it, the mutant
+    table just hadn't been built from that sentence. Each of the file's five
+    rows still has at least one mutant for which it's the sole red.
+
+  Registered in `finOfflineExecBans` with this family's standing eight names
+  plus `realHome` and `os.TempDir` — the two ambient reads the parameters
+  replace, and precisely the two the AST-identifier ban can catch that a
+  values-only assertion also catches through any helper indirection; neither
+  check substitutes for the other. Zero production files touched. See
+  `docs/specs/architecture/1732-initialize-capture-redaction-table.md` for
+  the full design, the mutant table and the security review.
+
+- `initialize_control_redaction_test.go` (#1733) — **applies #1732's table to
+  every field of `initControlFixtureRecord`, at the fill site.**
+  `redactInitControlRecord(red *dropcapRedactor, rec *initControlFixtureRecord)
+  []dropcapSubstitution` visits every string-bearing field of the record by
+  name — no reflection, no whole-record marshal/substitute/unmarshal (that
+  round trip strips insignificant whitespace and HTML-escapes `<`/`>`/`&`
+  inside every `json.RawMessage`, which a byte-identity row over path-free
+  payloads catches) — and returns the classes that fired instead of storing
+  them; `initControlFixtureRecord` gained no field from this ticket. (#1731,
+  below, later adds one — `Redaction`, the census itself — assigned at the
+  fill site from this pass's return value, and deliberately the one field
+  this pass does not visit, since visiting it would mean reading a value
+  that does not exist until the pass returns.) `runInitControlChild` now takes
+  a `*dropcapRedactor` instead of three more path strings, built once at the
+  live call site (`newInitControlRedactor(realHome, home, workdir,
+  os.TempDir())`); `writeInitControlFixture` is unchanged. `control_request_sent`
+  is a bare `json.RawMessage`, a different Go type from the `[]json.RawMessage`
+  pair beside it, and is visited separately — the split
+  `compactInitControlRawRows`'s doc comment already called "red on arrival".
+
+  **Two lessons from review:**
+  - **A "the pass runs before the log site" placement claim is really a
+    claim about which *variable* the log site reads.** The first cut placed
+    the pass correctly — ahead of both post-write `t.Logf` sites — but the
+    `control_response` log loop ranged the pre-pass local `responses` rather
+    than `record.ControlResponses`. `initControlRedactRaws` allocates a fresh
+    slice and `redact` returns `bytes.ReplaceAll`'s result; neither writes
+    through the input, so a pre-pass alias is untouched no matter where the
+    pass sits. Correct placement plus a stale alias leaks exactly as a late
+    pass does, and a comment asserting the mitigation reads identically in
+    both worlds. When a log site is the mitigation's subject, name the field
+    it reads, not just the pass's position.
+  - **A field an AC names explicitly can still ship with no test that
+    reddens if the code stops visiting it.** AC1 names `control_responses`
+    by hand as one of the payloads the pass must reach, but the fixture
+    gives it exactly one entry and that entry is path-free — deleting
+    `rec.ControlResponses = initControlRedactRaws(...)` from the pass and
+    running the whole offline suite stayed green (confirmed by mutation,
+    not assumed). The pass itself is correct; the row proving it for this
+    field is not. Shipped anyway as a known gap (two SHOULD-FIX findings,
+    under the fail threshold) — worth closing before #1729 arms the
+    fail-closed scan on top of this, since that ticket will be reasoning
+    about which fields the redaction already guarantees.
+
+  One more standing gap from the same review, for whoever next edits this
+  file: `initControlRedactRaws`'s doc comment says the nil→`[]` consequence
+  applies "only for `models_entry_fields` and `stdin_write_errors`" — both
+  `[]string` fields that never go through this helper. `control_responses`
+  *does* go through it and is nilable on a live run
+  (`snapshotControlResponses` returns `append([]json.RawMessage(nil),
+  ...)`), so a no-response capture now commits `"control_responses": []`
+  where it used to commit `null`. The behaviour is accepted (nothing decodes
+  the committed bytes, and `[]` reads better in an artifact a human opens);
+  the comment's field list is simply wrong and still says so as of this
+  writing.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1733-initialize-capture-record-redaction-pass.md`
+  for the full design, the nine-mutant table and the security review.
+
+- `initialize_control_writer_test.go` (#1731) — **the new field lands on the
+  record (described above), but its one new test lives here, not on the
+  record file or the redaction file, because it is the only one of the
+  three that writes and reads back.** `TestInitControlFixture_DistinguishesAnEmptyCensusFromAnAbsentOne`
+  writes two otherwise-identical records — one with `Redaction` set to the
+  post-pass census, one with it forced back to `nil` — through
+  `writeInitControlFixture` into separate `t.TempDir()`s (both records mint
+  the same filename via `initControlArmFixtureName`, so one directory would
+  make the second write clobber the first) and asserts the two files'
+  bytes differ. Going through the writer rather than a bare `json.Marshal`
+  is deliberate: it is the one instrument that catches both an `omitempty`
+  tag on the new field *and* a nil-normalising helper inside
+  `writeInitControlFixture`, since both would produce identical files this
+  test can compare, and a bare marshal-and-compare only catches the first.
+  The fill site (`runInitControlChild` in `initialize_control_probe_test.go`)
+  now assigns `record.Redaction = redactInitControlRecord(red, record)`
+  rather than discarding the pass's return — the sibling family's
+  `dropcapWriteRecord` assigns its identically-shaped field *inside the
+  writer*, and is the counter-example here, not the model:
+  `writeInitControlFixture` takes an `out := *rec` copy and must go on
+  receiving a record it only copies.
+
+  **Lessons from review:**
+  - **A vacuity precheck can need two separate failure messages, not one,
+    because the two ways it can fail have different causes.** A `nil`
+    census after the pass means `dropcapRedactor.substitutions` stopped
+    returning a non-nil empty slice (the whole distinction this test exists
+    to protect is gone, everywhere); a *non-empty* census means
+    `initControlFullRecord` picked up a real path value, so the row is
+    silently comparing a populated census against `nil` and proving nothing
+    about the empty-census case it's named for. One combined message
+    diagnoses neither failure.
+  - **An inherited "that is why" clause needs to be re-derived against the
+    fixture's current value, not carried forward verbatim.** Code review
+    caught two: a literal-choice note claiming a realistic path in
+    `Redaction.Replacement` would redden
+    `TestInitControlRedactRecord_LeavesAPathFreeRecordByteIdentical` (false —
+    that row never visits `Redaction`, so the path survives untouched and the
+    bytes still match; the actual guard is the doc-comment prose plus #1729's
+    future deny-scan), and `redactInitControlRecord`'s own doc describing
+    "before: zero value, after: populated" when `initControlFullRecord` now
+    ships a non-zero census, inverting which marshal is empty. Both
+    directives were right; only the justification attached to each had gone
+    stale the moment the fixture value it described was no longer what it
+    used to be.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1731-record-redaction-census.md` for the full
+  design and the security review.
+
+- `initialize_control_probe_test.go` (#1747) — **builds a `dropcapScanner`
+  beside the redactor at the capture site and wires it to the fifth field
+  described above.** `newDropcapScanner(home, "", workdir)` — the middle
+  parameter, `artifactDir`, is left empty deliberately: not by reusing
+  `workdir` (which would arm `artifact_dir` under the wrong value and leave
+  `workdir` itself unarmed) and not by minting a directory to fill the
+  slot. The empty value **is** the fact the field exists to record.
+  `CredentialScanApplied: initControlScanApplied(scanner)` is assigned in
+  `runInitControlChild`'s record literal, beside the other populated
+  fields — not inside `writeInitControlFixture`, whose `out := *rec` copy
+  must go on receiving a record it only copies (`Redaction`'s precedent).
+
+  **A scanner in scope is two live credentials, and the hazard is new to
+  this file.** `newDropcapScanner` reads `CLAUDE_CODE_OAUTH_TOKEN` and
+  `ANTHROPIC_API_KEY` into each `dropcapNeedle.value`, so `scanner` now
+  sits beside a driver that logs on nearly every path.
+  `initControlScrubbed` does not cover it — that guard reads the child's
+  stderr, and a `%+v` on the scanner would be the harness's own output,
+  not the child's. `runInitControlChild`'s doc now states the ban next to
+  the redactor's own concurrency note, and names `applied()`'s map as the
+  safe, useful thing to print instead: its keys are declared vocabulary
+  (env-var names, `dropcapClass*` identifiers) and its values are bools,
+  so no needle, path or credential can reach one. Any future parameter
+  added to this driver that carries a `dropcapNeedle`-shaped value needs
+  its own instruction written at its own call site — the ban does not
+  propagate from one parameter to the next by association.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1747-armed-credential-classes-on-the-initialize-capture.md`
+  for the full design and security review.
+
+- `initialize_control_writer_test.go` (#1747) — **one new test,
+  `TestInitControlFixture_DistinguishesAnArmedNothingScanFromAnAbsentOne`,
+  reusing #1731's `...DistinguishesAnEmptyCensusFromAnAbsentOne` shape**
+  for the new field, with one change: the armed-nothing map under test is
+  built from `dropcapScanner{}.applied()`, not a `map[string]bool{}`
+  literal — `applied()`'s non-nil-empty return is the entire mechanism the
+  `{}`-vs-`null` distinction rests on, and a literal would pin the test's
+  own value rather than the production one.
+
+  **A writer that filters armed-nothing entries out on the way to disk is
+  invisible to the very test built to catch nil-normalisation.** Confirmed
+  by mutation: a writer-side filter dropping every `false`-valued map
+  entry leaves this new test green, because its `{}`-vs-`null` comparison
+  never has an entry on either side for the filter to remove.
+  What reddens instead is
+  `TestInitControlFixture_RoundTripsEveryFieldIntoOneNamedEntry` — and only
+  because `initControlFullRecord`'s fixture value carries one entry of
+  each kind (`dropcapClassWorkdir: true`, `dropcapClassArtifactDir:
+  false`), not just one entry of any kind. A record field whose *values*
+  carry meaning, not only its presence, needs a fixture value of each kind
+  it can hold, or a mutant that discriminates by value has no test whose
+  sole purpose is to catch it.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1747-armed-credential-classes-on-the-initialize-capture.md`
+  for the full design and the mutant table.
+
+- `initialize_control_writer_test.go` (#1748) — **the fail-closed net behind
+  #1732/#1733's redaction table: a `dropcapScanner` deny-scan on the write
+  path, refusing the record outright on a hit instead of rewriting it.**
+  `scanInitControlFixture` copies the record, caps `StderrCapture` with
+  `capFixtureCapture`, marshals with `json.MarshalIndent`, runs
+  `scanner.scan` over the blob and returns exactly those bytes — making no
+  filesystem call of any kind, so a hit's `t.Fatalf` strands nothing under
+  the target directory, not even a `.tmp`. `writeInitControlFixture` takes
+  the scanner as a parameter (never a `newDropcapScanner` call inside the
+  file — `finOfflineExecBans` bans that name and `realHome` there for the
+  same reason #1732's entry banned `os.Getenv`) and writes the returned
+  slice byte for byte, with `os.MkdirAll` strictly after the step returns.
+  A table only rewrites what it predicted; this is different fabric on
+  purpose.
+
+  **The cap has to sit inside the scanning step, not before or after it, and
+  no bound assertion alone can tell the difference.** Length, prefix and
+  UTF-8 checks all stay green whether the cap runs before the scan, inside
+  it, or after it — moving the cap across the scan boundary changes only
+  which bytes get scanned, and only a byte-identity comparison between the
+  scanned bytes and the disk bytes can see that. That comparison is also
+  vacuous everywhere `json.MarshalIndent` is a no-op transform (it's
+  deterministic, so re-marshalling an under-cap record is byte-identical to
+  writing the returned slice) — it only discriminates over a record the cap
+  actually shortens, which is why the assertion rides inside
+  `TestInitControlFixture_WriterCapsStderrCapture`, the one test with
+  over-cap rows, rather than in a function of its own.
+
+  **A refusal that fatals has no seam to assert the refusal from.**
+  `testing.TB` can't be implemented outside `testing`, so "nothing was
+  written" and "no excerpt is printed" are properties of construction — the
+  scan sits inside the sole producer of the write's bytes, which touches the
+  filesystem not at all — not properties a test observes directly. Proving
+  the scan itself fires against a hit has to happen one level down, over the
+  marshalled record, the way `dropped_line_capture_test.go`'s
+  `dropcapWriteRecord`/`TestDropcapRedactionAndDenyScan` already do it for
+  the sibling family — `TestInitControlFixture_ScanRefusesAPlantedCredential`
+  follows that shape here, planting a `/Users/`-prefixed value and asserting
+  `dropcapContains(hits, dropcapDenyUsers)`, with a clean-record control row
+  first so the plant assertion can't pass vacuously.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1748-deny-scan-the-initialize-fixture-before-writing.md`
+  for the full design, the mutant table and the security review. #1749
+  (below) swept the remaining ten armed classes; this slice shipped only the
+  one planted row needed to prove the mechanism live.
+
+- `initialize_control_writer_test.go` (#1749) — **the per-class sweep #1748
+  deferred:** one row per class `newDropcapScanner` arms (all eleven), each
+  planting a value of that class into `initControlFullRecord().StderrCapture`
+  and asserting the class is among `scanner.scan`'s hits. `scan` reads the
+  whole marshalled blob, so one plant site per row is enough — unlike
+  `redactInitControlRecord`, which visits fields by name and needs per-field
+  rows. `newInitControlOfflineScanner` mirrors `newDropcapScanner`'s five
+  arming calls with its two `os.Getenv` reads and its `realHome` read
+  replaced by declared synthetic constants, so the table runs — not skips —
+  with no claude and no credentials; code review re-ran it with
+  `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` deliberately *set* to fake
+  values and got the same 12/12/0-skips result, confirming
+  environment-independence rather than mere credential-freeness. The scanner
+  is built once and shared read-only across eleven parallel subtests. Two
+  rows legitimately hit more than one class — `workdir`'s plant nests inside
+  both the fixed `/home/` literal and its own `temp_home` value, and
+  `private-var-folders-prefix`'s plant contains `var-folders-prefix` as a
+  literal tail — so the table asserts containment, never equality.
+
+  **A per-row presence check plus `len(applied) != len(rows)` does not by
+  itself prove the row-class set equals the armed-class set.** Code review
+  found the gap by measurement: swapping one row's class for a duplicate of
+  another's leaves the count at eleven and every row's presence check green,
+  while the class that lost its row goes uncaught. The fix — dedup `rows` by
+  class, or diff it against `applied`'s key set — was filed as a
+  non-blocking follow-up rather than shipped in #1749. Anyone editing this
+  table's row list should close that gap first; until then, the size check
+  only proves the *builder-arms-a-class-with-no-row* direction, not its
+  converse.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1749-per-class-capture-scan-coverage.md` for the
+  full design and the mutant table.
+
+- `initialize_control_compare_test.go` (#1764) — **the cross-arm read: the
+  two arms that send the `initialize` control request compared against the
+  arm that sends none, at the same turn index, over #1763's three committed
+  captures.** `initControlDiscoverArms` globs `initControlArmFixtureGlob`
+  (`testdata/initialize_control_v*_*.json`) rather than addressing the
+  family by exact name — exact-name addressing would need a hard-coded
+  version token and would make an undeclared `arm` structurally
+  unreachable — decodes each match through `initControlFixtureRecord`,
+  binds each base name to `initControlArmFixtureName(rec.ClaudeVersion,
+  rec.Arm)` by string equality (never a `filepath.Join` on a
+  fixture-supplied value), groups by `ClaudeVersion` and fails on anything
+  but exactly one group, and requires every id in `initControlArms` present
+  exactly once. The literal `_` after the version segment is the entire
+  exclusion: `filepath.Match` needs one, #1688's legacy
+  `initialize_control_v2.1.239.json` has none, and nothing mints an
+  unarmed name any more.
+
+  `initControlTurnReads` slices each arm's `StdoutEvents` at its
+  `TurnBoundaries` (mirroring `setModeTurnWindows`'s range guard and its
+  unclosed-trailing-window rule) and `initControlReadTurn` reduces each
+  window, through `initControlWindowField` verbatim, to the seven-field
+  `initControlTurnRead`. Every field but one is constant across all three
+  arms at both indices on today's fixtures — the drive sequence is
+  tool-free — which is why the field set isn't `probeOutcome`'s:
+  `ControlResponses`, whether a `control_response` line fell inside that
+  turn's own window, is the sole structural discriminator, fixed by each
+  arm's own send point, and it is what makes a wrong-index or wrong-window
+  slice observable instead of silently agreeing. `initControlTurnRows`
+  reports every field with "agrees"/"differs" as a first-class outcome
+  rather than a missing result, checked against
+  `reflect.TypeOf(initControlTurnRead{}).NumField()` so a field added to
+  the struct and forgotten in the row builder can't go silently
+  uncompared. On today's `2.1.239` bytes, `control_responses` is the only
+  field that ever differs — `before_first_turn` at turn 0,
+  `after_completed_turn` at turn 1 — everything else agrees at both
+  indices for both arms.
+
+  The verdict is reported; what
+  `TestInitControlArms_CompareMeasurementArmsAgainstTheControlAtTheSameTurnIndex`
+  asserts is the instrument. `initControlTurnReadAt` returns `(read, ok)`
+  rather than zero-filling an out-of-range index — the one place this file
+  diverges from `setModeOutcomeAt` — and liveness is keyed on
+  `ResultIsError`/`ResultTerminalReason`, never `ResultSubtype`:
+  `400db2d1`'s 401 capture recorded `subtype: "success"` with
+  `num_turns: 1` on turns that never reached the model. Registered in
+  `finOfflineExecBans` with fifteen names, derived from
+  `initialize_control_window_test.go`'s seventeen by dropping
+  `packageDir`, `filepath.Glob` and `os.ReadFile` — the first file in this
+  family with a legitimate reason to read the committed fixtures — while
+  every write name stays banned, since this file reads and must never
+  write.
+
+  Adding this glob made three shipped claims false, corrected in place
+  rather than left to rot: `initialize_control_names_test.go`'s file
+  header now says the family is swept by three *foreign* globs plus its
+  own; the "no minted name collides with the committed one-arm capture"
+  subtest's comment now names `initControlArmFixtureGlob` as the pattern
+  that matches these names on purpose; and
+  `initialize_control_probe_test.go`'s write-set `t.Errorf` string no
+  longer claims no glob in this package matches the family.
+
+  **Lessons that outlive this ticket:**
+  - **"Borrow the shape" can mean borrowing the wrong return type along
+    with it.** `setModeOutcomeAt`'s out-of-range zero value is safe for
+    its own caller, but ported into a comparison whose verdict is
+    agreement, two arms that both ran short would zero-fill and compare
+    `equal()` — agreement computed out of absence. The fix is a one-line
+    signature change (`(read, bool)`); finding it needed reading what the
+    sibling's zero value means to *its* caller, not just what type it
+    returns.
+  - **The obvious liveness field can be the one the rejected artifact
+    fakes.** `subtype` and `num_turns` are the fields a reader reaches for
+    first, and both read healthy on `400db2d1`'s 401 capture — only
+    `is_error` and `terminal_reason` separated it from a live run. Before
+    picking a liveness key, check it against the bytes of the capture the
+    clause was written to reject, not only against a healthy one.
+  - **A name↔record binding can retire a whole failure-mode branch as
+    unreachable.** Binding each fixture's base name to
+    `initControlArmFixtureName(rec.ClaudeVersion, rec.Arm)` makes "the
+    same arm twice for one version" require two directory entries with one
+    name, so the presence check alone is the entire "exactly once"
+    property — a dedicated duplicate-detection branch would have been a
+    return site nothing on disk can reach.
+
+  Zero production files touched. See
+  `docs/specs/architecture/1764-initialize-arm-comparison.md` for the full
+  design and security review.
 
 ## Test infrastructure
 

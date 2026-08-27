@@ -34,6 +34,7 @@ Today the pool holds exactly one entry — the **bootstrap session** — so exte
 - **#839:** `Pool.BootstrapID() SessionID` — new RLock-and-resolve-fresh accessor mirroring `Default()`/`DefaultSettings()`, deliberately reading `p.bootstrap` rather than `Default().ID()`/`sess.id` so it introduces no new reader of the latter (`RotateID` mutates `sess.id` without `Session.lcMu` under a documented no-concurrent-reader invariant). Wired as `supervisor.Config.ResolveSessionID` on the bootstrap `supCfg` (`ResumeLast: false` alongside it) via a late-bound `var p *Pool` closure, so the daemon's own persisted id — never a foreign `<uuid>.jsonl` from the shared sessions dir — is what `--session-id` resolves to at every spawn. The startup `reconcileBootstrapOnNew` call is deleted; `/clear` reconciliation now falls out of `ResolveSessionID` re-reading `p.bootstrap` fresh at each spawn, since the watcher's existing `RotateID` call already persists the rotated id before the next restart. `security-sensitive`: closes a confused-deputy restart-resume gap. See *`Pool.BootstrapID`* below, [codebase/839.md](../codebase/839.md), and [jsonl-reconciliation.md](jsonl-reconciliation.md) (now marked retired).
 - **#1164:** `ResolveSessionID` widened `func() string` → `func() (id string, resume bool)`. claude 2.1.199 refuses `--session-id <uuid>` when `<uuid>.jsonl` already exists (a hard daemon restart survives the pinned id's transcript), so the closure now probes `transcript.StatByID(cfg.ClaudeSessionsDir, id)` fresh every spawn — exists → `(id, true)` → `buildClaudeArgs` emits `--resume <id>` (reattach, preserves the idle conversation); absent, empty id, or `ClaudeSessionsDir == ""` → `(id, false)` → `--session-id <id>` (byte-identical #839 create path). Decided per-spawn (not `firstRun`-gated like `streamsup`, not a one-shot decision at `New()`) so cold start, in-process respawn, and daemon restart are all handled by one rule with no bookkeeping. `resume` never rotates the id — that stays #1165's independent, different-fabric safety net. Not `security-sensitive` (by-id probe, no dir scan — narrows the surface). See *`Pool.BootstrapID`* below, [codebase/1164.md](../codebase/1164.md), and [ADR 032](../decisions/032-bootstrap-resume-per-spawn-existence-probe.md).
 - **#1518:** `writeMCPSettings` signature widens to `func writeMCPSettings(registryPath string, id SessionID) (string, error)`. With a registry path configured, the file moves off `os.TempDir()` to `<dataDir>/session-settings/<id>.json` (created on demand at `0700`, mirroring `archived-sessions/`), written atomically (scratch file, `fsync`, rename), with `id` gated on `ValidID` since it now names a file and a warm-start id comes off disk unchecked. With no registry path (persistence disabled), behaviour is unchanged from #943. The id-derived name bounds the on-disk set by session count instead of daemon-restart count (AC #4), and because the data dir has no OS reaper, both write sites (`Pool.New`, `buildSession`) plus `CreateIn`'s `saveLocked` rollback now remove the file on every error return after the write via a `defer`-and-success-flag — the OS temp reaper had been acting as an accidental leak-bounder for #943's best-effort-only cleanup, and relocating without also closing those error paths would have shipped an unbounded leak. `materialise`'s discard branches deliberately do **not** remove the file — the race loser's path is byte-identical to the winner's live one. `security-sensitive` (id-to-path traversal gate). See the rewritten *`writeMCPSettings` + `Session.settingsPath`* below, [codebase/1518.md](../codebase/1518.md), and `docs/specs/architecture/1518-session-settings-under-data-dir.md`.
+- **#1805:** `Session.Activate` gains an entry guard — `if err := ctx.Err(); err != nil { return err }` — as the first statement, before `lcMu` is taken. Fixes a coin-flip: once a session is active, `activeCh` is closed, so the pre-existing `select` between `<-activeCh` and `<-ctx.Done()` had two ready arms and Go picked between them uniformly at random, leaking `nil` for an already-cancelled `ctx` on roughly half of production calls (`streamsup.Runner.WaitForPTY` never itself checks the context). The guard also stops a cancelled caller from still driving a full re-activation: it sits above the `activateCh` send, so a call that fails fast triggers no lifecycle-goroutine wake and spawns no child. Scoped narrowly: a `ctx` that cancels *during* the wait (after the guard) is unaffected — see the *ctx cancellation race* paragraph below. `Evict` has the identical `select` shape and the same latent coin flip; left alone, no failure observed against it.
 
 ## Package Layout
 
@@ -90,7 +91,7 @@ One supervised claude instance plus the bridge that mediates its I/O in service 
 - `Supervisor()` / `Bridge()` (#311) return the underlying supervisor handle and I/O bridge. Consumed by the assistant-turn bridge wiring in `cmd/pyry` to read `CurrentConversation()` at broadcast time and register an output observer on `Bridge.Write`. `Bridge()` returns `nil` in foreground mode; callers must gate on it. Returned pointers are owned by the session — callers must not retain them past the session's lifetime.
 - `LifecycleState()` returns the current lifecycle state under `lcMu`. Used by tests and (eventually) richer status payloads.
 - `Attach` returns `ErrAttachUnavailable` when `bridge == nil` (foreground mode); otherwise delegates to `(*supervisor.Bridge).Attach`. `supervisor.ErrBridgeBusy` is propagated **verbatim** so callers' `errors.Is` checks keep working. Bumps `attached` under `lcMu`; the wrapper goroutine spawned here decrements on bridge `done`. **Contract:** callers must `Activate` first — `bridge.Attach` on an evicted session would block on the pipe forever.
-- `Activate(ctx)` moves an evicted session to `active`, blocking until the supervisor has started (or `ctx` cancels). No-op when already active. Idempotent under concurrent calls.
+- `Activate(ctx)` moves an evicted session to `active`, blocking until the supervisor has started (or `ctx` cancels). It has no early-return for "already active" — an already-active call still falls into the same wait, which is why an already-cancelled `ctx` needed its own entry guard (#1805, below) rather than being caught by a no-op short-circuit. Idempotent under concurrent calls. An already-cancelled or expired `ctx` returns `ctx.Err()` immediately, before any re-activation is requested — no `activateCh` signal, no supervisor start, regardless of the session's current state.
 - `Run(ctx)` blocks until ctx cancellation, driving the lifecycle loop (`runActive` ↔ `runEvicted`). The supervisor is started on an inner ctx during active periods and drained when the ctx cancels.
 
 The `log` field is written by the constructor but not read in 1.0 (no per-session log lines yet — see [parent ADR](../decisions/003-session-addressable-runtime.md)). Kept on the struct so 1.1 can attach without reshaping.
@@ -223,7 +224,10 @@ not `sessions.State`. Its compile-time proof, `var _ sessions.Runner = streamRun
 package. The other five implementations are all test doubles: `fakeRunner`/`lifecycleRunner`
 (`internal/sessions/runner_test.go`), `raceRunner` (`internal/sessions/session_evict_race_test.go`),
 `stubRunner` (`cmd/pyry/session_router_test.go`), `baseRunner`
-(`cmd/pyry/inbound_deliver_rotation_test.go`).
+(`cmd/pyry/inbound_deliver_rotation_test.go`), `modelListRunner`
+(`cmd/pyry/session_model_list_test.go` — `stubRunner` plus the one method
+`resolveBoundModelList` asserts for, so `stubRunner` itself stays the
+ready-made not-implemented fixture for that resolver's refusal case, #1857).
 
 `Config.RunnerFactory` has **no default**: it is mandatory, and a nil factory is a construction error out
 of `sessions.New` (`"sessions: Config.RunnerFactory is required"`) — there is no implicit PTY
@@ -237,19 +241,33 @@ There is no `Session.Supervisor()` accessor. Consumers that need methods off the
 keeps returning the `Runner` interface — and a **capability type-assertion** on an anonymous method-set
 interface, e.g. `interface{ Interrupt() error }` (`interruptRunner`),
 `interface{ RestartFresh(string) }` (`startFreshRunner`), `interface{ BeginRotation() func() }`
-(`beginRotationOrNoop`) — all in `cmd/pyry/main.go`. None of the three asserts to the concrete
-`*streamsup.Runner` type; `Session.Runner()` holds the value-typed `streamRunner` adapter in production, so
-a literal `.(*streamsup.Runner)` assertion would be `ok == false` always and fall through silently to an
-inert default — the same class of hazard AC 5's #1580 review round caught in this file's own first-draft
-correction. `Interrupt`/`RestartFresh`/`BeginRotation` stay off `sessions.Runner` deliberately (adding them
-would be speculative surface); `SetSpawnArgs` and `RevokeBypass` are on it instead, because — per their own
-docs — widening is compile-checked across the whole one-production/five-double set, whereas a type
-assertion at a future call site would fail silently (open, for `RevokeBypass`) at runtime and either fall
-back to `Restart` or leave a posture un-revoked while the caller reports success — the exact outcomes these
-two swap/revoke-only methods exist to avoid. Both share the same placement rule: their consumer,
-`Pool.UpdateSettings`, is inside `internal/sessions`, so there is no `cmd/pyry` dispatch site to
-type-assert at. See [codebase/1580.md](../codebase/1580.md) for the swap-only installer and
-[codebase/1604.md](../codebase/1604.md) for the in-band revocation.
+(`beginRotationOrNoop`) — all in `cmd/pyry/main.go` — and, since #1857,
+`interface{ ModelList() (turnevent.ModelList, bool) }` (`resolveBoundModelList`), which lives in its own
+`cmd/pyry/session_model_list.go` rather than `main.go`: a fourth twin in the conversation-keyed resolver
+family (alongside `resolveBoundRunner` / `resolveBoundSession` / `resolveBoundRunSettings`), placed in a
+topic file the way `outstandingQueues` is, so adding it manufactures no merge conflict in the
+high-churn wiring file. None of these assert to the concrete `*streamsup.Runner` type; `Session.Runner()`
+holds the value-typed `streamRunner` adapter in production, so a literal `.(*streamsup.Runner)` assertion
+would be `ok == false` always and fall through silently to an inert default — the same class of hazard AC
+5's #1580 review round caught in this file's own first-draft correction. `Interrupt`/`RestartFresh`/
+`BeginRotation`/`ModelList` stay off `sessions.Runner` deliberately (adding any would be speculative
+surface, or in `ModelList`'s case would drag every test double in both packages into the diff for no
+compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs` and
+`RevokeBypass` are on it instead, because — per their own docs — widening is compile-checked across the
+whole one-production/five-double set, whereas a type assertion at a future call site would fail silently
+(open, for `RevokeBypass`) at runtime and either fall back to `Restart` or leave a posture un-revoked while
+the caller reports success — the exact outcomes these two swap/revoke-only methods exist to avoid. Both
+share the same placement rule: their consumer, `Pool.UpdateSettings`, is inside `internal/sessions`, so
+there is no `cmd/pyry` dispatch site to type-assert at. See [codebase/1580.md](../codebase/1580.md) for the
+swap-only installer and [codebase/1604.md](../codebase/1604.md) for the in-band revocation.
+
+A runner double armed for a **bootstrap-session** capability test cannot be armed at construction time:
+`sessions.New` invokes `RunnerFactory` while building the bootstrap entry, so the test does not know the
+bootstrap's session id until after the runner already exists. `modelListRunner` (#1857) solves this by
+reading a shared, mutex-guarded plan **keyed by session id at call time** rather than storing an answer on
+the runner value itself — which also gives "nothing reported" for free as the plan's zero state, and lets
+a refusal test arm the bootstrap with a distinguishable sentinel list so a broken isolation guard produces
+a visibly wrong (leaked) answer instead of an empty one that could pass unnoticed.
 
 **Capability type-assertions evade `staticcheck`'s unused check from the other direction too
 (#1550).** This package's one prior instance of the pattern — `probeUsable`'s
@@ -258,11 +276,15 @@ type-assert at. See [codebase/1580.md](../codebase/1580.md) for the swap-only in
 method, because a method reachable only from its own test still counts as "used", and the
 assertion (not an interface implementation) is the only thing that made it reachable at all.
 Deleting the resolver that held the assertion (#1550) is what stranded it, and finding that
-required a by-hand repo-wide grep, not a gate failure. The four capability interfaces above
-share the same structural blind spot: removing `interruptRunner`, `startFreshRunner`, or
-`beginRotationOrNoop` would not, by itself, surface any strandable method on
-`*streamsup.Runner` via a build or vet failure — that has to be checked by hand at deletion
-time, the same way #1550's spec did.
+required a by-hand repo-wide grep, not a gate failure. The five capability interfaces above
+share the same structural blind spot: removing `interruptRunner`, `startFreshRunner`,
+`beginRotationOrNoop`, or `resolveBoundModelList` would not, by itself, surface any strandable
+method on `*streamsup.Runner` via a build or vet failure — that has to be checked by hand at
+deletion time, the same way #1550's spec did. `resolveBoundModelList` (#1857) is the sharper
+case of the same coin: it ships with **no production caller at all** yet (its consumer, #1858,
+lands separately) and stays reported as "used" purely because a `_test.go` reference counts —
+verified empirically against the `staticcheck` version `make check` installs before relying on
+it, rather than assumed.
 
 **Typed-nil-in-interface trap for downstream consumers (#1101).** A call site that assigns `w.sup` (the `*supervisor.Supervisor` returned by `Supervisor()`) straight into a consumer-declared interface field inherits a footgun on the stream-json path: a nil `*supervisor.Supervisor` wrapped in an interface value is a **non-nil interface holding a nil pointer**, so the consumer's `== nil` guard silently fails and any method call on it panics on the nil receiver. `cmd/pyry/relay.go`'s `Snapshotter: w.sup` wiring hit exactly this and was fixed by a `screenSnapshotterOrNil` helper that returns a genuine nil when `sup == nil` — see [codebase/1101.md](../codebase/1101.md). Two sibling wiring sites carry the same unfixed trap as of #1101: `SessionStarter: w.sup` and the modal resolver's `w.sup` argument (both `cmd/pyry/relay.go`) — flagged out of scope there, not yet guarded.
 
@@ -950,7 +972,7 @@ func (p *Pool) Create(ctx context.Context, label string) (SessionID, error)
 
 Empty id ⇒ "nothing persisted, nothing to clean up." Non-empty id ⇒ "entry on disk, decide what to do (retry Activate, accept the eventual lifecycle, leave it for next pyry start)." Use `errors.Is(err, ErrPoolNotRunning)` to distinguish the not-running case from an Activate failure.
 
-**ctx cancellation race.** If the caller cancels `ctx` after `supervise` succeeded but before `Activate` returns, `sess.Activate` may have already sent the buffered signal on `activateCh` before its ctx check. The lifecycle goroutine respects the *pool's* run-context (the errgroup's `gctx`), not the caller's, so the session may still spin up to active even though `Create` returns `(id, ctx.Err)`. This is the inherent shape of the buffered-signal lifecycle — tests should not depend on "Activate error → claude not running" as a hard invariant.
+**ctx cancellation race — mid-flight only (narrowed, #1805).** `Session.Activate` now fails fast on an already-cancelled `ctx`: an entry guard reads `ctx.Err()` before taking `lcMu`, so a `ctx` that is cancelled or expired *at the call* returns immediately with no `activateCh` signal sent — for that case "Activate error → claude not running" **is** a hard invariant. The race described below still holds for a cancellation that lands *after* the call is already past the guard: if the caller cancels `ctx` after `supervise` succeeded but before `Activate` returns, `sess.Activate` may have already sent the buffered signal on `activateCh`. The lifecycle goroutine respects the *pool's* run-context (the errgroup's `gctx`), not the caller's, so the session may still spin up to active even though `Create` returns `(id, ctx.Err)`. Tests should not depend on the invariant for a `ctx` that was live when `Activate` was called and cancelled during the wait — only for one already dead at the call.
 
 **Lock order — unchanged.** `Create` introduces no new ordering edges:
 

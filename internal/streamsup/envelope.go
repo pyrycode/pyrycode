@@ -85,12 +85,14 @@ type controlRequest struct {
 // against the one #1595 measured live, subtype before mode.
 //
 // The omitempty on Mode is load-bearing rather than cosmetic. Mode belongs to
-// set_permission_mode only; without the tag every interrupt line would grow a
-// "mode":"" field it has no business carrying, and marshalInterruptEnvelope's
-// output would stop matching the line claude has been sent since #1120.
-// TestMarshalInterruptEnvelope's byte-exact want is what holds this.
+// set_permission_mode only; without the tag every interrupt and every initialize
+// line would grow a "mode":"" field it has no business carrying, and
+// marshalInterruptEnvelope's and marshalInitializeEnvelope's output would stop
+// matching the lines claude has been sent since #1120 and measured in #1763.
+// TestMarshalInterruptEnvelope's and TestMarshalInitializeEnvelope's byte-exact
+// wants are what hold this.
 type controlRequestInner struct {
-	Subtype string `json:"subtype"`        // "interrupt" | "set_permission_mode"
+	Subtype string `json:"subtype"`        // "interrupt" | "set_permission_mode" | "initialize"
 	Mode    string `json:"mode,omitempty"` // set_permission_mode only
 }
 
@@ -198,6 +200,71 @@ func WriteBypassRevocation(w io.Writer, requestID string) error {
 	}
 	if _, err := w.Write(env); err != nil {
 		return fmt.Errorf("streamsup: write bypass revocation: %w", err)
+	}
+	return nil
+}
+
+// marshalInitializeEnvelope returns the single newline-terminated initialize
+// control line, the request that makes claude report what the session knows about
+// itself — the model list (identifiers, display names, supported reasoning-effort
+// levels) and the slash-command list. #1763 captured this line live against claude
+// 2.1.239 across three arms, and all three agree field for field; the literal here
+// is that line with the locally-minted request_id substituted for the capture's
+// own probe id.
+//
+// The measurement is also why controlRequestInner needs no new field: the accepted
+// request object carries subtype and nothing else, so Mode stays at its zero value
+// and omitempty drops it. Like its two siblings every field but the request_id is
+// a fixed literal, so the line has no injection surface of its own; the appended
+// '\n' is the sole raw newline, making the envelope one physical line by
+// construction (structured encoding, never string concatenation).
+func marshalInitializeEnvelope(requestID string) ([]byte, error) {
+	env := controlRequest{
+		Type:      "control_request",
+		RequestID: requestID,
+		Request:   controlRequestInner{Subtype: "initialize"},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteInitialize writes one initialize control_request line onto w, the child's
+// held-open stdin (from Runner.Stdin), asking the live child to report what it
+// knows about itself without a respawn. It mirrors WriteBypassRevocation exactly:
+// nil-check first, marshal, one Write, never close w — the io.Writer type
+// structurally forbids a half-close/EOF forgery, which on a stream-json child
+// would mean "no more input" and take the live session down without killing it.
+//
+// requestID must be a LOCALLY-MINTED id — Runner.nextControlID is the only source
+// that satisfies this, and (*Runner).RequestInitialize is the only in-repo caller.
+// The structured encoding makes a hostile id non-catastrophic rather than merely
+// unlikely (json.Marshal escapes every metacharacter, so no id can open a second
+// physical line or rewrite the fixed subtype), but the contract is the primary
+// defence and the escaping the backstop.
+//
+// A nil w means no live child: WriteInitialize returns ErrNoLiveChild and writes
+// nothing (checked first, so no panic and no partial write). A marshal failure
+// (not reachable with fixed literals, defensive) and a write failure (e.g. EPIPE
+// when the pipe closed mid-teardown) are returned wrapped — never mis-reported as
+// the retryable ErrNoLiveChild.
+//
+// The control_response ack is not read here: this slice writes the line and stops,
+// exactly as WriteBypassRevocation writes without reading its ack. Nothing
+// correlates the request_id yet, and the parser already consumes control responses
+// content-free (#1500), so the reply is handled without being interpreted.
+func WriteInitialize(w io.Writer, requestID string) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalInitializeEnvelope(requestID)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal initialize: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write initialize: %w", err)
 	}
 	return nil
 }

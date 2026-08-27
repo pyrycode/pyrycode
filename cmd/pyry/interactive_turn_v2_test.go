@@ -466,12 +466,16 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
 
 	for _, ev := range []turnevent.Event{
-		// First on purpose: nothing is buffered yet, so the arm's flushDelta is a
-		// no-op and the five events below behave exactly as they did before #1638.
-		// It also exercises the no-turn-open path for free. Safe against the fake —
-		// ActiveConns clamps to the last snapshot in steady state rather than
-		// running out of them.
+		// The two turn-orthogonal frames go first on purpose: nothing is buffered
+		// yet, so each arm's flushDelta is a no-op and the five events below behave
+		// exactly as they did before #1638. They also exercise the no-turn-open path
+		// for free. Safe against the fake — ActiveConns clamps to the last snapshot
+		// in steady state rather than running out of them.
 		turnevent.ModelAnnounced{Model: secretModel, Truncated: true},
+		// #1849 AC#5 one variant over: the list's strings are the same #833 values
+		// multiplied per entry. Driven through the same log-heavy rig, and paired
+		// with the payload-presence check at the bottom.
+		emitterModelListFixture,
 		turnevent.ThoughtChunk{Text: secretThought},
 		turnevent.TextChunk{Text: secretAssistant},
 		turnevent.ToolStart{ToolCallID: "t1", Title: secretToolTitle, RawInput: json.RawMessage(`{"query":"` + secretToolInput + `"}`)},
@@ -485,7 +489,9 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	if logs == "" {
 		t.Fatal("expected DEBUG push-error logs; got none (test would not prove the no-leak property)")
 	}
-	for _, secret := range []string{secretThought, secretAssistant, secretToolTitle, secretToolInput, secretToolReslt, secretModel} {
+	leakable := append([]string{secretThought, secretAssistant, secretToolTitle, secretToolInput, secretToolReslt, secretModel},
+		emitterModelListSentinels()...)
+	for _, secret := range leakable {
 		if strings.Contains(logs, secret) {
 			t.Fatalf("application output %q leaked into logs:\n%s", secret, logs)
 		}
@@ -529,6 +535,33 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	}
 	if announced.Model != secretModel {
 		t.Fatalf("announced model on the wire: got %q, want %q", announced.Model, secretModel)
+	}
+
+	// The same polarity pair for the list (#1849): its sentinels are required
+	// ABSENT from the log above and PRESENT on the wire here, and again the second
+	// half is what discriminates — a Handle arm that dropped the event passes the
+	// log half on its own.
+	var listed *protocol.ModelListPayload
+	for _, p := range bcast.pushes {
+		if p.env.Type != protocol.TypeModelList {
+			continue
+		}
+		var pl protocol.ModelListPayload
+		if err := json.Unmarshal(p.env.Payload, &pl); err != nil {
+			t.Fatalf("decode model_list payload: %v", err)
+		}
+		listed = &pl
+		break
+	}
+	if listed == nil {
+		t.Fatalf("no %s envelope reached the wire; the Handle arm dropped the event", protocol.TypeModelList)
+	}
+	if len(listed.Models) != len(emitterModelListFixture.Models) {
+		t.Fatalf("model_list rows on the wire: got %d, want %d", len(listed.Models), len(emitterModelListFixture.Models))
+	}
+	if listed.Models[0].ResolvedModel != emitterModelListFixture.Models[0].ResolvedModel {
+		t.Fatalf("first row's resolved model on the wire: got %q, want %q",
+			listed.Models[0].ResolvedModel, emitterModelListFixture.Models[0].ResolvedModel)
 	}
 }
 
@@ -2025,7 +2058,22 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *te
 	t.Parallel()
 
 	var buf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr, for the reason measured on this very test
+		// and recorded above TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant.
+		// This test is the one that carried the hazard: its needles below are bare
+		// numerals, so the timestamp's digits matched them. With the attr gone the
+		// whole record — the message, event=interactive_turn.no_cursor and
+		// kind=thinking_progress — carries no digit at all, so either needle can
+		// now match only a genuine leak.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
 
 	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
 	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
@@ -2042,6 +2090,14 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *te
 	}
 	if strings.Contains(logs, "kind=unknown") {
 		t.Fatalf("eventKind returned unknown for thinking_progress:\n%s", logs)
+	}
+	// slog's own time= is the digit source that made this test's numeric needles
+	// flaky; the readings check below is only sound while it is absent. Asserted
+	// rather than merely configured, because dropping the ReplaceAttr above leaves
+	// the readings check passing on most runs — the disarming has to be red on
+	// EVERY run, not on the ~5% where the clock happens to spell a needle.
+	if strings.Contains(logs, "time=") {
+		t.Fatalf("capture carries slog's timestamp; the readings check below can match the clock:\n%s", logs)
 	}
 	// Both readings are claude's own integers; neither ever reaches a log.
 	for _, reading := range []string{"184", "37"} {
@@ -2201,10 +2257,17 @@ func TestInteractiveTurnEmitterV2_RateLimitedEventKindNamesTheVariant(t *testing
 		// Drop slog's own time= attr. The negative below is a strings.Contains
 		// over the WHOLE captured log, and the timestamp is a host-dependent
 		// source of digits a numeric needle can collide with — measured on the
-		// ThinkingProgress test above, whose "37" needle hits the timestamp in
-		// ~2% of runs on this host, and whose safety for a "-1"-shaped needle
-		// depends on the host's UTC offset. Removing the attr deletes the
-		// false-positive source outright rather than choosing needles around it.
+		// ThinkingProgress test above, whose "37" needle hits the timestamp on
+		// ~5% of runs and on 100% of runs landing in any minute :37 or any
+		// second :37, and whose safety for a "-1"-shaped needle depends on the
+		// host's UTC offset. That is a scheduled flake, not a rare one: against
+		// 2026-08-25T00:12:31.378+03:00 the needle matches when the minute is 37
+		// (1/60), when the second is 37 (1/60), or when the millisecond field
+		// contains it (~1.9%). An earlier ~2% figure recorded here undercounted,
+		// because it was taken inside a single -count=N burst — one burst shares
+		// a minute and usually a second, so it structurally cannot observe the
+		// two 1/60 terms. Removing the attr deletes the false-positive source
+		// outright rather than choosing needles around it.
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if len(groups) == 0 && a.Key == slog.TimeKey {
 				return slog.Attr{}
@@ -2429,5 +2492,346 @@ func TestInteractiveTurnEmitterV2_ModelAnnouncedMidTurnDoesNotDisturbOpenTurn(t 
 	}
 	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
 		t.Fatalf("model_announced disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
+	}
+}
+
+// emitterModelListDropped is the entry count claude sent beyond streamsup's
+// maxModelListEntries. Conspicuously non-zero so the wire assertion below cannot
+// pass against a mapping that hard-codes 0 or recomputes len(Models), and a value
+// whose decimal spelling appears nowhere in the captured log of the eventKind test
+// (which drops slog's time attr, leaving a record with no digits at all).
+const emitterModelListDropped = 41
+
+// emitterModelListFixture is the claude-authored inventory every model_list test drives.
+// Package-level and READ-ONLY: the tests below run in parallel and share it, and
+// the carry-never-mutate rule turnbridge.MapEvent's ModelList arm states means
+// nothing on this lane may write through those slice headers anyway.
+//
+// Conspicuous sentinels rather than realistic identifiers, for
+// modelAnnouncedFixture's reason one variant over: the eventKind negative is a
+// strings.Contains over the WHOLE captured log, which carries the literal
+// kind=model_list and the event name interactive_turn.no_cursor, so a natural value
+// containing "model", "list", "event" or "announced" would be a substring of the
+// log's own text and the negative would be RED against a correct implementation.
+//
+// The two entries are deliberately DISTINGUISHABLE in every field
+// (turnbridge-package.md's own rule: identical rows let a swapped-index bug pass),
+// and their TruncatedFields differ on purpose — the second is nil, which is the
+// load-bearing absence protocol.ModelOption.MarshalJSON exempts from its nil→[]
+// normalisation while normalising EffortLevels. A test that "fixed" that asymmetry
+// would be asserting the opposite of the wire contract.
+var emitterModelListFixture = turnevent.ModelList{
+	Models: []turnevent.ModelOption{
+		{
+			ResolvedModel:    "qq-resolved-alpha-sentinel",
+			Value:            "qq-value-alpha-sentinel",
+			DisplayName:      "qq-display-alpha-sentinel",
+			EffortLevels:     []string{"qq-effort-alpha-sentinel"},
+			SupportsAutoMode: true,
+			TruncatedFields:  []string{"qq-truncated-alpha-sentinel"},
+		},
+		{
+			ResolvedModel:    "zz-resolved-beta-sentinel",
+			Value:            "zz-value-beta-sentinel",
+			DisplayName:      "zz-display-beta-sentinel",
+			EffortLevels:     []string{"zz-effort-beta-sentinel", "zz-effort-gamma-sentinel"},
+			SupportsAutoMode: false,
+			TruncatedFields:  nil,
+		},
+	},
+	DroppedModels: emitterModelListDropped,
+}
+
+// emitterModelListSentinels returns every claude-authored string emitterModelListFixture
+// carries, for the log-leak negatives. Derived from the fixture rather than
+// re-listed beside it, so a sentinel added to an entry cannot silently drop out of
+// the assertions.
+func emitterModelListSentinels() []string {
+	var out []string
+	for _, m := range emitterModelListFixture.Models {
+		out = append(out, m.ResolvedModel, m.Value, m.DisplayName)
+		out = append(out, m.EffortLevels...)
+		out = append(out, m.TruncatedFields...)
+	}
+	return out
+}
+
+// #1849 AC#1: a model list reaches every interactive conn as one model_list
+// envelope carrying exactly what turnbridge.MapEvent produced for the event.
+//
+// This is the ONLY test in the family that decodes payload fields; the rest assert
+// on pushTypes. The per-field want below is built from the fixture's own fields
+// rather than from re-typed literals, which keeps it honest about a swapped
+// assignment inside MapEvent's loop: every field of every entry holds a distinct
+// sentinel, so a Value/DisplayName swap or an entry-index swap is red.
+func TestInteractiveTurnEmitterV2_ModelListFansOutToEveryInteractiveConn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: true},
+		{ConnID: "c", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), emitterModelListFixture)
+
+	for _, connID := range []string{"a", "b"} {
+		got := pushesFor(bcast.pushes, connID)
+		if len(got) != 1 {
+			t.Fatalf("conn %s received %d envelopes; want exactly 1", connID, len(got))
+		}
+		if got[0].env.Type != protocol.TypeModelList {
+			t.Fatalf("conn %s envelope type: got %q, want %q", connID, got[0].env.Type, protocol.TypeModelList)
+		}
+	}
+	if got := pushesFor(bcast.pushes, "c"); len(got) != 0 {
+		t.Fatalf("non-interactive conn received %d envelopes; want 0", len(got))
+	}
+
+	var pl protocol.ModelListPayload
+	if err := json.Unmarshal(pushesFor(bcast.pushes, "a")[0].env.Payload, &pl); err != nil {
+		t.Fatalf("decode model_list payload: %v", err)
+	}
+	if pl.ConversationID != testConvID {
+		t.Errorf("conversation_id: got %q, want %q", pl.ConversationID, testConvID)
+	}
+	if pl.DroppedModels != emitterModelListDropped {
+		t.Errorf("dropped_models: got %d, want %d", pl.DroppedModels, emitterModelListDropped)
+	}
+	src := emitterModelListFixture.Models
+	want := []protocol.ModelOption{
+		{
+			ResolvedModel:    src[0].ResolvedModel,
+			Value:            src[0].Value,
+			DisplayName:      src[0].DisplayName,
+			EffortLevels:     src[0].EffortLevels,
+			SupportsAutoMode: src[0].SupportsAutoMode,
+			TruncatedFields:  src[0].TruncatedFields,
+		},
+		{
+			ResolvedModel:    src[1].ResolvedModel,
+			Value:            src[1].Value,
+			DisplayName:      src[1].DisplayName,
+			EffortLevels:     src[1].EffortLevels,
+			SupportsAutoMode: src[1].SupportsAutoMode,
+			// nil, and it stays nil through the round trip: ModelOption.MarshalJSON
+			// exempts this field from the nil -> [] normalisation it applies to
+			// EffortLevels, so nothing-was-cut reaches the wire as null.
+			TruncatedFields: src[1].TruncatedFields,
+		},
+	}
+	if !reflect.DeepEqual(pl.Models, want) {
+		t.Fatalf("model_list rows on the wire:\n got %+v\nwant %+v", pl.Models, want)
+	}
+}
+
+// #1849 AC#2: a model_list frame opens and closes no turn. It is handled bare
+// before any turn and emits exactly one frame — no turn_state, no turn_end — and
+// the tracker's inTurn/turnID/currentState are asserted directly, then a following
+// content event is driven through to prove a fresh turn still opens.
+//
+// The lifecycle answer is the one TestTurnMarkFor_TotalOverEveryVariant already
+// pins for this variant as turnMarkNone; this is the emitter agreeing with it. It
+// matters here for a reason one step further out than model_announced's: the list
+// is a property of the CHILD, reported once per initialize exchange, so a turn
+// opened on one has no turn end anywhere in its future to clear it.
+func TestInteractiveTurnEmitterV2_ModelListNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), emitterModelListFixture)
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so the exact single-frame sequence is the assertion.
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeModelList}) {
+		t.Fatalf("bare model_list envelopes: got %v, want [%s]", got, protocol.TypeModelList)
+	}
+	if e.inTurn {
+		t.Error("model_list opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("model_list minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("model_list set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeModelList,
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-model_list envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after model_list: got %v, want [responding]", got)
+	}
+}
+
+// #1849 AC#2: mid-turn, buffered assistant text keeps its wire position AHEAD of
+// the frame, and the open turn survives the interleave untouched.
+//
+// The load-bearing part is the event driven PAST the frame. A frame-local check
+// passes even if the handler called endTurn, because an endTurn on an already-open
+// turn only shows its damage on the NEXT event, when a fresh turn gets minted. So
+// the second delta's turn_id and the unbroken seq are what actually bite here.
+func TestInteractiveTurnEmitterV2_ModelListMidTurnDoesNotDisturbOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
+	beforeTurnID, beforeState := e.turnID, e.currentState
+	if !e.inTurn {
+		t.Fatal("precondition: a turn must be open before the interleave")
+	}
+
+	e.Handle(context.Background(), emitterModelListFixture)
+
+	if !e.inTurn {
+		t.Error("model_list closed the open turn; inTurn must stay true")
+	}
+	if e.turnID != beforeTurnID {
+		t.Errorf("model_list changed turnID: got %q, want %q", e.turnID, beforeTurnID)
+	}
+	if e.currentState != beforeState {
+		t.Errorf("model_list changed currentState: got %q, want %q", e.currentState, beforeState)
+	}
+
+	// Drive one event past the frame: this is what catches an endTurn.
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "a2"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // a1, flushed AHEAD of the frame
+		protocol.TypeModelList,      // no surrounding turn_state
+		protocol.TypeAssistantDelta, // a2, flushed by turn_end
+		protocol.TypeTurnEnd,        //
+		protocol.TypeTurnState,      // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn model_list envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+	}
+	if deltas[0].TurnID != beforeTurnID || deltas[1].TurnID != beforeTurnID {
+		t.Fatalf("model_list split the turn: %q, %q want both %q", deltas[0].TurnID, deltas[1].TurnID, beforeTurnID)
+	}
+	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("model_list disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
+	}
+}
+
+// #1849 AC#3 + AC#5: a list arriving before any conversation has been routed
+// produces no envelope and no turn, and the drop that does fire names the variant
+// and nothing else.
+//
+// The empty cursor is load-bearing rather than incidental, exactly as it is in the
+// model_announced test above: with a LIVE cursor the Handle arm claims the event
+// and it reaches no eventKind call site at all, so the no-cursor drop is what keeps
+// this assertion reachable on this lane. The arm exists for the OTHER call sites
+// too — acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go — which would
+// otherwise read kind=unknown for a variant the daemon does recognize.
+//
+// The negatives are the half that discriminates, and this variant multiplies the
+// temptation rather than merely repeating it: every entry carries a Value, a
+// ResolvedModel, a DisplayName and an effort list, and both counts are derived from
+// the list's contents. An arm returning "model_list:" + Value, or + the entry
+// count, leaves strings.Contains(logs, "kind=model_list") TRUE — so the positive
+// assertion alone passes it and only the per-value checks catch it.
+func TestInteractiveTurnEmitterV2_ModelListEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr, for the rate-limited test's measured reason: a
+		// whole-log strings.Contains has a host-dependent source of digits to collide
+		// with otherwise. That is what makes the two numeric needles below safe — the
+		// remaining record carries no digits at all.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	cur := &stubCursor{} // empty cursor: no conversation has been routed yet
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), emitterModelListFixture)
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=model_list") {
+		t.Fatalf("log does not name the variant (want kind=model_list):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for model_list:\n%s", logs)
+	}
+	leakable := append(emitterModelListSentinels(),
+		strconv.Itoa(emitterModelListDropped),
+		strconv.Itoa(len(emitterModelListFixture.Models)),
+	)
+	for _, value := range leakable {
+		if strings.Contains(logs, value) {
+			t.Fatalf("value derived from the model list %q leaked into the kind log:\n%s", value, logs)
+		}
+	}
+
+	// AC#3's other half on the same rig: the pre-routing drop is unchanged, so no
+	// frame reaches the wire and no turn is opened on the way to the drop.
+	if len(bcast.pushes) != 0 {
+		t.Fatalf("pre-routing model_list pushed %d envelopes; want 0", len(bcast.pushes))
+	}
+	if e.inTurn {
+		t.Error("pre-routing model_list opened a turn; inTurn must stay false")
+	}
+}
+
+// #1849 AC#4: a session whose child never reported a list gets no model_list frame
+// at any point in a turn — the arm emits only in response to an actual event.
+//
+// Not a tautology. turnbridge.MapEvent maps a ZERO-VALUE ModelList rather than
+// dropping it ("whether the event exists at all is the producer's" gate), so an
+// emitter that synthesised a frame at a turn boundary, on a lifecycle hook, or from
+// a retained-but-empty list would put an empty menu on a phone's wire and this is
+// the test that reddens.
+func TestInteractiveTurnEmitterV2_ModelListNotSynthesizedWithoutAnEvent(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	for _, ev := range []turnevent.Event{
+		turnevent.TextChunk{MessageID: "m1", Text: "a1"},
+		turnevent.ToolStart{ToolCallID: "t1", Title: "grep"},
+		turnevent.ToolUpdate{ToolCallID: "t1", Status: turnevent.ToolStatusCompleted},
+		turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn},
+	} {
+		e.Handle(context.Background(), ev)
+	}
+
+	if got := pushTypes(bcast.pushes); slices.Contains(got, protocol.TypeModelList) {
+		t.Fatalf("an ordinary turn emitted a %s frame with no ModelList event: %v", protocol.TypeModelList, got)
 	}
 }

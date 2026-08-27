@@ -80,10 +80,18 @@ type stallTracker struct {
 var _ io.Writer = (*stallTracker)(nil)
 
 // newStallTracker returns a tracker using now as its clock seam (nil → time.Now)
-// and log for content-free Debug diagnostics (nil → slog.Default). It starts in
-// the awaiting state because the caller writes the opening user envelope to
-// claude's stdin before the child produces any output — claude owes the first
-// assistant turn (matches streamrunner's newStreamParser).
+// and log for content-free Debug diagnostics (nil → slog.Default). It starts NOT
+// awaiting, and arms only on a `user` line from the child or an explicit
+// Watchdog.UserTurnSent.
+//
+// The initial value cannot be true here even though streamrunner's
+// newStreamParser sets it (#1504). On this interactive surface the child spawns
+// on session activation or RestartFresh and emits its `system`/`init` before any
+// user turn exists — a message may not arrive for hours — and `init` is
+// activity-only, so a tracker that assumed an owed turn at construction fired a
+// false stall against a perfectly healthy idle session. streamrunner's runner *is*
+// the send side, so there construction and delivery are the same moment; see the
+// divergence paragraph on Watchdog.
 func newStallTracker(now func() time.Time, log *slog.Logger) *stallTracker {
 	if now == nil {
 		now = time.Now
@@ -95,7 +103,6 @@ func newStallTracker(now func() time.Time, log *slog.Logger) *stallTracker {
 		now:       now,
 		log:       log,
 		maxBuf:    defaultMaxParseBuf,
-		awaiting:  true,
 		lastEvent: now(),
 	}
 }
@@ -170,6 +177,38 @@ func (t *stallTracker) consumeLine(line []byte) {
 	// only. (No sawResult / kill trailer — this slice emits, never kills.)
 }
 
+// turnSent records that a user turn's bytes reached the child: claude owes an
+// assistant turn from this moment. The third writer of awaiting, alongside
+// consumeLine's arms; the contract for when a caller may invoke it lives on
+// Watchdog.UserTurnSent.
+//
+// Stamping lastEvent is load-bearing, not tidiness: an idle child emits nothing,
+// so lastEvent may be hours stale when the turn finally lands, and arming alone
+// would satisfy shouldFire on the next tick.
+func (t *stallTracker) turnSent() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.awaiting = true
+	t.lastEvent = t.now()
+}
+
+// childExited voids whatever the departed child owed and restarts the idle
+// clock, so the tracker meets the respawned child in the state a freshly
+// constructed one has. The fourth writer of awaiting.
+//
+// It deliberately does NOT drop the partial-line remainder. A dead child's
+// trailing partial concatenates with the new child's first line, but the result
+// is one unparseable line, which consumeLine already treats as activity-only — it
+// cannot flip awaiting to a wrong value, and the first line after a spawn is
+// `system`/`init`, activity-only anyway. Dropping it would defend a failure mode
+// never observed, and the sibling question for the #1088 Parser is still open.
+func (t *stallTracker) childExited() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.awaiting = false
+	t.lastEvent = t.now()
+}
+
 // snapshot returns the current awaiting flag and last-activity time.
 func (t *stallTracker) snapshot() (awaiting bool, last time.Time) {
 	t.mu.Lock()
@@ -233,6 +272,16 @@ type WatchdogConfig struct {
 // the Watchdog holds no context.CancelFunc and no process handle, so it has no
 // way to kill — WatchdogConfig has no cancel field to wire one, and no synthetic
 // `result` trailer is composed.
+//
+// SECOND DIVERGENCE from streamrunner (#1504): that runner *is* the send side, so
+// it may assume an owed turn the moment its parser is constructed. This watchdog
+// is constructed away from the send side and cannot, so the owed-turn fact is
+// supplied by UserTurnSent and ChildExited rather than assumed. The asymmetry is
+// unavoidable rather than stylistic: claude does not echo the delivered prompt
+// back as a `user` line on this surface (measured — see the streamsup feature
+// doc), so the stdout stream alone can never tell the watchdog that a turn was
+// sent, and a tracker left to arm from stdout would turn today's false positive
+// into a silent false negative on the wedge this component exists to catch.
 type Watchdog struct {
 	cfg     WatchdogConfig
 	tracker *stallTracker
@@ -262,6 +311,52 @@ func NewWatchdog(cfg WatchdogConfig) *Watchdog {
 // the child's stdout to both the #1088 Parser and this writer with
 // io.MultiWriter (deferred to the wiring slice).
 func (w *Watchdog) Writer() io.Writer { return w.tracker }
+
+// UserTurnSent tells the watchdog that a user turn's bytes reached the child's
+// stdin: claude owes an assistant turn, and the idle threshold counts from this
+// call rather than from the child's last output (which on an idle session is
+// arbitrarily stale).
+//
+// It means bytes actually DELIVERED, so call it only after a Runner.WriteUserTurn
+// that returned nil. That method's two refusals write zero bytes — ErrNoLiveChild
+// (no live child, or a BeginRotation gate) and turncommit.ErrDropped (gate deny) —
+// and a refused turn owes nothing, so arming on one reintroduces the same false
+// stall by another route. The method takes no argument and returns nothing
+// precisely so that decision stays at the one call site that can see the error
+// value.
+//
+// Control requests do NOT arm it. Runner.Interrupt and Runner.RevokeBypass write
+// `control_request` lines that claude acks in ~40ms (#1075/#1595) and that are not
+// user turns; no wedge has been observed on that path. The trigger is "a user turn
+// was delivered", not "a write happened".
+//
+// Call it on the writing goroutine after the write returns. Arming first and
+// unwinding on error would leave an armed tracker behind every error path — the
+// failure this signal removes. Arming after opens a nanosecond-width reorder in
+// which claude's first output could clear awaiting before this sets it; that is
+// bounded (microseconds after the write syscall, against claude's tens of
+// milliseconds to first output) and self-healing (the next `assistant` or `result`
+// line clears awaiting again), so it is named here rather than mechanised.
+//
+// Safe from any goroutine: it takes only the tracker's leaf mutex, never logs and
+// never calls out, so a caller may hold its own locks across it.
+func (w *Watchdog) UserTurnSent() { w.tracker.turnSent() }
+
+// ChildExited tells the watchdog that the child it was watching is gone: whatever
+// that child owed is void, so a turn abandoned by a crash mid-turn cannot make the
+// respawned child's healthy silence look like a wedge. The respawned child is met
+// in the state a freshly constructed tracker has — not awaiting, idle clock
+// restarted — which is the whole of the reset.
+//
+// The watchdog itself survives the respawn: one watchdog per runner, not one per
+// child, because Config.Stdout is fixed when the Runner is built and the supervise
+// loop never re-wires it, so a per-child watchdog could not reach the new child's
+// stdout. That also keeps exactly one poll goroutine and one Start/Wait pair for
+// the runner's life, which is the contract Start documents.
+//
+// Same locking properties as UserTurnSent: leaf mutex only, safe from any
+// goroutine.
+func (w *Watchdog) ChildExited() { w.tracker.childExited() }
 
 // Start launches the single poll goroutine. Call exactly once. The goroutine
 // ticks at watchdogTickFor(Idle); on each tick it snapshots the tracker and, on

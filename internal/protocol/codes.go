@@ -32,6 +32,29 @@ const (
 	// Session errors.
 	CodeSessionNotFound = "session.not_found"
 	CodeSessionBlocked  = "session.blocked" // terminal give-up; NOT a retry hint (contrast server.binary_busy)
+
+	// Attachment errors (#1751; docs/protocol-mobile.md § Attachments). The
+	// reject vocabulary both attachment_chunk legs answer with, declared in one
+	// place so #1741, #1743, #1744 and #1746 do not each invent a name. The
+	// reasoning is published in that section rather than duplicated here.
+	//
+	// attachment.not_found is DELIBERATELY MERGED: it answers every retrieval
+	// that yields no bytes — an unknown id, a non-canonical id, and an id
+	// resolving outside the named conversation's directory alike. Two
+	// distinguishable codes would make the retrieval verb a path-existence
+	// oracle, so the merge is a disclosure decision, not an imprecision.
+	//
+	// The three retryable members (too_many_uploads, storage_failed,
+	// stream_aborted) are published as retry-AFTER-A-BACKOFF: an immediate
+	// resend turns each into a hot loop, and too_many_uploads' bound clears
+	// only when OTHER uploads finish.
+	CodeAttachmentInvalidChunk    = "attachment.invalid_chunk"
+	CodeAttachmentIntegrityFailed = "attachment.integrity_failed"
+	CodeAttachmentTooManyUploads  = "attachment.too_many_uploads" // transient; the bound clears when other uploads finish (contrast attachment.too_large)
+	CodeAttachmentTooLarge        = "attachment.too_large"        // the WHOLE transfer exceeds the receiver's per-upload bound; ONE oversize envelope is message.too_long
+	CodeAttachmentStorageFailed   = "attachment.storage_failed"
+	CodeAttachmentNotFound        = "attachment.not_found"
+	CodeAttachmentStreamAborted   = "attachment.stream_aborted" // a TypeError correlated via in_reply_to, never a second attachment frame
 )
 
 // Envelope-type constants — wire values for Envelope.Type
@@ -371,6 +394,142 @@ const (
 	TypeModelAnnounced = "model_announced" // binary → phone, outbound v2 announced-model report
 )
 
+// Mobile Protocol v2 model-list report. The daemon can ask claude which models it
+// will accept — a control_request with subtype initialize, written on the child's
+// held-open stdin, returns a models array — and that inventory used to stop at the
+// daemon boundary, so no client could build a model menu, know which
+// reasoning-effort levels a model supports, or know which models accept auto
+// permission mode. #1848 added the turnbridge arm and #1849 the emitting case, so
+// a client can read the inventory now (docs/protocol-mobile.md § model_list); the
+// menus built on it are client-side work still outstanding (pyrycode-desktop#561,
+// blocked since 2026-08-19; #682 is the same defect for the permission-mode menu).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state with
+// two edges, not turn-independent work, not a periodic reading, not a condition
+// report about a window, and not an identity report about one turn. It is a
+// CAPABILITY report — what claude says it CAN be, where model_announced reports
+// what it IS for the turn it says it about. An inventory rather than an event: it
+// does not open or close a turn and is not turn-scoped.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give:
+// the wire type names what the frame IS to a client, so a claude rename lands in
+// one place instead of breaking every client at once. claude's words on this path
+// are initialize (the control_request subtype) and models (the array key), so the
+// discriminating words are "init" and "models" — model_list contains neither. The
+// sibling blocks' form does not transfer to a test on "model": that is this
+// frame's subject noun and the daemon's own word, so a strings.Contains check on
+// it would be RED against the correct name, the same trap TypeModelAnnounced's
+// block records for its own name.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone report an old phone never receives, and a leak
+// into that set would let a phone send a model_list frame into dispatch.Route.
+// Two drift detectors classify it, both mandatory from the moment the constant
+// exists rather than from the moment something emits it: the partition in
+// internal/protocol/compat_test.go splits Type* constants between
+// inboundAppTypeSet and v2OnlyTypes (this lives in the latter), and
+// cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
+//
+// No inbound request verb is declared here, and that is not an omission.
+// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
+// here would be red by construction, and filing it under excludedTypes to dodge
+// that would be a lie to the guard. It shipped as a PUSH rather than a reply:
+// #1849 emits it from interactiveTurnEmitterV2.Handle on the interactive turn
+// lane, so this constant's excludedTypes classification stays push. A later
+// ticket picking request/reply would still have to declare the verb together with
+// its handler; a client's decode path is the same frame whatever it picks, which
+// is what declaring the shape ahead of the producer bought.
+//
+// The declaring ticket (#1704) was wire vocabulary only; #1848 added
+// internal/turnbridge's MapEvent arm for turnevent.ModelList and #1849 added
+// cmd/pyry's emitting Handle case, so this frame now reaches an interactive v2
+// mobile client, and #1705 added the encoding fixtures and the
+// docs/protocol-mobile.md § model_list section. Same declare-then-emit sequencing
+// as #1405→#1410 and #1616→#1638.
+const (
+	TypeModelList = "model_list" // binary → phone, outbound v2 model-list report
+)
+
+// Mobile Protocol v2 slash-command-list report. The set of slash commands the
+// running child accepts for this conversation, sourced from the same initialize
+// control reply the block above uses — that reply carries a commands array
+// alongside its models array, so one round trip answers both. The defect it
+// closes: the desktop's Actions menu offers reset, compact and knowledge
+// capture, and knowledge capture is workspace-specific — it exists in the
+// operator's vault and in almost no repository — so a menu that always offers it
+// is wrong in most repositories, and sending it there produces an "Unknown
+// command" reply in the thread. Two consumers wait on the frame
+// (pyrycode-desktop#681, the Actions-menu grey-out; pyrycode-desktop#694, a
+// slash-command type-ahead in the message box).
+//
+// Grouped alone rather than with any block above: it is not a turn sub-state
+// with two edges, not turn-independent work, not a periodic reading, not a
+// condition report about a window, and not an identity report about one turn. It
+// is a capability inventory of VERBS — what the operator may ask the session to
+// do — where model_list is a capability inventory of identities and
+// model_announced reports the one identity in force. It is not merged into the
+// TypeModelList block despite sharing the initialize round trip: sharing a
+// source is not sharing a subject, the two naming paragraphs have to say
+// different things (two claude words there, four here), and every block in this
+// run groups alone.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give:
+// the wire type names what the frame IS to a client, so a claude rename lands in
+// one place instead of breaking every client at once.
+//
+// claude has FOUR words on this path where model_list had two: initialize (the
+// control_request subtype), commands (the array key in the control reply, 51
+// entries in the committed capture initialize_control_v2.1.239.json),
+// slash_commands (a key on the system/init stdout line carrying the identical 51
+// names as bare strings) and terminal_slash_commands (a different array on that
+// same line, 2 entries: doctor and color). The names-only twin is not the source
+// because it carries none of the 11 alias strings the control reply publishes
+// across 9 of its 51 entries — a daemon forwarding it would ship the grey-out
+// consumer a list in which reset does not appear, and reset is the desktop
+// Actions menu's own entry (an alias of clear, not a command name).
+//
+// The discriminating checks are therefore the PLURALS, and the sibling blocks'
+// subject-noun trap cuts three words wide here rather than one: command,
+// slash_command and slash are each a substring of the correct name, so a
+// strings.Contains check on any of the three would be RED against it — the same
+// trap TypeModelAnnounced's block records for model and TypeModelList's for
+// models. slash_command_list contains none of claude's four words and no init,
+// which is what makes the negative pins satisfiable at all. One plural check
+// covers all three: commands is a substring of slash_commands, which is a
+// substring of terminal_slash_commands, so a name derived from either longer key
+// necessarily contains the shorter one (see
+// TestSlashCommandListType_IsNotClaudesVocabulary).
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this
+// is an outbound binary → phone report an old phone never receives, and a leak
+// into that set would let a phone send a slash_command_list frame into
+// dispatch.Route. Two drift detectors classify it, both mandatory from the
+// moment the constant exists rather than from the moment something emits it: the
+// partition in internal/protocol/compat_test.go splits Type* constants between
+// inboundAppTypeSet and v2OnlyTypes (this lives in the latter), and
+// cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
+//
+// No inbound request verb is declared here, and that is not an omission.
+// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this ticket ships no handler — so a verb declared
+// here would be red by construction, and filing it under excludedTypes to dodge
+// that would be a lie to the guard. If #1720 picks request/reply it declares the
+// verb together with its handler and moves this constant from push to reply; a
+// client's decode path is the same frame either way, which is what declaring the
+// type now exists to freeze.
+//
+// The declaring ticket (#1726) is wire vocabulary only: #1727 declares the
+// payload and its entry type, #1720 produces and emits the frame, and #1718 adds
+// the encoding fixtures and the docs/protocol-mobile.md § slash_command_list
+// section. Same declare-then-emit sequencing as #1405→#1410, #1616→#1638 and
+// #1704→#1848.
+const (
+	TypeSlashCommandList = "slash_command_list" // binary → phone, outbound v2 slash-command-list report
+)
+
 // Mobile Protocol v2 screen-snapshot types. The always-available,
 // parser-independent screen snapshot is the floor of ADR 025's
 // safe-degradation strategy (docs/protocol-mobile.md § Screen snapshot): the
@@ -705,4 +864,60 @@ const (
 // frame on msgqueue give-up is sibling #1008.
 const (
 	TypeSessionError = "session_error" // binary → phone, outbound v2 unsolicited terminal session-error frame
+)
+
+// Mobile Protocol v2 attachment chunk (#1752, split from #1750; the
+// docs/protocol-mobile.md § Attachments section is #1751). One slice of one
+// attachment's bytes, carrying the whole transfer's metadata on every chunk
+// (AttachmentChunkPayload, attachments.go). A file crossing the encrypted mobile
+// channel routinely exceeds one AEAD frame, so the client splits it and the
+// receiver reassembles; the relay stays transport-only, with no blob endpoint —
+// that option was considered and rejected upstream.
+//
+// BOTH DIRECTIONS RIDE THIS ONE FRAME, which is why the trailing comment below
+// carries the file's only bidirectional arrow rather than a typo. Upload
+// (client → daemon) and retrieval (daemon → client) are built months apart, and
+// declaring exactly one type is what makes them impossible to drift apart: there
+// is no second shape to update. The trust asymmetry that creates — inbound every
+// field is a client claim, outbound the same fields are daemon-authored — cannot
+// be expressed in a struct, so it lives in AttachmentChunkPayload's SECURITY
+// block.
+//
+// There is NO completion frame, and that is not an omission. TotalChunks rides
+// every chunk, so a receiver learns the expected count from the FIRST frame it
+// sees and detects a truncated stream earlier than debug_bundle_done detects one
+// for the bundle stream — whose chunks carry only seq and therefore need a
+// terminal frame to learn the count at all. A terminal *error* (a retrieval the
+// daemon abandons mid-stream) is TypeError correlated via in_reply_to, which is
+// #1751's reject vocabulary, not a second attachment frame.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an
+// old (v1) phone must never receive this frame, and rejection is also what keeps
+// the type off the v1 inbound path — the upload leg really is inbound, so
+// IsKnownAppType refusing it is the structural bar against a v1 client sending
+// one into dispatch.Route. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this constant lives in the latter.
+//
+// cmd/pyry/relay_guard_test.go's excludedTypes records it too, and NOT as a
+// "push": the reason its seven newest neighbours give — this slice declares no
+// inbound request verb — is false for a frame whose upload leg is inbound, so
+// copying one would put a lie in the guard. Filing it in inboundTypes instead
+// would fail Assertion #1, which requires an inbound type to be wired into
+// cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this slice ships no dispatch. So the entry is
+// excluded under its own label with the reason that is actually true — the
+// inbound leg has no handler YET. #1744 adds the dispatchAppFrame case, at which
+// point the entry moves to inboundTypes as "switch-intercepted". TypeHello, a
+// borderline phone → binary type deliberately not filed inbound, is the
+// precedent followed there rather than the pushes.
+//
+// The declaring ticket (#1752) is wire vocabulary only: #1753 adds the per-chunk
+// size cap and the both-direction encoding fixtures, #1751 publishes the
+// client-facing contract and the attachment.* reject codes, #1741 reassembles
+// and checks the claims, #1743 stores, #1744 dispatches the inbound leg, and
+// #1746 serves retrieval. Same declare-then-emit sequencing as #1616→#1638 and
+// #1704→#1848.
+const (
+	TypeAttachmentChunk = "attachment_chunk" // phone ↔ binary, one chunk of an attachment's bytes (both directions)
 )

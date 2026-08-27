@@ -215,6 +215,93 @@ func TestSession_ActivateCtxCancellation(t *testing.T) {
 	}
 }
 
+// activateCancelledCalls is the sample size for the fail-fast assertion below.
+// One call cannot decide it: before the entry guard, an already-cancelled ctx
+// raced a closed activeCh in Activate's select and Go picks uniformly among
+// ready arms, so a single call was a coin flip and a green verdict meant
+// nothing. Over N calls a broken guard survives with probability 2^-N.
+const activateCancelledCalls = 400
+
+// TestSession_ActivateCancelledCtx_ActiveFailsFast: Activate with an
+// already-cancelled ctx returns ctx.Err() on every call against a session that
+// is active with its transition complete — the state a closed activeCh
+// encodes by construction (see closedChan).
+//
+// Bare Session literal: no pool, no lifecycle goroutine, no child, nothing
+// scheduler-dependent in either direction. The runner must be fakeRunner,
+// whose WaitForPTY returns nil unconditionally exactly as the production
+// (*streamsup.Runner).WaitForPTY does; lifecycleRunner's WaitForPTY is a
+// second select on ctx.Done() and would mask the leak this test measures.
+func TestSession_ActivateCancelledCtx_ActiveFailsFast(t *testing.T) {
+	t.Parallel()
+	sess := &Session{
+		id:         "activate-cancelled-active",
+		sup:        fakeRunner{},
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lcState:    stateActive,
+		activeCh:   closedChan(),
+		evictedCh:  make(chan struct{}),
+		activateCh: make(chan struct{}, 1),
+		evictCh:    make(chan struct{}, 1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	leaked, firstAt := 0, -1
+	for i := 0; i < activateCancelledCalls; i++ {
+		if err := sess.Activate(ctx); !errors.Is(err, context.Canceled) {
+			leaked++
+			if firstAt < 0 {
+				firstAt = i
+			}
+		}
+	}
+	if leaked > 0 {
+		t.Errorf("Activate(cancelled) leaked %d of %d calls (first at call %d), want context.Canceled every time",
+			leaked, activateCancelledCalls, firstAt)
+	}
+}
+
+// TestSession_ActivateCancelledCtx_EvictedRequestsNothing: Activate with an
+// already-cancelled ctx against an evicted session fails fast without asking
+// for a re-activation, so no supervisor starts and no child is spawned.
+//
+// The empty activateCh is the observable, not a timed "still evicted" poll:
+// the buffered send on activateCh is the sole trigger that lets runEvicted
+// return and Run reach transitionTo(stateActive), so an un-armed trigger is a
+// deterministic proxy for "nothing was spawned". Observing the absence of a
+// spawn directly can only ever be "not yet".
+//
+// No Run goroutine, so nothing drains activateCh and the depth assertion is a
+// fact rather than a race against a wake-up.
+func TestSession_ActivateCancelledCtx_EvictedRequestsNothing(t *testing.T) {
+	t.Parallel()
+	sess := &Session{
+		id:         "activate-cancelled-evicted",
+		sup:        fakeRunner{},
+		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		lcState:    stateEvicted,
+		activeCh:   make(chan struct{}),
+		evictedCh:  closedChan(),
+		activateCh: make(chan struct{}, 1),
+		evictCh:    make(chan struct{}, 1),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := sess.Activate(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Activate(cancelled) err = %v, want context.Canceled", err)
+	}
+	if n := len(sess.activateCh); n != 0 {
+		t.Errorf("len(activateCh) = %d, want 0 — a re-activation was requested for a caller that had already given up", n)
+	}
+	if st := sess.LifecycleState(); st != stateEvicted {
+		t.Errorf("LifecycleState = %v, want %v", st, stateEvicted)
+	}
+}
+
 // TestSession_Activate_GuaranteesPTYBound is the load-bearing test for #396:
 // once Activate returns nil from an evicted session, the supervisor's PTY
 // must already be bound. Without the strengthened contract, a

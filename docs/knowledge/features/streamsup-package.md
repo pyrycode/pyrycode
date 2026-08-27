@@ -197,7 +197,7 @@ forge a turn boundary:
 | `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
 | `system/init` | one `ModelAnnounced` **unless** `model` is absent, empty, or undecodable (#1600, below) — the family's only variant naming what claude is actually running, once per **turn** |
 | `rate_limit_event` | one `turnevent.RateLimited` **unless** `rate_limit_info.status` is the one measured-benign value or the line carries no decodable `rate_limit_info` (#1404, below) — the family's **first non-`system` mapping**, and the one whose gate suppresses the common case rather than the rare one |
-| `control_response` | nothing — consumed **content-free** from its own arm, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500). This is the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. A `subtype:"error"` NAK is consumed indistinguishably; deliberate, no such failure has been observed |
+| `control_response` | nothing, for every shape but one — consumed **content-free**, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500) — **except** a `success`-subtype response whose `response.response.models` decodes to a non-empty array, which emits one `turnevent.ModelList` (#1811, below). This is still the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority for the two content-free sibling shapes is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. CORRECTED 2026-08-27 (#1811): this used to say a `subtype:"error"` NAK is consumed indistinguishably from a success, deliberately, because discriminating it would cost a decode target for the nested object. #1811 built that decode target for an unrelated reason (publishing the model list) and the NAK gap closed as a side effect — the arm's one Debug record now carries a `reason` that names `nak` distinctly from `ack`/`model_list`/`undecodable` |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -354,6 +354,21 @@ in `Handle`'s `default`. CORRECTED 2026-08-19 (#1616): this used to say the prot
 mapping arm landed in sibling #1638, so it now reaches an interactive v2 mobile client instead of falling
 to `default:`. See [codebase/1600.md](../codebase/1600.md).
 
+**Kind-log capture tests in `interactive_turn_v2_test.go` must strip slog's own `time=` attribute before
+asserting bare numeric needles.** `TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant`'s
+negatives were `strings.Contains` over the whole captured `slog.TextHandler` record, which writes `time=`
+first; the `ThinkingProgress` readings' numeric needles (`184`/`37`, for `EstimatedTokens`/
+`EstimatedTokensDelta`) can match the timestamp's own digits instead of a real leak — measured at ≈5% of
+runs (not the ~2% first estimated from a single `-count=N` burst, which structurally can't observe the
+two 1-in-60 minute/second collision terms), and 100% of runs whose log instant lands in minute or second
+`:37` (#1758). The `RateLimited` (#1410) and `ModelAnnounced` (#1600) kind-log tests already carried a
+`ReplaceAttr` dropping `slog.TimeKey` for this exact reason; #1758 applied the same closure to the
+`ThinkingProgress` test and added an explicit `time=`-absence assertion so a future removal of the
+`ReplaceAttr` is red on every run instead of on the unlucky ~1-in-20. Only three of the file's six
+capture-logger construction sites need this — the three whose readings loop asserts bare numeric needles;
+the other three assert alphabetic sentinels that cannot collide with a timestamp and are deliberately left
+without it.
+
 Every claude-derived field is truncated **at construction**, mirroring `maxUnrecognizedRaw`'s
 cap-at-construction precedent, with each cut named in `TruncatedFields`. The two scalar events share
 `maxTaskFieldID` (256) / `maxTaskDescription` (4096) / `maxTaskPatch` (4096). `BackgroundTaskRoster`
@@ -476,6 +491,321 @@ in-band branch (an *enable* still takes `Restart`). The
 See [codebase/1603.md](../codebase/1603.md) and
 [set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md).
 
+**Initialize send primitive (#1689).** `(*Runner).RequestInitialize() error` writes a single
+structured `control_request` line —
+`{"type":"control_request","request_id":"<id>","request":{"subtype":"initialize"}}` — onto the live
+child's held-open stdin, the third subtype alongside `interrupt` and `set_permission_mode` above.
+`WriteInitialize(w io.Writer, requestID string) error` (`envelope.go`) mirrors
+`WriteBypassRevocation` field-for-field. Unlike `set_permission_mode`, the accepted line carries
+**no subtype-specific field** — three arm captures (#1763, re-captured 2026-08-25 against an
+authenticated child, claude 2.1.239) agree byte for byte that `request` holds only `subtype` — so
+`controlRequestInner` gained no new field and `TestMarshalInterruptEnvelope` /
+`TestMarshalBypassRevocationEnvelope` pass with their `want` literals unmodified. `request_id`
+comes from the same shared `nextControlID` counter as `Interrupt` and `RevokeBypass`. **Not added
+to `sessions.Runner`**, unlike `RevokeBypass`: the interface-placement rule is by consumer
+location, and #1839 (below) put the consumer inside this same file rather than inside
+`internal/sessions` — so the rule still argues against an interface method, now for the ordinary
+reason (in-package caller, no cross-package dispatch to satisfy) rather than for having no caller
+at all. This slice writes the line and stops; nothing reads the ack.
+
+**Firing the ask at spawn time (#1839).** A new `Config.RequestInitializeOnSpawn bool` gates one
+call to `RequestInitialize()` inside `spawnAndWait`, between `updateState` and the `onSpawn` seam.
+Cardinality is per **spawn**, which is per child by construction — there is no counter and no
+per-child bookkeeping, because `spawnAndWait` itself runs exactly once per child. The trap this
+design exists to avoid is triggering off the child's own `system`/`init` line instead:
+`emitModelAnnounced`'s doc measures that line as firing once per **turn**, so a trigger there would
+ask on every turn a child serves and only a multi-turn test would catch it. `mapStreamsupConfig`
+sets the field `true`, making the ask the interactive daemon's policy rather than every runner's
+behaviour; the zero value leaves every other `streamsup.Config` construction site — the three
+`internal/e2e/realclaude` runners included — unchanged with no edit, the same shipped-unwired
+property #1206's `OnChildExit` established. The ask's error (only a write-time EPIPE is reachable
+here in practice; see the test-writing lesson below) is absorbed into one `Debug` record and never
+reaches `waitErr`, so it cannot restart a child or fail a spawn. Because `RequestInitialize` reads
+`Stdin()` rather than the rotation-gated `turnTarget`, a `RestartFresh` can leave both the outgoing
+child and its successor asked — deliberate, not a gap: gating the ask on the rotation window would
+leave a child permanently unasked on the `BeginRotation` abort path, which costs more than one
+harmless extra line on a child already being killed.
+
+*Test-writing lesson, from the two multi-step assertions this ticket needed.* The `echo_lines` fake
+child gives tests a FIFO barrier, but only for lines the child lives long enough to read: waiting on
+`onSpawn`'s signal proves the daemon **wrote** the initialize line, not that the child **read** it,
+so a restart test that kills child 1 as soon as child 2's `onSpawn` fires can beat the read and lose
+child 1's ask from the transcript — the count reads 1 where 2 was expected, intermittently. The fix
+is to wait for the first ask's own echo before restarting. Separately, a single-turn test cannot
+distinguish "once per spawn" from "once per turn" — the two cardinalities agree until a second turn
+is delivered, so the second turn is the assertion, not padding, for the exact `system`/`init`
+mistake this design avoids.
+
+*Test-writing lesson, from code review: an "undeliverable ask is absorbed" test needs the reachable
+arm named correctly, or it proves nothing.* A test built around a `crash`-mode child (exits ~20ms
+after spawn) intends to exercise the absorbed-error path, but `go test -race -coverprofile` showed
+the absorb body at 0 executions against 7 successful asks: the write always lands in a pipe buffer
+created microseconds earlier, so only a microsecond-wide EPIPE race is reachable at this call site —
+`ErrNoLiveChild` is not, because that arm requires `takeStdin` to have already run, and `takeStdin`'s
+one call site sits below `cmd.Wait`, later in the very spawn `RequestInitialize` fires within. There
+is no race-free way to force the reachable arm from a child's behaviour, so the honest claim for such
+a test is "the flag doesn't perturb the crash/backoff ladder," not "the absorb branch is covered" —
+label it as what it measures rather than the AC it was written to satisfy.
+
+*Mutation-testing note, applicable to any future control-request marshaller added this way:* a
+byte-exact marshal test pinned against a **fixed literal id** cannot distinguish a structured
+`json.Marshal` from a `fmt.Sprintf`-concatenated line, because a plain digit id produces identical
+bytes either way. `TestMarshalBypassRevocationEnvelope`'s existing eight-row `request_id`
+injection table does not cover this for a new marshaller — a concatenation mutant is per-function,
+not inherited across siblings — so `TestMarshalInitializeEnvelope` needed its own single
+hostile-id case (an id carrying a raw newline) to catch it; confirmed as the sole detector under
+`go test -overlay` review. The revocation table's other seven rows exist to guard `mode`, a second
+fixed field `initialize`'s subtype-only inner doesn't have — a new subtype with no such second
+field needs the one hostile-id case, not the full table.
+
+**Reading the `initialize` ack's committed captures, in-package (#1810).** `capturedInitialize`/
+`capturedInitializePayload` (`initialize_capture_test.go`) read the four committed
+`internal/e2e/realclaude/testdata/initialize_control_*.json` captures of what claude actually sent
+back for the request above, selecting a capture by an **arm** (a closed set of identifiers), never a
+path — the reader mints the path from package constants and rejects any other string. This is a
+second, narrower struct over the same record `internal/e2e/realclaude`'s `initControlFixtureRecord`
+already decodes (that type sits behind the `e2e_realclaude` build tag and cannot be imported), so it
+inherits none of that package's live-run scaffolding — the whole point is that this proof now runs
+inside `make check` instead of behind the opt-in gate that exits 0 with zero tests run when there is
+no claude login. `capturedInitializePayload` fatals on the one arm that recorded no response
+(`control_no_request`); the wide reader hands that case back as a nil payload instead, so an
+absent-payload capture is a distinguishable *fact*, not a read failure — #1811/#1812/#1719/#1809 are
+the decodes meant to call the wrapper.
+
+Two things worth keeping in mind for any reader built the same way: first, a reader must not itself
+check the invariant its own test exists to pin — `capturedInitialize` deliberately never compares the
+decoded payload's model-entry count against the record's own `models_count` summary, precisely because
+`TestCapturedInitialize_ModelCountsMatchEachRecordsSummary` checks exactly that; had the reader also
+enforced it, that assertion would be satisfied by construction and a mutant substituting the outer
+wrapper for the inner payload would stay green. Second, a helper added only because future tickets will
+need it (`capturedInitializePayload` had no callers at the time — #1811/#1812/#1719/#1809 hadn't landed
+yet) should get a real call site in its own test rather than ship unexercised on the promise of a later
+caller: nothing in the build flagged the gap, and giving it one also pinned that the wide and narrow
+readers agree byte for byte.
+
+**Decoding the initialize ack into `turnevent.ModelList` (#1811).** `emitModelList` reaches the
+capture's `models` array through a **shape discriminant**, not through correlating
+`Runner.nextControlID`'s minted `request_id`: the writer discards its id inline
+(`WriteInitialize(r.Stdin(), r.nextControlID())`, exactly as `Interrupt`/`RevokeBypass` discard theirs
+above), and the parser holds no link to it, so correlation would cost new cross-object state between
+the writer and the parser that today share none. The gate is conjunctive —
+`response.subtype == controlResponseSuccess` AND a non-empty decoded `models` array — and its own doc
+names the limit this buys: it recognises a **shape**, not a **correlated reply**. A future claude
+putting a `models` array inside some other successful control response would have that response read
+as an inventory too. The consequence is bounded rather than a defect to fix here — the value is still
+claude's own claim about itself, bounded by the same three caps, retained for the session's life since
+#1840 (below), and published on the live interactive turn lane since #1849 (below). **The trade was
+revisited at that point (#1862) and re-taken unchanged**: correlating `Runner.nextControlID`'s minted
+`request_id` would prove **which reply** the bytes answered, not make the **content** any more
+trustworthy, since the same subprocess authors every control response including the one this arm
+reads — a correlated inventory is claude's own claim about itself exactly as an uncorrelated one is.
+
+Each `turnevent.ModelOption` entry keeps five of claude's payload keys —
+`ResolvedModel`/`Value`/`DisplayName`, `SupportsAutoMode` (#1819) and, since #1827, `EffortLevels` —
+mirroring `protocol.ModelOption`'s wire row (#1704) field-for-field, with nothing missing and nothing
+invented, taken verbatim per #1600's rule (no lowercasing, alias expansion, date-stamping, family
+mapping, or reordering). **`description`, `supportsEffort`, `supportsAdaptiveThinking` and
+`supportsFastMode` are decoded nowhere**, on purpose: a field decoded here that nothing publishes is
+untrusted prose bounded, retained and carried for nothing, and absence from the decode target is a
+stronger guarantee than any test sweep — `systemInitLine`'s argument (#1600) carried over unchanged.
+Each string is bounded by its own named cap (`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`,
+all 256; `maxModelEffortLevel`, 32, capping one level string). The list itself is bounded too, since
+#1821, by `maxModelEffortLevelCount` (8) — see "The per-entry byte budget" below; the bool needs no cap and
+is never named in `TruncatedFields`, since it carries none of claude's bytes. An empty or absent
+`models` array is the safe-failure direction (rung 3, no event) rather than an empty `ModelList` —
+`emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose the variant
+exists for.
+
+**The per-entry byte budget's third dimension is bounded too, since #1821.** `EffortLevels` is the
+family's first field that is a list *inside* a list entry — entries × levels × level length is a third
+size dimension. #1827 bounded the third factor (one level string's length, `maxModelEffortLevel`, 32);
+#1821 closed the second, `maxModelEffortLevelCount` (8), bounding how many levels one entry retains.
+The bound sits inside `boundEach`, **after** #1828's zero-length arm and **before** the per-element
+loop, and truncates **from the tail** so claude's order survives a cut, mirroring the entry-count cap's
+own placement argument one level down. See "The entry count is capped too" below for the resulting
+per-entry multiplicand (1024 bytes) and the re-derived `maxModelListEntries` arithmetic. The cut report
+still follows #1811's per-entry convention: `boundEach` appends `"effort_levels"` to `TruncatedFields`
+**at most once per entry**, whether the cause is an over-long element, an over-long list, or both —
+never once per cut element. Before #1848/#1849 published the event to a client, `logControlResponse` carried the only
+operational signal either mechanism had: a fifth attribute, `levels_dropped`, the daemon-computed total
+of levels dropped by the count bound across the *retained* entries (entries removed by the entry-count
+cap are already counted by `dropped`, so the accumulating loop runs over the already-resliced entry
+list). See [ADR 036](../decisions/036-aggregate-cap-product-is-not-a-ceiling.md) for why the 8192-byte
+figure this replaced was never really a ceiling.
+
+**`SupportsAutoMode` collapses absent, JSON `null` and an explicit `false` into one reading — `false`
+— and the reason is that this field describes a withheld permission grant, not a general-purpose
+optional bool (#1819).** "claude refused auto for this model" and "claude said nothing about auto for
+this model" drive the identical client behaviour (grey the option out), so no distinction was lost by
+choosing a plain `bool` over a `*bool`; the unsafe collapse would have been the inverse, granting on
+silence, which nothing here does. claude has never sent `false` at all — every capture arm shows four
+`true` entries and two carrying no capability key whatsoever — and `protocol.ModelOption` already made
+the same collapse (#1704), so a pointer here would have preserved a distinction only long enough for
+the mapping (#1848) to discard it. **The next field facing this question had to re-derive its own
+answer rather than inherit this one — and, having re-derived it, landed on a collapse too, by a
+different argument**: `EffortLevels` (#1827, decided #1828) is an empty-menu question, not a
+withheld-grant question. An absent key, a JSON `null` and a published `[]` are ONE reading in this
+field as well, spelled `nil`, but the reason is not the bool's asymmetric-safe-direction argument —
+it's that both readings leave the daemon holding the same empty hand: its one effort vocabulary
+(`internal/relay`'s `validEffort`) is forbidden from feeding this list in either direction, so
+"absent" and "published-empty" issue the identical instruction (*this is not a menu you may offer*)
+regardless of which of the two claude meant. `boundEach` (`internal/streamsup/parser.go`) normalises
+the zero-length shape at construction, to `nil` rather than `[]string{}`, because `nil` is
+`TruncatedFields`'s own spelling for "nothing cut" and a struct with two list fields disagreeing on
+how to spell empty is worse than the small one-time cost of picking a direction. One trap the decision
+exists partly to close: `slices.Equal(nil, []string{})` reports `true`, so a design that tried to
+*keep* the distinction would have carried a difference invisible to the comparison idiom every other
+assertion on this field already uses.
+
+*Test-writing lesson: a collapse design's test can't stop at asserting the decoded value.* With absent
+and present-`false` deliberately indistinguishable downstream, a table test that only checks
+`SupportsAutoMode`'s decoded value is satisfied by a fixture builder that quietly drops the `false` key
+— proving one wire shape twice and calling it two. The fix is a guard that asserts what the built
+fixture's line *actually carries* (read back with literal key strings, `capturedModelEntries`' idiom)
+before the decoded value is inspected at all. Also worth knowing before reaching for live capture: the
+present-`false` shape exists nowhere in the tree (not the committed capture, not `fakeclaude`'s canned
+list) and has to be hand-built — a design that keeps two shapes apart can never be shown to do so by a
+fixture transcribed from real bytes when one of the two shapes has never been observed.
+
+**Two more testing lessons, from #1827's list-valued extension of this same table shape.** First, a
+claim of *sole* redness in a test's doc comment is itself a measurable claim, not a description, and is
+cheapest to check at the moment it's written: two such claims here were plausible and wrong until
+mutation testing corrected them — an unconditional-append mutant reddens the all-fit row only *within
+that table*, not uniquely across the package (the capture pin and two decode-table rows also redden),
+and a scrambled-order row is not sole-red against a mutant that merely *sorts* (sorting also reddens the
+already-canonical five-level row); it's sole-red only against a mutant that canonicalises into claude's
+own published order, a narrower claim than "sorted." Second, a `check` closure that indexes into a
+decoded slice (`models[0].EffortLevels[0]`) turns a mutant's clean FAIL into a process-wide panic once a
+mutant (a json-tag typo) leaves that slice empty — it killed the parallel subtests before they could
+report, so one mutation run showed four reds where eleven were expected and briefly read as a coverage
+gap rather than a harness bug. A length `t.Fatalf` before the index costs two lines and keeps a
+mutation run's output honest.
+
+**Two further lessons, from tightening that same table's assertions to pin the #1828 collapse.**
+First, a spec's mutation predictions are written against the assertion as it stands *today*, and a
+ticket that both tightens an assertion and predicts mutants against the tightened version has to
+re-run the prediction after the tightening, not before: #1828's spec predicted that reverting the
+collapse the *other* way (`return []string{}}`) would leave the `published empty` row green, true
+against the old `len(got) != 0` check but false the moment the row's assertion became `got == nil` —
+both `[]string{}` values are non-nil, so that mutant now reddens all three zero-length rows together,
+not the two the row names suggested. Second, once a collapse makes several rows decode to the
+identical value, no mutant of the *production* code can prove they're three genuinely distinct wire
+shapes rather than one shape asserted three times — only a mutant on the *fixture* (dropping the key
+from one row's builder) can, because it reddens the `wantWire` guard while the decoded-value assertion
+stays green. A collapse design's "are these really separate rows" question has to be answered by
+mutating the fixture, not the code under test.
+
+**The entry count is capped too (#1812) — `maxModelListEntries` (10), the family's second cardinality
+bound after `maxTaskRosterEntries`.** A per-entry text cap alone leaves the list's total size a
+function of a number claude chooses; the count bound supplies the missing factor, applied after rung 3
+and before the entry loop, truncating **from the tail** so claude's order is preserved (the same
+ordering rule `Tasks`/`Models` both state). 10 is derived, not chosen, and the observed six-entry
+capture sets the floor with four slots of headroom — not the roster's 8, which would leave only two.
+
+The per-entry multiplicand is **1024 bytes since #1821** — `maxModelResolved + maxModelValue +
+maxModelDisplayName + (maxModelEffortLevelCount × maxModelEffortLevel) = 256×3 + 8×32` — the family's
+one-kibibyte entry unit, shared byte-for-byte with `maxTaskRosterEntries`' own per-entry figure despite
+the two entries having different field sets (256+256+512 vs. 4×256): a coincidence of arithmetic, not a
+rule the *next* aggregate variant is bound by (see [ADR 036](../decisions/036-aggregate-cap-product-is-not-a-ceiling.md)).
+`maxModelListEntries` itself did **not** move: `10 × 1024 = 10240` bytes (15.6% of the v2
+application-envelope cap, `docs/protocol-mobile.md` § Application-envelope size cap). The doc no longer
+measures that product against a fixed 8192 — 8192 was always `maxTaskRosterEntries`' own product,
+noticed to land on half of `maxUnrecognizedRaw`'s 16 KiB, and #1821 demoted it from an inherited
+ceiling back to that landmark. What actually bounds the product is `maxUnrecognizedRaw` itself, with
+the fraction stated per shape rather than a shared constant: the roster is 1/2, the model list is 5/8
+(10240/16384) — each aggregate variant re-derives its own fraction rather than inheriting the other's.
+
+`turnevent.ModelList.DroppedModels` carries what was cut (`0` when nothing was), so
+`len(Models) + DroppedModels` is the list's true size and a client can render "6 of 40" rather than
+presenting a short menu as complete. `logControlResponse`'s record grew a fourth attribute, `dropped`,
+for the reason the wire field's own doc argues about a permanent zero, one layer down: before #1848/#1849
+published the event to a client, that Debug record was the only observable the cap had, and `models=N`
+with no drop count would have read as "claude offers N models" even when it offered more. A fifth
+attribute, `levels_dropped`, was added the same way for the level-count cap (#1821) — see above.
+
+`ModelList` is a `turnevent.Event` (not parser-held session state) precisely because
+`protocol.ModelListPayload`'s own doc names mapping time — `turnbridge.MapEvent` — as the seam every
+v2 interactive payload supplies its `ConversationID` through; session state would have obliged a
+second parser→relay path beside the one every other interactive payload already uses. `MapEvent` gained
+a `turnevent.ModelList` arm in #1848 (previously falling to `default`, which dropped the event) and
+`cmd/pyry`'s `Handle` has carried the emitting case since #1849, so a client does read a real count
+today — best-effort on the live interactive turn lane, still with no connect-time snapshot for one it
+missed: #1863 shipped the relay-side seam nil in production, and **#1867** (open) is the daemon-side
+producer that fills it. See [protocol-package.md](protocol-package.md)'s Model-list payload section.
+
+*Test-writing lesson for the next per-entry accumulator built on `emitBackgroundTaskRoster`'s idiom
+(the `cut` closure declared inside the per-entry loop).* An isolation row asserting "a cut on one
+entry does not appear on a later entry" only reddens under a shared-accumulator mutant (`cut` hoisted
+out of the loop) if the **clean** entry is placed *after* the cut one in the fixture: the cut entry's
+report is appended to the shared slice before the next entry starts accumulating, so a clean-then-cut
+ordering proves nothing about cross-entry leakage — only cut-then-clean does.
+
+*Sharpened by #1821: a hoisted arithmetic accumulator needs a stronger fixture than a hoisted slice.*
+The level-count cap's per-entry drop total (`droppedLevels`, summed into `levelsDropped`) is a running
+`int`, not an appended slice, so the two-entry cut-then-clean fixture above does not catch it hoisted
+out of the loop: with two over-cap entries the hoisted and correct totals can coincide by construction
+(1+3 = 4 either way). It takes three entries with a **clean one in the middle** — over-by-one, clean,
+over-by-three — before a hoisted counter's running total (5) diverges from the correct per-entry-reset
+one (4). The same three-entry arrangement separately kills "report only the last entry's drop", "report
+the largest single drop", and "report how many entries dropped anything" — three more wrong shapes an
+accumulator can take that all read 3 against the same fixture. An accumulator's isolation fixture needs
+checking against more shapes than the slice-append lesson above calls for; a slice and a running total
+fail at different fixture sizes.
+
+*Test-writing lesson for `maxModelListEntries`' boundary row (#1812), and for any future cardinality
+cap shaped `if len(entries) > cap`.* At `len(entries) == cap` the block computes `dropped = 0` and
+slices to identity either way, so `>` vs `>=` is an **equivalent mutant** there — no fixture can tell
+them apart, and a boundary-row comment claiming otherwise (the phrasing `emitBackgroundTaskRoster`'s
+own equivalent row inherited) overstates what the row proves. What the "exactly at the cap" row
+actually pins is a cap that fires **one entry early** (`cap - 1`), verified live by overlaying
+`maxModelListEntries = 9`, which reddens that row while `>` → `>=` does not. Also: a shared record's
+attribute-set change (here, `logControlResponse` gaining `dropped`) can reach a `wantAttrs`-comparison
+test the spec's own amendment list didn't enumerate — `TestParser_ControlResponseAckIsConsumedSilently`
+compares with `reflect.DeepEqual` too and lives ~200 lines from the model-list block, so it only
+surfaced at the first green run. Any future attribute on that record needs every `wantAttrs` map in the
+file, not just the ones naming the feature that grew it.
+
+*The equivalence above does not generalize, and #1821's level-count cap is the counterexample.* "`>`
+vs `>=` is equivalent at `len == cap`" holds only while the guarded block computes *nothing but* a
+count and a slice. `boundEach`'s count bound sits beside a report flag (`cutAny`) in the same block, so
+at `len == cap` an `>=` mutant still computes a zero drop and an identity slice **but also fires the
+report** — `"effort_levels"` gets named on a list nothing happened to. Measured sole-red on the
+"exactly at the cap" row. Before inheriting a prior cap's equivalent-mutant note for a new one, check
+whether the new guarded block reports anything the prior one didn't; folding a report into the same
+block turns a boundary that used to prove nothing into one that does.
+
+**Declaring `commands` alongside `models` (#1853).** `controlResponseLine`'s decode target grew a
+second array, `commandEntryLine{ Name string }`, for claude's slash-command inventory — one field,
+same reasoning as `modelOptionLine` and `systemInitLine`: absence from the decode target is a
+stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stay undeclared.
+Declaring the array turns a `commands` that arrives as a number, a string or an object from
+*silently ignored* into a whole-line decode failure on the undecodable rung — the same shape
+guarantee `models` already had, extended to a second field. `logControlResponse` grew a sixth
+attribute, `commands`, the **decoded** count (not the emitted count `models` reports): taken below
+the success gate and above rung 3's early return, so undecodable and nak report 0 and ack/model_list
+report it — making a payload carrying `commands` and no `models` distinguishable in the log from one
+carrying neither, without touching the four-rung classification itself.
+
+*Testing lesson: a gate-placement claim needs a fixture where the two placements disagree.* The row
+pinning "count taken below the subtype check, not above" only works because it pairs a
+`subtype:"error"` NAK with a **non-empty** `commands` array — every other nak-rung row carries an
+absent or empty array and reads 0 under either placement, so a mutant moving the count above the
+gate survives all of them silently. The general form: when a design decision is "compute X after
+check Y, not before," the pinning fixture must make X differ depending on which side of Y it's
+computed on — an X that reads the same either way (because the fixture is empty/absent on the
+inputs the reordering would affect) proves nothing about the ordering.
+
+*Known future collision, not yet resolved: `commandEntryLine`'s doc absolutism versus #1720.* Its
+comment reads "a later reader must not 'complete' this struct" — but `protocol.SlashCommand`
+already declares all four keys today, and `protocol.SlashCommandListPayload`'s doc states outright
+that shape "adopts all four... unlike ModelOption it drops nothing," with **#1720** open to publish
+it. Code review flagged this as a SHOULD FIX (the comment borrows `systemInitLine`'s register — keys
+the daemon must *never* hold — for three keys the wire type is already committed to carrying) and it
+was left unfixed, deliberately non-blocking. Whoever picks up #1720 will read a production comment
+forbidding exactly what their ticket requires; the fix, when someone gets there, is scoping the
+completeness claim to *today* — nothing reads the other three keys yet, and widening is #1720's
+decision to take together with a cap, not a violation of this one.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
@@ -519,7 +849,7 @@ routing an inbound remote interrupt frame to the correct per-conversation runner
 crash-restart (see [codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge
 case, non-blocking for this unwired slice).
 
-## Idle/stall watchdog — receive-side, emit-not-kill (#1094)
+## Idle/stall watchdog — receive-side, emit-not-kill (#1094), arms from the send side (#1504)
 
 Lifts the type-aware idle watchdog from `streamrunner` (`internal/agentrun/streamrunner/watchdog.go`)
 with one crucial divergence: the one-shot runner **kills** on idle stall; `streamsup`'s watchdog **emits
@@ -538,6 +868,8 @@ type WatchdogConfig struct {
 
 func NewWatchdog(cfg WatchdogConfig) *Watchdog
 func (w *Watchdog) Writer() io.Writer          // the tracker; compose into Config.Stdout
+func (w *Watchdog) UserTurnSent()              // #1504 — a user turn's bytes reached the child; arms + restamps
+func (w *Watchdog) ChildExited()               // #1504 — the watched child is gone; voids what it owed
 func (w *Watchdog) Start(ctx context.Context)  // launches the one poll goroutine
 func (w *Watchdog) Wait()                       // blocks until the poll goroutine exits
 ```
@@ -554,6 +886,27 @@ the watchdog — the type-aware core), `user`/`tool_result`→awaiting, `result`
 goroutine (`Start`/`Wait`) ticks at `watchdogTickFor(Idle)` (`idle/8` clamped to `[5ms, 5s]`, lifted
 verbatim) and, on the edge of `awaiting && silent > Idle` (latched once per stall episode), evaluates
 `PendingPermission()` and calls `OnStall(pending)`.
+
+**The tracker starts not-awaiting, and the send side — not stdout — is the primary arm (#1504).** The
+original `awaiting: true` construction-time default was lifted from `streamrunner`, whose runner *is*
+the send side and so may assume an owed turn the instant it is built. `streamsup`'s watchdog is
+constructed away from the send side: the interactive child spawns on `Activate`/`RestartFresh` and
+emits `system`/`init` before any user turn exists — a message may not arrive for hours — and `init` is
+activity-only, so the old default fired a false stall 240s after every spawn, and again after every
+crash-mid-turn respawn. Because claude does **not** echo the delivered prompt back as a `user` line on
+this surface (measured; see the "Two tiers" section below), starting `awaiting: false` with no other
+change would have turned that false positive into a silent false negative — a turn that produces
+nothing would never arm the watchdog at all. The fix is two explicit lifecycle signals instead:
+`UserTurnSent()` (sets `awaiting=true` **and** restamps `lastEvent`, so an idle child's stale
+`lastEvent` doesn't fire on the very next tick) and `ChildExited()` (sets `awaiting=false` and restamps
+`lastEvent`, voiding whatever the departed child owed so the respawned child starts clean). Both are
+lifecycle facts the still-unfiled wiring slice already holds — `UserTurnSent` after a `WriteUserTurn`
+that returns `nil` (its two refusals, `ErrNoLiveChild` and `turncommit.ErrDropped`, write zero bytes and
+must not arm it), `ChildExited` from the supervise loop's respawn point — but wiring them into
+`Config.Stdout`/`Run` is deferred; this slice is additive to `watchdog.go` alone, no production caller.
+One `Watchdog` per `Runner`, not one per child: `Config.Stdout` is fixed at `New` and never re-wired, so
+a per-child watchdog would have no way to reach a respawned child's stdout. See
+[codebase/1504.md](../codebase/1504.md).
 
 **The hook annotates the signal, it does not gate it.** Both a genuine wedge (`pending=false`) and an
 approval-wait (`pending=true`) call `OnStall` — the distinction lives in the argument, not in whether the
@@ -666,10 +1019,10 @@ delivered the constructor (as the bare `streamRunnerFactory` func, the first `st
 tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
 to send turnevents, and #1168 added the `mcpApprovePath` param to inject the permission-approval flags.
 Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
-withApprovalArgs(scfg.Args, mcpApprovePath)`; `scfg.Stdout =
-streamsup.NewParser(sink.sinkFor(cfg.SessionID), cfg.Logger)`; `streamsup.New(scfg)`; on error,
-`fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
-`streamRunner{r: r}`.
+withApprovalArgs(scfg.Args, mcpApprovePath)`; `parser, held :=
+newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
+`streamsup.New(scfg)`; on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil
+`sessions.Runner`; on success, `streamRunner{r: r, models: held}`.
 
 **`withApprovalArgs(args []string, mcpApprovePath string) []string` (#1168)** is the interactive-stream
 twin of `agent_run.go`'s non-yolo `permissionArgs` wiring (#1106) — the first live consumer of
@@ -758,6 +1111,72 @@ itself, so an un-stripped id flag in `Args` would double-inject. Required at the
 
 Neither #1109 nor #1098 wired the factory into production on their own — that was #1081's scope (below).
 See [codebase/1109.md](../codebase/1109.md).
+
+## Retaining the decoded model list for the session (#1840)
+
+`emitModelList` (above) mints one `turnevent.ModelList` per child and hands it to the parser's sink —
+but that sink is `sink.sinkFor(cfg.SessionID)`, the droppable-class send into the turn-busy fan-in
+(`turnMarkFor`'s default arm answers `turnMarkNone` for `ModelList`), and one `initialize` reply per
+child means no later event ever replaces a copy lost there. `newSessionParser` (`cmd/pyry`) closes that
+gap by minting the parser and a `sessionModelHold` together from one call, so the two halves can't be
+wired to different holds: the hold's `Sink` method decorates `sink.sinkFor`, storing a `ModelList`
+**before** forwarding every event unchanged downstream. Storing happens inside the decorator, which sits
+on the parser's side of the channel entirely — the hold is never a candidate for the `droppableCap`
+refusal, whatever it does internally. `streamRunner` carries the hold and exposes `ModelList()
+(turnevent.ModelList, bool)` as a concrete method, off `sessions.Runner` (the fourth, after
+`Interrupt`/`RestartFresh`/`BeginRotation` — consumer is `cmd/pyry`, not `internal/sessions`, so the
+interface-placement rule argues against widening here too). `have` (a bool, not `len(Models) == 0`)
+represents "nothing reported yet" as its own state, because the producer's `Models` is documented never
+empty and no fixture can construct the state any other way. The hold has no logger field and no
+constructor parameter for one, so `Value`/`ResolvedModel`/`DisplayName`/effort levels have no path to a
+log record — the #833 posture enforced by construction, not by review. `Session.sup` is assigned once
+and never reassigned, so the hold's lifetime is the session's; there is no session-keyed registry to grow
+or prune. #1837 is the intended reader, via `Session.Runner()` and a type assertion.
+
+**`Sink`'s shipped doc justifies its mutex with a writer-overlap race that doesn't happen — code review
+flagged it as a SHOULD FIX and it shipped uncorrected anyway, since the finding didn't block merge.** The
+claim is that a respawn's new stdout-forwarder goroutine can briefly overlap the outgoing one during
+teardown. It can't: `spawnAndWait`'s single call site blocks on `cmd.Wait()`, which `os/exec` documents
+as joining the goroutine copying the child's stdout into a non-`*os.File` `Stdout`, before
+`spawnAndWait` returns — so forwarder N+1 cannot start until forwarder N has already finished. Were it
+true, `streamsup.Parser`'s own doc ("`Write`ing — hence `buf` and the sink calls — is only ever invoked
+serially from that one goroutine, across every respawn") would be describing a live data race in a file
+this ticket never touched. The mutex is still genuinely required — for the *reader* (#1837's publisher,
+concurrent with the sole writer), not for two writers that Go's own stdlib already serializes. Whoever
+next edits `sessionModelHold`'s doc comment should fix the justification, not just trust that a passed
+review means the prose is accurate. The general shape, for any future doc claiming "goroutine A can
+overlap goroutine B": check what actually joins A before B starts — `cmd.Wait()` is one such join point
+in this codebase, and it silently falsifies any respawn-overlap claim built on top of it.
+
+**Store-before-forward inside `Sink` is not what keeps the retention off the droppable send — being a
+decorator upstream of the channel at all is what does it, and a test can tell the difference.** A mutant
+that swaps the two statements (forward first, store second) still passes every test in the suite,
+`TestSessionModelHold_RetainsPastASaturatedSink` included: a refused channel send consumes nothing, so
+storing "after" a refusal still runs. What that test actually pins is that retention doesn't depend on
+the fan-in *admitting* the event — which is what rules out a retention point downstream of the channel —
+and no finer. A decorator whose store step can itself block or panic before reaching `next` would be a
+real ordering bug; statement order within an already-synchronous `Sink` is not the property to write the
+test's name around.
+
+**The live lane gained its own consumer of this event, separately from the retention (#1849).**
+`interactiveTurnEmitterV2.Handle` (below) now carries a `turnevent.ModelList` case, forwarding the same
+`ev` `Sink` already retained straight through `emitMapped` to every interactive conn — no lifecycle
+mutation, no read of the hold. That closes the routed-conversation case only: a bootstrap child at daemon
+start still drops the frame at the no-cursor guard (cursor is `""` until a message routes), and the
+fan-in can still refuse the frame under load since `turnMarkFor` answers `turnMarkNone` for it. Both are
+exactly the losses this retention exists to survive; reading `streamRunner.ModelList()` back for a client
+that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864 →
+#1867/#1868). #1863 shipped the relay-side seam nil in production; **#1867** (open) is what wires a real
+read of the hold into it, **#1868** (open) proves it — not this ticket, and not a second read of the hold
+from the live lane.
+
+**Test-writing lesson: a `cmd/pyry` fixture-builder name collides silently across files in the same
+package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function;
+#1849's emitter tests reaching for the same obvious name for the same `ModelList` shape hit a compile
+error that reads like a type error (`modelListFixture(...) — not a function`) rather than what it is, a
+same-package name collision across files. Prefixing a package-level test fixture with the consumer it
+belongs to (`emitterModelListFixture`, for the emitter tests) is what keeps siblings in one ticket
+sequence from colliding on the name each reaches for first.
 
 ## Draining turnevents into the interactive emitter (#1098)
 
@@ -1377,6 +1796,7 @@ and [codebase/1140.md](../codebase/1140.md).
 - [`codebase/1385.md`](../codebase/1385.md) — the fourth arm, `system/thinking_tokens` → `turnevent.ThinkingProgress`, and the parser's first rate-bounded mapping / first piece of cross-line state.
 - [`codebase/1404.md`](../codebase/1404.md) — the fifth arm and the first non-`system` mapping, `rate_limit_event` → `turnevent.RateLimited`, gated on `status` so a once-per-run report doesn't become a per-turn noise row; `ignoredLineTypes` is down to `{"system": true}`.
 - [`codebase/1240.md`](../codebase/1240.md) — the symptom #1380 fixes the cause of: `turn_end`/`end_turn` and state `idle` while a backgrounded command claude started is provably still alive.
+- [`codebase/1810.md`](../codebase/1810.md) — the in-package reader over the four committed `initialize` ack captures (`capturedInitialize`/`capturedInitializePayload`), moving that proof inside `make check`.
 - [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
 - `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
 - [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.

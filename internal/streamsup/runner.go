@@ -163,10 +163,51 @@ type Config struct {
 	// that sink, not from this callback.
 	OnChildExit func()
 
+	// RequestInitializeOnSpawn asks each spawned child, exactly once, to report
+	// what the session knows about itself — the model list and the slash-command
+	// list — by writing one initialize control_request onto its held-open stdin
+	// (see RequestInitialize). Optional; false (the zero value) keeps a runner
+	// byte-identical to pre-#1839 behaviour, which is what leaves every
+	// construction site other than the interactive daemon's mapStreamsupConfig
+	// untouched. Set it only there: the ask is that daemon's policy, not every
+	// runner's behaviour.
+	//
+	// CARDINALITY IS PER SPAWN, and that is the whole of how "exactly once per
+	// child" is enforced — there is no counter and no per-child bookkeeping, and
+	// none is wanted: spawnAndWait runs once per child, so firing there is once per
+	// child by construction, and the count does not grow with the turns that child
+	// serves. The trap this rules out is the child's system/init line, which looks
+	// like the per-child signal and is not — emitModelAnnounced's doc measures it
+	// firing once per TURN, so a trigger there would ask on every turn while
+	// staying green in any single-turn test.
+	//
+	// Unlike OnChildExit it fires only when a child ACTUALLY LAUNCHED: the call
+	// sits below cmd.Start, so a spawn-setup failure never reaches it. That is the
+	// opposite cardinality to OnChildExit's per-supervision-iteration one, and the
+	// two fields sit next to each other, so the contrast is stated rather than left
+	// to be inferred.
+	//
+	// The ask is BEST-EFFORT AND ITS ERROR IS ABSORBED — one Debug record, then the
+	// spawn continues. It never becomes spawnAndWait's waitErr, so it cannot enter
+	// the backoff ladder, restart a child or fail a spawn.
+	//
+	// It reads Stdin(), NOT the rotation-gated turnTarget, so an ask is not refused
+	// while a new_session rotation is armed and one can land on a child
+	// RestartFresh is about to kill. Deliberate rather than tolerated: that ask
+	// commits nothing and no queue head rides on it, whereas gating it would leave
+	// a child whose rotation was ABORTED (BeginRotation's disarm path) permanently
+	// unasked — the state the per-replacement ask exists to prevent.
+	RequestInitializeOnSpawn bool
+
 	// onSpawn is an unexported test seam, called once per spawn after cmd.Start
 	// and after the stdin handle is stored, with the child's pid. Nil in
 	// production. Lets a test observe "child N is up, Stdin() is live" without
 	// polling.
+	//
+	// It fires strictly AFTER the RequestInitializeOnSpawn ask, so when it fires
+	// that line is already in the child's pipe. Production cannot tell (the seam is
+	// nil there), but it is what makes a test that counts asks deterministic
+	// without polling the child's echo.
 	onSpawn func(pid int)
 }
 
@@ -568,9 +609,43 @@ func (r *Runner) RevokeBypass() error {
 	return WriteBypassRevocation(r.Stdin(), r.nextControlID())
 }
 
+// RequestInitialize writes a single initialize control_request line to the live
+// child's stdin, asking it to report what the session knows about itself — the
+// model list (identifiers, display names, supported reasoning-effort levels) and
+// the slash-command list — without a respawn. The request_id is locally minted
+// from the same counter Interrupt and RevokeBypass draw on. When no child is live
+// Stdin() is nil, so RequestInitialize returns the retryable ErrNoLiveChild
+// without writing and without panicking.
+//
+// It writes the line and stops: the control_response is NOT read here, exactly as
+// RevokeBypass writes without reading its ack. The minted id is deliberately not
+// returned either — the reader slice that correlates the ack is the first thing
+// that needs it, and a return value with no reader is a seam with nothing on the
+// far side of it.
+//
+// The name is RequestInitialize, not Initialize: on a type that already has New, a
+// bare Initialize() reads as "initialize the runner", which is the opposite of what
+// it does — it asks the CHILD to initialize.
+//
+// Like Interrupt and unlike RevokeBypass it is NOT on sessions.Runner, and the
+// placement rule is the same one in both directions: the interface carries a
+// method when its consumer sits inside internal/sessions, where a structural type
+// assertion would fail open (RevokeBypass's does — Pool.UpdateSettings). This
+// subtype has no consumer at all yet — the trigger lands with the publishing slice
+// — so an interface method here would be a seam with nothing on the far side of
+// it, and it would pull every fake runner under internal/sessions into the diff.
+// Stdin() releases r.mu before returning, so the potentially-blocking write never
+// holds it. Safe from any goroutine.
+func (r *Runner) RequestInitialize() error {
+	return WriteInitialize(r.Stdin(), r.nextControlID())
+}
+
 // nextControlID mints the next locally-unique control-request correlation id,
-// shared by Interrupt and RevokeBypass. The atomic counter is unique within the
-// runner's lifetime, which is all a future ack-correlator needs since each runner
+// shared by Interrupt, RevokeBypass and RequestInitialize. The atomic counter is
+// unique within the runner's lifetime — one sequence, not one per subtype, since
+// request_id must be unique across all in-flight control requests on the stream
+// rather than merely within one subtype. That is all a future ack-correlator
+// needs since each runner
 // drives exactly one child stream; this slice does not read the control_response
 // ack, so the id is write-only here.
 func (r *Runner) nextControlID() string {
@@ -1020,6 +1095,21 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 		st.ChildPID = cmd.Process.Pid
 		st.NextBackoff = 0
 	})
+	// One ask per spawn, which is one ask per child — see
+	// Config.RequestInitializeOnSpawn for why no bookkeeping is needed and why the
+	// child's per-turn init line is the wrong trigger. The error is absorbed
+	// rather than returned: it must never reach waitErr, or a benign teardown race
+	// would enter the backoff ladder and restart a child over an ask that commits
+	// nothing. Debug, not Warn, for that same reason and to match
+	// logControlResponse, which logs the reply half of this round trip at Debug;
+	// the wrapped error is daemon-authored, and no request id and no payload are
+	// admitted.
+	if r.cfg.RequestInitializeOnSpawn {
+		if err := r.RequestInitialize(); err != nil {
+			r.log.Debug("streamsup: initialize ask not delivered", "err", err)
+		}
+	}
+
 	if r.cfg.onSpawn != nil {
 		r.cfg.onSpawn(cmd.Process.Pid)
 	}

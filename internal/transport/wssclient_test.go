@@ -189,96 +189,111 @@ func TestBackoff_Sequence(t *testing.T) {
 	}
 }
 
+// TestBackoff_ResetAfterStableConnection pins both arms of the stability
+// reset in the post-serve tail of Client.Connect: an uptime at or beyond
+// stabilityReset restarts the backoff ladder at 1, a shorter one keeps
+// the counter climbing.
+//
+// The counter is read off the "transport: connected" log record, never
+// off a dial interval. Connect's post-serve path redials immediately —
+// the backoff sleep sits only on the dial-failure path — so the interval
+// between a healthy disconnect and the next dial carries no term the
+// attempt counter controls, and no wall-clock bound over it can tell the
+// two arms apart (#1802).
+//
+// Each row fails its first two dials, so the first connected record must
+// read attempt=3. Without that guard a fixture that stopped injecting
+// failures would enter the tail at attempt=1 and both arms would look
+// alike.
 func TestBackoff_ResetAfterStableConnection(t *testing.T) {
 	t.Parallel()
-	relay := newTestRelay(t)
 
-	// Track dial attempts and their inter-arrival.
-	var (
-		dialMu     sync.Mutex
-		dialTimes  []time.Time
-		dialErrors = []bool{true, true, false} // attempts 1,2 fail; 3 succeeds
-	)
-	cfg := Config{Logger: testLogger(t), WriteTimeout: time.Second}
+	// Dials 1 and 2 fail synthetically; every later dial reaches the relay.
+	const failedDials = 2
 
-	// Custom dialFn: first two attempts return error, third dials real.
-	c := newClientForTest(t, cfg, testOpts{
-		seed:             1,
-		reconnectInitial: 20 * time.Millisecond,
-		reconnectMax:     200 * time.Millisecond,
-		stabilityReset:   80 * time.Millisecond,
-		pingInterval:     500 * time.Millisecond,
-		pongTimeout:      500 * time.Millisecond,
-		dialFn: func(ctx context.Context) (*websocket.Conn, error) {
-			dialMu.Lock()
-			idx := len(dialTimes)
-			dialTimes = append(dialTimes, time.Now())
-			fail := idx < len(dialErrors) && dialErrors[idx]
-			dialMu.Unlock()
-			if fail {
-				return nil, errors.New("synthetic dial failure")
-			}
-			conn, _, err := websocket.Dial(ctx, relay.URL(), nil)
-			if err != nil {
-				return nil, err
-			}
-			conn.SetReadLimit(maxFrameBytes)
-			return conn, nil
+	tests := []struct {
+		name string
+		// stabilityReset is the uptime Connect requires before it calls a
+		// connection stable; hold is how long the test keeps the
+		// connection up before dropping it.
+		stabilityReset time.Duration
+		hold           time.Duration
+		wantSecond     int
+	}{
+		{
+			name:           "stable uptime resets the counter",
+			stabilityReset: 20 * time.Millisecond,
+			hold:           100 * time.Millisecond,
+			wantSecond:     1,
 		},
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	connectErr := make(chan error, 1)
-	go func() { connectErr <- c.Connect(ctx) }()
-	t.Cleanup(func() {
-		_ = c.Close()
-		<-connectErr
-	})
-
-	// Wait for the third dial (success) to register on the relay side.
-	select {
-	case <-relay.connectedCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("relay never observed a successful dial")
+		{
+			// Unreachable inside a test run, so the drop below always
+			// lands in the "too brief to be stable" arm.
+			name:           "brief uptime keeps the counter climbing",
+			stabilityReset: 10 * time.Minute,
+			hold:           0,
+			wantSecond:     failedDials + 2,
+		},
 	}
-	// Hold connection well beyond stabilityReset (80ms) so attempt count
-	// resets on next disconnect.
-	time.Sleep(150 * time.Millisecond)
-	relay.ForceClose()
 
-	// Wait for the 4th dial attempt to occur.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		dialMu.Lock()
-		n := len(dialTimes)
-		dialMu.Unlock()
-		if n >= 4 {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	dialMu.Lock()
-	defer dialMu.Unlock()
-	if len(dialTimes) < 4 {
-		t.Fatalf("expected ≥4 dial attempts after reset, got %d", len(dialTimes))
-	}
-	// Between dial[2] (the success at idx 2) and dial[3] (next attempt),
-	// the gap = uptime + backoff(1). uptime ≥ 150ms, backoff(1) ∈
-	// [16ms, 24ms]. Since uptime is the dominant component we can't
-	// pin backoff(1) by the gap. Instead, we verify the reset by
-	// asserting the delay between conn-drop (force close) and the 4th
-	// dial is in the attempt-1 bound. ForceClose ran approximately at
-	// the same time we noted "start of 150ms sleep + 150ms"; rather
-	// than rely on wall-clock subtraction we assert relative to the
-	// known-OK reset: dialTimes[3] - dialTimes[2] minus 150ms (uptime
-	// floor) should be roughly attempt-1 backoff. We loosen the bound
-	// to ≤ reconnectInitial*1.2 + a 50ms slack to account for the
-	// ForceClose latency.
-	gap := dialTimes[3].Sub(dialTimes[2])
-	maxExpected := 150*time.Millisecond + time.Duration(float64(c.reconnectInitial)*1.2) + 50*time.Millisecond
-	if gap > maxExpected {
-		t.Errorf("4th dial gap = %v, expected ≤ %v (attempt counter did not reset)", gap, maxExpected)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			relay := newTestRelay(t)
+			rec := &recordingHandler{}
+
+			var dials atomic.Int64
+			c := newClientForTest(t, Config{Logger: slog.New(rec), WriteTimeout: time.Second}, testOpts{
+				seed:             1,
+				reconnectInitial: 20 * time.Millisecond,
+				reconnectMax:     200 * time.Millisecond,
+				stabilityReset:   tc.stabilityReset,
+				pingInterval:     500 * time.Millisecond,
+				pongTimeout:      500 * time.Millisecond,
+				dialFn: func(ctx context.Context) (*websocket.Conn, error) {
+					if dials.Add(1) <= failedDials {
+						return nil, errors.New("synthetic dial failure")
+					}
+					conn, _, err := websocket.Dial(ctx, relay.URL(), nil)
+					if err != nil {
+						return nil, err
+					}
+					conn.SetReadLimit(maxFrameBytes)
+					return conn, nil
+				},
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			connectErr := make(chan error, 1)
+			go func() { connectErr <- c.Connect(ctx) }()
+			t.Cleanup(func() {
+				_ = c.Close()
+				<-connectErr
+			})
+
+			if got := waitConnectedAttempt(t, rec, 1); got != failedDials+1 {
+				t.Fatalf("first connected attempt = %d, want %d (backoff ladder never climbed)",
+					got, failedDials+1)
+			}
+			// ForceClose can only drop conns the relay handler has already
+			// registered, so wait for the accept before dropping. The hold
+			// starts after the record above, which Connect emits just after
+			// stamping the clock it measures uptime against — so scheduler
+			// pressure can only lengthen that uptime, never shorten it.
+			select {
+			case <-relay.connectedCh:
+			case <-time.After(10 * time.Second):
+				t.Fatal("relay never registered the accepted conn")
+			}
+			time.Sleep(tc.hold)
+			relay.ForceClose()
+
+			if got := waitConnectedAttempt(t, rec, 2); got != tc.wantSecond {
+				t.Errorf("second connected attempt = %d, want %d; records: %s",
+					got, tc.wantSecond, rec.messageSummary())
+			}
+		})
 	}
 }
 
@@ -703,12 +718,33 @@ func TestConnected_FiresOnEveryConnect(t *testing.T) {
 	connectErr := make(chan error, 1)
 	go func() { connectErr <- c.Connect(ctx) }()
 
+	// ForceClose can only drop conns the relay handler has already
+	// registered, and newTestRelay's handler registers after
+	// websocket.Accept returns — later than the client's own dial, which
+	// unblocks on the 101. Gating on Connected alone orders nothing on the
+	// relay side, so wait for the accept before dropping.
+	select {
+	case <-relay.connectedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay never registered the first conn")
+	}
+	// Draining the first signal keeps the buffer-1 Connected channel empty
+	// across the drop, so the read after the reconnect observes the second
+	// signal rather than a stale first one.
 	select {
 	case <-c.Connected():
 	case <-time.After(2 * time.Second):
 		t.Fatal("Connected did not fire after first connect")
 	}
 	relay.ForceClose()
+	// Split the reconnect from the signal: a timeout here means the redial
+	// never reached the relay, which is a harness fault rather than a
+	// regression in Client.Connected.
+	select {
+	case <-relay.connectedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client never reconnected to the relay")
+	}
 	select {
 	case <-c.Connected():
 	case <-time.After(2 * time.Second):
@@ -1342,6 +1378,85 @@ func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 
 func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// connectedRecordMsg is the successful-dial log line that carries the
+// backoff attempt counter — the Info call preceding serve in
+// Client.Connect. Renaming it there makes waitConnectedAttempt time out
+// loudly rather than let a test pass on an unread counter.
+const connectedRecordMsg = "transport: connected"
+
+// connectedAttempt returns the "attempt" value on the nth (1-based)
+// connectedRecordMsg record captured so far, and reports whether such a
+// record carrying that attr exists yet. A record missing the attr reads
+// as not-found, so a renamed attr key cannot pass for attempt 0.
+func (h *recordingHandler) connectedAttempt(n int) (int, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := 0
+	for _, r := range h.records {
+		if r.Message != connectedRecordMsg {
+			continue
+		}
+		seen++
+		if seen < n {
+			continue
+		}
+		attempt, found := 0, false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key != "attempt" {
+				return true
+			}
+			attempt, found = int(a.Value.Int64()), true
+			return false
+		})
+		return attempt, found
+	}
+	return 0, false
+}
+
+// messageSummary lists the captured record messages with their counts in
+// first-seen order, for failure diagnostics.
+func (h *recordingHandler) messageSummary() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	counts := make(map[string]int, len(h.records))
+	var order []string
+	for _, r := range h.records {
+		if counts[r.Message] == 0 {
+			order = append(order, r.Message)
+		}
+		counts[r.Message]++
+	}
+	if len(order) == 0 {
+		return "(none)"
+	}
+	parts := make([]string, 0, len(order))
+	for _, msg := range order {
+		parts = append(parts, fmt.Sprintf("%q x%d", msg, counts[msg]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// waitConnectedAttempt blocks until the nth (1-based) connectedRecordMsg
+// record carrying an "attempt" attr exists, and returns that attempt.
+// The deadline is a liveness guard, not a verdict: it turns a wedged
+// client — or a renamed message or attr key — into a diagnosable failure
+// instead of a hang, and a healthy run never approaches it.
+func waitConnectedAttempt(t *testing.T, h *recordingHandler, n int) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if attempt, ok := h.connectedAttempt(n); ok {
+			return attempt
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("fewer than %d %q records carrying an %q attr within the deadline; records: %s",
+				n, connectedRecordMsg, "attempt", h.messageSummary())
+			return 0
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
 
 // TestConnect_LoudOnFirstUpgradeReject proves AC#1's "loud on the first
 // failed upgrade, not buried": a sustained run of ErrUpgradeRejected dials

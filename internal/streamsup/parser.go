@@ -337,6 +337,304 @@ const (
 // variants do. Revisit on an OBSERVED rate, as #1385 did.
 const maxModelField = 256
 
+// maxModelResolved caps turnevent.ModelOption.ResolvedModel — claude's concrete
+// identifier for one entry of the initialize reply's models array. Applied at
+// CONSTRUCTION, exactly as the caps above are, so an oversized value never enters
+// the event stream, the push queue, or any log.
+//
+// MEASURED against the committed capture (#1688, claude 2.1.239, six entries):
+// the longest resolvedModel is 25 bytes (claude-haiku-4-5-20251001), so 256 is
+// roughly 10x the observation — maxModelField's multiple over the same identifier
+// shape, and for its reason verbatim: room for a naming scheme claude has not
+// shipped yet, and still a hard cut on anything that has stopped being an
+// identifier.
+//
+// A separate constant even though it currently equals maxModelField,
+// maxRateLimitField and maxTaskFieldID: maxRateLimitField's paragraph applies
+// verbatim — they bound different fields for different reasons, and folding them
+// into one would make a future change to one budget silently move this one.
+//
+// THE ENVELOPE ARITHMETIC, and it is COMPLETE: FOUR terms, every one of them bounded
+// by a constant of the daemon's. Per ENTRY the worst case is maxModelResolved +
+// maxModelValue + maxModelDisplayName + maxModelEffortLevelCount *
+// maxModelEffortLevel = 256 + 256 + 256 + 256 = 1024 bytes of claude-derived text,
+// 1.6% of the v2 application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap). 1024 is written here as the MULTIPLICAND rather
+// than as anything else, and the factor it is multiplied by is maxModelListEntries —
+// which carries the aggregate arithmetic rather than restating it here, exactly as
+// maxTaskRosterEntries carries the roster's. A per-entry text cap alone would leave a
+// list's total a function of a number claude chooses, which is maxTaskRosterEntries'
+// doctrine; the count bound supplies the missing factor, and the one constraint it
+// had to satisfy is checked there: the observed list is already SIX entries, so
+// maxTaskRosterEntries' 8 could not be reached for by analogy without checking that
+// six fits with room left.
+//
+// THE FOURTH TERM IS A PRODUCT RATHER THAN A CAP, which is worth naming because it
+// was the last dimension of this entry left open. An entry carries a level LIST, so
+// its budget is a per-element cap times a count bound and not a single number: until
+// both existed the honest per-entry figure was 768 + 32N with N claude's to choose,
+// and a reader who lands here to learn what an entry costs would have inherited a
+// completeness the numbers did not support. That the four terms come out EQUAL is
+// maxModelEffortLevelCount's third bullet rather than a coincidence to lean on:
+// 8 * 32 = 256 bytes is exactly one string field's cap, which lands this multiplicand
+// on maxTaskRosterEntries' own 1024-byte entry unit.
+//
+// Amplification from input to retained bytes is bounded but NOT near 1 the way the
+// scalar targets' is, and this is the one place that difference shows. The cap is
+// applied AFTER json.Unmarshal, so a hostile array is materialised in transient
+// memory before any of it is bounded — maxTaskRosterEntries' transient paragraph,
+// verbatim. defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees
+// it and the densest legal entry is `{}`, so one pathological line is order 100 MB
+// of transient — the spike is real, and that constant is the whole of what bounds
+// it.
+//
+// TRANSIENT AND RETAINED ARE TWO DIFFERENT FIGURES HERE, which is what makes the
+// bound above the whole story rather than half of it. What is TRANSIENT is the
+// unbounded decoded array itself: it lives from json.Unmarshal until emitModelList
+// applies the caps, and is garbage from that point on — nothing downstream is ever
+// handed it. What is RETAINED is only the CAPPED RESULT: at most
+// maxModelListEntries entries, each bounded by the three string caps and by the
+// level product above, and maxModelListEntries carries that aggregate rather than
+// restating it here. TWO holders retain it, both in cmd/pyry — sessionModelHold
+// keeps the decoded value for the session's life (#1840) and emitMapped's eventring
+// append keeps the mapped payload per conversation (#1849) — so what outlives the
+// line is the product, never the spike.
+const maxModelResolved = 256
+
+// maxModelValue caps turnevent.ModelOption.Value. maxModelResolved's paragraph
+// applies verbatim — the measurement, the multiple, the separate-constant rule and
+// the envelope arithmetic are ONE argument covering all three fields, stated once
+// there rather than transcribed three times.
+//
+// The one sentence that is this field's own: Value is not a dated identifier and
+// not even always a model name — an alias (sonnet), a bracketed variant
+// (claude-fable-5[1m], the capture's longest at 18 bytes), or default — so what
+// this cap bounds is claude's argument vocabulary rather than its naming scheme.
+const maxModelValue = 256
+
+// maxModelDisplayName caps turnevent.ModelOption.DisplayName. maxModelResolved's
+// paragraph applies verbatim, for maxModelValue's reason.
+//
+// The one sentence that is this field's own: DisplayName is PROSE rather than an
+// identifier ("Default (recommended)", the capture's longest at 21 bytes), so it
+// has the weakest claim of the three to a naturally bounded length. That argues for
+// keeping it level with its two siblings, NOT for giving it a smaller cap: a label
+// claude lengthens is not a malformation, and a tighter budget would cut a
+// legitimate one first while saving 0.x% of an envelope this list does not reach.
+const maxModelDisplayName = 256
+
+// maxModelEffortLevel caps ONE ELEMENT of turnevent.ModelOption.EffortLevels, not
+// the list. maxModelResolved's paragraph applies verbatim for maxModelValue's
+// reason — the separate-constant rule and the construction-time application are one
+// argument covering all four fields, stated once there rather than transcribed a
+// fourth time. A power of two, matching the family.
+//
+// MEASURED against the same capture: the longest level is 6 bytes (medium), so 32
+// is roughly 5x the observation — a THINNER multiple than the three strings' 10x,
+// for two reasons of which the second is the real one. A level is the most
+// constrained shape in the family, a token from a menu claude publishes and a client
+// renders as a control's options, not prose like DisplayName. And this cap is paid
+// PER ELEMENT against a count claude chooses, so generosity here multiplies where
+// the siblings' does not. 32 still admits every plausible future spelling —
+// ultrathink is 10 bytes, extended-thinking 17 — which is the property that matters:
+// a level claude adds later must DECODE, not arrive mangled.
+//
+// NOT sized to internal/relay's validEffort, whose CLOSED enum's longest member is
+// the same 6 bytes. That enum bounds a PHONE-supplied override on an INBOUND path
+// and is deliberately a different rule; sizing this cap to it would be applying the
+// inbound rule outbound by the back door, and the level claude adds next is what
+// both mistakes lose. See turnevent.ModelOption.EffortLevels, where the same
+// separation is stated for the consumer.
+//
+// It bounds the ELEMENT and maxModelEffortLevelCount bounds the COUNT, which is what
+// turns the multiplication sentence above from a warning into an arithmetic term:
+// this cap is multiplied by a KNOWN factor now rather than by a number claude
+// chooses, so raising it moves a per-entry budget a reader can compute instead of
+// reopening one that cannot be computed at all. 32 * 8 = 256 bytes is that budget,
+// and maxModelEffortLevelCount carries its derivation.
+const maxModelEffortLevel = 32
+
+// maxModelEffortLevelCount caps how many effort levels ONE
+// turnevent.ModelOption retains — the COUNT maxModelEffortLevel's per-element cap
+// cannot supply, and the last dimension of a model entry that was a function of a
+// number claude chooses. It is the family's third CARDINALITY bound and the first
+// that is per-ENTRY: maxTaskRosterEntries and maxModelListEntries bound a whole
+// event's entries, this one bounds a list INSIDE one entry. Applied at CONSTRUCTION
+// like every cap above, so an oversized payload never enters the event stream, the
+// push queue, or any log. Overflow is REPORTED — turnevent.ModelOption.TruncatedFields
+// names "effort_levels" — rather than silent, which is the property that makes a
+// cardinality bound honest: a client shown three of claude's ten levels as a complete
+// menu is a lie rather than a gap.
+//
+// THE NAME ENDS IN Count DELIBERATELY, and the plural maxModelEffortLevels was
+// rejected rather than not considered. It would differ from maxModelEffortLevel by
+// ONE character, both are int, and both bound the same field, so swapping them at a
+// call site COMPILES and neither vet nor a type error would say so: an 8-byte element
+// cap would cut `medium`, claude's ordinary output, on every child, and a 32-level
+// count cap would bound nothing worth bounding. The Entries suffix the two other
+// cardinality caps use is not available without maxModelEffortLevelEntries, which is
+// worse. maxTaskPatch's separate-constant paragraph is this same instinct one step
+// earlier — prevent a silent coupling before it can happen.
+//
+// The arithmetic, in maxTaskRosterEntries' style:
+//
+//   - The count itself: the observed list is FIVE levels — low, medium, high, xhigh,
+//     max, in the committed capture (claude 2.1.239), identically in all three of
+//     #1763's arms — so 8 is 1.6x the observation, essentially maxModelListEntries'
+//     own 1.67x over six entries. A THINNER multiple than the text caps' 10x for
+//     maxModelListEntries' stated reason: a cardinality overflow is REPORTED, and the
+//     reported failure mode is what buys the thinner margin. Three slots above what
+//     claude sends, so the level claude adds next is carried rather than cut.
+//   - A power of two, matching every constant in this family except
+//     maxModelListEntries, whose own doc explains why it alone is decimal.
+//   - The LIST's budget: 8 * 32 = 256 bytes, exactly one string field's cap. That is
+//     what puts maxModelResolved's per-entry multiplicand on 4 * 256 = 1024 bytes —
+//     maxTaskRosterEntries' per-entry unit, to the byte — so the family has ONE entry
+//     unit across both of its aggregate variants. Presented as the number both landed
+//     on rather than as a rule the next variant must satisfy: the two entries have
+//     different field sets (256 + 256 + 512 against 4 * 256), so the agreement is
+//     arithmetic and a variant that re-derives its own unit is not violating anything.
+//   - The aggregate is maxModelListEntries', which carries the product, the ceiling it
+//     is measured against and why that ceiling. Cross-referenced rather than restated,
+//     exactly as maxModelResolved does.
+//
+// NOT sized to the five levels claude sends, and NOT to internal/relay's validEffort
+// whose closed enum has the same cardinality. A cap AT the observation fires the
+// moment claude ships a sixth level, which is the failure maxModelListEntries' NOT 8
+// paragraph rejects by name at its own scale — a cap firing on claude's ORDINARY
+// output. The validEffort separation is maxModelEffortLevel's paragraph verbatim: a
+// CLOSED enum bounding a PHONE-supplied override on an INBOUND path is deliberately a
+// different rule, and sizing an outbound cap to it in either direction is applying the
+// inbound rule by the back door.
+//
+// The cap is applied AFTER json.Unmarshal, so a hostile array is materialised in
+// transient memory before it is shortened — maxTaskRosterEntries' accepted trade, with
+// maxModelResolved's amplification paragraph bounding the exposure. This cap bounds
+// what is RETAINED and what crosses the wire, which is the property that matters.
+const maxModelEffortLevelCount = 8
+
+// maxModelListEntries caps how many entries a turnevent.ModelList carries. It is
+// the second application of maxTaskRosterEntries' doctrine and the constant that
+// supplies the factor maxModelResolved's per-entry budget was missing: a per-entry
+// text cap alone leaves a list's total size a function of a number claude chooses.
+// Applied at CONSTRUCTION like every cap above, so an oversized payload never
+// enters the event stream, the push queue, or any log. Overflow is REPORTED
+// (turnevent.ModelList.DroppedModels), not silent — the one property that makes a
+// cardinality bound honest, because a client showing six of claude's forty models
+// as a complete menu is a lie rather than a gap.
+//
+// The number is DERIVED, and the derivation is written out because it is decimal
+// rather than a power of two and a reader will ask why:
+//
+//   - Multiplicand: 1024 bytes per entry (maxModelResolved + maxModelValue +
+//     maxModelDisplayName + maxModelEffortLevelCount * maxModelEffortLevel),
+//     inherited from maxModelResolved's doc, which states it for this constant rather
+//     than leaving it to be re-derived. All four terms are bounded by a constant of
+//     the daemon's, so it is the per-entry TOTAL and not a floor on it.
+//   - Ceiling: maxUnrecognizedRaw's whole-line 16 KiB, at 5/8 of it. That is the
+//     package's ordering one level up — a whole KNOWN event must not approach the cap
+//     on an entire UNKNOWN line — measured retained-against-retained, which is the
+//     comparison the rule is about. 16384 * 5/8 = 10240, and 10240 / 1024 = 10 exactly.
+//   - Floor: the observed list is SIX entries (the committed capture, claude
+//     2.1.239), the check maxModelResolved's doc requires. 10 leaves four slots.
+//   - Product: 10 * 1024 = 10240 bytes = 10 KiB, ten entries at the family's
+//     one-kibibyte entry unit. 15.6% of the v2 application-envelope cap of 65519 bytes
+//     (docs/protocol-mobile.md § Application-envelope size cap), which reads alongside
+//     the family's 7.4%, 6.6% and 12.5%. Escaping is mild for maxUnrecognizedRaw's
+//     reason verbatim: these are JSON string values, so the growth is quotes and
+//     backslashes rather than a \u00XX expansion of every byte. Pathological all-quote
+//     content roughly doubles it — ~20 KB, ~31% of the envelope. That doubling is
+//     stated against the ENVELOPE only: the maxUnrecognizedRaw comparison above is on
+//     RETAINED bytes, and mixing the two would measure a doubled wire figure against a
+//     retained cap.
+//
+// THE CEILING MOVED AND THE PRODUCT GREW, which is written out because a reader
+// re-running the arithmetic this doc used to carry will find it no longer closes. The
+// old ceiling was 8192, and 8192 was never DERIVED as one: it is maxTaskRosterEntries'
+// PRODUCT, whose doc NOTICED that 8 * 1024 lands on half of maxUnrecognizedRaw, and
+// this constant inherited the noticed landmark as a constraint. What actually survives
+// is the rule the roster stated, which fixes no particular fraction — so the fraction
+// is stated PER SHAPE: the roster reads 1/2, this list reads 5/8. THE NEXT AGGREGATE
+// VARIANT RE-DERIVES ITS OWN FRACTION rather than inheriting 5/8, because inheriting a
+// noticed landmark as a constraint is exactly the mistake this paragraph undoes.
+//
+// It HAD to move, and the proof is short. Both factors have a doctrine floor. A level
+// cap at claude's observed five fires on ORDINARY output, so maxModelEffortLevelCount
+// is at least 6; an entry cap of 8 is rejected by name below, so this constant is at
+// least 10. The smallest product consistent with both is 10 * (768 + 6 * 32) = 9600
+// bytes, already above 8192. No pair of caps this family's own doctrine permits fits
+// the inherited ceiling, so the ceiling was the only lever left rather than one of
+// three. The two alternatives are closed where they live: a 10-byte per-level cap is
+// what 8192 would need at ten entries and five levels, and maxModelEffortLevel argues
+// 32 against spellings claude has not shipped (ultrathink is 10 bytes,
+// extended-thinking 17); and RAISING maxUnrecognizedRaw would loosen the bound on an
+// UNKNOWN line to make room for a KNOWN one, inverting the ordering rule it exists to
+// state.
+//
+// WHICH NUMBERS MOVED: the ceiling, from 8192 to 5/8 of 16 KiB, and the multiplicand,
+// from three strings to four terms. maxModelEffortLevel (32) did not — its own doc's
+// argument is unchanged, and a thinner per-level cap is the alternative rejected
+// above. This constant did not either: the NOT 8 paragraph rejects a smaller count on
+// evidence that has not changed, and trading a bound on the dimension claude has never
+// inflated (five levels of eight) for a tighter bound on the dimension claude is
+// closest to (six entries of ten) is the wrong direction.
+//
+// NOT 8, borrowed from maxTaskRosterEntries by analogy. Two slots above an
+// observation of six is not room, and the failure that buys is a cap firing on
+// claude's ORDINARY output — the menu everyone sees, cut, on every child.
+//
+// NOT a power of two, unlike every other constant in this family, because neither
+// neighbouring power fits: 8 is the too-tight case above, and 16 lands the product at
+// 16384 bytes, EXACTLY maxUnrecognizedRaw's whole-line 16 KiB, so a KNOWN event would
+// REACH the cap on an entire UNKNOWN line rather than staying below it. The decimal is
+// what satisfies both binding constraints at once.
+//
+// The multiple over the observation is thinner than the text caps' 10x, and that is
+// deliberate: a text cap's overflow mangles an identifier in place, while this one
+// shortens a list and says BY HOW MANY, so a client can render "6 of 40" rather
+// than a wrong menu. The reported failure mode is what buys the thinner margin.
+//
+// 1024 counts claude-derived text only. An entry can also carry up to four
+// DAEMON-authored names in TruncatedFields (~55 bytes), which claude cannot inflate
+// and which maxTaskRosterEntries' arithmetic likewise excludes.
+//
+// The cap is applied AFTER json.Unmarshal, so a hostile array is materialised in
+// transient memory before it is shortened — maxTaskRosterEntries' accepted trade,
+// with maxModelResolved's amplification paragraph bounding the exposure. This cap
+// bounds what is RETAINED and what crosses the wire, which is the property that
+// matters.
+const maxModelListEntries = 10
+
+// controlResponseSuccess is the ONE response.subtype whose payload this parser
+// will read. Byte-exact equality against a DAEMON-authored constant, never a fold
+// or a prefix: it is half of emitModelList's conjunctive gate, and the half that
+// refuses to read an inventory out of a response reporting FAILURE. Everything
+// else — "error", a subtype claude invents later, an absent one — is not success
+// and takes the nak rung, which is what makes that classification total.
+const controlResponseSuccess = "success"
+
+// controlResponseMsg is the ONE record every control_response produces, and the
+// constants below are the closed set of reasons it carries. rateLimitDropMsg's
+// shape and its argument: daemon-authored keywords, never claude's values, and one
+// message string for the tests to filter on.
+//
+// The message is UNCHANGED from #1500 and every control_response still produces
+// exactly one record; what #1811 added is `reason` and a `models` count on records
+// that previously carried the type alone, and what #1812 added beside them is a
+// `dropped` count, so a shortened list is not read as a whole one. All three are
+// daemon-authored — a keyword from this set and two integers — so the content-free
+// discipline is intact, and the side
+// benefit is the gap consumeLine's own arm recorded as accepted: a NAK is no longer
+// indistinguishable from a success in the log.
+const (
+	controlResponseMsg = "streamsup: consuming solicited control_response"
+
+	controlResponseNAK         = "nak"         // subtype was not controlResponseSuccess
+	controlResponseAck         = "ack"         // success, no model list on the line
+	controlResponseUndecodable = "undecodable" // the nested shape did not decode
+	controlResponseModelList   = "model_list"  // one turnevent.ModelList emitted
+)
+
 // ignoredLineTypes is the MEASURED set of top-level stream-json types the
 // parser deliberately drops in silence. Membership is what separates "known and
 // deliberately ignored" from "genuinely unrecognized"; getting it wrong in
@@ -732,6 +1030,141 @@ type systemInitLine struct {
 	Model string `json:"model"`
 }
 
+// controlResponseLine is the decoded payload of one top-level control_response
+// line. Kept separate from streamLine for systemTaskStartedLine's reason, and it
+// is the family's first DOUBLE-nested target: the outer `response` is claude's
+// wrapper carrying subtype and request_id, and its own `response` is the
+// initialize payload the models array sits in.
+//
+// The nesting path is spelled out in full deliberately. The decode's input is the
+// TOP-LEVEL line bytes, never a nested field — streamLine's doc states the
+// property that preserves — so every level between the line and the array has to
+// appear here, exactly as rateLimitEventLine spells rate_limit_info.
+//
+// request_id is deliberately absent, and so is `error`. Nothing correlates the id
+// (see emitModelList's provenance paragraph) and nothing reads the error string,
+// which is claude's prose about a failure the daemon takes no action on; a field
+// never declared cannot reach a log or an event, which is systemInitLine's
+// argument for its own twenty-one omissions.
+//
+// The initialize payload's other twelve top-level keys are absent for that same
+// reason and one of them is why it matters: `account`. It is never decoded, never
+// bounded, never retained and never logged, because it is not on this struct.
+type controlResponseLine struct {
+	Response struct {
+		Subtype  string `json:"subtype"`
+		Response struct {
+			Models []modelOptionLine `json:"models"`
+			// A plain []commandEntryLine for Models' reason verbatim: absent, null and
+			// empty are answered identically — a count of 0 — so a pointer would buy a
+			// distinction nothing acts on.
+			Commands []commandEntryLine `json:"commands"`
+		} `json:"response"`
+	} `json:"response"`
+}
+
+// modelOptionLine is one element of that array, reduced to the five keys the
+// mapping reads. The field set is exactly what turnevent.ModelOption carries and
+// nothing invented: description, supportsEffort, supportsAdaptiveThinking and
+// supportsFastMode are all absent by decision, not by oversight — see that type's
+// doc. supportedEffortLevels is decoded HERE (#1827), which leaves no capability key
+// claude sends unaccounted for.
+//
+// A plain []modelOptionLine on the container above, not a pointer to one, and no
+// distinction is kept between an absent `models`, a null one and an empty array:
+// emitModelAnnounced's formulation carries over verbatim — absent,
+// present-but-empty, and a line carrying no such key all land in the same rung and
+// are answered identically, which is what makes a plain decode target sufficient.
+//
+// The first three are plain strings, and so is every ELEMENT of EffortLevels,
+// which is why truncateField's json.RawMessage exception does not reach this shape:
+// encoding/json has already U+FFFD-replaced invalid input on decode, so our own cut
+// is the only mid-rune hazard. A non-string value for any of the three — or a
+// supportsAutoMode that is a string, a number, an object or an array, or a
+// supportedEffortLevels that is a string, a number or an object, or a `models` that
+// is a number, an object or a string, or a non-object `response` at either level —
+// fails the WHOLE-LINE decode and takes emitModelList's undecodable rung, exactly as
+// systemTaskUpdatedLine.TaskID does for a numeric task id. That type mismatch is
+// the ONLY reachable failure there: consumeLine has already decoded this line into
+// streamLine, so malformed JSON never reaches the function at all.
+//
+// A supportedEffortLevels ARRAY carrying a non-string element fails the same way,
+// and it is named here rather than left to be inferred because it is the family's
+// first ELEMENT-level mismatch and "the array decoded but one element was wrong" is
+// the shape a reader would otherwise assume is tolerated. The decode is
+// all-or-nothing at the LINE: there is no path that keeps an array's good elements
+// and drops the bad one, which is the behaviour this field wants, since a menu that
+// silently lost an element would be published as claude's complete one.
+//
+// JSON null is the one carve-out, and it has always applied to the three strings
+// as much as to the bool: encoding/json documents unmarshalling a null into a
+// non-pointer Go value as a NO-OP producing no error, so a null-valued key decodes
+// cleanly and lands as the zero value rather than on the undecodable rung. For
+// supportsAutoMode that is the same reading an absent key gets, which is what
+// turnevent.ModelOption.SupportsAutoMode's doc argues is deliberate. For
+// supportedEffortLevels it lands as nil, which is the same reading an absent key
+// gets — and, since #1828, the same one a published [] gets too, the producer
+// normalising that third shape onto this nil in emitModelList's boundEach. There is
+// no branch in which a null reads as its own thing; the argument for the single
+// reading is turnevent.ModelOption.EffortLevels'.
+type modelOptionLine struct {
+	ResolvedModel    string   `json:"resolvedModel"`
+	Value            string   `json:"value"`
+	DisplayName      string   `json:"displayName"`
+	EffortLevels     []string `json:"supportedEffortLevels"`
+	SupportsAutoMode bool     `json:"supportsAutoMode"`
+}
+
+// commandEntryLine is one element of the initialize payload's `commands` array —
+// claude's slash-command inventory for the workspace the child was spawned in
+// (#1853). "Entry" rather than modelOptionLine's "option": that word names a menu
+// choice the daemon publishes, and a slash command is not one.
+//
+// ONE FIELD, and the OMISSION is the point, exactly as it is on systemInitLine.
+// claude sends four keys per entry — name, argumentHint, description, aliases — and
+// three are deliberately absent, because a field that is never declared cannot reach
+// a log or an event. It is also the whole of the memory story: the captured array is
+// 14,277 bytes compact and the fifty-one `name` strings inside it total 494, so
+// declaring one field is what keeps 96% of a workspace-authored payload from ever
+// becoming a Go string. A later reader must not "complete" this struct.
+//
+// EVERY STRING HERE IS WORKSPACE-AUTHORED. A slash command defined in a repository
+// was written by whoever wrote that repository, and the daemon reads it in whatever
+// directory the operator points a session at. Name is nevertheless NOT validated —
+// not for emptiness, not for charset, not for control bytes — and the reason is NO
+// SINK rather than safe bytes. The capture carries `__remote-workflow`, which is the
+// committed proof that no charset may be assumed; what makes that harmless is that
+// the string reaches no exec.Command argument, no filepath.Join, no filepath.Match,
+// no regexp and no log attribute. Only its COUNT leaves emitModelList. The first
+// slice that actually READS Name inherits the validation question OPEN, not settled,
+// and several of those sinks treat bytes as syntax with no shell anywhere in sight.
+//
+// NO PER-FIELD CAP, and the bound that makes one unnecessary is named rather than
+// added: defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees it,
+// which is already the whole of what bounds the models array's transient spike (see
+// controlResponseLine's neighbouring paragraph). The arithmetic favours this array on
+// both sides — this struct is ONE field where modelOptionLine is five, so per
+// densest-legal element the worst-case transient is a fraction of the already-accepted
+// one and a single 4 MiB line cannot maximise both; and this slice is TRANSIENT,
+// living from json.Unmarshal until emitModelList returns, where the models array's
+// CAPPED result is retained for the child's life by cmd/pyry's sessionModelHold.
+//
+// The decode is all-or-nothing at the LINE, modelOptionLine's rule verbatim and at
+// the ELEMENT level too: a `commands` that is a number, a string or an object, an
+// element that is a bare string or a number, or a `name` that is not a string all
+// fail the WHOLE-LINE decode and take emitModelList's undecodable rung. The bare
+// string is worth naming because it is the shape a future claude most plausibly
+// sends: systemInitLine's line already spells this same inventory as bare strings
+// under slash_commands.
+//
+// JSON null is the one carve-out and it applies at BOTH positions, for
+// modelOptionLine's reason: encoding/json documents unmarshalling a null into a
+// non-pointer Go value as a NO-OP producing no error, so a null `commands` lands as a
+// nil slice and a null `name` lands as "" — a counted entry, not a failed line.
+type commandEntryLine struct {
+	Name string `json:"name"`
+}
+
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
 // on demand in emitAssistant / emitUser. streamBlock declares only the fields
 // the mapping reads, so decoding straight into it would DISCARD every unknown
@@ -824,39 +1257,42 @@ func (p *Parser) consumeLine(line []byte) {
 		// and there is no "did you handle it?" to report back.
 		p.emitRateLimit(line)
 	case "control_response":
-		// The ack the DAEMON ITSELF solicited, consumed content-free (#1500).
-		// Interrupt on this path is a stdin control_request, and claude answers it
-		// ~40ms later on the same stdout the parser reads — see Runner.Interrupt and
-		// marshalInterruptEnvelope for the request side. Without this arm every
-		// interrupt put an unrecognized_message row on the phone, which is the one
-		// frame whose whole value is meaning "claude started emitting something NEW";
-		// firing it on a routine user action spends that meaning. So consuming this is
-		// not tolerating a stranger's line, it is the daemon not alarming about its own.
+		// The reply the DAEMON ITSELF solicited (#1500). Interrupt on this path is a
+		// stdin control_request and claude answers it ~40ms later on the same stdout
+		// the parser reads — see Runner.Interrupt and marshalInterruptEnvelope for the
+		// request side, WriteInitialize and marshalInitializeEnvelope for the
+		// initialize one. Without this arm every interrupt put an unrecognized_message
+		// row on the phone, which is the one frame whose whole value is meaning
+		// "claude started emitting something NEW"; firing it on a routine user action
+		// spends that meaning. So consuming this is not tolerating a stranger's line,
+		// it is the daemon not alarming about its own.
 		//
 		// Its own arm rather than an ignoredLineTypes member, for #1404's reasons
 		// verbatim: that list is documented as top-level types only and as MEASURED
 		// (the 2026-07-27 census, which never interrupted and so never saw this type),
 		// and emitUnrecognized stays unreachable here BY MATCHING rather than by list
-		// membership — the stronger of the two guarantees.
+		// membership — the stronger of the two guarantees. emitModelList holds that
+		// guarantee on every rung, malformed payloads included.
 		//
 		// Shape authority is the verbatim capture in
-		// docs/knowledge/features/set-permission-mode-inband-probe.md, and it inverts
-		// the request side: `subtype` and `request_id` are nested UNDER `response`, not
-		// top-level, so streamLine.Subtype decodes empty and there is nothing for an
-		// emitSystemSubtype-shaped dispatch to match on. Nothing below the top-level
-		// `type` is read at all, which is also why an ack carrying an inner payload and
-		// one carrying none are handled identically.
+		// docs/knowledge/features/set-permission-mode-inband-probe.md for the two ack
+		// shapes and internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json
+		// for the initialize one, and both invert the request side: `subtype` and
+		// `request_id` are nested UNDER `response`, not top-level, so streamLine.Subtype
+		// decodes empty and there is nothing for an emitSystemSubtype-shaped dispatch
+		// to match on.
 		//
-		// Consequence, decided and not stumbled into: a subtype:"error" NAK — whose
-		// real shape that same capture records — is consumed indistinguishably from a
-		// success, and this record does not discriminate them. Only `success` has ever
-		// been observed for an interrupt and no failure of that shape exists, so no
-		// branch is built for one; making it visible would cost a decode target for the
-		// nested object, which IS building the branch.
-		//
-		// Type only in the record, never the line and never the request_id: the same
-		// content-free discipline the ignored branch below and emitRateLimit hold.
-		p.log.Debug("streamsup: consuming solicited control_response", "type", sl.Type)
+		// CORRECTED 2026-08-26 (#1811): this arm no longer reads nothing below the
+		// top-level `type`, and the consequence that choice justified has expired with
+		// it. emitModelList decodes the nested shape, so a subtype:"error" NAK is no
+		// longer consumed INDISTINGUISHABLY from a success — the decode target whose
+		// cost the old reasoning weighed against discriminating one now exists for the
+		// initialize payload's sake, and the discrimination is one comparison against a
+		// daemon-authored constant. What has NOT changed is the BEHAVIOUR for every
+		// response that is not the initialize reply: an interrupt ack, a
+		// set_permission_mode ack and a NAK are each still consumed content-free, one
+		// record and no event, whether they carry an inner payload or none.
+		p.emitModelList(line)
 	default:
 		if ignoredLineTypes[sl.Type] {
 			// The subtype match lives INSIDE this branch, which is what keeps
@@ -1459,6 +1895,385 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 		Truncated: truncated,
 	})
 	return true
+}
+
+// emitModelList decodes one top-level control_response line and emits AT MOST ONE
+// turnevent.ModelList. It never emits an Unrecognized, and it returns nothing:
+// consumeLine's case arm consumes the line by MATCHING, exactly as emitRateLimit's
+// does, so unlike the emitSystemSubtype family there is no "did you handle it?" to
+// report back. Field mapping comes from the committed capture, read in the tests
+// through capturedInitializePayload, never from a hand-built payload.
+//
+// THE DISCRIMINANT is the substance of this mapping; the field copying is routine.
+// claude answers three different requests on this one line type and only one of the
+// replies carries a payload the daemon reads, so the gate is CONJUNCTIVE —
+// subtype == controlResponseSuccess AND a non-empty decoded models array — and
+// each half is load-bearing on its own:
+//
+//   - The models half alone already excludes all three sibling shapes on record: a
+//     set_permission_mode success (whose inner response is `{"mode":"default"}`), a
+//     set_permission_mode NAK (which carries an `error` string and no inner
+//     response), and an interrupt ack (which carries no inner response at all).
+//     None of them has the key.
+//   - The subtype half is what stops a payload being read out of a response that
+//     reported FAILURE. It is what makes the classification total as well: every
+//     subtype that is not success — including an absent one — lands on the nak rung
+//     rather than falling through to a shape test.
+//
+// IT RECOGNISES A SHAPE, NOT A CORRELATED REPLY, and the limit is written here so a
+// later reader does not infer more than the code claims. This says "the line
+// carries a success-subtype model list", not "this is the reply to the initialize
+// request THIS daemon sent": claude authors the inner response object on every
+// control response, so a future claude putting a models array inside some other ack
+// would have that ack read as an inventory.
+//
+// WHERE A MIS-READ INVENTORY NOW GOES, written out because it used to go nowhere
+// and that absence was once the whole bound. cmd/pyry's sessionModelHold retains it
+// as the session's menu for the child's life (#1840),
+// turnbridge.MapEvent's ModelList arm maps it onto protocol.ModelListPayload
+// (#1848), and cmd/pyry's interactiveTurnEmitterV2.Handle emits the mapped frame to
+// any interactive conn and appends it to the eventring (#1849). A menu the daemon
+// never asked for would be presented to a client as one it did.
+//
+// THE TRADE STILL LANDS THE SAME WAY, and what decides it is the CONTENT bound
+// rather than the audience. Correlating request_id would prove WHICH REPLY the
+// bytes answered; it would not make the bytes more trustworthy, because the
+// subprocess that could plant a models array in an unrelated ack is the same
+// subprocess that authors the initialize reply — a correlated inventory is claude's
+// own claim about itself exactly as an uncorrelated one is. That claim stays
+// bounded whichever line carries it, and by the same three things: the caps above,
+// nothing from the payload reaching a log (logControlResponse), and the render
+// boundary the CLIENT owes (protocol.ModelOption's SECURITY paragraph). The
+// alternative buys real provenance and costs new cross-object state:
+// Runner.nextControlID mints the id inline at the call site and nothing retains it,
+// exactly as its two sibling writers discard theirs, so the parser holds no link to
+// it. This paragraph once deferred the question to whenever the value first reached
+// a client; that HAPPENED, and the answer was re-taken here unchanged — recognise
+// the shape, hold no cross-object parser state for provenance. No new trigger is
+// set, because there is no later fact that would move the content bound.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
+// streamLine's doc states the property it preserves: control shapes are read from
+// the top level only and nested content is never re-scanned, which is what stops a
+// tool result whose text is literally `{"type":"result"}` from forging a turn
+// boundary. Decoding this payload from anywhere else would let claude's own tool
+// output announce a model inventory the daemon never asked for — and, since #1853,
+// a slash-command inventory too. commandEntryLine rides this same input; nothing
+// reaches for a nested field to get at either array.
+//
+// FOUR RUNGS, total over the input, none of which can panic and none of which
+// surfaces an Unrecognized:
+//
+//  1. The line will not decode into the shape — a `models` that is a number or an
+//     object, a non-object `response` at either level — → undecodable, no event.
+//  2. subtype is not success → nak, no event. The rung the arm's old doc named as
+//     the accepted gap.
+//  3. models absent, null, empty, or decoded empty → ack, no event. NOT settled by
+//     rung 4's naive reading: emitRateLimit's rung 3 is the precedent, and its
+//     argument carries over unchanged — a ModelList carrying zero entries names no
+//     model, so it cannot serve the purpose the variant exists for, and emitting it
+//     would be the daemon reporting an inventory it never observed. The safe failure
+//     direction here is the false NEGATIVE, and the choice is made with BOTH
+//     outcomes visible: a client on the live interactive lane reads the result
+//     today (#1849). A false ZERO would reach that client's menu as "claude offers
+//     no models". A false NEGATIVE shows no menu at all — cmd/pyry's
+//     sessionModelHold holds nothing, so resolveBoundModelList refuses rather than
+//     answering an empty list. Both are a MISSING menu; only the false positive is
+//     a WRONG one, and that asymmetry is the footing. It is stronger now that
+//     either outcome is observable than it was when neither was.
+//  4. success and a non-empty array → one ModelList.
+//
+// A per-entry field is never validated beyond its cap. An entry whose value is
+// empty, whose resolvedModel is missing, or which carries no keys at all still
+// becomes an entry: absence is claude's to choose, and emitBackgroundTaskStarted's
+// doc is the standing answer — the field lands empty rather than inventing a
+// validation rule. The capture's two four-key entries are the committed proof that
+// a partial key set is claude's NORMAL output rather than a malformation. The gate
+// that suppresses the event lives at the LIST level, not the entry level. That
+// extends to the bool with one difference: what an absent supportsAutoMode READS AS
+// is decided at turnevent.ModelOption's type rather than here, because the field's
+// shape is the decision — there is no daemon code below implementing the collapse.
+//
+// The level LIST goes through TWO caps where each string goes through one —
+// maxModelEffortLevel on every ELEMENT and maxModelEffortLevelCount on how many are
+// RETAINED — and reports like neither: ONE name in TruncatedFields per entry whether
+// that entry's levels were cut, its list was shortened, or both, because the report
+// names FIELDS and a list is one field. What an absent
+// supportedEffortLevels READS AS is likewise turnevent.ModelOption.EffortLevels' to
+// say rather than this function's, and it SAYS that an absent key, a null and a
+// published empty array are ONE reading, spelled nil (#1828). Unlike the bool that
+// reading needs code, because encoding/json keeps the two shapes apart for free:
+// boundEach's zero-length arm is where it lands, and it is the only normalisation
+// anything below performs.
+//
+// NOTHING FROM THE PAYLOAD IS LOGGED, on any path — see logControlResponse, which
+// is the one place that is decided.
+func (p *Parser) emitModelList(line []byte) {
+	var cr controlResponseLine
+	if err := json.Unmarshal(line, &cr); err != nil {
+		// The err is deliberately NOT logged, and emitModelAnnounced's undecodable arm
+		// is where that rule is argued at length: encoding/json QUOTES the offending
+		// input bytes into its error text, so `"err", err` would route claude's own
+		// strings into the daemon log through a channel no per-attribute check can see.
+		// #1853 made that strictly more load-bearing: with commandEntryLine declared,
+		// the bytes a type error quotes are workspace-authored command names.
+		p.logControlResponse(controlResponseUndecodable, 0, 0, 0, 0)
+		return
+	}
+	if cr.Response.Subtype != controlResponseSuccess {
+		p.logControlResponse(controlResponseNAK, 0, 0, 0, 0)
+		return
+	}
+	// BELOW the success gate and ABOVE rung 3's return, and both halves are the
+	// placement: taking it above the subtype comparison would report a count off a
+	// response that announced FAILURE, and taking it below rung 3 would leave the ack
+	// rung — the one rung where this is the record's only non-zero number — reporting
+	// 0. Nothing but this int leaves the function; the decoded entries are never read,
+	// retained, bounded or emitted.
+	commands := len(cr.Response.Response.Commands)
+	entries := cr.Response.Response.Models
+	if len(entries) == 0 {
+		// Rung 3. An absent `models`, a null one, an empty array, and a response
+		// object carrying no such key all land here and are answered identically —
+		// including a payload carrying a non-empty `commands` and no models, which is
+		// an ack whose record now tells it apart from one carrying neither array.
+		p.logControlResponse(controlResponseAck, 0, 0, 0, commands)
+		return
+	}
+
+	// Never nil and never empty: the rung above returned on both. The COUNT bound
+	// runs before the loop, and truncation is FROM THE TAIL: claude's order is
+	// preserved because no ranking is invented, its ordering semantics being
+	// unobserved. It sits BELOW rung 3 and cannot move a rung's classification —
+	// the cap is >= 1, so capping can neither create an empty list nor rescue one.
+	var dropped int
+	if len(entries) > maxModelListEntries {
+		dropped = len(entries) - maxModelListEntries
+		entries = entries[:maxModelListEntries]
+	}
+
+	models := make([]turnevent.ModelOption, 0, len(entries))
+	// levelsDropped totals what the LEVEL-count bound cut across the RETAINED entries.
+	// Entries the count cap above removed are already counted by `dropped`, and their
+	// levels are never seen by the loop below, so nothing is counted twice.
+	var levelsDropped int
+	for _, entry := range entries {
+		// The TEXT bound is per entry, so `cut` is per entry — which is the whole
+		// reason this closure cannot be hoisted out of the loop.
+		var cut []string
+		// droppedLevels is per entry for `cut`'s reason, and its SCOPE is the whole of
+		// what makes it correct: declared inside the loop, it cannot carry one entry's
+		// drop onto the next, which is the mistake the "a cut on one entry does not
+		// appear on the entries AFTER it" row exists to catch on the sibling path.
+		var droppedLevels int
+		bound := func(value, name string, limit int) string {
+			out, truncated := truncateField(value, limit)
+			if truncated {
+				cut = append(cut, name)
+			}
+			return out
+		}
+		// boundEach is bound's sibling for the one field of this entry that is a LIST,
+		// and it exists rather than a fourth bound call because a list is where ONE
+		// name has to cover MANY values. Four properties, each load-bearing, in the
+		// order the statements run:
+		//
+		//   - A ZERO-LENGTH input returns nil and appends nothing, so a published []
+		//     reads as an absent key does. That is #1828's collapse implemented, and
+		//     nil is the direction because it is this struct's own spelling for an
+		//     empty list — see turnevent.ModelOption.TruncatedFields for the convention
+		//     and ModelOption.EffortLevels for the argument. It normalises how Go
+		//     spells ZERO and no element or position, so #1600's verbatim rule is
+		//     untouched. The arm returns BEFORE everything below, so a zero-length list
+		//     is neither counted against the cap nor named in TruncatedFields.
+		//   - The COUNT bound then runs, and truncation is FROM THE TAIL for the
+		//     entry-count cap's reason verbatim: claude's order is preserved because no
+		//     ranking is invented, its ordering semantics being unobserved. Being >= 1
+		//     it can neither create an empty list nor rescue one, so it cannot turn a
+		//     non-empty list into the empty one whose reading #1828 settled, nor the
+		//     other way about — the two mechanisms are independent by construction
+		//     rather than by care. The > boundary matches truncateField's <=, and unlike
+		//     maxModelListEntries' it is NOT an equivalent mutant: that block computes a
+		//     count and a slice, both identity at len == cap, while this one also raises
+		//     the report flag, so >= would name the field on a list nothing happened to.
+		//   - Every SURVIVING element then goes through truncateField into a slice of
+		//     the SAME length, so cutting an element neither drops it nor disturbs
+		//     claude's order. That is the ELEMENT cap's property and not the closure's:
+		//     the count bound above does shorten the list, which is why it reports.
+		//   - The name is appended AT MOST ONCE, after the loop, and only if the list
+		//     was shortened or some element was cut or both. Appending inside the loop
+		//     would name the field once per cut level, which is the realistic mistake
+		//     and the one the three-over-long row of TestParser_ModelListFieldsAreCapped
+		//     exists to catch.
+		//
+		// The name is KEPT even though the closure now bounds the list's LENGTH too.
+		// Bounding each element is still what it does per value, the count bound is one
+		// statement before the loop, and the report is still one name; a rename would
+		// buy no behaviour and would rot the by-symbol citations this function's own doc
+		// and turnevent.ModelOption.EffortLevels make to it. The count constant is read
+		// from package scope rather than taken as a second parameter beside `limit`: a
+		// fourth int argument would put the two caps adjacent at the call site, which is
+		// precisely the swap maxModelEffortLevelCount's naming paragraph spends itself
+		// preventing, and unlike `bound` — three fields, three limits — this closure has
+		// one call site and one field, so parameterizing buys nothing. It closes over
+		// the same per-entry `cut` slice bound does, plus the per-entry droppedLevels
+		// counter, and cannot be hoisted for the same reason.
+		boundEach := func(values []string, name string, limit int) []string {
+			if len(values) == 0 {
+				return nil
+			}
+			var cutAny bool
+			if len(values) > maxModelEffortLevelCount {
+				droppedLevels = len(values) - maxModelEffortLevelCount
+				values = values[:maxModelEffortLevelCount]
+				cutAny = true
+			}
+			out := make([]string, len(values))
+			for i, level := range values {
+				var truncated bool
+				out[i], truncated = truncateField(level, limit)
+				cutAny = cutAny || truncated
+			}
+			if cutAny {
+				cut = append(cut, name)
+			}
+			return out
+		}
+		// Sequential statements rather than a composite literal, for
+		// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these
+		// calls, and inside a literal that order would rest on the left-to-right
+		// operand rule rather than on something a reader sees. The names are the
+		// DAEMON's snake_case ones, not claude's camelCase keys.
+		resolvedModel := bound(entry.ResolvedModel, "resolved_model", maxModelResolved)
+		value := bound(entry.Value, "value", maxModelValue)
+		displayName := bound(entry.DisplayName, "display_name", maxModelDisplayName)
+		effortLevels := boundEach(entry.EffortLevels, "effort_levels", maxModelEffortLevel)
+		// The per-entry drop joins the total HERE rather than inside the closure. A
+		// counter the closure incremented directly would be one declared outside the
+		// loop, and that is how a drop on one entry starts appearing on the next.
+		levelsDropped += droppedLevels
+
+		models = append(models, turnevent.ModelOption{
+			// claude's values VERBATIM: no lowercasing, no alias expansion, no
+			// date-stamping, no family mapping, no lookup against any published model
+			// list (#1600's rule). The cap is the only judgement made about them here.
+			ResolvedModel: resolvedModel,
+			Value:         value,
+			DisplayName:   displayName,
+			// Through `boundEach` rather than `bound`: the caps are per ELEMENT and per
+			// COUNT while the report is per FIELD. claude's order survives both of them and
+			// the list's cardinality survives an element CUT untouched — what changes the
+			// cardinality is the count bound, which shortens FROM THE TAIL and says so in
+			// TruncatedFields. #1600's verbatim rule covers the elements exactly as it covers
+			// the three strings — no lowercasing and no canonicalisation into any effort
+			// vocabulary of the daemon's own. internal/relay's validEffort is a CLOSED enum
+			// on an INBOUND path and is deliberately not consulted here.
+			EffortLevels: effortLevels,
+			// Not through `bound`: a bool has no length to cut, carries none of claude's
+			// bytes into the per-entry budget, and is therefore never named in
+			// TruncatedFields. Absent, null and false arrive here already collapsed by
+			// encoding/json — see turnevent.ModelOption.SupportsAutoMode for why that is
+			// the intended reading rather than a distinction lost.
+			SupportsAutoMode: entry.SupportsAutoMode,
+			// nil when nothing was cut: append never ran.
+			TruncatedFields: cut,
+		})
+	}
+
+	p.logControlResponse(controlResponseModelList, len(models), dropped, levelsDropped, commands)
+	p.emit(turnevent.ModelList{Models: models, DroppedModels: dropped})
+}
+
+// logControlResponse writes emitModelList's ONE record, and it exists so the
+// content-free rule is decided in a single place rather than on each of the four
+// rungs. Every control_response produces exactly one of these, whatever it was a
+// reply to.
+//
+// Six attributes and NOTHING else. `type` is a constant here rather than
+// sl.Type, which the case arm's match makes byte-identical; `reason` comes from the
+// closed keyword set at controlResponseMsg; `models` is the emitted entry count,
+// `dropped` how many maxModelListEntries cut, and `levels_dropped` how many effort
+// levels maxModelEffortLevelCount cut in TOTAL across the RETAINED entries — all
+// three 0 on the three non-emitting rungs. Levels belonging to entries `dropped`
+// removed are not counted again there. No value, no resolvedModel, no displayName, no
+// level string, no request_id, no error string,
+// no unmarshal err, no line bytes. The three strings are precisely what #833's
+// posture — restated across internal/relay's v2session_settings.go and
+// internal/sessions' pool.go as "model / effort / YOLO values are NEVER logged at
+// any level" — exists to keep out of a log, and a drop site explaining itself with
+// the value it dropped is how that rule usually breaks. All four integers are
+// DAEMON-computed and carry none of claude's bytes, which is what admits them where
+// no string from the payload is admitted.
+//
+// `dropped` is here rather than omitted (#1812) for the reason the wire field's own
+// doc argues about a permanent zero, one layer down: `models=6` on a reply that
+// carried forty reads as "claude offers six models". emitBackgroundTaskRoster logs
+// no count and does not oppose this — its only record is the UNDECODABLE drop, so it
+// has no success record to complete, while this path has one and completing it is
+// consistent. The entry count is no longer this record's alone:
+// turnbridge.MapEvent's ModelList arm carries turnevent.ModelList.DroppedModels
+// through verbatim (#1848) and cmd/pyry's interactiveTurnEmitterV2.Handle puts it
+// on the wire as dropped_models (#1849), where
+// protocol.ModelListPayload.DroppedModels documents it as client-facing. The record
+// keeps its own reason, on two facts the wire field cannot supply. AN
+// OPERATOR-FACING SIGNAL IS NOT A CLIENT-FACING ONE — the wire field tells a phone
+// its menu is short, this record tells an operator, on the daemon's own timeline.
+// And the wire field is not a RELIABLE observable of the cap: no conn need be
+// interactive when the initialize exchange happens, and the live send is droppable
+// at the fan-in, so a cap can fire with no frame reaching anyone. This record always
+// exists. So a cap firing in production is still a cap no OPERATOR can know fired
+// without it — that would take a phone having been connected and having reported
+// back — and the first evidence that 10 is the wrong number would arrive as a user's
+// short menu.
+//
+// `levels_dropped` is here for that argument VERBATIM, one dimension down, and here
+// the record is still the only place the NUMBER appears at all.
+// turnevent.ModelOption.TruncatedFields does reach a client — MapEvent's arm crosses
+// it as the slice it is (#1848), and protocol.ModelOption.MarshalJSON deliberately
+// exempts it so nothing-was-cut arrives as null — but what crosses is a NAME,
+// "effort_levels", at most once per entry, saying the same thing whether one level
+// was cut or ninety were dropped. The MAGNITUDE reaches nowhere else, which
+// turnevent.ModelOption.EffortLevels' own "WHAT THAT GIVES UP" paragraph states
+// from the other side: the true level count is not recoverable from the event, where
+// ModelList's true entry count is recoverable as len(Models) + DroppedModels. The
+// operator-versus-client and best-effort points from `dropped` above apply here
+// unchanged. So without this the level bound would be a cap on subprocess-supplied
+// data with no count anywhere, and the first evidence that maxModelEffortLevelCount
+// is the wrong number would arrive as a user's short effort menu. It is admissible
+// under this function's own rule for the same reason the other two counts are — a
+// DAEMON-computed integer derived from slice lengths, carrying none of claude's
+// bytes — and the level STRINGS it counts are exactly the "effort values are NEVER
+// logged at any level" half of #833's posture, so none of them goes anywhere near
+// this record.
+//
+// `commands` is the initialize payload's slash-command entry count (#1853), and its
+// argument is `dropped`'s SIMPLER and STRONGER: this record is the ONLY observable
+// that decode has. The operator-versus-client half does not transfer — `dropped`
+// completes a client-facing wire field, and this number has no wire field to
+// complete, no event, no retention and no daemon-internal value. Without it a
+// `commands` array that stopped decoding would be a change nobody could know
+// happened. It counts what DECODED, where `models` counts what was EMITTED after
+// maxModelListEntries cut: two counts with different meanings on one record, and the
+// difference is that nothing caps or retains this one, so there is no cap here to
+// infer. Admissible on the other three counts' footing exactly — a DAEMON-computed
+// integer derived from a slice length, carrying none of claude's bytes. No name, no
+// argumentHint, no description and no alias reaches this record on any rung, and
+// commandEntryLine's single field is what makes three of those four unreachable
+// rather than merely unwritten.
+//
+// It is the LAST parameter and the LAST attribute, so the two orders are one order a
+// reader checks once. The existing three ints are one dimension — `models` with
+// `dropped` and `levels_dropped` qualifying it — and inserting a fourth between them
+// would split a trio that reads as a unit. Four adjacent ints is a swap hazard, and
+// it is PINNED rather than designed away: a swap shows on exactly one rung, the ack
+// rung, where the model trio is all-zero and this count is not.
+//
+// The attribute set is FIXED at six on every rung, which is why the non-emitting ones
+// pass 0 rather than omitting the key.
+func (p *Parser) logControlResponse(reason string, models, dropped, levelsDropped, commands int) {
+	p.log.Debug(controlResponseMsg,
+		"type", "control_response", "reason", reason, "models", models, "dropped", dropped,
+		"levels_dropped", levelsDropped, "commands", commands)
 }
 
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors
