@@ -435,6 +435,241 @@ func TestRunner_RequestInitialize_LiveChildDelivers(t *testing.T) {
 	}
 }
 
+// --- RequestInitializeOnSpawn: the per-spawn ask -----------------------------
+
+// initializeAsks returns the request id of every initialize control_request the
+// child echoed back, in arrival order. The echo_lines child echoes EVERY stdin
+// line, so what it returns is a faithful transcript of what the daemon wrote:
+// the length is the ask count and the entries are the minted ids.
+//
+// A payload that is not an initialize request — a user-turn envelope, another
+// control subtype — is skipped rather than failed, so a scenario is free to write
+// turns as FIFO barriers.
+func initializeAsks(output string) []string {
+	var ids []string
+	for _, line := range findEchoedLines(output) {
+		var cr decodedControlRequest
+		if err := json.Unmarshal([]byte(line), &cr); err != nil {
+			continue
+		}
+		if cr.Request.Subtype == "initialize" {
+			ids = append(ids, cr.RequestID)
+		}
+	}
+	return ids
+}
+
+// TestRunner_RequestInitializeOnSpawn_OncePerChild pins the cardinality in both
+// directions: with the flag set a live child is asked exactly ONCE, and with the
+// zero value it is not asked at all.
+//
+// The two turns are load-bearing rather than decorative. "Once per spawn" and
+// "once per turn" are indistinguishable in a single-turn test, so a trigger on the
+// child's system/init line — the obvious-looking per-child signal that
+// emitModelAnnounced's doc measures firing once per TURN — would stay green there
+// and reddens here. They are also the barrier: stdin is a pipe and the ask is
+// written at spawn, ahead of both turns, so once the second turn's marker comes
+// back every line the daemon wrote to this child already has.
+//
+// The disabled row is not the enabled row's mirror image. It is what pins every
+// OTHER streamsup.Config construction site as untouched — including the three
+// internal/e2e/realclaude runners, which the hermetic gate cannot even compile —
+// since the field defaults to false and nothing but the interactive daemon's
+// mapper sets it.
+func TestRunner_RequestInitializeOnSpawn_OncePerChild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		flag bool
+		want int
+	}{
+		{name: "enabled asks the live child once", flag: true, want: 1},
+		{name: "zero value never asks", flag: false, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, stderr := &safeBuffer{}, &safeBuffer{}
+			cfg := helperRunCfg(t, "echo_lines", out, stderr)
+			cfg.RequestInitializeOnSpawn = tc.flag
+			spawned := make(chan struct{}, 1)
+			cfg.onSpawn = func(int) {
+				select {
+				case spawned <- struct{}{}:
+				default:
+				}
+			}
+			r, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			cancel, join := runInBackground(t, r)
+			defer func() { cancel(); join() }()
+
+			select {
+			case <-spawned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("child never spawned")
+			}
+			waitForContains(t, out, "READY", 3*time.Second)
+
+			const lastMarker = "once-per-child-turn-2"
+			for _, marker := range []string{"once-per-child-turn-1", lastMarker} {
+				if err := r.WriteUserTurn(context.Background(), "c1", []byte(marker)); err != nil {
+					t.Fatalf("WriteUserTurn(%q) on a live child: %v", marker, err)
+				}
+			}
+			waitForContains(t, out, lastMarker, 3*time.Second)
+
+			ids := initializeAsks(out.String())
+			if len(ids) != tc.want {
+				t.Fatalf("child was asked %d time(s) across two turns, want %d:\n%s", len(ids), tc.want, out.String())
+			}
+			if tc.want > 0 && ids[0] == "" {
+				t.Error("the ask carried an empty request_id, want a locally-minted id")
+			}
+		})
+	}
+}
+
+// TestRunner_RequestInitializeOnSpawn_ReplacementChild pins that a child which
+// replaces an earlier one is asked in its own right, so a session that has
+// respawned or rotated is not left with the question unasked.
+//
+// Both rows kill a LIVE echo_lines child, which never self-exits, so the second
+// spawn is attributable to the restart rather than to the child's own exit. The
+// RestartFresh row is what pins the rotation decision that is otherwise prose
+// only: the ask reads Stdin() rather than the rotation-gated turnTarget, so a
+// rotation's successor is an ordinary new child here and is asked like one.
+//
+// The distinct-id assertion is the sole detector for a design that mints or caches
+// ONE id per runner rather than one per ask — the count stays 2 and both ids stay
+// non-empty under that mutant.
+func TestRunner_RequestInitializeOnSpawn_ReplacementChild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		restart func(r *Runner, cfg Config)
+	}{
+		{
+			// Restart swaps the base argv VERBATIM, so the live Args are
+			// re-installed: passing nil would clear them.
+			name:    "Restart",
+			restart: func(r *Runner, cfg Config) { r.Restart(cfg.Args) },
+		},
+		{
+			name:    "RestartFresh",
+			restart: func(r *Runner, _ Config) { r.RestartFresh("sess-rotated-once-per-child") },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, stderr := &safeBuffer{}, &safeBuffer{}
+			cfg := helperRunCfg(t, "echo_lines", out, stderr)
+			cfg.RequestInitializeOnSpawn = true
+			spawns := make(chan struct{}, 8)
+			cfg.onSpawn = func(int) {
+				select {
+				case spawns <- struct{}{}:
+				default:
+				}
+			}
+			r, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			cancel, join := runInBackground(t, r)
+			defer func() { cancel(); join() }()
+
+			waitSpawn := func(n int) {
+				t.Helper()
+				select {
+				case <-spawns:
+				case <-time.After(5 * time.Second):
+					t.Fatalf("child %d never spawned", n)
+				}
+			}
+			waitSpawn(1)
+			// The first child must have ECHOED its ask before it is killed: onSpawn
+			// proves only that the daemon wrote the line, and the kill can beat the
+			// child's read of it.
+			waitForContains(t, out, `"subtype":"initialize"`, 3*time.Second)
+
+			tc.restart(r, cfg)
+			waitSpawn(2)
+
+			// The same FIFO barrier, on the second child: its ask was written at
+			// spawn, ahead of this turn, so the turn's echo proves the ask's echo
+			// has already landed.
+			const marker = "replacement-child-barrier"
+			if err := r.WriteUserTurn(context.Background(), "c1", []byte(marker)); err != nil {
+				t.Fatalf("WriteUserTurn on the replacement child: %v", err)
+			}
+			waitForContains(t, out, marker, 3*time.Second)
+
+			ids := initializeAsks(out.String())
+			if len(ids) != 2 {
+				t.Fatalf("saw %d ask(s) across two children, want 2:\n%s", len(ids), out.String())
+			}
+			if ids[0] == ids[1] {
+				t.Errorf("both children were asked with request_id %q; each ask must mint its own id", ids[0])
+			}
+		})
+	}
+}
+
+// TestRunner_RequestInitializeOnSpawn_UndeliverableAskAbsorbed pins that an ask
+// which cannot be delivered restarts no child, fails no spawn, and neither stalls
+// nor exits the supervision loop.
+//
+// The crash child exits almost immediately, so the ask races a dying child and may
+// take the ErrNoLiveChild arm (takeStdin already ran), the EPIPE arm, or land
+// cleanly. The test deliberately forces none of them: WriteInitialize's own error
+// contract is already pinned by TestWriteInitialize_NilRefusal and
+// TestWriteInitialize_WriteError, and all that is new here is that the CALL SITE
+// swallows whatever comes back.
+func TestRunner_RequestInitializeOnSpawn_UndeliverableAskAbsorbed(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "crash", out, stderr)
+	cfg.RequestInitializeOnSpawn = true
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+	spawns := make(chan struct{}, 32)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawns <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	// ≥2 spawns: the ladder respawned past a child whose ask may well have failed,
+	// so that failure entered neither the spawn's error nor the backoff decision.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-spawns:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("saw only %d spawn(s), want ≥2 — the supervision loop stalled", i)
+		}
+	}
+	// Run's own deferred updateState is what sets PhaseStopped, so anything else
+	// means Run has not returned.
+	if st := r.State(); st.Phase == PhaseStopped {
+		t.Fatalf("Run returned while the loop should still be supervising; state = %+v", st)
+	}
+
+	cancel()
+	if err := join(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled after teardown", err)
+	}
+}
+
 // --- Live Restart: AC3 -------------------------------------------------------
 
 // waitArgvLines polls the argv capture file until it holds at least n complete

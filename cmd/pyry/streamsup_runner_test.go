@@ -156,6 +156,9 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 	if got.Stderr != nil || got.Env != nil {
 		t.Errorf("Stderr/Env = %v/%v, want nil (no sessions.RunnerConfig analogue)", got.Stderr, got.Env)
 	}
+	if !got.RequestInitializeOnSpawn {
+		t.Error("RequestInitializeOnSpawn = false, want true — the ask is the interactive daemon's policy and this mapper is the one place that sets it")
+	}
 }
 
 // TestMapStreamsupConfig_PerSession mirrors the Pool.buildSession shape, where
@@ -184,6 +187,9 @@ func TestMapStreamsupConfig_PerSession(t *testing.T) {
 	}
 	if !slices.Equal(got.Args, []string{"--settings", "p"}) {
 		t.Errorf("Args = %q, want %q", got.Args, []string{"--settings", "p"})
+	}
+	if !got.RequestInitializeOnSpawn {
+		t.Error("RequestInitializeOnSpawn = false, want true — a per-conversation runner asks its children like the bootstrap one does")
 	}
 }
 
