@@ -85,6 +85,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `ThinkingProgress` (#1386) | `TypeThinkingProgress` | `ThinkingProgressPayload{tc.ConversationID, ev.EstimatedTokens, ev.EstimatedTokensDelta}` (`tc.TurnID`/`tc.Seq` ignored — a periodic reading of an inference request in flight, not a turn-scoped fact) | true |
 | `RateLimited` (#1410) | `TypeRateLimited` | `RateLimitedPayload{tc.ConversationID, ev.Status, ev.LimitType, ev.ResetsAt, ev.TruncatedFields}` (`tc.TurnID`/`tc.Seq` ignored — a usage-limit window is a condition of the account, orthogonal to whichever turn observed it). Nil `TruncatedFields` left nil, and here that nil is what reaches the wire as `null`: unlike `BackgroundTaskRosterPayload` two rows up, `RateLimitedPayload` deliberately has **no** `MarshalJSON`, because nothing-was-cut is an absence. `ResetsAt` crosses unclamped and unvalidated in both directions; neither string is re-capped (the producer bounded both at construction) | true |
 | `ModelAnnounced` (#1638) | `TypeModelAnnounced` | `ModelAnnouncedPayload{tc.ConversationID, ev.Model, ev.Truncated}` (`tc.TurnID`/`tc.Seq` ignored — an announced model is a property of the turn's configuration, not a turn boundary: claude emits its `init` line once per turn, and `TestTurnMarkFor_TotalOverEveryVariant` pins the lifecycle answer as `turnMarkNone`). `Model` crosses byte-for-byte — no lowercasing, no re-cap, no charset check: the producer already bounds it at `streamsup`'s `maxModelField`, and `internal/relay`'s `validModel` is a deliberately different rule (it bounds a phone-supplied override, not a claude-supplied report). No suppression branch — a zero-value `ModelAnnounced` maps rather than dropping, the same posture `ThinkingProgress` and `RateLimited` both state. `ModelAnnouncedPayload` has no slice field and, unlike `RateLimitedPayload` one row up, no `MarshalJSON`, so the nil-vs-`[]` hazard does not arise here | true |
+| `ModelList` (#1848) | `TypeModelList` | `ModelListPayload{tc.ConversationID, models, ev.DroppedModels}` (`tc.TurnID`/`tc.Seq` ignored — one `initialize` exchange per child, not even per-turn, opens and closes no turn; `turnMarkFor` answers `turnMarkNone` by construction). `ev.Models` looped into `[]protocol.ModelOption`, nil left nil (`ModelListPayload.MarshalJSON` owns nil→`[]`, the `ToolStart`/`BackgroundTaskRoster` rule); each row's six fields cross verbatim, including `EffortLevels` (nil→`[]` via `ModelOption.MarshalJSON`) and `TruncatedFields` (nil stays nil — that field is deliberately exempt from normalisation, so an absence reaches the wire as `null`, the opposite polarity from `EffortLevels` one field over). `DroppedModels` is carried from the decode, never recomputed from `len(models)` and never a constant. No re-cap, re-order or charset check of any field — the producer already bounds all three dimensions (`streamsup`'s `maxModelListEntries`/`maxModelResolved`/`maxModelEffortLevel*`), and `internal/relay`'s `validModel`/`validEffort` bound a phone-supplied *inbound* value, not this outbound report. No suppression branch — a zero-value `ModelList` maps, `ModelAnnounced`'s posture unchanged | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
@@ -120,6 +121,31 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   with a decoded-payload presence assertion on the recorded push; the payload half is
   what actually caught the arm dropping the event silently — the log-absence half
   alone stayed green throughout.
+- **Pinning "entry order is preserved" needs a non-monotonic fixture, not just two
+  distinguishable entries.** `ModelList`'s outbound row (#1848) uses two entries
+  whose `ResolvedModel`/`Value`/`DisplayName` all happen to sort ascending; the
+  row's own comment claims a reversal *or a re-sort* is caught, but an ascending
+  canonicalising sort is a no-op against an already-ascending fixture — only the
+  reversal is. Code review found this by running the sort mutant, not by reading
+  the comment. Two entries can only ever be monotonic or reversed; three
+  non-monotonic entries (e.g. Beta, Alpha, Gamma) are the minimum that catches a
+  sort in either direction. Unfixed as of #1848 (a single SHOULD FIX, below the
+  review's three-finding action threshold) — the fixture and its overclaiming
+  comment still stand; correct both the next time this row is touched.
+- **A row pinning a mutate-through mapper needs its `ev` and `wantPayload` built
+  from two separate slice literals, not one shared between them.** If the
+  expected payload is built by re-slicing the same backing array as the input
+  event, an in-place sort or dedupe inside the mapper's loop mutates both sides
+  together and `reflect.DeepEqual` stays green. `ModelList`'s rows (#1848) spell
+  the same effort-level and truncated-field slices out twice on purpose. This is
+  more than a test nicety here: `sessionModelHold` (#1840) retains the same
+  `turnevent.ModelList` without copying and is read on a relay-leg goroutine, so a
+  mapper that mutated through would be a data race in production, not merely a
+  wrong test result. The same asymmetric-nil hazard applies to a byte-level wire
+  test: `ModelOption.EffortLevels` (nil→`[]`) and `TruncatedFields` (nil stays
+  `null`) sit on adjacent fields with opposite rules, and copying either row's
+  `want`/`notWant` pair onto the other passes against exactly the allocating
+  mapper the test exists to catch.
 
 ### `BuildTurnState` — the lifecycle payload builder
 
