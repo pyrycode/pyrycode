@@ -567,22 +567,29 @@ mapping, or reordering). **`description`, `supportsEffort`, `supportsAdaptiveThi
 untrusted prose bounded, retained and carried for nothing, and absence from the decode target is a
 stronger guarantee than any test sweep — `systemInitLine`'s argument (#1600) carried over unchanged.
 Each string is bounded by its own named cap (`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`,
-all 256; `maxModelEffortLevel`, 32, capping one level string, not the list); the bool needs no cap and
+all 256; `maxModelEffortLevel`, 32, capping one level string). The list itself is bounded too, since
+#1821, by `maxModelEffortLevelCount` (8) — see "The per-entry byte budget" below; the bool needs no cap and
 is never named in `TruncatedFields`, since it carries none of claude's bytes. An empty or absent
 `models` array is the safe-failure direction (rung 3, no event) rather than an empty `ModelList` —
 `emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose the variant
 exists for.
 
-**The per-entry byte budget is a floor, not a total, since #1827.** `EffortLevels` is the family's
-first field that is a list *inside* a list entry — entries × levels × level length is a third size
-dimension, and #1827 bounds only the third factor. Per entry the retained claude-derived text is now
-`768 + 32×N`, where N is the number of levels claude sends for that model — a count nothing bounds
-until #1821 adds a cap. The arithmetic already shows the gap can't be closed by a count cap alone:
-`10 × (768 + 32N) ≤ 8192` requires `N ≤ 1.6`, so any level-count cap of 2 or more forces
-`maxModelListEntries` or the 8192-byte ceiling to move too — #1821 has both levers, not one. The cut
-report follows #1811's per-entry convention but had to grow to fit a list: `bound`'s sibling closure,
-`boundEach`, appends `"effort_levels"` to `TruncatedFields` **at most once per entry**, however many of
-that entry's levels were over-long, rather than once per cut element.
+**The per-entry byte budget's third dimension is bounded too, since #1821.** `EffortLevels` is the
+family's first field that is a list *inside* a list entry — entries × levels × level length is a third
+size dimension. #1827 bounded the third factor (one level string's length, `maxModelEffortLevel`, 32);
+#1821 closed the second, `maxModelEffortLevelCount` (8), bounding how many levels one entry retains.
+The bound sits inside `boundEach`, **after** #1828's zero-length arm and **before** the per-element
+loop, and truncates **from the tail** so claude's order survives a cut, mirroring the entry-count cap's
+own placement argument one level down. See "The entry count is capped too" below for the resulting
+per-entry multiplicand (1024 bytes) and the re-derived `maxModelListEntries` arithmetic. The cut report
+still follows #1811's per-entry convention: `boundEach` appends `"effort_levels"` to `TruncatedFields`
+**at most once per entry**, whether the cause is an over-long element, an over-long list, or both —
+never once per cut element. Until #1693 publishes the event, `logControlResponse` carries the only
+operational signal either mechanism has: a fifth attribute, `levels_dropped`, the daemon-computed total
+of levels dropped by the count bound across the *retained* entries (entries removed by the entry-count
+cap are already counted by `dropped`, so the accumulating loop runs over the already-resliced entry
+list). See [ADR 036](../decisions/036-aggregate-cap-product-is-not-a-ceiling.md) for why the 8192-byte
+figure this replaced was never really a ceiling.
 
 **`SupportsAutoMode` collapses absent, JSON `null` and an explicit `false` into one reading — `false`
 — and the reason is that this field describes a withheld permission grant, not a general-purpose
@@ -650,16 +657,29 @@ mutating the fixture, not the code under test.
 bound after `maxTaskRosterEntries`.** A per-entry text cap alone leaves the list's total size a
 function of a number claude chooses; the count bound supplies the missing factor, applied after rung 3
 and before the entry loop, truncating **from the tail** so claude's order is preserved (the same
-ordering rule `Tasks`/`Models` both state). 10 is derived, not chosen: the 768-byte per-entry
-multiplicand against `maxTaskRosterEntries`' 8192-byte product (itself half of `maxUnrecognizedRaw`'s
-16 KiB, the package's one-level-up ordering) puts the ceiling at 10 (8192/768 = 10.67); the observed
-six-entry capture sets the floor with four slots of headroom — not the roster's 8, which would leave
-only two. `turnevent.ModelList.DroppedModels` carries what was cut (`0` when nothing was), so
+ordering rule `Tasks`/`Models` both state). 10 is derived, not chosen, and the observed six-entry
+capture sets the floor with four slots of headroom — not the roster's 8, which would leave only two.
+
+The per-entry multiplicand is **1024 bytes since #1821** — `maxModelResolved + maxModelValue +
+maxModelDisplayName + (maxModelEffortLevelCount × maxModelEffortLevel) = 256×3 + 8×32` — the family's
+one-kibibyte entry unit, shared byte-for-byte with `maxTaskRosterEntries`' own per-entry figure despite
+the two entries having different field sets (256+256+512 vs. 4×256): a coincidence of arithmetic, not a
+rule the *next* aggregate variant is bound by (see [ADR 036](../decisions/036-aggregate-cap-product-is-not-a-ceiling.md)).
+`maxModelListEntries` itself did **not** move: `10 × 1024 = 10240` bytes (15.6% of the v2
+application-envelope cap, `docs/protocol-mobile.md` § Application-envelope size cap). The doc no longer
+measures that product against a fixed 8192 — 8192 was always `maxTaskRosterEntries`' own product,
+noticed to land on half of `maxUnrecognizedRaw`'s 16 KiB, and #1821 demoted it from an inherited
+ceiling back to that landmark. What actually bounds the product is `maxUnrecognizedRaw` itself, with
+the fraction stated per shape rather than a shared constant: the roster is 1/2, the model list is 5/8
+(10240/16384) — each aggregate variant re-derives its own fraction rather than inheriting the other's.
+
+`turnevent.ModelList.DroppedModels` carries what was cut (`0` when nothing was), so
 `len(Models) + DroppedModels` is the list's true size and a client can render "6 of 40" rather than
 presenting a short menu as complete. `logControlResponse`'s record grew a fourth attribute, `dropped`,
 for the reason the wire field's own doc argues about a permanent zero, one layer down: until #1693
 publishes the event, that Debug record is the only observable the cap has, and `models=N` with no drop
-count reads as "claude offers N models" even when it offered more.
+count reads as "claude offers N models" even when it offered more. A fifth attribute, `levels_dropped`,
+was added the same way for the level-count cap (#1821) — see above.
 
 `ModelList` is a `turnevent.Event` (not parser-held session state) precisely because
 `protocol.ModelListPayload`'s own doc names mapping time — `turnbridge.MapEvent` — as the seam every
@@ -674,6 +694,18 @@ out of the loop) if the **clean** entry is placed *after* the cut one in the fix
 report is appended to the shared slice before the next entry starts accumulating, so a clean-then-cut
 ordering proves nothing about cross-entry leakage — only cut-then-clean does.
 
+*Sharpened by #1821: a hoisted arithmetic accumulator needs a stronger fixture than a hoisted slice.*
+The level-count cap's per-entry drop total (`droppedLevels`, summed into `levelsDropped`) is a running
+`int`, not an appended slice, so the two-entry cut-then-clean fixture above does not catch it hoisted
+out of the loop: with two over-cap entries the hoisted and correct totals can coincide by construction
+(1+3 = 4 either way). It takes three entries with a **clean one in the middle** — over-by-one, clean,
+over-by-three — before a hoisted counter's running total (5) diverges from the correct per-entry-reset
+one (4). The same three-entry arrangement separately kills "report only the last entry's drop", "report
+the largest single drop", and "report how many entries dropped anything" — three more wrong shapes an
+accumulator can take that all read 3 against the same fixture. An accumulator's isolation fixture needs
+checking against more shapes than the slice-append lesson above calls for; a slice and a running total
+fail at different fixture sizes.
+
 *Test-writing lesson for `maxModelListEntries`' boundary row (#1812), and for any future cardinality
 cap shaped `if len(entries) > cap`.* At `len(entries) == cap` the block computes `dropped = 0` and
 slices to identity either way, so `>` vs `>=` is an **equivalent mutant** there — no fixture can tell
@@ -686,6 +718,15 @@ test the spec's own amendment list didn't enumerate — `TestParser_ControlRespo
 compares with `reflect.DeepEqual` too and lives ~200 lines from the model-list block, so it only
 surfaced at the first green run. Any future attribute on that record needs every `wantAttrs` map in the
 file, not just the ones naming the feature that grew it.
+
+*The equivalence above does not generalize, and #1821's level-count cap is the counterexample.* "`>`
+vs `>=` is equivalent at `len == cap`" holds only while the guarded block computes *nothing but* a
+count and a slice. `boundEach`'s count bound sits beside a report flag (`cutAny`) in the same block, so
+at `len == cap` an `>=` mutant still computes a zero drop and an identity slice **but also fires the
+report** — `"effort_levels"` gets named on a list nothing happened to. Measured sole-red on the
+"exactly at the cap" row. Before inheriting a prior cap's equivalent-mutant note for a new one, check
+whether the new guarded block reports anything the prior one didn't; folding a report into the same
+block turns a boundary that used to prove nothing into one that does.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
