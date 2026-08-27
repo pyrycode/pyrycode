@@ -33,6 +33,8 @@ Selects which interactive runner the daemon builds. `Load` decodes it verbatim a
 
 See [streamsup-package.md](streamsup-package.md) for the runner itself and [`codebase/1081.md`](../codebase/1081.md) for the composition-root and relay-leg wiring this field drives.
 
+The `case "pty"` (rejected-value) arm here is the pattern later reused for the CLI verbs #1348 deleted outright (`attach`/`acp`) — see [cli-verb-dispatch.md](cli-verb-dispatch.md).
+
 The default is built into the function body (not a package-level `const`) so callers don't reach for "the current value" through a separate symbol; when more fields land, the constructor grows naturally to a multi-line struct literal.
 
 ## Defaults
