@@ -623,8 +623,8 @@ own placement argument one level down. See "The entry count is capped too" below
 per-entry multiplicand (1024 bytes) and the re-derived `maxModelListEntries` arithmetic. The cut report
 still follows #1811's per-entry convention: `boundEach` appends `"effort_levels"` to `TruncatedFields`
 **at most once per entry**, whether the cause is an over-long element, an over-long list, or both —
-never once per cut element. Until #1693 publishes the event, `logControlResponse` carries the only
-operational signal either mechanism has: a fifth attribute, `levels_dropped`, the daemon-computed total
+never once per cut element. Before #1848/#1849 published the event to a client, `logControlResponse` carried the only
+operational signal either mechanism had: a fifth attribute, `levels_dropped`, the daemon-computed total
 of levels dropped by the count bound across the *retained* entries (entries removed by the entry-count
 cap are already counted by `dropped`, so the accumulating loop runs over the already-resliced entry
 list). See [ADR 036](../decisions/036-aggregate-cap-product-is-not-a-ceiling.md) for why the 8192-byte
@@ -638,7 +638,7 @@ choosing a plain `bool` over a `*bool`; the unsafe collapse would have been the 
 silence, which nothing here does. claude has never sent `false` at all — every capture arm shows four
 `true` entries and two carrying no capability key whatsoever — and `protocol.ModelOption` already made
 the same collapse (#1704), so a pointer here would have preserved a distinction only long enough for
-the mapping (#1693) to discard it. **The next field facing this question had to re-derive its own
+the mapping (#1848) to discard it. **The next field facing this question had to re-derive its own
 answer rather than inherit this one — and, having re-derived it, landed on a collapse too, by a
 different argument**: `EffortLevels` (#1827, decided #1828) is an empty-menu question, not a
 withheld-grant question. An absent key, a JSON `null` and a published `[]` are ONE reading in this
@@ -715,16 +715,19 @@ the fraction stated per shape rather than a shared constant: the roster is 1/2, 
 `turnevent.ModelList.DroppedModels` carries what was cut (`0` when nothing was), so
 `len(Models) + DroppedModels` is the list's true size and a client can render "6 of 40" rather than
 presenting a short menu as complete. `logControlResponse`'s record grew a fourth attribute, `dropped`,
-for the reason the wire field's own doc argues about a permanent zero, one layer down: until #1693
-publishes the event, that Debug record is the only observable the cap has, and `models=N` with no drop
-count reads as "claude offers N models" even when it offered more. A fifth attribute, `levels_dropped`,
-was added the same way for the level-count cap (#1821) — see above.
+for the reason the wire field's own doc argues about a permanent zero, one layer down: before #1848/#1849
+published the event to a client, that Debug record was the only observable the cap had, and `models=N`
+with no drop count would have read as "claude offers N models" even when it offered more. A fifth
+attribute, `levels_dropped`, was added the same way for the level-count cap (#1821) — see above.
 
 `ModelList` is a `turnevent.Event` (not parser-held session state) precisely because
 `protocol.ModelListPayload`'s own doc names mapping time — `turnbridge.MapEvent` — as the seam every
 v2 interactive payload supplies its `ConversationID` through; session state would have obliged a
-second parser→relay path beside the one every other interactive payload already uses. `MapEvent`'s
-`default` drops the event until #1693, so no client can read a false zero in the meantime.
+second parser→relay path beside the one every other interactive payload already uses. `MapEvent` gained
+a `turnevent.ModelList` arm in #1848 (previously falling to `default`, which dropped the event) and
+`cmd/pyry`'s `Handle` has carried the emitting case since #1849, so a client does read a real count
+today — best-effort on the live interactive turn lane, still with no connect-time snapshot for one it
+missed (#1864, open). See [protocol-package.md](protocol-package.md)'s Model-list payload section.
 
 *Test-writing lesson for the next per-entry accumulator built on `emitBackgroundTaskRoster`'s idiom
 (the `cut` closure declared inside the per-entry loop).* An isolation row asserting "a cut on one
@@ -1125,9 +1128,10 @@ test's name around.
 mutation, no read of the hold. That closes the routed-conversation case only: a bootstrap child at daemon
 start still drops the frame at the no-cursor guard (cursor is `""` until a message routes), and the
 fan-in can still refuse the frame under load since `turnMarkFor` answers `turnMarkNone` for it. Both are
-exactly the losses this retention exists to survive, and #1846 (reading `streamRunner.ModelList()` back
-for a client that connects or reconnects afterward) is what closes them — not this ticket, and not a
-second read of the hold from the live lane.
+exactly the losses this retention exists to survive; reading `streamRunner.ModelList()` back for a client
+that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864). #1863
+shipped the relay-side seam nil in production; #1864 (open) is what wires a real read of the hold into
+it — not this ticket, and not a second read of the hold from the live lane.
 
 **Test-writing lesson: a `cmd/pyry` fixture-builder name collides silently across files in the same
 package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function;
