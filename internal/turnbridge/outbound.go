@@ -435,6 +435,98 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Model:          e.Model,
 			Truncated:      e.Truncated,
 		}, true
+	case turnevent.ModelList:
+		// Conversation identity only, like the status peers above: tc.TurnID and
+		// tc.Seq are ignored and the payload has no field for either. It is not even
+		// per-turn, let alone turn-scoped — one initialize exchange per child
+		// produces one of these — and it opens and closes no turn: cmd/pyry's
+		// turnMarkFor answers turnMarkNone by construction (whitelist opener set,
+		// turnMarkNone default) and TestTurnMarkFor_TotalOverEveryVariant pins that
+		// independently.
+		//
+		// Every field crosses 1:1 and VERBATIM. This is translation, not policy, and
+		// nothing here is derived, defaulted or synthesised — ConversationID is the
+		// only value the mapping supplies. Specifically:
+		//
+		//   - A nil Models is FORWARDED, not pre-allocated. ModelListPayload's
+		//     MarshalJSON owns nil→[], and allocating here would produce the same
+		//     bytes while hiding which layer owns the normalisation — the rule the
+		//     ToolStart and BackgroundTaskRoster arms above both state.
+		//   - EffortLevels crosses as the SLICE IT IS, nil left nil, and
+		//     ModelOption's MarshalJSON normalises it to []. Same reason as Models,
+		//     and note the hazard here is ONLY the layer-ownership one: an allocation
+		//     would produce identical bytes.
+		//   - TruncatedFields crosses as the slice it is too, and HERE the nil is
+		//     load-bearing. ModelOption's MarshalJSON deliberately EXEMPTS this
+		//     field, so nothing normalises it afterwards: nothing-was-cut is an
+		//     ABSENCE and must reach the wire as null. A mapper that helpfully
+		//     allocated an empty slice — or appended into a fresh one — would emit []
+		//     and tell a phone that claude's cut text is complete. That is the
+		//     RateLimited arm's rule above, unchanged. THE ASYMMETRY WITH
+		//     EffortLevels ONE FIELD UP IS THE POINT, in both directions: two list
+		//     fields of one struct, one normalised and one not, and a reader who
+		//     takes that for an accident will "fix" whichever of them they meet
+		//     second.
+		//   - DroppedModels is CARRIED, never recomputed from len(models) and never a
+		//     constant. It is the count the decode recorded when streamsup's
+		//     maxModelListEntries fired: recomputing it from the payload's own rows
+		//     yields the wrong number by construction, and shipping 0 tells a phone
+		//     that a capped menu is the whole menu. BackgroundTaskRoster's
+		//     DroppedTasks states the reason, unchanged.
+		//   - SupportsAutoMode crosses verbatim, including a false. Absent, JSON null
+		//     and an explicit false were already collapsed to false upstream by
+		//     encoding/json and by turnevent.ModelOption's SupportsAutoMode, and it
+		//     is a REPORT to a client's menu that nothing in the daemon may read as
+		//     authorization.
+		//
+		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED. The
+		// producer bounded all three of the list's dimensions at construction —
+		// turnevent.ModelList's Models names them together — so a second cap here
+		// would be a second place the limit is decided and the two could disagree
+		// silently. maxSummaryLen and maxResultSummaryRunes live in THIS file and are
+		// NOT applicable bounds; reaching for either is the specific mistake to
+		// avoid. Entry order is claude's and so is effort-level order, the latter
+		// measured non-alphabetical, so a sort is observable rather than harmless.
+		// internal/relay's validModel and validEffort bound a PHONE-supplied inbound
+		// value and are deliberately not applied here in either direction:
+		// validEffort's enum is closed, so running claude's outbound list through it
+		// would drop a level claude legitimately publishes.
+		//
+		// CARRY, NEVER MUTATE THROUGH. The loop copies slice HEADERS, so the payload
+		// shares backing arrays with the event it was handed, and two facts make that
+		// sharing safe only under this rule: cmd/pyry's sessionModelHold.Sink retains
+		// the ModelList WITHOUT copying and forwards the same value, and
+		// sessionModelHold.ModelList() is read on a relay-leg goroutine while the
+		// parser's forwarder writes the hold. A sort, an in-place dedupe, a filter,
+		// or an append into a slice the event owns would therefore corrupt the
+		// session's retained menu across two goroutines — a data race, not merely a
+		// correctness bug. ModelListPayload's MarshalJSON refuses to reach through
+		// into p.Models[i] for exactly this reason and says so; this arm inherits the
+		// rule one layer up, and a read-only loop building a fresh OUTER slice holds
+		// it by construction.
+		//
+		// No suppression branch, not even on an empty Models. The gate that decides
+		// whether the event exists at all is the producer's, and turnevent.ModelList's
+		// Models documents it ("Never empty"), so a second, differently-shaped filter
+		// here would silently diverge from it — the hazard the ThinkingProgress,
+		// RateLimited and ModelAnnounced arms above each name. A zero-value ModelList
+		// therefore maps, exactly as a zero-value ModelAnnounced does.
+		var models []protocol.ModelOption
+		for _, m := range e.Models {
+			models = append(models, protocol.ModelOption{
+				ResolvedModel:    m.ResolvedModel,
+				Value:            m.Value,
+				DisplayName:      m.DisplayName,
+				EffortLevels:     m.EffortLevels,
+				SupportsAutoMode: m.SupportsAutoMode,
+				TruncatedFields:  m.TruncatedFields,
+			})
+		}
+		return protocol.TypeModelList, protocol.ModelListPayload{
+			ConversationID: tc.ConversationID,
+			Models:         models,
+			DroppedModels:  e.DroppedModels,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

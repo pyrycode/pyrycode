@@ -657,8 +657,14 @@ func (p ModelListPayload) MarshalJSON() ([]byte, error) {
 // not currently send. Absent in claude's reply (Haiku's entry omits it) decodes to
 // false, which is the correct reading.
 //
-// TruncatedFields names THIS row's cut fields ("value", "display_name"), null
-// when nothing was cut. Deliberately NOT normalised the way EffortLevels is — see
+// TruncatedFields names THIS row's cut fields, null when nothing was cut. The
+// producer records FOUR names, in this order: "resolved_model", "value",
+// "display_name", "effort_levels". "effort_levels" is the one reporting on a
+// LIST rather than a value, and it covers three outcomes — an element cut to fit
+// the per-element cap, the list shortened to fit the count cap, or both —
+// appearing at most once per entry in every case, because the report names FIELDS
+// and a list is one field. turnevent.ModelOption's TruncatedFields is the source
+// of truth for that vocabulary. Deliberately NOT normalised the way EffortLevels is — see
 // MarshalJSON. It is load-bearing rather than decoration: a row that dropped it
 // would present claude's cut text to a phone as complete, and would offer back a
 // Value the client was never told was truncated.
