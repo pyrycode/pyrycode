@@ -466,4 +466,43 @@ type V2SessionConfig struct {
 	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#878 / foreground /
 	// existing-test posture. Production wires the cmd/pyry outstandingQueues adapter.
 	OutstandingQueues func() []protocol.QueueStatePayload
+
+	// RetainedModelLists enumerates the daemon's currently-retained model lists as
+	// marshal-ready model_list payloads (one per session holding a list) for
+	// connect-time reconcile (#1863) — the third Mode B instance after
+	// OutstandingModals and OutstandingQueues. Called on the Run goroutine from
+	// handleNoiseInit's interactive-open tail; the returned payloads are unicast to
+	// the just-opened conn only. model_list is snapshot-shaped full state ("a
+	// SNAPSHOT of what claude will accept, not a delta", ModelListPayload's own
+	// doc), so the re-send is idempotent by construction — re-connecting re-sends
+	// the same snapshot. A pure read: it mints nothing, retires nothing, and
+	// changes no daemon state.
+	//
+	// A closure returning []protocol.ModelListPayload, not a *sessions.Pool or a
+	// turnevent value: internal/relay imports neither internal/sessions nor
+	// internal/turnevent (sessions appears only transitively via internal/control,
+	// so a go list -deps reading looks like a contradiction and is not one), and
+	// protocol is already imported, so the payload crosses the boundary with no new
+	// import and no cycle (matching OutstandingModals / OutstandingQueues — define
+	// the dependency where it is consumed).
+	//
+	// Enumerate-all, not conversation-keyed. A V2Session carries no conversation id
+	// — it holds connID, state, resp, send, recv, device, interactive and
+	// peerStatic — so there is no "this conn's conversation" to key on at connect
+	// time. OutstandingQueues' one-per-conversation enumerate-all shape is the
+	// precedent; RunConfigFor is the conversation-keyed variant and is the wrong
+	// shape here.
+	//
+	// SECURITY: this seam accepts ALREADY-BOUNDED payloads only. The reconcile path
+	// applies no bound of its own — not on how many payloads are returned, not on
+	// any entry's text — because the bound is decided at construction upstream
+	// (ModelListPayload.DroppedModels on the aggregate, ModelOption.TruncatedFields
+	// per entry, frozen by #1704/#1705). A second cap here would be a second place
+	// the limit is decided and the two could disagree silently, so the obligation
+	// stays the producer's. The payload text is claude-authored and untrusted
+	// (ModelOption's own doc) and is NEVER logged on the reconcile path.
+	//
+	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#1863 / foreground /
+	// existing-test posture. #1864 wires the daemon-side producer.
+	RetainedModelLists func() []protocol.ModelListPayload
 }
