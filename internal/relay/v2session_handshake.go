@@ -354,6 +354,17 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// prompt ahead of the backlog.
 	m.reconcileQueues(ctx, s)
 
+	// Connect-time model-list reconcile (#1863): send the retained model_list for
+	// each session holding one to this conn — the third Mode B instance alongside
+	// the two reconciles above — so a client attaching later can populate its model
+	// menu without sending a message first. The live turn lane never reaches such a
+	// client (and on the bootstrap session reaches none), for the three loss points
+	// reconcileModelLists names. No-op for a non-interactive conn or an unwired
+	// seam. Ordering relative to the other two and to replayMissed is immaterial
+	// (distinct payload types); placed third to keep the time-sensitive permission
+	// prompt first, the same reason the queue reconcile is already second.
+	m.reconcileModelLists(ctx, s)
+
 	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
 	// off, replay the conversation's missed tail (or emit a resync marker) on
 	// this conn before Run returns to its select to service the live stream
