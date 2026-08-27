@@ -1119,6 +1119,24 @@ and no finer. A decorator whose store step can itself block or panic before reac
 real ordering bug; statement order within an already-synchronous `Sink` is not the property to write the
 test's name around.
 
+**The live lane gained its own consumer of this event, separately from the retention (#1849).**
+`interactiveTurnEmitterV2.Handle` (below) now carries a `turnevent.ModelList` case, forwarding the same
+`ev` `Sink` already retained straight through `emitMapped` to every interactive conn — no lifecycle
+mutation, no read of the hold. That closes the routed-conversation case only: a bootstrap child at daemon
+start still drops the frame at the no-cursor guard (cursor is `""` until a message routes), and the
+fan-in can still refuse the frame under load since `turnMarkFor` answers `turnMarkNone` for it. Both are
+exactly the losses this retention exists to survive, and #1846 (reading `streamRunner.ModelList()` back
+for a client that connects or reconnects afterward) is what closes them — not this ticket, and not a
+second read of the hold from the live lane.
+
+**Test-writing lesson: a `cmd/pyry` fixture-builder name collides silently across files in the same
+package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function;
+#1849's emitter tests reaching for the same obvious name for the same `ModelList` shape hit a compile
+error that reads like a type error (`modelListFixture(...) — not a function`) rather than what it is, a
+same-package name collision across files. Prefixing a package-level test fixture with the consumer it
+belongs to (`emitterModelListFixture`, for the emitter tests) is what keeps siblings in one ticket
+sequence from colliding on the name each reaches for first.
+
 ## Draining turnevents into the interactive emitter (#1098)
 
 The turn I/O parser (#1088) emits neutral `turnevent.Event`s from its sink callback, but that sink is
