@@ -3784,10 +3784,11 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 				// on every row here: none of them reaches the emit rung, and the
 				// attribute set is fixed rather than per-rung.
 				wantAttrs := map[string]string{
-					"type":    "control_response",
-					"reason":  tt.wantReason,
-					"models":  "0",
-					"dropped": "0",
+					"type":           "control_response",
+					"reason":         tt.wantReason,
+					"models":         "0",
+					"dropped":        "0",
+					"levels_dropped": "0",
 				}
 				if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 					t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -3851,12 +3852,18 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // taskRosterEntriesCapFixture's reasoning carries over unchanged: a count fixture
 // written as maxModelListEntries would follow the constant green if someone halved
 // it, which is exactly the edit worth catching.
+//
+// modelEffortLevelCountCapFixture is that same rule for the per-ENTRY cardinality —
+// how many levels one entry retains, not how many entries the list does. Written as
+// maxModelEffortLevelCount it would follow the constant green if someone halved it,
+// and halving that constant is the edit the exactly-at-the-cap row exists to redden.
 const (
-	modelResolvedCapFixture    = 256
-	modelValueCapFixture       = 256
-	modelDisplayNameCapFixture = 256
-	modelEffortLevelCapFixture = 32
-	modelListEntriesCapFixture = 10
+	modelResolvedCapFixture         = 256
+	modelValueCapFixture            = 256
+	modelDisplayNameCapFixture      = 256
+	modelEffortLevelCapFixture      = 32
+	modelEffortLevelCountCapFixture = 8
+	modelListEntriesCapFixture      = 10
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -4631,10 +4638,11 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 					controlResponseConsumeMsgFixture, len(consumes), rec.all())
 			}
 			wantAttrs := map[string]string{
-				"type":    "control_response",
-				"reason":  tt.wantReason,
-				"models":  "0",
-				"dropped": "0",
+				"type":           "control_response",
+				"reason":         tt.wantReason,
+				"models":         "0",
+				"dropped":        "0",
+				"levels_dropped": "0",
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -4955,11 +4963,227 @@ func TestParser_ModelListEntryCountIsBounded(t *testing.T) {
 			t.Fatalf("records with message %q: got %d, want 1 — all records: %+v",
 				controlResponseConsumeMsgFixture, len(consumes), rec.all())
 		}
+		// levels_dropped is 0 because no entry here carries a level list at all, so the
+		// level bound never runs — its non-zero case is
+		// TestParser_ModelListEffortLevelCountIsBounded's.
 		wantAttrs := map[string]string{
-			"type":    "control_response",
-			"reason":  "model_list",
-			"models":  strconv.Itoa(modelListEntriesCapFixture),
-			"dropped": strconv.Itoa(100 - modelListEntriesCapFixture),
+			"type":           "control_response",
+			"reason":         "model_list",
+			"models":         strconv.Itoa(modelListEntriesCapFixture),
+			"dropped":        strconv.Itoa(100 - modelListEntriesCapFixture),
+			"levels_dropped": "0",
+		}
+		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
+			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
+		}
+	})
+}
+
+// modelLevelsFixture builds n effort levels, each identifiable by its index so
+// tail-truncation is PINNED rather than assumed from a length. modelEntriesFixture's
+// shape, one dimension down.
+//
+// Every element is well under maxModelEffortLevel, which is what lets a row built from
+// it exercise the COUNT bound ALONE: a row wanting the element cap too says so by
+// replacing an element, and then the two mechanisms are visibly two.
+func modelLevelsFixture(n int) []string {
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, fmt.Sprintf("level-%03d", i))
+	}
+	return out
+}
+
+// TestParser_ModelListEffortLevelCountIsBounded is the central pin for the per-entry
+// LEVEL count: how many levels one entry retains is bounded AT CONSTRUCTION and the
+// overflow is REPORTED, so a client is never handed three of claude's ten levels as a
+// complete menu.
+//
+// The capture proves neither half and cannot: claude sends five levels, three under
+// the cap, which is the zero-drop path TestParser_ModelListEffortLevelsReadClaudesKey
+// and the captured-decode test already pin. So these lines are SYNTHESIZED, which
+// invents no field structure — the keys are the capture's, only the level count varies.
+//
+// Empty, null and absent level lists are deliberately NOT rows here. They return at
+// boundEach's zero-length arm BEFORE the count bound runs, and
+// TestParser_ModelListEffortLevelsReadClaudesKey already covers all three; a row here
+// would assert the bound against an input it never sees. Same exclusion
+// TestParser_ModelListEntryCountIsBounded states for the ack rung, one dimension down.
+func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
+	t.Parallel()
+
+	base := modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")
+	levelEntry := func(levels []string) map[string]any {
+		return modelEntryWithFixture(base, "supportedEffortLevels", levels)
+	}
+	overCap := func(limit int) string { return strings.Repeat("a", limit+1) }
+
+	t.Run("the level count is bounded and the overflow is reported", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name string
+			// entries are claude's per-entry maps, in the order the line carries them.
+			entries []map[string]any
+			// wantLevels is the expected EffortLevels per entry, index for index. By
+			// VALUE rather than by length, which is what pins tail truncation.
+			wantLevels [][]string
+			// wantCut is the expected TruncatedFields per entry, index for index.
+			wantCut [][]string
+		}{
+			{
+				// The row proving the COUNT bound reports AT ALL: every surviving element
+				// is far under maxModelEffortLevel, so the name can only have come from
+				// the drop. Without it the report is exercised by the element cap alone.
+				name:       "one over the cap drops one and names effort_levels",
+				entries:    []map[string]any{levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture + 1))},
+				wantLevels: [][]string{modelLevelsFixture(modelEffortLevelCountCapFixture)},
+				wantCut:    [][]string{{"effort_levels"}},
+			},
+			{
+				// The boundary row. It discriminates a bound firing one level EARLY, which
+				// is why the want is the LITERAL fixture and never the production constant:
+				// lower maxModelEffortLevelCount and this row goes red alongside the
+				// over-the-cap rows rather than following the edit green.
+				//
+				// AND, unlike TestParser_ModelListEntryCountIsBounded's row of this shape,
+				// it discriminates > from >= — measured, sole red among all six. The entry
+				// cap's block computes only a count and a slice, so at len == cap both arms
+				// are identity and the operator is an equivalent mutant. This block also
+				// sets the REPORT flag, so >= would name "effort_levels" on a list of
+				// exactly the cap where nothing was dropped and nothing was cut.
+				// The inherited "expect the same" reading is wrong here, and the difference
+				// is the flag rather than the arithmetic.
+				name:       "exactly at the cap keeps every level and names nothing",
+				entries:    []map[string]any{levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture))},
+				wantLevels: [][]string{modelLevelsFixture(modelEffortLevelCountCapFixture)},
+				wantCut:    [][]string{nil},
+			},
+			{
+				// Under the cap, so the bound is not proven only at its own boundary.
+				name:       "one under the cap is untouched",
+				entries:    []map[string]any{levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture - 1))},
+				wantLevels: [][]string{modelLevelsFixture(modelEffortLevelCountCapFixture - 1)},
+				wantCut:    [][]string{nil},
+			},
+			{
+				// The row a head-truncating values[len(values)-cap:] fails: the survivors
+				// are claude's FIRST levels, pinned one by one in claude's own order.
+				name:       "a large list keeps claude's FIRST levels, in order",
+				entries:    []map[string]any{levelEntry(modelLevelsFixture(100))},
+				wantLevels: [][]string{modelLevelsFixture(100)[:modelEffortLevelCountCapFixture]},
+				wantCut:    [][]string{{"effort_levels"}},
+			},
+			{
+				// The aggregation pin extended to TWO mechanisms: a dropped tail AND a cut
+				// survivor still name the field exactly once, because the report names
+				// FIELDS and a list is one field.
+				name: "over the cap AND a surviving element over-long names effort_levels ONCE",
+				entries: []map[string]any{levelEntry(append(
+					[]string{overCap(modelEffortLevelCapFixture)},
+					modelLevelsFixture(modelEffortLevelCountCapFixture)...))},
+				wantLevels: [][]string{append(
+					[]string{strings.Repeat("a", modelEffortLevelCapFixture)},
+					modelLevelsFixture(modelEffortLevelCountCapFixture-1)...)},
+				wantCut: [][]string{{"effort_levels"}},
+			},
+			{
+				// Per-entry accumulation for the DROP path, the shape
+				// TestParser_ModelListFieldsAreCapped pins for the CUT path. A counter or a
+				// `cut` hoisted out of the per-entry scope leaks FORWARD, never backward,
+				// so a clean entry placed AFTER an over-long one is the only arrangement
+				// that catches it — and entry 3 carries a level list of its own so the leak
+				// would have somewhere to land rather than being masked by an absent key.
+				name: "a drop on one entry does not appear on the entries AFTER it",
+				entries: []map[string]any{
+					levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture + 1)),
+					modelEntryFixture("claude-opus-5", "opus", "Opus"),
+					levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture - 1)),
+				},
+				wantLevels: [][]string{
+					modelLevelsFixture(modelEffortLevelCountCapFixture),
+					nil,
+					modelLevelsFixture(modelEffortLevelCountCapFixture - 1),
+				},
+				wantCut: [][]string{{"effort_levels"}, nil, nil},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				events := collectEvents(modelListLineFixture(t, "success", tt.entries))
+				if len(events) != 1 {
+					t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+				}
+				list, ok := events[0].(turnevent.ModelList)
+				if !ok {
+					t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+				}
+				if len(list.Models) != len(tt.entries) {
+					t.Fatalf("ModelList carries %d entries, want %d", len(list.Models), len(tt.entries))
+				}
+				// The level bound is per ENTRY, so it can never remove an entry: the
+				// list-level count is the entry cap's business and is untouched here.
+				if list.DroppedModels != 0 {
+					t.Errorf("DroppedModels: got %d, want 0 — a LEVEL bound must not drop entries",
+						list.DroppedModels)
+				}
+				for i, got := range list.Models {
+					// DeepEqual rather than slices.Equal: slices.Equal(nil, []string{})
+					// reports true, and the entry carrying no key at all must come back nil.
+					if !reflect.DeepEqual(got.EffortLevels, tt.wantLevels[i]) {
+						t.Errorf("entry %d EffortLevels: got %#v, want %#v — the survivors are claude's "+
+							"first levels, in order", i, got.EffortLevels, tt.wantLevels[i])
+					}
+					if !reflect.DeepEqual(got.TruncatedFields, tt.wantCut[i]) {
+						t.Errorf("entry %d TruncatedFields: got %#v, want %#v",
+							i, got.TruncatedFields, tt.wantCut[i])
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("the record names how many levels were dropped", func(t *testing.T) {
+		t.Parallel()
+		// The ONLY place `levels_dropped` is non-zero. Without it the attribute is
+		// decorative: a producer hard-coding 0 would stay green in every other record
+		// assertion on this path, and this record is the only observable the level bound
+		// has until #1693.
+		//
+		// THREE entries — over by one, clean, over by three — which is the arrangement
+		// that pins the attribute as a TOTAL over the RETAINED entries and pins the
+		// counter's SCOPE at the same time. A producer reporting only the last entry's
+		// drop reads 3, one reporting the largest reads 3, one reporting how many
+		// entries dropped anything reads 2, and one whose per-entry counter is hoisted
+		// out of the loop reads 5 — the clean entry in the middle carrying the first
+		// entry's drop forward. Only the correct total reads 4.
+		//
+		// The exact map equality is also what sweeps the new drop site for content: any
+		// attribute added beside the counter — the classic `"level", level` beside it —
+		// turns this red, which is TestParser_ModelListIsLoggedContentFree's guarantee
+		// extended to the one rung that path cannot reach with a level list over the cap.
+		rec := &logRecorder{}
+		p := NewParser(func(turnevent.Event) {}, slog.New(rec))
+		line := modelListLineFixture(t, "success", []map[string]any{
+			levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture + 1)),
+			levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture - 1)),
+			levelEntry(modelLevelsFixture(modelEffortLevelCountCapFixture + 3)),
+		})
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+
+		consumes := rec.withMessage(controlResponseConsumeMsgFixture)
+		if len(consumes) != 1 {
+			t.Fatalf("records with message %q: got %d, want 1 — all records: %+v",
+				controlResponseConsumeMsgFixture, len(consumes), rec.all())
+		}
+		wantAttrs := map[string]string{
+			"type":           "control_response",
+			"reason":         "model_list",
+			"models":         "3",
+			"dropped":        "0",
+			"levels_dropped": "4",
 		}
 		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -5028,14 +5252,18 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 			t.Errorf("record %d message: got %q, want %q", i, r.msg, controlResponseConsumeMsgFixture)
 			continue
 		}
-		// Every line here is under the cap, so `dropped` is 0 on all five — the
-		// non-zero case is TestParser_ModelListEntryCountIsBounded's. What this sweep
-		// adds is that the new attribute is swept for leaks like the other three.
+		// Every line here is under both cardinality caps — the capture's entries carry
+		// five levels each, three under maxModelEffortLevelCount — so `dropped` and
+		// `levels_dropped` are 0 on all five; their non-zero cases are
+		// TestParser_ModelListEntryCountIsBounded's and
+		// TestParser_ModelListEffortLevelCountIsBounded's. What this sweep adds is that
+		// both count attributes are swept for leaks like the other three.
 		wantAttrs := map[string]string{
-			"type":    "control_response",
-			"reason":  wantReasons[i],
-			"models":  wantCounts[i],
-			"dropped": "0",
+			"type":           "control_response",
+			"reason":         wantReasons[i],
+			"models":         wantCounts[i],
+			"dropped":        "0",
+			"levels_dropped": "0",
 		}
 		if !reflect.DeepEqual(r.attrs, wantAttrs) {
 			t.Errorf("record %d attrs: got %v, want exactly %v", i, r.attrs, wantAttrs)
