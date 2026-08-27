@@ -370,6 +370,51 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// gate stops being single.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ModelList:
+		// claude's inventory of selectable models (#1849), taking the same shape as
+		// the status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
+		// transitionTo / endTurn; inTurn, turnID, currentState untouched).
+		//
+		// Kept a separate case from ModelAnnounced above despite the identical body,
+		// following the rule that arm states: this switch merges arms that share a
+		// REASON and keeps apart the ones that do not. An announced model is a
+		// property of the TURN'S CONFIGURATION, emitted once per turn; the menu is a
+		// property of the CHILD, reported once per initialize exchange, so it is not
+		// per-turn at all. That is one step further out than its neighbour, and it is
+		// what makes opening a turn here worse than merely wrong: an announcement at
+		// least rides a turn that some TurnEnd will close, while a turn opened on a
+		// list has no turn end anywhere in its future to clear the mark.
+		// TestTurnMarkFor_TotalOverEveryVariant already pins the lifecycle answer as
+		// turnMarkNone and this arm agrees with it.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position ahead
+		// of the menu. The event is passed through UNTOUCHED and no field of it is
+		// read here: turnbridge.MapEvent's arm copies slice HEADERS, cmd/pyry's
+		// sessionModelHold retains the same value without copying, and
+		// sessionModelHold.ModelList() reads it on a relay-leg goroutine — so a sort,
+		// an in-place dedupe or an append into a slice the event owns would be a data
+		// race on the session's retained menu, not merely a wrong menu.
+		//
+		// TWO QUEUES, TWO ANSWERS — there is no blanket "never dropped" here.
+		// DOWNSTREAM at pushQueue this is not a droppable delta (the droppable set
+		// there is assistant_delta only, #610), same as every peer above. UPSTREAM at
+		// the fan-in it is: turnMarkFor answers turnMarkNone, so streamTurnSink's
+		// sinkFor classes the event droppable and can refuse it at droppableCap under
+		// load. That loss point is known and deliberately not fixed here — the live
+		// lane is best-effort by construction, which is acceptable precisely because
+		// sessionModelHold's retention sits ABOVE that send and #1846 is the reliable
+		// path for a client that needs the menu it missed.
+		//
+		// Nothing bounds the rate on either side and that is deliberate: one
+		// initialize exchange per child is the cadence, claude's own rather than
+		// anything network-reachable, and all three of the list's dimensions are
+		// already bounded at construction by streamsup's caps — a second,
+		// differently-shaped filter here is the hazard the ThinkingProgress,
+		// RateLimited and ModelAnnounced arms each name.
+		//
+		// No capability gate in the arm, for the arm above's reason.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -647,7 +692,7 @@ func eventKind(ev turnevent.Event) string {
 		// Like the two arms above, this variant is now claimed by a Handle case on
 		// this lane (#1638), so this file's `interactive_turn.unknown` Debug is no
 		// longer a live call site for it — nor for anything else the production
-		// producer emits. Handle now has an arm for 15 of turnevent.Event's 16
+		// producer emits. Handle now has an arm for 16 of turnevent.Event's 17
 		// implementations, and the one without is PermissionRequest, which
 		// streamsup.Parser never produces: it is PTY/modalbridge-only, as
 		// TestTurnMarkFor_TotalOverEveryVariant states independently. "No variant the
@@ -665,12 +710,13 @@ func eventKind(ev turnevent.Event) string {
 		// arm above names #833's posture as existing to keep out of a log. None of
 		// them is returned, and neither is the entry count.
 		//
-		// Unlike the three arms above this variant is NOT claimed by a Handle case on
-		// this lane: turnbridge.MapEvent's default drops it until #1693, so it reaches
-		// this file's `interactive_turn.unknown` Debug. The arm exists for that call
-		// site and for the others (acp_turn_stream.go, stream_turn_busy.go,
-		// stream_turn_drain.go), all of which would otherwise read kind=unknown for a
-		// variant the daemon does recognize.
+		// Like the three arms above, this variant is now claimed by a Handle case on
+		// this lane (#1849), so this file's `interactive_turn.unknown` Debug is no
+		// longer a live call site for it. The arm exists for the OTHER eventKind call
+		// sites (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go) and
+		// for the no-cursor drop on this lane, which returns before the type switch
+		// and is therefore the reachable one here — all of which would otherwise read
+		// kind=unknown for a variant the daemon does recognize.
 		return "model_list"
 	default:
 		return "unknown"
