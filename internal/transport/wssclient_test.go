@@ -718,12 +718,33 @@ func TestConnected_FiresOnEveryConnect(t *testing.T) {
 	connectErr := make(chan error, 1)
 	go func() { connectErr <- c.Connect(ctx) }()
 
+	// ForceClose can only drop conns the relay handler has already
+	// registered, and newTestRelay's handler registers after
+	// websocket.Accept returns — later than the client's own dial, which
+	// unblocks on the 101. Gating on Connected alone orders nothing on the
+	// relay side, so wait for the accept before dropping.
+	select {
+	case <-relay.connectedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay never registered the first conn")
+	}
+	// Draining the first signal keeps the buffer-1 Connected channel empty
+	// across the drop, so the read after the reconnect observes the second
+	// signal rather than a stale first one.
 	select {
 	case <-c.Connected():
 	case <-time.After(2 * time.Second):
 		t.Fatal("Connected did not fire after first connect")
 	}
 	relay.ForceClose()
+	// Split the reconnect from the signal: a timeout here means the redial
+	// never reached the relay, which is a harness fault rather than a
+	// regression in Client.Connected.
+	select {
+	case <-relay.connectedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client never reconnected to the relay")
+	}
 	select {
 	case <-c.Connected():
 	case <-time.After(2 * time.Second):
