@@ -558,19 +558,31 @@ claude's own claim about itself, bounded by the same three caps, retained by not
 nobody until #1693 — so the trade is worth revisiting when a client can first read the value and
 provenance starts to matter, not before.
 
-Each `turnevent.ModelOption` entry keeps four of claude's payload keys —
-`ResolvedModel`/`Value`/`DisplayName` plus, since #1819, `SupportsAutoMode` — mirroring
-`protocol.ModelOption`'s wire row (#1704) field-for-field (minus `EffortLevels`, #1820's slice), taken
-verbatim per #1600's rule (no lowercasing, alias expansion, date-stamping, or family mapping).
-**`description`, `supportsEffort`, `supportsAdaptiveThinking` and `supportsFastMode` are decoded
-nowhere**, on purpose: a field decoded here that nothing publishes is untrusted prose bounded, retained
-and carried for nothing, and absence from the decode target is a stronger guarantee than any test sweep
-— `systemInitLine`'s argument (#1600) carried over unchanged. Each string is bounded by its own named
-cap (`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`, all 256, per-entry worst case 768 bytes);
-the bool needs no cap and is never named in `TruncatedFields`, since it carries none of claude's bytes.
-An empty or absent `models` array is the safe-failure direction (rung 3, no event) rather than an empty
-`ModelList` — `emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose
-the variant exists for.
+Each `turnevent.ModelOption` entry keeps five of claude's payload keys —
+`ResolvedModel`/`Value`/`DisplayName`, `SupportsAutoMode` (#1819) and, since #1827, `EffortLevels` —
+mirroring `protocol.ModelOption`'s wire row (#1704) field-for-field, with nothing missing and nothing
+invented, taken verbatim per #1600's rule (no lowercasing, alias expansion, date-stamping, family
+mapping, or reordering). **`description`, `supportsEffort`, `supportsAdaptiveThinking` and
+`supportsFastMode` are decoded nowhere**, on purpose: a field decoded here that nothing publishes is
+untrusted prose bounded, retained and carried for nothing, and absence from the decode target is a
+stronger guarantee than any test sweep — `systemInitLine`'s argument (#1600) carried over unchanged.
+Each string is bounded by its own named cap (`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`,
+all 256; `maxModelEffortLevel`, 32, capping one level string, not the list); the bool needs no cap and
+is never named in `TruncatedFields`, since it carries none of claude's bytes. An empty or absent
+`models` array is the safe-failure direction (rung 3, no event) rather than an empty `ModelList` —
+`emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose the variant
+exists for.
+
+**The per-entry byte budget is a floor, not a total, since #1827.** `EffortLevels` is the family's
+first field that is a list *inside* a list entry — entries × levels × level length is a third size
+dimension, and #1827 bounds only the third factor. Per entry the retained claude-derived text is now
+`768 + 32×N`, where N is the number of levels claude sends for that model — a count nothing bounds
+until #1821 adds a cap. The arithmetic already shows the gap can't be closed by a count cap alone:
+`10 × (768 + 32N) ≤ 8192` requires `N ≤ 1.6`, so any level-count cap of 2 or more forces
+`maxModelListEntries` or the 8192-byte ceiling to move too — #1821 has both levers, not one. The cut
+report follows #1811's per-entry convention but had to grow to fit a list: `bound`'s sibling closure,
+`boundEach`, appends `"effort_levels"` to `TruncatedFields` **at most once per entry**, however many of
+that entry's levels were over-long, rather than once per cut element.
 
 **`SupportsAutoMode` collapses absent, JSON `null` and an explicit `false` into one reading — `false`
 — and the reason is that this field describes a withheld permission grant, not a general-purpose
@@ -580,9 +592,13 @@ choosing a plain `bool` over a `*bool`; the unsafe collapse would have been the 
 silence, which nothing here does. claude has never sent `false` at all — every capture arm shows four
 `true` entries and two carrying no capability key whatsoever — and `protocol.ModelOption` already made
 the same collapse (#1704), so a pointer here would have preserved a distinction only long enough for
-the mapping (#1693) to discard it. **The next field facing this question must re-derive its own
-answer rather than inherit this one**: `supportedEffortLevels` (#1820) is an empty-menu question, not a
-withheld-grant question, and those two failure shapes are not interchangeable.
+the mapping (#1693) to discard it. **The next field facing this question had to re-derive its own
+answer rather than inherit this one**: `EffortLevels` (#1827) is an empty-menu question, not a
+withheld-grant question, and those two failure shapes are not interchangeable — so unlike this bool,
+`EffortLevels` gets *no* collapse at all. An absent key decodes to nil, a published `[]` decodes to
+empty-non-nil, and the daemon adds no normalisation in either direction. Whether the two mean the same
+thing is not settled by the decode; it is **#1828**'s to answer, and `ModelOption.EffortLevels`'s own
+doc says so rather than let a reader infer a position from the Go shape.
 
 *Test-writing lesson: a collapse design's test can't stop at asserting the decoded value.* With absent
 and present-`false` deliberately indistinguishable downstream, a table test that only checks
@@ -593,6 +609,20 @@ before the decoded value is inspected at all. Also worth knowing before reaching
 present-`false` shape exists nowhere in the tree (not the committed capture, not `fakeclaude`'s canned
 list) and has to be hand-built — a design that keeps two shapes apart can never be shown to do so by a
 fixture transcribed from real bytes when one of the two shapes has never been observed.
+
+**Two more testing lessons, from #1827's list-valued extension of this same table shape.** First, a
+claim of *sole* redness in a test's doc comment is itself a measurable claim, not a description, and is
+cheapest to check at the moment it's written: two such claims here were plausible and wrong until
+mutation testing corrected them — an unconditional-append mutant reddens the all-fit row only *within
+that table*, not uniquely across the package (the capture pin and two decode-table rows also redden),
+and a scrambled-order row is not sole-red against a mutant that merely *sorts* (sorting also reddens the
+already-canonical five-level row); it's sole-red only against a mutant that canonicalises into claude's
+own published order, a narrower claim than "sorted." Second, a `check` closure that indexes into a
+decoded slice (`models[0].EffortLevels[0]`) turns a mutant's clean FAIL into a process-wide panic once a
+mutant (a json-tag typo) leaves that slice empty — it killed the parallel subtests before they could
+report, so one mutation run showed four reds where eleven were expected and briefly read as a coverage
+gap rather than a harness bug. A length `t.Fatalf` before the index costs two lines and keeps a
+mutation run's output honest.
 
 **The entry count is capped too (#1812) — `maxModelListEntries` (10), the family's second cardinality
 bound after `maxTaskRosterEntries`.** A per-entry text cap alone leaves the list's total size a
