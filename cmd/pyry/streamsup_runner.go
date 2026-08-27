@@ -218,6 +218,12 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 		BackoffInitial:    cfg.BackoffInitial,
 		BackoffMax:        cfg.BackoffMax,
 		BackoffReset:      cfg.BackoffReset,
+		// The interactive daemon asks every child, once, what the session knows
+		// about itself (#1839). Set HERE rather than in newStreamRunnerFactory
+		// because it is a plain bool constant, not a runtime object — the same
+		// dividing line ClaudeSessionsDir sits on — and setting it in the pure
+		// mapper makes the policy directly assertable with no new scaffolding.
+		RequestInitializeOnSpawn: true,
 	}
 }
 
