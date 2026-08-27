@@ -593,12 +593,20 @@ silence, which nothing here does. claude has never sent `false` at all — every
 `true` entries and two carrying no capability key whatsoever — and `protocol.ModelOption` already made
 the same collapse (#1704), so a pointer here would have preserved a distinction only long enough for
 the mapping (#1693) to discard it. **The next field facing this question had to re-derive its own
-answer rather than inherit this one**: `EffortLevels` (#1827) is an empty-menu question, not a
-withheld-grant question, and those two failure shapes are not interchangeable — so unlike this bool,
-`EffortLevels` gets *no* collapse at all. An absent key decodes to nil, a published `[]` decodes to
-empty-non-nil, and the daemon adds no normalisation in either direction. Whether the two mean the same
-thing is not settled by the decode; it is **#1828**'s to answer, and `ModelOption.EffortLevels`'s own
-doc says so rather than let a reader infer a position from the Go shape.
+answer rather than inherit this one — and, having re-derived it, landed on a collapse too, by a
+different argument**: `EffortLevels` (#1827, decided #1828) is an empty-menu question, not a
+withheld-grant question. An absent key, a JSON `null` and a published `[]` are ONE reading in this
+field as well, spelled `nil`, but the reason is not the bool's asymmetric-safe-direction argument —
+it's that both readings leave the daemon holding the same empty hand: its one effort vocabulary
+(`internal/relay`'s `validEffort`) is forbidden from feeding this list in either direction, so
+"absent" and "published-empty" issue the identical instruction (*this is not a menu you may offer*)
+regardless of which of the two claude meant. `boundEach` (`internal/streamsup/parser.go`) normalises
+the zero-length shape at construction, to `nil` rather than `[]string{}`, because `nil` is
+`TruncatedFields`'s own spelling for "nothing cut" and a struct with two list fields disagreeing on
+how to spell empty is worse than the small one-time cost of picking a direction. One trap the decision
+exists partly to close: `slices.Equal(nil, []string{})` reports `true`, so a design that tried to
+*keep* the distinction would have carried a difference invisible to the comparison idiom every other
+assertion on this field already uses.
 
 *Test-writing lesson: a collapse design's test can't stop at asserting the decoded value.* With absent
 and present-`false` deliberately indistinguishable downstream, a table test that only checks
@@ -623,6 +631,20 @@ mutant (a json-tag typo) leaves that slice empty — it killed the parallel subt
 report, so one mutation run showed four reds where eleven were expected and briefly read as a coverage
 gap rather than a harness bug. A length `t.Fatalf` before the index costs two lines and keeps a
 mutation run's output honest.
+
+**Two further lessons, from tightening that same table's assertions to pin the #1828 collapse.**
+First, a spec's mutation predictions are written against the assertion as it stands *today*, and a
+ticket that both tightens an assertion and predicts mutants against the tightened version has to
+re-run the prediction after the tightening, not before: #1828's spec predicted that reverting the
+collapse the *other* way (`return []string{}}`) would leave the `published empty` row green, true
+against the old `len(got) != 0` check but false the moment the row's assertion became `got == nil` —
+both `[]string{}` values are non-nil, so that mutant now reddens all three zero-length rows together,
+not the two the row names suggested. Second, once a collapse makes several rows decode to the
+identical value, no mutant of the *production* code can prove they're three genuinely distinct wire
+shapes rather than one shape asserted three times — only a mutant on the *fixture* (dropping the key
+from one row's builder) can, because it reddens the `wantWire` guard while the decoded-value assertion
+stays green. A collapse design's "are these really separate rows" question has to be answered by
+mutating the fixture, not the code under test.
 
 **The entry count is capped too (#1812) — `maxModelListEntries` (10), the family's second cardinality
 bound after `maxTaskRosterEntries`.** A per-entry text cap alone leaves the list's total size a
