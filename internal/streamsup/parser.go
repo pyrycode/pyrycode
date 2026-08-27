@@ -383,11 +383,22 @@ const maxModelField = 256
 // scalar targets' is, and this is the one place that difference shows. The cap is
 // applied AFTER json.Unmarshal, so a hostile array is materialised in transient
 // memory before any of it is bounded — maxTaskRosterEntries' transient paragraph,
-// verbatim. Three facts bound the exposure: defaultMaxParseBuf caps the whole line
-// at 4 MiB before the decoder sees it and the densest legal entry is `{}`, so one
-// pathological line is order 100 MB of transient; it is TRANSIENT, not retained,
-// because turnbridge.MapEvent's default drops the event and frees it, one in flight
-// at a time; and nothing puts it in the eventring or on the wire until #1693.
+// verbatim. defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees
+// it and the densest legal entry is `{}`, so one pathological line is order 100 MB
+// of transient — the spike is real, and that constant is the whole of what bounds
+// it.
+//
+// TRANSIENT AND RETAINED ARE TWO DIFFERENT FIGURES HERE, which is what makes the
+// bound above the whole story rather than half of it. What is TRANSIENT is the
+// unbounded decoded array itself: it lives from json.Unmarshal until emitModelList
+// applies the caps, and is garbage from that point on — nothing downstream is ever
+// handed it. What is RETAINED is only the CAPPED RESULT: at most
+// maxModelListEntries entries, each bounded by the three string caps and by the
+// level product above, and maxModelListEntries carries that aggregate rather than
+// restating it here. TWO holders retain it, both in cmd/pyry — sessionModelHold
+// keeps the decoded value for the session's life (#1840) and emitMapped's eventring
+// append keeps the mapped payload per conversation (#1849) — so what outlives the
+// line is the product, never the spike.
 const maxModelResolved = 256
 
 // maxModelValue caps turnevent.ModelOption.Value. maxModelResolved's paragraph
@@ -1860,14 +1871,32 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // carries a success-subtype model list", not "this is the reply to the initialize
 // request THIS daemon sent": claude authors the inner response object on every
 // control response, so a future claude putting a models array inside some other ack
-// would have that ack read as an inventory. The consequence is bounded — the value
-// would still be claude's own claim about itself, bounded by the same three caps,
-// retained by nothing, published to nobody, and acted on nowhere. The alternative
-// buys real provenance and costs new cross-object state: Runner.nextControlID mints
-// the id inline at the call site and nothing retains it, exactly as its two sibling
-// writers discard theirs, so the parser holds no link to it. That trade is worth
-// revisiting at #1693, when the value first reaches a client and provenance starts
-// to matter; it is not worth new parser state in a slice nothing publishes.
+// would have that ack read as an inventory.
+//
+// WHERE A MIS-READ INVENTORY NOW GOES, written out because it used to go nowhere
+// and that absence was once the whole bound. cmd/pyry's sessionModelHold retains it
+// as the session's menu for the child's life (#1840),
+// turnbridge.MapEvent's ModelList arm maps it onto protocol.ModelListPayload
+// (#1848), and cmd/pyry's interactiveTurnEmitterV2.Handle emits the mapped frame to
+// any interactive conn and appends it to the eventring (#1849). A menu the daemon
+// never asked for would be presented to a client as one it did.
+//
+// THE TRADE STILL LANDS THE SAME WAY, and what decides it is the CONTENT bound
+// rather than the audience. Correlating request_id would prove WHICH REPLY the
+// bytes answered; it would not make the bytes more trustworthy, because the
+// subprocess that could plant a models array in an unrelated ack is the same
+// subprocess that authors the initialize reply — a correlated inventory is claude's
+// own claim about itself exactly as an uncorrelated one is. That claim stays
+// bounded whichever line carries it, and by the same three things: the caps above,
+// nothing from the payload reaching a log (logControlResponse), and the render
+// boundary the CLIENT owes (protocol.ModelOption's SECURITY paragraph). The
+// alternative buys real provenance and costs new cross-object state:
+// Runner.nextControlID mints the id inline at the call site and nothing retains it,
+// exactly as its two sibling writers discard theirs, so the parser holds no link to
+// it. This paragraph once deferred the question to whenever the value first reached
+// a client; that HAPPENED, and the answer was re-taken here unchanged — recognise
+// the shape, hold no cross-object parser state for provenance. No new trigger is
+// set, because there is no later fact that would move the content bound.
 //
 // The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
 // streamLine's doc states the property it preserves: control shapes are read from
@@ -1888,8 +1917,14 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 //     argument carries over unchanged — a ModelList carrying zero entries names no
 //     model, so it cannot serve the purpose the variant exists for, and emitting it
 //     would be the daemon reporting an inventory it never observed. The safe failure
-//     direction here is the false NEGATIVE, and nothing publishes the value until
-//     #1693, so no client can read a false zero in the meantime.
+//     direction here is the false NEGATIVE, and the choice is made with BOTH
+//     outcomes visible: a client on the live interactive lane reads the result
+//     today (#1849). A false ZERO would reach that client's menu as "claude offers
+//     no models". A false NEGATIVE shows no menu at all — cmd/pyry's
+//     sessionModelHold holds nothing, so resolveBoundModelList refuses rather than
+//     answering an empty list. Both are a MISSING menu; only the false positive is
+//     a WRONG one, and that asymmetry is the footing. It is stronger now that
+//     either outcome is observable than it was when neither was.
 //  4. success and a non-empty array → one ModelList.
 //
 // A per-entry field is never validated beyond its cap. An entry whose value is
@@ -2108,20 +2143,41 @@ func (p *Parser) emitModelList(line []byte) {
 // carried forty reads as "claude offers six models". emitBackgroundTaskRoster logs
 // no count and does not oppose this — its only record is the UNDECODABLE drop, so it
 // has no success record to complete, while this path has one and completing it is
-// consistent. Until #1693 publishes the event, this record is the ONLY observable
-// the cap has: without it, a cap firing in production is a cap nobody can know
-// fired, and the first evidence that 10 is the wrong number would arrive as a user's
+// consistent. The entry count is no longer this record's alone:
+// turnbridge.MapEvent's ModelList arm carries turnevent.ModelList.DroppedModels
+// through verbatim (#1848) and cmd/pyry's interactiveTurnEmitterV2.Handle puts it
+// on the wire as dropped_models (#1849), where
+// protocol.ModelListPayload.DroppedModels documents it as client-facing. The record
+// keeps its own reason, on two facts the wire field cannot supply. AN
+// OPERATOR-FACING SIGNAL IS NOT A CLIENT-FACING ONE — the wire field tells a phone
+// its menu is short, this record tells an operator, on the daemon's own timeline.
+// And the wire field is not a RELIABLE observable of the cap: no conn need be
+// interactive when the initialize exchange happens, and the live send is droppable
+// at the fan-in, so a cap can fire with no frame reaching anyone. This record always
+// exists. So a cap firing in production is still a cap no OPERATOR can know fired
+// without it — that would take a phone having been connected and having reported
+// back — and the first evidence that 10 is the wrong number would arrive as a user's
 // short menu.
 //
-// `levels_dropped` is here for that argument VERBATIM, one dimension down: nothing
-// reads turnevent.ModelOption.TruncatedFields either until #1693, so without this the
-// level bound would be a cap on subprocess-supplied data with no operational signal
-// at all, and the first evidence that maxModelEffortLevelCount is the wrong number
-// would arrive as a user's short effort menu. It is admissible under this function's
-// own rule for the same reason the other two counts are — a DAEMON-computed integer
-// derived from slice lengths, carrying none of claude's bytes — and the level STRINGS
-// it counts are exactly the "effort values are NEVER logged at any level" half of
-// #833's posture, so none of them goes anywhere near this record.
+// `levels_dropped` is here for that argument VERBATIM, one dimension down, and here
+// the record is still the only place the NUMBER appears at all.
+// turnevent.ModelOption.TruncatedFields does reach a client — MapEvent's arm crosses
+// it as the slice it is (#1848), and protocol.ModelOption.MarshalJSON deliberately
+// exempts it so nothing-was-cut arrives as null — but what crosses is a NAME,
+// "effort_levels", at most once per entry, saying the same thing whether one level
+// was cut or ninety were dropped. The MAGNITUDE reaches nowhere else, which
+// turnevent.ModelOption.EffortLevels' own "WHAT THAT GIVES UP" paragraph states
+// from the other side: the true level count is not recoverable from the event, where
+// ModelList's true entry count is recoverable as len(Models) + DroppedModels. The
+// operator-versus-client and best-effort points from `dropped` above apply here
+// unchanged. So without this the level bound would be a cap on subprocess-supplied
+// data with no count anywhere, and the first evidence that maxModelEffortLevelCount
+// is the wrong number would arrive as a user's short effort menu. It is admissible
+// under this function's own rule for the same reason the other two counts are — a
+// DAEMON-computed integer derived from slice lengths, carrying none of claude's
+// bytes — and the level STRINGS it counts are exactly the "effort values are NEVER
+// logged at any level" half of #833's posture, so none of them goes anywhere near
+// this record.
 //
 // The attribute set is FIXED at five on every rung, which is why the non-emitting ones
 // pass 0 rather than omitting the key.

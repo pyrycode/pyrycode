@@ -4950,7 +4950,10 @@ func TestParser_ModelListEntryCountIsBounded(t *testing.T) {
 		t.Parallel()
 		// The ONLY place `dropped` is non-zero. Without it the attribute is decorative:
 		// a producer hard-coding 0 would stay green in every other record assertion on
-		// this path, and this record is the only observable the cap has until #1693.
+		// this path. The entry count does reach a client — turnbridge.MapEvent's arm
+		// carries it (#1848) and it lands on the wire as dropped_models (#1849) — but
+		// the record is the OPERATOR-facing signal that survives a cap firing with no
+		// interactive conn present, which is logControlResponse's own argument for it.
 		rec := &logRecorder{}
 		p := NewParser(func(turnevent.Event) {}, slog.New(rec))
 		line := modelListLineFixture(t, "success", modelEntriesFixture(100))
@@ -5147,8 +5150,10 @@ func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
 		t.Parallel()
 		// The ONLY place `levels_dropped` is non-zero. Without it the attribute is
 		// decorative: a producer hard-coding 0 would stay green in every other record
-		// assertion on this path, and this record is the only observable the level bound
-		// has until #1693.
+		// assertion on this path. What reaches the wire is only the per-entry
+		// "effort_levels" NAME (#1848), which says the same thing whether one level was
+		// cut or ninety were dropped, so this record stays the only observable of HOW
+		// MANY the level bound cut — logControlResponse's own argument for it.
 		//
 		// THREE entries — over by one, clean, over by three — which is the arrangement
 		// that pins the attribute as a TOTAL over the RETAINED entries and pins the
