@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
@@ -340,15 +341,55 @@ func (m *V2SessionManager) settingsReplyError(ctx context.Context, s *V2Session,
 }
 
 // validModel reports whether m is an acceptable per-session model value from an
-// untrusted set_session_settings frame (#845). It is a SHAPE check, NOT an
-// allowlist: model names churn per claude release, so a fixed allowlist would
-// reject a new model and force a code edit per launch. "" is accepted (clear to
-// the daemon template — claudeSettingsArgs emits no --model for it); otherwise the
-// value is 1..64 bytes, its first byte alphanumeric, and every byte in
-// [A-Za-z0-9._-]. This is the argv-injection defense: the first-byte-alphanumeric
-// rule bars a leading-dash value (--foo) from posing as a claude flag, and the
-// closed charset admits no shell metachar, whitespace, or control byte (a
-// multi-byte UTF-8 rune's continuation bytes are >= 0x80 and are rejected).
+// untrusted set_session_settings frame (#845, widened by #1838). It is a SHAPE
+// check, NOT an allowlist: model names churn per claude release, so a fixed
+// allowlist would reject a new model and force a code edit per launch. It is also
+// stateless by design — validating against a menu this daemon previously
+// published would add cross-request state and a TOCTOU window while still needing
+// a shape check underneath.
+//
+// The rule is a GRAMMAR rather than a byte set, because it has to be checkable in
+// both directions — what it newly admits, and what it still refuses:
+//
+//	model    := "" | base variant?
+//	base     := alnum wordbyte*
+//	variant  := "[" wordbyte+ "]"
+//	wordbyte := alnum | "." | "_" | "-"
+//	alnum    := [A-Za-z0-9]
+//
+// plus a 64-byte bound over the WHOLE value, the variant group included — the
+// charset widened at #1838, the length did not. "" is accepted (clear to the
+// daemon template — claudeSettingsArgs emits no --model for it).
+//
+// The optional trailing group is the form claude publishes for a variant row in
+// its own initialize model menu (claude-fable-5[1m], opus[1m]), which
+// protocol.ModelOption carries to a client and which this validator refused until
+// #1838. Admitting it is deliberately NARROWER than adding two bytes to the
+// charset: the group's interior draws from the same closed class as the base, so
+// a value carries at most one group and cannot nest one; the group is non-empty,
+// is balanced, and — because its "]" must be the value's last byte — is the
+// value's final element, never a leading or interior one.
+//
+// The two properties the closed class buys are unchanged, and the accepted value
+// reaches two sinks, each depending on one of them:
+//
+//   - No leading-dash value (--foo) can pose as a claude flag, because base's
+//     first byte is alphanumeric. That is the ARGV sink: claudeSettingsArgs emits
+//     --model and the value as two separate elements of an argv slice and no
+//     shell parses either, so "[" and "]" are ordinary bytes to execve.
+//   - No shell metachar, whitespace, control byte, separator or byte >= 0x80 (a
+//     multi-byte UTF-8 rune's continuation bytes) appears anywhere in an accepted
+//     value. That is the TURN-TEXT sink, which is the branch a menu click
+//     actually travels since #1581 stopped restarting the child for a model
+//     change: deliverSettingsInBand interpolates "/model " + value onto the live
+//     child's stdin as ONE line, so an accepted value must be a single
+//     whitespace-free token that can neither end that line nor open a second word
+//     or a second slash command. Neither bracket is a line terminator, a
+//     separator or a command sigil, so admitting them does not weaken it.
+//
+// That closure is machine-checked rather than asserted:
+// TestValidModel_ByteSetIsClosed walks all 256 byte values in each of the three
+// positions.
 func validModel(m string) bool {
 	if m == "" {
 		return true
@@ -356,20 +397,59 @@ func validModel(m string) bool {
 	if len(m) > 64 {
 		return false
 	}
-	for i := 0; i < len(m); i++ {
-		c := m[i]
-		alnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+	base := m
+	if i := strings.IndexByte(m, '['); i >= 0 {
+		// Three conditions on the FIRST "[", and between them they rule out a
+		// nested group, a second group and a trailing suffix without any of the
+		// three needing a check of its own: the value's last byte closes the
+		// group, the interior is non-empty, and every interior byte is a
+		// wordbyte — which excludes both brackets, so nothing inside can open or
+		// close another group.
+		if m[len(m)-1] != ']' {
+			return false
+		}
+		inner := m[i+1 : len(m)-1]
+		if inner == "" {
+			return false
+		}
+		for j := 0; j < len(inner); j++ {
+			if !modelWordByte(inner[j]) {
+				return false
+			}
+		}
+		base = m[:i]
+	}
+	if base == "" {
+		return false // a leading group: "[1m]" has no base to carry it
+	}
+	for i := 0; i < len(base); i++ {
+		c := base[i]
 		if i == 0 {
-			if !alnum {
+			if !modelAlnumByte(c) {
 				return false
 			}
 			continue
 		}
-		if !alnum && c != '.' && c != '_' && c != '-' {
+		if !modelWordByte(c) {
 			return false
 		}
 	}
 	return true
+}
+
+// modelAlnumByte reports whether c is in [A-Za-z0-9] — the class validModel's
+// grammar demands of a value's FIRST byte, and the whole of the bar that keeps a
+// leading-dash value from posing as a claude flag on the argv sink.
+func modelAlnumByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// modelWordByte reports whether c is in [A-Za-z0-9._-] — validModel's closed byte
+// class, and the ONE place it is written down. Both the base and the variant
+// group's interior consult it, so "the group admits nothing the base does not" is
+// a property of the code rather than of two lists kept in step by hand.
+func modelWordByte(c byte) bool {
+	return modelAlnumByte(c) || c == '.' || c == '_' || c == '-'
 }
 
 // validEffort reports whether e is an acceptable reasoning-effort value from an

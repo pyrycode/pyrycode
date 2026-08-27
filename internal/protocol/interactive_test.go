@@ -1011,9 +1011,9 @@ func TestModelListType_IsNotClaudesVocabulary(t *testing.T) {
 	// "models" is NOT in the list and must not be: it is this payload's own wire
 	// key, so checking for it would be red against the correct shape.
 	//
-	// Value is opus[1m] deliberately — one of the two measured values
-	// internal/relay's validModel rejects — so this fixture-free test carries the
-	// hazard ModelOption's Value paragraph describes.
+	// Value is opus[1m] deliberately — the bracketed variant form, whose bytes
+	// are the ones an encoding probe is most likely to mangle, and the shape
+	// internal/relay's validModel was widened for at #1838.
 	body, err := json.Marshal(ModelListPayload{
 		ConversationID: "c1",
 		Models: []ModelOption{{
