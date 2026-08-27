@@ -1047,7 +1047,7 @@ type systemInitLine struct {
 // never declared cannot reach a log or an event, which is systemInitLine's
 // argument for its own twenty-one omissions.
 //
-// The initialize payload's other thirteen top-level keys are absent for that same
+// The initialize payload's other twelve top-level keys are absent for that same
 // reason and one of them is why it matters: `account`. It is never decoded, never
 // bounded, never retained and never logged, because it is not on this struct.
 type controlResponseLine struct {
@@ -1055,6 +1055,10 @@ type controlResponseLine struct {
 		Subtype  string `json:"subtype"`
 		Response struct {
 			Models []modelOptionLine `json:"models"`
+			// A plain []commandEntryLine for Models' reason verbatim: absent, null and
+			// empty are answered identically — a count of 0 — so a pointer would buy a
+			// distinction nothing acts on.
+			Commands []commandEntryLine `json:"commands"`
 		} `json:"response"`
 	} `json:"response"`
 }
@@ -1109,6 +1113,56 @@ type modelOptionLine struct {
 	DisplayName      string   `json:"displayName"`
 	EffortLevels     []string `json:"supportedEffortLevels"`
 	SupportsAutoMode bool     `json:"supportsAutoMode"`
+}
+
+// commandEntryLine is one element of the initialize payload's `commands` array —
+// claude's slash-command inventory for the workspace the child was spawned in
+// (#1853). "Entry" rather than modelOptionLine's "option": that word names a menu
+// choice the daemon publishes, and a slash command is not one.
+//
+// ONE FIELD, and the OMISSION is the point, exactly as it is on systemInitLine.
+// claude sends four keys per entry — name, argumentHint, description, aliases — and
+// three are deliberately absent, because a field that is never declared cannot reach
+// a log or an event. It is also the whole of the memory story: the captured array is
+// 14,277 bytes compact and the fifty-one `name` strings inside it total 494, so
+// declaring one field is what keeps 96% of a workspace-authored payload from ever
+// becoming a Go string. A later reader must not "complete" this struct.
+//
+// EVERY STRING HERE IS WORKSPACE-AUTHORED. A slash command defined in a repository
+// was written by whoever wrote that repository, and the daemon reads it in whatever
+// directory the operator points a session at. Name is nevertheless NOT validated —
+// not for emptiness, not for charset, not for control bytes — and the reason is NO
+// SINK rather than safe bytes. The capture carries `__remote-workflow`, which is the
+// committed proof that no charset may be assumed; what makes that harmless is that
+// the string reaches no exec.Command argument, no filepath.Join, no filepath.Match,
+// no regexp and no log attribute. Only its COUNT leaves emitModelList. The first
+// slice that actually READS Name inherits the validation question OPEN, not settled,
+// and several of those sinks treat bytes as syntax with no shell anywhere in sight.
+//
+// NO PER-FIELD CAP, and the bound that makes one unnecessary is named rather than
+// added: defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees it,
+// which is already the whole of what bounds the models array's transient spike (see
+// controlResponseLine's neighbouring paragraph). The arithmetic favours this array on
+// both sides — this struct is ONE field where modelOptionLine is five, so per
+// densest-legal element the worst-case transient is a fraction of the already-accepted
+// one and a single 4 MiB line cannot maximise both; and this slice is TRANSIENT,
+// living from json.Unmarshal until emitModelList returns, where the models array's
+// CAPPED result is retained for the child's life by cmd/pyry's sessionModelHold.
+//
+// The decode is all-or-nothing at the LINE, modelOptionLine's rule verbatim and at
+// the ELEMENT level too: a `commands` that is a number, a string or an object, an
+// element that is a bare string or a number, or a `name` that is not a string all
+// fail the WHOLE-LINE decode and take emitModelList's undecodable rung. The bare
+// string is worth naming because it is the shape a future claude most plausibly
+// sends: systemInitLine's line already spells this same inventory as bare strings
+// under slash_commands.
+//
+// JSON null is the one carve-out and it applies at BOTH positions, for
+// modelOptionLine's reason: encoding/json documents unmarshalling a null into a
+// non-pointer Go value as a NO-OP producing no error, so a null `commands` lands as a
+// nil slice and a null `name` lands as "" — a counted entry, not a failed line.
+type commandEntryLine struct {
+	Name string `json:"name"`
 }
 
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
@@ -1903,7 +1957,9 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // the top level only and nested content is never re-scanned, which is what stops a
 // tool result whose text is literally `{"type":"result"}` from forging a turn
 // boundary. Decoding this payload from anywhere else would let claude's own tool
-// output announce a model inventory the daemon never asked for.
+// output announce a model inventory the daemon never asked for — and, since #1853,
+// a slash-command inventory too. commandEntryLine rides this same input; nothing
+// reaches for a nested field to get at either array.
 //
 // FOUR RUNGS, total over the input, none of which can panic and none of which
 // surfaces an Unrecognized:
@@ -1959,18 +2015,29 @@ func (p *Parser) emitModelList(line []byte) {
 		// is where that rule is argued at length: encoding/json QUOTES the offending
 		// input bytes into its error text, so `"err", err` would route claude's own
 		// strings into the daemon log through a channel no per-attribute check can see.
-		p.logControlResponse(controlResponseUndecodable, 0, 0, 0)
+		// #1853 made that strictly more load-bearing: with commandEntryLine declared,
+		// the bytes a type error quotes are workspace-authored command names.
+		p.logControlResponse(controlResponseUndecodable, 0, 0, 0, 0)
 		return
 	}
 	if cr.Response.Subtype != controlResponseSuccess {
-		p.logControlResponse(controlResponseNAK, 0, 0, 0)
+		p.logControlResponse(controlResponseNAK, 0, 0, 0, 0)
 		return
 	}
+	// BELOW the success gate and ABOVE rung 3's return, and both halves are the
+	// placement: taking it above the subtype comparison would report a count off a
+	// response that announced FAILURE, and taking it below rung 3 would leave the ack
+	// rung — the one rung where this is the record's only non-zero number — reporting
+	// 0. Nothing but this int leaves the function; the decoded entries are never read,
+	// retained, bounded or emitted.
+	commands := len(cr.Response.Response.Commands)
 	entries := cr.Response.Response.Models
 	if len(entries) == 0 {
 		// Rung 3. An absent `models`, a null one, an empty array, and a response
-		// object carrying no such key all land here and are answered identically.
-		p.logControlResponse(controlResponseAck, 0, 0, 0)
+		// object carrying no such key all land here and are answered identically —
+		// including a payload carrying a non-empty `commands` and no models, which is
+		// an ack whose record now tells it apart from one carrying neither array.
+		p.logControlResponse(controlResponseAck, 0, 0, 0, commands)
 		return
 	}
 
@@ -2113,7 +2180,7 @@ func (p *Parser) emitModelList(line []byte) {
 		})
 	}
 
-	p.logControlResponse(controlResponseModelList, len(models), dropped, levelsDropped)
+	p.logControlResponse(controlResponseModelList, len(models), dropped, levelsDropped, commands)
 	p.emit(turnevent.ModelList{Models: models, DroppedModels: dropped})
 }
 
@@ -2122,7 +2189,7 @@ func (p *Parser) emitModelList(line []byte) {
 // rungs. Every control_response produces exactly one of these, whatever it was a
 // reply to.
 //
-// Five attributes and NOTHING else. `type` is a constant here rather than
+// Six attributes and NOTHING else. `type` is a constant here rather than
 // sl.Type, which the case arm's match makes byte-identical; `reason` comes from the
 // closed keyword set at controlResponseMsg; `models` is the emitted entry count,
 // `dropped` how many maxModelListEntries cut, and `levels_dropped` how many effort
@@ -2134,7 +2201,7 @@ func (p *Parser) emitModelList(line []byte) {
 // posture — restated across internal/relay's v2session_settings.go and
 // internal/sessions' pool.go as "model / effort / YOLO values are NEVER logged at
 // any level" — exists to keep out of a log, and a drop site explaining itself with
-// the value it dropped is how that rule usually breaks. Both integers are
+// the value it dropped is how that rule usually breaks. All four integers are
 // DAEMON-computed and carry none of claude's bytes, which is what admits them where
 // no string from the payload is admitted.
 //
@@ -2179,12 +2246,34 @@ func (p *Parser) emitModelList(line []byte) {
 // logged at any level" half of #833's posture, so none of them goes anywhere near
 // this record.
 //
-// The attribute set is FIXED at five on every rung, which is why the non-emitting ones
+// `commands` is the initialize payload's slash-command entry count (#1853), and its
+// argument is `dropped`'s SIMPLER and STRONGER: this record is the ONLY observable
+// that decode has. The operator-versus-client half does not transfer — `dropped`
+// completes a client-facing wire field, and this number has no wire field to
+// complete, no event, no retention and no daemon-internal value. Without it a
+// `commands` array that stopped decoding would be a change nobody could know
+// happened. It counts what DECODED, where `models` counts what was EMITTED after
+// maxModelListEntries cut: two counts with different meanings on one record, and the
+// difference is that nothing caps or retains this one, so there is no cap here to
+// infer. Admissible on the other three counts' footing exactly — a DAEMON-computed
+// integer derived from a slice length, carrying none of claude's bytes. No name, no
+// argumentHint, no description and no alias reaches this record on any rung, and
+// commandEntryLine's single field is what makes three of those four unreachable
+// rather than merely unwritten.
+//
+// It is the LAST parameter and the LAST attribute, so the two orders are one order a
+// reader checks once. The existing three ints are one dimension — `models` with
+// `dropped` and `levels_dropped` qualifying it — and inserting a fourth between them
+// would split a trio that reads as a unit. Four adjacent ints is a swap hazard, and
+// it is PINNED rather than designed away: a swap shows on exactly one rung, the ack
+// rung, where the model trio is all-zero and this count is not.
+//
+// The attribute set is FIXED at six on every rung, which is why the non-emitting ones
 // pass 0 rather than omitting the key.
-func (p *Parser) logControlResponse(reason string, models, dropped, levelsDropped int) {
+func (p *Parser) logControlResponse(reason string, models, dropped, levelsDropped, commands int) {
 	p.log.Debug(controlResponseMsg,
 		"type", "control_response", "reason", reason, "models", models, "dropped", dropped,
-		"levels_dropped", levelsDropped)
+		"levels_dropped", levelsDropped, "commands", commands)
 }
 
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors
