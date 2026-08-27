@@ -583,12 +583,14 @@ type ModelOption struct {
 	// xhigh, max) is neither alphabetical nor sorted, and preserving it is what
 	// carries claude's answer rather than the daemon's opinion of it.
 	//
-	// EACH ELEMENT IS BOUNDED AND THE COUNT IS NOT. The producer caps every level
-	// string AT CONSTRUCTION (streamsup's maxModelEffortLevel), so no oversized level
-	// enters the event stream, a queue, or a log; how MANY levels arrive is claude's
-	// to choose and nothing bounds it yet. That is the third dimension of a per-entry
-	// budget whose other two are bounded, and #1821 closes it — see ModelList.Models,
-	// which states the same gap for the list as a whole.
+	// BOTH THE ELEMENT AND THE COUNT ARE BOUNDED. The producer caps every level string
+	// AT CONSTRUCTION (streamsup's maxModelEffortLevel) and how MANY levels this list
+	// retains (streamsup's maxModelEffortLevelCount), so neither an oversized level nor
+	// an inflated menu enters the event stream, a queue, or a log. The count bound is
+	// what a per-element cap alone cannot supply: the array's length is claude's to
+	// choose, so without it a per-entry size stayed a function of a number claude
+	// picks. See ModelList.Models, which states all three of the list's dimensions
+	// together.
 	//
 	// AN ABSENT KEY, A JSON null AND A PUBLISHED EMPTY ARRAY ARE ONE READING, AND IT
 	// IS SPELLED nil (#1828). The producer normalises a zero-length list at
@@ -648,9 +650,23 @@ type ModelOption struct {
 	// does not, this reading is wrong, and reopening it costs a ticket plus a *[]string
 	// or a companion bool. That is the price of one reading, paid knowingly.
 	//
-	// A CUT LEVEL IS NOT A LEVEL CLAUDE PUBLISHED. When TruncatedFields names
-	// "effort_levels" at least one element is the daemon's prefix of a string claude
-	// sent, so this list is no longer claude's menu and must not be offered as one.
+	// A CUT LEVEL IS NOT A LEVEL CLAUDE PUBLISHED, AND A LEVEL CLAUDE PUBLISHED MAY BE
+	// MISSING ENTIRELY. When TruncatedFields names "effort_levels", at least one
+	// element is the daemon's prefix of a string claude sent, or the count bound
+	// shortened the list from the tail, or both. Either way this list is no longer
+	// claude's menu and must not be offered as one. The instruction is the same for
+	// both, which is why one name covers them: a list that is not claude's whole
+	// published menu is unofferable whether one level was mangled or ninety were
+	// dropped.
+	//
+	// WHAT THAT GIVES UP, stated rather than waved away: the TRUE level count is not
+	// recoverable from this event, where ModelList's true entry count is recoverable as
+	// len(Models) + DroppedModels. A per-entry dropped-level integer is what would
+	// recover it, and protocol.ModelOption has no field to carry one, so it would be
+	// preserved only long enough for the mapping (#1693) to discard it — the argument
+	// SupportsAutoMode makes against a *bool, one field over. Reopening it costs a
+	// ticket plus a wire field. The daemon's own operational signal for the bound is
+	// streamsup's control_response record, not this event.
 	//
 	// internal/relay's validEffort is NOT applied to this list, and is not to be
 	// widened or narrowed to match it. It is a CLOSED enum bounding a phone-supplied
@@ -721,11 +737,12 @@ type ModelOption struct {
 	// nothing was cut, never an empty non-nil slice; BackgroundTask.TruncatedFields
 	// is the convention's single source.
 	//
-	// "effort_levels" is the one name reporting a cut on ONE OR MORE VALUES: it
-	// appears at most once per entry however many of that entry's levels were cut,
-	// because this report names FIELDS and a list is one field. It is last for the
-	// declaration-order reason and no other — the producer's per-element bound runs
-	// after the three strings'.
+	// "effort_levels" is the one name reporting on a LIST rather than a value, and it
+	// covers three outcomes: one or more of that entry's levels were cut to fit the
+	// per-element cap, the list was shortened to fit the count cap, or both. It appears
+	// at most once per entry in every case, because this report names FIELDS and a list
+	// is one field. It is last for the declaration-order reason and no other — the
+	// producer's list bound runs after the three strings'.
 	TruncatedFields []string
 }
 
@@ -773,13 +790,15 @@ type ModelList struct {
 	// truncated FROM THE TAIL when the count cap fires, and the true size stays
 	// recoverable as len(Models) + DroppedModels.
 	//
-	// THERE ARE THREE DIMENSIONS SINCE #1827 AND ONLY TWO OF THEM ARE BOUNDED. Each
-	// level STRING in an entry's EffortLevels is bounded at construction (streamsup's
-	// maxModelEffortLevel); how MANY levels an entry carries is bounded by nothing, so
-	// a per-entry size is still a function of a number claude chooses, which is the
-	// property the entry count supplied for the other two. #1821 closes it. The bool
-	// beside those strings is bounded by nothing and needs no cap: it carries none of
-	// claude's bytes.
+	// THERE ARE THREE DIMENSIONS AND ALL THREE ARE BOUNDED. The per-entry TEXT by the
+	// three string caps above and by streamsup's maxModelEffortLevel on each level,
+	// reported per entry in ModelOption.TruncatedFields; the ENTRY count by streamsup's
+	// maxModelListEntries, reported here as DroppedModels; and the per-entry LEVEL
+	// count by streamsup's maxModelEffortLevelCount, reported on the entry it happened
+	// to, as "effort_levels" in that entry's TruncatedFields. Each dimension reports at
+	// the level where it happens, which is why the level count reports per entry and
+	// the entry count reports on the list. The bool beside those strings is bounded by
+	// nothing and needs no cap: it carries none of claude's bytes.
 	Models []ModelOption
 	// DroppedModels is how many entries claude sent beyond the producer's cap that
 	// this event does NOT carry; 0 when nothing was dropped. The list's true size is
