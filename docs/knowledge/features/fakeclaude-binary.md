@@ -703,10 +703,12 @@ no new env var, no widened signature, no new `main()` call site. This is a delib
 departure from this doc's "default-off, byte-identical when unset" house rule for riders:
 nothing sends the request yet, so the unconditional answer changes no existing suite's
 bytes today, and gating it behind a knob would leave the default path — the one every
-future suite runs once #1689 lands — silently unanswered. `streamsup.Parser`'s
-`control_response` case reads nothing below the top-level `type`, so today the answer
-reaches no client and changes no frame count anywhere; #1690 is what teaches the daemon
-to read it.
+future suite runs once #1689 lands — silently unanswered. At the time this answer
+shipped, `streamsup.Parser`'s `control_response` case read nothing below the top-level
+`type`, so the answer reached no client and changed no frame count anywhere; `emitModelList`
+(`internal/streamsup/parser.go`) is what now decodes it — see
+[streamsup-package.md](streamsup-package.md) for the settled per-field absent/empty/false
+readings.
 
 `controlRequestID(line []byte, subtype string) (string, bool)` is the shared decode
 `interruptControlRequest` used to own alone, generalised by subtype (`subtypeInterrupt`
@@ -727,12 +729,19 @@ list carries two entries transcribed verbatim from
 with the full eight-key shape (five effort levels, `supportsAutoMode: true`) and a
 `haiku` entry with only four keys, `supportedEffortLevels`/`supportsAutoMode` **absent as
 JSON keys**, not `false` or `[]`. `internal/protocol`'s `ModelOption.MarshalJSON` (#1704)
-already decided that absent and empty both publish as `[]` on the *wire*, deliberately
-leaving the daemon-internal reading of that distinction for #1690 — a fake that emitted
-`[]`/`false` for the minimal entry would settle #1690's question before it got there.
-Each canned entry is a `map[string]any`, like `writeInterruptAck`/`writeRateLimitEvent`:
-a struct with `omitempty` would conflate `false` with absent for exactly the field this
-ticket exists to keep distinct.
+already decided that absent and empty both publish as `[]` on the *wire*; the
+daemon-internal reading is settled too — `turnevent.ModelOption.EffortLevels` reads
+absent, `null` and published `[]` as one reading, `nil` (#1828), and
+`turnevent.ModelOption.SupportsAutoMode` reads absent, `null` and explicit `false` as one
+reading, `false` (#1819). The collapse is the *decode*'s to perform (`emitModelList`'s
+`boundEach` for the list, a plain `bool` needing no code at all for the flag — see
+[streamsup-package.md](streamsup-package.md)), so the minimal entry's job is to keep
+feeding that decode the one shape claude actually sends: a fake that emitted `[]`/`false`
+for the minimal entry instead of omitting the keys would hand the decode an
+already-collapsed input and the absent-key arm would go unexercised. Each canned entry is
+a `map[string]any`, like `writeInterruptAck`/`writeRateLimitEvent`: a struct with
+`omitempty` would conflate `false` with absent for exactly the field this ticket exists to
+keep distinct.
 
 **The `request_id` echo depends on going through `writeJSONLine`, not `fmt.Sprintf`.**
 `requestID` is inbound bytes the daemon wrote to this child's stdin, reflected straight

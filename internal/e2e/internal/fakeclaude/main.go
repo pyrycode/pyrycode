@@ -1889,11 +1889,28 @@ func writeInitializeAck(w io.Writer, requestID string) error {
 // canned, because two arms is what the consumers need.
 //
 // A map per entry, not a struct with omitempty: ABSENCE is the load-bearing property
-// and a map makes it literal — the key is simply not there. omitempty would conflate
-// false with absent for supportsAutoMode, which is precisely the distinction the
-// minimal entry exists to carry, and #1704 leaves the daemon-internal reading of that
-// distinction for #1690 to decide. A fake emitting "supportedEffortLevels":[] instead
-// of omitting the key would settle it first.
+// of this fake's OUTPUT and a map makes it literal — the key is simply not there.
+// omitempty would conflate false with absent for supportsAutoMode. The minimal entry
+// exists to supply that absent INPUT SHAPE, not to carry a distinction the daemon's
+// reading keeps: both readings are settled, and each has one canonical home.
+// turnevent.ModelOption.EffortLevels reads an absent supportedEffortLevels, a JSON
+// null and a published empty array as ONE reading, spelled nil (#1828).
+// turnevent.ModelOption.SupportsAutoMode reads an absent supportsAutoMode, a JSON
+// null and an explicit false as ONE reading — false, so a client greys the option
+// out on silence; the field is a permission GRANT and the unsafe inverse would be
+// granting on silence (#1819).
+//
+// The collapse is the DECODE's to perform, and the two collapse in different places.
+// The list needs code: streamsup's emitModelList, in its boundEach closure's
+// zero-length arm, which is the only normalisation anything below the decode does.
+// The bool needs none: encoding/json's absent/null no-op already lands all three on
+// false, and the plain bool on streamsup's modelOptionLine IS the decision. So the
+// minimal entry's job is to feed that decode the shape claude actually sends. A fake
+// emitting "supportedEffortLevels":[] or "supportsAutoMode":false instead of omitting
+// the keys would hand the decode an already-collapsed input, so the absent-key arm
+// would never be traversed — and absent is the only shape observed: the capture's two
+// four-key entries omit the entire capability block, and claude has never published
+// [] or false at all.
 //
 // READ-ONLY: never appended to, never reassigned. It is marshalled from
 // runStreamJSON's single goroutine in production and from t.Parallel() subtests in
