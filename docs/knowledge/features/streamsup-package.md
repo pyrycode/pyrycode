@@ -983,6 +983,36 @@ stated premise ("a commands-carrying payload with no models emits nothing") was 
 exact claim the ticket falsified, which meant the table's shared assertion was built on
 that premise and had to go with it.
 
+**The commands-only rung's cap gets its own row (#1885).** #1891 gave rung 4 a call
+into the same `emitSlashCommandList` rung 5 uses, but every row in
+`TestParser_SlashCommandNamesAreCapped`'s cap matrix still rode rung 5 — so rung 4's
+per-name cut was inherited by construction, not pinned, and relocating the bound out of
+`emitSlashCommandList` onto rung 5's call site left the whole package green while
+workspace-authored command names rode uncut into a retained `turnevent.SlashCommandList`.
+The matrix gained one `commandsOnly` bool from which the `models` key, the expected
+event count and the `SlashCommandList` index all derive, and one row that is its
+neighbour's twin in every variable but the rung.
+
+*Lesson: a `//`-claim sweep has to sort hits by what a sentence asserts, not by whether
+it contains a flagged phrase.* Two comments in this file describe the same "one emitter,
+one cap" structure this ticket measures for the first time — `emitModelList`'s rung-4
+doc and `TestParser_SlashCommandListIsSuppressed`'s "cannot reach the emitter with an
+empty array by construction" — and both survive untouched. They read like the claims
+the ticket falsified and are not: they assert *behaviour* (what the code does), where
+the falsified claims asserted *proof* (that construction alone was sufficient evidence).
+Sorting the sweep's hits into those two buckets is what separates a live claim from a
+stale one; a phrase grep alone cannot.
+
+*Lesson: when a cut and its report live in the same loop, a relocation mutant and a
+pre-cut mutant test different things, and only one matches the risk.* The candidate
+mutant was to pre-truncate the entries rung 5 passes into `emitSlashCommandList` and
+leave the loop a plain copy — but that also destroys rung 5's report, since the emitter
+now sees an already-short name and computes `truncated == false`, reddening the existing
+matrix on the *report* rather than isolating the rung. The mutant that actually matches
+what a future edit to that loop could do is a relocation: give `emitSlashCommandList` a
+`nameLimit` parameter, pass `maxSlashCommandName` from rung 5 and an unbounded limit from
+rung 4. Under that one, the new row is the sole failing subtest in the package.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart

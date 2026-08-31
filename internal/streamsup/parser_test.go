@@ -4989,15 +4989,17 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 // THE CAP IS NOT PINNED BY THAT, and the difference is worth a line rather than a
 // claim: every name on the row is far under maxSlashCommandName, so a byte-exact
 // comparison reddens a SECOND cap tighter than `__remote-workflow`'s 17 bytes and
-// never the bound itself. What carries the cap to this call site is the structure the
-// next paragraph names — ONE emitter reached from two rungs, so one loop and one
-// maxSlashCommandName — which is inheritance by construction, not a pin, and the
-// measuring is the matrix's.
+// never the bound itself. Where this rung's cap IS pinned is the commands-only row of
+// TestParser_SlashCommandNamesAreCapped, which since #1885 rides this rung with one
+// over-cap name and one that fits. The structure — ONE emitter reached from two rungs,
+// so one loop and one maxSlashCommandName — is what makes that single row enough here,
+// and that row is what MEASURES the structure rather than inheriting it.
 //
 // NOT a row here: any cap boundary. That whole matrix is
-// TestParser_SlashCommandNamesAreCapped's and it is measured on the models rung; the
-// construction is one emitter reached from two rungs, so duplicating a boundary row
-// here would buy a second copy of a bound rather than a second proof of it.
+// TestParser_SlashCommandNamesAreCapped's, its boundary rows are still measured on the
+// models rung, and this rung's cap already has its own single row in that same matrix;
+// duplicating a boundary row here would buy a second copy of a bound rather than a
+// second proof of it.
 //
 // The `neither array` row is the PAIRED NEGATIVE for BOTH halves now. It is what makes
 // the keyword a SPLIT rather than a rename — without it a mutant logging commands_only
@@ -5154,14 +5156,21 @@ func slashCommandNamePreview(s string) string {
 // the halving on either side. What is this row's alone is the BOUNDARY OPERATOR, which
 // no input over the cap or well under it can see.
 //
-// The models array is carried by every row because that is the rung this matrix was
-// MEASURED on, and since #1891 it is no longer the only rung that could carry it: a
-// line with no models lands on the commands_only rung, which emits an inventory of its
-// own (TestParser_InitializeControlResponseCommandsOnlyRungEmits pins that). Moving the
-// matrix there would buy nothing, because the construction is IDENTICAL on both — one
-// emitSlashCommandList, one loop, one maxSlashCommandName — so the bound is pinned
-// wherever it is exercised, and a second copy of these rows would be a second copy of a
-// cap rather than a second proof of it. A row therefore never states the models half.
+// The models array is carried by every row but ONE, because that is the rung this
+// matrix was MEASURED on, and since #1891 it is no longer the only rung that could
+// carry it: a line with no models lands on the commands_only rung, which emits an
+// inventory of its own (TestParser_InitializeControlResponseCommandsOnlyRungEmits pins
+// that). Moving the MATRIX there would still buy nothing, because the construction is
+// IDENTICAL on both — one emitSlashCommandList, one loop, one maxSlashCommandName — so
+// the boundary rows stay on the rung they were measured on and a second copy of them
+// would be a second copy of a cap rather than a second proof of it.
+//
+// What that identity does NOT survive is a RELOCATION of the cut onto the models rung's
+// call site: every row above stays green under it while the other rung copies uncut,
+// workspace-authored names into a retained list. So exactly one row states its rung
+// (#1885), and it is not a copy of the matrix — it is the measurement that the identity
+// the paragraph above claims actually holds. A row is otherwise on the models rung by
+// omission, which is what the zero value of commandsOnly means.
 //
 // Not a row here, deliberately: that an over-cap name is DROPPED, reordered,
 // lowercased or trimmed. #1600's verbatim rule is carried by the exact equality on the
@@ -5180,6 +5189,13 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 
 	tests := []struct {
 		name string
+		// commandsOnly puts the row on the rung that carries NO models array, where the
+		// SlashCommandList is the line's only event. The zero value is the models rung,
+		// which is where the boundary rows below are measured and where they stay. ONE
+		// bool rather than a wantEvents/wantIndex pair: the rung is the fact and the two
+		// literals are its consequences, so a pair could state (2, 0) — a combination no
+		// rung produces — and a row could disagree with itself about which rung it is on.
+		commandsOnly bool
 		// entries are claude's per-entry maps, in the order the line carries them.
 		entries []any
 		// want is the expected emitted entry, index for index.
@@ -5199,6 +5215,25 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 			why: "the second entry is what makes the first non-vacuous against a producer naming " +
 				"\"name\" on every entry regardless of the cut, and it is simultaneously the " +
 				"\"a cut on one entry does not appear on the entries AFTER it\" pin",
+		},
+		{
+			name:         "on the commands-only rung, over the cap is cut and reported",
+			commandsOnly: true,
+			entries: []any{
+				commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
+				commandEntryFixture("deep-research"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: atCap, TruncatedFields: []string{"name"}},
+				{Name: "deep-research"},
+			},
+			why: "the row above's entries and expectations VERBATIM, so the rung is the only variable " +
+				"between the two and this row proves that and nothing else. It is the SOLE red — measured, " +
+				"not reasoned — against RELOCATING the bound out of emitSlashCommandList onto the models " +
+				"rung's call site (the emitter taking a nameLimit, the models rung passing " +
+				"maxSlashCommandName and this one an unbounded limit), under which every row above stays " +
+				"green while workspace-authored names ride uncut into a retained list. A DELETION of the " +
+				"cut does NOT grade this row: it reddens the models rows too",
 		},
 		{
 			name:    "exactly at the cap is NOT truncated",
@@ -5247,17 +5282,31 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			events := collectEvents(initializeLineFixture(t, "success", map[string]any{
-				"models":   []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")},
-				"commands": tt.entries,
-			}))
-			if len(events) != 2 {
-				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
-					len(events), events)
+			// The models key, the expected event count and the SlashCommandList's index all
+			// derive from the row's ONE rung bool, so a row cannot ask for a rung and then
+			// assert the other one's shape.
+			inner := map[string]any{"commands": tt.entries}
+			rung, wantEvents, listIndex := "commands-only", 1, 0
+			if !tt.commandsOnly {
+				inner["models"] = []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")}
+				rung, wantEvents, listIndex = "models", 2, 1
 			}
-			list, ok := events[1].(turnevent.SlashCommandList)
+			events := collectEvents(initializeLineFixture(t, "success", inner))
+			// The message NAMES THE RUNG, the rung being a row variable now: a count that
+			// disagrees says which of emitModelList's two calls to emitSlashCommandList the
+			// row asked for, and without it the reader goes to the wrong call site. It is
+			// also the deterministic guard on the derivation above — a harness that dropped
+			// the models key for every row would move the whole matrix onto the
+			// commands-only rung, and the rows above fail here rather than silently
+			// re-target their proof.
+			if len(events) != wantEvents {
+				t.Fatalf("event count on the %s rung: got %d, want %d — %#v",
+					rung, len(events), wantEvents, events)
+			}
+			list, ok := events[listIndex].(turnevent.SlashCommandList)
 			if !ok {
-				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+				t.Fatalf("event[%d] on the %s rung = %T, want turnevent.SlashCommandList",
+					listIndex, rung, events[listIndex])
 			}
 			// Length FIRST, deliberately, and fatal: the cap cuts a NAME and never an
 			// ENTRY, so a producer that dropped one must fail here rather than panic on the
