@@ -3468,8 +3468,7 @@ The real-`claude` suite is NOT wired into GitHub Actions. It runs **locally
 during the code-review phase** of every dispatched ticket via the pipeline
 — see the code-review agent's `CLAUDE.md` for the invocation contract.
 
-The earlier nightly workflow (`.github/workflows/e2e-realclaude-nightly.yml`,
-#362) was removed in #379 the same day it landed. CI-side rationale for the
+The earlier nightly workflow (`.github/workflows/e2e-realclaude-nightly.yml`, #362) was removed in #379 the same day it landed. CI-side rationale for the
 removal:
 
 - GitHub Actions would need an `ANTHROPIC_API_KEY` repo secret; Max-plan

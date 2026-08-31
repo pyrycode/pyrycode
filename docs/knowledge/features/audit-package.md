@@ -117,7 +117,7 @@ path it passes `""`; the primitive is agnostic.
 
 ## The `RemotePermissionOutcome` → `Outcome` mapping (#703's obligation)
 
-#703 owns this mapping; recorded here so the vocabularies line up. The primitive
+\#703 owns this mapping; recorded here so the vocabularies line up. The primitive
 does **not** perform it (it records the already-classified `Outcome`):
 
 | gate input (`devices.RemotePermissionOutcome`) + eligibility | audit `Outcome` | audit `Source` |
@@ -135,8 +135,7 @@ which point no-answer has become a timeout.
 
 ## Data flow
 
-```
-#703 modal control loop (the ONLY caller; owns the modal, the timer, the decision)
+``` #703 modal control loop (the ONLY caller; owns the modal, the timer, the decision)
   resolves a decision ─┬─ inbound modal_answer → gate predicates (#702) → Outcome + SourceRemote
                        └─ deny-on-timeout fires → safe-deny          → OutcomeDeniedTimeout + SourceTimeout
         │ builds audit.Entry{DeviceHash: dev.TokenHash, DeviceLabel: dev.Name, ModalID, ModalClass, Outcome, Source}

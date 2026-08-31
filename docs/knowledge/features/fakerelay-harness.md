@@ -15,8 +15,7 @@ e2e test in `internal/e2e/relay_test.go` is the first production consumer.
 The Strangler Fig of #569 then retired that handshake end-to-end:
 **#581 migrated the suite's readiness gates off `LastBinaryHello`-polling
 onto `WaitBinary` → #582 retired the binary↔relay handshake in the real
-binary (the leg is now established on WS upgrade, header-registered) →
-#583 removed the now-dead binary-direct hello dispatch and the
+binary (the leg is now established on WS upgrade, header-registered) → #583 removed the now-dead binary-direct hello dispatch and the
 `LastBinaryHello` accessor from this harness.** The WS-4409 close mode
 stays. See [`codebase/583.md`](../codebase/583.md).
 

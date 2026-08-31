@@ -15,8 +15,7 @@ the two **lifecycle** verbs that address a session the host already opened —
 onto the session's supervisor for the future abort keystroke). #747 adds the two
 **handshake** methods every connection opens with —
 [`initialize`](#initialize--authenticate-handshake-747) (negotiate protocol
-version, declare pyry's minimal capabilities) and `authenticate` (a no-op stub).
-#750 adds the **outbound streaming half** — [`Transport.Notify`](#outbound-notification-primitive-transportnotify-750)
+version, declare pyry's minimal capabilities) and `authenticate` (a no-op stub). #750 adds the **outbound streaming half** — [`Transport.Notify`](#outbound-notification-primitive-transportnotify-750)
 (the write-only sibling of `Call`) and the stateless
 [`acpTurnStream`](#outbound-streaming-adapter-acpturnstream-750) sink that turns a
 session's neutral turn-event stream into `session/update` notifications. #753
@@ -33,13 +32,12 @@ line to stdout. Outbound: the agent issues its own request to the client —
 for the id-correlated response ([`Transport.Call`](#outbound-request-primitive-transportcall-757)).
 stderr carries human-readable diagnostics only, **never protocol frames**.
 
-#755 built the inbound floor: the package, the framing, the dispatch table, the
+\#755 built the inbound floor: the package, the framing, the dispatch table, the
 diagnostics. #756 added the [`pyry acp` subcommand](#subcommand-pyry-acp-756)
 that serves this transport over real stdio. #757 added the
 [outbound direction](#outbound-request-primitive-transportcall-757): id
 generation, a pending-call registry, the blocking `Call`, and routing of inbound
-*response* lines to their waiters — replacing #755's response-frame log-and-drop.
-#761 delivered the **first real ACP method** and the composition root it needs:
+*response* lines to their waiters — replacing #755's response-frame log-and-drop. #761 delivered the **first real ACP method** and the composition root it needs:
 [`session/new`](#sessionnew-and-the-embedded-pool-761) over an embedded
 `internal/sessions` pool — the subcommand now *drives claude*. #762 added the
 [`session/load` + `session/cancel`](#sessionload--sessioncancel-762) lifecycle
@@ -80,7 +78,7 @@ and a test asserts the spawn argv is exactly the interactive path.
 
 ## Exported surface (3 types — under the 5-type sizing line)
 
-#757 added **one new exported method** (`Call`) but **zero new exported types**:
+\#757 added **one new exported method** (`Call`) but **zero new exported types**:
 it reuses the existing `*Error` for the mapped error response, so the surface
 stays at three types.
 
@@ -355,8 +353,7 @@ Full per-ticket detail: [`codebase/757.md`](../codebase/757.md).
 `session/update` is a JSON-RPC **notification** — a method + params with **no
 `id`** and no response — so `Call`'s request/pending machinery does not fit. #750
 adds `Notify`, `Call`'s write-only sibling, in a **new file** `internal/acp/notify.go`
-(zero edits to `acp.go`, keeping the package conflict-free with the in-flight
-#765 branch — the same "new outbound concern → new file" precedent as `Call`'s
+(zero edits to `acp.go`, keeping the package conflict-free with the in-flight #765 branch — the same "new outbound concern → new file" precedent as `Call`'s
 future `responder.go`).
 
 ```go
@@ -563,8 +560,7 @@ is deliberate for the control plane). An empty/missing `sessionId` must be refus
 ### `session/load` — resume by id (`Lookup` + `Activate`, never `GetOrCreate`)
 
 `loadSessionHandler` does `decodeSessionID` → `pool.Lookup(id)` →
-`pool.Activate(ctx, id)` → `newSessionResult{SessionID: string(id)}` (reuses
-#761's result struct → `{"sessionId":"<id>"}`).
+`pool.Activate(ctx, id)` → `newSessionResult{SessionID: string(id)}` (reuses #761's result struct → `{"sessionId":"<id>"}`).
 
 - **`Lookup` = miss-is-an-error, no side effect.** An unknown non-empty id →
   `ErrSessionNotFound` → `CodeInvalidParams` ("unknown session"), **no `Activate`,
@@ -795,8 +791,7 @@ tui-driver + supervisor surface — out of scope. **Decision: pin one mode.**
 Because no mode/config ever changes, the sourceless outbound `current_mode_update`
 / `config_option_update` reflections are **never emitted** — their
 synthesize-vs-omit call stays parked in
-[ADR 027](../decisions/027-acp-mapping.md) Open Item #2 (outbound cluster,
-#750/#769).
+[ADR 027](../decisions/027-acp-mapping.md) Open Item #2 (outbound cluster, #750/#769).
 
 ### Out of scope
 

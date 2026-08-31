@@ -22,7 +22,7 @@ The public wrapper is two lines: `os.UserHomeDir()` then delegate to unexported 
 
 ## Why a subpackage instead of `internal/agentrun/trust.go`
 
-#341 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/trust/`) was chosen for #475 to mirror the sibling spawn primitives `internal/agentrun/ptyrunner/` and `internal/agentrun/streamrunner/`. The parent `internal/agentrun` package now hosts only workdir helpers (`ResolveWorkdir`, `EncodeProjectDir`) that all three subpackages import; spawn concerns and trust concerns are package-scoped, not file-scoped.
+\#341 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/trust/`) was chosen for #475 to mirror the sibling spawn primitives `internal/agentrun/ptyrunner/` and `internal/agentrun/streamrunner/`. The parent `internal/agentrun` package now hosts only workdir helpers (`ResolveWorkdir`, `EncodeProjectDir`) that all three subpackages import; spawn concerns and trust concerns are package-scoped, not file-scoped.
 
 ## Key shape — realpath, on-disk case, not abspath
 

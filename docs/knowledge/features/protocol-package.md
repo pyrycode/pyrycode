@@ -293,8 +293,7 @@ N=2 items, `dequeue_message.json`) authored in **struct-field order**. See
 
 The byte-generic wire bodies for streaming a large debug bundle over the encrypted
 mobile channel (`docs/protocol-mobile.md` § Debug bundle; split from #803). A
-content-bearing bundle (assembled by [`internal/debugbundle`](debugbundle-package.md),
-#811) routinely exceeds one 65535-byte AEAD frame, so the daemon streams it as
+content-bearing bundle (assembled by [`internal/debugbundle`](debugbundle-package.md), #811) routinely exceeds one 65535-byte AEAD frame, so the daemon streams it as
 ordered, cap-respecting chunks ending in a completion marker. **Binary → phone
 direction; wire vocabulary only** — the chunker, the streaming primitive
 (`StreamBundle`), and the reassembly reference (`ReassembleBundle`) live in
@@ -341,8 +340,7 @@ type DebugBundleDonePayload struct {
 ### Session settings payloads (#844)
 
 The wire vocabulary for changing a session's per-session model / reasoning
-effort / YOLO (`docs/protocol-mobile.md` § Session settings; split from
-#841). **Wire vocabulary only** — the handler that intercepts
+effort / YOLO (`docs/protocol-mobile.md` § Session settings; split from #841). **Wire vocabulary only** — the handler that intercepts
 `set_session_settings` at `v2session.go`'s `dispatchAppFrame` **before**
 `dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no
 `dispatch.Route` handler**), gates on the `interactive` capability, validates,

@@ -145,7 +145,7 @@ The body composes `List` (cannot fail), `ShouldArchive` (pure predicate), and `D
 
 ### `Registry.Delete` is the consumer-driven addition
 
-#217 explicitly deferred `Delete` until a real consumer surfaced ("conversations are not deleted in Phase 3 — they're archived via `IsPromoted` flips"). The auto-archive sweep is that consumer: archival is implemented as removal-from-registry. The two arrived together in #237 to keep the deletion semantics and the sweep semantics evolving in lockstep.
+\#217 explicitly deferred `Delete` until a real consumer surfaced ("conversations are not deleted in Phase 3 — they're archived via `IsPromoted` flips"). The auto-archive sweep is that consumer: archival is implemented as removal-from-registry. The two arrived together in #237 to keep the deletion semantics and the sweep semantics evolving in lockstep.
 
 ### `SweepInterval = time.Hour`, exported
 
@@ -316,7 +316,7 @@ if p.convReg != nil {
 
 The original wiring (#243) used a package-private `var convSweepInterval = conversations.SweepInterval` swapped by a `withConvSweepInterval(t, d)` helper for in-package tests. #251's e2e split-source needs an out-of-process test that drives the loop at ~100ms instead of one hour — and a package-level var is unreachable from a test process that spawns `pyry` as a subprocess.
 
-#262 replaces the package var (and its helper) with a real `Config.SweepInterval` field plus the `-pyry-conv-sweep-interval` flag in `cmd/pyry`. **One seam, not two**: the dual seam (Config field + package var fallback) was rejected because it invites future drift (a new test could set one but not the other). In-package tests now set `pool.convSweepInterval = …` directly after `helperPoolWithSleepArgs`, mirroring the existing `pool.convReg` / `pool.convRegistryPath` pattern.
+\#262 replaces the package var (and its helper) with a real `Config.SweepInterval` field plus the `-pyry-conv-sweep-interval` flag in `cmd/pyry`. **One seam, not two**: the dual seam (Config field + package var fallback) was rejected because it invites future drift (a new test could set one but not the other). In-package tests now set `pool.convSweepInterval = …` directly after `helperPoolWithSleepArgs`, mirroring the existing `pool.convReg` / `pool.convRegistryPath` pattern.
 
 ```go
 // cmd/pyry/main.go

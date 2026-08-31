@@ -788,8 +788,7 @@ is process-wide; any concurrent test subscribing to SIGWINCH would race.
 Audit confirms no other test in `internal/control` does so today; if a
 future test adds a peer subscriber, it must coordinate.
 
-The wire-shape SIGWINCH→`SendResize` transformation is the primary AC of
-#133; structural integration with `pty.GetsizeFull` and `os.Stdin` is
+The wire-shape SIGWINCH→`SendResize` transformation is the primary AC of #133; structural integration with `pty.GetsizeFull` and `os.Stdin` is
 covered by the existing `supervisor/winsize.go` patterns and is not
 re-exercised here. End-to-end coverage (real PTY, real attach, real
 resize) lives in #126.
@@ -1340,7 +1339,7 @@ No human-affordance stderr lines (`--stdio` mode already suppresses them); the d
 
 The attach-commit branch (has-id true → `AttachStdio` runs) is intentionally **not** unit-tested; e2e coverage of the dispatch lives in #163 (happy path — `TestE2E_ForegroundAutoAttach_AttachesWhenDaemonHasSession` in `internal/e2e/auto_attach_happy_test.go`, see [e2e-harness.md § Foreground Auto-Attach Harness Pattern](e2e-harness.md#foreground-auto-attach-harness-pattern-auto_attachgo-auto_attach_happy_testgo-163)) and #164 (fallback scenarios). `internal/control/attach_stdio_client_test.go` (#154) covers `AttachStdio`'s own contract.
 
-#163's test was the **first end-to-end proof** of `control.AttachStdio` against a real daemon — #161/#162's stdio-attach tests were `t.Skip`'d pending #167, then rotated to #257 once #167 landed (the underlying harness bug was a separate `--session-id`-vs-test-binary collision). Auto-attach reaches `AttachStdio` directly from `runSupervisor` (no `parseClientFlags`, no verb dispatch, no `Pool.Create` argv-append against the test binary), so neither bug reaches this code path.
+\#163's test was the **first end-to-end proof** of `control.AttachStdio` against a real daemon — #161/#162's stdio-attach tests were `t.Skip`'d pending #167, then rotated to #257 once #167 landed (the underlying harness bug was a separate `--session-id`-vs-test-binary collision). Auto-attach reaches `AttachStdio` directly from `runSupervisor` (no `parseClientFlags`, no verb dispatch, no `Pool.Create` argv-append against the test binary), so neither bug reaches this code path.
 
 See `docs/specs/architecture/158-foreground-auto-attach.md` for the full ticket-time design; this section is the canonical evergreen reference.
 

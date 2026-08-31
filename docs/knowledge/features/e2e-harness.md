@@ -4,8 +4,7 @@
 daemon in an isolated temp `$HOME`, blocks until the control socket is dialable,
 drives CLI verbs against it, and tears down reliably on test cleanup.
 
-Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e),
-#52 (CLI verbs e2e coverage — `stop`, `logs`, `version`, `status` stopped path
+Phase: tickets #68 (spawn + cleanup), #69 (CLI driver + first feature e2e), #52 (CLI verbs e2e coverage — `stop`, `logs`, `version`, `status` stopped path
 + `RunBare` helper), #106 (restart primitive — `StartIn` / `Stop` + first
 restart-survival test), #107 (two more restart-survival tests — evicted
 state + `lastActiveAt` timestamps — plus file-local `newRegistryHome`
@@ -13,8 +12,7 @@ helper), #111 (failed-start primitive — `StartExpectingFailureIn` + the
 corrupt-registry fail-loud test), #112 (positive-outcome startup test —
 `TestE2E_Startup_MissingClaudeProjectsDir`, no harness changes), #115
 (idle-eviction + lazy-respawn e2e — variadic flags on `StartIn` / `spawn`
-+ two new tests asserting eviction and respawn at the binary boundary),
-#125 (attach PTY harness — `AttachHarness` + `StartAttach(t, sessionID)`
++ two new tests asserting eviction and respawn at the binary boundary), #125 (attach PTY harness — `AttachHarness` + `StartAttach(t, sessionID)`
 in `attach_pty.go` + `TestE2E_Attach_RoundTripsBytes` proving terminal →
 attach client → control socket → bridge → supervisor PTY → claude →ack
 flow at the binary boundary), #123 (rotation primitive — `StartRotation(t,
@@ -32,8 +30,7 @@ daemon-survives + supervised-child-still-`Phase: running`), #120
 `StartRotation` + the fake-claude binary to drive a real pyry through
 one `/clear`-shaped JSONL rotation; asserts the registry's bootstrap
 id follows from the pre-created `<initialUUID>.jsonl` to the post-trigger
-fresh UUID against the real `/proc`-or-`lsof` probe; no harness changes),
-#128 (attach survives claude restart e2e —
+fresh UUID against the real `/proc`-or-`lsof` probe; no harness changes), #128 (attach survives claude restart e2e —
 `TestE2E_Attach_SurvivesClaudeRestart` extends `TestHelperProcess`'s
 `echo` mode with a startup PID marker + `__EXIT__\n`/`__PID__\n`
 control lines and drives an attach across a forced child restart; the
@@ -1165,8 +1162,7 @@ separately, with no file overlap: `spawnAttachableDaemon`'s Go-test-binary
 stand-in (4 `TestE2E_Attach_*` tests, rejects `--session-id` via
 `flag.Parse()`) was #257 (landed — see § Attach PTY Harness Pattern below,
 [codebase/257.md](../codebase/257.md)); `TestRelayV2_InterruptStopsRunningTurn`'s
-argv-immune-fakeclaude failure ("turn never started") is a daemon-side
-#839 regression, #929. A **ninth** red test outside the original
+argv-immune-fakeclaude failure ("turn never started") is a daemon-side #839 regression, #929. A **ninth** red test outside the original
 enumeration, `TestTwoPhoneStructured_InteractiveReceivesStream`, fails
 identically on `main` (not a regression) via yet another path
 (`StartRotationWithRelay` sets `claudeBin` directly, bypassing the
@@ -1278,7 +1274,7 @@ routing through `spawnAttachableDaemon` was exposed to this — including the
 bootstrap session, since `Pool.Create` is unconditional, not
 non-bootstrap-only.
 
-#257 migrated `spawnAttachableDaemon` onto the same `echoClaudeScript` /
+\#257 migrated `spawnAttachableDaemon` onto the same `echoClaudeScript` /
 `writeEchoClaude` shell wrapper `spawnAutoAttachDaemon` (#163) already used
 — see § Daemon variant below for the wrapper's shape. The wrapper ignores
 its own argv and `exec`s `$E2E_HELPER_BIN -test.run=TestHelperProcess`, so
@@ -1428,8 +1424,7 @@ short-circuits to a pre-built binary on disk for CI prebuild.
 
 `spawn(t, home, extraFlags...)` and `StartRotation` both forward to a new
 `spawnWith(t, home, spawnOpts) (socket, *exec.Cmd, *safeBuffer,
-*safeBuffer, doneCh)` core (stdout/stderr buffers became `*safeBuffer` in
-#398 so tests can poll while `os/exec`'s pipe-copy goroutine still writes). `spawnOpts` zero-value yields the historical
+*safeBuffer, doneCh)` core (stdout/stderr buffers became `*safeBuffer` in #398 so tests can poll while `os/exec`'s pipe-copy goroutine still writes). `spawnOpts` zero-value yields the historical
 `/bin/sleep 99999` behaviour, so `spawn` is now a one-liner over
 `spawnWith`. Existing call sites (`StartIn`, `StartExpectingFailureIn`)
 unchanged.
@@ -2141,8 +2136,7 @@ matrix; defensive against future restrictive environments.
 
 ### Round-trip test unskipped by #257
 
-`TestE2E_AttachStdio_BytesRoundTrip` was originally **skipped pending
-#167**, the `parseClientFlags` rejection of `--stdio` before
+`TestE2E_AttachStdio_BytesRoundTrip` was originally **skipped pending #167**, the `parseClientFlags` rejection of `--stdio` before
 `parseAttachArgs` ever saw the flag. Unit tests in
 `internal/control/attach_stdio_client_test.go` and
 `cmd/pyry/args_test.go` bypassed `parseClientFlags`, so the harness was
@@ -2226,8 +2220,7 @@ stable PTY fd would not race a single-pass directory read, so the bias
 is toward false-negative on a closing fd — acceptable.
 
 **Carried the same `t.Skip("blocked on #257")` as the byte-flow test.**
-Both skips originally tracked #167 (CLI flag rejection); rotated to
-#257 once #167 landed and exposed the underlying `--session-id`-vs-
+Both skips originally tracked #167 (CLI flag rejection); rotated to #257 once #167 landed and exposed the underlying `--session-id`-vs-
 test-binary harness bug. #257 lifted both skips in the same commit —
 this test also self-skips gracefully if fd-inspection is unavailable
 (`openPTYDeviceTargets` err → `t.Skipf`), independent of the harness fix.
@@ -2319,8 +2312,7 @@ func pgrepChildren(pid int) ([]int, error)
 ```
 
 `Pid` is exported (unlike the stdio harness's hidden `attachCmd`)
-because the process-tree assertion is the test's headline check — and
-#164 needs the same field for its fallback tests' inverse assertion
+because the process-tree assertion is the test's headline check — and #164 needs the same field for its fallback tests' inverse assertion
 (supervised spawn fired → exactly one child). Surface it once.
 
 ### Argv shape: foreground binary, NOT the `attach` verb
@@ -2360,8 +2352,7 @@ pyry -pyry-socket=<sock> -- --session-id <uuid> --input-format stream-json --out
 The `pyry attach --stdio` CLI bug (#167, fixed) blocked #161/#162's
 `TestE2E_AttachStdio_*` tests because `parseClientFlags` rejected
 `--stdio` before `parseAttachArgs` ran. The follow-up harness bug
-(#257, fixed — the `--session-id`-vs-test-binary collision exposed when
-#167's fix lifted the skip) kept those tests skipped until it migrated
+(#257, fixed — the `--session-id`-vs-test-binary collision exposed when #167's fix lifted the skip) kept those tests skipped until it migrated
 `spawnAttachableDaemon` onto the wrapper. **#163 was unaffected by
 both, from the start.** `tryAutoAttach` calls `control.AttachStdio`
 *directly* from inside the foreground binary's `runSupervisor` — no
@@ -2427,8 +2418,7 @@ under lock); see [lessons.md § `cmd.Stderr` reads race the os/exec
 copy goroutine](../../lessons.md#cmdstderr-reads-race-the-osexec-copy-goroutine).
 The stdio harness's `StdioAttachClient.Stderr` had the same latent race
 but was not refactored here (#163) — its proof-of-life test was still
-`t.Skip`'d on #257 at the time, so the race never fired under `-race`.
-#257 later applied the identical `safeBuffer` swap to
+`t.Skip`'d on #257 at the time, so the race never fired under `-race`. #257 later applied the identical `safeBuffer` swap to
 `StdioAttachClient.Stderr` (AC#4, § Public API above) once unskipping
 the test made the race live.
 
@@ -2876,8 +2866,7 @@ Registered via `t.Cleanup`:
    Under `StartIn(t, home)` the caller owns the directory's lifecycle —
    teardown leaves `HomeDir` intact so a subsequent `StartIn` can reuse it.
 
-The `sync.Once` makes this safe to call from a manual `Stop()` (shipped in
-#106) plus `t.Cleanup` without double-firing.
+The `sync.Once` makes this safe to call from a manual `Stop()` (shipped in #106) plus `t.Cleanup` without double-firing.
 
 ## Failure Posture
 
@@ -3002,8 +2991,7 @@ the **spawned daemon's** environment via `childEnv`, not the test process's own.
 
 `make e2e` (`go test -tags e2e -race -count=1 ./internal/e2e/...`) is part of
 `make check` as of #919 — a core-daemon regression now fails the standard
-local gate instead of sitting red on `main` unnoticed (the #918 incident: eight
-#839-era regressions accumulated because the suite ran nowhere by default).
+local gate instead of sitting red on `main` unnoticed (the #918 incident: eight #839-era regressions accumulated because the suite ran nowhere by default).
 `make preship`'s prerequisite list dropped its own explicit `e2e` token in the
 same change since `check` now covers it; `preship` still runs `e2e-realclaude`
 (live claude, separate suite) on top. No GitHub Actions workflow runs this on

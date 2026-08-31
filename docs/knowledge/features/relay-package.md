@@ -214,8 +214,7 @@ const MsgInvalidToken = "device token not recognised; re-pair via pyry pair on t
 
 Sub-package `internal/relay/handlers`. Each handler is a pure function: routing envelope in, routing envelope out, plus side effects on the registries it is passed. The dispatcher (future, in `internal/relay`) owns conn state, per-conn id allocation, and conn lifecycle; handlers know only payload semantics.
 
-First inhabitant: `register_push_token` (`register_push_token.go`).
-#319 rewrote the original #250 pure handler against `dispatch.Handler`
+First inhabitant: `register_push_token` (`register_push_token.go`). #319 rewrote the original #250 pure handler against `dispatch.Handler`
 and registered it in `cmd/pyry/relay.go` alongside
 `list_conversations`. The pre-#319 `Handle` signature (routing-envelope
 in/out, self-stamping `id`/`ts`/`in_reply_to`, sentinel

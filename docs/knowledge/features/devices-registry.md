@@ -207,8 +207,7 @@ The mutation (`r.devices[i].LastSeenAt = ...`) is registry-side. A free function
 
 `Reload(path) error` lets a device paired via `pyry pair` **after** daemon startup
 authenticate on its next handshake without a service restart. The daemon `Load`s
-the registry once at startup and holds that snapshot for its lifetime, so before
-#782 a device added to `devices.json` by the separate `pyry pair` process was on
+the registry once at startup and holds that snapshot for its lifetime, so before #782 a device added to `devices.json` by the separate `pyry pair` process was on
 disk but absent from memory and rejected until restart. `Reload` reconciles the
 on-disk set into memory, disk being authoritative for **membership**:
 

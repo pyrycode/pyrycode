@@ -54,7 +54,7 @@ type permissions struct {
 
 ## Why a subpackage instead of `internal/agentrun/settings.go`
 
-#339 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/settings/`) mirrors the sibling primitives [`internal/agentrun/trust/`](agentrun-trust-subpackage.md), [`internal/agentrun/ptyrunner/`](ptyrunner-package.md), [`internal/agentrun/streamrunner/`](streamrunner-package.md), and [`internal/agentrun/jsonl/`](jsonl-reader.md). The parent `internal/agentrun` package hosts only workdir helpers (`ResolveWorkdir`, `EncodeProjectDir`); spawn / trust / settings concerns are package-scoped.
+\#339 lived as a sibling file under `internal/agentrun/`. The subpackage layout (`internal/agentrun/settings/`) mirrors the sibling primitives [`internal/agentrun/trust/`](agentrun-trust-subpackage.md), [`internal/agentrun/ptyrunner/`](ptyrunner-package.md), [`internal/agentrun/streamrunner/`](streamrunner-package.md), and [`internal/agentrun/jsonl/`](jsonl-reader.md). The parent `internal/agentrun` package hosts only workdir helpers (`ResolveWorkdir`, `EncodeProjectDir`); spawn / trust / settings concerns are package-scoped.
 
 ## What changed from #339
 

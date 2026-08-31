@@ -120,9 +120,7 @@ as those comments describe it.
   above, which restates that finding in full.
 
 `internal/agentrun/ptyrunner` no longer exists in the tree. `docs/knowledge/features/ptyrunner-package.md`
-still describes it as a live sibling package — that doc is stale in the same way this one was before
-#1555's documentation pass, and is not corrected here (out of scope for this ticket; a sibling
-#1348-residue ticket owns it).
+still describes it as a live sibling package — that doc is stale in the same way this one was before #1555's documentation pass, and is not corrected here (out of scope for this ticket; a sibling #1348-residue ticket owns it).
 
 ## Flags
 

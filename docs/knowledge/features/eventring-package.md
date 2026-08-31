@@ -139,8 +139,7 @@ fabricate a gap — see below.
 
 ## `After` — the three-way replay contract
 
-`After(convID, afterID)` returns `(events, gap)`, distinguishing three outcomes the
-#647 consumer must tell apart:
+`After(convID, afterID)` returns `(events, gap)`, distinguishing three outcomes the #647 consumer must tell apart:
 
 | Outcome | Condition | Return | Consumer action |
 |---|---|---|---|

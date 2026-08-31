@@ -736,8 +736,7 @@ intercepted in `dispatchAppFrame`'s discriminator switch **before** `dispatch.Ro
 `dispatch.Route` handler. This is the **inbound** half of the daemon-side modal
 bridge: the outbound half surfaces a modal to phones ([`modal_shown` + the
 outstanding-modal registry](modalbridge-package.md), #716); this slice lets a
-phone *resolve* it. The seam is the foundation #717 (gated `modal_answer`) and
-#725 (deny-on-timeout) layer on; #727 proves it via `modal_cancel` (dismiss =
+phone *resolve* it. The seam is the foundation #717 (gated `modal_answer`) and #725 (deny-on-timeout) layer on; #727 proves it via `modal_cancel` (dismiss =
 fail-safe deny). **`security-sensitive`**: an inbound untrusted frame mutates the
 modal lifecycle and fans out a broadcast on the internet-exposed relay (spec-stage
 security review, verdict PASS). See [`codebase/727.md`](../codebase/727.md).
@@ -854,8 +853,7 @@ ever drives the deny keystroke**, never a grant — fail-closed by construction 
 § Security model: "answered with the SAFE default (deny / ESC) … Never auto-grant").
 **Live in production since [#798](../codebase/798.md)** wired the surfacer: a real
 permission/trust modal now `Record`s an entry and arms this timer, so an unanswered modal is
-safe-denied on the window even if it reached zero phones (net-positive availability — before
-#798 nothing armed it in production). `TestV2Session_ModalTimeout_FanOut` proves the
+safe-denied on the window even if it reached zero phones (net-positive availability — before #798 nothing armed it in production). `TestV2Session_ModalTimeout_FanOut` proves the
 off-`Run`-arm → on-`Run`-fire crossing under `-race`.
 
 #### Stream-json approval bridge — the verdict arm (#1080)
@@ -1070,8 +1068,7 @@ always wires the `Interrupter`. See [`codebase/1192.md`](../codebase/1192.md),
 `TypeInterrupt`) — there is **no** `dispatch.Route` handler. It is the **remote
 start-new-session**: a paired phone's equivalent of typing **`/clear`** at the
 local terminal. The daemon routes it directly to the supervised claude as a
-`/clear` via the sealed `supervisor.StartNewSession` seam (#830) — split from
-#824, and structurally the `interrupt` (#707) shape one verb over.
+`/clear` via the sealed `supervisor.StartNewSession` seam (#830) — split from #824, and structurally the `interrupt` (#707) shape one verb over.
 **`security-sensitive`**: it reuses the `interactive`-capability-is-the-
 authorization posture #707 established (spec-stage security review, verdict
 PASS). See [`codebase/831.md`](../codebase/831.md).
@@ -2007,7 +2004,7 @@ Server-initiated push (#571; backpressure + drop policy #610) — all `t.Paralle
 - `TestV2Session_Push_ClosedSession_ReturnsErrConnNotFound` — drives an AEAD-failure 4421 teardown (flips a ciphertext byte) that deletes the session (and its queue), then asserts a push to that `conn_id` collapses into `ErrConnNotFound`.
 - `TestV2Session_Push_CtxCancelled_ReturnsCtxErr` — a `Push` with an already-cancelled ctx returns `ctx.Err()` without blocking; `Push` checks `ctx.Err()` before consulting `m.queues` (#610), so a cancelled ctx short-circuits deterministically.
 
-#610 backpressure tests (added): the drop policy is a pure unit surface — `TestPushQueue_Enqueue_*` (helpers `pqEnv` / `fillDeltas` / `assertQueue`) cover under-cap retention, drop-oldest-delta (AC#2), control-evicts-delta (AC#3), `message`-is-never-drop, control-never-dropped-when-deltas-present, order-preserved-across-drops (AC#4), and the all-control soft overflow. The end-to-end non-blocking guarantee (AC#1) is `TestV2Session_Push_NonBlockingUnderStall`: a stalling outbound double wedges the `Run` forward, every `Push` still returns within a tight deadline, the drop counter engages past `pushQueueCap`, and after release the survivors decrypt **in order** under the phone's `recv` state (proving drop-before-seal left no nonce gap). See [`codebase/610.md`](../codebase/610.md).
+\#610 backpressure tests (added): the drop policy is a pure unit surface — `TestPushQueue_Enqueue_*` (helpers `pqEnv` / `fillDeltas` / `assertQueue`) cover under-cap retention, drop-oldest-delta (AC#2), control-evicts-delta (AC#3), `message`-is-never-drop, control-never-dropped-when-deltas-present, order-preserved-across-drops (AC#4), and the all-control soft overflow. The end-to-end non-blocking guarantee (AC#1) is `TestV2Session_Push_NonBlockingUnderStall`: a stalling outbound double wedges the `Run` forward, every `Push` still returns within a tight deadline, the drop counter engages past `pushQueueCap`, and after release the survivors decrypt **in order** under the phone's `recv` state (proving drop-before-seal left no nonce gap). See [`codebase/610.md`](../codebase/610.md).
 
 Capability negotiation (#626) — `buildHelloEarlyDataCaps` / `driveToOpenCaps` variants carry the advertised set without changing the `buildHelloEarlyData` (5 callers) / `driveToOpen` (30 callers) signatures; the handshake tests capture the hello_ack early-data (which `driveToOpen` discards) via `Initiator.ReadResp` → decode `Envelope` → `HelloAckPayload`:
 

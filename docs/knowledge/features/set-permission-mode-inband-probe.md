@@ -69,7 +69,7 @@ discriminate" branch did not fire.
 - **`enable`: ESCALATION FAILED**, judged against `control_default` (matched exactly); it
   did not match `control_bypass`.
 
-#383's finding #2 — a `default`-launched child auto-approved Bash anyway — **does not carry over
+\#383's finding #2 — a `default`-launched child auto-approved Bash anyway — **does not carry over
 to this argv**: that spike ran with `--permission-prompt-tool stdio`, which it found
 short-circuits enforcement. Without it, a `default` child is genuinely gated.
 

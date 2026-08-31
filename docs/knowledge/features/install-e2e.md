@@ -4,8 +4,7 @@
 exercise the `pyry install-service` round-trip against the operator's real
 service manager on each platform: write the unit/plist, start it, hit
 `pyry status` against the daemon, stop it, clean up. They also carry a
-regression guard for the bug-#19 PATH-inheritance class. Phase: tickets
-#80 (Linux/systemd) and #81 (macOS/launchd), siblings of the e2e harness
+regression guard for the bug-#19 PATH-inheritance class. Phase: tickets #80 (Linux/systemd) and #81 (macOS/launchd), siblings of the e2e harness
 from #68/#69.
 
 Both files share the `e2e_install` build tag so a single CI invocation

@@ -88,7 +88,7 @@ Any mint error (pool not running, activate timeout, in-pool save failure, ctx de
 
 ## Routing: `send_message` consumes the binding
 
-#678 is the consumer half. Where the create path *writes* `CurrentSessionID`, `send_message` *reads* it to select the session a turn is delivered to. Before #678 the handler held a single `TurnWriter` (the bootstrap session) and routed every turn there regardless of `ConversationID`; now it resolves the frame's conversation to its bound session. Since [#721](../codebase/721.md) the handler no longer *delivers* synchronously — it validates the binding, **enqueues**, and acks; the daemon's `msgqueue` drain runs Activate-before-write against *that* session asynchronously (see [§ Enqueue-and-ack (#721)](#enqueue-and-ack-721)).
+\#678 is the consumer half. Where the create path *writes* `CurrentSessionID`, `send_message` *reads* it to select the session a turn is delivered to. Before #678 the handler held a single `TurnWriter` (the bootstrap session) and routed every turn there regardless of `ConversationID`; now it resolves the frame's conversation to its bound session. Since [#721](../codebase/721.md) the handler no longer *delivers* synchronously — it validates the binding, **enqueues**, and acks; the daemon's `msgqueue` drain runs Activate-before-write against *that* session asynchronously (see [§ Enqueue-and-ack (#721)](#enqueue-and-ack-721)).
 
 ### The `SessionRouter` seam (mirrors `SessionCreator`)
 
@@ -223,7 +223,7 @@ The binding maintained here is the attribution a downstream mobile-facing consum
 
 ## Reading the binding to stamp `conversation_id` (#741)
 
-#739 maintains the binding so a reverse lookup resolves correctly; #741 **is** that reverse lookup, wired into the `session_transition` producer (`cmd/pyry/session_transition_v2.go`). Every emitted `session_transition` envelope now carries the `conversation_id` of the thread the transitioning session belongs to, so `pyrycode-mobile#336` can fold the session-boundary marker into the correct conversation instead of having no routing key. The wire field itself was added by [#740](../codebase/740.md) (it shipped emitting `conversation_id: ""`); #741 fills it.
+\#739 maintains the binding so a reverse lookup resolves correctly; #741 **is** that reverse lookup, wired into the `session_transition` producer (`cmd/pyry/session_transition_v2.go`). Every emitted `session_transition` envelope now carries the `conversation_id` of the thread the transitioning session belongs to, so `pyrycode-mobile#336` can fold the session-boundary marker into the correct conversation instead of having no routing key. The wire field itself was added by [#740](../codebase/740.md) (it shipped emitting `conversation_id: ""`); #741 fills it.
 
 ### The duplicated read scan
 

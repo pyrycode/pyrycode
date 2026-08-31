@@ -4,8 +4,7 @@ The **outbound half** of the daemon-side modal bridge (EPIC #597 Phase 3,
 [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) — no-raw-bytes
 invariant). When tui-driver detects a permission or trust modal on claude's screen,
 the daemon turns it into a typed `modal_shown` event and pushes it to
-interactive-capable phones — **never raw PTY bytes**. This slice (#716, split from
-#703) establishes the **outstanding-modal registry**, keyed by a one-time `modal_id`
+interactive-capable phones — **never raw PTY bytes**. This slice (#716, split from #703) establishes the **outstanding-modal registry**, keyed by a one-time `modal_id`
 nonce, that the inbound resolution half consumes to route answers/cancels back and
 to reject stale/replayed answers — `Resolve` (the consume-and-retire idempotency
 gate) is wired by #727's `modal_cancel` resolver; `Lookup` by #717's gated
@@ -37,7 +36,7 @@ Two new files, in two packages:
 
 ## Why `internal/modalbridge` is relay-free
 
-#717 intercepts an inbound `modal_answer` at `(*V2SessionManager).dispatchAppFrame`
+\#717 intercepts an inbound `modal_answer` at `(*V2SessionManager).dispatchAppFrame`
 (in `internal/relay`) and must look the nonce up in this registry — so
 `internal/relay` will import `internal/modalbridge`. Therefore `internal/modalbridge`
 **MUST NOT import `internal/relay`** (it would cycle). It imports only
@@ -83,8 +82,7 @@ func (r *Registry) Resolve(modalID string) (Outstanding, bool) // #727's consume
 func (r *Registry) Snapshot() []protocol.ModalShownPayload     // #876's current-truth read seam
 ```
 
-`Lookup`/`Resolve` were **defined in #716, exercised downstream** — `Resolve` by
-#727's `modal_cancel` resolver (the atomic consume-and-retire that makes the first
+`Lookup`/`Resolve` were **defined in #716, exercised downstream** — `Resolve` by #727's `modal_cancel` resolver (the atomic consume-and-retire that makes the first
 cancel win and every replay/unknown id a no-op), `Lookup` by #717's gated
 `modal_answer`. They belong with the type's contract even though #716 only calls
 `Record`.
@@ -190,8 +188,7 @@ goroutine (see § The local resolution arm).
 
 When the operator answers a modal at the local `pyry attach` TTY, claude's modal
 vanishes and tui-driver fires `EventKindPtyModalHidden` for the just-hidden **class**
-([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § Security model
-#4). The arm correlates that class back to the `modal_id` this emitter surfaced,
+([ADR 025](../decisions/025-mobile-remote-head-interactive-session.md) § Security model #4). The arm correlates that class back to the `modal_id` this emitter surfaced,
 `Resolve`s it through the shared registry, and — **only if this head wins the race**
 against a remote answer/cancel (#717/#727) or the deny-on-timeout (#725) — audits the
 local resolution and broadcasts one `modal_dismissed{source: local}`.

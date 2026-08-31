@@ -601,8 +601,7 @@ the writer and the parser that today share none. The gate is conjunctive —
 names the limit this buys: it recognises a **shape**, not a **correlated reply**. A future claude
 putting a `models` array inside some other successful control response would have that response read
 as an inventory too. The consequence is bounded rather than a defect to fix here — the value is still
-claude's own claim about itself, bounded by the same three caps, retained for the session's life since
-#1840 (below), and published on the live interactive turn lane since #1849 (below). **The trade was
+claude's own claim about itself, bounded by the same three caps, retained for the session's life since #1840 (below), and published on the live interactive turn lane since #1849 (below). **The trade was
 revisited at that point (#1862) and re-taken unchanged**: correlating `Runner.nextControlID`'s minted
 `request_id` would prove **which reply** the bytes answered, not make the **content** any more
 trustworthy, since the same subprocess authors every control response including the one this arm
@@ -617,8 +616,7 @@ mapping, or reordering). **`description`, `supportsEffort`, `supportsAdaptiveThi
 untrusted prose bounded, retained and carried for nothing, and absence from the decode target is a
 stronger guarantee than any test sweep — `systemInitLine`'s argument (#1600) carried over unchanged.
 Each string is bounded by its own named cap (`maxModelResolved`/`maxModelValue`/`maxModelDisplayName`,
-all 256; `maxModelEffortLevel`, 32, capping one level string). The list itself is bounded too, since
-#1821, by `maxModelEffortLevelCount` (8) — see "The per-entry byte budget" below; the bool needs no cap and
+all 256; `maxModelEffortLevel`, 32, capping one level string). The list itself is bounded too, since #1821, by `maxModelEffortLevelCount` (8) — see "The per-entry byte budget" below; the bool needs no cap and
 is never named in `TruncatedFields`, since it carries none of claude's bytes. An empty or absent
 `models` array is the safe-failure direction (rung 3, no event) rather than an empty `ModelList` —
 `emitRateLimit`'s rung 3 is the precedent: a list naming no model can't serve the purpose the variant
@@ -626,8 +624,7 @@ exists for.
 
 **The per-entry byte budget's third dimension is bounded too, since #1821.** `EffortLevels` is the
 family's first field that is a list *inside* a list entry — entries × levels × level length is a third
-size dimension. #1827 bounded the third factor (one level string's length, `maxModelEffortLevel`, 32);
-#1821 closed the second, `maxModelEffortLevelCount` (8), bounding how many levels one entry retains.
+size dimension. #1827 bounded the third factor (one level string's length, `maxModelEffortLevel`, 32); #1821 closed the second, `maxModelEffortLevelCount` (8), bounding how many levels one entry retains.
 The bound sits inside `boundEach`, **after** #1828's zero-length arm and **before** the per-element
 loop, and truncates **from the tail** so claude's order survives a cut, mirroring the entry-count cap's
 own placement argument one level down. See "The entry count is capped too" below for the resulting
@@ -787,8 +784,7 @@ block turns a boundary that used to prove nothing into one that does.
 second array, `commandEntryLine{ Name string }`, for claude's slash-command inventory — one field,
 same reasoning as `modelOptionLine` and `systemInitLine`: absence from the decode target is a
 stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stay undeclared
-(as of #1853 — `description` joined in #1904, below; `argumentHint`/`aliases` remain undeclared,
-#1830 and #1825).
+(as of #1853 — `description` joined in #1904, below; `argumentHint`/`aliases` remain undeclared, #1830 and #1825).
 Declaring the array turns a `commands` that arrives as a number, a string or an object from
 *silently ignored* into a whole-line decode failure on the undecodable rung — the same shape
 guarantee `models` already had, extended to a second field. `logControlResponse` grew a sixth
@@ -1071,9 +1067,7 @@ probe overrides it — a rotated id with no transcript still creates, but a rota
 collide with an existing transcript would resume, contrary to `forceFirst`'s own intent. That case is
 unreachable from `sessions.NewID`'s minting and never observed, so it is deliberately left as a
 consequence of `useCreateForm`'s one rule rather than special-cased (see `useCreateForm` above). The one
-acquisition is the
-#1481 fix: splitting the id read from the `iterCancel` publish — as this loop did from #1124 until
-#1481 — leaves a gap where a racing `RestartFresh` sets `sessionID`/`rotatePending`, reads a `nil`
+acquisition is the #1481 fix: splitting the id read from the `iterCancel` publish — as this loop did from #1124 until #1481 — leaves a gap where a racing `RestartFresh` sets `sessionID`/`rotatePending`, reads a `nil`
 cancel, cancels nothing, and the spawn launches under the pre-rotation id anyway (see the supervise
 loop above). The existing `started`-gated `firstRun`
 flip (see the gate above) then does the rest for free: a successful fresh spawn flips `firstRun` back to
@@ -1091,8 +1085,7 @@ primitive boundary" convention. Concrete method, off `sessions.Runner` (#1077), 
 
 Still deferred (needs richer context than this slice): `max_tokens`/`refusal` `TurnEnd` reason
 classification (`resultTurnEndReason`'s `default` branch is the safe placeholder until one is observed);
-routing an inbound remote interrupt frame to the correct per-conversation runner (#1121, blocked-by
-#1120); routing an inbound `new_session` frame to the correct per-conversation runner and the pool-side
+routing an inbound remote interrupt frame to the correct per-conversation runner (#1121, blocked-by #1120); routing an inbound `new_session` frame to the correct per-conversation runner and the pool-side
 `Pool.RotateID` (#1125, blocked-by #1124); whether the parser's line buffer needs resetting across a
 crash-restart (see [codebase/1088.md](../codebase/1088.md) — code review flagged a stale-partial edge
 case, non-blocking for this unwired slice).
@@ -1413,14 +1406,12 @@ mutation, no read of the hold. That closes the routed-conversation case only: a 
 start still drops the frame at the no-cursor guard (cursor is `""` until a message routes), and the
 fan-in can still refuse the frame under load since `turnMarkFor` answers `turnMarkNone` for it. Both are
 exactly the losses this retention exists to survive; reading `streamRunner.ModelList()` back for a client
-that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864 →
-#1867/#1868). #1863 shipped the relay-side seam nil in production; #1867 wired a real read of the hold
+that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864 → #1867/#1868). #1863 shipped the relay-side seam nil in production; #1867 wired a real read of the hold
 into it (`retainedModelLists`, [v2-session-manager.md](v2-session-manager.md)), not a second read of the
 hold from the live lane. **#1868** (open) is the cross-process e2e proof.
 
 **Test-writing lesson: a `cmd/pyry` fixture-builder name collides silently across files in the same
-package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function;
-#1849's emitter tests reaching for the same obvious name for the same `ModelList` shape hit a compile
+package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function; #1849's emitter tests reaching for the same obvious name for the same `ModelList` shape hit a compile
 error that reads like a type error (`modelListFixture(...) — not a function`) rather than what it is, a
 same-package name collision across files. Prefixing a package-level test fixture with the consumer it
 belongs to (`emitterModelListFixture`, for the emitter tests) is what keeps siblings in one ticket
@@ -1550,8 +1541,7 @@ past the nil guard into a nil-map read — the `screenSnapshotterOrNil` hazard, 
 **Known gap, recorded in the tracker's own doc comment, not just here:** #1201 shipped with the clear
 event-driven only (`TurnEnd` on the fan-in). #1202 (below) closed the session-teardown half of that gap.
 One path remains open: a child that dies mid-turn and respawns, firing no pool transition and no `result`
-line for the abandoned turn. #1206 (below) added the runner-side seam that makes that exit observable;
-#1209 (below) added the fan-in lane that turns such an exit into a clear, correctly ordered against the
+line for the abandoned turn. #1206 (below) added the runner-side seam that makes that exit observable; #1209 (below) added the fan-in lane that turns such an exit into a clear, correctly ordered against the
 dead child's already-pushed events — still shipped **unfired**. #1210 (open, blocked-by #1209) is the
 wiring slice that assigns `streamsup.Config.OnChildExit` in production; the gap stays open until #1210
 lands. See [codebase/1201.md](../codebase/1201.md).
@@ -1666,8 +1656,7 @@ couldn't reach. See [codebase/1206.md](../codebase/1206.md).
 
 ### Exit lane on the turn-busy fan-in (#1209)
 
-Split from #1207 (itself the last child of the #1203/#1198 crash-clear lineage), alongside open sibling
-#1210. #1206's `Config.OnChildExit` is explicitly *not* a drain barrier: `cmd.Wait` joins the stdout
+Split from #1207 (itself the last child of the #1203/#1198 crash-clear lineage), alongside open sibling #1210. #1206's `Config.OnChildExit` is explicitly *not* a drain barrier: `cmd.Wait` joins the stdout
 copier goroutine and `Parser.emit` calls its sink synchronously (`parser.go:231-235`), so by the time the
 callback fires, every event the dead child produced has been **pushed** onto `streamTurnSink.ch` — but not
 necessarily **drained** by the separate drain goroutine reading that 256-slot buffer. A clear delivered on
@@ -1764,9 +1753,7 @@ behaviour (today's bug crowds out everything, including the bursting session's o
 vector, and left undefended since a fix would need the per-session accounting this design exists to avoid.
 
 **Reconciling the "busy forever" claim.** It now holds up to the documented 32-slot reserve rather than
-unconditionally: `turnBusyTracker`'s three closing feeds (`observe`'s `TurnEnd`, #1202's teardown clear,
-#1210's exit lane) are unchanged by this ticket and still jointly exhaustive over *how* a turn closes — what
-#1496 fixed is that the fan-in itself no longer discards the first of those three before it can be observed,
+unconditionally: `turnBusyTracker`'s three closing feeds (`observe`'s `TurnEnd`, #1202's teardown clear, #1210's exit lane) are unchanged by this ticket and still jointly exhaustive over *how* a turn closes — what #1496 fixed is that the fan-in itself no longer discards the first of those three before it can be observed,
 short of exhausting the reserve. See [codebase/1496.md](../codebase/1496.md).
 
 ### Delivery-seam consumer, mid-turn hold (#1199)
@@ -1925,8 +1912,7 @@ existing `restartMu` section (the empty-id early return stays above that section
 call never bumps it). `BeginRotation` reads the current `freshSeq` under `restartMu` — **before**
 taking `mu` — and captures it as `armFreshSeq` in the same `mu` acquisition that sets
 `rotating = true` and bumps `rotateGen`; two sequential leaf acquisitions, never nested. Each
-spawn snapshots `freshSeq` inside `beginSpawn`'s existing `restartMu` section (the same section
-#1481 fused the id read and `iterCancel` publish into) and carries it to `setStdin`, which clears
+spawn snapshots `freshSeq` inside `beginSpawn`'s existing `restartMu` section (the same section #1481 fused the id read and `iterCancel` publish into) and carries it to `setStdin`, which clears
 `rotating` iff the snapshot is strictly greater than `armFreshSeq`. Because `RestartFresh`'s bump
 and `beginSpawn`'s snapshot are both sections of the same mutex, a spawn set up before the arm's
 partner `RestartFresh` always reads a snapshot equal to `armFreshSeq` (refused) and a spawn set up
@@ -1990,8 +1976,7 @@ stream needed a replacement. See [codebase/1081.md](../codebase/1081.md) for the
 event with the runner's *construction-time* `SessionID`; `RestartFresh` (a stream-mode `new_session`)
 rebinds `conv.CurrentSessionID` to a fresh id but doesn't retag the Parser, so `boundSessionIDForActive`
 and the event tag diverge and the drain's scoping gate drops everything for that conversation until the
-daemon restarts. No cross-session disclosure (unmatched tag ⇒ dropped, not misdelivered). Follow-up:
-#1133. Confirmed live (not just by inspection) by the #1137 `new_session` e2e: after a stream rotation, a
+daemon restarts. No cross-session disclosure (unmatched tag ⇒ dropped, not misdelivered). Follow-up: #1133. Confirmed live (not just by inspection) by the #1137 `new_session` e2e: after a stream rotation, a
 subsequent turn's `assistant_delta` never reaches the phone, so that spec's post-rotation "serving a turn"
 milestone asserts delivery at the fakeclaude stdin boundary instead — see
 [codebase/1137.md § The post-rotation drain divergence](../codebase/1137.md).

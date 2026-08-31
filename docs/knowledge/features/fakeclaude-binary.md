@@ -790,7 +790,7 @@ value into a path safe. A child whose argv carries no usable id (unreachable via
 `streamsup.buildArgs`, which always appends `--session-id`/`--resume`) falls back to
 `<stem>.unattributed` — a rendering choice, not a defense.
 
-#1137 originally had the bootstrap child and a later fresh post-rotation child
+\#1137 originally had the bootstrap child and a later fresh post-rotation child
 (after a stream `new_session`) accumulate into one shared log, on the theory that a
 needle proved the turn was received. #1331 retired that: the daemon's process env is
 inherited identically by every child, so a needle in a shared file proved only that
@@ -1065,7 +1065,7 @@ test's marker text; the bootstrap transcript must not).
 
 ## On-turn transcript growth (#673)
 
-#668 made the supervised-bootstrap delivery path confirm a turn by observing the
+\#668 made the supervised-bootstrap delivery path confirm a turn by observing the
 resolved claude session JSONL **grow** past a pre-delivery baseline
 (`confirmViaTranscriptGrowth`): `WriteUserTurn` returns `nil` only on growth, else
 `ErrTurnNotCommitted` after a 10 s timeout. Real claude appends the turn at commit

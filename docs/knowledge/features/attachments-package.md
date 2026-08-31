@@ -1,7 +1,6 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782,
-#1795, #1796, #1784, #1880, #1817), fourteen slices of the family split from #1741/#1766:
+Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782, #1795, #1796, #1784, #1880, #1817), fourteen slices of the family split from #1741/#1766:
 holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
@@ -194,8 +193,7 @@ incumbent's stamp untouched. Delivery stamps through the new unexported
 `lookupAndStamp`, which `Deliver`'s step 1 now calls in place of `Lookup` — on
 a hit it moves `lastChunkAt` forward and returns the accumulator, on a miss it
 stores nothing. **`Lookup` itself stays a pure read and deliberately does not
-stamp** — a look-up that moved the activity time would let a diagnostic or
-#1744's dispatch-site read keep a dead upload alive indefinitely, the exact
+stamp** — a look-up that moved the activity time would let a diagnostic or #1744's dispatch-site read keep a dead upload alive indefinitely, the exact
 exhaustion path this family is closing.
 
 **#1881 landed the policy that reads the stamp: `uploadIdleTimeout` (15
@@ -309,8 +307,7 @@ transfer, not what "per delivered chunk" means for a method that never calls
 posture `Admit` already hands its
 accumulator back under, safe for the same reason: the conn is in the key and
 `appFrameWorker` serialises one conn's frames, so exactly one goroutine can
-ever reach one accumulator. `Deliver` still has no production caller;
-#1744 is expected to call it with the same chunk it just fed to `Admit`,
+ever reach one accumulator. `Deliver` still has no production caller; #1744 is expected to call it with the same chunk it just fed to `Admit`,
 looking the pair back up rather than feeding `Admit`'s returned accumulator
 directly — the latter would bypass every release this ticket added and
 re-open the lockout for single-chunk transfers.
@@ -336,8 +333,7 @@ Both checks run **ahead of** the incumbent look-up, so a repeat under a held
 pair answers the incumbent only when its declaration is admissible; an
 invalid repeat answers its own declaration sentinel instead, and the
 incumbent is left untouched
-(`TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent`). Through
-#1788 that was an accident of statement order — no landed test read anything
+(`TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent`). Through #1788 that was an accident of statement order — no landed test read anything
 into it either way, by design — and #1795 turned it into a decision, because
 the obvious restructure (look the incumbent up first, return early) would
 have flipped it silently and nothing would have caught the flip. Which check
