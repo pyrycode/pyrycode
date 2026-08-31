@@ -691,19 +691,20 @@ func eventKind(ev turnevent.Event) string {
 		//
 		// Like the two arms above, this variant is now claimed by a Handle case on
 		// this lane (#1638), so this file's `interactive_turn.unknown` Debug is no
-		// longer a live call site for it — nor for anything else the production
-		// producer emits. Handle now has an arm for 16 of turnevent.Event's 18
-		// implementations, and the two without are PermissionRequest, which
-		// streamsup.Parser never produces (it is PTY/modalbridge-only, as
-		// TestTurnMarkFor_TotalOverEveryVariant states independently), and
-		// SlashCommandList, which nothing produces yet — #1719 / #1720 own that
-		// producer, and the arm below says what follows for its call sites. "No variant the
-		// production producer emits" is the accurate claim rather than "unreachable" —
-		// a nil Event still lands in that default. The reachable eventKind call site
-		// left on this lane is the no-cursor drop, which returns before the type
-		// switch. Without the arm every eventKind site — here, acp_turn_stream.go,
-		// stream_turn_busy.go, stream_turn_drain.go — would read kind=unknown for a
-		// variant the daemon does recognize.
+		// longer a live call site for it. That is a claim about ModelAnnounced ALONE
+		// and does not generalise to the production producer: since #1877
+		// internal/streamsup emits SlashCommandList, which no Handle case claims, so
+		// that Debug is a live call site for a variant the production producer emits
+		// — the arm below says what follows for its call sites. Handle now has an arm
+		// for 16 of turnevent.Event's 18 implementations, and the two without are
+		// PermissionRequest, which streamsup.Parser never produces (it is
+		// PTY/modalbridge-only, as TestTurnMarkFor_TotalOverEveryVariant states
+		// independently), and SlashCommandList, whose Handle case and wire mapping
+		// are #1720's; #1719 is closed and was the decode. The reachable eventKind
+		// call site left on this lane for THIS variant is the no-cursor drop, which
+		// returns before the type switch. Without the arm every eventKind site —
+		// here, acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go —
+		// would read kind=unknown for a variant the daemon does recognize.
 		return "model_announced"
 	case turnevent.ModelList:
 		// The variant NAME only, for the arms above's reason — and here the
@@ -732,7 +733,8 @@ func eventKind(ev turnevent.Event) string {
 		// neither is the entry count.
 		//
 		// Unlike the four arms above, NO Handle case claims this variant: #1854
-		// declares it and nothing in the tree produces it. So this file's
+		// declares it, internal/streamsup's emitModelList produces it (#1877), and
+		// the Handle case that would claim it is #1720's, still open. So this file's
 		// `interactive_turn.unknown` Debug IS a live call site for it, alongside the
 		// no-cursor drop that returns before the type switch, and
 		// stream_turn_drain.go's sink-full droppable drop and not-active-session
@@ -740,10 +742,13 @@ func eventKind(ev turnevent.Event) string {
 		// sinkFor's close drop, both gated on a non-turnMarkNone mark, and
 		// emitMapped's unmapped drop, which nothing routes it to.
 		//
-		// No production producer emits the variant yet, so no production path
-		// reaches any of those sites today. The arm lands with the declaration
-		// anyway, because the alternative is a window in which the daemon recognises
-		// the variant and every drop log calls it kind=unknown.
+		// A PRODUCTION PRODUCER NOW EMITS THE VARIANT, so those four sites are
+		// reachable rather than merely live: every initialize reply carrying a
+		// commands array beside its models one puts one of these on this lane, and
+		// each is dropped and logged by kind. The arm landed with the declaration
+		// ahead of that, because the alternative was a window in which the daemon
+		// recognises the variant and every drop log calls it kind=unknown — and this
+		// producer is exactly what would have opened that window.
 		return "slash_command_list"
 	default:
 		return "unknown"

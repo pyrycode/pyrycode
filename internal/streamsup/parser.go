@@ -605,6 +605,49 @@ const maxModelEffortLevelCount = 8
 // matters.
 const maxModelListEntries = 10
 
+// maxSlashCommandName caps turnevent.SlashCommand.Name — claude's name for one entry
+// of the initialize reply's commands array, the workspace's slash-command inventory.
+// Applied at CONSTRUCTION, exactly as the model caps above are, so an oversized value
+// never enters the event stream, the push queue, or any log.
+//
+// MEASURED against the committed capture (claude 2.1.239, byte-identical across all
+// three responding arms): fifty-one entries, `name` present and non-empty on every
+// one, longest 24 bytes (fewer-permission-prompts), mean 9.69, median 8, 494 bytes in
+// total. So 256 is roughly 10.7x the observation — maxModelField's and
+// maxModelResolved's multiple over the same identifier shape, and for their reason
+// verbatim: room for a naming scheme claude has not shipped yet, and still a hard cut
+// on anything that has stopped being a name.
+//
+// A separate constant even though it currently equals maxModelResolved, maxModelField
+// and maxModelValue: maxRateLimitField's paragraph applies verbatim — they bound
+// different fields for different reasons, and folding them into one would make a
+// future change to one budget silently move this one.
+//
+// A BYTE CUT AND NOTHING ELSE. One captured name is outside [a-z0-9-]
+// (__remote-workflow), the committed proof that no charset may be assumed, so #1600's
+// verbatim rule governs here as it does for the model strings: no lowercasing, no
+// trimming, no charset filtering, and no leading "/" added or removed. See
+// turnevent.SlashCommand.Name, which states the same rule for the consumer.
+//
+// THE PER-ENTRY TERM, stated so the later field slices add to it: today one entry
+// costs at most maxSlashCommandName = 256 bytes of workspace-derived text. THE
+// AGGREGATE IS DELIBERATELY NOT SETTLED HERE, unlike maxModelResolved's, and both
+// missing factors are named rather than left to be inferred. The field that will
+// dominate the per-entry budget is the description (#1833), and 51 * 24 = 1224 bytes
+// of name text decides nothing on its own; the entry-count factor arrives with the
+// count bound (#1826), exactly as maxModelListEntries supplied maxModelResolved's.
+//
+// TRANSIENT AND RETAINED ARE TWO DIFFERENT FIGURES HERE TOO, which is what makes this
+// bound the whole story rather than half of it. What is TRANSIENT is the unbounded
+// decoded array, bounded one level up by defaultMaxParseBuf's 4 MiB whole-line cap
+// before the decoder ever sees it — commandEntryLine's own paragraph. What is
+// RETAINED is only this capped copy inside the emitted turnevent.SlashCommandList,
+// and nothing downstream retains THAT: there is no sessionModelHold analogue for this
+// array, so the retention is the event's own lifetime. That is the one place this cap
+// differs from maxModelResolved, whose capped result cmd/pyry holds for the child's
+// life.
+const maxSlashCommandName = 256
+
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
 // or a prefix: it is half of emitModelList's conjunctive gate, and the half that
@@ -1133,21 +1176,47 @@ type modelOptionLine struct {
 // directory the operator points a session at. Name is nevertheless NOT validated —
 // not for emptiness, not for charset, not for control bytes — and the reason is NO
 // SINK rather than safe bytes. The capture carries `__remote-workflow`, which is the
-// committed proof that no charset may be assumed; what makes that harmless is that
-// the string reaches no exec.Command argument, no filepath.Join, no filepath.Match,
-// no regexp and no log attribute. Only its COUNT leaves emitModelList. The first
-// slice that actually READS Name inherits the validation question OPEN, not settled,
-// and several of those sinks treat bytes as syntax with no shell anywhere in sight.
+// committed proof that no charset may be assumed.
 //
-// NO PER-FIELD CAP, and the bound that makes one unnecessary is named rather than
+// THAT VALIDATION QUESTION WAS LEFT OPEN FOR THE FIRST SLICE THAT READS Name, AND IT
+// IS ANSWERED HERE. A byte-capped COPY of Name now leaves emitModelList inside a
+// turnevent.SlashCommand (#1877), so the count is no longer the only thing that does.
+// Validation stays REFUSED and the reason is still NO SINK — but a CHECKED no-sink
+// rather than a structural impossibility, and the check is what this paragraph
+// records. Name reaches: one field of a daemon-internal struct, the parser's emit
+// callback, and from there turnbridge.MapEvent's default, which has no arm for the
+// variant and drops it, and cmd/pyry's interactiveTurnEmitterV2.Handle default, which
+// has no case and logs it BY KIND through eventKind before discarding it. It reaches
+// no exec.Command argument, no filepath.Join, no filepath.Match, no regexp, no log
+// attribute, no eventring append and no wire frame. An ENUMERATION OF REACHED SINKS
+// is the answer rather than a judgement about the bytes, and precisely because `[`,
+// `*` and `?` are syntax to filepath.Match and to regexp with no shell anywhere in
+// sight: "these look like identifiers" would be the wrong argument for a string one
+// captured entry already spells __remote-workflow.
+//
+// THE RE-OPEN TRIGGER, named rather than left to be noticed: the first slice that
+// gives this value a SYNTAX sink — a path element, a match pattern, a regexp, an argv
+// element, a log attribute — or that renders it into an HTML sink, an attribute or a
+// URL inherits the question open again. #1720 is the nearest such slice, and what it
+// owes is the CLIENT-side render boundary turnevent.SlashCommandList's SECURITY
+// paragraph already assigns.
+//
+// THE DECODED SLICE IS UNCAPPED HERE, and the bound is one level up rather than
 // added: defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees it,
 // which is already the whole of what bounds the models array's transient spike (see
 // controlResponseLine's neighbouring paragraph). The arithmetic favours this array on
 // both sides — this struct is ONE field where modelOptionLine is five, so per
 // densest-legal element the worst-case transient is a fraction of the already-accepted
-// one and a single 4 MiB line cannot maximise both; and this slice is TRANSIENT,
-// living from json.Unmarshal until emitModelList returns, where the models array's
-// CAPPED result is retained for the child's life by cmd/pyry's sessionModelHold.
+// one and a single 4 MiB line cannot maximise both.
+//
+// A PER-FIELD CAP DOES EXIST, one step downstream, which is what narrows the
+// transient/retained contrast this paragraph used to draw: maxSlashCommandName bounds
+// Name at CONSTRUCTION in emitModelList (#1877), where every cap in this package is
+// applied. The transience is unchanged — this slice still lives from json.Unmarshal
+// until emitModelList returns — but a BOUNDED COPY of each Name is now retained
+// inside the emitted turnevent.SlashCommandList for that event's lifetime. That is
+// still shorter than the models array's, whose CAPPED result is retained for the
+// child's life by cmd/pyry's sessionModelHold.
 //
 // The decode is all-or-nothing at the LINE, modelOptionLine's rule verbatim and at
 // the ELEMENT level too: a `commands` that is a number, a string or an object, an
@@ -1898,7 +1967,9 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 }
 
 // emitModelList decodes one top-level control_response line and emits AT MOST ONE
-// turnevent.ModelList. It never emits an Unrecognized, and it returns nothing:
+// turnevent.ModelList and, on that same rung and under a SECOND independent gate, AT
+// MOST ONE turnevent.SlashCommandList. It never emits an Unrecognized, and it returns
+// nothing:
 // consumeLine's case arm consumes the line by MATCHING, exactly as emitRateLimit's
 // does, so unlike the emitSystemSubtype family there is no "did you handle it?" to
 // report back. Field mapping comes from the committed capture, read in the tests
@@ -1981,7 +2052,11 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 //     answering an empty list. Both are a MISSING menu; only the false positive is
 //     a WRONG one, and that asymmetry is the footing. It is stronger now that
 //     either outcome is observable than it was when neither was.
-//  4. success and a non-empty array → one ModelList.
+//  4. success and a non-empty models array → one ModelList. The `commands` array is
+//     then read on this same rung under a SECOND, INDEPENDENT gate: non-empty → one
+//     SlashCommandList beside it, absent / null / empty → the ModelList alone
+//     (#1877). A non-empty `commands` with NO models does not reach here at all — it
+//     is rung 3's ack, which is #1876's to split.
 //
 // A per-entry field is never validated beyond its cap. An entry whose value is
 // empty, whose resolvedModel is missing, or which carries no keys at all still
@@ -2182,6 +2257,81 @@ func (p *Parser) emitModelList(line []byte) {
 
 	p.logControlResponse(controlResponseModelList, len(models), dropped, levelsDropped, commands)
 	p.emit(turnevent.ModelList{Models: models, DroppedModels: dropped})
+
+	// THE SECOND GATE, and it is INDEPENDENT of the models one: this rung was reached
+	// because the models array is non-empty, and whether a SlashCommandList joins the
+	// ModelList is decided here on the `commands` array alone. An absent `commands`, a
+	// null one, an empty array and a response object carrying no such key are ONE
+	// reading and all return here — controlResponseLine.Commands is a plain slice
+	// precisely so that they are.
+	//
+	// SUPPRESSION RATHER THAN AN EMPTY EMIT, and the decision is this producer's to
+	// take: turnevent.SlashCommandList.Commands' doc hands it here explicitly. What
+	// decides it is that THE PRODUCER CANNOT MAKE THE STATEMENT AN EMPTY EMIT WOULD BE
+	// MAKING. protocol.SlashCommandListPayload.MarshalJSON declares a wire [] a
+	// POSITIVE statement — claude offered nothing — but by the time this line runs the
+	// decode has already collapsed absent, null and a published [] onto one nil slice,
+	// so the daemon cannot tell "claude offered nothing" from "claude said nothing
+	// about commands". Emitting an empty list would assert the first from evidence
+	// that cannot distinguish it from the second, which is inventing a distinction
+	// rather than reporting one. Rung 3's false-negative asymmetry is NOT the
+	// argument, and was weighed rather than inherited: it rests on both outcomes being
+	// observable to a client (#1849 made them so for models), and nothing publishes
+	// this list today (#1720), so that footing is unavailable here. The wire's []
+	// position is untouched either way — it governs how a list that WAS emitted
+	// serialises, which says nothing about whether to emit one, and #1720 reads it for
+	// that.
+	//
+	// THE ORDER IS DELIBERATE, because it is observable in the captured-line
+	// assertions: the models array is this rung's own DISCRIMINANT — the rung exists
+	// because of it — so the rung's defining emit goes first and the second,
+	// independently gated one follows. Gate order and statement order are then one
+	// order a reader checks once.
+	//
+	// The whole block sits BELOW logControlResponse, which is what makes "the record
+	// is unchanged" structural rather than merely intended: six attributes, the same
+	// values and the same reason keyword, whatever happens below.
+	if len(cr.Response.Response.Commands) == 0 {
+		return
+	}
+	// slashCommands rather than `commands`, which is already taken by the int the
+	// record reports and would be shadowed here.
+	slashCommands := make([]turnevent.SlashCommand, 0, len(cr.Response.Response.Commands))
+	for _, entry := range cr.Response.Response.Commands {
+		// No `bound` closure and no sequential-statements rule, emitModelAnnounced's
+		// reason verbatim: one field means there is no TruncatedFields ORDER for a
+		// composite literal to decide, which is the only thing either device protects.
+		// The models loop above needs both; a one-field entry needs neither.
+		name, truncated := truncateField(entry.Name, maxSlashCommandName)
+		// Declared INSIDE the loop, and that scope is the whole of what makes the report
+		// per entry: a cut on one entry cannot appear on the entries after it. The models
+		// loop declares its own `cut` and `droppedLevels` here for the same reason.
+		var cut []string
+		if truncated {
+			// The DAEMON's snake_case name, the models loop's rule — and for this field it
+			// coincides with the wire name protocol.SlashCommand.TruncatedFields documents,
+			// so a later mapping is a copy rather than a translation. The distinction starts
+			// mattering at argument_hint (#1833).
+			cut = append(cut, "name")
+		}
+		slashCommands = append(slashCommands, turnevent.SlashCommand{
+			// claude's name VERBATIM (#1600's rule): no lowercasing, no trimming, no
+			// charset filtering, no leading "/" added or removed. The cap is the only
+			// judgement made about it here and it is a BYTE cut — see maxSlashCommandName,
+			// and turnevent.SlashCommand.Name for the same rule stated at the consumer.
+			Name: name,
+			// nil when nothing was cut: append never ran.
+			TruncatedFields: cut,
+		})
+	}
+	// NO ENTRY-COUNT CAP and no DroppedCommands, deliberately: that bound is #1826's
+	// and turnevent.SlashCommandList's own doc fixes the sequencing, so this slice must
+	// not add the field. The precedent is exact and in this same function — #1811
+	// emitted turnevent.ModelList with no entry-count cap and #1812 added
+	// maxModelListEntries and DroppedModels in the next slice — and the consequence
+	// that keeps the record at six attributes is logControlResponse's: with no count
+	// cap the decoded count IS the emitted count.
+	p.emit(turnevent.SlashCommandList{Commands: slashCommands})
 }
 
 // logControlResponse writes emitModelList's ONE record, and it exists so the
@@ -2250,12 +2400,21 @@ func (p *Parser) emitModelList(line []byte) {
 // argument is `dropped`'s SIMPLER and STRONGER: this record is the ONLY observable
 // that decode has. The operator-versus-client half does not transfer — `dropped`
 // completes a client-facing wire field, and this number has no wire field to
-// complete, no event, no retention and no daemon-internal value. Without it a
+// complete, and #1826 still owns the drop count that would give it one. What it no
+// longer lacks is an event, a daemon-internal value and a retention: since #1877 the
+// entries this counts are copied into a turnevent.SlashCommandList and retained for
+// that event's lifetime, each name under maxSlashCommandName. Without it a
 // `commands` array that stopped decoding would be a change nobody could know
 // happened. It counts what DECODED, where `models` counts what was EMITTED after
-// maxModelListEntries cut: two counts with different meanings on one record, and the
-// difference is that nothing caps or retains this one, so there is no cap here to
-// infer. Admissible on the other three counts' footing exactly — a DAEMON-computed
+// maxModelListEntries cut: two counts with different meanings on one record, and what
+// separates them is no longer whether a cap exists — a per-FIELD cap now does — but
+// that there is no ENTRY-COUNT cap on this array. So the decoded count IS the emitted
+// count, this attribute stays an unambiguous decode count with nothing to
+// disambiguate, and NO SEVENTH ATTRIBUTE IS ADDED. Nothing became unobservable
+// either: on the `model_list` rung a non-empty `commands` now always means emitted
+// and on the ack rung always not, so the existing six already separate the two — and
+// how legibly the KEYWORD says so is #1876's to revisit, not this record's shape.
+// Admissible on the other three counts' footing exactly — a DAEMON-computed
 // integer derived from a slice length, carrying none of claude's bytes. No name, no
 // argumentHint, no description and no alias reaches this record on any rung, and
 // commandEntryLine's single field is what makes three of those four unreachable
