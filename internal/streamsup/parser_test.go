@@ -4219,14 +4219,25 @@ func commandNameIsPlainSlug(name string) bool {
 // `models: 6` sits beside the command count deliberately — it is what kills an
 // argument swap between the two ints at the logControlResponse call site.
 //
-// It is ALSO #1877's captured-line pin for the emit: the same line now produces a
-// turnevent.SlashCommandList behind the ModelList, and its entry count is asserted
-// against the capture's own array length. `wantAttrs` is deliberately UNCHANGED —
-// the record keeps its six attributes and their values, which is what the
-// no-seventh-attribute decision buys. The per-name verbatim comparison over all
-// fifty-one is #1878's.
+// It is ALSO #1877's captured-line pin for the emit: the same line produces a
+// turnevent.SlashCommandList behind the ModelList. `wantAttrs` is deliberately
+// UNCHANGED — the record keeps its six attributes and their values, which is what the
+// no-seventh-attribute decision buys.
+//
+// #1878 turned that entry COUNT into a per-name verbatim comparison over all
+// fifty-one, index for index against the capture's own bytes, so claude's ORDER is
+// pinned alongside the values and every entry's TruncatedFields is asserted nil. The
+// ModelList's own per-entry comparison is NOT re-copied here — it stays in
+// TestParser_InitializeControlResponseDecodesTheCapturedModels, which this test
+// touches in no way; what this one adds beside it is the command inventory.
 func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T) {
 	t.Parallel()
+
+	// The one captured name outside [a-z0-9-], as a LITERAL. Written out rather than
+	// derived from the capture on purpose: derived, it would follow a re-capture that
+	// dropped it and assert nothing, which is the whole failure this pin exists to make
+	// loud. commandNameIsPlainSlug's guard below carries the general class claim.
+	const nameOutsideSlug = "__remote-workflow"
 
 	for _, arm := range initCaptureArms {
 		if arm == initCaptureArmNoRequest {
@@ -4280,11 +4291,42 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 			}
 			// Against the capture's OWN array length, never a transcribed 51: there is no
 			// entry-count cap on this array (#1826 owns that), so every decoded entry is
-			// emitted and a re-capture moves this expectation with the fixture. The
-			// verbatim per-name comparison is #1878's.
+			// emitted and a re-capture moves this expectation with the fixture.
+			//
+			// FATAL rather than reported (#1878): the loop below indexes both sides at i,
+			// and indexing past the end would turn a producer bug into a panic.
 			if len(list.Commands) != len(want) {
-				t.Errorf("SlashCommandList carries %d entries, want %d — one per array element, in claude's own order",
+				t.Fatalf("SlashCommandList carries %d entries, want %d — one per array element, in claude's own order",
 					len(list.Commands), len(want))
+			}
+			var sawNameOutsideSlugEmitted bool
+			for i, got := range list.Commands {
+				// The capture's own bytes on the right-hand side, never a transcription — and
+				// index i on BOTH sides, which is what pins claude's ORDER as well as the
+				// values, exactly as the models test's loop does.
+				if wantName := capturedCommandString(t, want[i], "name"); got.Name != wantName {
+					t.Errorf("entry %d name: got %q, want %q verbatim — no lowercasing, no trimming, "+
+						"no charset filtering, no leading \"/\" added or removed", i, got.Name, wantName)
+				}
+				if got.Name == nameOutsideSlug {
+					sawNameOutsideSlugEmitted = true
+				}
+				// nil rather than an empty non-nil slice, and this arm proves the UNTRUNCATED
+				// path: the capture's longest name is an order of magnitude under
+				// maxSlashCommandName, so a report here could only mean the cap fired on a
+				// value that fits. Mirrors the models test's own untruncated-path assertion.
+				if got.TruncatedFields != nil {
+					t.Errorf("entry %d TruncatedFields: got %v, want nil — no captured name approaches the cap",
+						i, got.TruncatedFields)
+				}
+			}
+			if !sawNameOutsideSlugEmitted {
+				t.Errorf("the emitted names carry no %q. It is pinned BY NAME rather than left to ride "+
+					"anonymously inside the fifty-one comparisons above, because it is the committed proof "+
+					"that a name outside [a-z0-9-] crosses the daemon verbatim — and a re-capture that "+
+					"swapped it out would fail the comparisons with a message saying nothing about charsets. "+
+					"The anonymous class guard (commandNameIsPlainSlug) stands beside this, not instead of it",
+					nameOutsideSlug)
 			}
 			consumes := rec.withMessage(controlResponseConsumeMsgFixture)
 			if len(consumes) != 1 {
@@ -4989,66 +5031,287 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 	}
 }
 
-// TestParser_SlashCommandNamesAreCapped is #1877's liveness proof for the new bound:
-// the name is cut at its OWN cap at construction and the cut is REPORTED, by the
-// DAEMON's snake_case name for the field — which for this one field coincides with
-// the wire name protocol.SlashCommand.TruncatedFields documents.
+// slashCommandNamePreview bounds one name for a failure message. The rows below
+// compare 253-258 byte strings, and a bare %q of one of those prints two screens of
+// `a`s — which turns a single red row into several reading passes for whoever has to
+// act on it. Lengths are reported first and separately; this is only ever the second
+// half of a message that already said how long the two sides were.
 //
-// TWO entries in one list, and the second is what makes the row non-vacuous: with
-// only the over-cap entry, a mutant naming "name" on every entry regardless of the
-// cut stays green. The over-cap name is built FROM the cap fixture rather than from a
-// hand-written length, so the row moves with the cap.
+// The head is scrubbed with truncateField's own replacement so a preview cut inside a
+// rune cannot itself print an invalid sequence.
+func slashCommandNamePreview(s string) string {
+	const head = 16
+	if len(s) <= head {
+		return fmt.Sprintf("%q", s)
+	}
+	return fmt.Sprintf("%q…(%d bytes)", strings.ToValidUTF8(s[:head], ""), len(s))
+}
+
+// TestParser_SlashCommandNamesAreCapped is the per-name bound's whole boundary
+// matrix: the name is cut at its OWN cap at construction and the cut is REPORTED, by
+// the DAEMON's snake_case name for the field — which for this one field coincides
+// with the wire name protocol.SlashCommand.TruncatedFields documents.
 //
-// The models array is carried too because the commands emit rides the MODEL-LIST
-// rung: a line with no models lands on the ack rung and emits nothing at all, which
-// TestParser_InitializeControlResponseAckReportsTheCommandCount pins.
+// #1877 shipped the first two rows as the bound's liveness proof, so it was never
+// unproven for a merge window; #1878 turned them into a table and added the rest.
+// What each row is FOR is in its own `why`, and the exactly-at-the-cap row carries
+// the ticket's reason for existing: it is the only row that reddens on truncateField's
+// <= becoming <.
 //
-// The full boundary matrix — exactly at the cap, the mid-rune cut, the empty name,
-// the suppression table and the fifty-one-name verbatim pin — is #1878's. This is the
-// one row that keeps the bound from being unproven for a merge window.
+// MEASURED rather than reasoned, because the reasoning overshoots: a halved
+// maxSlashCommandName reddens this row, but it reddens the over-cap and mid-rune rows
+// too. Their INPUTS do follow the constant down, but their expected OUTPUT lengths are
+// written against slashCommandNameCapFixture as well, so the fixture literal catches
+// the halving on either side. What is this row's alone is the BOUNDARY OPERATOR, which
+// no input over the cap or well under it can see.
+//
+// The models array is carried by every row because the commands emit rides the
+// MODEL-LIST rung: a line with no models lands on the ack rung and emits nothing at
+// all, which TestParser_InitializeControlResponseAckReportsTheCommandCount pins. A row
+// therefore never states the models half.
+//
+// Not a row here, deliberately: that an over-cap name is DROPPED, reordered,
+// lowercased or trimmed. #1600's verbatim rule is carried by the exact equality on the
+// entries that fit, and the entry-count bound does not exist (#1826 owns it).
 func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 	t.Parallel()
 
-	const fits = "deep-research"
-	events := collectEvents(initializeLineFixture(t, "success", map[string]any{
-		"models": []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")},
-		"commands": []any{
-			commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
-			commandEntryFixture(fits),
-		},
-	}))
-	if len(events) != 2 {
-		t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
-			len(events), events)
-	}
-	list, ok := events[1].(turnevent.SlashCommandList)
-	if !ok {
-		t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
-	}
-	// Length first, so a producer that dropped the over-cap entry FAILS here rather
-	// than panicking on the index below: the cap cuts a NAME, never an entry.
-	if len(list.Commands) != 2 {
-		t.Fatalf("SlashCommandList carries %d entries, want 2 — %#v", len(list.Commands), list.Commands)
-	}
+	// Runes whose UTF-8 encodings are two and four bytes, so a cut landing inside
+	// either leaves a partial rune for the scrub to delete.
+	// TestParser_ModelListFieldsAreCapped carries the two-byte row one array over.
+	const (
+		twoByteRune  = "é"
+		fourByteRune = "😀"
+	)
+	atCap := strings.Repeat("a", slashCommandNameCapFixture)
 
-	// The cap's VALUE, pinned on the emitted name: halve maxSlashCommandName and this
-	// is what goes red.
-	if got := len(list.Commands[0].Name); got != slashCommandNameCapFixture {
-		t.Errorf("a cut name came back %d bytes, want %d", got, slashCommandNameCapFixture)
+	tests := []struct {
+		name string
+		// entries are claude's per-entry maps, in the order the line carries them.
+		entries []any
+		// want is the expected emitted entry, index for index.
+		want []turnevent.SlashCommand
+		why  string
+	}{
+		{
+			name: "over the cap is cut and reported; a name that fits is not",
+			entries: []any{
+				commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
+				commandEntryFixture("deep-research"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: atCap, TruncatedFields: []string{"name"}},
+				{Name: "deep-research"},
+			},
+			why: "the second entry is what makes the first non-vacuous against a producer naming " +
+				"\"name\" on every entry regardless of the cut, and it is simultaneously the " +
+				"\"a cut on one entry does not appear on the entries AFTER it\" pin",
+		},
+		{
+			name:    "exactly at the cap is NOT truncated",
+			entries: []any{commandEntryFixture(atCap), commandEntryFixture("design")},
+			want:    []turnevent.SlashCommand{{Name: atCap}, {Name: "design"}},
+			why: "THE row this matrix exists for: the only one that reddens on truncateField's <= " +
+				"becoming <, since every other row's input is either over the cap (cut under either " +
+				"operator) or far under it (untouched under either). A halved maxSlashCommandName " +
+				"reddens this row too — and the over-cap and mid-rune rows with it, their expected " +
+				"OUTPUT lengths being fixture literals — but the boundary operator is this row's alone",
+		},
+		{
+			name: "a cut landing mid-rune deletes the partial rune (two-byte)",
+			entries: []any{
+				commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture-1) + twoByteRune + "z"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: strings.Repeat("a", slashCommandNameCapFixture-1), TruncatedFields: []string{"name"}},
+			},
+			why: "one byte UNDER the cap: truncateField's scrub is a DELETION, not a replacement — and " +
+				"the report still names the field, because the bool says only whether the cap cut",
+		},
+		{
+			name: "a cut landing mid-rune deletes the partial rune (four-byte)",
+			entries: []any{
+				commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture-3) + fourByteRune + "z"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: strings.Repeat("a", slashCommandNameCapFixture-3), TruncatedFields: []string{"name"}},
+			},
+			why: "THREE bytes under, which is what makes \"1-3 bytes under the cap\" a range rather than " +
+				"a one-byte anecdote — and it is the row a scrub replacing the partial rune instead of " +
+				"deleting it fails most visibly",
+		},
+		{
+			name:    "an absent name is still an entry, spelled \"\" or null",
+			entries: []any{commandEntryFixture(""), commandEntryFixture(nil), commandEntryFixture("design")},
+			want:    []turnevent.SlashCommand{{Name: ""}, {Name: ""}, {Name: "design"}},
+			why: "ONE row rather than two, because the claim is that the two absence spellings decode " +
+				"ALIKE: \"\" and JSON null both arrive as \"\". The gate is on the ARRAY's length and never " +
+				"on an entry's content — per-entry values are never validated beyond the cap, absence being " +
+				"claude's to choose — so a producer skipping empty names emits fewer entries and fails the " +
+				"count assertion, and the trailing real name is what pins their positions",
+		},
 	}
-	// DeepEqual rather than a length or a contains check, for the models table's
-	// reason: nil and []string{} disagree here and only one of them is the contract.
-	if want := []string{"name"}; !reflect.DeepEqual(list.Commands[0].TruncatedFields, want) {
-		t.Errorf("entry 0 TruncatedFields: got %#v, want %#v", list.Commands[0].TruncatedFields, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			events := collectEvents(initializeLineFixture(t, "success", map[string]any{
+				"models":   []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")},
+				"commands": tt.entries,
+			}))
+			if len(events) != 2 {
+				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+					len(events), events)
+			}
+			list, ok := events[1].(turnevent.SlashCommandList)
+			if !ok {
+				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+			}
+			// Length FIRST, deliberately, and fatal: the cap cuts a NAME and never an
+			// ENTRY, so a producer that dropped one must fail here rather than panic on the
+			// index below.
+			if len(list.Commands) != len(tt.want) {
+				t.Fatalf("SlashCommandList carries %d entries, want %d (%s) — %#v",
+					len(list.Commands), len(tt.want), tt.why, list.Commands)
+			}
+			for i, got := range list.Commands {
+				want := tt.want[i]
+				// Lengths before values, and a bounded preview when values print at all — see
+				// slashCommandNamePreview. The length message alone is what identifies a cut
+				// landing at the wrong byte; the equality below is what identifies a repair.
+				if len(got.Name) != len(want.Name) {
+					t.Errorf("entry %d name: got %d bytes, want %d (%s)",
+						i, len(got.Name), len(want.Name), tt.why)
+				} else if got.Name != want.Name {
+					t.Errorf("entry %d name: got %s, want %s — same length, different bytes; claude's name "+
+						"is carried VERBATIM and the cut is a BYTE cut and nothing else",
+						i, slashCommandNamePreview(got.Name), slashCommandNamePreview(want.Name))
+				}
+				// Live on the two mid-rune rows and a no-op on the rest: a scrub that replaced
+				// the partial rune would keep this green, which is why the byte length above is
+				// the assertion that carries those rows.
+				if !utf8.ValidString(got.Name) {
+					t.Errorf("entry %d name is not valid UTF-8: %s", i, slashCommandNamePreview(got.Name))
+				}
+				// DeepEqual rather than a length or a contains check, for the models table's
+				// reason: nil and []string{} disagree here and only one of them is the contract.
+				if !reflect.DeepEqual(got.TruncatedFields, want.TruncatedFields) {
+					t.Errorf("entry %d TruncatedFields: got %#v, want %#v (%s)",
+						i, got.TruncatedFields, want.TruncatedFields, tt.why)
+				}
+			}
+		})
 	}
-	// The entry that FITS, which is the half that makes the two assertions above
-	// non-vacuous: claude's name verbatim, and nil rather than an empty non-nil slice.
-	if list.Commands[1].Name != fits {
-		t.Errorf("entry 1 Name: got %q, want %q (verbatim, no repair)", list.Commands[1].Name, fits)
+}
+
+// TestParser_SlashCommandListIsSuppressed is the suppression table: the second gate
+// on rung 4 is INDEPENDENT of the models one and decides on the `commands` array
+// alone, and the emit block sits below logControlResponse, below the ModelList emit
+// and below rung 3's return — so no non-emitting rung can reach it.
+//
+// The first three rows are ONE behaviour rather than three: controlResponseLine's
+// Commands is a plain slice precisely so an absent key, a JSON null and a published []
+// are one reading, and emitModelList's gate is a len == 0 test. Stated precisely,
+// because the decoded struct does not collapse them the way the gate does — an absent
+// key and a null both leave the field nil while a published [] leaves an empty
+// non-nil slice. What these rows pin is the GATE's reading of all three, not a claim
+// that the shapes are indistinguishable before it.
+//
+// The last two rows look over-specified and are not. A suppression fixture proves an
+// ORDERING only if the two placements disagree on it, which is why the nak row carries
+// a non-empty `commands` (an absent or empty one reads zero events under a mutant that
+// hoisted the emit above the subtype gate, and proves nothing) and why the undecodable
+// row's `commands` array is itself WELL-FORMED with the decode failure in the models
+// half (a row whose commands was the malformed value would leave a hoisted emit with
+// nothing to emit). encoding/json records the type error and keeps decoding, and
+// initializeLineFixture marshals a map — so `commands` decodes before `models` fails
+// and a hoisted block would have a populated array available to it.
+//
+// THE ACK RUNG IS THIS TABLE'S SIXTH ROW AND IT LIVES ELSEWHERE:
+// TestParser_InitializeControlResponseAckReportsTheCommandCount's `commands and no
+// models` row already carries three entries, asserts zero events, and asserts the
+// record's six attributes besides — strictly stronger than anything here, so it is not
+// restated. If it reddens, the ack rung's classification changed, which is #1876's
+// scope and not this table's.
+func TestParser_SlashCommandListIsSuppressed(t *testing.T) {
+	t.Parallel()
+
+	models := []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")}
+
+	tests := []struct {
+		name       string
+		subtype    string
+		inner      map[string]any
+		wantEvents int
+		why        string
+	}{
+		{
+			name:       "commands key absent",
+			subtype:    "success",
+			inner:      map[string]any{"models": models},
+			wantEvents: 1,
+			why:        "claude said nothing about commands: the field decodes nil and the gate suppresses",
+		},
+		{
+			name:       "commands null",
+			subtype:    "success",
+			inner:      map[string]any{"models": models, "commands": nil},
+			wantEvents: 1,
+			why:        "a JSON null decodes nil exactly as an absent key does, and reaches the same gate",
+		},
+		{
+			name:       "commands empty array",
+			subtype:    "success",
+			inner:      map[string]any{"models": models, "commands": []any{}},
+			wantEvents: 1,
+			why: "a published [] decodes to an EMPTY NON-NIL slice, unlike the two rows above — and the " +
+				"gate reads len == 0, which is what collapses all three onto one answer. An empty emit " +
+				"would assert \"claude offered nothing\" from evidence that cannot tell it apart from " +
+				"\"claude said nothing about commands\"",
+		},
+		{
+			name:    "nak rung, non-empty commands",
+			subtype: "error",
+			inner: map[string]any{"models": models, "commands": []any{
+				commandEntryFixture("deep-research"),
+			}},
+			why: "BOTH arrays non-empty on a FAILURE reply: the row is the sole red against an emit " +
+				"block hoisted above the subtype gate, which an absent or empty array could not catch",
+		},
+		{
+			name:    "undecodable rung, valid commands",
+			subtype: "success",
+			inner: map[string]any{"models": 5, "commands": []any{
+				commandEntryFixture("deep-research"),
+			}},
+			why: "the decode failure is in the MODELS half and the commands array is well-formed and " +
+				"non-empty, so a block hoisted above the undecodable return has a populated array " +
+				"available to it and reddens",
+		},
 	}
-	if list.Commands[1].TruncatedFields != nil {
-		t.Errorf("entry 1 TruncatedFields: got %#v, want nil — nothing was cut on it",
-			list.Commands[1].TruncatedFields)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			events := collectEvents(initializeLineFixture(t, tt.subtype, tt.inner))
+			if len(events) != tt.wantEvents {
+				t.Errorf("event count: got %d, want %d (%s) — %#v",
+					len(events), tt.wantEvents, tt.why, events)
+			}
+			// A TYPE SCAN over the whole slice rather than an index check, because that is
+			// the claim: no SlashCommandList anywhere, whatever the count turns out to be.
+			for i, ev := range events {
+				if _, ok := ev.(turnevent.SlashCommandList); ok {
+					t.Errorf("event[%d] is a turnevent.SlashCommandList; none may be emitted here (%s)", i, tt.why)
+				}
+			}
+			// The models half is UNTOUCHED by the commands gate: on rung 4 a non-empty
+			// models array still produces its ModelList whatever `commands` holds.
+			if tt.wantEvents == 1 && len(events) == 1 {
+				if _, ok := events[0].(turnevent.ModelList); !ok {
+					t.Errorf("event[0] = %T, want turnevent.ModelList — the models half is untouched (%s)",
+						events[0], tt.why)
+				}
+			}
+		})
 	}
 }
 
@@ -5609,6 +5872,19 @@ func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
 // only the expected one — the realistic way this rule breaks is someone appending
 // "value", entry.Value to a drop site. The captured line is fed in beside them so
 // the emit rung is swept with claude's real strings too.
+//
+// #1878 extended it to COMMAND names on every rung. The captured line already supplied
+// one, but every captured name is 24 bytes or shorter, so no line here drove a command
+// name through truncateField while the sweep was watching: a Debug at the truncation
+// site logging the full-length WORKSPACE-AUTHORED name reddened only the record COUNT,
+// and a version appending to the existing record only the DeepEqual. Four lines and
+// five command sentinels close that, one sentinel per rung so a failure names the rung.
+//
+// The undecodable line carrying a commands array is the highest-value one:
+// encoding/json QUOTES the offending input bytes into its error text, so an
+// `"err", err` added to that arm would route workspace-authored command names into the
+// daemon log through a channel no per-attribute check can see. emitModelList's
+// undecodable arm argues that rule in prose; this is where it is a red test.
 func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 	t.Parallel()
 
@@ -5617,7 +5893,20 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		valueSentinel    = "value-sentinel-181102"
 		displaySentinel  = "display-sentinel-181103"
 		nakSentinel      = "nak-error-sentinel-181104"
+		// One command sentinel per rung, so a leak names the rung it came from.
+		commandFitsSentinel        = "command-fits-sentinel-187801"
+		commandCutPrefix           = "command-cut-sentinel-187802"
+		nakCommandSentinel         = "nak-command-sentinel-187803"
+		undecodableCommandSentinel = "undecodable-command-sentinel-187804"
+		ackCommandSentinel         = "ack-command-sentinel-187805"
 	)
+	// The over-cap name carries its distinctive part at the FRONT and is padded past
+	// the cap with `a`s. The order is load-bearing: a sentinel sitting at the END would
+	// be exactly what the cut removes, so the sweep would go silently vacuous on the one
+	// path it was added to cover. It is commandCutPrefix — not this padded value — that
+	// goes into `leaks` below, so a leak of the CUT value matches too.
+	commandCutSentinel := commandCutPrefix +
+		strings.Repeat("a", slashCommandNameCapFixture+1-len(commandCutPrefix))
 	captured := capturedModelEntries(t, initCaptureArmBase)
 	capturedValue := capturedModelString(t, captured[0], "value")
 	capturedResolved := capturedModelString(t, captured[0], "resolvedModel")
@@ -5633,15 +5922,33 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 	var events []turnevent.Event
 	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
 	lines := []string{
-		// The emit rung, twice: the sentinel-carrying synthetic line, then the real
+		// The emit rung, three times: the sentinel-carrying synthetic line, then one
+		// carrying COMMAND sentinels — one that fits and one over the cap — then the real
 		// captured one with all fourteen payload keys intact.
 		modelListLineFixture(t, "success", []map[string]any{
 			modelEntryFixture(resolvedSentinel, valueSentinel, displaySentinel)}),
+		// Plain model values here rather than the three model sentinels, so a failure
+		// unambiguously names WHICH line leaked.
+		initializeLineFixture(t, "success", map[string]any{
+			"models": []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")},
+			"commands": []any{
+				commandEntryFixture(commandFitsSentinel),
+				commandEntryFixture(commandCutSentinel),
+			}}),
 		capturedInitializeLine(t, initCaptureArmBase),
-		// The three non-emitting rungs.
+		// The three non-emitting rungs, each twice: once as it stood, and once carrying a
+		// `commands` array whose name is that rung's sentinel. The second of each pair is
+		// what makes the sweep cover a rung that DECODES command names and emits nothing.
 		`{"type":"control_response","response":{"subtype":"error","error":"` + nakSentinel + `"}}`,
+		initializeLineFixture(t, "error", map[string]any{
+			"commands": []any{commandEntryFixture(nakCommandSentinel)}}),
 		modelListLineFixture(t, "success", 5),
+		initializeLineFixture(t, "success", map[string]any{
+			"models":   5,
+			"commands": []any{commandEntryFixture(undecodableCommandSentinel)}}),
 		modelListLineFixture(t, "success", []map[string]any{}),
+		initializeLineFixture(t, "success", map[string]any{
+			"commands": []any{commandEntryFixture(ackCommandSentinel)}}),
 	}
 	for _, line := range lines {
 		if _, err := p.Write([]byte(line + "\n")); err != nil {
@@ -5649,15 +5956,14 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		}
 	}
 
-	// THREE, not two: the two model-carrying lines each emit a ModelList, and only the
-	// CAPTURED one carries a commands array, so it alone adds a SlashCommandList behind
-	// its ModelList (#1877). The four synthetic lines carry no commands key, which is
-	// this count's own half of the suppression pin. What the emit does NOT change is
-	// the sweep below — the capturedCommand sentinel reddens if a bounded name ever
-	// reaches a record — which is why it stays exactly as it was.
-	if len(events) != 3 {
-		t.Fatalf("event count: got %d, want 3 (the two model-carrying lines, plus the captured "+
-			"line's command inventory) — %#v", len(events), events)
+	// FIVE: the three model-carrying lines each emit a ModelList, and two of them carry
+	// a non-empty commands array, so each adds a SlashCommandList behind its ModelList
+	// (#1877). The three command-carrying lines on the NON-emitting rungs add nothing,
+	// which is those rungs' whole point and this count's own half of the suppression
+	// pin. What the emits do NOT change is the sweep below.
+	if len(events) != 5 {
+		t.Fatalf("event count: got %d, want 5 (the three model-carrying lines, plus a command "+
+			"inventory behind two of them) — %#v", len(events), events)
 	}
 	// One record per line, and every one of them this arm's: the count is the half
 	// the per-record assertions cannot see.
@@ -5666,12 +5972,19 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		t.Fatalf("records: got %d, want %d (one per control_response): %+v", len(all), len(lines), all)
 	}
 
-	wantReasons := []string{"model_list", "model_list", "nak", "undecodable", "ack"}
-	wantCounts := []string{"1", "6", "0", "0", "0"}
-	// Only the captured line carries a commands array; the four synthetic ones carry
-	// none. Its count comes from the capture's own bytes, so a re-capture moves the
-	// expectation with the fixture rather than reddening a transcribed number.
-	wantCommandCounts := []string{"0", strconv.Itoa(len(capturedCommands)), "0", "0", "0"}
+	wantReasons := []string{"model_list", "model_list", "model_list", "nak", "nak",
+		"undecodable", "undecodable", "ack", "ack"}
+	wantCounts := []string{"1", "1", "6", "0", "0", "0", "0", "0", "0"}
+	// The captured line's count comes from the capture's own bytes, so a re-capture
+	// moves the expectation with the fixture rather than reddening a transcribed number.
+	//
+	// The two zeros worth re-deriving rather than guessing are the nak and undecodable
+	// lines that DO carry a non-empty commands array: the count is taken BELOW the
+	// success gate, so both read 0 even though the array decoded (undecodable) or would
+	// have (nak). That is logControlResponse's documented placement and these two rows
+	// are its proof on this path.
+	wantCommandCounts := []string{"0", "2", strconv.Itoa(len(capturedCommands)),
+		"0", "0", "0", "0", "0", "1"}
 	for i, r := range all {
 		if r.msg != controlResponseConsumeMsgFixture {
 			t.Errorf("record %d message: got %q, want %q", i, r.msg, controlResponseConsumeMsgFixture)
@@ -5696,8 +6009,12 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		}
 	}
 
+	// commandCutPrefix rather than the padded commandCutSentinel: the value a leak would
+	// carry is the CUT one, 256 bytes of it, and only the prefix is in both.
 	leaks := []string{resolvedSentinel, valueSentinel, displaySentinel, nakSentinel,
-		capturedValue, capturedResolved, capturedDisplay, capturedCommand}
+		capturedValue, capturedResolved, capturedDisplay, capturedCommand,
+		commandFitsSentinel, commandCutPrefix, nakCommandSentinel,
+		undecodableCommandSentinel, ackCommandSentinel}
 	for _, r := range all {
 		for _, leak := range leaks {
 			if strings.Contains(r.msg, leak) {
