@@ -3866,14 +3866,20 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // three model ones, mirroring the production split: they bound different fields for
 // different reasons, and sharing one fixture would let a change to one silently
 // retarget the others' proof.
+//
+// slashCommandDescriptionCapFixture is that rule again for maxSlashCommandDescription
+// (#1904), and the pair is where it bites hardest: the two caps sit on adjacent fields
+// of the SAME entry and currently hold the same number, so one fixture for both would
+// let a change to either budget follow the other's proof green.
 const (
-	modelResolvedCapFixture         = 256
-	modelValueCapFixture            = 256
-	modelDisplayNameCapFixture      = 256
-	modelEffortLevelCapFixture      = 32
-	modelEffortLevelCountCapFixture = 8
-	modelListEntriesCapFixture      = 10
-	slashCommandNameCapFixture      = 256
+	modelResolvedCapFixture           = 256
+	modelValueCapFixture              = 256
+	modelDisplayNameCapFixture        = 256
+	modelEffortLevelCapFixture        = 32
+	modelEffortLevelCountCapFixture   = 8
+	modelListEntriesCapFixture        = 10
+	slashCommandNameCapFixture        = 256
+	slashCommandDescriptionCapFixture = 256
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -4313,12 +4319,21 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 				if got.Name == nameOutsideSlug {
 					sawNameOutsideSlugEmitted = true
 				}
-				// nil rather than an empty non-nil slice, and this arm proves the UNTRUNCATED
-				// path: the capture's longest name is an order of magnitude under
-				// maxSlashCommandName, so a report here could only mean the cap fired on a
-				// value that fits. Mirrors the models test's own untruncated-path assertion.
-				if got.TruncatedFields != nil {
-					t.Errorf("entry %d TruncatedFields: got %v, want nil — no captured name approaches the cap",
+				// The NAME's untruncated path: the capture's longest name is an order of
+				// magnitude under maxSlashCommandName, so "name" appearing here could only mean
+				// the cap fired on a value that fits. Mirrors the models test's own
+				// untruncated-path assertion.
+				//
+				// It was `TruncatedFields != nil` until #1904 and could not stay so: the
+				// capture's DESCRIPTIONS are not all under their cap, so the whole slice is no
+				// longer empty on every entry and the old form would fail on a producer doing
+				// exactly what it should. Narrowing it to the one name keeps precisely the claim
+				// the message makes. How many captured descriptions report, and which, is the
+				// description's committed-capture pin — the sibling ticket's, and asserting it
+				// here would be that pin in the wrong test. The nil-not-empty-slice contract is
+				// unaffected: TestParser_SlashCommandNamesAreCapped's DeepEqual carries it.
+				if slices.Contains(got.TruncatedFields, "name") {
+					t.Errorf("entry %d TruncatedFields: got %v, want no \"name\" — no captured name approaches the cap",
 						i, got.TruncatedFields)
 				}
 			}
@@ -4415,11 +4430,39 @@ func initializeLineFixture(t *testing.T, subtype string, inner map[string]any) s
 	return string(line)
 }
 
-// commandEntryFixture builds one entry of the `commands` array from the one key the
+// commandEntryFixture builds one entry of the `commands` array from the FIRST key the
 // decode reads. The value is `any` so a row can put a number or a null where a string
 // belongs, which is the undecodable rung's input and the null carve-out's.
+//
+// It still takes ONE parameter although the decode target declares two keys since
+// #1904: commandEntryWithFixture is how a row adds the second, for the reason stated
+// there.
 func commandEntryFixture(name any) map[string]any {
 	return map[string]any{"name": name}
+}
+
+// commandEntryWithFixture returns a COPY of one `commands` entry carrying an extra
+// claude key. commandEntryFixture's one-parameter signature is deliberately not
+// widened — it has 26 calls across 21 lines of this file and none of them wants a
+// second argument — which is modelEntryWithFixture's stated reason for
+// modelEntryFixture, one array over, and this helper is that one's shape verbatim.
+//
+// The key is a PARAMETER rather than a description-specific signature, so #1830's
+// argumentHint and #1825's aliases reuse this instead of adding a third helper. The
+// value is `any` so a row can put a null or a non-string where a string belongs, which
+// is the null carve-out's input and the undecodable rung's.
+//
+// Its own function rather than a call to modelEntryWithFixture, which is
+// map-shaped identically: the two build entries of two different arrays with two
+// different key sets, and a row naming the wrong array's builder is the thing a
+// reader has to be able to see at the call site.
+func commandEntryWithFixture(entry map[string]any, key string, value any) map[string]any {
+	out := make(map[string]any, len(entry)+1)
+	for k, v := range entry {
+		out[k] = v
+	}
+	out[key] = value
+	return out
 }
 
 // modelEntryFixture builds one entry of that array from the three mapped keys.
@@ -4897,6 +4940,18 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 			wantReason: "undecodable",
 		},
 		{
+			// The row above's pair, and the pair is the point: the all-or-nothing rule is
+			// commandEntryLine's rather than `name`'s, so the SECOND declared key fails the
+			// WHOLE line the same way rather than being tolerated as one bad field. That is
+			// also what separates this from a null description, which the cap table's own row
+			// pins as an ordinary counted entry.
+			name: "an entry's description is a number",
+			line: initializeLineFixture(t, "success", map[string]any{"commands": []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "description", 5),
+			}}),
+			wantReason: "undecodable",
+		},
+		{
 			name:       "commands is null",
 			line:       initializeLineFixture(t, "success", map[string]any{"commands": nil}),
 			wantReason: "ack",
@@ -5122,7 +5177,7 @@ func TestParser_InitializeControlResponseCommandsOnlyRungEmits(t *testing.T) {
 	}
 }
 
-// slashCommandNamePreview bounds one name for a failure message. The rows below
+// slashCommandNamePreview bounds one name or description for a failure message. The rows below
 // compare 253-258 byte strings, and a bare %q of one of those prints two screens of
 // `a`s — which turns a single red row into several reading passes for whoever has to
 // act on it. Lengths are reported first and separately; this is only ever the second
@@ -5138,10 +5193,13 @@ func slashCommandNamePreview(s string) string {
 	return fmt.Sprintf("%q…(%d bytes)", strings.ToValidUTF8(s[:head], ""), len(s))
 }
 
-// TestParser_SlashCommandNamesAreCapped is the per-name bound's whole boundary
-// matrix: the name is cut at its OWN cap at construction and the cut is REPORTED, by
-// the DAEMON's snake_case name for the field — which for this one field coincides
-// with the wire name protocol.SlashCommand.TruncatedFields documents.
+// TestParser_SlashCommandNamesAreCapped is the per-name bound's whole boundary matrix
+// PLUS the description bound's LIVENESS rows (#1904): each field is cut at its OWN cap
+// at construction and the cut is REPORTED, by the DAEMON's snake_case name for the
+// field — which for both of these fields coincides with the wire name
+// protocol.SlashCommand.TruncatedFields documents. The description's own boundary
+// matrix — its exactly-at-cap row, its mid-rune rows and its committed-capture pin —
+// is the sibling ticket's and is deliberately not here.
 //
 // #1877 shipped the first two rows as the bound's liveness proof, so it was never
 // unproven for a merge window; #1878 turned them into a table and added the rest.
@@ -5186,6 +5244,9 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 		fourByteRune = "😀"
 	)
 	atCap := strings.Repeat("a", slashCommandNameCapFixture)
+	// A different fill byte from the name's, so a row carrying both cut fields reddens
+	// on the two values being swapped as well as on their report names being.
+	descAtCap := strings.Repeat("d", slashCommandDescriptionCapFixture)
 
 	tests := []struct {
 		name string
@@ -5278,6 +5339,57 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 				"claude's to choose — so a producer skipping empty names emits fewer entries and fails the " +
 				"count assertion, and the trailing real name is what pins their positions",
 		},
+		{
+			name: "a description over the cap is cut and reported; one that fits is not",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "description",
+					strings.Repeat("d", slashCommandDescriptionCapFixture+1)),
+				commandEntryWithFixture(commandEntryFixture("design"), "description", "plan a change"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Description: descAtCap, TruncatedFields: []string{"description"}},
+				{Name: "design", Description: "plan a change"},
+			},
+			why: "the description's LIVENESS row: it is cut at maxSlashCommandDescription and the cut is " +
+				"reported under \"description\", the field's own wire name. Both names are far under their " +
+				"cap, so \"name\" appearing here at all would be the report naming a field nothing " +
+				"happened to. The second entry is what makes the first non-vacuous against a producer " +
+				"naming \"description\" on every entry regardless of the cut, and is simultaneously the " +
+				"\"a cut on one entry does not appear on the entries AFTER it\" pin for the second bound " +
+				"call — the first row's device, one field over",
+		},
+		{
+			name: "both fields cut on ONE entry report in DECLARATION order",
+			entries: []any{
+				commandEntryWithFixture(
+					commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
+					"description", strings.Repeat("d", slashCommandDescriptionCapFixture+1)),
+				commandEntryWithFixture(commandEntryFixture("design"), "description", "plan a change"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: atCap, Description: descAtCap, TruncatedFields: []string{"name", "description"}},
+				{Name: "design", Description: "plan a change"},
+			},
+			why: "the ORDER row, and the only one that can be: a TruncatedFields of one name has no order " +
+				"to exhibit, which is why the claim was unobservable until this field landed. It is the " +
+				"SOLE red against the emitter's two bound calls being swapped — every other row cuts at " +
+				"most one field and stays green under that swap — and the two fill bytes differ so a swap " +
+				"of the two VALUES reddens here too, not only a swap of their report names. The uncut " +
+				"second entry is the same non-vacuity pin the row above carries",
+		},
+		{
+			name: "a null description is still an entry, spelled \"\"",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "description", nil),
+				commandEntryFixture("design"),
+			},
+			want: []turnevent.SlashCommand{{Name: "deep-research"}, {Name: "design"}},
+			why: "the null carve-out one field over, and it is INHERITED rather than implemented: " +
+				"encoding/json unmarshals a null into a non-pointer Go value as a no-op, so the entry is " +
+				"ordinary and counted — no panic, no unrecognized_message, no failed line. The second " +
+				"entry OMITS the key entirely, which is the absent spelling landing on the same \"\", and " +
+				"the trailing position is what pins that neither one was skipped",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5333,6 +5445,19 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 				// the assertion that carries those rows.
 				if !utf8.ValidString(got.Name) {
 					t.Errorf("entry %d name is not valid UTF-8: %s", i, slashCommandNamePreview(got.Name))
+				}
+				// The name's two assertions again for the second capped field, and for their
+				// reason: the length is what identifies a cut landing at the wrong byte and the
+				// equality is what identifies a repair. No UTF-8 check beside them, deliberately
+				// — that assertion grades a mid-rune cut, and the description's mid-rune rows are
+				// the sibling ticket's, so one here would have nothing to grade.
+				if len(got.Description) != len(want.Description) {
+					t.Errorf("entry %d description: got %d bytes, want %d (%s)",
+						i, len(got.Description), len(want.Description), tt.why)
+				} else if got.Description != want.Description {
+					t.Errorf("entry %d description: got %s, want %s — same length, different bytes; "+
+						"claude's description is carried VERBATIM and the cut is a BYTE cut and nothing else",
+						i, slashCommandNamePreview(got.Description), slashCommandNamePreview(want.Description))
 				}
 				// DeepEqual rather than a length or a contains check, for the models table's
 				// reason: nil and []string{} disagree here and only one of them is the contract.
