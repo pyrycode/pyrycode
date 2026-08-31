@@ -743,12 +743,15 @@ func eventKind(ev turnevent.Event) string {
 		// emitMapped's unmapped drop, which nothing routes it to.
 		//
 		// A PRODUCTION PRODUCER NOW EMITS THE VARIANT, so those four sites are
-		// reachable rather than merely live: every initialize reply carrying a
-		// commands array beside its models one puts one of these on this lane, and
-		// each is dropped and logged by kind. The arm landed with the declaration
-		// ahead of that, because the alternative was a window in which the daemon
-		// recognises the variant and every drop log calls it kind=unknown — and this
-		// producer is exactly what would have opened that window.
+		// reachable rather than merely live: any initialize reply carrying a
+		// NON-EMPTY commands array puts one of these on this lane, whether or not a
+		// models array rides with it (#1891 added the second producing rung; #1877
+		// was the first, and required both). Each is dropped and logged by kind. That
+		// widening strengthens what this arm already argued rather than qualifying
+		// it — strictly more inputs reach the same four drop sites. The arm landed
+		// with the declaration ahead of any producer, because the alternative was a
+		// window in which the daemon recognises the variant and every drop log calls
+		// it kind=unknown.
 		return "slash_command_list"
 	default:
 		return "unknown"
