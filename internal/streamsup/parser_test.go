@@ -3781,8 +3781,10 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 				// request_id, never the NAK's error string — the package's standing
 				// content-free logging rule, held here by the same exactly-these-attrs
 				// shape the harness-nudge and rate-limit drops use. Every count is 0
-				// on every row here: none of them reaches the emit rung, none carries a
-				// commands array, and the attribute set is fixed rather than per-rung.
+				// on every row here: none of them reaches EITHER emitting rung — since
+				// #1891 there are two and no definite article picks one out — none
+				// carries a commands array, and the attribute set is fixed rather than
+				// per-rung.
 				wantAttrs := map[string]string{
 					"type":           "control_response",
 					"reason":         tt.wantReason,
@@ -4982,7 +4984,15 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 // standing proof that NO NAME CHARSET MAY BE ASSUMED. Together with the type
 // assertion — the single event must be a SlashCommandList and nothing else, so no
 // ModelList rides along — this is what pins "same construction, same verbatim name
-// (#1600), same per-field cap" at the new call site rather than at the models rung's.
+// (#1600)" at the new call site rather than at the models rung's.
+//
+// THE CAP IS NOT PINNED BY THAT, and the difference is worth a line rather than a
+// claim: every name on the row is far under maxSlashCommandName, so a byte-exact
+// comparison reddens a SECOND cap tighter than `__remote-workflow`'s 17 bytes and
+// never the bound itself. What carries the cap to this call site is the structure the
+// next paragraph names — ONE emitter reached from two rungs, so one loop and one
+// maxSlashCommandName — which is inheritance by construction, not a pin, and the
+// measuring is the matrix's.
 //
 // NOT a row here: any cap boundary. That whole matrix is
 // TestParser_SlashCommandNamesAreCapped's and it is measured on the models rung; the
@@ -5289,12 +5299,12 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 // TestParser_SlashCommandListIsSuppressed is the suppression table: the second gate
 // on the MODEL-LIST rung is INDEPENDENT of the models one and decides on the
 // `commands` array alone, and the CALL to emitSlashCommandList sits below
-// logControlResponse, below the ModelList emit and below the ONE remaining return in
-// the empty-models block, the narrowed ack's. The commands_only rung's return no
-// longer sits above it in the sense that mattered here: since #1891 that rung has its
-// own call to the emitter (which is why one return, not two), so what this rung's call
-// is unreachable from is rungs 1 through 3 — undecodable, nak, and the success
-// carrying neither array.
+// logControlResponse, below the ModelList emit and below BOTH returns in the
+// empty-models block — the narrowed ack's and the commands_only rung's. That COUNT is
+// unchanged by #1891; what narrowed is which of the two returns belongs to a rung that
+// emits nothing. The commands_only rung now has its own call to the emitter, so passing
+// its return no longer means passing a silent rung, and what THIS call is unreachable
+// from is rungs 1 through 3 — undecodable, nak, and the success carrying neither array.
 //
 // The first three rows are ONE behaviour rather than three: controlResponseLine's
 // Commands is a plain slice precisely so an absent key, a JSON null and a published []
@@ -5963,7 +5973,8 @@ func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
 // synthetic line and then searched for across EVERY record the parser produced, not
 // only the expected one — the realistic way this rule breaks is someone appending
 // "value", entry.Value to a drop site. The captured line is fed in beside them so
-// the emit rung is swept with claude's real strings too.
+// the MODEL-LIST rung is swept with claude's real strings too — named rather than
+// called "the emit rung", which since #1891 is two of them.
 //
 // #1878 extended it to COMMAND names on every rung. The captured line already supplied
 // one, but every captured name is 24 bytes or shorter, so no line here drove a command
@@ -6020,7 +6031,7 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 	var events []turnevent.Event
 	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
 	lines := []string{
-		// The emit rung, three times: the sentinel-carrying synthetic line, then one
+		// The model-list rung, three times: the sentinel-carrying synthetic line, then one
 		// carrying COMMAND sentinels — one that fits and one over the cap — then the real
 		// captured one with all fourteen payload keys intact.
 		modelListLineFixture(t, "success", []map[string]any{

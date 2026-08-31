@@ -650,8 +650,12 @@ const maxSlashCommandName = 256
 
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
-// or a prefix: it is half of emitModelList's conjunctive gate, and the half that
-// refuses to read an inventory out of a response reporting FAILURE. Everything
+// or a prefix: it is the SHARED PRECONDITION of both of emitModelList's emits, and
+// what refuses to read an inventory out of a response reporting FAILURE. It was
+// HALF OF A CONJUNCTION until #1891, the other half being a non-empty models array;
+// since that slice each array decides its own event below this test, so this
+// constant gates both emits and neither array gates the other — emitModelList's
+// THE DISCRIMINANT states the lattice that replaced the conjunction. Everything
 // else — "error", a subtype claude invents later, an absent one — is not success
 // and takes the nak rung, which is what makes that classification total.
 const controlResponseSuccess = "success"
@@ -1987,12 +1991,11 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // emitModelList decodes one top-level control_response line and emits AT MOST ONE
 // turnevent.ModelList, from one rung, and AT MOST ONE turnevent.SlashCommandList, from
 // either of two rungs. The two are decided INDEPENDENTLY under one shared subtype gate.
-// It never emits an Unrecognized, and it returns
-// nothing:
-// consumeLine's case arm consumes the line by MATCHING, exactly as emitRateLimit's
-// does, so unlike the emitSystemSubtype family there is no "did you handle it?" to
-// report back. Field mapping comes from the committed capture, read in the tests
-// through capturedInitializePayload, never from a hand-built payload.
+// It never emits an Unrecognized, and it returns nothing: consumeLine's case arm
+// consumes the line by MATCHING, exactly as emitRateLimit's does, so unlike the
+// emitSystemSubtype family there is no "did you handle it?" to report back. Field
+// mapping comes from the committed capture, read in the tests through
+// capturedInitializePayload, never from a hand-built payload.
 //
 // THE DISCRIMINANT is the substance of this mapping; the field copying is routine.
 // claude answers three different requests on this one line type and only one of the
