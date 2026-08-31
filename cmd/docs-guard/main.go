@@ -6,16 +6,24 @@
 // a file over the size cap, and a line that markdown reads as a heading only
 // because a wrapped paragraph put a ticket reference first.
 //
-// **Why the size cap.** QMD is the search surface every agent uses, and its
-// structure-aware chunker covers code languages only. Markdown is chunked by
-// byte count with no heading awareness, so a large overview becomes a run of
-// slices that start and end mid-sentence and carry no heading context.
-// Measured 2026-08-31 against the then-315KB v2-session-manager.md: a
-// semantic query, a hybrid query and a keyword query with reranking off, all
-// aimed at a topic whose canonical home was a section of that file, and none
-// of the three returned the file. What came back instead was the frozen
-// docs/knowledge/codebase/ archive. After the split the owning section
-// document ranks first on the same query.
+// **Why the size cap.** QMD is the search surface every agent uses. It cuts a
+// document into roughly 900-token chunks, and it does prefer a heading
+// boundary: its break table scores an h1 at 100 down to a bare newline at 1.
+// But it only looks for that boundary inside a narrow window around each
+// 900-token mark. When a document's sections run much larger than one chunk,
+// no heading falls inside the window, so the cut lands on a paragraph break
+// and the chunk carries no heading with it.
+//
+// Measured 2026-08-31 against the then-315KB v2-session-manager.md, whose
+// sections averaged 7000 bytes: a semantic query, a hybrid query and a
+// keyword query with reranking off, all aimed at a topic whose canonical home
+// was a section of that file, and none of the three returned the file. What
+// came back instead was the frozen docs/knowledge/codebase/ archive. After
+// the split the owning section document ranks first on the same query.
+//
+// So the cap is really a statement about section size: keep a document small
+// enough that its sections are comparable to a chunk, and the chunker's
+// heading preference starts working for you instead of being unreachable.
 //
 // **Why the heading check.** A paragraph line that wraps with a ticket
 // reference first, "#1840 (below), and published on...", is a top-level

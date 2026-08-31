@@ -56,9 +56,10 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 A package overview is capped at 50000 bytes. Past that it is split into
 sibling documents named `<package>-<section>.md`, and the overview keeps its
 own path and becomes a map linking to them. Only the overview is listed here;
-open it for the section documents. The cap exists because search chunks
-markdown by byte count with no heading awareness, so a document much larger
-than this stops being retrievable at all.
+open it for the section documents. The cap exists because search cuts a
+document into roughly 900-token chunks and can only prefer a heading boundary
+when one falls near the cut. Sections much larger than a chunk get cut at
+paragraph breaks instead, and the document stops being retrievable.
 
 | File | Topic |
 |------|-------|
