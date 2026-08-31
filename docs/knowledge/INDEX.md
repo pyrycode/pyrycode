@@ -53,6 +53,13 @@ Search with QMD: `mcp__qmd__query(collection: "pyrycode-docs", query: "your quer
 
 ## Features
 
+A package overview is capped at 50000 bytes. Past that it is split into
+sibling documents named `<package>-<section>.md`, and the overview keeps its
+own path and becomes a map linking to them. Only the overview is listed here;
+open it for the section documents. The cap exists because search chunks
+markdown by byte count with no heading awareness, so a document much larger
+than this stops being retrievable at all.
+
 | File | Topic |
 |------|-------|
 | [session-transcript-and-resume-probe.md](features/session-transcript-and-resume-probe.md) | #1655 live measurement (claude 2.1.220): a `--session-id <id>` launch that runs no turn leaves no `<id>.jsonl` on disk, both while the child is alive and after a graceful `SIGTERM` exit (**HOLDS**) — the premise [ADR 032](decisions/032-bootstrap-resume-per-spawn-existence-probe.md) and #1630's respawn-time existence probe rest on; #1630 consumes the after-exit reading. #1656 extends it: `--resume <id>` against that absent transcript exits non-zero while the identical `--resume` against an id whose transcript exists does not (**HOLDS**), confirming the mechanism the suspected respawn crash-loop needs. |

@@ -38,7 +38,7 @@ BIN         ?= ./pyry
 DIST        ?= ./dist
 
 .PHONY: check
-check: vet test staticcheck substrate-guard cite-guard e2e
+check: vet test staticcheck substrate-guard cite-guard docs-guard e2e
 
 .PHONY: vet
 vet:
@@ -128,6 +128,18 @@ substrate-guard:
 .PHONY: cite-guard
 cite-guard:
 	$(GO) run ./cmd/cite-guard
+
+# Bounds a package overview's size and bans a line that parses as a heading
+# only because a wrapped paragraph put a ticket reference first — see
+# cmd/docs-guard. Search chunks markdown by byte count with no heading
+# awareness, so an overview past the cap stops being retrievable at all and a
+# lesson folded into it is a lesson lost. Same fabric-of-a-different-kind
+# argument as the two guards above: the documentation agent already carries a
+# prose rule for both, and a prose rule cannot police a prose rule. Fast (a
+# file walk); no network or install needed.
+.PHONY: docs-guard
+docs-guard:
+	$(GO) run ./cmd/docs-guard
 
 .PHONY: build
 build:

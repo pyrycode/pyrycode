@@ -143,6 +143,14 @@ The Claude Code memory index is injected into every agent run and it is capped. 
 
 The dispatcher enforces this deterministically. Between cycles it strips every entry whose title or note filename carries a ticket number, so an entry that names one disappears on its own. The note file stays on disk; only the pointer goes. Writing one is not dangerous, it is just wasted.
 
+## Package overview size
+
+**A document under `docs/knowledge/features/` is capped at 50000 bytes.** Past that it stops being findable. Search chunks markdown by byte count with no heading awareness, so a large document becomes a run of slices that begin and end mid-sentence and carry no heading context. Measured 2026-08-31 against the then-315KB `v2-session-manager.md`: three query shapes aimed at a topic whose canonical home was a section of that file, and none of the three returned it. A lesson folded into a document that size is a lesson lost.
+
+**Past the cap, split it.** Cut at `##` headings, and where a `##` section is itself over the cap cut it at its `###` headings. Each child is named `<package>-<section>.md` and lives beside its parent. **The parent keeps its own path**, its title and its intro, and its body becomes a map linking to the children: every agent prompt names the parent path and hundreds of documents link to it. A section under 3000 bytes stays in the parent rather than becoming a file of its own.
+
+`make docs-guard`, wired into `make check`, fails the build on an over-cap document and on a line that parses as a heading because a wrapped paragraph put a ticket reference first.
+
 Why this rule exists, measured 2026-08-25: the old classifier keyed on the title's first character, ticket entries titled with a decoration in front of the number were read as permanent lessons, and 216 curation passes and about 34 hours of blocked dispatch went into hand-trimming a file that should never have held them.
 ## Testing
 
