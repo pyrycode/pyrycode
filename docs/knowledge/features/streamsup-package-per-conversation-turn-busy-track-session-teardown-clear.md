@@ -8,9 +8,11 @@ alone would wedge the conversation busy forever. `turnBusyTracker.clearForSessio
 rule `observe` follows), and on an unresolved session logs `stream_turn.clear_unresolved` (`session_id`
 only — the resolved `conversation_id` is deliberately withheld) and returns without mutating. The
 membership mutation itself — resolve-then-delete-then-broadcast — was extracted out of `observe` into a
-shared `setBusy(conversationID string, open bool)` so both feeds use one copy of the close-and-replace
-protocol `WaitIdle`'s check-and-subscribe atomicity depends on, rather than a second hand-written copy of
-it.
+shared `setBusy` so both feeds use one copy of the close-and-replace protocol `WaitIdle`'s
+check-and-subscribe atomicity depends on, rather than a second hand-written copy of it. `setBusy` gained a
+third parameter, a `toolCallDelta`, with #1917's in-flight tool-call retention — `clearForSession` passes
+the zero value, since teardown clears the whole conversation rather than one call. See
+[Resolve an in-flight tool call to its conversation](streamsup-package-per-conversation-turn-busy-track-resolve-an-in-flight-tool-call.md).
 
 **Session-keyed, not conversation-keyed, on purpose.** A `clearConversation(convID)` shape would be a
 shorter call chain but would accept a conversation id from anywhere, retiring the type's own `SECURITY`
