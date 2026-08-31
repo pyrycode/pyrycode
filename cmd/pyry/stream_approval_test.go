@@ -594,9 +594,12 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 // "known to the daemon, never observed" negative row.
 const testConvIDC = "33333333-3333-4333-8333-333333333333"
 
-// approvalReport is the #1919 fixture: the bridge whose byModal holds the parked
-// correlations, the tracker that answers the membership question, and the two
-// registries the park path runs through.
+// approvalReport is the #1919 fixture, now serving both parked-approval reports:
+// the bridge whose byModal holds the parked correlations, the tracker that answers
+// ApprovalParked's membership question, and the two registries the park path runs
+// through. #1915's report reads the correlation and the broadcaster instead, so
+// bcast is the only knob its tests turn (see conns) and the tracker half is inert
+// for them.
 //
 // The two halves are joined the way relay.go joins them — the method value
 // assigned AFTER construction — so newStreamApprovalBridge's 14 call sites stay
@@ -826,5 +829,171 @@ func TestStreamApprovalBridge_ApprovalParked_NoTrackerReportsNegative(t *testing
 
 	if f.bridge.ApprovalParked(testConvID) {
 		t.Error("ApprovalParked(A) = true with no tracker wired; PTY mode must report negative")
+	}
+}
+
+// --- #1915: whether a parked approval still has anyone able to answer it ------
+
+// conns replaces the fixture broadcaster's scripted snapshot with one fresh entry,
+// so the next ActiveConns call sees exactly cs (no argument ⇒ nobody connected).
+//
+// fakeInteractiveBcast consumes one entry per call and reuses the last once the
+// sequence is exhausted, and Surface's own broadcast has already consumed one
+// before any report call — so a report test assigns the steady-state entry
+// immediately before the call it is about. A scripted multi-entry sequence would
+// be off by one and drift further with every park.
+func (f approvalReport) conns(cs ...relay.ActiveConn) {
+	f.bcast.snapshots = [][]relay.ActiveConn{cs}
+}
+
+// AC1: for one still-parked approval the report is positive while an
+// interactive-capable client is connected and negative for that SAME approval
+// once none is — which is what tells "a human has not got to it yet" apart from
+// "nobody is connected".
+//
+// Asserting the correlation is still populated after the negative is load-bearing:
+// it proves the negative came from the connectivity conjunct rather than from the
+// correlation quietly going away. Nothing is retired here, and without that
+// assertion an implementation that dropped the correlation would pass.
+func TestStreamApprovalBridge_ApprovalAnswerable_NegativeOnlyWhenNobodyIsConnected(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.park(t, "tu-a1")
+
+	if !f.bridge.ApprovalAnswerable("tu-a1") {
+		t.Error("ApprovalAnswerable = false with the approval parked and an interactive client connected")
+	}
+
+	f.conns() // everybody disconnected; nothing retired
+
+	if f.bridge.ApprovalAnswerable("tu-a1") {
+		t.Error("ApprovalAnswerable = true for a still-parked approval with nobody connected")
+	}
+	if n := bridgeLen(f.bridge); n == 0 {
+		t.Error("byModal is empty; the negative above came from the correlation side, not the connectivity side")
+	}
+}
+
+// AC2: a connected client that never negotiated the interactive capability does
+// not count as able to answer — the same #607 gate broadcast applies before it
+// pushes a modal_shown anyone could answer.
+//
+// The three snapshots are asked in sequence on ONE goroutine, not as parallel
+// subtests: fakeInteractiveBcast carries no mutex and its scripted snapshot is
+// rewritten between the calls. Row 2 is what makes row 1 non-vacuous — the only
+// thing that changed is the flag on the same conn id — and row 3 kills an inverted
+// gate that answers negative on the first non-interactive conn, which rows 1 and 2
+// alone leave green.
+func TestStreamApprovalBridge_ApprovalAnswerable_NonInteractiveClientCannotAnswer(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.park(t, "tu-a1")
+
+	tests := []struct {
+		name     string
+		snapshot []relay.ActiveConn
+		want     bool
+	}{
+		{"one connected client, interactive never negotiated", []relay.ActiveConn{{ConnID: "c1"}}, false},
+		{"the same client, interactive negotiated", []relay.ActiveConn{{ConnID: "c1", Interactive: true}}, true},
+		{"a non-interactive client alongside an interactive one", []relay.ActiveConn{{ConnID: "c1"}, {ConnID: "c2", Interactive: true}}, true},
+	}
+	for _, tc := range tests {
+		f.conns(tc.snapshot...)
+		if got := f.bridge.ApprovalAnswerable("tu-a1"); got != tc.want {
+			t.Errorf("%s: ApprovalAnswerable = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// AC3: unknown, never-surfaced, already-resolved and empty approval ids all reach
+// the same negative answer, so the report does not become an existence oracle for
+// approval ids.
+//
+// One fixture holds every row with the interactive conn connected throughout (the
+// fixture's default snapshot, reused in steady state) and a LIVE POSITIVE CONTROL,
+// so no row can pass merely by the report being universally negative — a negative
+// reached with nobody connected would prove nothing about id handling. The rows run
+// sequentially on one goroutine for the reason given on conns.
+//
+// Three honesty notes. The never-surfaced row is production-reachable: it is
+// exactly the state Surface's modal.Record failure path leaves behind — no
+// correlation stored, nothing broadcast, claude left to time out to deny — so
+// simply not calling Surface reproduces it, with no RNG injection. The
+// already-resolved row drives retire and deliberately does NOT reconstruct the four
+// terminal paths: a client's answer, the deadline, a lost caller and shutdown are
+// four CALLERS of one deleter, retire's delete is unconditional and takes no path
+// parameter, so there is no mutant a per-caller fixture reddens that this one does
+// not. And the empty row asserts against a fixture with NO empty-ToolUseID
+// correlation planted, unlike ApprovalParked's table, which plants one harmlessly
+// because ToolCallInFlight refuses an empty tool-call id anyway. Here a planted
+// empty correlation would MATCH the scan and flip this row positive;
+// permbridge.Register is what holds the invariant, refusing an empty id before the
+// control server can reach Surface.
+//
+// The "by the same path" half of the criterion is a structural claim about the
+// implementation — the absence of an id-specific branch — which no fixture can
+// distinguish, because inserting `if approvalID == "" { return false }` is an
+// equivalent mutant that changes no answer below. The rows pin the answers; the
+// absent branch is read in ApprovalAnswerable.
+func TestStreamApprovalBridge_ApprovalAnswerable_NegativesCollapse(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.park(t, "tu-a1")
+	parkApproval(t, f.perm, "tu-unsurfaced", "Read", json.RawMessage(`{"file":"x"}`))
+	retireResolved := f.park(t, "tu-a2")
+	retireResolved()
+
+	tests := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"the control: parked and surfaced", "tu-a1", true},
+		{"an id that was never registered anywhere", "tu-never-registered", false},
+		{"parked in permbridge but never surfaced", "tu-unsurfaced", false},
+		{"already resolved", "tu-a2", false},
+		{"the empty approval id", "", false},
+	}
+	for _, tc := range tests {
+		if got := f.bridge.ApprovalAnswerable(tc.id); got != tc.want {
+			t.Errorf("%s: ApprovalAnswerable(%q) = %v, want %v", tc.name, tc.id, got, tc.want)
+		}
+	}
+}
+
+// AC5: the report emits nothing at any level. Every diagnostic worth emitting from
+// it would carry a tool_use id, a conn id, or the fact that a specific approval is
+// outstanding — all withheld by the bridge's own SECURITY block — so the correct
+// count of log statements inside ApprovalAnswerable is zero.
+//
+// The buffer is reset after the park so the assertion is scoped to the report and
+// cannot be reddened by Surface's own broadcast, and auditLogger captures Debug, so
+// a line added at the lowest level still reddens it. The positive arm comes first:
+// a universally-negative implementation would make the assertion vacuous.
+func TestStreamApprovalBridge_ApprovalAnswerable_LogsNothing(t *testing.T) {
+	t.Parallel()
+
+	logger, logBuf := auditLogger()
+	f := newApprovalReport(t, "", logger)
+	f.park(t, "tu-a1")
+
+	logBuf.Reset()
+	if !f.bridge.ApprovalAnswerable("tu-a1") {
+		t.Fatal("ApprovalAnswerable = false with the approval parked and a client connected; the assertion below would be vacuous")
+	}
+	if f.bridge.ApprovalAnswerable("tu-never-registered") {
+		t.Fatal("ApprovalAnswerable = true for an id that was never parked")
+	}
+	f.conns()
+	if f.bridge.ApprovalAnswerable("tu-a1") {
+		t.Fatal("ApprovalAnswerable = true with nobody connected")
+	}
+
+	if s := logBuf.String(); s != "" {
+		t.Errorf("ApprovalAnswerable wrote to the log: %s", s)
 	}
 }

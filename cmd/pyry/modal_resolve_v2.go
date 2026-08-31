@@ -674,6 +674,96 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 	return false
 }
 
+// ApprovalAnswerable reports whether approvalID is still parked on a person AND at
+// least one interactive-capable client is connected to answer it (#1915).
+// approvalID is claude's tool_use_id, which is ALSO permbridge's registry id (the
+// control server registers each approval under Request.ToolUseID) and ALSO byModal's
+// value type — one key both sides already agree on, so the eventual consumer needs
+// no new id vocabulary.
+//
+// Both halves of the CONJUNCTION are load-bearing. An approval can sit parked having
+// never been surfaced to anybody: Surface's modal.Record failure path stores no
+// correlation and broadcasts nothing, leaving claude to time out to deny. A
+// connectivity-only report would call that approval answerable while no client has
+// ever seen it; requiring both halves answers negative there, which is the
+// fail-closed direction for a deny deadline.
+//
+// THE PARKED HALF IS CHECKED FIRST, and that ordering is not a flourish. ActiveConns
+// is not a lock acquisition but a blocking round-trip onto the relay manager's Run
+// goroutine, and the consumer sits on permbridge's fail-closed deny path — so the
+// common negative, an approval whose correlation is already gone, must not pay a
+// cross-goroutine hand-off to reach an answer it cannot change.
+//
+// The interactive gate is deliberately the SAME gate broadcast applies (#607): a
+// conn that never negotiated the capability is never pushed a modal_shown, so it can
+// never produce a modal_answer, and counting it would claim an answerer that
+// structurally cannot answer. ActiveConns additionally excludes sessions still
+// handshaking or token-unvalidated, so an un-authenticated peer is never counted
+// either — inherited, not restated. It also returns nil once the daemon ctx is
+// cancelled or Run has exited, which reads as "nobody connected": at teardown nobody
+// can answer, so that is fail-closed too.
+//
+// SNAPSHOT UNDER mu, RELEASE, THEN ASK — the discipline broadcast already
+// establishes in this file by taking mu INSIDE its ActiveConns loop, never around
+// it. mu is a leaf lock; holding it across the hand-off would block every concurrent
+// Surface, retire and ResolveStream for the manager's scheduling latency and would
+// retire the leaf-lock property outright. Here the snapshot is a single bool, so the
+// scan allocates nothing.
+//
+// NEVER CALL THIS FROM THE RELAY Run GOROUTINE. ActiveConns funnels its request onto
+// Run and is documented safe only from other goroutines, so a call from Run
+// deadlocks the manager: Run blocked sending to itself, no frames dispatched, no
+// modals delivered, every parked approval left to its deadline. ResolveStream is a
+// bridge method that already runs on Run, so proximity makes this an easy mistake.
+// permbridge's time.AfterFunc timer goroutine — where the consumer sits — is not Run.
+//
+// A retire, a Surface or a disconnect landing between the scan and the enumeration
+// makes the answer one call stale, and that is CORRECT rather than tolerated: the
+// truth changes under any locking discipline, and a caller that read it under a
+// global lock would still act on it after releasing. The report is a level, not an
+// edge — its consumer re-reads it, so there is no transition to miss.
+//
+// MEMBERSHIP, mirroring Busy and ApprovalParked: THE SIGNATURE IS THE
+// EXISTENCE-ORACLE ENFORCEMENT, not a runtime branch. Unknown, never-surfaced,
+// already-resolved and empty approval ids reach one false through the same scan.
+// There is no id-specific branch, and deliberately no `if approvalID == ""` guard: an
+// empty correlation is never stored because permbridge.Register refuses an empty id
+// before the control server can reach Surface, so that invariant belongs at the write
+// side. A later widening to (bool, error), or any variant handing back a modal id, a
+// conn id or a count, would reintroduce the oracle silently.
+//
+// There is also no b.bcast nil guard: broadcast already dereferences it
+// unconditionally on the Surface and retire paths, so a bridge built without a
+// broadcaster panics long before this report is reached, and a guard here would let a
+// wiring bug read as "nobody can answer".
+//
+// It logs NOTHING, for ApprovalParked's reason: every diagnostic worth emitting from
+// here would carry a tool_use id or a conn id.
+//
+// Callable from any goroutine except the relay Run goroutine.
+func (b *streamApprovalBridge) ApprovalAnswerable(approvalID string) bool {
+	b.mu.Lock()
+	parked := false
+	for _, toolUseID := range b.byModal {
+		if toolUseID == approvalID {
+			parked = true
+			break
+		}
+	}
+	b.mu.Unlock()
+
+	if !parked {
+		return false // nobody is holding this approval — no round-trip needed
+	}
+
+	for _, c := range b.bcast.ActiveConns(b.ctx) {
+		if c.Interactive {
+			return true // the #607 capability gate, the same one broadcast applies
+		}
+	}
+	return false
+}
+
 // retire is the guaranteed cleanup + dismissal backstop the control server defers
 // for a surfaced stream approval. It runs on EVERY Await return (answer, timeout,
 // disconnect, shutdown) in two steps with separate arbiters:
