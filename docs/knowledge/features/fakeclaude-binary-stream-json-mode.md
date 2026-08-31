@@ -333,10 +333,47 @@ proven via the FIFO stdin-pipe chain rather than `queue_state` depth.
 `PYRY_FAKE_CLAUDE_STREAM_APPROVE` (default-off) is a rider on stream mode, mutually
 exclusive with the interrupt rider — a turn either does the approval dance or the
 plain echo. Where every other mode/rider *reacts* to stdin, this one *originates* a
-request: on each `{"type":"user",…}` turn it calls `control.Approve` — the same
-client `pyry mcp-approve` calls — directly against the daemon's control socket,
-blocking until the daemon answers allow/deny, then reflects the verdict into its
-assistant echo instead of parroting the prompt.
+request: on each `{"type":"user",…}` turn it writes an assistant `tool_use` block
+for the gated call, **then** calls `control.Approve` — the same client
+`pyry mcp-approve` calls — directly against the daemon's control socket, blocking
+until the daemon answers allow/deny, then reflects the verdict into its assistant
+echo instead of parroting the prompt.
+
+**The `tool_use` block precedes the dial, on purpose (#1918).** Real claude emits a
+gated call on the stream before the permission gate gets to it — Claude Code's
+enforcement sits *between* the model's `tool_use` emission and the tool's
+`tool_result`, per the permissions reference quoted in
+[agentrun-selfcheck-package.md](agentrun-selfcheck-package.md), and every committed
+`permission_protocol_*` capture shows the call as its own assistant line ahead of its
+`tool_result`. `writeAssistantToolUse(w, msgID, toolUseID)` reproduces that shape:
+one line, `{"type":"assistant","message":{"id":…,"role":"assistant","content":[{"type":"tool_use","id":…,"name":…,"input":…}]}}`,
+reusing the turn's existing `msgID` — the captures show a message's thinking-block
+and `tool_use` lines sharing one id, so this is a shape real claude produces, not an
+invented one. The tool name and input are package consts (`approveToolName`,
+`approveToolInput`) that both `writeAssistantToolUse` and `dialApproval` read, so
+the block on the stream and the payload dialed into `control.Approve` cannot drift
+into describing two different calls — the writer takes no name/input parameter, so
+nothing steers them independently. The block's envelope is a parallel typed family
+(`outToolUseBlock`, `outAsstToolMessage`, `outAssistantToolUse`), not a widened
+`outAsstMessage.Content` — that field stays `[]outTextBlock` and `writeAssistantEcho`
+and its three other callers are untouched.
+
+No `tool_result` line follows the block; nothing needs one. `setBusy`'s close arm
+(#1917's retention) sweeps a conversation's whole retained-call set on `TurnEnd`,
+which the rider's existing `result` line already produces, so the unmatched
+`ToolStart` cannot leak.
+
+**An "arrives before X" claim spanning two transports has to be observed from the
+far side, not from the emitted bytes.** The block reaches the daemon on the child's
+stdout; the approval reaches it on the control socket — two transports, two
+goroutines, so nothing orders their arrival at a client (don't assert it). But
+*within the rider*, "block before dial" is also unprovable from stdout alone: a
+rider that dialled first and wrote the block second would emit byte-identical
+output, since the block's bytes don't depend on the verdict. The only place the
+ordering is visible is the dial's own arrival: a stub control-socket server that
+snapshots the rider's (mutex-guarded) output writer the instant a request lands,
+then asserts the snapshot already contains a parsed `tool_use` block. A snapshot
+with no `ToolStart` in it is a rider that dialled before writing.
 
 ```go
 if os.Getenv(envStreamApprove) != "" {
