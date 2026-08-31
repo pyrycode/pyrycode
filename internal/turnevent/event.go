@@ -916,8 +916,10 @@ type SlashCommand struct {
 // THE PRODUCER HAS SINCE ARRIVED, and the work is split four ways — worth naming
 // because the attributions are the easy thing to get wrong here.
 // internal/streamsup's commandEntryLine holds the DECODE (#1853, in the tree); its
-// emitModelList applies the BYTE CAP, constructs the entries and EMITS this list
-// (#1877, in the tree); the ENTRY-COUNT BOUND, and the drop count that arrives
+// emitSlashCommandList applies the BYTE CAP, constructs the entries and EMITS this
+// list (#1877, in the tree — #1886 moved that construction out of emitModelList into
+// an emitter of its own, so more than one call site reaches it); the ENTRY-COUNT
+// BOUND, and the drop count that arrives
 // with it, is #1826's; and the PUBLISH — turnbridge.MapEvent's arm and cmd/pyry's
 // interactiveTurnEmitterV2.Handle case — is #1720's and is still open. #1719 is
 // CLOSED and was the decode, so it names no future producer.
@@ -984,8 +986,8 @@ type SlashCommandList struct {
 	// WHETHER AN EMPTY LIST IS EMITTED AT ALL IS THE PRODUCER'S GATE and is still
 	// not decided here. It has been ANSWERED, one slice later than ModelList.Models
 	// answered its own — #1811 declared that type and wrote its producer together,
-	// where this one was declared first: streamsup's emitModelList SUPPRESSES the
-	// empty list (#1877), so nothing reaches this field with zero entries. The
+	// where this one was declared first: streamsup's emitSlashCommandList SUPPRESSES
+	// the empty list (#1877), so nothing reaches this field with zero entries. The
 	// WIRE's position is what that producer slice READ, and it did not govern:
 	// protocol.SlashCommandListPayload.MarshalJSON states that [] is a POSITIVE
 	// statement, that claude offered nothing, but the decode collapses an absent

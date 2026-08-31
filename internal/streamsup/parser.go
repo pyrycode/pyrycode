@@ -1179,8 +1179,8 @@ type modelOptionLine struct {
 // committed proof that no charset may be assumed.
 //
 // THAT VALIDATION QUESTION WAS LEFT OPEN FOR THE FIRST SLICE THAT READS Name, AND IT
-// IS ANSWERED HERE. A byte-capped COPY of Name now leaves emitModelList inside a
-// turnevent.SlashCommand (#1877), so the count is no longer the only thing that does.
+// IS ANSWERED HERE. A byte-capped COPY of Name now leaves emitSlashCommandList inside
+// a turnevent.SlashCommand (#1877), so the count is no longer the only thing that does.
 // Validation stays REFUSED and the reason is still NO SINK — but a CHECKED no-sink
 // rather than a structural impossibility, and the check is what this paragraph
 // records. Name reaches: one field of a daemon-internal struct, the parser's emit
@@ -1211,8 +1211,8 @@ type modelOptionLine struct {
 //
 // A PER-FIELD CAP DOES EXIST, one step downstream, which is what narrows the
 // transient/retained contrast this paragraph used to draw: maxSlashCommandName bounds
-// Name at CONSTRUCTION in emitModelList (#1877), where every cap in this package is
-// applied. The transience is unchanged — this slice still lives from json.Unmarshal
+// Name at CONSTRUCTION in emitSlashCommandList (#1877), where every cap in this package
+// is applied. The transience is unchanged — this slice still lives from json.Unmarshal
 // until emitModelList returns — but a BOUNDED COPY of each Name is now retained
 // inside the emitted turnevent.SlashCommandList for that event's lifetime. That is
 // still shorter than the models array's, whose CAPPED result is retained for the
@@ -2260,27 +2260,10 @@ func (p *Parser) emitModelList(line []byte) {
 
 	// THE SECOND GATE, and it is INDEPENDENT of the models one: this rung was reached
 	// because the models array is non-empty, and whether a SlashCommandList joins the
-	// ModelList is decided here on the `commands` array alone. An absent `commands`, a
-	// null one, an empty array and a response object carrying no such key are ONE
-	// reading and all return here — controlResponseLine.Commands is a plain slice
-	// precisely so that they are.
-	//
-	// SUPPRESSION RATHER THAN AN EMPTY EMIT, and the decision is this producer's to
-	// take: turnevent.SlashCommandList.Commands' doc hands it here explicitly. What
-	// decides it is that THE PRODUCER CANNOT MAKE THE STATEMENT AN EMPTY EMIT WOULD BE
-	// MAKING. protocol.SlashCommandListPayload.MarshalJSON declares a wire [] a
-	// POSITIVE statement — claude offered nothing — but by the time this line runs the
-	// decode has already collapsed absent, null and a published [] onto one nil slice,
-	// so the daemon cannot tell "claude offered nothing" from "claude said nothing
-	// about commands". Emitting an empty list would assert the first from evidence
-	// that cannot distinguish it from the second, which is inventing a distinction
-	// rather than reporting one. Rung 3's false-negative asymmetry is NOT the
-	// argument, and was weighed rather than inherited: it rests on both outcomes being
-	// observable to a client (#1849 made them so for models), and nothing publishes
-	// this list today (#1720), so that footing is unavailable here. The wire's []
-	// position is untouched either way — it governs how a list that WAS emitted
-	// serialises, which says nothing about whether to emit one, and #1720 reads it for
-	// that.
+	// ModelList is decided on the `commands` array alone. The gate itself is
+	// emitSlashCommandList's PRECONDITION rather than a guard written here, which is
+	// what lets a second call site inherit the suppression instead of repeating it, so
+	// this call is unconditional.
 	//
 	// THE ORDER IS DELIBERATE, because it is observable in the captured-line
 	// assertions: the models array is this rung's own DISCRIMINANT — the rung exists
@@ -2288,30 +2271,89 @@ func (p *Parser) emitModelList(line []byte) {
 	// independently gated one follows. Gate order and statement order are then one
 	// order a reader checks once.
 	//
-	// The whole block sits BELOW logControlResponse, which is what makes "the record
-	// is unchanged" structural rather than merely intended: six attributes, the same
-	// values and the same reason keyword, whatever happens below.
-	if len(cr.Response.Response.Commands) == 0 {
+	// The CALL sits BELOW logControlResponse, which is what makes "the record is
+	// unchanged" structural rather than merely intended: six attributes, the same
+	// values and the same reason keyword, whatever happens below. emitSlashCommandList
+	// logs nothing on any path, so that holds through the callee too.
+	p.emitSlashCommandList(cr.Response.Response.Commands)
+}
+
+// emitSlashCommandList emits AT MOST ONE turnevent.SlashCommandList for one decoded
+// `commands` array — the initialize reply's slash-command inventory for the workspace
+// the child was spawned in. It takes the DECODED entries rather than the line: the
+// decode, its error path and the whole four-rung classification stay in emitModelList,
+// and a second json.Unmarshal of the same bytes would add a second undecodable outcome
+// to classify.
+//
+// IT LOGS NOTHING, on any path. The one record every control_response produces is
+// logControlResponse's and is written by emitModelList BEFORE this call, which is what
+// keeps "six attributes, the same values, the same reason keyword" a structural
+// property of the caller rather than a promise this function has to keep.
+//
+// THE GATE IS THIS EMITTER'S PRECONDITION, so every caller inherits the suppression
+// rather than repeating it. An absent `commands`, a null one, an empty array and a
+// response object carrying no such key are ONE reading and all return here —
+// controlResponseLine.Commands is a plain slice precisely so that they are.
+//
+// SUPPRESSION RATHER THAN AN EMPTY EMIT, and the decision is this producer's to
+// take: turnevent.SlashCommandList.Commands' doc hands it here explicitly. What
+// decides it is that THE PRODUCER CANNOT MAKE THE STATEMENT AN EMPTY EMIT WOULD BE
+// MAKING. protocol.SlashCommandListPayload.MarshalJSON declares a wire [] a
+// POSITIVE statement — claude offered nothing — but by the time this line runs the
+// decode has already collapsed absent, null and a published [] onto one nil slice,
+// so the daemon cannot tell "claude offered nothing" from "claude said nothing
+// about commands". Emitting an empty list would assert the first from evidence
+// that cannot distinguish it from the second, which is inventing a distinction
+// rather than reporting one. Rung 3's false-negative asymmetry is NOT the
+// argument, and was weighed rather than inherited: it rests on both outcomes being
+// observable to a client (#1849 made them so for models), and nothing publishes
+// this list today (#1720), so that footing is unavailable here. The wire's []
+// position is untouched either way — it governs how a list that WAS emitted
+// serialises, which says nothing about whether to emit one, and #1720 reads it for
+// that.
+//
+// WHERE THE CONSTRUCTED LIST GOES, and it is NOT where a mis-read model inventory
+// goes — emitModelList's own paragraph on that names three destinations and this value
+// reaches none of the three, so the two must not be read across. It goes to the
+// parser's emit callback and, on the interactive lane, to cmd/pyry's
+// interactiveTurnEmitterV2.Handle, which has NO CASE for this variant: it lands on that
+// function's own default, which logs it by kind through eventKind and returns. Because
+// that default returns, emitMapped never runs for it — and emitMapped is
+// turnbridge.MapEvent's only caller on this lane, resolveBoundModelList being handed a
+// ModelList explicitly — so the value never reaches MapEvent AT ALL. "It falls to
+// MapEvent's default" is the wrong reason for the right conclusion. NOTHING RETAINS
+// IT either: there is no sessionModelHold analogue for this array, which
+// maxSlashCommandName's doc already states and owns. Handle's case and MapEvent's arm
+// are both #1720's and still open. What the value DOES reach is eventKind, whose
+// SlashCommandList arm returns the variant NAME only — and that arm, not this doc,
+// carries the enumeration of which drop sites are reachable for it and which are not,
+// so there is one copy to correct when #1720's case lands.
+func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
+	if len(entries) == 0 {
 		return
 	}
-	// slashCommands rather than `commands`, which is already taken by the int the
-	// record reports and would be shadowed here.
-	slashCommands := make([]turnevent.SlashCommand, 0, len(cr.Response.Response.Commands))
-	for _, entry := range cr.Response.Response.Commands {
+	// slashCommands rather than a name shared with the parameter: `entries` holds the
+	// DECODED entries and this holds the CONSTRUCTED turnevent.SlashCommand values, so
+	// two names keep the two apart. The shadowing this name used to avoid — the int
+	// `commands` the record reports — is no longer a hazard: that int stays in
+	// emitModelList.
+	slashCommands := make([]turnevent.SlashCommand, 0, len(entries))
+	for _, entry := range entries {
 		// No `bound` closure and no sequential-statements rule, emitModelAnnounced's
 		// reason verbatim: one field means there is no TruncatedFields ORDER for a
 		// composite literal to decide, which is the only thing either device protects.
-		// The models loop above needs both; a one-field entry needs neither.
+		// emitModelList's models loop needs both; a one-field entry needs neither.
 		name, truncated := truncateField(entry.Name, maxSlashCommandName)
 		// Declared INSIDE the loop, and that scope is the whole of what makes the report
-		// per entry: a cut on one entry cannot appear on the entries after it. The models
-		// loop declares its own `cut` and `droppedLevels` here for the same reason.
+		// per entry: a cut on one entry cannot appear on the entries after it.
+		// emitModelList's models loop declares its own `cut` and `droppedLevels` inside
+		// its own loop for the same reason.
 		var cut []string
 		if truncated {
-			// The DAEMON's snake_case name, the models loop's rule — and for this field it
-			// coincides with the wire name protocol.SlashCommand.TruncatedFields documents,
-			// so a later mapping is a copy rather than a translation. The distinction starts
-			// mattering at argument_hint (#1833).
+			// The DAEMON's snake_case name, emitModelList's models loop's rule — and for this
+			// field it coincides with the wire name protocol.SlashCommand.TruncatedFields
+			// documents, so a later mapping is a copy rather than a translation. The
+			// distinction starts mattering at argument_hint (#1833).
 			cut = append(cut, "name")
 		}
 		slashCommands = append(slashCommands, turnevent.SlashCommand{
@@ -2326,11 +2368,11 @@ func (p *Parser) emitModelList(line []byte) {
 	}
 	// NO ENTRY-COUNT CAP and no DroppedCommands, deliberately: that bound is #1826's
 	// and turnevent.SlashCommandList's own doc fixes the sequencing, so this slice must
-	// not add the field. The precedent is exact and in this same function — #1811
-	// emitted turnevent.ModelList with no entry-count cap and #1812 added
-	// maxModelListEntries and DroppedModels in the next slice — and the consequence
-	// that keeps the record at six attributes is logControlResponse's: with no count
-	// cap the decoded count IS the emitted count.
+	// not add the field. The precedent is exact and in this emitter's caller,
+	// emitModelList — #1811 emitted turnevent.ModelList with no entry-count cap and
+	// #1812 added maxModelListEntries and DroppedModels in the next slice — and the
+	// consequence that keeps the record at six attributes is logControlResponse's: with
+	// no count cap the decoded count IS the emitted count.
 	p.emit(turnevent.SlashCommandList{Commands: slashCommands})
 }
 
