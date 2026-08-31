@@ -78,3 +78,17 @@ tool-call id and a correlation with an empty `ToolUseID` as separate arms, but b
 alongside the same positive control on one other conversation — no second fixture conversation is
 needed, because what separates the arms is which lookup inside `ToolCallInFlight` returns false,
 not which conversation they're attached to.
+
+**A twin's existence-oracle-collapse fixture is not automatically transferable to a sibling
+report over the same store — the direction of the difference matters.** `ApprovalAnswerable`
+(#1915), added beside `ApprovalParked` on the same `streamApprovalBridge`, needed the *opposite*
+empty-id fixture. `ApprovalParked`'s table plants a `byModal` correlation with an empty
+`ToolUseID` and gets away with it only because its own lookup (`ToolCallInFlight`) separately
+refuses an empty tool-call id. `ApprovalAnswerable` instead scans `byModal`'s values directly by
+equality, so the identical plant would *match* the scan and flip its empty-id row positive —
+manufacturing the exact oracle the criterion forbids. The invariant that keeps the row negative
+lives at the write side (`permbridge.Register` refuses an empty id before the control server ever
+reaches `Surface`), not in an `if approvalID == ""` guard on the read side, which would itself be
+the id-specific branch the criterion rules out. Before reusing a sibling's existence-oracle-
+collapse fixture, trace *why* its trap case was harmless there — often a downstream refusal in a
+different lookup — and confirm the new report doesn't skip that same refusal.
