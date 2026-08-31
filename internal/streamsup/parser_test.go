@@ -3737,7 +3737,7 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 			name:       "an ack carrying an inner response payload",
 			line:       `{"type":"control_response","response":{"subtype":"success","request_id":"` + ackID + `","response":{"mode":"default"}}}`,
 			wantReason: "ack",
-			why:        "the set_permission_mode success, verbatim from the probe capture: an inner payload carrying no models array is still an ack",
+			why:        "the set_permission_mode success, verbatim from the probe capture: an inner payload carrying NEITHER array is still an ack, which is what that keyword narrowed to in #1890 — a payload carrying commands and no models is its own rung now",
 		},
 		{
 			name:       "a NAK, consumed with no event and named in the log (#1811)",
@@ -4767,10 +4767,11 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 	tests := []struct {
 		name string
 		line string
-		// wantCommands is the record's `commands` attribute, and its zero value is the
-		// right answer for every row that predates #1853: none of them carries the key.
-		wantReason   string
-		wantCommands int
+		// No wantCommands field: since #1890 relocated the one row that decoded a
+		// non-empty array, EVERY row here reports 0 — the rejected ones because the
+		// array never decoded or the subtype refused it, the ack ones because their
+		// `commands` is absent, null or empty. The attribute is hardcoded below.
+		wantReason string
 	}{
 		{
 			name:       "models is a number",
@@ -4894,17 +4895,6 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 			wantReason: "undecodable",
 		},
 		{
-			// THE NULL CARVE-OUT: encoding/json decodes a null into a non-pointer Go
-			// value as a NO-OP, so the entry lands with an empty Name and is COUNTED
-			// rather than failing the line. The well-formed sibling is what makes the
-			// count say 2 instead of agreeing with a decode that dropped the null entry.
-			name: "an entry's name is null, beside a well-formed sibling",
-			line: initializeLineFixture(t, "success", map[string]any{
-				"commands": []any{commandEntryFixture(nil), commandEntryFixture("deep-research")}}),
-			wantReason:   "ack",
-			wantCommands: 2,
-		},
-		{
 			name:       "commands is null",
 			line:       initializeLineFixture(t, "success", map[string]any{"commands": nil}),
 			wantReason: "ack",
@@ -4950,7 +4940,7 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 				"models":         "0",
 				"dropped":        "0",
 				"levels_dropped": "0",
-				"commands":       strconv.Itoa(tt.wantCommands),
+				"commands":       "0",
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -4960,25 +4950,38 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 }
 
 // TestParser_InitializeControlResponseAckReportsTheCommandCount is #1853's AC 2
-// second half: the ACK rung reports the decoded command count, so a payload carrying
-// commands and no models is distinguishable in the log from one carrying neither
-// array.
+// second half and, since #1890, the proof of the keyword that second half handed
+// over: a success carrying commands and no models lands on its OWN rung and logs
+// controlResponseCommandsOnly, where a success carrying neither array logs the
+// narrowed `ack`. The count still says what decoded on both; what the split added is
+// that the KEYWORD says which payload arrived rather than leaving the count to carry
+// the distinction alone.
 //
 // The fixture is HAND-BUILT because the capture cannot supply it: all three
 // responding arms carry both arrays, so no committed bytes exercise the
 // commands-without-models case. The capture pins the other half
 // (TestParser_InitializeControlResponseCountsTheCapturedCommands).
 //
-// THREE entries, not one. A mutant reporting a bare present/absent bool, a literal 1,
-// or len(models) all read right against a one-entry fixture and wrong against three.
+// THREE entries, not one, on the first row. A mutant reporting a bare present/absent
+// bool, a literal 1, or len(models) all read right against a one-entry fixture and
+// wrong against three.
+//
+// The `neither array` row is the PAIRED NEGATIVE and it is what makes the new keyword
+// a SPLIT rather than a rename: without it a mutant logging commands_only on every
+// success goes green. It is also the reason wantReason is a row field rather than a
+// literal in wantAttrs — the two rows disagree on it now.
+//
 // It is also the one rung where a swap between `commands` and any of the model trio
-// shows: the trio is all-zero here and this count is not.
+// shows: the trio is all-zero here and this count is not. That sentence is scoped to
+// the rows that report a non-zero count, which after #1890 are the commands_only ones
+// — on the narrowed ack row all four ints are 0 and a swap is invisible.
 func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		inner        map[string]any
+		wantReason   string
 		wantCommands int
 		why          string
 	}{
@@ -4989,13 +4992,32 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 				commandEntryFixture("design"),
 				commandEntryFixture("__remote-workflow"),
 			}},
+			wantReason:   "commands_only",
 			wantCommands: 3,
-			why:          "nothing new is emitted, so the rung is still ack — but the record now says what decoded",
+			why:          "nothing is emitted yet, but the rung is no longer ack — the record names the payload it answered (#1890)",
 		},
 		{
-			name:  "neither array",
-			inner: map[string]any{"mode": "default"},
-			why:   "the paired case: an ack carrying neither array reads 0, which is what makes the row above distinguishable",
+			// THE NULL CARVE-OUT: encoding/json decodes a null into a non-pointer Go
+			// value as a NO-OP, so the entry lands with an empty Name and is COUNTED
+			// rather than failing the line. The well-formed sibling is what makes the
+			// count say 2 instead of agreeing with a decode that dropped the null entry.
+			//
+			// It lived in TestParser_InitializeControlResponseRejectBranches until #1890,
+			// which is where a row that decodes and reports 2 never really belonged: it
+			// is a commands-only success, so it is a third fixture for exactly this
+			// outcome and it moved to sit beside its two.
+			name: "an entry's name is null, beside a well-formed sibling",
+			inner: map[string]any{"commands": []any{
+				commandEntryFixture(nil), commandEntryFixture("deep-research")}},
+			wantReason:   "commands_only",
+			wantCommands: 2,
+			why:          "a null name is a no-op decode, so the entry is counted and the line is a commands-only success like the row above",
+		},
+		{
+			name:       "neither array",
+			inner:      map[string]any{"mode": "default"},
+			wantReason: "ack",
+			why:        "the paired negative: a success carrying neither array is what `ack` NARROWED to, and it is what makes the rows above a split rather than a rename",
 		},
 	}
 	for _, tt := range tests {
@@ -5018,7 +5040,7 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 			}
 			wantAttrs := map[string]string{
 				"type":           "control_response",
-				"reason":         "ack",
+				"reason":         tt.wantReason,
 				"models":         "0",
 				"dropped":        "0",
 				"levels_dropped": "0",
@@ -5066,9 +5088,12 @@ func slashCommandNamePreview(s string) string {
 // no input over the cap or well under it can see.
 //
 // The models array is carried by every row because the commands emit rides the
-// MODEL-LIST rung: a line with no models lands on the ack rung and emits nothing at
-// all, which TestParser_InitializeControlResponseAckReportsTheCommandCount pins. A row
-// therefore never states the models half.
+// MODEL-LIST rung: a line with no models emits nothing at all, which
+// TestParser_InitializeControlResponseAckReportsTheCommandCount pins. Since #1890 the
+// rung such a line lands on depends on what else it carries — a commands array like
+// this test's rows puts it on commands_only, and only a line carrying neither array
+// reaches the narrowed ack — but the emit half is the same on both and is what makes
+// the models array load-bearing here. A row therefore never states the models half.
 //
 // Not a row here, deliberately: that an over-cap name is DROPPED, reordered,
 // lowercased or trimmed. #1600's verbatim rule is carried by the exact equality on the
@@ -5204,9 +5229,11 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 }
 
 // TestParser_SlashCommandListIsSuppressed is the suppression table: the second gate
-// on rung 4 is INDEPENDENT of the models one and decides on the `commands` array
-// alone, and the CALL to emitSlashCommandList sits below logControlResponse, below the
-// ModelList emit and below rung 3's return — so no non-emitting rung can reach it.
+// on the MODEL-LIST rung is INDEPENDENT of the models one and decides on the
+// `commands` array alone, and the CALL to emitSlashCommandList sits below
+// logControlResponse, below the ModelList emit and below BOTH returns in the
+// empty-models block — the narrowed ack's and the commands_only rung's (#1890) — so no
+// non-emitting rung can reach it.
 //
 // The first three rows are ONE behaviour rather than three: controlResponseLine's
 // Commands is a plain slice precisely so an absent key, a JSON null and a published []
@@ -5226,12 +5253,13 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 // initializeLineFixture marshals a map — so `commands` decodes before `models` fails
 // and a hoisted block would have a populated array available to it.
 //
-// THE ACK RUNG IS THIS TABLE'S SIXTH ROW AND IT LIVES ELSEWHERE:
+// THE COMMANDS-ONLY RUNG IS THIS TABLE'S SIXTH ROW AND IT LIVES ELSEWHERE:
 // TestParser_InitializeControlResponseAckReportsTheCommandCount's `commands and no
 // models` row already carries three entries, asserts zero events, and asserts the
 // record's six attributes besides — strictly stronger than anything here, so it is not
-// restated. If it reddens, the ack rung's classification changed, which is #1876's
-// scope and not this table's.
+// restated. It was on the ack rung until #1890 gave it a keyword of its own; what this
+// table needs from it is unchanged either way, because the ZERO-EVENTS half is what is
+// borrowed and no keyword moves it.
 func TestParser_SlashCommandListIsSuppressed(t *testing.T) {
 	t.Parallel()
 
@@ -5303,8 +5331,8 @@ func TestParser_SlashCommandListIsSuppressed(t *testing.T) {
 					t.Errorf("event[%d] is a turnevent.SlashCommandList; none may be emitted here (%s)", i, tt.why)
 				}
 			}
-			// The models half is UNTOUCHED by the commands gate: on rung 4 a non-empty
-			// models array still produces its ModelList whatever `commands` holds.
+			// The models half is UNTOUCHED by the commands gate: on the model_list rung a
+			// non-empty models array still produces its ModelList whatever `commands` holds.
 			if tt.wantEvents == 1 && len(events) == 1 {
 				if _, ok := events[0].(turnevent.ModelList); !ok {
 					t.Errorf("event[0] = %T, want turnevent.ModelList — the models half is untouched (%s)",
@@ -5863,7 +5891,7 @@ func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
 }
 
 // TestParser_ModelListIsLoggedContentFree is AC 5: no record on this path carries
-// decoded content, on any of the four rungs. The constraint is #833's posture,
+// decoded content, on ANY rung. The constraint is #833's posture,
 // restated across internal/relay's v2session_settings.go and internal/sessions'
 // pool.go as "model / effort / YOLO values are NEVER logged at any level".
 //
@@ -5878,7 +5906,9 @@ func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
 // name through truncateField while the sweep was watching: a Debug at the truncation
 // site logging the full-length WORKSPACE-AUTHORED name reddened only the record COUNT,
 // and a version appending to the existing record only the DeepEqual. Four lines and
-// five command sentinels close that, one sentinel per rung so a failure names the rung.
+// five command sentinels close that, each named for the rung its line lands on so a
+// failure names the rung. The narrowed ack rung (#1890) carries none, and cannot: a
+// line that decodes a command name is by definition not on it.
 //
 // The undecodable line carrying a commands array is the highest-value one:
 // encoding/json QUOTES the offending input bytes into its error text, so an
@@ -5893,12 +5923,16 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		valueSentinel    = "value-sentinel-181102"
 		displaySentinel  = "display-sentinel-181103"
 		nakSentinel      = "nak-error-sentinel-181104"
-		// One command sentinel per rung, so a leak names the rung it came from.
-		commandFitsSentinel        = "command-fits-sentinel-187801"
-		commandCutPrefix           = "command-cut-sentinel-187802"
-		nakCommandSentinel         = "nak-command-sentinel-187803"
-		undecodableCommandSentinel = "undecodable-command-sentinel-187804"
-		ackCommandSentinel         = "ack-command-sentinel-187805"
+		// One command sentinel per rung that can carry one, so a leak names the rung it
+		// came from. The last was the ack rung's until #1890 split that rung; the line
+		// carrying it lands on commands_only now, and both the name and the value follow
+		// it — a sentinel whose text names the wrong rung would misdirect the one reader
+		// it exists for.
+		commandFitsSentinel         = "command-fits-sentinel-187801"
+		commandCutPrefix            = "command-cut-sentinel-187802"
+		nakCommandSentinel          = "nak-command-sentinel-187803"
+		undecodableCommandSentinel  = "undecodable-command-sentinel-187804"
+		commandsOnlyCommandSentinel = "commands-only-command-sentinel-189001"
 	)
 	// The over-cap name carries its distinctive part at the FRONT and is padded past
 	// the cap with `a`s. The order is load-bearing: a sentinel sitting at the END would
@@ -5936,9 +5970,14 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 				commandEntryFixture(commandCutSentinel),
 			}}),
 		capturedInitializeLine(t, initCaptureArmBase),
-		// The three non-emitting rungs, each twice: once as it stood, and once carrying a
+		// The non-emitting rungs, each paired: once as it stood, and once carrying a
 		// `commands` array whose name is that rung's sentinel. The second of each pair is
 		// what makes the sweep cover a rung that DECODES command names and emits nothing.
+		// The nak and undecodable pairs stay on ONE rung each — the count is taken below
+		// the success gate, so a decoded array does not move them. The last pair does not
+		// stay on one rung: since #1890 its first line is the narrowed ack and its second
+		// is the commands_only rung, so that pair covers two rungs and the sweep gained a
+		// rung without gaining a line.
 		`{"type":"control_response","response":{"subtype":"error","error":"` + nakSentinel + `"}}`,
 		initializeLineFixture(t, "error", map[string]any{
 			"commands": []any{commandEntryFixture(nakCommandSentinel)}}),
@@ -5948,7 +5987,7 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 			"commands": []any{commandEntryFixture(undecodableCommandSentinel)}}),
 		modelListLineFixture(t, "success", []map[string]any{}),
 		initializeLineFixture(t, "success", map[string]any{
-			"commands": []any{commandEntryFixture(ackCommandSentinel)}}),
+			"commands": []any{commandEntryFixture(commandsOnlyCommandSentinel)}}),
 	}
 	for _, line := range lines {
 		if _, err := p.Write([]byte(line + "\n")); err != nil {
@@ -5972,8 +6011,11 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		t.Fatalf("records: got %d, want %d (one per control_response): %+v", len(all), len(lines), all)
 	}
 
+	// The ninth is commands_only rather than ack (#1890): its line carries a non-empty
+	// `commands` and no models, which is now its own rung. The eighth is the narrowed
+	// ack — an empty models array and no commands at all.
 	wantReasons := []string{"model_list", "model_list", "model_list", "nak", "nak",
-		"undecodable", "undecodable", "ack", "ack"}
+		"undecodable", "undecodable", "ack", "commands_only"}
 	wantCounts := []string{"1", "1", "6", "0", "0", "0", "0", "0", "0"}
 	// The captured line's count comes from the capture's own bytes, so a re-capture
 	// moves the expectation with the fixture rather than reddening a transcribed number.
@@ -6014,7 +6056,7 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 	leaks := []string{resolvedSentinel, valueSentinel, displaySentinel, nakSentinel,
 		capturedValue, capturedResolved, capturedDisplay, capturedCommand,
 		commandFitsSentinel, commandCutPrefix, nakCommandSentinel,
-		undecodableCommandSentinel, ackCommandSentinel}
+		undecodableCommandSentinel, commandsOnlyCommandSentinel}
 	for _, r := range all {
 		for _, leak := range leaks {
 			if strings.Contains(r.msg, leak) {

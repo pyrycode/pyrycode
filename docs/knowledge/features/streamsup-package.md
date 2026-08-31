@@ -197,7 +197,7 @@ forge a turn boundary:
 | `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
 | `system/init` | one `ModelAnnounced` **unless** `model` is absent, empty, or undecodable (#1600, below) — the family's only variant naming what claude is actually running, once per **turn** |
 | `rate_limit_event` | one `turnevent.RateLimited` **unless** `rate_limit_info.status` is the one measured-benign value or the line carries no decodable `rate_limit_info` (#1404, below) — the family's **first non-`system` mapping**, and the one whose gate suppresses the common case rather than the rare one |
-| `control_response` | nothing, for every shape but one — consumed **content-free**, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500) — **except** a `success`-subtype response whose `response.response.models` decodes to a non-empty array, which emits one `turnevent.ModelList` (#1811, below). This is still the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority for the two content-free sibling shapes is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. CORRECTED 2026-08-27 (#1811): this used to say a `subtype:"error"` NAK is consumed indistinguishably from a success, deliberately, because discriminating it would cost a decode target for the nested object. #1811 built that decode target for an unrelated reason (publishing the model list) and the NAK gap closed as a side effect — the arm's one Debug record now carries a `reason` that names `nak` distinctly from `ack`/`model_list`/`undecodable` |
+| `control_response` | nothing, for every shape but one — consumed **content-free**, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500) — **except** a `success`-subtype response whose `response.response.models` decodes to a non-empty array, which emits one `turnevent.ModelList` (#1811, below). This is still the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority for the two content-free sibling shapes is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. CORRECTED 2026-08-27 (#1811): this used to say a `subtype:"error"` NAK is consumed indistinguishably from a success, deliberately, because discriminating it would cost a decode target for the nested object. #1811 built that decode target for an unrelated reason (publishing the model list) and the NAK gap closed as a side effect — the arm's one Debug record now carries a `reason` that names `nak` distinctly from `ack`/`commands_only`/`model_list`/`undecodable` — the fifth keyword, `commands_only`, split off `ack` by #1890 (below) |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
@@ -791,9 +791,12 @@ Declaring the array turns a `commands` that arrives as a number, a string or an 
 *silently ignored* into a whole-line decode failure on the undecodable rung — the same shape
 guarantee `models` already had, extended to a second field. `logControlResponse` grew a sixth
 attribute, `commands`, the **decoded** count (not the emitted count `models` reports): taken below
-the success gate and above rung 3's early return, so undecodable and nak report 0 and ack/model_list
-report it — making a payload carrying `commands` and no `models` distinguishable in the log from one
-carrying neither, without touching the four-rung classification itself.
+the success gate and above the empty-models block's return(s), so undecodable and nak report 0 —
+originally making a payload carrying `commands` and no `models` distinguishable from one carrying
+neither by count alone, without touching the classification itself. **#1890 changed that**: `ack`
+now narrows to "neither array" and reports 0, and `commands_only` — a fifth rung, split out of what
+used to be the whole of rung 3 — reports the count instead. The distinction moved from the count to
+the keyword; see below.
 
 *Testing lesson: a gate-placement claim needs a fixture where the two placements disagree.* The row
 pinning "count taken below the subtype check, not above" only works because it pairs a
@@ -829,7 +832,8 @@ still #1720's.
 **The construction moved into its own emitter (#1886).** The cap, the `turnevent.SlashCommand`
 construction and the single emit no longer sit inline at `emitModelList`'s tail — they're
 `emitSlashCommandList`, a method on `*Parser` taking the already-decoded `[]commandEntryLine`, so a
-second classification rung (#1876) can reach the same construction instead of copying it. The
+second classification rung — split out by #1890, below — can reach the same construction instead of
+copying it. The
 `len == 0` gate moved in as the new emitter's precondition rather than staying a guard at the call
 site, making suppression a property of the callee; `emitModelList`'s tail call is unconditional. The
 record stays `logControlResponse`'s, written by `emitModelList` before the call — the new emitter logs
@@ -902,6 +906,48 @@ under a mutant that logs the decoded command name there, its `name` attribute co
 the exact-attrs `reflect.DeepEqual` catches it — the content sweep never fires. A second line on the same
 rung, carrying a real sentinel name, is what makes the sweep's own failure message name the leak. The same
 code review pass is what surfaced the `encoding/json`-quoting correction above.
+
+**The commands-only success gets its own keyword (#1890).** Rung 3's `ack` used to answer two
+different payloads — a success carrying neither array, and one carrying a non-empty `commands` and
+no `models` — with only the decoded count telling them apart on the record. Rung 3 now splits on
+that count: `ack` narrows to "neither array" and reports an all-zero record by definition, and the
+new `commands_only` keyword takes the payload the split carves out. `ack` deliberately stays rung 3
+(not the new keyword) so `emitSlashCommandList`'s existing ordinal cite into the enumeration keeps
+resolving — renumbering the other way would have rotted that cite silently, with no test and no gate
+to catch it. This slice adds no call to `emitSlashCommandList` and emits nothing new; it only decides
+which keyword the sibling that makes this rung emit will inherit, so that sibling moves no keyword
+and adds none.
+
+**The keyword had to name the payload's shape, not the daemon's reaction to it.** A name for the
+emit (`command_list`, parallel to `model_list`) would have been false in this slice, where the rung
+emits nothing; a name spelling "ack" would go false the moment the sibling lands. `commands_only`
+survives both states because it describes what the payload IS rather than what happened to it — the
+general form for any keyword decided ahead of the behavior it will eventually describe.
+
+*Lesson: a closed-set arity claim rots by COUNT WORD, not by rung name, and a name-only sweep misses
+it.* The ticket's own `//`-claim sweep was built by grepping for mentions of "the ack rung," which
+found every claim naming that rung by name but missed five more that described the classification's
+*cardinality* instead — "four rungs," "the three non-emitting rungs," "on any of the four rungs."
+Those went stale from the split alone, independent of whether they mentioned `ack`. A rung-split
+ticket needs two sweeps: one for the rung's name, one for how many rungs the prose says there are.
+
+*Lesson: a test-local sentinel constant is itself a `//` claim.* `ackCommandSentinel` (the
+leak-detection literal on the commands-only fixture) named the pre-split rung in both its identifier
+and its string value. Every assertion using it stayed green through the split — nothing forced a
+second look — because the constant's role in the test doesn't depend on what its name says. The only
+reader it exists for is someone chasing a leak-detection failure message, and a stale name would have
+misdirected exactly that reader. A sentinel constant's name is documentation with the same rot
+exposure as a comment, just invisible to a `//`-claim grep.
+
+*Lesson from code review: build the mutant before writing the counterfactual, because "would go
+green" is often false when several tests cover the same outcome from different angles.* The spec (and
+the PR body inheriting its wording) claimed that deleting one specific test row would let a
+"`commands_only` on every success" mutant pass unnoticed. Code review built that exact mutant with
+that exact row deleted and found three *other* test functions still caught it — the row's real value
+(the paired negative that proves the split, and the reason `wantReason` is a row field rather than a
+hardcoded literal) was true and unaffected, but the "goes green" clause overstated the row's
+uniqueness. A claim about what a mutant would do is an empirical claim; write it after running the
+mutant, not instead of running it.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
