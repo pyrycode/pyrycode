@@ -200,8 +200,14 @@ func driveMCP(t *testing.T, s *approveServer, frame string) (jsonrpcReply, []byt
 // newMCPApproveServer derives: approvalTimeout() + mcpApproveClientMargin, the
 // same env-aware source the daemon hands the pending-approval registry. Raising
 // PYRY_APPROVAL_TIMEOUT must raise both ends of the socket together instead of
-// truncating the client at the constant's 2m30s (#1507). The first two rows are
-// the production-unchanged pins: absent and unparseable both keep 2m30s.
+// truncating the client at the constant's 10m30s (#1507). The first two rows are
+// the production-unchanged pins: absent and unparseable both keep 10m30s.
+//
+// Those two rows are also the tree's only NUMERIC pin on the default window
+// (#1909): TestApprovalTimeout's fallback rows compare against mcpApprovalTimeout
+// symbolically, so they cannot see a value regression. Combined with the margin
+// assertion below they force approvalTimeout() with the env absent to be exactly
+// ten minutes.
 //
 // Serial by construction — t.Setenv forbids t.Parallel, the same constraint
 // TestApprovalTimeout carries. It coexists with this file's parallel tests
@@ -213,13 +219,27 @@ func TestMCPApproveServer_ClientDeadline(t *testing.T) {
 		unset bool
 		want  time.Duration
 	}{
-		{name: "unset falls back to the default window", unset: true, want: 2*time.Minute + 30*time.Second},
-		{name: "unparseable falls back to the default window", env: "not-a-duration", want: 2*time.Minute + 30*time.Second},
+		{name: "unset falls back to the default window", unset: true, want: 10*time.Minute + 30*time.Second},
+		{name: "unparseable falls back to the default window", env: "not-a-duration", want: 10*time.Minute + 30*time.Second},
 		{name: "short override 2s", env: "2s", want: 32 * time.Second},
-		{name: "generous override 10m", env: "10m", want: 10*time.Minute + 30*time.Second},
+		// 12m, not the old 10m: an override row equal to the default proves nothing,
+		// because approvalTimeout() returns that value whether or not it reads the
+		// env. Above the default (so it also pins that the accessor does not clamp
+		// down to it) and below streamTurnHoldTimeout, so the fixture does not read
+		// as advice against the guide's fifteen-minute ceiling.
+		{name: "generous override 12m", env: "12m", want: 12*time.Minute + 30*time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			// The deterministic half of "no row can pass by reading the default": an
+			// override row whose window equals mcpApprovalTimeout is vacuous, since
+			// approvalTimeout() returns it on both the env and the fallback path. The
+			// unset and unparseable rows fail to parse and are excluded by
+			// construction, so no special-casing is needed.
+			if d, err := time.ParseDuration(tc.env); err == nil && d == mcpApprovalTimeout {
+				t.Fatalf("override row env %q equals mcpApprovalTimeout (%v) — vacuous, it passes even if the env is ignored; pick a distinct window", tc.env, mcpApprovalTimeout)
+			}
+
 			// t.Setenv captures the prior value for restore-at-cleanup at call time,
 			// so the Unsetenv below yields a genuine unset row (testing has no
 			// t.Unsetenv) and an operator's real PYRY_APPROVAL_TIMEOUT still cannot

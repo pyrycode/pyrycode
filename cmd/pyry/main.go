@@ -1665,16 +1665,24 @@ const inboundActivateTimeout = 30 * time.Second
 // contract.
 const streamTurnHoldTimeout = 15 * time.Minute
 
-// mcpApprovalTimeout is the human-approval window handed to the
-// pending-approval registry (internal/permbridge) for every VerbMCPApprove
-// request: after it elapses with no resolver decision, the registry's
-// own timer denies the request. Until #1080 wires the modal-resolve
-// consumer there is no resolver, so every production approval times out to
-// deny after this window — inert for now because nothing invokes the verb
-// until the `pyry mcp-approve` sibling wires --permission-prompt-tool. A
-// tuning knob, not a contract; make it configurable when the full chain
-// lands.
-const mcpApprovalTimeout = 2 * time.Minute
+// mcpApprovalTimeout is the DEFAULT human-approval window handed to the
+// pending-approval registry (permbridge.Register) for every VerbMCPApprove
+// request: after it elapses with no resolver decision, the registry's own timer
+// denies the request and deletes the entry. It is a default, not the value —
+// envApprovalTimeout overrides it, and approvalTimeout is the accessor every
+// consumer actually calls.
+//
+// Why ten and not two: waiting is not the unsafe state. The tool does not run
+// while the approval is outstanding, so denying early prevents nothing that
+// remaining pending was not already preventing. The number is about how long a
+// person may reasonably take to reach a phone, not about safety.
+//
+// Why ten and not more: it is deliberately held clear of streamTurnHoldTimeout,
+// which bounds the delivery hold — a give-up there ABANDONS whatever message was
+// queued behind the waiting turn. Raising this past that hold trades a prompt
+// that gives up too early for a message that silently disappears (#1911 is where
+// that abandonment is tracked). A tuning knob, not a contract.
+const mcpApprovalTimeout = 10 * time.Minute
 
 // envApprovalTimeout overrides the human-approval window (mcpApprovalTimeout). A
 // plausibly-operational knob for tuning the window — the e2e (#1139) shrinks it to
