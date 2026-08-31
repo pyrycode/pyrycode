@@ -15,6 +15,7 @@ This guide walks through using `pyry` from first install to running it as a long
 - [Updating pyry](#updating-pyry)
 - [Foreground mode](#foreground-mode-development)
 - [Service mode](#service-mode-production)
+- [Environment knobs](#environment-knobs)
 - [Control verbs](#control-verbs)
 - [Multiple instances](#multiple-instances)
 - [CLI transparency](#cli-transparency)
@@ -143,6 +144,25 @@ since the 2026-07-24 cutover, because the bridge they read was only ever fed by 
 terminal copy loop.
 
 `pyry status`, `pyry logs` and `pyry stop` are unaffected and work from any shell.
+
+## Environment knobs
+
+A few runtime settings are read from the environment rather than from flags, so they apply in both foreground and service mode.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PYRY_NAME` | `pyry` | Instance name, same as `-pyry-name`; the flag wins when both are set |
+| `PYRY_APPROVAL_TIMEOUT` | `2m` | How long an approval waits for a human before the daemon denies it |
+
+`PYRY_APPROVAL_TIMEOUT` is the one worth setting deliberately. When claude asks permission to use a tool, the request is parked until a client answers it, and this is how long the daemon waits before answering "no" on your behalf. Waiting is not the risky state, because the tool does not run while the request is outstanding, so the value is about how long you might reasonably take to reach your phone rather than about safety. Two minutes suits someone sitting at the machine and is short for a remote client. Around ten minutes is a better fit for remote use:
+
+```bash
+PYRY_APPROVAL_TIMEOUT=10m pyry
+```
+
+Do not raise it much past fifteen minutes without reading [issue #1902](https://github.com/pyrycode/pyrycode/issues/1902) first. A message you send while an approval is still pending is held behind it, and that hold gives up after fifteen minutes and discards the message. Setting the approval window longer than the hold trades a prompt that gives up too early for a message that disappears. That issue covers lifting the ceiling properly.
+
+The value takes any Go duration, such as `90s`, `10m` or `1h`. An unset or unparseable value falls back to the default.
 
 ## Control verbs
 
