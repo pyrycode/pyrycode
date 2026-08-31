@@ -343,9 +343,17 @@ an already-specific one through unchanged, so the value is not reliably dated an
 published model list). An absent, empty, or undecodable `model` is consumed with no event and (absent/empty)
 no log at all — the empty case diverges from the task handlers' emit-with-empty-field rule, following
 `emitRateLimit`'s `case ""` suppress-on-empty precedent instead, because the model *is* the whole payload
-here. Only the undecodable path logs, and only the subtype keyword — never `err`, since `encoding/json`
-quotes offending input into its error text and would otherwise leak the value through a channel no
-per-path log check can see. `cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a sixth mapped arm
+here. Only the undecodable path logs, and only the subtype keyword — never `err`. CORRECTED 2026-08-31
+(#1878): this used to justify that with "`encoding/json` quotes offending input into its error text."
+Measured false, by mutation, on the sibling undecodable arm in `emitModelList`: a type-mismatch error
+carries only the Go type path (`json: cannot unmarshal number into Go struct field ... of type
+[]streamsup.modelOptionLine`), never the field's bytes — `encoding/json` quotes input only in narrow
+cases (one character in a `SyntaxError`, the literal in a numeric overflow), never a string field's
+contents, and `Model` is a string field. `err` still stays out of the log, but for the narrower reason:
+those two quoting cases are real, just rarer than the blanket claim implied, and `Model` is single-field
+here so there's no sibling value a partial decode could leave populated to leak instead (contrast
+`commands`, below, where a decode failure on `models` still leaves `Commands` populated).
+`cmd/pyry/interactive_turn_v2.go`'s `eventKind` gained a sixth mapped arm
 (`ModelAnnounced → "model_announced"`, name only), and #1638 gave it a `Handle` arm so it no longer lands
 in `Handle`'s `default`. CORRECTED 2026-08-19 (#1616): this used to say the protocol type and the
 `turnbridge.MapEvent` case would land together "in a later ticket" — they didn't. #1616 declared
@@ -848,6 +856,26 @@ three files over, in a do-not-correct sentence this ticket preserved verbatim (`
 `SlashCommandList` arm: "`emitMapped`'s unmapped drop, which nothing routes it to"). The
 spec-inherited enumeration and the surviving sentence disagreed, and only reading both caught it — an
 enumeration transcribed from a spec is not verified by transcription.
+
+**Proving the bound with a matrix (#1878).** #1877's own liveness proof — one over-cap row, one that
+fits — became a full proof matrix, test-only, in the same file: the cap boundary at and either side of
+`maxSlashCommandName`, the committed capture's fifty-one names verbatim, an exhaustive suppression
+table, and the content-free log sweep extended to every rung. No production file changed.
+
+*Lesson: a fixture-built row's expected OUTPUT, not only its input, decides which mutants it separates.*
+The spec credited the exactly-at-the-cap row with sole redness against a halved `maxSlashCommandName`,
+reasoning that the over-cap row's *input* is built from the same cap fixture and so follows the constant
+down. Measured by mutation, the over-cap row and both mid-rune rows redden too, because their *expected
+lengths* are written against that same fixture. What the exactly-at-the-cap row alone catches is
+`truncateField`'s `<=` boundary itself — no input above or well below the cap can observe that operator
+flipping to `<`. A row's claimed exclusivity needs checking against its assertions, not just its inputs.
+
+*Lesson: a leak sentinel on a rung that decodes nothing is vacuous until paired with a line that actually
+carries the swept data class.* The pre-existing undecodable-rung line carries no `commands` array, so
+under a mutant that logs the decoded command name there, its `name` attribute comes back empty and only
+the exact-attrs `reflect.DeepEqual` catches it — the content sweep never fires. A second line on the same
+rung, carrying a real sentinel name, is what makes the sweep's own failure message name the leak. The same
+code review pass is what surfaced the `encoding/json`-quoting correction above.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
