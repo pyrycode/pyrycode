@@ -5205,12 +5205,12 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 
 // TestParser_SlashCommandListIsSuppressed is the suppression table: the second gate
 // on rung 4 is INDEPENDENT of the models one and decides on the `commands` array
-// alone, and the emit block sits below logControlResponse, below the ModelList emit
-// and below rung 3's return — so no non-emitting rung can reach it.
+// alone, and the CALL to emitSlashCommandList sits below logControlResponse, below the
+// ModelList emit and below rung 3's return — so no non-emitting rung can reach it.
 //
 // The first three rows are ONE behaviour rather than three: controlResponseLine's
 // Commands is a plain slice precisely so an absent key, a JSON null and a published []
-// are one reading, and emitModelList's gate is a len == 0 test. Stated precisely,
+// are one reading, and emitSlashCommandList's gate is a len == 0 test. Stated precisely,
 // because the decoded struct does not collapse them the way the gate does — an absent
 // key and a null both leave the field nil while a published [] leaves an empty
 // non-nil slice. What these rows pin is the GATE's reading of all three, not a claim
