@@ -627,10 +627,15 @@ func (t *turnBusyTracker) openForDelivery(conversationID string) (undo func()) {
 		return func() {}
 	}
 	// Zero delta on both marks: this feed carries no event and no tool call. The
-	// undo's sweep is likewise a no-op by construction — it only fires when this
-	// call actually opened the turn, so the conversation was idle, so its inflight
-	// entry was absent. A delivery's undo can never discard another feed's
-	// retained calls.
+	// undo's sweep is a no-op whenever the conversation was still idle, which is
+	// the ordinary case — the undo only fires when this call actually opened the
+	// turn, so nothing was retained at the moment it was placed. Not
+	// unconditionally, though: the delta is applied ahead of setBusy's membership
+	// early return, so a ToolStart landing between the open and a failed write
+	// does populate the entry — reachable once a /clear has cleared the mark while
+	// the old child is still streaming. Discarding it there is correct rather than
+	// incidental: inflight moves with busy under one lock acquisition, so a
+	// conversation this tracker reports idle never retains a call.
 	if !t.setBusy(conversationID, true, toolCallDelta{}) {
 		return func() {}
 	}

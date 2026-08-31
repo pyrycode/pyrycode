@@ -690,6 +690,81 @@ func TestTurnBusyTracker_ToolCallAttributedToItsOwnConversation(t *testing.T) {
 	}
 }
 
+// #1917 AC1, the sharpest reading of "and as not belonging to any other": the
+// SAME tool-call id in flight on two conversations at once. A collision is the
+// ONLY input that separates the nested retention from a flat
+// map[toolCallID]conversationID, because that flat shape is not
+// conversation-blind — it stores the conversation and the report compares it —
+// so it answers every distinct-id fixture in this file correctly,
+// TestTurnBusyTracker_ToolCallAttributedToItsOwnConversation included.
+//
+// It is still the shape the spec's Security review rejected, and the collision
+// is what shows why. Tool-call ids are minted by each child, so a hostile or
+// confused child on B can emit a tool_use block reusing an id genuinely in
+// flight on A. Flat, B's capture OVERWRITES A's entry and flips A's answer to
+// false — B changing another conversation's answer, retiring the type's SECURITY
+// claim that a child "can only ever mark its OWN conversation busy". Nested, B's
+// fabrication lands under B's own key and the worst it achieves is a false
+// positive about itself. Without this test the nesting is defended by a comment
+// and nothing else: a later "simplify: one lookup, not two" refactor would leave
+// the whole package green.
+//
+// The rows differ only in how B's claim on the shared id ends, and each asserts A
+// is untouched afterwards — a flat map's sweep has to scan by value, so B's close
+// takes A's entry with it too.
+func TestTurnBusyTracker_CollidingToolCallIDStaysConfinedToItsConversation(t *testing.T) {
+	t.Parallel()
+
+	const shared = "tu-shared"
+
+	tests := []struct {
+		name string
+		endB func(*turnBusyTracker)
+	}{
+		{"B's stream says the shared call finished", func(tr *turnBusyTracker) {
+			tr.observe("sess-b", turnevent.ToolUpdate{ToolCallID: shared, Status: turnevent.ToolStatusCompleted})
+		}},
+		{"B's turn ends", func(tr *turnBusyTracker) {
+			tr.observe("sess-b", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+		}},
+		{"B's session is torn down", func(tr *turnBusyTracker) {
+			tr.clearForSession("sess-b")
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+				"sess-a": testConvID,
+				"sess-b": testConvIDB,
+			}), discardLogger())
+
+			tr.observe("sess-a", turnevent.ToolStart{ToolCallID: shared, Title: "Read"})
+			tr.observe("sess-b", turnevent.ToolStart{ToolCallID: shared, Title: "Read"})
+
+			// Both, independently. A flat map cannot get past this pair: B's capture
+			// has already overwritten A's entry.
+			if !tr.ToolCallInFlight(testConvID, shared) {
+				t.Fatalf("ToolCallInFlight(A, %q) = false while A's own stream has it in flight", shared)
+			}
+			if !tr.ToolCallInFlight(testConvIDB, shared) {
+				t.Fatalf("ToolCallInFlight(B, %q) = false while B's own stream has it in flight", shared)
+			}
+
+			tc.endB(tr)
+
+			if tr.ToolCallInFlight(testConvIDB, shared) {
+				t.Errorf("ToolCallInFlight(B, %q) = true after B's call ended, want false", shared)
+			}
+			if !tr.ToolCallInFlight(testConvID, shared) {
+				t.Errorf("ToolCallInFlight(A, %q) = false after B's call ended; B changed A's answer", shared)
+			}
+		})
+	}
+}
+
 // #1917 AC2: every negative reaches false through the identical pair of map
 // lookups, so the report is an existence oracle for neither id. Unknown,
 // never-seen and empty values of EITHER parameter collapse to one answer — the
@@ -709,6 +784,16 @@ func TestTurnBusyTracker_ToolCallInFlightNegativesCollapse(t *testing.T) {
 		"sess-b": testConvIDB,
 	}), discardLogger())
 	tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+
+	// The empty tool-call id is FED as a real event rather than merely never
+	// inserted, which is what gives the empty rows below teeth. streamsup's
+	// emitAssistant copies block.ID into ToolCallID with no non-empty check, so a
+	// tool_use block that simply omits id reaches observe with an empty one; drop
+	// setBusy's refusal of it and that capture lands, making
+	// ToolCallInFlight(A, "") answer true — a conversation-existence oracle keyed
+	// on a value the child controls by omission, which is exactly what this
+	// criterion forbids. ToolCallInFlight's own doc rests on the refusal.
+	tr.observe("sess-a", turnevent.ToolStart{Title: "Read"})
 
 	if !tr.ToolCallInFlight(testConvID, "tu-a1") {
 		t.Fatal("ToolCallInFlight(A, tu-a1) = false with the call in flight; every row below would pass vacuously")
@@ -843,8 +928,11 @@ func TestToolCallDeltaFor_ClassifiesToolVariantsOnly(t *testing.T) {
 		// The ID alone is the discriminant — an empty one is no delta whatever
 		// `started` says, which is why setBusy tests `tool.id != ""` and never the
 		// zero VALUE. Asserting the zero value here instead would pin a normalisation
-		// the classifier deliberately does not perform.
-		{"tool_start with no id carries no delta", turnevent.ToolStart{Title: "Read"}, toolCallDelta{started: true}},
+		// the classifier deliberately does not perform, so this row is named for what
+		// it actually checks: that the classifier passes the empty id THROUGH. That
+		// the empty id then carries no delta is setBusy's refusal, pinned in
+		// TestTurnBusyTracker_ToolCallInFlightNegativesCollapse.
+		{"tool_start with no id passes the empty id through unnormalised", turnevent.ToolStart{Title: "Read"}, toolCallDelta{started: true}},
 		{"text_chunk carries no delta", turnevent.TextChunk{MessageID: "m1", Text: "hello"}, toolCallDelta{}},
 		{"turn_end carries no delta", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, toolCallDelta{}},
 		{"permission_request carries no delta", turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), toolCallDelta{}},
