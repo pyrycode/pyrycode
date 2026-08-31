@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -582,5 +583,248 @@ func TestStreamApproval_RoundTrip(t *testing.T) {
 				t.Error("modal still outstanding after the round-trip")
 			}
 		})
+	}
+}
+
+// --- #1919: which conversation a parked approval belongs to -------------------
+
+// testConvIDC is a third valid conversation id, distinct from testConvID
+// (interactive_turn_v2_test.go) and testConvIDB (stream_turn_drain_test.go). The
+// report fixture's resolver knows it and the tracker never sees it, which is the
+// "known to the daemon, never observed" negative row.
+const testConvIDC = "33333333-3333-4333-8333-333333333333"
+
+// approvalReport is the #1919 fixture: the bridge whose byModal holds the parked
+// correlations, the tracker that answers the membership question, and the two
+// registries the park path runs through.
+//
+// The two halves are joined the way relay.go joins them — the method value
+// assigned AFTER construction — so newStreamApprovalBridge's 14 call sites stay
+// untouched. Note what that assignment is not: it is not a nil-receiver guard on
+// ToolCallInFlight, which #1917 refused on the record. Here the tracker is always
+// live; the absent-dependency arm is the separate PTY-mode case.
+type approvalReport struct {
+	bridge *streamApprovalBridge
+	tr     *turnBusyTracker
+	perm   *permbridge.Registry
+	bcast  *fakeInteractiveBcast
+}
+
+// newApprovalReport builds that fixture. activeConv is the follow-active cursor
+// value the bridge stamps on the modals it raises; the report must not read it,
+// which is what TestStreamApprovalBridge_ApprovalParked_IsConversationKeyedNotCursorKeyed
+// drives it with.
+func newApprovalReport(t *testing.T, activeConv string, logger *slog.Logger) approvalReport {
+	t.Helper()
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+		"sess-a": testConvID,
+		"sess-b": testConvIDB,
+		"sess-c": testConvIDC,
+	}), discardLogger())
+	perm := permbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modalbridge.New(), bcast, func() string { return activeConv }, context.Background(), logger)
+	bridge.toolCallInFlight = tr.ToolCallInFlight
+	return approvalReport{bridge: bridge, tr: tr, perm: perm, bcast: bcast}
+}
+
+// park runs the production park path for toolUseID — permbridge.Register, then
+// the bridge's Surface, which is what writes the modal_id ⇄ tool_use_id
+// correlation the report reads — and returns the retire closure the control
+// server defers.
+func (f approvalReport) park(t *testing.T, toolUseID string) (retire func()) {
+	t.Helper()
+	req, _ := parkApproval(t, f.perm, toolUseID, "Read", json.RawMessage(`{"file":"x"}`))
+	return f.bridge.Surface(req)
+}
+
+// AC1: the report is keyed by the conversation the parked call is in flight on,
+// and that key is NOT the follow-active cursor.
+//
+// The cursor is pointed at B, the conversation that must report negative, and B
+// is itself busy with its own turn and its own tool call — it simply has no
+// approval parked. Both details are load-bearing. An implementation that stamped
+// activeConv() at Surface time reports these two answers exactly inverted, and one
+// that answered len(byModal) > 0 reports B positive; without this fixture both
+// rejected designs pass.
+func TestStreamApprovalBridge_ApprovalParked_IsConversationKeyedNotCursorKeyed(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, testConvIDB, discardLogger())
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	f.tr.observe("sess-b", turnevent.ToolStart{ToolCallID: "tu-b1", Title: "Read"})
+	f.park(t, "tu-a1")
+
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = false with A's own tool call parked on a human")
+	}
+	if f.bridge.ApprovalParked(testConvIDB) {
+		t.Error("ApprovalParked(B) = true; B is busy with its own turn but has no approval parked")
+	}
+}
+
+// AC2: the conversation reports negative again once its approvals resolve, and
+// only after the LAST of them does.
+//
+// It drives retire and deliberately does NOT reconstruct the four terminal paths
+// the criterion names. A client's answer, the deadline, a lost caller and daemon
+// shutdown are four CALLERS of one deleter: retire is the sole correlation
+// deleter, its delete is unconditional, and it takes no path parameter — so there
+// is no mutant a per-caller fixture reddens that this one does not.
+func TestStreamApprovalBridge_ApprovalParked_NegativeOnlyAfterTheLastRetire(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a2", Title: "Read"})
+	retireFirst := f.park(t, "tu-a1")
+	retireSecond := f.park(t, "tu-a2")
+
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Fatal("ApprovalParked(A) = false with two approvals parked")
+	}
+	retireFirst()
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = false after one of two approvals resolved; the second is still parked")
+	}
+	retireSecond()
+	if f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = true after the last approval resolved")
+	}
+}
+
+// AC2, the tracker half: the report is a conjunction across two membership sets,
+// so it goes negative when the CALL side empties even while the correlation side
+// is still populated.
+//
+// The turn's close sweeps A's in-flight calls (inflight moves with busy under one
+// setBusy acquisition) while nothing retires the approval, and negative is the
+// fail-closed direction for a delivery hold. Nothing else in the suite pins this
+// half — the other fixtures all move the byModal side — and asserting bridgeLen is
+// still non-zero is what stops the expectation being met by an accidental
+// correlation delete.
+func TestStreamApprovalBridge_ApprovalParked_GoesNegativeWhenTheCallEnds(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	f.park(t, "tu-a1")
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Fatal("ApprovalParked(A) = false with the call in flight and the approval parked")
+	}
+
+	f.tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	if f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = true after A's turn closed and swept its in-flight calls")
+	}
+	if n := bridgeLen(f.bridge); n == 0 {
+		t.Error("byModal is empty; the negative above came from the correlation side, not the tracker side")
+	}
+}
+
+// AC5: the report emits nothing. Every diagnostic worth logging from it would
+// carry either a conversation id — which clearForSession deliberately withholds as
+// a routing key treated as sensitive — or a tool_use id, so the correct count of
+// log statements inside ApprovalParked is zero.
+//
+// The buffer is reset after Surface so the assertion is scoped to the report and
+// cannot be reddened by the surrounding wiring, and both a positive and a negative
+// conversation are asked so neither arm can log.
+func TestStreamApprovalBridge_ApprovalParked_LogsNothing(t *testing.T) {
+	t.Parallel()
+
+	logger, logBuf := auditLogger()
+	f := newApprovalReport(t, "", logger)
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	f.park(t, "tu-a1")
+
+	logBuf.Reset()
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Fatal("ApprovalParked(A) = false with the approval parked; the assertion below would be vacuous")
+	}
+	if f.bridge.ApprovalParked(testConvIDB) {
+		t.Fatal("ApprovalParked(B) = true with nothing parked for B")
+	}
+
+	if s := logBuf.String(); s != "" {
+		t.Errorf("ApprovalParked wrote to the log: %s", s)
+	}
+}
+
+// AC3: unknown, never-seen and empty values of EITHER id reach the same negative
+// answer, so the report is an existence oracle for neither conversation nor
+// approval ids.
+//
+// One fixture holds every row, including a LIVE POSITIVE CONTROL on A, so no row
+// can pass merely by the report being universally negative. B carries the two
+// approval-id negatives: it is busy with its own turn, and the correlations parked
+// alongside A's name a call the tracker never observed and a call with an empty
+// tool_use id.
+//
+// Two honesty notes. The empty-ToolUseID correlation is NOT production-reachable
+// through the approve lane — permbridge.Register refuses an empty id with
+// ErrDuplicateID and the control server returns on that before Surface runs — so
+// it is built by calling Surface directly and is a POSTURE PIN: it asserts the
+// report cannot be turned into an oracle if that entry ever becomes reachable, not
+// that a live bug exists. And the "by the same path" half of the criterion is a
+// structural claim about the implementation — the absence of an id-specific branch
+// — which no fixture can distinguish, because inserting
+// `if conversationID == "" { return false }` is an equivalent mutant that changes
+// no answer below. The rows pin the answers; the absent branch is read in
+// ApprovalParked.
+func TestStreamApprovalBridge_ApprovalParked_NegativesCollapse(t *testing.T) {
+	t.Parallel()
+
+	const foreignConv = "99999999-9999-4999-8999-999999999999"
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	f.tr.observe("sess-b", turnevent.ToolStart{ToolCallID: "tu-b1", Title: "Read"})
+	f.park(t, "tu-a1")
+	f.park(t, "tu-never-observed")
+	f.bridge.Surface(permbridge.Request{ToolName: "Read", ToolUseID: ""})
+
+	tests := []struct {
+		name string
+		conv string
+		want bool
+	}{
+		{"the control: parked, and the call is in flight", testConvID, true},
+		{"a conversation neither the resolver nor the tracker ever saw", foreignConv, false},
+		{"a conversation the resolver knows but the tracker never saw", testConvIDC, false},
+		{"the empty conversation id", "", false},
+		{"busy with its own turn; the parked ids name a never-observed call and an empty one", testConvIDB, false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := f.bridge.ApprovalParked(tc.conv); got != tc.want {
+				t.Errorf("ApprovalParked(%q) = %v, want %v", tc.conv, got, tc.want)
+			}
+		})
+	}
+}
+
+// The absent dependency answers negative WITHOUT calling out, which is what keeps
+// the daemon's PTY mode semantically unchanged: the bridge is built under
+// w.approvals != nil and approvals is minted unconditionally at the composition
+// root, while the tracker exists only alongside streamSink — two different
+// discriminants, so the bridge is live there and holds no tracker.
+func TestStreamApprovalBridge_ApprovalParked_NoTrackerReportsNegative(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, "", discardLogger())
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	f.park(t, "tu-a1")
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Fatal("ApprovalParked(A) = false with the tracker wired; the assertion below would be vacuous")
+	}
+
+	f.bridge.toolCallInFlight = nil
+
+	if f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = true with no tracker wired; PTY mode must report negative")
 	}
 }

@@ -739,6 +739,25 @@ func startRelayV2(
 	// approvals (foreground/v1) leaves streamApprovals nil ⇒ keystroke-only.
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
+		// The #1919 report's membership half, assigned after construction rather
+		// than passed in — the same shape modalResolver.activeConv/notifyBlocked use
+		// above, and the only way to keep the constructor's 14 call sites untouched.
+		//
+		// THE GUARD IS MANDATORY, not defensive padding. A method value on a nil
+		// *turnBusyTracker is a NON-NIL func that panics on its first call:
+		// ToolCallInFlight takes the tracker's mutex immediately and carries no
+		// receiver guard, by #1917's explicit decision. Unguarded, this assignment
+		// would defeat ApprovalParked's nil short-circuit entirely and turn PTY mode
+		// — where w.busy is nil, the composition root minting it only alongside
+		// streamSink — from "reports negative" into "panics on the first consumer
+		// read". It is the typed-nil-in-an-interface hazard the tracker's observe
+		// documents, arriving through a method value instead of an interface.
+		//
+		// Set before mgr.Run's goroutine starts below, like streamApprovals — no
+		// data race on the field.
+		if w.busy != nil {
+			bridge.toolCallInFlight = w.busy.ToolCallInFlight
+		}
 		modalResolver.streamApprovals = bridge
 		surface = bridge.Surface
 	}
