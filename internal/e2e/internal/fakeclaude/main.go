@@ -1499,6 +1499,45 @@ type outTextBlock struct {
 	Text string `json:"text"`
 }
 
+// outAssistantToolUse / outAsstToolMessage / outToolUseBlock are the assistant line
+// carrying ONE tool_use block — the shape every committed permission capture
+// (internal/e2e/realclaude/testdata/permission_protocol_*) shows for a gated call:
+// its own assistant line whose content is a single-element array. The capture's
+// message also carries model, usage, stop_reason and more, all omitted here for the
+// reason the echo omits them — streamsup's streamMessage reads only id, role and
+// content, and streamBlock reads only type/id/name/input off the block.
+//
+// A DUPLICATED family rather than widening outAsstMessage.Content to []any.
+// writeAssistantEcho is that type's only constructor and has three callers
+// (runStreamJSON, writeStreamResponse, writeVerdictResponse) whose bytes must not
+// move; widening would marshal identically, but then "the echo's bytes are
+// unchanged" would rest on a marshal-equivalence argument instead of on nothing
+// shared having been touched. Same trade this file already made when it duplicated
+// runStreamJSON's read loop for the approve rider.
+//
+// Structs rather than the nested map[string]any writeInterruptAck and its siblings
+// use: those writers need absent-vs-present-false key semantics, this block has a
+// fixed four-key shape, and Go sorts map keys — which would ship id, input, name,
+// type instead of the captures' order and would stop the shape being
+// compile-checked.
+type outAssistantToolUse struct {
+	Type    string             `json:"type"`
+	Message outAsstToolMessage `json:"message"`
+}
+
+type outAsstToolMessage struct {
+	ID      string            `json:"id"`
+	Role    string            `json:"role"`
+	Content []outToolUseBlock `json:"content"`
+}
+
+type outToolUseBlock struct {
+	Type  string          `json:"type"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
 type outResult struct {
 	Type      string `json:"type"`
 	Subtype   string `json:"subtype"`
@@ -2004,16 +2043,45 @@ const (
 // deadline >= the daemon window (client.go), so it doubles as that patient-read line.
 const approveDialTimeout = 30 * time.Second
 
+// approveToolName and approveToolInput describe the ONE gated call the rider
+// originates per turn. Both the tool_use block writeAssistantToolUse puts on the
+// stream and the control.Approve payload dialApproval sends read these, so the two
+// paths cannot drift into describing two different calls (#1918) — which is what
+// makes a downstream join of the stream feed against the approval meaningful rather
+// than coincidental.
+//
+// approveToolInput stays a string const converted at each use site rather than a
+// package-level json.RawMessage: that would be a mutable shared slice read from two
+// call sites. The `cmd` key is deliberately NOT the captures' `command` — nothing
+// consumes this fake's input, and renaming it would change the approve payload for no
+// observable gain.
+const (
+	approveToolName  = "Bash"
+	approveToolInput = `{"cmd":"ls"}`
+)
+
 // runStreamJSONApprove is the approve-rider counterpart of runStreamJSON: per
-// {"type":"user",…} turn it originates ONE permission request via control.Approve
-// (blocking until the daemon answers) and writes one assistant echo carrying the
-// verdict needle + one result{success} line. runStreamJSON stays byte-identical (the
+// {"type":"user",…} turn it writes the gated call's assistant tool_use block, then
+// originates ONE permission request for that same call via control.Approve (blocking
+// until the daemon answers), then writes one assistant echo carrying the verdict
+// needle + one result{success} line. runStreamJSON stays byte-identical (the
 // send / interrupt / queue siblings depend on it), so the ~15-line read loop is
 // duplicated rather than widening its signature — the cheaper trade. Non-user lines
 // are ignored, and the loop returns on EOF or the first write error, exactly like
-// runStreamJSON. Runs on main()'s single goroutine — control.Approve blocks it until
-// the verdict lands, so no assistant output is written mid-approval; -race clean by
-// construction.
+// runStreamJSON.
+//
+// The block goes BEFORE the dial (#1918), which is the position real claude's gate
+// has: the deny-default boundary lives between the tool_use emission and its
+// tool_result, so a gated call appears on the stream first and is gated second. That
+// order is the point rather than a detail — the daemon must hold the call as in
+// flight FOR the duration of the approval, not only after it, which is what an
+// attribution report joining the stream feed to the approval's tool_use_id depends
+// on.
+//
+// Runs on main()'s single goroutine: one write, then a blocking dial, then two
+// writes. Nothing is written WHILE the dial is in flight, and there is no second
+// writer of w, so -race cleanliness is unchanged by moving that first write ahead of
+// the dial.
 func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 	br := bufio.NewReader(r)
 	turn := 0
@@ -2023,8 +2091,15 @@ func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 			if _, ok := userTurnText([]byte(line)); ok {
 				turn++
 				msgID := fmt.Sprintf("m%d", turn)
-				// A unique tool_use_id per turn (the registry correlation key).
+				// A unique tool_use_id per turn (the registry correlation key), carried
+				// onto BOTH paths — the stream block below and the approve payload — so
+				// they describe one call rather than two.
 				toolUseID := fmt.Sprintf("tu-1139-%d", turn)
+				// First write error ends the loop, the rule writeVerdictResponse's call
+				// below already follows.
+				if werr := writeAssistantToolUse(w, msgID, toolUseID); werr != nil {
+					return
+				}
 				verdict := dialApproval(socketFile, toolUseID)
 				if werr := writeVerdictResponse(w, msgID, verdict); werr != nil {
 					return
@@ -2035,6 +2110,39 @@ func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 			return
 		}
 	}
+}
+
+// writeAssistantToolUse writes the single assistant line carrying the gated call's
+// tool_use block as message msgID — the line real claude emits before a permission
+// gate fires, and the one the daemon's parser maps to turnevent.ToolStart.
+//
+// The tool name and input are read from approveToolName / approveToolInput rather
+// than taken as parameters. That is the mechanism behind "one call, described once":
+// the caller has no way to describe a call different from the one dialApproval sends.
+// It is also the security posture — Input is emitted verbatim as json.RawMessage
+// where every other field is a string json.Marshal escapes, so wiring it to
+// caller-controlled bytes would be the stdout line-injection vector
+// writeInitializeAck's doc describes. A future change that adds an input parameter
+// must revisit that.
+//
+// msgID is the turn's existing m<N>: the captures show the assistant lines of one
+// message sharing a message id, and turnevent.ToolStart carries no message id at all,
+// so reusing it is a shape claude produces and is inert to the parser either way.
+// Returns the first marshal/write error.
+func writeAssistantToolUse(w io.Writer, msgID, toolUseID string) error {
+	return writeJSONLine(w, outAssistantToolUse{
+		Type: "assistant",
+		Message: outAsstToolMessage{
+			ID:   msgID,
+			Role: "assistant",
+			Content: []outToolUseBlock{{
+				Type:  "tool_use",
+				ID:    toolUseID,
+				Name:  approveToolName,
+				Input: json.RawMessage(approveToolInput),
+			}},
+		},
+	})
 }
 
 // dialApproval originates one approval against the daemon control socket and maps the
@@ -2053,8 +2161,8 @@ func dialApproval(socketFile, toolUseID string) approveVerdict {
 	ctx, cancel := context.WithTimeout(context.Background(), approveDialTimeout)
 	defer cancel()
 	res, err := control.Approve(ctx, socket, control.ApprovePayload{
-		ToolName:  "Bash",
-		Input:     json.RawMessage(`{"cmd":"ls"}`),
+		ToolName:  approveToolName,
+		Input:     json.RawMessage(approveToolInput),
 		ToolUseID: toolUseID,
 	})
 	if err != nil {

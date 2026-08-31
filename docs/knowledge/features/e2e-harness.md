@@ -337,6 +337,18 @@ on disk). Pair every `PYRY_E2E_BIN` mutant run with a control run of the
 clean-PASS / mutant-FAIL pair proves the mutant actually reached the spawned
 daemon.
 
+**`ensureFakeClaudeBuilt` has the identical shape, and the identical fix
+(#1918).** It shells its own plain `go build ./internal/e2e/internal/fakeclaude`,
+so `go test -overlay=<path>` mutating fakeclaude's `main.go` mutates only the
+test binary's compilation unit — the spawned fake runs unmutated, and a spec
+that dials it (rather than reading its source) reads green for the same
+"vacuous assertion" reason as the pyry case above. `PYRY_E2E_FAKE_CLAUDE_BIN`
+is the injection point, same two-command route: build the mutant to its own
+`-o` path, then run the suite with the env var set to it and a clean-binary
+control run for comparison. An e2e that spawns *both* binaries needs mutants
+targeted at whichever one the claim under test actually lives in — `PYRY_E2E_BIN`
+does not reach fakeclaude and `PYRY_E2E_FAKE_CLAUDE_BIN` does not reach pyry.
+
 **A test-local `t.Setenv("HOME", …)` must come after `ensurePyryBuilt`/
 `ensureFakeClaudeBuilt`, not before (#1631).** Both are `sync.Once`-guarded, so
 whichever caller runs first performs the actual `go build`; every later call
