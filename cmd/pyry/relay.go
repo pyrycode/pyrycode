@@ -233,6 +233,18 @@ type relayWiring struct {
 	// internal/relay; this cmd/pyry-typed value never does. nil in foreground/v1 ⇒
 	// no seam is built at all.
 	runSettings func(convID string) (boundRunSettings, bool)
+	// retainedModelLists enumerates the daemon's currently-retained model lists as
+	// marshal-ready model_list payloads — one per conversation whose bound session
+	// holds a list — for the relay's connect-time reconcile seam (#1867 fills
+	// #1863's V2SessionConfig.RetainedModelLists). Built at main.go over the
+	// conversations registry and *sessions.Pool for the SAME reason runSettings
+	// above is: the internal/sessions dependency stays at the composition root.
+	// OutstandingQueues below is built inline in startRelayV2 only because this
+	// file imports internal/msgqueue; it deliberately does not import
+	// internal/sessions, so the queue precedent does not apply here. The value is
+	// already primitive to internal/relay (protocol is imported both sides), so it
+	// crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒ no reconcile.
+	retainedModelLists func() []protocol.ModelListPayload
 	// approvals is the daemon-singleton pending-approval registry (#1103). The
 	// stream-approval bridge (#1080) constructed in startRelayV2 Lookups/Resolves
 	// parked completers against this SAME instance the control server parks into,
@@ -649,6 +661,18 @@ func startRelayV2(
 		// dequeue handler (QueueRemover below) mutates, so enumerate-current-truth
 		// reflects live backlog state. A pure read: it mints no id and dequeues nothing.
 		OutstandingQueues: outstandingQueues(w.queue),
+		// Connect-time model-list reconcile source (#1867): enumerates the model menu
+		// each conversation's bound session retained from its child's initialize reply
+		// (#1839/#1840) as marshal-ready model_list payloads, so a client that attaches
+		// AFTER that exchange is unicast the current menu on open instead of having to
+		// send a message first to discover which models exist. The live turn lane
+		// (#1849) reaches only a client that was already connected — three independent
+		// loss points sit in front of it (reconcileModelLists names them). Assigned
+		// straight through rather than wrapped in a closure: a wrapper would be non-nil
+		// even when the field is nil and would silently defeat the seam's
+		// nil ⇒ no-reconcile contract, which every foreground/v1 and test wiring relies
+		// on. A pure read: it mints no id and mutates no daemon state.
+		RetainedModelLists: w.retainedModelLists,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. The keystroker is nil-safe-wrapped (#1131): PTY mode

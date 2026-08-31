@@ -128,3 +128,90 @@ func resolveBoundModelList(convReg *conversations.Registry, pool *sessions.Pool,
 	// Models. Hence a refusal rather than a panic, and no log.
 	return out, true
 }
+
+// retainedModelLists adapts the conversation-keyed resolver above to the relay's
+// connect-time reconcile seam (#1863): one marshal-ready
+// protocol.ModelListPayload per conversation whose bound session currently holds
+// a list. The shape is outstandingQueues' — dependencies in, a closure out, one
+// payload per contributing entity, a pure read — and the ENUMERATION is forced
+// rather than chosen: a relay V2Session carries no conversation id, so there is
+// nothing to key the resolver on at connect time and the only way to fill a
+// conversation-scoped seam is to walk the registry.
+//
+// The comma-ok is the ONLY filter. This function reads no field of Conversation
+// but ID, and inspects no payload it is about to append. Every refusal rule stays
+// inside resolveBoundModelList, where #1857 put them; a second spelling here
+// would be a second place the rule is decided. In particular there is
+// deliberately NO len(Models) > 0 check — the resolver's bool is the only
+// spelling of "nothing to send" and no arm of it answers true with an empty
+// Models, so such a check would be a strictly weaker restatement no test could
+// redden.
+//
+// The DOUBLE LOOKUP is deliberate. Registry.List already hands back each
+// Conversation, CurrentSessionID included, and this loop throws that away so the
+// resolver can Get the row again. Reading CurrentSessionID off the listed row and
+// calling Pool.Lookup directly would fork the empty-CurrentSessionID guard, which
+// is the #678 isolation enforcement point: Pool.Lookup("") returns the BOOTSTRAP
+// session, so a fork that drifted would hand an unbound conversation the shared
+// bootstrap child's menu stamped with its own conversation id. The pool's
+// bootstrap session contributes nothing for the same reason it needs no special
+// case — it has no conversation record, so it never appears in List at all, and
+// ModelListPayload is conversation-scoped with no id to stamp for it.
+//
+// The cost of that choice is O(rows²) comparisons: Registry.Get is a linear scan,
+// so N rows cost N scans, plus one deep copy per contributing session's list.
+// This runs once per interactive handshake and never per turn, so at the tens to
+// hundreds of rows this daemon carries it is microseconds on the relay manager's
+// Run goroutine. It is stated because the registry only GROWS — auto-archive sets
+// a flag rather than deleting, and archived rows are deliberately enumerated
+// below — so whoever hits it can see the cost. The fix, if one is ever needed, is
+// an id-keyed index inside internal/conversations, NOT reading the binding off
+// the listed row.
+//
+// Enumerate-all, unfiltered, so ARCHIVED conversations CONTRIBUTE. List with no
+// filter returns them, and Registry.SetArchived writes exactly one field without
+// unbinding CurrentSessionID, so an archived conversation whose bound session
+// still holds a list produces a payload. That is intended: the reconcile asserts
+// current control truth and the client decides what to show. Neither adding nor
+// omitting a conversations.ListFilter here is a free edit.
+//
+// Order is List's (registry insertion order) and is NOT a contract.
+// reconcileModelLists sends one envelope per payload and the client correlates on
+// conversation_id, so callers and tests index by ConversationID, never by
+// position.
+//
+// SECURITY: a pure read — it mints nothing, retires nothing and mutates no daemon
+// state. It takes NO logger and MUST NOT grow one, resolveBoundModelList's #833
+// rule inherited for its reason: the only thing a "why did this row not
+// contribute" line could carry is a conversation id or the model values
+// themselves. Every id it hands the resolver came out of this daemon's own
+// registry and is server-minted (handlers.CreateConversation builds each row's ID
+// from conversations.NewID), so the resolver's untrusted-id arm is unreachable
+// from this entry point and needs no second guard here. This path applies no
+// bound of its own: the payloads arrive already bounded at construction
+// (DroppedModels, TruncatedFields) and the count is deliberately uncapped, the
+// shape outstandingQueues already ships.
+//
+// Concurrency: synchronous on the caller's goroutine; nothing is spawned, so
+// there is nothing to leak or join. The per-row Get runs OUTSIDE List's lock
+// scope because the loop iterates the copy List returns — do not restructure
+// through Registry.Update or any registry-held callback, which would both add a
+// registry→pool lock edge the daemon does not have today and deadlock against
+// Update's own no-re-entry rule. The List → Get window is the benign TOCTOU the
+// resolver documents: a row created, deleted, rebound or rotated inside it either
+// resolves to the menu of the session bound a moment ago or refuses, and both are
+// correct. No re-read, no retry, no re-list.
+func retainedModelLists(convReg *conversations.Registry, pool *sessions.Pool) func() []protocol.ModelListPayload {
+	return func() []protocol.ModelListPayload {
+		convs := convReg.List()
+		out := make([]protocol.ModelListPayload, 0, len(convs))
+		for _, c := range convs {
+			payload, ok := resolveBoundModelList(convReg, pool, string(c.ID))
+			if !ok {
+				continue
+			}
+			out = append(out, payload)
+		}
+		return out
+	}
+}
