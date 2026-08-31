@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -639,6 +640,262 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 	}
 }
 
+// --- #1917: in-flight tool-call retention --------------------------------------
+
+// #1917 AC1: a tool call is reported in flight on the conversation whose stream
+// carried it AND on no other, and several calls in flight at once are reported
+// independently.
+//
+// The load-bearing test of the slice. A retention set that ignores the
+// conversation key entirely — one flat set of tool-call ids with no conversation
+// in it at all — satisfies every other clause of the criterion and every other
+// test in this file; only the negative rows below kill it. A single-entry "most
+// recent call" retention is killed by the two-calls-on-A rows, which claude's
+// parallel tool_use blocks inside one assistant message make reachable.
+//
+// NO cursor exists anywhere in this test, copying
+// TestTurnBusyTracker_PerConversationIndependence: the tracker holds no cursor
+// reference at all, so a cursor move cannot change any verdict. That absence is
+// the whole premise of the ticket — activeConv() moves at ENQUEUE, so a message
+// enqueued for B while A's turn is parked would misattribute every later
+// approval on A to B.
+func TestTurnBusyTracker_ToolCallAttributedToItsOwnConversation(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+		"sess-a": testConvID,
+		"sess-b": testConvIDB,
+	}), discardLogger())
+
+	tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+	tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a2", Title: "Bash"})
+	tr.observe("sess-b", turnevent.ToolStart{ToolCallID: "tu-b1", Title: "Read"})
+
+	tests := []struct {
+		conv string
+		tool string
+		want bool
+	}{
+		{testConvID, "tu-a1", true},
+		{testConvID, "tu-a2", true}, // ...both of A's calls at once
+		{testConvIDB, "tu-b1", true},
+		{testConvIDB, "tu-a1", false}, // and neither of A's belongs to B
+		{testConvIDB, "tu-a2", false},
+		{testConvID, "tu-b1", false},
+	}
+	for _, tc := range tests {
+		if got := tr.ToolCallInFlight(tc.conv, tc.tool); got != tc.want {
+			t.Errorf("ToolCallInFlight(%q, %q) = %v, want %v", tc.conv, tc.tool, got, tc.want)
+		}
+	}
+}
+
+// #1917 AC2: every negative reaches false through the identical pair of map
+// lookups, so the report is an existence oracle for neither id. Unknown,
+// never-seen and empty values of EITHER parameter collapse to one answer — the
+// posture Busy's own doc records ("the signature is the existence-oracle
+// enforcement, not a runtime branch"), doubled here because the pair could
+// otherwise oracle the conversation id or the tool-call id.
+//
+// One call is genuinely in flight on A throughout, so no row can pass merely by
+// the retention being empty.
+func TestTurnBusyTracker_ToolCallInFlightNegativesCollapse(t *testing.T) {
+	t.Parallel()
+
+	const foreignConv = "99999999-9999-4999-8999-999999999999"
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+		"sess-a": testConvID,
+		"sess-b": testConvIDB,
+	}), discardLogger())
+	tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+
+	if !tr.ToolCallInFlight(testConvID, "tu-a1") {
+		t.Fatal("ToolCallInFlight(A, tu-a1) = false with the call in flight; every row below would pass vacuously")
+	}
+
+	tests := []struct {
+		name string
+		conv string
+		tool string
+	}{
+		{"unknown conversation, known tool", foreignConv, "tu-a1"},
+		{"known conversation, unknown tool", testConvID, "tu-nope"},
+		{"both unknown", foreignConv, "tu-nope"},
+		{"empty conversation, known tool", "", "tu-a1"},
+		{"known conversation, empty tool", testConvID, ""},
+		{"both empty", "", ""},
+		{"a conversation the resolver knows but the tracker never saw", testConvIDB, "tu-a1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tr.ToolCallInFlight(tc.conv, tc.tool) {
+				t.Errorf("ToolCallInFlight(%q, %q) = true, want false", tc.conv, tc.tool)
+			}
+		})
+	}
+}
+
+// #1917 AC3: every close feed drops the conversation's in-flight calls. The rows
+// differ only in the drop driver applied after a ToolStart on A, and a second
+// call stays in flight on B throughout — so a row cannot pass by wiping
+// everything, which is what an unkeyed sweep would do.
+//
+// The /clear rotation and the idle/cap eviction are ONE row rather than two on
+// purpose: transitionClearsTurn is what routes both to this single
+// clearForSession call, and TestTurnBusyTracker_ClearForSession already pins
+// that routing.
+func TestTurnBusyTracker_ToolCallDropSignals(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		drop func(*turnBusyTracker)
+	}{
+		{"the stream says the call finished", func(tr *turnBusyTracker) {
+			tr.observe("sess-a", turnevent.ToolUpdate{ToolCallID: "tu-a1", Status: turnevent.ToolStatusCompleted})
+		}},
+		{"the turn ends", func(tr *turnBusyTracker) {
+			tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+		}},
+		{"the turn is cancelled", func(tr *turnBusyTracker) {
+			tr.observe("sess-a", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonCancelled})
+		}},
+		{"the session is torn down", func(tr *turnBusyTracker) {
+			tr.clearForSession("sess-a")
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTurnBusyTracker(stubBusyResolve(map[string]string{
+				"sess-a": testConvID,
+				"sess-b": testConvIDB,
+			}), discardLogger())
+
+			tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: "Read"})
+			tr.observe("sess-b", turnevent.ToolStart{ToolCallID: "tu-b1", Title: "Read"})
+			if !tr.ToolCallInFlight(testConvID, "tu-a1") {
+				t.Fatal("ToolCallInFlight(A, tu-a1) = false before the drop; the assertion below would pass vacuously")
+			}
+
+			tc.drop(tr)
+
+			if tr.ToolCallInFlight(testConvID, "tu-a1") {
+				t.Error("ToolCallInFlight(A, tu-a1) = true after the drop, want false")
+			}
+			if !tr.ToolCallInFlight(testConvIDB, "tu-b1") {
+				t.Error("ToolCallInFlight(B, tu-b1) = false; the drop reached a conversation it was not for")
+			}
+		})
+	}
+}
+
+// #1917 AC1 (the mid-turn case, which the ordering inside setBusy is what makes
+// work): a ToolStart landing on an ALREADY-BUSY conversation is still captured.
+// The tool delta is applied before setBusy's membership early return precisely
+// for this — open == was fires that return for every tool call but the first of a
+// turn, so a delta applied after it would capture none of them.
+func TestTurnBusyTracker_ToolCallCapturedMidTurn(t *testing.T) {
+	t.Parallel()
+
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), discardLogger())
+
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "hello"})
+	if !tr.Busy(testConvID) {
+		t.Fatal("Busy = false after an opener; the tool call below would not be arriving mid-turn")
+	}
+
+	tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"})
+	if !tr.ToolCallInFlight(testConvID, "tu-1") {
+		t.Error("ToolCallInFlight = false for a tool call started mid-turn, want true")
+	}
+}
+
+// #1917: toolCallDeltaFor is pure and switches on the Go variant type only.
+//
+// The ToolUpdate rows are one per ToolStatus value, all expecting the SAME drop
+// — that is what pins "Status is deliberately not read" and reddens a later
+// `switch upd.Status` refinement. Reading it would break the discipline
+// turnMarkFor states, that no content claude produced steers the answer, and
+// would fail OPEN: a fabricated in-progress tool_result would pin a finished
+// call in flight instead of dropping it. In production a ToolUpdate is always
+// terminal anyway — the parser emits it from one site, emitUser, and toolStatus
+// maps is_error onto completed/failed only.
+//
+// The PermissionRequest row is the interesting negative: it is the one other
+// variant carrying a ToolCallID, and it must still contribute no delta.
+func TestToolCallDeltaFor_ClassifiesToolVariantsOnly(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ev   turnevent.Event
+		want toolCallDelta
+	}{
+		{"tool_start adds", turnevent.ToolStart{ToolCallID: "tu-1", Title: "Read"}, toolCallDelta{id: "tu-1", started: true}},
+		{"tool_update drops (pending)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusPending}, toolCallDelta{id: "tu-1"}},
+		{"tool_update drops (in_progress)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusInProgress}, toolCallDelta{id: "tu-1"}},
+		{"tool_update drops (completed)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusCompleted}, toolCallDelta{id: "tu-1"}},
+		{"tool_update drops (failed)", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusFailed}, toolCallDelta{id: "tu-1"}},
+		// The ID alone is the discriminant — an empty one is no delta whatever
+		// `started` says, which is why setBusy tests `tool.id != ""` and never the
+		// zero VALUE. Asserting the zero value here instead would pin a normalisation
+		// the classifier deliberately does not perform.
+		{"tool_start with no id carries no delta", turnevent.ToolStart{Title: "Read"}, toolCallDelta{started: true}},
+		{"text_chunk carries no delta", turnevent.TextChunk{MessageID: "m1", Text: "hello"}, toolCallDelta{}},
+		{"turn_end carries no delta", turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}, toolCallDelta{}},
+		{"permission_request carries no delta", turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), toolCallDelta{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := toolCallDeltaFor(tc.ev); got != tc.want {
+				t.Errorf("toolCallDeltaFor(%T) = %+v, want %+v", tc.ev, got, tc.want)
+			}
+		})
+	}
+}
+
+// #1917 AC4: no log line is added on any tool-call path.
+//
+// ZERO records rather than a substring scan over forbidden fields. A scan has to
+// enumerate what it forbids and goes vacuous the day a diagnostic names
+// something new; the count reddens on any added line whatever it carries. The
+// tool's name and its raw input are both present on the fed event, so a
+// diagnostic that echoed either would be caught.
+//
+// The session RESOLVES, so the pre-existing stream_turn.busy_unresolved line —
+// content-free, and not this criterion's subject — is not what is being measured.
+func TestTurnBusyTracker_ToolCallPathLogsNothing(t *testing.T) {
+	t.Parallel()
+
+	recs := make(chan slog.Record, 8)
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}),
+		slog.New(dropWatcher{recs: recs}))
+
+	tr.observe("sess-a", turnevent.ToolStart{
+		ToolCallID: "tu-1",
+		Title:      "Bash",
+		RawInput:   json.RawMessage(`{"command":"echo hi"}`),
+	})
+	if !tr.ToolCallInFlight(testConvID, "tu-1") {
+		t.Fatal("ToolCallInFlight = false after a ToolStart; the record count below would be measuring nothing")
+	}
+	tr.observe("sess-a", turnevent.ToolUpdate{ToolCallID: "tu-1", Status: turnevent.ToolStatusCompleted})
+	_ = tr.ToolCallInFlight(testConvID, "tu-1")
+	// The empty-id refusal is silent too — the classification arm most likely to
+	// attract a diagnostic later.
+	tr.observe("sess-a", turnevent.ToolStart{Title: "Read"})
+
+	if n := len(recs); n != 0 {
+		t.Errorf("the tool-call path emitted %d log record(s), want 0", n)
+	}
+}
+
 // --- #1199: the delivery feed -------------------------------------------------
 
 // busyGeneration reads the tracker's current generation channel. Channel IDENTITY
@@ -1058,6 +1315,46 @@ func TestStreamTurnDrainV2_ExitClearsInlineBeforeTheNextEnvelope(t *testing.T) {
 
 	if busy.Busy(testConvID) {
 		t.Errorf("Busy(A) = true once a later envelope had already been processed; the clear did not run inline on the drain goroutine")
+	}
+}
+
+// #1917 AC3 (last clause): a child that dies mid-turn drops the tool calls it
+// left in flight. Drain tier, on the exit lane, so the drop can only have come
+// from there: no result line is fed, so no TurnEnd is ever parsed for this turn,
+// and no transition observer exists anywhere in this fixture.
+//
+// The line is the real tool_use block, through the real parser — the reachable
+// input the unit-tier tables stand in for.
+func TestStreamTurnDrainV2_ExitDropsInFlightToolCall(t *testing.T) {
+	t.Parallel()
+
+	sink, busy, drops := exitLaneDrain(t)
+
+	feedLines(sink, "sess-a", toolUseLine)
+
+	// Barrier: the not-active drop is logged AFTER observe on the same goroutine,
+	// so seeing it proves the tracker was already fed. No sleep.
+	waitDropKind(t, drops, "tool_start")
+
+	// NOT decoration, and it has to come FIRST: a tracker that captured nothing at
+	// all reports exactly the same false as one that dropped correctly, so without
+	// this the negative below passes vacuously.
+	if !busy.ToolCallInFlight(testConvID, "tu-1") {
+		t.Fatalf("ToolCallInFlight(A, tu-1) = false after A's tool_use block; the assertion below would pass vacuously")
+	}
+
+	sink.exitFor("sess-a")()
+
+	// Barrier: the clear's setBusy closes t.changed, which is what wakes WaitIdle
+	// — the one barrier an exit envelope offers, since its arm continues before
+	// the gate's drop log and before any push.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	if err := busy.WaitIdle(waitCtx, testConvID); err != nil {
+		t.Fatalf("WaitIdle(A) = %v after a child-exit signal for A's session, want nil", err)
+	}
+	if busy.ToolCallInFlight(testConvID, "tu-1") {
+		t.Errorf("ToolCallInFlight(A, tu-1) = true after the exit closed A's abandoned turn, want false")
 	}
 }
 

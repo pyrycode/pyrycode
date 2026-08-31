@@ -33,6 +33,16 @@ import (
 // posture screenSnapshotterOrNil records). The map is bounded by the
 // conversations currently mid-turn, not by every conversation ever seen.
 //
+// A SECOND membership set sits beside it, and it is membership too: inflight
+// holds the tool calls that have not finished, keyed by conversation and then by
+// claude's tool_use_id — never the tool's name, its input, or a timestamp
+// (#1917). ToolCallInFlight collapses unknown, never-seen and empty values of
+// EITHER key to one false through the identical pair of lookups, for the reason
+// the paragraph above gives, doubled because the pair could otherwise oracle
+// either id. Its own bound is tighter: an outer key exists only while its inner
+// set is non-empty, and the whole entry dies with the turn at every close feed
+// below.
+//
 // THREE FEEDS close a turn here, and between them no reachable sequence leaves a
 // conversation reported busy forever: its TurnEnd arriving on the fan-in
 // (observe); a pool teardown transition — a /clear rotation or an idle/cap
@@ -101,6 +111,18 @@ type turnBusyTracker struct {
 
 	mu   sync.Mutex
 	busy map[string]struct{}
+	// inflight holds the tool calls currently in flight, keyed by conversation and
+	// then by claude's tool_use_id. NESTED rather than a flat
+	// map[toolCallID]conversationID, and that is a SECURITY property rather than a
+	// shape preference: tool-call ids are minted by each child, so a hostile or
+	// confused child on conversation C can emit a tool_use block reusing an id
+	// genuinely in flight on A. Flat, that capture would OVERWRITE A's entry and
+	// flip A's answer to false — C changing another conversation's answer. Nested,
+	// C's fabrication lands under C's own key and the worst it achieves is a false
+	// positive about itself, which is exactly the bound the SECURITY paragraph
+	// above already claims. Sweeping is O(1) either way here — one delete of the
+	// outer key rather than a scan.
+	inflight map[string]map[string]struct{}
 	// changed is a generation channel: never sent on, closed and replaced under mu
 	// whenever set membership actually changes. One channel serves every waiter —
 	// each re-checks its own key after a wakeup, so a spurious wakeup costs a map
@@ -120,10 +142,11 @@ func newTurnBusyTracker(resolve func(sessionID string) (conversationID string, o
 		logger = slog.Default()
 	}
 	return &turnBusyTracker{
-		resolve: resolve,
-		logger:  logger,
-		busy:    make(map[string]struct{}),
-		changed: make(chan struct{}),
+		resolve:  resolve,
+		logger:   logger,
+		busy:     make(map[string]struct{}),
+		inflight: make(map[string]map[string]struct{}),
+		changed:  make(chan struct{}),
 	}
 }
 
@@ -197,6 +220,45 @@ func turnMarkFor(ev turnevent.Event) turnMark {
 	}
 }
 
+// toolCallDelta is one event's effect on the in-flight set. The zero value
+// carries no delta, which is what every non-tool variant produces.
+type toolCallDelta struct {
+	id      string // empty ⇒ no delta
+	started bool   // true: the call went in flight; false: it finished
+}
+
+// toolCallDeltaFor classifies one event. Pure, and switches on the Go variant
+// type only — the sole field it reads is the id itself, never a discriminant.
+// That is turnMarkFor's discipline, kept for the same reason: no content claude
+// produced may steer the answer.
+//
+// A ToolUpdate always DROPS, and its Status is deliberately not read. The parser
+// emits ToolUpdate from exactly one site, emitUser, out of a tool_result block,
+// and toolStatus maps is_error onto completed/failed only — never pending, never
+// in progress — so a ToolUpdate in production is always terminal.
+// turnevent.ToolStatusInProgress has no production producer at all. Reading
+// Status would therefore buy nothing and would fail OPEN: a fabricated
+// in-progress tool_result would pin a finished call in flight instead of
+// dropping the child's own call early.
+//
+// NOT folded into turnMarkFor, which has a second caller — sinkFor, whose
+// never-drop reserve reads the same value. Widening its return would couple the
+// fan-in's drop policy to tool-call retention for no reason. Two small pure
+// classifiers, one concern each.
+func toolCallDeltaFor(ev turnevent.Event) toolCallDelta {
+	switch e := ev.(type) {
+	case turnevent.ToolStart:
+		return toolCallDelta{id: e.ToolCallID, started: true}
+	case turnevent.ToolUpdate:
+		return toolCallDelta{id: e.ToolCallID}
+	default:
+		// Every other variant, PermissionRequest included — it carries a
+		// ToolCallID but is a question about a call, not a change to whether one
+		// is running, and it never reaches this fan-in anyway.
+		return toolCallDelta{}
+	}
+}
+
 // observe feeds one fan-in envelope into the tracker. It is called only from the
 // drain goroutine, so it inherits that goroutine's single-writer invariant
 // (`exitFor`) — but the type is self-synchronised regardless,
@@ -245,7 +307,16 @@ func (t *turnBusyTracker) observe(sessionID string, ev turnevent.Event) {
 		return
 	}
 
-	t.setBusy(convID, opens)
+	// The tool-call delta rides the resolve and the non-empty check above rather
+	// than repeating them: an unresolvable session captures nothing, so no call is
+	// ever retained under an empty conversation key, and no second resolve call is
+	// needed — which is what keeps resolve outside t.mu, as its own note requires.
+	//
+	// A turnMarkNone event returns before this, so a variant that is neither
+	// opener nor closer contributes no delta even if a future one carried an id.
+	// That is the correct answer: a call cannot be in flight on a conversation
+	// with no turn open.
+	t.setBusy(convID, opens, toolCallDeltaFor(ev))
 }
 
 // clearForSession closes any open turn on the conversation that owns sessionID.
@@ -318,12 +389,21 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 		return
 	}
 
-	t.setBusy(convID, false)
+	t.setBusy(convID, false, toolCallDelta{})
 }
 
-// setBusy applies one membership change for conversationID under a SINGLE t.mu
-// acquisition, broadcasting on t.changed only when the set actually moved, and
-// reports whether it moved.
+// setBusy applies one membership change for conversationID — AND that event's
+// tool-call delta — under a SINGLE t.mu acquisition, broadcasting on t.changed
+// only when the busy set actually moved, and reports whether it moved.
+//
+// Carrying the delta here rather than in a capture method of its own is what
+// makes the two mutations atomic against each other, and the split version is a
+// reachable lost update rather than a style question: observe runs on the drain
+// goroutine while the teardown feed runs clearForSession on the pool's lifecycle
+// or rotation-watcher goroutine, so a /clear landing between the mark and a
+// separate capture would sweep an empty inflight entry and let the capture
+// re-insert afterwards — a call reported in flight on a conversation whose
+// session is gone, and invisible to -race because both paths hold t.mu.
 //
 // Shared by every feed rather than hand-duplicated in each: the close-and-replace
 // protocol below is the invariant WaitIdle's check-and-subscribe atomicity
@@ -337,9 +417,39 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 // never opened, reporting a live turn idle and letting the next message through
 // unheld. The two event-driven callers discard it, which Go permits with no edit
 // at their call sites.
-func (t *turnBusyTracker) setBusy(conversationID string, open bool) (changed bool) {
+func (t *turnBusyTracker) setBusy(conversationID string, open bool, tool toolCallDelta) (changed bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// The tool delta is applied BEFORE the membership comparison, and that
+	// ordering is a contract rather than a detail. A ToolStart mid-turn arrives on
+	// an ALREADY-BUSY conversation, so open == was and the early return below
+	// fires; a delta applied after it would capture nothing but the first tool
+	// call of a turn.
+	//
+	// An empty id is no delta at all, silently — the whole reason ToolCallInFlight
+	// needs no guard for an empty tool-call id. Whether the parser can even
+	// produce one is left unresolved on purpose: the refusal makes the answer
+	// irrelevant to correctness, and the empty answer has to be negative however
+	// it arises.
+	if tool.id != "" {
+		if tool.started {
+			calls := t.inflight[conversationID]
+			if calls == nil {
+				calls = make(map[string]struct{})
+				t.inflight[conversationID] = calls
+			}
+			calls[tool.id] = struct{}{}
+		} else if calls := t.inflight[conversationID]; calls != nil {
+			delete(calls, tool.id)
+			if len(calls) == 0 {
+				// The outer key exists only while its inner set is non-empty, which
+				// is what bounds the map by the conversations with a call running
+				// rather than by every conversation ever seen.
+				delete(t.inflight, conversationID)
+			}
+		}
+	}
 
 	_, was := t.busy[conversationID]
 	if open == was {
@@ -349,6 +459,18 @@ func (t *turnBusyTracker) setBusy(conversationID string, open bool) (changed boo
 		t.busy[conversationID] = struct{}{}
 	} else {
 		delete(t.busy, conversationID)
+		// The whole sweep, one statement: a closing turn takes its retained calls
+		// with it, which is what every close feed rides — the turn's own TurnEnd,
+		// a pool teardown through clearForSession, and the drain's exit arm. Placed
+		// AFTER the delta above so a close wins over a same-call add; that pair is
+		// unreachable today, since every tool-bearing variant is an opener, and the
+		// ordering makes it fail closed if it ever becomes reachable.
+		//
+		// Reaching here at all implies the conversation was busy, and a non-empty
+		// inflight entry implies busy — capture and mark happen in this one call
+		// for every tool-bearing variant — so the early return above can never skip
+		// a sweep that had anything to do.
+		delete(t.inflight, conversationID)
 	}
 
 	// Close-and-replace under the same lock acquisition as the mutation: that is
@@ -369,6 +491,35 @@ func (t *turnBusyTracker) Busy(conversationID string) bool {
 	defer t.mu.Unlock()
 	_, busy := t.busy[conversationID]
 	return busy
+}
+
+// ToolCallInFlight reports whether toolCallID is a tool call currently in flight
+// on conversationID (#1917). MEMBERSHIP, not lookup: it answers "does this call
+// belong to this conversation?" and never "which conversation owns this call?",
+// mirroring Busy.
+//
+// Unknown, never-seen and empty values of EITHER parameter reach false through
+// the identical two lookups — an empty conversation key is never inserted
+// (observe refuses an unresolvable session) and an empty tool-call id is never
+// inserted (setBusy refuses it) — so neither needs a guard, and adding one would
+// be the runtime branch this posture forbids. As with Busy, THE SIGNATURE IS THE
+// EXISTENCE-ORACLE ENFORCEMENT: a later widening to (bool, error), or any
+// variant handing back the conversation id, would reintroduce the oracle
+// silently, and here it would do so for either id.
+//
+// No nil-receiver guard, matching Busy and WaitIdle. The wiring hands the nil
+// only to the methods PTY mode actually reaches, and this read is not one of
+// them; a guard would be the first step toward a consumer silently reading false
+// in PTY mode instead of failing loudly.
+//
+// It deliberately does NOT also gate on busy[conversationID]: that is redundant
+// under the invariant that a non-empty inflight entry implies a busy one, and
+// would add a lookup and a branch for no change in behaviour.
+func (t *turnBusyTracker) ToolCallInFlight(conversationID, toolCallID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, inFlight := t.inflight[conversationID][toolCallID]
+	return inFlight
 }
 
 // WaitIdle blocks until conversationID has no open turn and returns nil, or
@@ -475,8 +626,13 @@ func (t *turnBusyTracker) openForDelivery(conversationID string) (undo func()) {
 	if t == nil || conversationID == "" {
 		return func() {}
 	}
-	if !t.setBusy(conversationID, true) {
+	// Zero delta on both marks: this feed carries no event and no tool call. The
+	// undo's sweep is likewise a no-op by construction — it only fires when this
+	// call actually opened the turn, so the conversation was idle, so its inflight
+	// entry was absent. A delivery's undo can never discard another feed's
+	// retained calls.
+	if !t.setBusy(conversationID, true, toolCallDelta{}) {
 		return func() {}
 	}
-	return func() { t.setBusy(conversationID, false) }
+	return func() { t.setBusy(conversationID, false, toolCallDelta{}) }
 }
