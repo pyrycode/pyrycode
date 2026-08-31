@@ -63,6 +63,11 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 		userText    = "e2e-1139-user:approve\n"
 		sendReqID   = uint64(1139)
 		answerReqID = uint64(1140)
+		// The id runStreamJSONApprove's per-turn scheme mints for turn 1, and the id it
+		// raises the approval with. A literal because this package cannot import the
+		// fake's package main — the same reason the needles above are literals.
+		riderToolUseID = "tu-1139-1"
+		riderToolName  = "Bash"
 	)
 
 	allowOnce := string(turnevent.PermissionOptionKindAllowOnce)
@@ -186,6 +191,15 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				sendNoiseMsg(t, phone, ciphertext)
 			}
 
+			// The rider's tool_use frame (#1918), recorded at the SINGLE decrypt point
+			// rather than in any await loop. It rides the child's stdout while the
+			// approval rides the control socket — two transports, two goroutines — so
+			// nothing the daemon guarantees orders it against modal_shown, and every
+			// await loop below `continue`s past frames it does not match. Recording
+			// centrally is what makes the later assertion ordering-independent.
+			var toolUse protocol.ToolUsePayload
+			sawToolUse := false
+
 			// nextEnv decrypts the next binary→phone application envelope, skipping
 			// non-noise_msg frames in capture order so the receive nonce stays in sequence.
 			// One recvCS for the whole case (the single reader). ok=false on deadline.
@@ -210,7 +224,14 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					if inner.Type != protocol.TypeNoiseMsg {
 						continue
 					}
-					return decryptInnerEnvelope(t, inner, recvCS), true
+					env := decryptInnerEnvelope(t, inner, recvCS)
+					if !sawToolUse && env.Type == protocol.TypeToolUse {
+						if err := json.Unmarshal(env.Payload, &toolUse); err != nil {
+							t.Fatalf("decode tool_use payload: %v", err)
+						}
+						sawToolUse = true
+					}
+					return env, true
 				}
 			}
 
@@ -364,6 +385,34 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					}
 					sawDismissal = true
 				}
+			}
+
+			// --- The rider's gated call reached the phone as a tool_use frame carrying
+			// the SAME tool_use_id it raised the approval with (#1918). That join is what
+			// a later attribution report — "this approval is parked on a conversation
+			// with that call in flight" — is built on, so proving the feed reachable here
+			// is what keeps such a report from reporting negative whether the daemon is
+			// right or wrong.
+			//
+			// Asserted after the drain rather than inside it, and never against
+			// modal_shown's arrival: the two ride different transports. It is nonetheless
+			// not a race — the block and the verdict text ride the same child stdout in
+			// that order through one parser, one drain goroutine and one conn, and nextEnv
+			// is the single reader, so the frame is necessarily consumed before the needle
+			// that ended the loop.
+			if !sawToolUse {
+				t.Fatalf("never observed a tool_use frame; the rider's gated call did not reach the phone, so the "+
+					"feed a tool-call attribution report joins against (tool_use_id %q) is unreachable", riderToolUseID)
+			}
+			if toolUse.ToolUseID != riderToolUseID {
+				t.Errorf("tool_use ToolUseID = %q, want %q — the frame must carry the id the approval was raised with",
+					toolUse.ToolUseID, riderToolUseID)
+			}
+			if toolUse.Name != riderToolName {
+				t.Errorf("tool_use Name = %q, want %q", toolUse.Name, riderToolName)
+			}
+			if toolUse.ConversationID != knownConvID {
+				t.Errorf("tool_use ConversationID = %q, want %q", toolUse.ConversationID, knownConvID)
 			}
 		})
 	}
