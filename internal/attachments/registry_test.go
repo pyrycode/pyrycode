@@ -229,7 +229,7 @@ func TestRegistry_ConcurrentMixedOperations_AreSafe(t *testing.T) {
 	)
 	r := NewRegistry()
 	start := make(chan struct{})
-	done := make(chan struct{}, workers+readers+1)
+	done := make(chan struct{}, workers+readers+2)
 
 	// Each worker drives its own distinct pair from insert to release. workers
 	// exceeds maxInFlightUploads by design, so a distinct pair has TWO legal
@@ -281,8 +281,24 @@ func TestRegistry_ConcurrentMixedOperations_AreSafe(t *testing.T) {
 		}()
 	}
 
+	// The conn-wide sweep runs against every operation above, which is what buys
+	// -race coverage of ReleaseConn concurrent with insert, Release, Lookup and
+	// count. It targets testConnB and MUST NOT target testConnA: the workers
+	// assert that a pair they just inserted under that conn is present, and a
+	// concurrent sweep of it would delete the entry between the insert and the
+	// look-up, failing that assertion for a reason with nothing to do with what is
+	// under test. testConnB's own readers assert safety and never ordering, and
+	// the closing count() holds either way.
+	go func() {
+		<-start
+		for j := 0; j < 64; j++ {
+			r.ReleaseConn(testConnB)
+		}
+		done <- struct{}{}
+	}()
+
 	close(start)
-	for i := 0; i < workers+readers+1; i++ {
+	for i := 0; i < workers+readers+2; i++ {
 		<-done
 	}
 
@@ -1558,5 +1574,185 @@ func TestRegistry_Reap_LeavesAFedUploadOfAnotherPairInFlight(t *testing.T) {
 	}
 	if got := r.count(); got != 1 {
 		t.Errorf("count() after the reap = %d, want 1 — %q's upload alone", got, testConnA)
+	}
+}
+
+// The four tests below admit their pairs directly rather than through
+// fillRegistry, which fills testConnA alone and names its ids itself. Each of
+// them either needs a SECOND conn or needs to look its own ids up afterwards, and
+// copying that helper's id scheme to the call site would be a citation of an
+// unexported naming detail rather than a fixture. The declaration is
+// fillRegistry's own — (total_chunks 1, size 0), the cheapest CONFORMING pair —
+// so the capacity gate, which is the LATER of three gates, is the only one any of
+// them can reach.
+
+// TestRegistry_ReleaseConn_RemovesEveryUploadTheConnHolds is AC 1. THREE entries
+// and not two: on a two-entry map a body that removes the first and the last is
+// indistinguishable from one that removes them all, so two would go green under a
+// sweep that stops early.
+func TestRegistry_ReleaseConn_RemovesEveryUploadTheConnHolds(t *testing.T) {
+	t.Parallel()
+
+	held := []string{testAttachmentID, "att-2", "att-3"}
+
+	r := NewRegistry()
+	for _, attachmentID := range held {
+		if _, err := r.Admit(testConnA, attachmentID, 1, 0, testFixtureDigest); err != nil {
+			t.Fatalf("Admit of %q on %q: %v", attachmentID, testConnA, err)
+		}
+	}
+
+	r.ReleaseConn(testConnA)
+
+	if n := r.count(); n != 0 {
+		t.Errorf("count() after releasing the conn holding all %d = %d, want 0", len(held), n)
+	}
+	for _, attachmentID := range held {
+		if _, ok := r.Lookup(testConnA, attachmentID); ok {
+			t.Errorf("Lookup(%q, %q) after ReleaseConn reported the upload present", testConnA, attachmentID)
+		}
+	}
+}
+
+// TestRegistry_ReleaseConn_LeavesAnotherConnsUploadsInFlight is AC 2. Both conns
+// hold the SAME attachment_id plus one of their own, so the survivor claim is
+// about uploadKey's own shape and not merely about two unrelated entries — that
+// id is documented as guessable, so two conns mid-transfer on it at once is
+// routine.
+//
+// The pointer-identity assertion is the load-bearing one, the
+// TestRegistry_SameAttachmentIDOnTwoConns_AreSeparateEntries idiom: presence
+// alone would still hold if the sweep had removed B's entry and left A's, since
+// SOMETHING sits at the key either way.
+func TestRegistry_ReleaseConn_LeavesAnotherConnsUploadsInFlight(t *testing.T) {
+	t.Parallel()
+
+	const otherAttachmentID = "att-2"
+	both := []string{testAttachmentID, otherAttachmentID}
+
+	r := NewRegistry()
+	for _, connID := range []string{testConnA, testConnB} {
+		for _, attachmentID := range both {
+			if _, err := r.Admit(connID, attachmentID, 1, 0, testFixtureDigest); err != nil {
+				t.Fatalf("Admit of %q on %q: %v", attachmentID, connID, err)
+			}
+		}
+	}
+	survivor, ok := r.Lookup(testConnB, testAttachmentID)
+	if !ok {
+		t.Fatalf("Lookup(%q, %q) reported absent before the release, want present", testConnB, testAttachmentID)
+	}
+
+	r.ReleaseConn(testConnA)
+
+	for _, attachmentID := range both {
+		if _, ok := r.Lookup(testConnA, attachmentID); ok {
+			t.Errorf("Lookup(%q, %q) after releasing that conn reported the upload present", testConnA, attachmentID)
+		}
+		if _, ok := r.Lookup(testConnB, attachmentID); !ok {
+			t.Errorf("releasing %q removed %q's upload of %q", testConnA, testConnB, attachmentID)
+		}
+	}
+	if n := r.count(); n != len(both) {
+		t.Errorf("count() after releasing one of two conns = %d, want %d", n, len(both))
+	}
+	if got, _ := r.Lookup(testConnB, testAttachmentID); got != survivor {
+		t.Errorf("Lookup(%q, %q) answered an accumulator other than the one that conn was admitted with", testConnB, testAttachmentID)
+	}
+}
+
+// TestRegistry_ReleaseConnHoldingNothing_ChangesNothingAndDoesNotReap is AC 3,
+// and it carries the no-reap decision in the same body because a reap is exactly
+// what "changes nothing" would be violated by. Both held entries are idle PAST
+// uploadIdleTimeout when the release runs, and nothing has reaped them: count and
+// Lookup do not reap either, which is what makes them honest observers here.
+//
+// It is the sole red for a ReleaseConn that runs reapExpiredLocked at the head of
+// its body. Every other test of this method holds its clock still, so this is the
+// only one that can see the difference.
+func TestRegistry_ReleaseConnHoldingNothing_ChangesNothingAndDoesNotReap(t *testing.T) {
+	t.Parallel()
+
+	held := []string{testAttachmentID, "att-2"}
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+	for _, attachmentID := range held {
+		if _, err := r.Admit(testConnA, attachmentID, 1, 0, testFixtureDigest); err != nil {
+			t.Fatalf("Admit of %q on %q: %v", attachmentID, testConnA, err)
+		}
+	}
+
+	clk.advance(uploadIdleTimeout + time.Second)
+	r.ReleaseConn(testConnB)
+
+	if n := r.count(); n != len(held) {
+		t.Errorf("count() after releasing a conn holding nothing = %d, want %d", n, len(held))
+	}
+	for _, attachmentID := range held {
+		if _, ok := r.Lookup(testConnA, attachmentID); !ok {
+			t.Errorf("Lookup(%q, %q) after releasing %q reported the upload absent", testConnA, attachmentID, testConnB)
+		}
+	}
+}
+
+// TestRegistry_ReleaseConn_ReturnsEverySlotItHeld is AC 4 —
+// TestRegistry_AdmitAtTheBound_ReleaseReturnsTheSlot widened from a pair to a
+// conn — and its two halves are the AC's two halves. That the slots free is the
+// first; that THE RELEASE is what freed them is the second, and the fixture's
+// clock is NEVER ADVANCED, so no reap can fire anywhere in this test and nothing
+// else is left that could have.
+//
+// "That many new pairs" is an EXACT count, so the refusal after the second
+// admission is as load-bearing as the two successes: without it a sweep that
+// emptied the whole map would satisfy every other assertion here.
+func TestRegistry_ReleaseConn_ReturnsEverySlotItHeld(t *testing.T) {
+	t.Parallel()
+
+	const perConn = maxInFlightUploads / 2
+	// The fixture's own arithmetic, asserted rather than trusted: at an odd bound
+	// the two conns would not fill it and every assertion below would be measuring
+	// a registry that never reached capacity.
+	if perConn*2 != maxInFlightUploads {
+		t.Fatalf("this fixture splits maxInFlightUploads (%d) across two conns and needs it even", maxInFlightUploads)
+	}
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+	ids := make([]string, perConn)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("att-%d", i)
+	}
+	for _, connID := range []string{testConnA, testConnB} {
+		for _, attachmentID := range ids {
+			if _, err := r.Admit(connID, attachmentID, 1, 0, testFixtureDigest); err != nil {
+				t.Fatalf("Admit of %q on %q: %v", attachmentID, connID, err)
+			}
+		}
+	}
+	if _, err := r.Admit(testConnA, "att-next", 1, 0, testFixtureDigest); !errors.Is(err, ErrTooManyUploads) {
+		t.Fatalf("Admit of a new pair at the bound: error = %v, want one wrapping %v", err, ErrTooManyUploads)
+	}
+
+	r.ReleaseConn(testConnA)
+
+	if n := r.count(); n != perConn {
+		t.Fatalf("count() after releasing one of the two conns at the bound = %d, want %d", n, perConn)
+	}
+	for i := 0; i < perConn; i++ {
+		attachmentID := fmt.Sprintf("fresh-%d", i)
+		if _, err := r.Admit(testConnA, attachmentID, 1, 0, testFixtureDigest); err != nil {
+			t.Fatalf("Admit of %q into a slot the release freed: %v", attachmentID, err)
+		}
+	}
+	if _, err := r.Admit(testConnA, "fresh-past-the-bound", 1, 0, testFixtureDigest); !errors.Is(err, ErrTooManyUploads) {
+		t.Errorf("Admit of one pair more than the release freed: error = %v, want one wrapping %v", err, ErrTooManyUploads)
+	}
+
+	// The other conn's transfers were never the ones being reclaimed.
+	for _, attachmentID := range ids {
+		if _, ok := r.Lookup(testConnB, attachmentID); !ok {
+			t.Errorf("Lookup(%q, %q) after %q's slots were refilled reported the upload absent", testConnB, attachmentID, testConnA)
+		}
 	}
 }

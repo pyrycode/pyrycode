@@ -1,7 +1,7 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
 Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782,
-#1795, #1796, #1784, #1880), thirteen slices of the family split from #1741/#1766:
+#1795, #1796, #1784, #1880, #1817), fourteen slices of the family split from #1741/#1766:
 holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
@@ -162,17 +162,20 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
 The entry-count cap landed as `maxInFlightUploads` (#1796); see § "In-flight
 upload registry" below for the gate and its shape.
 
-## In-flight upload registry (#1787, #1788, #1795, #1796, #1880, #1881)
+## In-flight upload registry (#1787, #1788, #1795, #1796, #1880, #1881, #1817)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
 chunks: a map from `uploadKey{connID, attachmentID}` to an
 `entry{acc *Accumulator, lastChunkAt time.Time}`, held **by value** so the
 stamp can only move by storing into the map under `mu` — an unexported
 `insertLocked` core, a thin lock-taking `insert` wrapper kept for tests,
-comma-ok `Lookup`, an unexported stamping `lookupAndStamp`, `Release`, and two
-unexported test-only readers, `count` and `lastChunkAt` (#1880). Still
-unreachable from production — nothing calls it until #1744 wires the dispatch
-site, and #1744 lands last in the family.
+comma-ok `Lookup`, an unexported stamping `lookupAndStamp`, `Release`, its
+conn-keyed sibling `ReleaseConn` (#1817, removes every upload one conn holds
+in a single pass, for a teardown path that has the conn but never the list of
+attachment_ids it was admitted under), and two unexported test-only readers,
+`count` and `lastChunkAt` (#1880). Still unreachable from production — nothing
+calls it until #1744 wires the dispatch site, and #1744 lands last in the
+family.
 
 **Each entry carries `lastChunkAt`, the clock's reading at admission and at
 the last delivered chunk (#1880).** The clock is a nil-tolerant seam —
@@ -428,7 +431,17 @@ that.
   is true whether or not any method currently composes with another. **#1880
   grew the roster to seven** (`Admit`, `insert`, `Lookup`, `lookupAndStamp`,
   `Release`, `count`, `lastChunkAt`) without touching the rule itself —
-  exactly what the re-scope-proof phrasing was written to survive.
+  exactly what the re-scope-proof phrasing was written to survive. **#1817
+  grew it to eight** (`ReleaseConn`), and is the first addition with no
+  lock-free `Locked` core of its own — `insertLocked` and `reapExpiredLocked`
+  are cores because two bodies share each; nothing shares `ReleaseConn`'s, so
+  it takes `mu` and deletes directly rather than publishing a seam no caller
+  asked for. It also had to reject the shape that would have looked like
+  reuse: composing `ReleaseConn` from a per-pair loop over the lock-taking
+  `Release` looks like tidy DRY and is instead a deadlock — `sync.Mutex` is
+  not reentrant, and unlike a race, a deadlock is not something `-race`
+  catches, so the rejection has to be a documented constraint rather than
+  something a test could be trusted to surface.
 
 ## Directory resolution and creation (#1781)
 
@@ -840,6 +853,26 @@ surfaced:
   Having already named the by-construction trap once in a spec is not
   evidence the rest of that spec is safe from it — every by-construction
   sentence needs its own mutant, not just the one already flagged as risky.
+- **A sweep-and-delete mutant's red set is a property of each fixture's
+  cardinality, not of which AC the test's name cites** (#1817). The spec
+  predicted `ReleaseConn`'s stop-after-first-delete mutant (`return`
+  immediately after the loop's first `delete`) would redden only the tests
+  named for "every upload" and "the freed slots"; measured, a third reddened
+  too, because that test's conn happened to hold two entries rather than one.
+  Same discipline #1784 already states two entries above ("predict from what
+  each test executes, not from what it is named after"), refined for this
+  mutant shape specifically: for a sweep over a multi-entry key space, read
+  each fixture's admit calls for how many entries the mutated conn holds,
+  not the AC label on the test.
+- **A fixture helper's own unexported naming scheme is not a citable
+  contract** (#1817). `fillRegistry` names its ids with a private `filler-%d`
+  pattern; three of `ReleaseConn`'s four new tests admit their pairs directly
+  instead of calling it, because each needed either a second conn or to
+  `Lookup` an id back out afterward, and copying the helper's naming scheme to
+  the call site would cite an implementation detail with no symbol for
+  `cite-guard` to anchor — the one rot shape that guard cannot see. Widening
+  `fillRegistry` to take a conn parameter was the alternative and is worse:
+  several existing capacity tests depend on it staying single-conn.
 
 All three properties #1769 shipped without a test pin are now pinned,
 landed alongside #1770's own checks rather than left for a third mutation
@@ -898,8 +931,20 @@ hash, fetch the blob"), which is a requirement from
   to land — #1796 discharged the family's sequencing constraint that this
   ticket not go first, and #1784 shipped the routing surface (`Registry.Deliver`)
   it is expected to call (see § "In-flight upload registry" above) — and is the
-  first production caller of this package. Two things are parked for whichever
-  of #1744 or the documentation phase next touches `Deliver`: which wire code
-  `ErrUnknownUpload` maps to (#1784 deliberately named no candidate), and the
-  never-log claim on `Deliver`'s doc block, which code review found unpinned
-  by any fixture (see § "In-flight upload registry" above).
+  first production caller of this package. Four things are parked for
+  whichever of #1744 or the documentation phase next touches this area: which
+  wire code `ErrUnknownUpload` maps to (#1784 deliberately named no
+  candidate); the never-log claim on `Deliver`'s doc block, which code review
+  found unpinned by any fixture (see § "In-flight upload registry" above);
+  and two more #1817's code review flagged. `uploadIdleTimeout`'s doc
+  (`admission.go`) reads "IT DOES NOT SUBSUME #1817, which releases a dropped
+  conn's uploads AT THE DROP" — true only once #1744 wires that call, not on
+  #1817's own merge, since #1817 ships `ReleaseConn` with no production
+  caller; #1744 is what makes that sentence describe what actually ships
+  rather than a closed ticket by what it didn't. And `Release`/`ReleaseConn`'s
+  own docs (`registry.go`) both now name #1744 as the caller that decides
+  when either runs — right only if #1744's teardown wiring lands as this
+  family has planned it; #1744's own issue body scopes it to
+  `dispatchAppFrame`'s frame switch and names no teardown or `closeWith`
+  path, so if it refines to the chunk path alone, those two cites need a
+  different, as yet unticketed, owner.
