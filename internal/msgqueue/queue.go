@@ -118,12 +118,14 @@ type ChangeFunc func(convID string)
 type GiveUpFunc func(convID, reason string)
 
 // PendingFunc classifies a delivery error as a legitimate hold — the head is
-// being deliberately withheld awaiting an external decision (e.g. claude's
-// startup trust-folder modal is up, so DeliverFunc declined before touching the
-// consent gate) — rather than a delivery failure. It is an injected predicate
-// because msgqueue is a leaf that must not import the delivery seam's package
-// (internal/supervisor); the composition root wires it as
-// errors.Is(err, supervisor.ErrTrustModalPending). It MUST be a pure, non-blocking
+// being deliberately withheld awaiting an external decision (a person is being
+// asked to approve a tool call, so DeliverFunc declined having written nothing) —
+// rather than a delivery failure. It is an injected predicate because msgqueue is a
+// leaf that must not import the delivery seam's package; the composition root wires
+// it as a predicate over a cmd/pyry-local sentinel marking a delivery held behind an
+// approval parked on a person (#1911). The conversation-scoped question gating that
+// mark is answered at the delivery seam, before the error reaches here — this
+// predicate sees the error and nothing else. It MUST be a pure, non-blocking
 // function (it is called on the drain path). nil ⇒ every non-nil delivery error
 // counts toward the give-up bound (pre-#1014 behaviour). #1014 AC-1.
 type PendingFunc func(error) bool

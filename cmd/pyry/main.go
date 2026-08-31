@@ -856,17 +856,36 @@ func runSupervisor(args []string) error {
 	// surface a folder-not-trusted session_error on a trust deny/timeout (#1014).
 	// One closure, two senders into the same #1008 frame path.
 	blocked := sessionErrorNotify(giveUps, logger)
+	// approvalParked is the third value in this block built BEFORE msgqueue.New for
+	// the same chicken-and-egg reason as queueChanges and giveUps: it carries #1919's
+	// ApprovalParked report to the Pending gate below, and the bridge that answers
+	// the report is constructed inside startRelayV2, well after this queue. Unlike
+	// the two channels it cannot be a channel — the gate needs an answer, not a
+	// notification — so it is the one late-bound field here, threaded to its single
+	// setter through relayWiring.approvalParked. Left unset (PTY mode, or before the
+	// relay leg wires it) it reports negative for every conversation, which is the
+	// pre-#1911 behaviour exactly.
+	approvalParked := &approvalParkedReport{}
 	queue, err := msgqueue.New(msgqueue.Config{
-		Deliver:  newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout),
+		Deliver:  approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
-		// Pending exempted a turn held behind claude's startup trust modal from the
-		// give-up bound (#1014 AC-1). That modal only ever appeared on the terminal
-		// surface, which #1348 removed, so nothing produces the sentinel any more
-		// and the exemption is permanently false. Left unset rather than wired to a
-		// never-true predicate: the stream surface has no equivalent hold today,
-		// and inventing one here would be guessing at a failure nobody has seen.
-		Logger: logger,
+		// Pending exempts a head held behind an approval parked on a PERSON from the
+		// give-up bound (#1911). #1014 wired this seam to claude's startup trust modal;
+		// that modal only ever appeared on the terminal surface, which #1348 removed,
+		// so supervisor.ErrTrustModalPending has had no producer since and this is the
+		// exemption's second and only current one. The delivery wrap above answers the
+		// conversation-scoped half — Pending is func(error) bool and never sees a
+		// conversation — and this predicate classifies its mark.
+		//
+		// THE GATE IS WHAT KEEPS THE BOUND SATISFIABLE, and is why the exemption could
+		// not simply be granted to every hold (streamTurnHoldTimeout's doc records the
+		// refusal). Held to a person actually being asked, a turn making no progress
+		// with nothing parked still reaches give-up on today's schedule, and the
+		// exemption ends the moment the approval does — retire deletes the correlation
+		// on every terminal path an approval has.
+		Pending: approvalHoldPending,
+		Logger:  logger,
 	})
 	if err != nil {
 		return fmt.Errorf("msgqueue init: %w", err)
@@ -982,6 +1001,7 @@ func runSupervisor(args []string) error {
 		approvals:          approvals,
 		streamSink:         streamSink,
 		busy:               turnBusy,
+		approvalParked:     approvalParked,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)
@@ -1654,15 +1674,21 @@ const inboundActivateTimeout = 30 * time.Second
 // trades "a wedged turn is reported late" against "a message queued behind a
 // genuinely long agentic turn is thrown away". 15 minutes sits above any
 // interactive turn observed to date while keeping the client-visible bound inside
-// the half hour. There is deliberately NO Pending analogue (contrast
-// supervisor.ErrTrustModalPending at the msgqueue.Config literal): that exemption
-// resets the give-up streak forever, which a HUMAN decision may legitimately need
-// and a running turn should not — it would make the bound unsatisfiable. The
-// better discriminator is staleness (no turn event for N minutes) rather than
-// duration, but that needs a per-conversation timestamp the tracker deliberately
-// does not hold (#1201); it is a separate ticket if production ever surfaces a
-// session_error for a turn that was legitimately progressing. A tuning knob, not a
-// contract.
+// the half hour.
+//
+// There IS now a Pending analogue, and it is GATED (#1911): approvalHoldPending
+// exempts an attempt from the give-up bound only when this hold timed out while an
+// approval was parked on a person for that conversation. What it exempts is the
+// PERSON'S deciding time, not the turn. The unconditional exemption this doc used
+// to refuse resets the give-up streak forever, which a human decision may
+// legitimately need and a running turn must not — that is what would make the bound
+// unsatisfiable; per-conversation gating is what keeps it satisfiable, and the
+// arithmetic above stands unchanged for a turn making no progress with nobody being
+// asked. For THAT case the better discriminator is still staleness (no turn event
+// for N minutes) rather than duration, but that needs a per-conversation timestamp
+// the tracker deliberately does not hold (#1201); it is a separate ticket if
+// production ever surfaces a session_error for a turn that was legitimately
+// progressing. A tuning knob, not a contract.
 const streamTurnHoldTimeout = 15 * time.Minute
 
 // mcpApprovalTimeout is the DEFAULT human-approval window handed to the
@@ -1677,11 +1703,15 @@ const streamTurnHoldTimeout = 15 * time.Minute
 // remaining pending was not already preventing. The number is about how long a
 // person may reasonably take to reach a phone, not about safety.
 //
-// Why ten and not more: it is deliberately held clear of streamTurnHoldTimeout,
-// which bounds the delivery hold — a give-up there ABANDONS whatever message was
-// queued behind the waiting turn. Raising this past that hold trades a prompt
-// that gives up too early for a message that silently disappears (#1911 is where
-// that abandonment is tracked). A tuning knob, not a contract.
+// Why ten and not more: this constant no longer answers that. It used to be held
+// deliberately clear of streamTurnHoldTimeout, which bounds the delivery hold,
+// because a give-up there ABANDONED whatever message was queued behind the waiting
+// turn — so raising this window past that hold traded a prompt that gives up too
+// early for a message that silently disappears. #1911 removed the abandonment:
+// approvalHoldPending exempts a hold from the give-up bound for exactly as long as
+// an approval is parked on a person, so a queued message now waits out the decision
+// instead of vanishing. Ten stays because it is what a person reaching a phone
+// plausibly needs, not because the hold pins it. A tuning knob, not a contract.
 const mcpApprovalTimeout = 10 * time.Minute
 
 // envApprovalTimeout overrides the human-approval window (mcpApprovalTimeout). A
@@ -1705,6 +1735,99 @@ func approvalTimeout() time.Duration {
 	return mcpApprovalTimeout
 }
 
+// approvalParkedReport is the late-bound holder for #1919's ApprovalParked report,
+// carrying it from the relay wiring back to the delivery seam (#1911). The
+// composition root builds msgqueue.New — and therefore the seam — well before
+// startRelayV2 constructs the bridge that answers the report, and the relayWiring
+// literal is built after the queue, so the report cannot be handed to the queue at
+// construction. This is the same shape, for the same reason, as
+// streamApprovalBridge.toolCallInFlight: one holder, set at one wiring site.
+//
+// ask is written exactly once, at wiring time, and read from each conversation's
+// drain goroutine. It carries no mutex because goroutine creation supplies the
+// happens-before edge on every link of the chain: set runs inside startRelayV2
+// before the v2 manager's Run goroutine starts, that goroutine spawns the
+// per-connection goroutines, the send_message handler on one of them calls
+// msgqueue.Enqueue, and Enqueue spawns the drain that reads it. The queue's own Run
+// goroutine cannot beat that: it holds no conversation until an Enqueue lands.
+type approvalParkedReport struct {
+	// ask is streamApprovalBridge.ApprovalParked; nil until the relay wiring sets it.
+	ask func(conversationID string) bool
+}
+
+// set publishes the report. A nil receiver is a no-op, matching the nil-safety
+// idiom of the seam this feeds (waitIdleForDelivery, openForDelivery).
+func (r *approvalParkedReport) set(ask func(conversationID string) bool) {
+	if r == nil {
+		return
+	}
+	r.ask = ask
+}
+
+// parked reports whether a person is currently being asked about conversationID.
+// A nil receiver or an unset ask answers false for every conversation — which is
+// the behaviour before this exemption existed, and the right answer in PTY mode,
+// where ApprovalParked is negative anyway because no tracker is wired.
+func (r *approvalParkedReport) parked(conversationID string) bool {
+	if r == nil || r.ask == nil {
+		return false
+	}
+	return r.ask(conversationID)
+}
+
+// errStreamTurnHold marks a delivery attempt that ended in the stream-path
+// mid-turn hold, having written nothing. newInboundDeliver's hold branch is its
+// only producer and markApprovalHolds its only consumer. Its text keeps the
+// rendered hold error byte-identical to the pre-#1911 wrap.
+var errStreamTurnHold = errors.New("stream turn hold")
+
+// errHeldForApproval marks a hold that happened while a person was being asked
+// about the conversation (#1911). markApprovalHolds is its only producer and
+// approvalHoldPending its only consumer. Like errStreamTurnHold it is a fixed
+// daemon-authored string with no interpolation, so a wrapped hold error carries
+// neither queued text nor approval content by construction.
+var errHeldForApproval = errors.New("delivery held for a parked approval")
+
+// markApprovalHolds decorates the delivery seam so msgqueue's Pending classifier
+// can tell a person's deciding time apart from a wedged conversation. It exists
+// because msgqueue.PendingFunc is func(error) bool: it classifies the delivery
+// error alone and never sees a conversation, so the conversation-scoped question
+// has to be answered here, before the error leaves the delivery seam.
+//
+// The two-step test order is load-bearing, for the reason ApprovalParked's own doc
+// gives about its conjunction: the sentinel test is a local comparison while parked
+// crosses two leaf locks, so the common case — an ordinary delivery failure with
+// nobody being asked — must not pay the second.
+//
+// PRECISION IS THE POINT. Only a hold error is ever re-marked. A resolve or
+// Activate failure is a genuinely wedged conversation and stays on the give-up
+// clock even while an approval is parked, which is what keeps that clock
+// satisfiable once an approval may outlive the hold. There is deliberately no
+// context.Canceled guard here: both cancellation sources — a removed head and
+// daemon shutdown — are decided by branches upstream of Pending in msgqueue's
+// drain, so a guard would be dead code defending a failure mode nobody has seen.
+func (r *approvalParkedReport) markApprovalHolds(deliver msgqueue.DeliverFunc) msgqueue.DeliverFunc {
+	return func(ctx context.Context, convID string, payload []byte) error {
+		err := deliver(ctx, convID, payload)
+		if err == nil || !errors.Is(err, errStreamTurnHold) {
+			return err
+		}
+		if !r.parked(convID) {
+			return err
+		}
+		return fmt.Errorf("%w: %w", errHeldForApproval, err)
+	}
+}
+
+// approvalHoldPending is the msgqueue.PendingFunc the composition root wires: it
+// classifies a delivery held behind an approval parked on a person as a legitimate
+// hold rather than a failure, so the give-up streak resets instead of counting.
+//
+// A free function rather than a method on the report: PendingFunc must be pure and
+// non-blocking (msgqueue calls it on the drain path), and everything that could
+// block has already run on the delivery path, which blocks for whole turns anyway.
+func approvalHoldPending(err error) bool { return errors.Is(err, errHeldForApproval) }
+
 // newInboundDeliver builds the msgqueue.DeliverFunc seam over the stamp-free
 // resolve core. The engine (#704) calls it on a per-conversation drain
 // goroutine, one delivery at a time. It:
@@ -1717,7 +1840,10 @@ func approvalTimeout() time.Duration {
 //     error instead of a permanent block;
 //   - HOLDS the delivery while the conversation's turn is running on the
 //     stream-json path (#1199), then marks the conversation mid-turn, both
-//     between Activate and the write — see the placement note below;
+//     between Activate and the write — see the placement note below. A hold that
+//     ends in an error is the sole producer of errStreamTurnHold, which is what
+//     lets markApprovalHolds exempt a person's deciding time from the give-up
+//     bound (#1911) without exempting a wedged conversation with it;
 //   - writes the turn with the RAW lifecycle ctx — no deliver timeout, because
 //     that blocking IS the drain's turn-end pacing (DeliverFunc must return nil
 //     only on a confirmed commit, `defaultRetryInterval`).
@@ -1759,8 +1885,11 @@ func newInboundDeliver(resolve func(string) (handlers.TurnWriter, error), busy *
 		// Wrapped, so a hold failure is legible in msgqueue's retry Warn; the wrap
 		// keeps errors.Is(err, context.DeadlineExceeded) and context.Canceled true for
 		// the drain's own classification. Nothing has been written at this point.
+		// errStreamTurnHold rides the same wrap and this statement is its only
+		// producer, so markApprovalHolds can tell a hold apart from every other
+		// delivery failure without widening this seam; the rendered text is unchanged.
 		if err := busy.waitIdleForDelivery(ctx, convID, hold); err != nil {
-			return fmt.Errorf("stream turn hold: %w", err)
+			return fmt.Errorf("%w: %w", errStreamTurnHold, err)
 		}
 		undo := busy.openForDelivery(convID)
 		if err := w.WriteUserTurn(ctx, convID, payload); err != nil {

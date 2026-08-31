@@ -271,6 +271,16 @@ type relayWiring struct {
 	// send against it. This leg's two consumers are the stream turn drain (which
 	// FEEDS it) and that teardown clear.
 	busy *turnBusyTracker
+	// approvalParked is the late-bound seam carrying #1919's ApprovalParked report
+	// back to the msgqueue delivery seam (#1911), which main.go builds FIRST:
+	// msgqueue.New runs well before this function constructs the bridge that answers
+	// the report, and this struct's own literal is built after the queue. It travels
+	// in the wiring rather than being handed to the queue at construction for that
+	// reason alone. Set inside the approvals branch below, beside
+	// bridge.toolCallInFlight. nil, or never set, answers negative for every
+	// conversation and the give-up bound runs exactly as it did before the exemption
+	// existed.
+	approvalParked *approvalParkedReport
 }
 
 // startRelay opens the binary↔relay leg in a supervisor-owned goroutine.
@@ -757,6 +767,15 @@ func startRelayV2(
 		// data race on the field.
 		if w.busy != nil {
 			bridge.toolCallInFlight = w.busy.ToolCallInFlight
+			// The report's consumer side (#1911): the delivery seam's give-up
+			// exemption. Published under the SAME guard rather than beside the
+			// constructor because with no tracker the bridge answers negative for
+			// every conversation anyway — setting it there would be exactly as
+			// informative — and keeping the pair adjacent keeps the two halves of
+			// this knot readable as one. set is written before mgr.Run's goroutine
+			// starts below, which is the first link of the happens-before chain
+			// approvalParkedReport's doc records for its unguarded field.
+			w.approvalParked.set(bridge.ApprovalParked)
 		}
 		modalResolver.streamApprovals = bridge
 		surface = bridge.Surface

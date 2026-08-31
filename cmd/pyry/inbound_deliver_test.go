@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -467,11 +468,18 @@ func TestInboundDeliver_StreamHold_TimesOutWithoutWriting(t *testing.T) {
 	}
 }
 
-// #1199 AC3 (second half): that bounded failure surfaces through the EXISTING
-// give-up path — OnGiveUp, which the daemon routes to the typed
+// #1199 AC3 (second half), and #1911 AC-2: that bounded failure surfaces through
+// the EXISTING give-up path — OnGiveUp, which the daemon routes to the typed
 // session_error/CodeSessionBlocked frame — rather than leaving the conversation
 // held forever. The bounds are shrunk to keep the test fast; the production
 // arithmetic against them is recorded on streamTurnHoldTimeout.
+//
+// The queue is built in the PRODUCTION shape (#1911) — the seam wrapped by
+// markApprovalHolds, Pending set to approvalHoldPending — with the report left
+// unset, which is both PTY mode and every moment before the relay leg wires it. A
+// turn making no progress with nobody being asked must still give up on exactly
+// today's schedule, and this is where that is asserted. It is the "unset report ⇒
+// never exempt" case too, so that needs no test of its own.
 func TestInboundDeliver_StreamHold_NeverEndingTurnGivesUp(t *testing.T) {
 	t.Parallel()
 
@@ -479,9 +487,11 @@ func TestInboundDeliver_StreamHold_NeverEndingTurnGivesUp(t *testing.T) {
 	tr := holdTestTracker()
 	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "working"})
 
+	unwired := &approvalParkedReport{}
 	gaveUp := make(chan string, 1)
 	q, err := msgqueue.New(msgqueue.Config{
-		Deliver:       newInboundDeliver(func(string) (handlers.TurnWriter, error) { return w, nil }, tr, 50*time.Millisecond),
+		Deliver:       unwired.markApprovalHolds(newInboundDeliver(func(string) (handlers.TurnWriter, error) { return w, nil }, tr, 50*time.Millisecond)),
+		Pending:       approvalHoldPending,
 		RetryInterval: 10 * time.Millisecond,
 		GiveUpAfter:   60 * time.Millisecond,
 		OnGiveUp: func(convID, _ string) {
@@ -553,5 +563,327 @@ func TestInboundDeliver_StreamHold_MarksBeforeTheWrite(t *testing.T) {
 	}
 	if !tr.Busy(testConvID) {
 		t.Error("Busy = false after a successful write; the turn the write started must be marked open")
+	}
+}
+
+// --- #1911: the give-up exemption for a person's deciding time -----------------
+
+// parkedSwitch builds an approvalParkedReport a test can flip while the drain is
+// running, standing in for the bridge's ApprovalParked. The func value is
+// installed once, before the queue starts — exactly how the relay wiring installs
+// the real one — so the only value crossing goroutines is the atomic it closes
+// over, and the unguarded field is written under the same happens-before argument
+// production runs on.
+func parkedSwitch(initial bool) (*approvalParkedReport, *atomic.Bool) {
+	parked := &atomic.Bool{}
+	parked.Store(initial)
+	r := &approvalParkedReport{}
+	r.set(func(string) bool { return parked.Load() })
+	return r, parked
+}
+
+// #1911 AC-1 and AC-5: a message queued behind a turn whose conversation has an
+// approval parked on a person is still delivered once that turn ends, however long
+// the person took — no give-up, no session_error — and no log line on that path
+// carries the queued text or a tool-call id.
+//
+// The no-give-up window is many multiples of GiveUpAfter and of the hold, so a
+// non-exempt implementation abandons the head well inside it and this test fails:
+// unexempted, the second attempt trips the bound at ~2× the hold. The flip to false
+// plus the turn ending models the person answering — the approval retires, the turn
+// resumes, and the still-queued message is written.
+//
+// The AC-5 capture is auditLogger's Debug-level buffer, wired to BOTH the queue and
+// the tracker. Debug matters: the only line the exemption path reaches is msgqueue's
+// own "delivery held (awaiting external decision)" Debug, so a capture above Debug
+// would make the assertion vacuous. The buffer is read only after Run has returned
+// and joined every drain, so the read never races a handler write.
+func TestInboundDeliver_ApprovalHold_ParkedApprovalOutlastsGiveUpBound(t *testing.T) {
+	t.Parallel()
+
+	const queuedText = "please rebase this onto main"
+	const parkedToolCallID = "toolu-parked-01"
+
+	logger, logBuf := auditLogger()
+	w := newGatingWriter()
+	close(w.release) // the stream write returns as soon as the envelope is written
+	tr := newTurnBusyTracker(stubBusyResolve(map[string]string{"sess-a": testConvID}), logger)
+	// A turn that never ends on its own, with the approval's tool call in flight —
+	// the state a parked approval leaves behind.
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "working"})
+	tr.observe("sess-a", turnevent.ToolStart{ToolCallID: parkedToolCallID, Kind: turnevent.ToolKindOther})
+
+	report, parked := parkedSwitch(true)
+	gaveUp := make(chan string, 1)
+	q, err := msgqueue.New(msgqueue.Config{
+		Deliver:       report.markApprovalHolds(newInboundDeliver(func(string) (handlers.TurnWriter, error) { return w, nil }, tr, 50*time.Millisecond)),
+		Pending:       approvalHoldPending,
+		RetryInterval: 10 * time.Millisecond,
+		GiveUpAfter:   60 * time.Millisecond,
+		OnGiveUp: func(convID, _ string) {
+			select {
+			case gaveUp <- convID:
+			default:
+			}
+		},
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("msgqueue.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- q.Run(ctx) }()
+
+	q.Enqueue(testConvID, queuedText)
+
+	select {
+	case convID := <-gaveUp:
+		t.Fatalf("OnGiveUp fired for %q while an approval was parked; the queued message was abandoned while a person was still deciding", convID)
+	case <-time.After(600 * time.Millisecond):
+	}
+	// Held, not lost: it is still in the backlog the queued-message UI snapshots,
+	// and nothing has been written.
+	waitBacklog(t, q, testConvID, []string{queuedText})
+
+	// The person answers: the approval retires and the turn it blocked ends.
+	parked.Store(false)
+	endHeldTurn(tr)
+
+	if got := recvStringWithin(t, w.completed, "commit after the approval cleared"); got != queuedText {
+		t.Fatalf("commit after the approval cleared = %q, want %q", got, queuedText)
+	}
+	waitBacklog(t, q, testConvID, nil)
+
+	cancel()
+	if err := recvErrWithin(t, runDone, "queue Run exit"); !errors.Is(err, context.Canceled) {
+		t.Errorf("Run returned %v, want context.Canceled", err)
+	}
+
+	logged := logBuf.String()
+	if strings.Contains(logged, queuedText) {
+		t.Error("the captured log carries the queued message text; nothing on the hold path may log untrusted phone content")
+	}
+	if strings.Contains(logged, parkedToolCallID) {
+		t.Error("the captured log carries the parked approval's tool-call id; the exemption path must stay content-free")
+	}
+}
+
+// #1911 AC-3: once the parked approval is gone — for ANY reason: answered, denied
+// on its deadline, its caller lost, the daemon shutting down — the held head is
+// back under the ordinary give-up bound, running from that point.
+//
+// The teeth are the ORDER. The first half (no give-up while parked, over many
+// GiveUpAfter windows) fails an implementation that never exempts anything; the
+// second half (give-up once the report goes negative, with the turn STILL never
+// ending) fails one that exempts forever. Neither half alone pins the AC.
+//
+// No new negative edge is invented here: ApprovalParked is resolved on read, so the
+// report simply answers false once retire has deleted the correlation, and the very
+// next attempt stamps the failure clock.
+func TestInboundDeliver_ApprovalHold_ClearedApprovalRestartsTheBound(t *testing.T) {
+	t.Parallel()
+
+	w := funcWriter{write: func(context.Context, string, []byte) error { return nil }}
+	tr := holdTestTracker()
+	tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "working"}) // never ends
+
+	report, parked := parkedSwitch(true)
+	gaveUp := make(chan string, 1)
+	q, err := msgqueue.New(msgqueue.Config{
+		Deliver:       report.markApprovalHolds(newInboundDeliver(func(string) (handlers.TurnWriter, error) { return w, nil }, tr, 50*time.Millisecond)),
+		Pending:       approvalHoldPending,
+		RetryInterval: 10 * time.Millisecond,
+		GiveUpAfter:   60 * time.Millisecond,
+		OnGiveUp: func(convID, _ string) {
+			select {
+			case gaveUp <- convID:
+			default:
+			}
+		},
+		Logger: inboundTestLogger(t),
+	})
+	if err != nil {
+		t.Fatalf("msgqueue.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = q.Run(ctx) }()
+
+	q.Enqueue(testConvID, "held")
+
+	select {
+	case convID := <-gaveUp:
+		t.Fatalf("OnGiveUp fired for %q while the approval was still parked; the bound must not run during a person's deciding time", convID)
+	case <-time.After(600 * time.Millisecond):
+	}
+
+	// The approval is gone but the turn is not: the exemption ends, and the turn's
+	// own lack of progress is back under the ordinary bound from this point.
+	parked.Store(false)
+
+	if got := recvStringWithin(t, gaveUp, "give-up after the approval cleared"); got != testConvID {
+		t.Errorf("OnGiveUp convID = %q, want %q", got, testConvID)
+	}
+	waitBacklog(t, q, testConvID, nil)
+}
+
+// #1911 AC-4: a message held behind a parked approval stays droppable. Removing it
+// takes it out of the backlog, it is never written, and the drain advances to the
+// message behind it — the #1199 control, unchanged by the exemption.
+//
+// It is structural rather than new code: msgqueue's drain evaluates `dropped`
+// BEFORE `pending`, so a cancelled head is a clean cancellation whatever the
+// exemption said. The bounds are shrunk so attempts really do fail and be exempted
+// during the test — with a long hold nothing would ever reach the classifier and
+// the give-up assertion would be vacuous — which is what makes "OnGiveUp never
+// fired" the assertion separating "dropped as a cancellation" from "abandoned".
+func TestInboundDeliver_ApprovalHold_HeldHeadStaysDroppable(t *testing.T) {
+	t.Parallel()
+
+	w := newCommitClaimingWriter()
+	tr := holdTestTracker()
+	report, _ := parkedSwitch(true)
+
+	gaveUp := make(chan string, 1)
+	q, err := msgqueue.New(msgqueue.Config{
+		Deliver:       report.markApprovalHolds(newInboundDeliver(func(string) (handlers.TurnWriter, error) { return w, nil }, tr, 50*time.Millisecond)),
+		Pending:       approvalHoldPending,
+		RetryInterval: 10 * time.Millisecond,
+		GiveUpAfter:   60 * time.Millisecond,
+		OnGiveUp: func(convID, _ string) {
+			select {
+			case gaveUp <- convID:
+			default:
+			}
+		},
+		Logger: inboundTestLogger(t),
+	})
+	if err != nil {
+		t.Fatalf("msgqueue.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = q.Run(ctx) }()
+
+	q.Enqueue(testConvID, "m1")
+	if got := recvStringWithin(t, w.entered, "m1 write"); got != "m1" {
+		t.Fatalf("first write = %q, want m1", got)
+	}
+	if !tr.Busy(testConvID) {
+		t.Fatal("Busy = false after the first delivery; nothing would be held")
+	}
+
+	m2ID := q.Enqueue(testConvID, "m2")
+	q.Enqueue(testConvID, "m3")
+	if m2ID == 0 {
+		t.Fatal("Enqueue rejected m2 (backlog full?); there is nothing to drop")
+	}
+	assertNoWriteWithin(t, w.entered, 100*time.Millisecond)
+
+	if !q.Remove(testConvID, m2ID) {
+		t.Fatal("Remove of a head held behind a parked approval returned false; the exemption must not take the drop-before-drain control away exactly when a person is slowest")
+	}
+	waitBacklog(t, q, testConvID, []string{"m3"})
+
+	// The drain advanced to m3, which parks on the same hold until the turn ends.
+	assertNoWriteWithin(t, w.entered, 100*time.Millisecond)
+	endHeldTurn(tr)
+	if got := recvStringWithin(t, w.entered, "m3 write"); got != "m3" {
+		t.Fatalf("write after turn end = %q, want m3", got)
+	}
+
+	if got := w.deliveredOrder(); !slices.Equal(got, []string{"m1", "m3"}) {
+		t.Errorf("delivered order = %v, want [m1 m3]; the dropped message must never reach claude", got)
+	}
+	select {
+	case convID := <-gaveUp:
+		t.Errorf("OnGiveUp fired for %q; a dropped head is a cancellation, never an abandonment", convID)
+	default:
+	}
+}
+
+// #1911, the precision the exemption rests on: ONLY the delivery hold is ever
+// exempt. A conversation that is genuinely wedged — resolve failing, Activate
+// failing — stays on the give-up clock even while an approval is parked on it,
+// which is what keeps the bound satisfiable once an approval may outlive the hold.
+//
+// The seam is called directly: the property is the classification of the returned
+// error, and going through the queue would only observe it as timing.
+func TestInboundDeliver_ApprovalHold_NonHoldErrorIsNeverExempt(t *testing.T) {
+	t.Parallel()
+
+	resolveErr := errors.New("conversation not bound")
+	unwired := &approvalParkedReport{}
+	var nilReport *approvalParkedReport
+	parkedReport, _ := parkedSwitch(true)
+	idleReport, _ := parkedSwitch(false)
+
+	tests := []struct {
+		name        string
+		resolveFail bool
+		report      *approvalParkedReport
+		wantPending bool
+		wantErrText string
+	}{
+		{
+			name:        "resolve fails while an approval is parked",
+			resolveFail: true,
+			report:      parkedReport,
+			wantPending: false,
+			wantErrText: resolveErr.Error(),
+		},
+		{
+			name:        "hold times out while an approval is parked",
+			report:      parkedReport,
+			wantPending: true,
+		},
+		{
+			name:        "hold times out with nothing parked",
+			report:      idleReport,
+			wantPending: false,
+			// The unexempted wrap is byte-identical to the pre-#1911 one.
+			wantErrText: "stream turn hold: context deadline exceeded",
+		},
+		{
+			name:        "hold times out with the report never wired",
+			report:      unwired,
+			wantPending: false,
+		},
+		{
+			name:        "hold times out with no report at all",
+			report:      nilReport,
+			wantPending: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := funcWriter{write: func(context.Context, string, []byte) error { return nil }}
+			resolve := func(string) (handlers.TurnWriter, error) {
+				if tc.resolveFail {
+					return nil, resolveErr
+				}
+				return w, nil
+			}
+			tr := holdTestTracker()
+			tr.observe("sess-a", turnevent.TextChunk{MessageID: "m1", Text: "working"}) // never ends
+
+			deliver := tc.report.markApprovalHolds(newInboundDeliver(resolve, tr, 20*time.Millisecond))
+			err := deliver(context.Background(), testConvID, []byte("held"))
+
+			if err == nil {
+				t.Fatal("deliver = nil, want an error; every row here is a failing attempt")
+			}
+			if got := approvalHoldPending(err); got != tc.wantPending {
+				t.Errorf("approvalHoldPending(%v) = %v, want %v", err, got, tc.wantPending)
+			}
+			if tc.wantErrText != "" && err.Error() != tc.wantErrText {
+				t.Errorf("err = %q, want %q", err.Error(), tc.wantErrText)
+			}
+		})
 	}
 }
