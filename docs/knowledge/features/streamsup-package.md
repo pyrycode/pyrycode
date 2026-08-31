@@ -729,9 +729,10 @@ v2 interactive payload supplies its `ConversationID` through; session state woul
 second parser→relay path beside the one every other interactive payload already uses. `MapEvent` gained
 a `turnevent.ModelList` arm in #1848 (previously falling to `default`, which dropped the event) and
 `cmd/pyry`'s `Handle` has carried the emitting case since #1849, so a client does read a real count
-today — best-effort on the live interactive turn lane, still with no connect-time snapshot for one it
-missed: #1863 shipped the relay-side seam nil in production, and **#1867** (open) is the daemon-side
-producer that fills it. See [protocol-package.md](protocol-package.md)'s Model-list payload section.
+today — best-effort on the live interactive turn lane; a client that missed it now also gets a
+connect-time snapshot: #1863 shipped the relay-side seam nil in production, and #1867 wired the
+daemon-side producer that fills it. See [protocol-package.md](protocol-package.md)'s Model-list payload
+section.
 
 *Test-writing lesson for the next per-entry accumulator built on `emitBackgroundTaskRoster`'s idiom
 (the `cut` closure declared inside the per-entry loop).* An isolation row asserting "a cut on one
@@ -1166,9 +1167,9 @@ start still drops the frame at the no-cursor guard (cursor is `""` until a messa
 fan-in can still refuse the frame under load since `turnMarkFor` answers `turnMarkNone` for it. Both are
 exactly the losses this retention exists to survive; reading `streamRunner.ModelList()` back for a client
 that connects or reconnects afterward was #1846, re-cut twice (→ #1857/#1858 → #1863/#1864 →
-#1867/#1868). #1863 shipped the relay-side seam nil in production; **#1867** (open) is what wires a real
-read of the hold into it, **#1868** (open) proves it — not this ticket, and not a second read of the hold
-from the live lane.
+#1867/#1868). #1863 shipped the relay-side seam nil in production; #1867 wired a real read of the hold
+into it (`retainedModelLists`, [v2-session-manager.md](v2-session-manager.md)), not a second read of the
+hold from the live lane. **#1868** (open) is the cross-process e2e proof.
 
 **Test-writing lesson: a `cmd/pyry` fixture-builder name collides silently across files in the same
 package.** `session_model_hold_test.go` (#1840) already defines a `modelListFixture` builder function;

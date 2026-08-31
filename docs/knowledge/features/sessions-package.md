@@ -280,11 +280,13 @@ required a by-hand repo-wide grep, not a gate failure. The five capability inter
 share the same structural blind spot: removing `interruptRunner`, `startFreshRunner`,
 `beginRotationOrNoop`, or `resolveBoundModelList` would not, by itself, surface any strandable
 method on `*streamsup.Runner` via a build or vet failure — that has to be checked by hand at
-deletion time, the same way #1550's spec did. `resolveBoundModelList` (#1857) is the sharper
-case of the same coin: it ships with **no production caller at all** yet (its consumer, #1858,
-lands separately) and stays reported as "used" purely because a `_test.go` reference counts —
-verified empirically against the `staticcheck` version `make check` installs before relying on
-it, rather than assumed.
+deletion time, the same way #1550's spec did. `resolveBoundModelList` (#1857) shipped with
+**no production caller at all**, and stayed reported as "used" purely because a `_test.go`
+reference counts — verified empirically against the `staticcheck` version `make check`
+installs before relying on it, rather than assumed. It gained its first production caller in
+#1867: `retainedModelLists` (`cmd/pyry/session_model_list.go`), the enumerator that adapts it
+to the relay's connect-time reconcile seam (see [v2-session-manager.md § Connect-time
+model-list reconcile](v2-session-manager.md#connect-time-model-list-reconcile-1863--retainedmodellists-seam--reconcilemodellists)).
 
 **Typed-nil-in-interface trap for downstream consumers (#1101).** A call site that assigns `w.sup` (the `*supervisor.Supervisor` returned by `Supervisor()`) straight into a consumer-declared interface field inherits a footgun on the stream-json path: a nil `*supervisor.Supervisor` wrapped in an interface value is a **non-nil interface holding a nil pointer**, so the consumer's `== nil` guard silently fails and any method call on it panics on the nil receiver. `cmd/pyry/relay.go`'s `Snapshotter: w.sup` wiring hit exactly this and was fixed by a `screenSnapshotterOrNil` helper that returns a genuine nil when `sup == nil` — see [codebase/1101.md](../codebase/1101.md). Two sibling wiring sites carry the same unfixed trap as of #1101: `SessionStarter: w.sup` and the modal resolver's `w.sup` argument (both `cmd/pyry/relay.go`) — flagged out of scope there, not yet guarded.
 

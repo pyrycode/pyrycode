@@ -978,9 +978,10 @@ func runSupervisor(args []string) error {
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
 		},
-		approvals:  approvals,
-		streamSink: streamSink,
-		busy:       turnBusy,
+		retainedModelLists: retainedModelLists(convReg, pool),
+		approvals:          approvals,
+		streamSink:         streamSink,
+		busy:               turnBusy,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)

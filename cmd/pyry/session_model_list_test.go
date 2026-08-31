@@ -411,3 +411,280 @@ func TestResolveBoundModelList_LogsNothing(t *testing.T) {
 		t.Errorf("the caller's untrusted conversation id leaked into a log record:\n%s", logs)
 	}
 }
+
+// indexByConversation keys an enumeration's result on ConversationID, which is
+// how every assertion below reads it: retainedModelLists returns List's order
+// (registry insertion order) and that is deliberately NOT a contract — the
+// client correlates on conversation_id and reconcileModelLists sends one
+// envelope per payload. It also fails a duplicated id, which is the shape a
+// loop that appended the same row twice would take.
+func indexByConversation(t *testing.T, got []protocol.ModelListPayload) map[string]protocol.ModelListPayload {
+	t.Helper()
+	byID := make(map[string]protocol.ModelListPayload, len(got))
+	for _, p := range got {
+		if _, dup := byID[p.ConversationID]; dup {
+			t.Fatalf("conversation %q contributed twice: %+v", p.ConversationID, got)
+		}
+		byID[p.ConversationID] = p
+	}
+	return byID
+}
+
+// #1867 AC 1: one conversation bound to a session holding a retained list yields
+// exactly one payload, carrying that session's entries in claude's order under
+// that conversation's id.
+//
+// The bootstrap session is armed and bound, so a mutant that returned the zero
+// payload or an empty slice is red on the count as well as on the contents.
+func TestRetainedModelLists_EnumeratesTheBoundSessionsMenu(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	held := sentinelModelList("ENUM")
+	plan.arm(pool.BootstrapID(), held)
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-enum",
+		CurrentSessionID: string(pool.BootstrapID()),
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	got := retainedModelLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedModelLists returned %d payloads, want exactly 1: %+v", len(got), got)
+	}
+	if got[0].ConversationID != "conv-enum" {
+		t.Errorf("ConversationID = %q, want %q", got[0].ConversationID, "conv-enum")
+	}
+	if got[0].DroppedModels != 3 {
+		t.Errorf("DroppedModels = %d, want 3 (carried from the retained list, never recomputed)", got[0].DroppedModels)
+	}
+	assertPayloadCarries(t, got[0], held)
+}
+
+// #1867 AC 2: each refusal contributes no payload and raises no error, and does
+// so WITHOUT aborting the enumeration or contaminating a sibling's payload.
+//
+// All four rows live in ONE registry on purpose — that is the whole point of the
+// test. A refusal that aborted the enumeration, appended a zero payload, or
+// carried the previous row's models forward is red here and invisible in four
+// single-row registries. The three refusing rows are the three reachable arms AC
+// 2 names; the resolver's unknown-conversation arm is unreachable from here
+// because every id came out of List.
+//
+// The contributing row is created LAST, after all three refusals, and that order
+// is load-bearing: List returns registry insertion order, so a mutant that broke
+// out of the loop on the first refusal instead of continuing would still return
+// the survivor — and go green — if the survivor came first. Behind three
+// refusals it returns nothing.
+func TestRetainedModelLists_SkipsEachRefusalAndKeepsGoing(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	held := sentinelModelList("SURVIVOR")
+	plan.arm(pool.BootstrapID(), held)
+
+	// A second pool session whose runner implements ModelList but has nothing
+	// armed: the "holds no retained list" refusal, one step deeper than the two
+	// below. Bound to its own row so the refusal is reached through the registry.
+	ctx := runPoolReady(t, pool)
+	silent, err := pool.Create(ctx, "session-silent")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-silent", CurrentSessionID: string(silent), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-live", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+
+	got := retainedModelLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedModelLists returned %d payloads, want exactly 1 (only conv-live contributes): %+v", len(got), got)
+	}
+	if got[0].ConversationID != "conv-live" {
+		t.Fatalf("the surviving payload names %q, want %q", got[0].ConversationID, "conv-live")
+	}
+	assertPayloadCarries(t, got[0], held)
+	// An empty menu is never presented as a real one: no payload may carry zero
+	// models, whichever row produced it.
+	for _, p := range got {
+		if len(p.Models) == 0 {
+			t.Errorf("payload for %q carries an empty menu; a refusal must contribute nothing at all", p.ConversationID)
+		}
+	}
+}
+
+// #1867 AC 2, the nothing-to-send half: an empty registry and a registry whose
+// every row refuses both enumerate to no payloads and no panic. Split from the
+// test above because that one always has a survivor, so it cannot distinguish
+// "skipped the refusals" from "returned the survivor and stopped".
+func TestRetainedModelLists_NothingToSend(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	// Armed but never bound: a mutant that enumerated the POOL instead of the
+	// registry would contribute here, and an unarmed bootstrap would hide that.
+	plan.arm(pool.BootstrapID(), sentinelModelList("UNREACHABLE"))
+
+	now := time.Now().UTC()
+	allRefuse := &conversations.Registry{}
+	allRefuse.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	allRefuse.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+
+	tests := []struct {
+		name string
+		reg  *conversations.Registry
+	}{
+		{"empty registry", &conversations.Registry{}},
+		{"every row refuses", allRefuse},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := retainedModelLists(tc.reg, pool)(); len(got) != 0 {
+				t.Fatalf("retainedModelLists returned %d payloads, want none: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+// #1867: the enumeration is unfiltered, so an ARCHIVED conversation whose bound
+// session still holds a list DOES contribute. Registry.SetArchived writes
+// exactly one field and never unbinds CurrentSessionID, and the reconcile
+// asserts current control truth — the client decides what to show.
+//
+// This is the sole red for a mutant that narrows the call to
+// List(ListFilter{IsArchived: &f}), which is otherwise invisible: every other
+// test here builds unarchived rows.
+func TestRetainedModelLists_ArchivedConversationsContribute(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	held := sentinelModelList("ARCHIVED")
+	plan.arm(pool.BootstrapID(), held)
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-archived",
+		CurrentSessionID: string(pool.BootstrapID()),
+		IsArchived:       true,
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	got := retainedModelLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedModelLists returned %d payloads, want 1 — archiving does not unbind the session: %+v", len(got), got)
+	}
+	if got[0].ConversationID != "conv-archived" {
+		t.Errorf("ConversationID = %q, want %q", got[0].ConversationID, "conv-archived")
+	}
+	assertPayloadCarries(t, got[0], held)
+}
+
+// #1867: two conversations bound to two DIFFERENT pool sessions each carry their
+// own session's menu across one enumeration. This is the pin a shared buffer, an
+// off-by-one, or a loop-variable capture cannot pass — TestResolveBoundModelList_
+// IsolatesConversations makes the same point one call at a time, and only the
+// enumerator can cross two rows within a single result slice.
+//
+// Not parallel: t.Setenv confines anything the pool's create path resolves out
+// of HOME, and t.Setenv forbids t.Parallel.
+func TestRetainedModelLists_DoesNotCrossConversations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	pool, plan := newModelListTestPool(t)
+	ctx := runPoolReady(t, pool)
+	sessA := pool.BootstrapID()
+	sessB, err := pool.Create(ctx, "session-b")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	listA, listB := sentinelModelList("ALPHAENUM"), sentinelModelList("BETAENUM")
+	plan.arm(sessA, listA)
+	plan.arm(sessB, listB)
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-a", CurrentSessionID: string(sessA), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-b", CurrentSessionID: string(sessB), LastUsedAt: now})
+
+	got := retainedModelLists(reg, pool)()
+	if len(got) != 2 {
+		t.Fatalf("retainedModelLists returned %d payloads, want 2: %+v", len(got), got)
+	}
+	byID := indexByConversation(t, got)
+	gotA, ok := byID["conv-a"]
+	if !ok {
+		t.Fatalf("conv-a contributed no payload: %+v", got)
+	}
+	gotB, ok := byID["conv-b"]
+	if !ok {
+		t.Fatalf("conv-b contributed no payload: %+v", got)
+	}
+	assertPayloadCarries(t, gotA, listA)
+	assertPayloadCarries(t, gotB, listB)
+	// Stated separately for the same reason the resolver's twin states it: the
+	// failure this test exists to catch is A being handed B's menu, and a reader
+	// should not have to compare two sentinel tags to see it.
+	if gotA.Models[0].Value == gotB.Models[0].Value {
+		t.Fatalf("both conversations enumerated the same menu: %q", gotA.Models[0].Value)
+	}
+}
+
+// #1867 AC 3: no model value — selectable value, resolved model or display name
+// — and no effort level reaches a log record on this path at any level.
+//
+// What this pins, honestly: retainedModelLists takes no *slog.Logger, so the
+// structural half of AC 3 is enforced by the signature and by review. What this
+// catches is the one real regression shape — someone reaching for the
+// package-level slog.Info / slog.Default() to explain why a row did not
+// contribute. The registry deliberately holds BOTH a contributing row and the
+// refusing ones, because that "why did this row skip" line is exactly where such
+// a call would be added.
+//
+// It must NOT call t.Parallel: slog.SetDefault is process-global. The pool is
+// built BEFORE the default is swapped, so sessions.New captures the old default
+// and the pool's own diagnostics cannot land in this buffer.
+func TestRetainedModelLists_LogsNothing(t *testing.T) {
+	pool, plan := newModelListTestPool(t)
+	held := sentinelModelList("ENUMLOGNEG")
+	plan.arm(pool.BootstrapID(), held)
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-logneg", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-ZZUNTRUSTEDZZ", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-gone", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	got := retainedModelLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedModelLists returned %d payloads, want 1; the log negative needs the happy path", len(got))
+	}
+
+	logs := buf.String()
+	if logs != "" {
+		t.Fatalf("retainedModelLists wrote %d bytes of log; it must write none:\n%s", len(logs), logs)
+	}
+	// Belt-and-braces on the values themselves, so a future handler swap that made
+	// the emptiness check weaker still names what leaked.
+	for _, m := range got[0].Models {
+		for _, v := range append([]string{m.ResolvedModel, m.Value, m.DisplayName}, m.EffortLevels...) {
+			if v != "" && strings.Contains(logs, v) {
+				t.Errorf("a model value leaked into a log record: %q", v)
+			}
+		}
+	}
+	if strings.Contains(logs, "ZZUNTRUSTEDZZ") {
+		t.Errorf("a skipped conversation's id leaked into a log record:\n%s", logs)
+	}
+}
