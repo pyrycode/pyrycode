@@ -6,7 +6,10 @@ conversation-then-`tool_use_id`, fed by `toolCallDeltaFor` (a pure classifier re
 variant, never a field value) and applied inside the existing single `setBusy` acquisition.
 `ToolCallInFlight(conversationID, toolCallID) bool` answers membership only, extending
 `Busy`'s existence-oracle posture to a two-key question so neither id can be inferred from the
-other. Nothing reads it yet — #1919 is the intended consumer. See
+other. #1919's `streamApprovalBridge.ApprovalParked` (`cmd/pyry/modal_resolve_v2.go`) is now the
+consumer: it snapshots `byModal`'s parked `tool_use_id`s under its own leaf lock, releases the
+lock, then asks `ToolCallInFlight` per id — never nesting the two locks. Nothing outside a test
+calls `ApprovalParked` itself yet; #1911 (the delivery hold) is next. See
 [Session-teardown clear](streamsup-package-per-conversation-turn-busy-track-session-teardown-clear.md)
 and [Exit lane on the turn-busy fan-in](streamsup-package-per-conversation-turn-busy-track-exit-lane-on-the-turn-busy-fan.md)
 for the other two feeds this one's close arm rides.
@@ -54,3 +57,24 @@ a future variant is required to declare itself here rather than fall silently in
 arm — a second classifier reading the same event stream should not rely on a sibling's routing
 to stay correct. If `turnMarkFor` ever starts treating `BackgroundTaskStarted` as an opener,
 `toolCallDeltaFor`'s handling of it needs revisiting at the same time, not after.
+
+**A membership conjunction across two independently-updated stores has an ordering gap its
+misattribution fix does not close.** `ApprovalParked` resolves the conversation on read rather
+than stamping it at `Surface` time, which removes the race the design was chasing — a message
+enqueued for another conversation moving `activeConv()` out from under a parked approval.
+It does not remove a second, narrower gap: the approve lands (claude → `pyry mcp-approve` →
+control socket, writing `byModal`) and the matching `ToolStart` is observed (child → parser →
+sink → drain, writing `inflight`) on two unordered paths, so a caller can read `ApprovalParked`
+in the interval where the correlation exists but the tracker hasn't caught up, and get `false`
+for a call that *is* about to be genuinely parked. This is inside `ApprovalParked`'s own
+precondition — it answers about an *in-flight* tool call — and it is the fail-closed direction,
+so it needed no fix; it needs the next reader of the report to know it's a level that can lag by
+one poll, not a value that's true for the whole parked window. #1911 (the delivery hold) is that
+reader.
+
+**Two negative arms of an existence-oracle-collapse table can share one fixture row when both
+lean on the same conversation's state.** `ApprovalParked`'s test table has a never-observed
+tool-call id and a correlation with an empty `ToolUseID` as separate arms, but both can be parked
+alongside the same positive control on one other conversation — no second fixture conversation is
+needed, because what separates the arms is which lookup inside `ToolCallInFlight` returns false,
+not which conversation they're attached to.
