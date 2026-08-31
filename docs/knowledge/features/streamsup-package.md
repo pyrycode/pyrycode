@@ -786,7 +786,9 @@ block turns a boundary that used to prove nothing into one that does.
 **Declaring `commands` alongside `models` (#1853).** `controlResponseLine`'s decode target grew a
 second array, `commandEntryLine{ Name string }`, for claude's slash-command inventory — one field,
 same reasoning as `modelOptionLine` and `systemInitLine`: absence from the decode target is a
-stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stay undeclared.
+stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stay undeclared
+(as of #1853 — `description` joined in #1904, below; `argumentHint`/`aliases` remain undeclared,
+#1830 and #1825).
 Declaring the array turns a `commands` that arrives as a number, a string or an object from
 *silently ignored* into a whole-line decode failure on the undecodable rung — the same shape
 guarantee `models` already had, extended to a second field. `logControlResponse` grew a sixth
@@ -807,16 +809,17 @@ check Y, not before," the pinning fixture must make X differ depending on which 
 computed on — an X that reads the same either way (because the fixture is empty/absent on the
 inputs the reordering would affect) proves nothing about the ordering.
 
-*Known future collision, not yet resolved: `commandEntryLine`'s doc absolutism versus #1720.* Its
-comment reads "a later reader must not 'complete' this struct" — but `protocol.SlashCommand`
-already declares all four keys today, and `protocol.SlashCommandListPayload`'s doc states outright
-that shape "adopts all four... unlike ModelOption it drops nothing," with **#1720** open to publish
-it. Code review flagged this as a SHOULD FIX (the comment borrows `systemInitLine`'s register — keys
-the daemon must *never* hold — for three keys the wire type is already committed to carrying) and it
-was left unfixed, deliberately non-blocking. Whoever picks up #1720 will read a production comment
-forbidding exactly what their ticket requires; the fix, when someone gets there, is scoping the
-completeness claim to *today* — nothing reads the other three keys yet, and widening is #1720's
-decision to take together with a cap, not a violation of this one.
+*Known future collision, partially resolved by #1904, below.* `commandEntryLine`'s comment used to
+read "a later reader must not 'complete' this struct" — but `protocol.SlashCommand` already declares
+all four keys today, and `protocol.SlashCommandListPayload`'s doc states outright that shape "adopts
+all four... unlike ModelOption it drops nothing," with **#1720** open to publish it. Code review
+flagged this as a SHOULD FIX (the comment borrowed `systemInitLine`'s register — keys the daemon must
+*never* hold — for three keys the wire type was already committed to carrying) and it was left
+unfixed at the time, deliberately non-blocking. #1904 declared the first of those three
+(`description`) and rewrote the paragraph to name which omissions survive rather than forbid
+completion outright: `argumentHint` is #1830's, `aliases` is #1825's. Whoever picks up the remaining
+two now reads an explicit assignment instead of an absolute ban; #1720 still owns *publishing* the
+shape once all four are decoded.
 
 **Producing `turnevent.SlashCommandList` (#1877).** `emitModelList`'s rung 4 gained a second,
 independent gate on `commands`, below the existing `ModelList` emit: non-empty → each entry's `Name`
@@ -1012,6 +1015,44 @@ matrix on the *report* rather than isolating the rung. The mutant that actually 
 what a future edit to that loop could do is a relocation: give `emitSlashCommandList` a
 `nameLimit` parameter, pass `maxSlashCommandName` from rung 5 and an unbounded limit from
 rung 4. Under that one, the new row is the sole failing subtest in the package.
+
+**`Description` joins the per-entry shape (#1904).** `commandEntryLine` gains a second field,
+`Description string`, decoded verbatim per #1600's rule — no lowercasing, trimming, charset
+filtering, or newline stripping; one captured description carries two raw `0x0a` bytes and they
+are not stripped. `turnevent.SlashCommand` gains `Description` in its **mirrored position**,
+between `Name` and `TruncatedFields`, matching `protocol.SlashCommand`'s declaration order and
+leaving the gap `ArgumentHint` will fill (#1830) — the first evidence for the type's
+fixed-order-before-the-second-field-exists promise. A new `maxSlashCommandDescription` (256 bytes)
+cuts it at construction; the per-entry term is now the **sum of caps**,
+`maxSlashCommandName + maxSlashCommandDescription` = 512 bytes — a worst case, not a description of
+one capture, the same derivation shape `maxModelListEntries` uses for its own product. The
+ceiling argument follows that doc's corrected framing: state the fraction of `maxUnrecognizedRaw`'s
+16 KiB (1/2 or 5/8), never the retired 8192 landmark. This slice does not pick the fraction or the
+entry-count factor — both are #1826's — it hands forward only the 512-byte term and the two
+arithmetics it implies (16 entries at 1/2, 20 at 5/8). `emitSlashCommandList`'s construction loop
+adopts `emitModelList`'s `bound` closure, declared inside the per-entry loop, so the two sequential
+`truncateField` calls (`Name` then `Description`) report cuts in call order — the property that
+makes `TruncatedFields`'s `["name", "description"]` ordering a consequence of the call sequence
+rather than a sort.
+
+*Lesson: a committed-capture pin can assert a narrower claim than its assertion's scope covers.*
+`TestParser_InitializeControlResponseCountsTheCapturedCommands` asserted `TruncatedFields == nil`
+across the whole 51-entry capture under the message "no captured name approaches the cap" — a claim
+about `Name` specifically, checked over the entry's *entire* `TruncatedFields` slice. Declaring
+`Description` (whose capture values legitimately exceed 256 on 10 of 51 entries) turned that
+assertion red against a correct producer, because the whole-slice check silently absorbed a second
+field's cap it was never written to reason about. Narrowed to
+`slices.Contains(got.TruncatedFields, "name")`. Worth checking before any future field lands on a
+type a capture test asserts whole-struct absence on: a message naming one field and an assertion
+covering the whole struct are two different claims, and only the narrower one survives the next
+field landing on that struct.
+
+*Lesson: a ten-item `//`-correction list costs a paragraph each, not a sentence each.* The spec
+estimated ~265–350 lines against its own ≤400 boundary; the change landed at ~500, almost entirely
+in doc prose — the emitter's own code change was ~15 lines. Two of the ten corrections were
+re-arguments (rewriting a memory-share-of-payload paragraph, redrawing an unreachable-vs-unwritten
+distinction) rather than sentence edits. Worth costing in before sizing #1830 and #1825, which
+correct a comparable number of paragraphs in these same functions.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
