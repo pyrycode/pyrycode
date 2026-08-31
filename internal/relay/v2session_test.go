@@ -4966,12 +4966,22 @@ func TestV2Session_Push_HoldGatedOnProbeNotSendError(t *testing.T) {
 	// send=fail to prove a send failure alone never holds.
 	var probeUp, sendFail atomic.Bool
 	probeUp.Store(true)
+	// sends counts completed send DECISIONS, incremented after the sendFail read
+	// on both branches. drainOnce commits the pop under pushMu and releases the
+	// lock before forwardEnvelope seals and reaches this closure, so an assertion
+	// synchronised on the queue emptying returns inside that gap. Observing
+	// sends >= N is program-ordered after envelope N's sendFail read, so it is a
+	// real happens-before — no duration to tune.
+	var sends atomic.Int64
 	rec := &v2Recorder{}
 	outbound := func(env protocol.RoutingEnvelope) error {
 		if sendFail.Load() {
+			sends.Add(1)
 			return errTransportDown
 		}
-		return rec.outbound(env)
+		err := rec.outbound(env)
+		sends.Add(1)
+		return err
 	}
 	frames := make(chan protocol.RoutingEnvelope, 2)
 	sess := driveToOpen(t, V2SessionConfig{
@@ -4993,6 +5003,21 @@ func TestV2Session_Push_HoldGatedOnProbeNotSendError(t *testing.T) {
 	sendFail.Store(true)
 	if err := sess.mgr.Push(ctx, v2TestConnID, buildMessageEnvelope(t, 1, "up-send-fails")); err != nil {
 		t.Fatalf("Push (probe up, send fails): %v", err)
+	}
+	// Wait for THIS push's send decision (the handshake resp is decision #1)
+	// before asserting anything or touching either flag. Synchronising on the
+	// pop alone leaves the already-popped envelope in flight to outbound: the
+	// sendFail flip below would then land before its sendFail read, the success
+	// branch would record a second envelope, and sub-case (a)'s assertHeldQueued
+	// would fail with "recorded 2 envelopes while down, want 1". It also makes
+	// the recorder check that follows non-vacuous — today it can pass simply
+	// because the send has not happened yet.
+	deadline := time.Now().Add(2 * time.Second)
+	for sends.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("send decisions = %d, want >= 2 (handshake resp + the probe-up push)", sends.Load())
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	assertQueueDrains(t, sess.mgr, v2TestConnID)
 	if got := rec.snapshot(); len(got) != 1 {
@@ -5284,10 +5309,28 @@ func TestV2Session_RekeyScheduled_TransportDown_NoRekeyFailed_NoClose(t *testing
 
 	logger, logBuf := bufferLogger()
 	gated := newGatedRecorder()
+	// Drop the relay leg the instant the handshake resp is on the wire.
+	// handleNoiseInit runs m.send(resp) → s.state = V2StateOpen → armRekeyTimer
+	// sequentially on the Run goroutine and m.send never consults
+	// transportDown(), so this store is program-ordered before the scheduled
+	// rekey timer is even armed: the FIRST scheduled boundary is guaranteed to
+	// find the transport down. Dropping it after driveToOpen returns instead
+	// leaves a window of real time in which that first boundary emits for real,
+	// arms the reply window and tears the session down at 4426 — the exact
+	// outcome this test refutes, so under load the test manufactured its own
+	// failure. The store is idempotent; no one-shot guard is needed. The
+	// gatedRecorder lockstep is preserved — after the flip, outbound errors and
+	// connected() reads false together, so "the recorder saw exactly one
+	// envelope" still means "exactly one frame was sealed under s.send".
+	outbound := func(env protocol.RoutingEnvelope) error {
+		err := gated.outbound(env)
+		gated.up.Store(false)
+		return err
+	}
 	frames := make(chan protocol.RoutingEnvelope, 2)
 	sess := driveToOpen(t, V2SessionConfig{
 		Frames:     frames,
-		Outbound:   gated.outbound,
+		Outbound:   outbound,
 		Connected:  gated.connected,
 		StaticPriv: respPriv,
 		Devices:    reg,
@@ -5296,18 +5339,21 @@ func TestV2Session_RekeyScheduled_TransportDown_NoRekeyFailed_NoClose(t *testing
 	}, frames, gated.rec, respPub, initPriv)
 	t.Cleanup(sess.stop)
 
-	// Down for well over rekeyReplyTimeout and several scheduled fires.
-	gated.up.Store(false)
-	time.Sleep(300 * time.Millisecond)
+	// Positive assertion: the defer path must have actually run (proves this is
+	// the fix, not just an unarmed timer). Wait until it is observed rather than
+	// sleeping a fixed span, so a starved scheduler delays this test instead of
+	// failing it.
+	waitForLogContains(t, logBuf, "event=v2.rekey.emit.deferred_transport_down")
+
+	// The negative below is a real settle window, but anchored to the CONFIRMED
+	// deferral above rather than to test start, so starvation lengthens it
+	// instead of consuming it. 5× rekeyReplyTimeout is ample for a blind emit's
+	// reply window to expire and produce the noise.rekey_failed + 4426 teardown.
+	time.Sleep(5 * rekeyReplyTimeout)
 
 	out := logBuf.String()
 	if strings.Contains(out, "noise.rekey_failed") {
 		t.Errorf("log contains noise.rekey_failed — a transport blip was mislabelled a rekey failure; got:\n%s", out)
-	}
-	// The defer path must have actually run (proves this is the fix, not just an
-	// unarmed timer).
-	if !strings.Contains(out, "event=v2.rekey.emit.deferred_transport_down") {
-		t.Errorf("log missing the deferred-transport-down line; got:\n%s", out)
 	}
 
 	sess.stop()
