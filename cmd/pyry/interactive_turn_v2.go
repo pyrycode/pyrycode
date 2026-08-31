@@ -692,10 +692,12 @@ func eventKind(ev turnevent.Event) string {
 		// Like the two arms above, this variant is now claimed by a Handle case on
 		// this lane (#1638), so this file's `interactive_turn.unknown` Debug is no
 		// longer a live call site for it — nor for anything else the production
-		// producer emits. Handle now has an arm for 16 of turnevent.Event's 17
-		// implementations, and the one without is PermissionRequest, which
-		// streamsup.Parser never produces: it is PTY/modalbridge-only, as
-		// TestTurnMarkFor_TotalOverEveryVariant states independently. "No variant the
+		// producer emits. Handle now has an arm for 16 of turnevent.Event's 18
+		// implementations, and the two without are PermissionRequest, which
+		// streamsup.Parser never produces (it is PTY/modalbridge-only, as
+		// TestTurnMarkFor_TotalOverEveryVariant states independently), and
+		// SlashCommandList, which nothing produces yet — #1719 / #1720 own that
+		// producer, and the arm below says what follows for its call sites. "No variant the
 		// production producer emits" is the accurate claim rather than "unreachable" —
 		// a nil Event still lands in that default. The reachable eventKind call site
 		// left on this lane is the no-cursor drop, which returns before the type
@@ -718,6 +720,31 @@ func eventKind(ev turnevent.Event) string {
 		// and is therefore the reachable one here — all of which would otherwise read
 		// kind=unknown for a variant the daemon does recognize.
 		return "model_list"
+	case turnevent.SlashCommandList:
+		// The variant NAME only, and here the discipline matters MORE than in the
+		// arms above rather than less. Every string this variant carries is
+		// WORKSPACE-authored — a command defined in a repository was written by
+		// whoever wrote that repository, a lower-trust origin than claude's own
+		// strings — so the #833 posture the arm above names, restated across
+		// internal/relay's v2session_settings.go and internal/sessions' pool.go as
+		// "model / effort / YOLO values are NEVER logged at any level", covers these
+		// a fortiori. No entry's Name is returned, no entry's TruncatedFields, and
+		// neither is the entry count.
+		//
+		// Unlike the four arms above, NO Handle case claims this variant: #1854
+		// declares it and nothing in the tree produces it. So this file's
+		// `interactive_turn.unknown` Debug IS a live call site for it, alongside the
+		// no-cursor drop that returns before the type switch, and
+		// stream_turn_drain.go's sink-full droppable drop and not-active-session
+		// drop. Not reachable for this variant: observe's unbound-session drop and
+		// sinkFor's close drop, both gated on a non-turnMarkNone mark, and
+		// emitMapped's unmapped drop, which nothing routes it to.
+		//
+		// No production producer emits the variant yet, so no production path
+		// reaches any of those sites today. The arm lands with the declaration
+		// anyway, because the alternative is a window in which the daemon recognises
+		// the variant and every drop log calls it kind=unknown.
+		return "slash_command_list"
 	default:
 		return "unknown"
 	}

@@ -2835,3 +2835,161 @@ func TestInteractiveTurnEmitterV2_ModelListNotSynthesizedWithoutAnEvent(t *testi
 		t.Fatalf("an ordinary turn emitted a %s frame with no ModelList event: %v", protocol.TypeModelList, got)
 	}
 }
+
+// emitterSlashCommandListFixture is the workspace-authored inventory every
+// slash_command_list test drives. Package-level and READ-ONLY: the tests below run
+// in parallel and share it, and turnevent.SlashCommandList's carried-never-mutated
+// rule means nothing on this lane may write through that slice header anyway.
+//
+// Conspicuous sentinels rather than realistic command names, for
+// emitterModelListFixture's reason: the eventKind negative is a strings.Contains
+// over the WHOLE captured log, which carries the literal kind=slash_command_list
+// and the event names interactive_turn.no_cursor / interactive_turn.unknown, so a
+// natural value — clear, compact, or anything containing "slash", "command",
+// "list", "turn", "event", "cursor", "drop" or "kind" — would be a substring of the
+// log's own text and the negative would be RED against a CORRECT implementation.
+//
+// The two entries are deliberately DISTINGUISHABLE in every field
+// (turnbridge-package.md's own rule: identical rows let a swapped-index bug pass),
+// and their TruncatedFields differ on purpose — the second is nil, the family's
+// load-bearing absence, present in the fixture from the start rather than added by
+// whichever slice first needs it.
+var emitterSlashCommandListFixture = turnevent.SlashCommandList{
+	Commands: []turnevent.SlashCommand{
+		{
+			Name:            "qq-name-alpha-sentinel",
+			TruncatedFields: []string{"qq-truncated-alpha-sentinel"},
+		},
+		{
+			Name:            "zz-name-beta-sentinel",
+			TruncatedFields: nil,
+		},
+	},
+}
+
+// emitterSlashCommandListSentinels returns every workspace-authored string
+// emitterSlashCommandListFixture carries, for the log-leak negatives. Derived from
+// the fixture rather than re-listed beside it, so a sentinel added to an entry
+// cannot silently drop out of the assertions — and so the enumeration keeps
+// covering the fields turnevent.SlashCommand grows.
+func emitterSlashCommandListSentinels() []string {
+	var out []string
+	for _, c := range emitterSlashCommandListFixture.Commands {
+		out = append(out, c.Name)
+		out = append(out, c.TruncatedFields...)
+	}
+	return out
+}
+
+// slashCommandListDropLogger returns a DEBUG logger capturing into buf with slog's
+// own time attr dropped, for the model_list test's measured reason: a whole-log
+// strings.Contains has a host-dependent source of digits to collide with
+// otherwise. That is what makes the numeric needle in the assertions below safe —
+// the remaining record carries no digits at all.
+func slashCommandListDropLogger(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+}
+
+// assertSlashCommandListKindLeaksNothing is the shared half of the two drop-site
+// tests: the captured log names the variant, does not read as unknown, and carries
+// nothing derived from the event — no entry's Name, no entry's TruncatedFields,
+// and not the entry count.
+//
+// The negatives are the half that discriminates. An arm returning
+// "slash_command_list:" + Name, or + len(Commands), leaves
+// strings.Contains(logs, "kind=slash_command_list") TRUE, so the positive
+// assertion alone passes it and only the per-value checks catch it.
+func assertSlashCommandListKindLeaksNothing(t *testing.T, logs string) {
+	t.Helper()
+
+	if logs == "" {
+		t.Fatal("expected a DEBUG drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=slash_command_list") {
+		t.Fatalf("log does not name the variant (want kind=slash_command_list):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for slash_command_list:\n%s", logs)
+	}
+	leakable := append(emitterSlashCommandListSentinels(),
+		strconv.Itoa(len(emitterSlashCommandListFixture.Commands)),
+	)
+	for _, value := range leakable {
+		if strings.Contains(logs, value) {
+			t.Fatalf("value derived from the slash-command list %q leaked into the kind log:\n%s", value, logs)
+		}
+	}
+}
+
+// #1854 AC#3: the drop-logging kind function names the variant and returns the
+// variant NAME only.
+//
+// The empty cursor is load-bearing rather than incidental, exactly as it is in the
+// model_list test above: it makes Handle's no-cursor drop — which returns before
+// the type switch — a reachable eventKind call site. The arm exists for the other
+// live sites too: Handle's default arm (see the live-cursor test below), and
+// stream_turn_drain.go's sinkFor sink-full drop and startStreamTurnDrainV2
+// not-active-session drop, all of which would otherwise read kind=unknown for a
+// variant the daemon does recognize.
+//
+// The discipline matters MORE for this variant than for the model list rather than
+// less: every string it carries is WORKSPACE-authored, a lower-trust origin than
+// claude's own strings, so the #833 posture that keeps model values out of a log
+// covers these a fortiori.
+func TestInteractiveTurnEmitterV2_SlashCommandListEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cur := &stubCursor{} // empty cursor: no conversation has been routed yet
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, slashCommandListDropLogger(&buf))
+
+	e.Handle(context.Background(), emitterSlashCommandListFixture)
+
+	assertSlashCommandListKindLeaksNothing(t, buf.String())
+
+	// The pre-routing drop is unchanged, so no frame reaches the wire and no turn is
+	// opened on the way to the drop.
+	if len(bcast.pushes) != 0 {
+		t.Fatalf("pre-routing slash_command_list pushed %d envelopes; want 0", len(bcast.pushes))
+	}
+	if e.inTurn {
+		t.Error("pre-routing slash_command_list opened a turn; inTurn must stay false")
+	}
+}
+
+// #1854's scope boundary, pinned deterministically: with a conversation routed the
+// event reaches Handle's DEFAULT arm — no case claims it — so nothing in this slice
+// produces or publishes the variant.
+//
+// This is a deliberate tripwire. The slice that finally gives Handle an arm for
+// this variant WILL redden it, and updating it is that slice's work — the same
+// lifecycle every arm-claiming ticket in this family has had.
+func TestInteractiveTurnEmitterV2_SlashCommandListIsNotPublished(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, slashCommandListDropLogger(&buf))
+
+	e.Handle(context.Background(), emitterSlashCommandListFixture)
+
+	assertSlashCommandListKindLeaksNothing(t, buf.String())
+
+	if len(bcast.pushes) != 0 {
+		t.Fatalf("slash_command_list pushed %d envelopes; want 0 — nothing in this slice publishes it", len(bcast.pushes))
+	}
+	if e.inTurn {
+		t.Error("slash_command_list opened a turn; inTurn must stay false")
+	}
+}

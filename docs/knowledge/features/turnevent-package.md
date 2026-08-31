@@ -80,6 +80,21 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   isTurnEvent() {}`), so `TextChunk{}` — not only `&TextChunk{}` — satisfies the
   interface. The events are pure value types. Compile-time `var _ Event =
   TextChunk{}` (and one per content shape) assertions live alongside the markers.
+- **Adding an `Event` variant means checking every production type switch over
+  it, not just the totality gate.** `TestTurnMarkFor_TotalOverEveryVariant` is
+  AST-derived and proves only that `turnMarkFor` (`cmd/pyry/stream_turn_busy.go`)
+  is total — it says nothing about `cmd/pyry`'s `eventKind`
+  (`interactive_turn_v2.go`), `interactiveTurnEmitterV2.Handle`, or
+  `turnbridge.MapEvent`, none of which are exhaustiveness-checked by the build.
+  `SlashCommandList` (#1854) landed with all four walked by hand: `Handle`'s
+  `default` arm is a live drop site for it (no `case` claims the variant yet),
+  `eventKind` got a name-only arm, the totality row asserts the `turnMarkFor`
+  whitelist's existing answer, and `MapEvent`'s `default` correctly stays armless
+  since nothing produces the variant yet. Deriving which drop sites are reachable
+  for a new, unclaimed variant from its **turn mark** plus whether a `Handle` case
+  claims it is the reliable method — copying a neighbouring arm's site-list prose
+  is not: the `ModelList`/`ModelAnnounced` arms' own lists still name
+  `acp_turn_stream.go`, deleted with the terminal-driving path in #1348.
 
 ## The outbound `Event` variants (`event.go`, `permission.go`)
 
@@ -98,6 +113,40 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
 | `Unrecognized` | `Site UnrecognizedSite`, `Kind string`, `Raw string`, `Truncated bool` | **internal-only** diagnostic, and the one variant that is not a claude sub-state: the stream parser met output it has no mapping for. `Site` is a closed enum (`line_type` / `assistant_block` / `user_block` / `undecodable`); `Kind` is the offending type, empty for `undecodable`; `Raw` is the offending JSON already truncated by the producer, a `string` and not `json.RawMessage` because a truncated blob is no longer valid JSON |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
+| `SlashCommandList` (#1854) | `Commands []SlashCommand` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Declared ahead of its producer; see below |
+| `SlashCommand` (#1854, element type — not an `Event`, no marker) | `Name, TruncatedFields []string` | one inventory entry, mirroring `protocol.SlashCommand`'s field order |
+
+- **`SlashCommandList` / `SlashCommand` (#1854) are declared ahead of their
+  producer, and nothing publishes them yet.** `internal/streamsup` (unbuilt) owns
+  the decode, the byte caps and the entry-count bound; `turnbridge.MapEvent`'s
+  `default` drops the variant and `interactiveTurnEmitterV2.Handle` has no case
+  for it. `turnMarkFor` answers it correctly by construction (`turnMarkNone`,
+  same as `ModelList`): the inventory is reported once per `initialize` exchange,
+  which opens and closes no turn and is not even per-turn.
+- **`SlashCommand`'s two fields are the first and the last of
+  `protocol.SlashCommand`'s five**, in that type's own declaration order —
+  `ArgumentHint`, `Description` and `Aliases` arrive with their own slices,
+  following `ModelOption`'s one-field-at-a-time growth across #1819/#1827/#1828.
+  Fixing the order before the second field exists is the point: each later field
+  lands in its mirrored position instead of being appended.
+- **No `DroppedCommands` field, deliberately**, unlike the wire type's
+  `SlashCommandListPayload`. A daemon-internal struct isn't a compatibility
+  surface, so the count arrives later with the entry-count bound that produces
+  it — the same order `ModelList.DroppedModels` arrived in with
+  `maxModelListEntries`.
+- **SECURITY: every string on these two types is workspace-authored** — a
+  command defined in a repository was written by whoever wrote that repository,
+  a *lower*-trust origin than claude's own strings, which strengthens rather than
+  restates `ModelOption`'s claude-authored warning. The daemon bounds these
+  strings but does not sanitize them (no control-character or terminal-escape
+  stripping); the render boundary owing the sanitization is the client's. A
+  client sending a `Name` back as ordinary message text is the feature, but
+  publishing a name never makes it trusted — nothing in the daemon may treat a
+  value from this type as a command vocabulary or hand it to a child as an argv
+  element. This is why `eventKind`'s arm for the variant returns the name alone
+  (never an entry count, never a string from any entry): the workspace-authored
+  provenance makes the #833 keep-values-out-of-logs posture apply *a fortiori*,
+  not merely by analogy to `ModelOption`.
 
 - **`Stall` is an internal-only, onset-only empty marker (#638).** It mirrors
   tui-driver's one-shot `stall_detected` signal (no payload, no clearing edge), so
