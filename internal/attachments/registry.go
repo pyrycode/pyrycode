@@ -3,6 +3,7 @@ package attachments
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -31,9 +32,38 @@ type uploadKey struct {
 	attachmentID string
 }
 
-// Registry holds the attachment uploads currently in flight, one *Accumulator
-// per conn-and-attachment_id pair, and SYNCHRONISES ITSELF rather than
-// documenting a caller obligation the way Accumulator does.
+// entry is one in-flight upload: the pair's accumulator TOGETHER WITH the time
+// a chunk last arrived for it. lastChunkAt is set when the pair is admitted and
+// moved forward by every chunk Deliver routes to it, and by NOTHING ELSE — not a
+// Lookup, not a diagnostic, not a repeat admission under a pair already held.
+//
+// The field is named for the event and not "last activity", because the name is
+// the guard rail: "activity" invites a later reader to stamp on a look-up, and a
+// read that moved the time would let any diagnostic or dispatch-site look-up
+// keep a dead upload alive indefinitely — re-opening at this layer the
+// slot-exhaustion path an idle window (#1881) exists to close.
+//
+// Named entry and not upload because upload is already a named return in
+// insertLocked and insert and a local in Admit and Deliver, so a package-level
+// type by that name would be shadowed at the very store site that needs it.
+type entry struct {
+	acc         *Accumulator
+	lastChunkAt time.Time
+}
+
+// Registry holds the attachment uploads currently in flight, one entry per
+// conn-and-attachment_id pair — that pair's *Accumulator together with the time
+// a chunk last arrived for it — and SYNCHRONISES ITSELF rather than documenting
+// a caller obligation the way Accumulator does.
+//
+// The map's value is a struct held BY VALUE rather than a *entry. A pointer
+// would let any in-package caller keep the entry after a look-up returned and
+// read or write lastChunkAt with mu released; a value forecloses that
+// structurally, since the stamp can then only change by storing into the map and
+// the map can only be written under mu. That is uploadKey's own argument for
+// being a struct rather than a concatenated string — foreclose it in the type
+// instead of documenting a caller obligation — and the cost is one small copy
+// per map read, bounded by maxInFlightUploads entries.
 //
 // mu is taken once per operation and held for that whole operation, never once
 // to look up and again to write. That is more than race-freedom: a registry
@@ -50,15 +80,16 @@ type uploadKey struct {
 //
 // mu is a LEAF: never held across a call into Accumulator — not Add, not
 // Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
-// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the five
-// locked methods — Admit, insert, Lookup, Release and count — take mu for their
-// whole body and never call one another. TWO methods here take no lock, for
-// OPPOSITE reasons. insertLocked runs with mu held BY ITS CALLER, which is what
-// lets Admit and insert run ONE critical section rather than two copies free to
-// drift; the Locked suffix is this repo's signal for a caller-holds-the-lock
-// body, as in sessions' saveLocked. Deliver holds mu at NO POINT: it composes
-// Lookup and Release, each of which takes it for its own whole body, and feeds
-// the accumulator between them off-lock. That composer breaches nothing above —
+// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the seven
+// locked methods — Admit, insert, Lookup, lookupAndStamp, Release, count and
+// lastChunkAt — take mu for their whole body and never call one another. TWO
+// methods here take no lock, for OPPOSITE reasons. insertLocked runs with mu
+// held BY ITS CALLER, which is what lets Admit and insert run ONE critical
+// section rather than two copies free to drift; the Locked suffix is this repo's
+// signal for a caller-holds-the-lock body, as in sessions' saveLocked. Deliver
+// holds mu at NO POINT: it composes lookupAndStamp and Release, each of which
+// takes it for its own whole body, and feeds the accumulator between them
+// off-lock. That composer breaches nothing above —
 // "no method takes mu and then calls another that takes it" is satisfied by a
 // method that takes it never — and it is what keeps the feed off-lock while the
 // entry accounting stays inside this type.
@@ -74,20 +105,67 @@ type uploadKey struct {
 // two handlers for one conn run concurrently — so exactly one goroutine can ever
 // reach any one accumulator, which preserves Accumulator's mutex-free contract
 // rather than quietly widening it.
+//
+// THE CLOCK IS A SEAM, and it is read WITH mu HELD — at the admission store in
+// insertLocked and at the delivery stamp in lookupAndStamp — so the reading and
+// the store it lands in are one critical section and two stampers of one pair
+// cannot commit out of order. That is the type's only call out to a
+// caller-supplied function under its only mutex, and the three constraints it
+// puts on that function are stated where one can be supplied:
+// newRegistryWithClock. The single lock order is Registry.mu → whatever the
+// clock locks, never the reverse, which is a total order only because the clock
+// never calls back in. The stamp itself is never read off-lock, and holding the
+// map value by value rather than by pointer is what makes that a property of the
+// type instead of a caller obligation.
 type Registry struct {
 	mu      sync.Mutex
-	uploads map[uploadKey]*Accumulator
+	uploads map[uploadKey]entry
+
+	// now is the clock every stamp is read from, never nil after construction:
+	// newRegistryWithClock substitutes time.Now. Assigned once there and never
+	// written again, which is why reading it needs no separate rule.
+	now func() time.Time
 }
 
-// NewRegistry returns an empty Registry ready for use.
+// NewRegistry returns an empty Registry reading the REAL WALL CLOCK, and is the
+// only construction path outside this package's tests. The clock-taking way in
+// is newRegistryWithClock, which this delegates to with a nil clock rather than
+// building a Registry of its own, so the nil substitution exists in one place.
 func NewRegistry() *Registry {
-	return &Registry{uploads: make(map[uploadKey]*Accumulator)}
+	return newRegistryWithClock(nil)
 }
 
-// insertLocked stores a as the upload in flight for the pair and answers
-// (a, true, nil); or — when the pair is already held — stores NOTHING and
-// answers the incumbent with false; or — when the registry is already at
-// maxInFlightUploads — stores nothing and answers capacityRefusal. Caller MUST
+// newRegistryWithClock returns an empty Registry reading now as its clock,
+// substituting time.Now for a nil one. That nil-tolerance is the whole reason
+// the clock is not a parameter of NewRegistry: production supplies nothing and
+// every existing construction site is left untouched, which is the shape
+// streamsup's newStallTracker and streamjson's emitter constructor already take
+// for the same seam.
+//
+// Unexported because every site that would supply a clock is a test in this
+// package; count is the precedent for that. Exporting it would publish a seam
+// with no production caller and let a caller outside this package install a
+// clock this type's own invariants read.
+//
+// THREE CONSTRAINTS ON now, because it is called with mu held. It must not
+// block, or it stalls every conn's admissions and deliveries behind it. It must
+// not call back into the Registry: mu is not reentrant, so a callback reaching
+// any locked method deadlocks rather than races. And it must be safe for
+// concurrent use, because mu serialises only the calls THIS type makes — a test
+// advancing the same clock from another goroutine does not go through mu.
+// time.Now satisfies all three.
+func newRegistryWithClock(now func() time.Time) *Registry {
+	if now == nil {
+		now = time.Now
+	}
+	return &Registry{uploads: make(map[uploadKey]entry), now: now}
+}
+
+// insertLocked stores a as the upload in flight for the pair, stamped with the
+// clock's reading, and answers (a, true, nil); or — when the pair is already
+// held — stores NOTHING and answers the incumbent with false; or — when the
+// registry is already at maxInFlightUploads — stores nothing and answers
+// capacityRefusal. Caller MUST
 // hold r.mu. It takes no lock itself and is the one method here callable with
 // mu held, which is what keeps mu a leaf while two methods share this body.
 //
@@ -106,6 +184,14 @@ func NewRegistry() *Registry {
 // inserted is the INVERSE of sync.Map.LoadOrStore's loaded: true means FRESH. A
 // caller that ports the intuition and inverts the branch double-admits.
 //
+// IT IS THE ADMISSION STAMP: the entry it stores carries r.now(), read inside
+// the acquisition its caller already holds. BOTH REFUSAL BRANCHES RETURN AHEAD
+// OF THAT STORE, so NO REFUSAL STAMPS — a repeat under a held pair answers the
+// incumbent and leaves that incumbent's lastChunkAt exactly where it was, and a
+// capacity refusal writes nothing at all. Admit and insert inherit the stamp
+// from this one shared core, which is what keeps an insert-inserted entry from
+// carrying a zero stamp that an idle window would read as infinitely idle.
+//
 // PRECONDITION: a is non-nil, unguarded.
 //
 // It is a shared core rather than one method's body copied into the other so
@@ -120,7 +206,7 @@ func NewRegistry() *Registry {
 func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool, err error) {
 	key := uploadKey{connID: connID, attachmentID: attachmentID}
 	if held, ok := r.uploads[key]; ok {
-		return held, false, nil
+		return held.acc, false, nil
 	}
 	// len(r.uploads) DIRECTLY, never r.count(): that one takes mu, this body
 	// runs with mu held, and sync.Mutex is not reentrant — the call would
@@ -130,7 +216,7 @@ func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (up
 	if len(r.uploads) >= maxInFlightUploads {
 		return nil, false, capacityRefusal(len(r.uploads))
 	}
-	r.uploads[key] = a
+	r.uploads[key] = entry{acc: a, lastChunkAt: r.now()}
 	return a, true, nil
 }
 
@@ -260,13 +346,67 @@ func (r *Registry) Admit(connID, attachmentID string, totalChunks int, size int6
 }
 
 // Lookup answers the transfer in flight under the pair, comma-ok. Presence comes
-// from map-key membership and never from the stored value, and the bool is what
-// Deliver turns into "chunk for an unknown transfer", ErrUnknownUpload.
+// from map-key membership and never from the stored value. It is a PURE READ,
+// for #1744's dispatch site and for diagnostics; Deliver's own look-up is
+// lookupAndStamp, and it is THAT method's bool — not this one — that becomes
+// "chunk for an unknown transfer", ErrUnknownUpload.
+//
+// IT DELIBERATELY DOES NOT STAMP. A look-up that moved the entry's lastChunkAt
+// would let a diagnostic, or a dispatch-site read that routes no bytes at all,
+// keep a dead upload alive indefinitely — the exact slot-exhaustion path an idle
+// window (#1881) exists to close. Only a chunk that actually arrived may move
+// that time, which is why the stamping look-up is a second method rather than a
+// flag on this one.
 func (r *Registry) Lookup(connID, attachmentID string) (*Accumulator, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	a, ok := r.uploads[uploadKey{connID: connID, attachmentID: attachmentID}]
-	return a, ok
+	u, ok := r.uploads[uploadKey{connID: connID, attachmentID: attachmentID}]
+	return u.acc, ok
+}
+
+// lookupAndStamp answers the pair's accumulator comma-ok and, ON A HIT, moves
+// that entry's lastChunkAt to the clock's reading — a chunk has arrived for it.
+// ON A MISS IT STORES NOTHING, which is what keeps Deliver's "nothing is stored"
+// contract true on the unknown-pair path. It takes mu for its whole body and
+// calls no other method that takes it, so the read, the stamp and the store are
+// one critical section.
+//
+// The re-store is what a by-value map entry costs and what it buys: the stamp
+// cannot be moved from outside a locked body, which is the property Registry's
+// type doc rests the never-read-off-lock claim on.
+//
+// Its callers are Deliver and this package's tests.
+func (r *Registry) lookupAndStamp(connID, attachmentID string) (*Accumulator, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := uploadKey{connID: connID, attachmentID: attachmentID}
+	u, ok := r.uploads[key]
+	if !ok {
+		return nil, false
+	}
+	u.lastChunkAt = r.now()
+	r.uploads[key] = u
+	return u.acc, true
+}
+
+// lastChunkAt is when a chunk last arrived for the pair, comma-ok: the clock's
+// reading at admission until a chunk is delivered, and the reading at the last
+// delivered chunk after that.
+//
+// Unexported because in-package tests are its only reader — count is the
+// precedent — and it is shaped for a single-pair read rather than for whatever
+// an idle sweep (#1881) turns out to want.
+//
+// It reads r.uploads DIRECTLY under mu and must never be built on Lookup or
+// lookupAndStamp. That is a testability constraint rather than style: routed
+// through Lookup, this accessor would redden for its own reason under the mutant
+// that makes Lookup stamp, and the sole-red measurement that pins Lookup's pure
+// read would be destroyed.
+func (r *Registry) lastChunkAt(connID, attachmentID string) (time.Time, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.uploads[uploadKey{connID: connID, attachmentID: attachmentID}]
+	return u.lastChunkAt, ok
 }
 
 // Release removes exactly the pair's entry, leaving another conn's transfer of
@@ -316,14 +456,23 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 //
 // The steps, in the order the body runs them:
 //
-//  1. look the pair up. On a miss, ErrUnknownUpload and NOTHING IS STORED —
-//     Lookup creates no entry and neither does this path.
+//  1. look the pair up AND STAMP IT — a chunk has arrived for it. On a miss,
+//     ErrUnknownUpload and NOTHING IS STORED: lookupAndStamp creates no entry
+//     and stamps none, and neither does this path.
 //  2. feed the accumulator off-lock. On ANY non-nil answer from Add, release the
 //     pair and return that error verbatim.
 //  3. assemble. Keep the entry when — and ONLY when — the answer is
 //     ErrIncomplete, and return it verbatim.
 //  4. every other outcome releases, the nil-error one included: the assembled
 //     bytes on success, the latched refusal on an integrity mismatch.
+//
+// THE STAMP SITS AT THE LOOK-UP rather than after Add accepts, and the two are
+// observationally identical. The entry survives exactly ONE of the four outcomes
+// above — Assemble answering ErrIncomplete — and on that one Add had already
+// accepted, so "a chunk arrived" and "a chunk arrived and was accepted" agree
+// wherever the stamp can still be read; every other outcome releases the entry
+// and takes its stamp with it. Stamping after Add would buy nothing and cost a
+// third acquisition of mu.
 //
 // THE KEEP CASE IS THE ALLOW-LIST AND THAT POLARITY IS THE CONTRACT. Written
 // the other way — enumerate the refusals that release — a further latching
@@ -347,9 +496,13 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 // or hashing anything, so only the completing chunk pays for the copy and the
 // digest.
 //
-// It TAKES mu AT NO POINT. Lookup and Release each take it for their own whole
-// body and the accumulator is fed between them with the lock released, so three
-// acquisitions per delivered chunk and mu stays a LEAF — never held across Add
+// It TAKES mu AT NO POINT. lookupAndStamp and Release each take it for their own
+// whole body and the accumulator is fed between them with the lock released, so
+// AT MOST TWO acquisitions per delivered chunk — one on a miss and one when
+// Assemble answers ErrIncomplete, since neither releases; two on every path that
+// does release, which is any non-nil answer from Add, an integrity mismatch, and
+// the completing chunk. Never three: nothing on this path calls Admit. mu stays
+// a LEAF — never held across Add
 // or Assemble, which is the rule Registry's type doc states and which this
 // method must not be the first to break. The gap between the look-up and the
 // release is not a TOCTOU hole: the conn is in the key and relay spawns exactly
@@ -392,7 +545,7 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 // longer holds is a documented no-op, and a look-up that misses answers
 // ErrUnknownUpload, the honest answer for a transfer that has been reaped.
 func (r *Registry) Deliver(connID string, chunk protocol.AttachmentChunkPayload) ([]byte, error) {
-	upload, ok := r.Lookup(connID, chunk.AttachmentID)
+	upload, ok := r.lookupAndStamp(connID, chunk.AttachmentID)
 	if !ok {
 		return nil, ErrUnknownUpload
 	}

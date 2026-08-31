@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -69,9 +71,10 @@ var packageSentinels = []error{
 }
 
 // The concurrency tests below coordinate with channels rather than sync
-// primitives: after this slice sync is imported by registry.go and by no other
-// file in this package, which is what makes that an absence check with a live
-// control. A start channel closed once releases the fan-out, and a result
+// primitives: sync is imported by registry.go and, in this file, by fakeClock
+// alone, so no test's own coordination reaches for a mutex and Accumulator's
+// mutex-free contract still reads as an absence with a live control beside it.
+// A start channel closed once releases the fan-out, and a result
 // channel BUFFERED TO N is the join — unbuffered, an assertion failing
 // mid-drain would park every goroutine not yet drained for the life of the test
 // binary.
@@ -1214,5 +1217,197 @@ func TestRegistry_DeliverUnheldPair_RefusesAndCreatesNothing(t *testing.T) {
 				t.Errorf("count() after an unknown-pair refusal = %d, want 1", n)
 			}
 		})
+	}
+}
+
+// fakeClock is a controllable time source for the registry's `now` seam,
+// mirroring streamsup's watchdog_test double. It is the first clock double in
+// this package.
+//
+// It locks even though every test below is single-goroutine: the concurrency
+// tests above are one edit away from wanting a controllable clock, and a
+// lock-free double would be a -race landmine for whoever makes that edit. That
+// lock is also the third of the constraints newRegistryWithClock states, since
+// advance runs on the test's goroutine while a stamping method reads it under
+// Registry.mu, which does not cover this type.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// testClockStart is the instant every fake clock in this file starts at. Its
+// exact value carries no meaning; what matters is that it is not the zero
+// time.Time, so a stamp that was never written is distinguishable from one that
+// was.
+var testClockStart = time.Unix(1_000, 0)
+
+// Time comparisons below use Equal and never == or reflect.DeepEqual, per
+// docs/PROJECT-MEMORY.md § "time.Time round-trip discipline": a wall-clock
+// reading carries a monotonic component that == compares and Equal does not.
+
+// TestRegistry_AdmitStampsTheClockReading is AC 1. Its second half is the half
+// that matters: a registry that stored the clock FUNCTION and read it on demand
+// would satisfy the first assertion and fail this one, and it is the difference
+// between a recorded instant an idle window can measure and a value that is
+// always "now".
+func TestRegistry_AdmitStampsTheClockReading(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+
+	stamped, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt(%q, %q) reported absent after Admit, want present", testConnA, testAttachmentID)
+	}
+	if !stamped.Equal(testClockStart) {
+		t.Errorf("lastChunkAt after Admit = %v, want the clock's reading %v", stamped, testClockStart)
+	}
+
+	// The stamp is a RECORDED INSTANT, not a live read of the seam.
+	clk.advance(time.Hour)
+	after, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt reported absent after the clock advanced with nothing delivered, want present")
+	}
+	if !after.Equal(stamped) {
+		t.Errorf("lastChunkAt after advancing the clock = %v, want the admission reading %v", after, stamped)
+	}
+}
+
+// TestRegistry_DeliverMovesTheStampForwardForThatPairOnly is AC 2. The two pairs
+// share one attachment_id across two conns — uploadKey's own shape — so the
+// unchanged-pair assertion is a statement about the KEY and not merely about two
+// unrelated entries. ErrIncomplete is the outcome deliberately chosen: it is the
+// one answer that keeps the entry, so the stamp is still there to read.
+func TestRegistry_DeliverMovesTheStampForwardForThatPairOnly(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	for _, connID := range []string{testConnA, testConnB} {
+		if _, err := r.Admit(connID, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+			t.Fatalf("Admit of the bound declaration on %q: %v", connID, err)
+		}
+	}
+	beforeA, okA := r.lastChunkAt(testConnA, testAttachmentID)
+	beforeB, okB := r.lastChunkAt(testConnB, testAttachmentID)
+	if !okA || !okB {
+		t.Fatalf("lastChunkAt after admitting both pairs: %q present = %v, %q present = %v, want both present", testConnA, okA, testConnB, okB)
+	}
+
+	clk.advance(time.Minute)
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(0), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of chunk 0 of %d: error = %v, want one wrapping %v", testBoundTotal, err, ErrIncomplete)
+	}
+
+	gotA, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt on %q after an incomplete delivery reported absent, want present", testConnA)
+	}
+	want := testClockStart.Add(time.Minute)
+	if !gotA.Equal(want) {
+		t.Errorf("lastChunkAt on %q after a delivered chunk = %v, want the clock's reading at that moment %v", testConnA, gotA, want)
+	}
+	if !gotA.After(beforeA) {
+		t.Errorf("lastChunkAt on %q did not move forward: %v, was %v", testConnA, gotA, beforeA)
+	}
+
+	gotB, ok := r.lastChunkAt(testConnB, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt on %q reported absent after a delivery on %q, want present", testConnB, testConnA)
+	}
+	if !gotB.Equal(beforeB) {
+		t.Errorf("delivering a chunk on %q moved %q's stamp to %v, want it left at %v", testConnA, testConnB, gotB, beforeB)
+	}
+}
+
+// TestRegistry_LookupAndRepeatAdmitLeaveTheStampWhereItIs is AC 3: only a
+// DELIVERED CHUNK moves the time. Both clauses are what stops a client holding a
+// slot open indefinitely by re-sending a first chunk it never follows, so both
+// advance the clock first — a clause that failed to advance would pass against a
+// stamping look-up too.
+func TestRegistry_LookupAndRepeatAdmitLeaveTheStampWhereItIs(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	incumbent, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+
+	// (a) a pure read.
+	clk.advance(time.Minute)
+	if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != incumbent {
+		t.Fatalf("Lookup answered (%p, %v), want the accumulator Admit returned", got, ok)
+	}
+	stamp, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt after a Lookup reported absent, want present")
+	}
+	if !stamp.Equal(testClockStart) {
+		t.Errorf("Lookup moved lastChunkAt to %v, want it left at the admission reading %v", stamp, testClockStart)
+	}
+
+	// (b) a repeat admission under the held pair, which still answers the
+	// incumbent exactly as TestRegistry_AdmitUnderAHeldPair_KeepsTheIncumbent
+	// asserts today.
+	clk.advance(time.Minute)
+	repeat, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit under a held pair: %v", err)
+	}
+	if repeat != incumbent {
+		t.Errorf("Admit under a held pair answered an accumulator other than the incumbent")
+	}
+	stamp, ok = r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt after a repeat admission reported absent, want present")
+	}
+	if !stamp.Equal(testClockStart) {
+		t.Errorf("a repeat Admit under a held pair moved lastChunkAt to %v, want it left at the admission reading %v", stamp, testClockStart)
+	}
+}
+
+// TestRegistry_NewRegistryReadsTheWallClock is AC 4, bracketed rather than slept
+// through. The bracket is falsified by a zero stamp, by a seam left nil and
+// never read, and by any fixed instant substituted for a nil clock — which is
+// every way the delegation could go wrong. All three readings carry monotonic
+// components, so the comparison is exact rather than clock-resolution dependent.
+func TestRegistry_NewRegistryReadsTheWallClock(t *testing.T) {
+	t.Parallel()
+
+	before := time.Now()
+	r := NewRegistry()
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+	after := time.Now()
+
+	stamp, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt(%q, %q) reported absent after Admit, want present", testConnA, testAttachmentID)
+	}
+	if stamp.Before(before) || stamp.After(after) {
+		t.Errorf("lastChunkAt from a registry built by NewRegistry = %v, want a wall-clock reading inside [%v, %v]", stamp, before, after)
 	}
 }
