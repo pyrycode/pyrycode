@@ -1,0 +1,42 @@
+# Related
+
+- [streamrunner-package.md](streamrunner-package.md) — the single-turn stream-json sibling this package inverts (held-open vs. close-after-one-turn); shares the reap seam shape, `ExitErrIsBenign` discipline, and the envelope shape/line-buffering mechanics the turn I/O slice mirrors.
+- [turnbridge-package.md](turnbridge-package.md) — `mapper.go`, the content-extraction logic the #1088 parser mirrors (not imports) for assistant text/thinking/tool_use and tool_result mapping.
+- [agentrun-package.md](agentrun-package.md) — the shared parent supplying `ResolveWorkdir`, `ExitErrIsBenign`, `ReapDescendantGroups`.
+- [ptyrunner-package.md](ptyrunner-package.md) — the PTY-path analogue this package's spawn/teardown shape and #1087's "ptyrunner-skeleton analogue" framing both reference.
+- `internal/supervisor`'s `backoffTimer`/`Run` (see [system-overview.md](../architecture/system-overview.md)) — the exponential-backoff-with-stability-reset ladder this package copies verbatim (cannot import across the PTY/stream-json boundary).
+- [`codebase/1087.md`](../codebase/1087.md) — the process-lifecycle slice.
+- [`codebase/1088.md`](../codebase/1088.md) — the turn I/O slice (this section).
+- [`codebase/1093.md`](../codebase/1093.md) — the send-side turncommit gate slice.
+- [`codebase/1094.md`](../codebase/1094.md) — the receive-side idle/stall watchdog slice.
+- [`codebase/1097.md`](../codebase/1097.md) — the `sessions.Runner` satisfaction slice (`State`/`WriteUserTurn`/`WaitForPTY`/`Restart` + `cmd/pyry` adapter).
+- [`codebase/1109.md`](../codebase/1109.md) — the `streamRunnerFactory`/`mapStreamsupConfig`/`stripSessionIDFlags` construction slice.
+- [`codebase/1098.md`](../codebase/1098.md) — the turnevent drain slice (`streamTurnSink`/`startStreamTurnDrainV2`).
+- [`codebase/1120.md`](../codebase/1120.md) — the interrupt send primitive + `result` subtype mapping slice.
+- [`codebase/1124.md`](../codebase/1124.md) — the fresh-restart-under-a-new-id mechanism slice (`RestartFresh`/`beginSpawn`).
+- [`codebase/1168.md`](../codebase/1168.md) — `withApprovalArgs`, wiring the #1106 permission-approval flags onto the live interactive spawn.
+- [`codebase/1201.md`](../codebase/1201.md) — the per-conversation turn-busy tracker (`turnBusyTracker`), fed from the drain before its active-session gate; shipped unwired, and closed off by #1202 (session teardown clear), #1206/#1209/#1210 (mid-turn respawn clear), and #1199 (the delivery-path consumer both readers were built for).
+- [`codebase/1202.md`](../codebase/1202.md) — `clearForSession`, the session-teardown half of the tracker's clear (`/clear` rotation + eviction), composed onto the pool's `TransitionObserver` slot.
+- [`codebase/1206.md`](../codebase/1206.md) — `Config.OnChildExit`, the per-child-exit seam on the streamsup `Run` loop (one field, one unconditional call above the shutdown return); split from #1203 alongside #1207, which itself later split into #1209 (the fan-in exit lane) and #1210 (the production wiring, landed).
+- [`codebase/1209.md`](../codebase/1209.md) — `streamTurnEnvelope.exit` / `streamTurnSink.exitFor`, the fan-in lane that carries a child-exit signal ordered correctly against the dead child's already-pushed events; fired in production by #1210.
+- [`codebase/1199.md`](../codebase/1199.md) — `waitIdleForDelivery`/`openForDelivery`, the inbound-delivery seam that holds a mid-turn send in the queue and marks the conversation busy before writing; the tracker's first production reader.
+- [`codebase/1295.md`](../codebase/1295.md) — forced-ordering test proving this seam's hold is released by the `new_session` rotation's `clearForSession` and delivers to the post-rotation child; eliminates one M4-stall hypothesis, leaves the straggler-re-mark hypothesis ([#1298](https://github.com/pyrycode/pyrycode/issues/1298)) open and named the clear-before-`RestartFresh` window as an undecided Open question 4, closed by #1330.
+- [`codebase/1330.md`](../codebase/1330.md) — the rotation-delivery gate (`BeginRotation`/`turnTarget`, `rotating`/`rotateGen` under `mu`) that closes #1295's Open question 4: no turn accepted once a `new_session` rotation has begun is written into the outgoing child.
+- [`codebase/1380.md`](../codebase/1380.md) — the `system` subtype dispatch mechanism (`emitSystemSubtype`) and its first mapping, `system/task_started` → `turnevent.BackgroundTaskStarted`; fixes #1240's symptom. `task_updated` (#1382) and `background_tasks_changed` (#1381) extend the same mapped set.
+- [`codebase/1385.md`](../codebase/1385.md) — the fourth arm, `system/thinking_tokens` → `turnevent.ThinkingProgress`, and the parser's first rate-bounded mapping / first piece of cross-line state.
+- [`codebase/1404.md`](../codebase/1404.md) — the fifth arm and the first non-`system` mapping, `rate_limit_event` → `turnevent.RateLimited`, gated on `status` so a once-per-run report doesn't become a per-turn noise row; `ignoredLineTypes` is down to `{"system": true}`.
+- [`codebase/1240.md`](../codebase/1240.md) — the symptom #1380 fixes the cause of: `turn_end`/`end_turn` and state `idle` while a backgrounded command claude started is provably still alive.
+- [`codebase/1810.md`](../codebase/1810.md) — the in-package reader over the four committed `initialize` ack captures (`capturedInitialize`/`capturedInitializePayload`), moving that proof inside `make check`.
+- [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the MCP stdio server `withApprovalArgs`'s `--mcp-config` points claude's approval-prompt tool at.
+- `cmd/pyry/interactive_turn_v2.go`'s `interactiveTurnEmitterV2` / `cmd/pyry/interactive_turn_stream_v2.go`'s `startInteractiveTurnStreamV2` — the PTY-path emitter and lifecycle shape #1098's drain reproduces for the stream-json path (no dedicated feature doc yet; see [turnbridge-package.md](turnbridge-package.md) for the producer side it mirrors).
+- [sessions-package.md](sessions-package.md) — the `Runner` interface / `RunnerFactory` seam this package now satisfies, and the `supervisor.Config.SessionID` seam `mapStreamsupConfig` reads.
+- Spec [`docs/specs/architecture/1087-streamsup-child-lifecycle.md`](../../specs/architecture/1087-streamsup-child-lifecycle.md) — the process-lifecycle architect spec.
+- Spec [`docs/specs/architecture/1088-streamsup-turn-io.md`](../../specs/architecture/1088-streamsup-turn-io.md) — the turn I/O architect spec.
+- Spec [`docs/specs/architecture/1093-turncommit-gate-on-streamsup-send.md`](../../specs/architecture/1093-turncommit-gate-on-streamsup-send.md) — the turncommit gate architect spec.
+- Spec [`docs/specs/architecture/1094-streamsup-idle-stall-watchdog.md`](../../specs/architecture/1094-streamsup-idle-stall-watchdog.md) — the idle/stall watchdog architect spec.
+- Spec [`docs/specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md`](../../specs/architecture/1097-streamsup-runner-satisfies-sessions-runner.md) — the `sessions.Runner` satisfaction architect spec.
+- Spec [`docs/specs/architecture/1109-streamsup-runner-factory.md`](../../specs/architecture/1109-streamsup-runner-factory.md) — the `streamRunnerFactory` construction architect spec.
+- Spec [`docs/specs/architecture/1098-stream-turn-drain.md`](../../specs/architecture/1098-stream-turn-drain.md) — this slice's architect spec, including the scoping proof and security review.
+- Spec [`docs/specs/architecture/1206-streamsup-child-exit-seam.md`](../../specs/architecture/1206-streamsup-child-exit-seam.md) — the per-child-exit seam architect spec, including the two-wrong-anchors proof and the fire-window security review.
+- Spec [`docs/specs/architecture/1295-forced-rotation-delivery-ordering.md`](../../specs/architecture/1295-forced-rotation-delivery-ordering.md) — the forced-ordering test spec, including the ranked open-questions list #1330 closes item 4 of.
+- Spec [`docs/specs/architecture/1330-rotation-delivery-gate.md`](../../specs/architecture/1330-rotation-delivery-gate.md) — the rotation-delivery gate architect spec, including the two-frame concurrency proof and security review.
