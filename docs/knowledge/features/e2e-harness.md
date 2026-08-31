@@ -2810,6 +2810,45 @@ same "drive a turn, then force a respawn that keeps the session id" shape.
 See § Build Helper for the mutation-testing methodology this spec's AC
 required (`PYRY_E2E_BIN` + a control run, not `-overlay` alone).
 
+### `relay_v2_stream_model_list_reconcile_test.go` — `TestRelayV2_StreamModelListReachesLateConnectingPhone` (#1868)
+
+The deliberate inverse of the sibling above: that test forces a *second
+spawn* while a client is already connected, because the live lane only
+fires at spawn. This one must NOT do that — it proves the connect-time
+reconcile (`reconcileModelLists`), so the list has to exist *first* and the
+observing client (phone B) has to connect *after*, sending nothing but its
+handshake. Two paired phones, driven strictly sequentially: phone A mints a
+conversation over the wire and drives one turn (the only way to put a
+retained list behind a real conversation record — the bootstrap session has
+none), then phone B dials and handshakes, observing the frame its own
+handshake's success tail pushes.
+
+**`listsOnMinter` — a diagnostic counter, and the value it converges on is
+the opposite of what the original design predicted.** The spec assumed the
+live lane could never also deliver the list to phone A (the minting conn),
+reasoning that the conversation cursor `interactiveTurnEmitterV2.Handle`
+checks is still empty when the `initialize` ack is parsed. Measurement
+during code review found otherwise: both are real outcomes across runs. See
+[v2-session-manager.md's model-list reconcile section](v2-session-manager.md)
+for the mechanism — it's a genuine unordered race between two goroutines,
+not a bug in this test. Practical upshot for this file and any sibling:
+**a spawn-time-emitter diagnostic on the spawning conn itself cannot be
+asserted to either value** — log it, don't assert it, and say so in the
+field's doc comment (this file's own comment on `listsOnMinter` still
+reads as though zero were guaranteed; the corrected account lives in
+v2-session-manager.md rather than in a frozen test file).
+
+**Budget for a first-arrival window has to be sized against the mutant, not
+the happy path.** AC-1 here ("a frame arrived") has no positive terminator
+the way `turn_end` terminates a turn — the collection loop can only end by
+finding the frame or by exhausting its deadline. The green run costs about
+1s; the AC-3 mutation run (unwiring `RetainedModelLists`) is honestly red
+only at the full ~21s deadline, because there is nothing for it to notice
+early. Any test in this family built the same way — assert a frame arrives,
+nothing more — should expect its red path to cost its whole budget, and
+should size that budget (and CI expectations around it) accordingly rather
+than against how fast the test runs when it passes.
+
 ## Concurrency Model
 
 | Goroutine | Owns | Lifetime |
