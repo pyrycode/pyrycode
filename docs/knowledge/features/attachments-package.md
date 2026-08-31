@@ -162,7 +162,7 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
 The entry-count cap landed as `maxInFlightUploads` (#1796); see § "In-flight
 upload registry" below for the gate and its shape.
 
-## In-flight upload registry (#1787, #1788, #1795, #1796, #1880)
+## In-flight upload registry (#1787, #1788, #1795, #1796, #1880, #1881)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
 chunks: a map from `uploadKey{connID, attachmentID}` to an
@@ -193,9 +193,40 @@ a hit it moves `lastChunkAt` forward and returns the accumulator, on a miss it
 stores nothing. **`Lookup` itself stays a pure read and deliberately does not
 stamp** — a look-up that moved the activity time would let a diagnostic or
 #1744's dispatch-site read keep a dead upload alive indefinitely, the exact
-exhaustion path this family is closing. Nothing here reaps an idle entry —
-that policy is #1881, wired blocked-by this ticket, and it inherits a
-truthful stamp rather than having to invent one.
+exhaustion path this family is closing.
+
+**#1881 landed the policy that reads the stamp: `uploadIdleTimeout` (15
+minutes, `admission.go`) and the unexported `reapExpiredLocked`.** The reap is
+lazy — no goroutine, no ticker, no shutdown path — and runs inline at the head
+of the two locked bodies that gate on the map's contents, `insertLocked` and
+`lookupAndStamp`, deleting every entry whose `lastChunkAt` is more than the
+window behind one reading of `r.now()`. An eager sweeper was considered and
+rejected: this package owns no goroutine and `NewRegistry` has no production
+caller, so a sweeper would need a lifecycle (`Start`/`Stop` or a `context`)
+nothing here has yet, and a different seam — a ticker rather than #1880's
+`func() time.Time` clock. Nothing needs the promptness either, since both
+places a pair's liveness is actually asked about (`insertLocked`'s capacity
+gate, `lookupAndStamp`'s map read) already run inside a lock the lazy reap can
+sit in front of. An expired upload's next chunk answers the existing
+`ErrUnknownUpload` rather than a new sentinel — a distinct one would let a
+client binary-search the window's length from outside, exactly the receiver
+policy `docs/protocol-mobile.md` § Attachments keeps unpublished for this
+constant's two neighbours. Two properties worth carrying forward to any future
+policy added at this layer:
+
+- **The reap and the gate it feeds must share one lock acquisition, not two.**
+  `insertLocked` runs the reap ahead of the capacity check inside the single
+  acquisition `Admit` already takes for its whole decision — a reap under one
+  acquisition of `mu` followed by a capacity check under another would let two
+  concurrent admissions each observe the same reclaimed slot and both take
+  it, the exact split-lock shape
+  `TestRegistry_ConcurrentAdmitAtTheBound_AdmitsExactlyTheFreeSlots` exists to
+  redden.
+- **A reader that reaps is a reader that causes what it reports.** `count`
+  and `lastChunkAt` are the tests' only observers of expiry and deliberately
+  do not reap, so a test asserting expiry must drive `Admit` or `Deliver`
+  first and read one of those after — reading either one before driving a
+  locked body sees no change, because nothing has reaped yet.
 
 `Admit` is the registry's only exported way in, and now runs three checks
 under one acquisition of `mu` before admitting anything: `CheckDeclaration`,
@@ -802,7 +833,10 @@ surfaced:
   stamp out of `insertLocked` into `Admit`'s body passes green across all 151
   tests, because `insert` is unexported and test-only and no production path
   can reach it today. Not a behaviour bug in shipped code, but the exact
-  invariant #1881's reaper depends on, parked unpinned rather than fixed.
+  invariant `reapExpiredLocked` (#1881) depends on — an entry inserted with a
+  zero stamp reads as infinitely idle and is reaped on the very next pass —
+  and #1881's own four new tests all drive `Admit`, so this still shipped
+  unpinned rather than fixed.
   Having already named the by-construction trap once in a spec is not
   evidence the rest of that spec is safe from it — every by-construction
   sentence needs its own mutant, not just the one already flagged as risky.
@@ -845,10 +879,12 @@ hash, fetch the blob"), which is a requirement from
   `Registry` (#1787, its admission decision moved under one lock acquisition
   by #1795, and given its entry-count cap by #1796 — refiled after #1786
   closed without shipping it — see § "In-flight upload registry" above).
-- **#1742** — expiry/abandonment of a partial upload. Note this covers
-  *partial* uploads only — a complete-but-corrupt transfer that fails one of
-  #1770's integrity checks is not partial, so it's #1770's own `reject` latch
-  (not #1742's reaper) that frees those held bytes.
+- **#1742** — closed, split into this family. Expiry/abandonment of a partial
+  upload landed as `uploadIdleTimeout` / `reapExpiredLocked` (#1881, see
+  § "In-flight upload registry" above). That reap covers *partial* uploads
+  only — a complete-but-corrupt transfer that fails one of #1770's integrity
+  checks is not partial, so it's #1770's own `reject` latch, not the reap,
+  that frees those held bytes.
 - **#1773** — split into #1781 and #1782 while this family waited. Resolving
   and creating the attachment directory landed as `EnsureDir` (#1781, see
   § "Directory resolution and creation" above); writing bytes into it landed
