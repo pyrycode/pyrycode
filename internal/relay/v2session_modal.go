@@ -393,7 +393,10 @@ func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID 
 // interactive-open conn (#877). A phone that connects or reconnects after a
 // permission prompt was raised never saw the raise-time broadcastInteractive
 // fan-out (EventID == nil, so it is not in the turn-event replay ring); without
-// this, the prompt silently rides the daemon's 2-minute deny-on-timeout unseen.
+// this, the prompt silently rides unseen on the daemon's 10-minute
+// deny-on-timeout — cmd/pyry's mcpApprovalTimeout, the window permbridge parks the
+// approval for, NOT this file's modalDenyTimeout (nothing in production arms that
+// one).
 //
 // Structural sibling of broadcastModalDismissed, minus the fan-out: it addresses
 // exactly s.connID rather than every open interactive conn, and sources the

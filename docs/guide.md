@@ -152,15 +152,17 @@ A few runtime settings are read from the environment rather than from flags, so 
 | Variable | Default | Purpose |
 |---|---|---|
 | `PYRY_NAME` | `pyry` | Instance name, same as `-pyry-name`; the flag wins when both are set |
-| `PYRY_APPROVAL_TIMEOUT` | `2m` | How long an approval waits for a human before the daemon denies it |
+| `PYRY_APPROVAL_TIMEOUT` | `10m` | How long an approval waits for a human before the daemon denies it |
 
-`PYRY_APPROVAL_TIMEOUT` is the one worth setting deliberately. When claude asks permission to use a tool, the request is parked until a client answers it, and this is how long the daemon waits before answering "no" on your behalf. Waiting is not the risky state, because the tool does not run while the request is outstanding, so the value is about how long you might reasonably take to reach your phone rather than about safety. Two minutes suits someone sitting at the machine and is short for a remote client. Around ten minutes is a better fit for remote use:
+`PYRY_APPROVAL_TIMEOUT` is the one worth setting deliberately. When claude asks permission to use a tool, the request is parked until a client answers it, and this is how long the daemon waits before answering "no" on your behalf. Waiting is not the risky state, because the tool does not run while the request is outstanding, so the value is about how long you might reasonably take to reach your phone rather than about safety. The default is sized for answering from a phone. Shorten it if you sit at the machine and want a faster fail-closed:
 
 ```bash
-PYRY_APPROVAL_TIMEOUT=10m pyry
+PYRY_APPROVAL_TIMEOUT=2m pyry
 ```
 
-Do not raise it much past fifteen minutes without reading [issue #1902](https://github.com/pyrycode/pyrycode/issues/1902) first. A message you send while an approval is still pending is held behind it, and that hold gives up after fifteen minutes and discards the message. Setting the approval window longer than the hold trades a prompt that gives up too early for a message that disappears. That issue covers lifting the ceiling properly.
+Lengthening it is fine too, within the ceiling below.
+
+Do not raise it much past fifteen minutes without reading [issue #1911](https://github.com/pyrycode/pyrycode/issues/1911) first. A message you send while an approval is still pending is held behind it, and that hold gives up after fifteen minutes and discards the message. Setting the approval window longer than the hold trades a prompt that gives up too early for a message that disappears. The default is already set clear of that hold, but only by five minutes — so a prompt answered near the end of the window leaves a queued message a thin margin, and raising the knob thins it further. That issue covers lifting the ceiling properly.
 
 The value takes any Go duration, such as `90s`, `10m` or `1h`. An unset or unparseable value falls back to the default.
 
