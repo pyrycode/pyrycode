@@ -82,9 +82,10 @@ type entry struct {
 //
 // mu is a LEAF: never held across a call into Accumulator — not Add, not
 // Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
-// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the seven
-// locked methods — Admit, insert, Lookup, lookupAndStamp, Release, count and
-// lastChunkAt — take mu for their whole body and never call one another. THREE
+// CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the eight
+// locked methods — Admit, insert, Lookup, lookupAndStamp, Release, ReleaseConn,
+// count and lastChunkAt — take mu for their whole body and never call one
+// another. THREE
 // methods here take no lock, and the third is a second member of the first of
 // the two OPPOSITE reasons rather than a third reason. insertLocked and
 // reapExpiredLocked both run with mu held BY THEIR CALLERS: that is what lets
@@ -527,18 +528,120 @@ func (r *Registry) lastChunkAt(connID, attachmentID string) (time.Time, bool) {
 // Release removes exactly the pair's entry, leaving another conn's transfer of
 // the same attachment_id untouched; releasing a pair the registry does not hold
 // is a no-op. It returns nothing because Deliver releases what it just looked up
-// and #1817, which releases a dropped conn's uploads, decides only when to call
-// it, so a presence answer would invite a caller to branch on it outside the
-// lock.
+// and #1744, the caller that decides when this and ReleaseConn are called, wants
+// no answer either, so a presence answer would only invite a caller to branch on
+// it outside the lock, where it is already stale.
 //
-// THE IDLE REAP IS NOT BUILT ON THIS METHOD and a reader must not expect it to
-// be: this one takes mu and sync.Mutex is not reentrant, so a reap running
+// THE CONN-WIDE RELEASE IS ReleaseConn AND IS NOT BUILT ON THIS METHOD. A
+// teardown path holds the conn and never the attachment_ids that conn was
+// admitted under, so it is a SIBLING beside this one rather than a caller looping
+// over it, and it deletes directly under its own acquisition for the same
+// non-reentrancy reason the reap does.
+//
+// THE IDLE REAP IS NOT BUILT ON THIS METHOD either, and a reader must not expect
+// it to be: this one takes mu and sync.Mutex is not reentrant, so a reap running
 // inside a body that already holds it would deadlock rather than race.
 // reapExpiredLocked deletes directly under its caller's acquisition instead.
 func (r *Registry) Release(connID, attachmentID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.uploads, uploadKey{connID: connID, attachmentID: attachmentID})
+}
+
+// ReleaseConn removes every upload the conn holds and NOTHING ELSE, leaving
+// another conn's transfer of the same attachment_id in flight; a conn holding
+// none is a no-op. It is the way in that a teardown path needs and Release cannot
+// give it: that path holds the conn and never the list of attachment_ids the conn
+// was admitted under, so composing Release per pair would oblige the caller to
+// keep a shadow copy of this type's own bookkeeping.
+//
+// THE PREDICATE IS EXACT EQUALITY ON THE CONN HALF OF THE KEY — no trimming, no
+// folding, no prefix match, and no validation of connID — and both halves of that
+// are load-bearing. A fold or a prefix match would let one conn's teardown remove
+// another conn's entries, which is the isolation the key exists for defeated in
+// the predicate rather than at the key. And it must accept EXACTLY WHAT Admit
+// STORES, which stores the connID it is handed verbatim and unvalidated: a
+// normalising release would refuse to remove an entry Admit had happily stored,
+// leaving it permanently unreleasable, which is a slot leak. Validating the conn
+// namespace is not this type's job — connID is the receiver's own name for the
+// conn and never appears on the wire, which is what makes a client-chosen
+// attachment_id safe to key on at all.
+//
+// IT DOES NOT REAP, like Release and Lookup and unlike Admit and Deliver. The
+// reap exists to protect a DECISION — insertLocked's capacity gate must not count
+// dead entries, lookupAndStamp must not resume an expired transfer — and this
+// body decides nothing, it removes unconditionally, so there is no verdict a
+// stale entry could corrupt. Nothing is lost by walking past one: it is taken by
+// the very next Admit or Deliver, the only two bodies whose correctness depends
+// on its being gone. It also keeps the clock out of a body that otherwise needs
+// none.
+// TestRegistry_ReleaseConnHoldingNothing_ChangesNothingAndDoesNotReap is the sole
+// red for a reap added here, and it is what keeps the decision measured rather
+// than satisfied by construction.
+//
+// IT TAKES mu ITSELF AND DELETES DIRECTLY, and MUST NOT be built on Release: that
+// one takes mu and sync.Mutex is not reentrant, so a per-pair loop over it would
+// DEADLOCK rather than race — and a deadlock is not something -race reports,
+// which is why this is a constraint and not a preference. It is the same rule
+// reapExpiredLocked's doc states from the other side. There is no
+// releaseConnLocked core, because insertLocked and reapExpiredLocked are
+// lock-free cores only where TWO bodies share one; nothing shares this one, and a
+// Locked variant with a single caller would publish a seam no one asked for. It
+// joins the locked roster as the EIGHTH member — see Registry's type doc, whose
+// leaf rule this satisfies unchanged.
+//
+// ONE PASS AND NO KEY-COLLECTION SLICE, reapExpiredLocked's precedent: deleting
+// from a map while ranging over it is defined, and an entry deleted before the
+// iteration reaches it is simply not produced. THE PASS IS BOUNDED BY
+// maxInFlightUploads, which is what makes an O(len(uploads)) sweep under this
+// package's ONLY mutex safe rather than one conn's teardown stalling every other
+// conn's admissions and deliveries. That bound is #1796's gate in insertLocked
+// making "the registry never holds more than maxInFlightUploads" a property of
+// the CONTAINER rather than of one entry point, so this is at most four
+// comparisons however many entries the conn holds — a real dependency, and a
+// later ticket that lifts the cap lifts this sweep's cost with it.
+//
+// IT CALLS NOTHING ON Accumulator, and never reject, verbatim the rule
+// reapExpiredLocked states. Dropping the map entry drops the registry's last
+// reference and the bytes become collectable; reject is an UNLOCKED mutator on a
+// type that carries no mutex by design, and mu does not cover an accumulator — a
+// pointer to one may already be held off-lock by a goroutine that took it from
+// Admit, Lookup or Deliver — so a reject from here would be a data race and not
+// merely a leaf breach.
+//
+// IT IS SILENT AND RETURNS NOTHING. The map key holds the client-chosen
+// attachment_id, one of the four strings protocol.AttachmentChunkPayload's
+// SECURITY block bans from ever reaching a log or an error string, so there is no
+// logger and no format string in this body and the rule stays structural. The
+// absent return is Release's own reason rather than a privacy one — a COUNT would
+// be injection-free, since an int cannot carry an attachment_id — namely that an
+// answer here invites a caller to branch on it outside the lock. #1744 is where a
+// released-count would be added, if it turns out to have an operator log line
+// that wants one.
+//
+// IT IS THE FIRST REMOVER MEANT TO RUN ON A GOROUTINE OTHER THAN THE ONE FEEDING
+// THAT CONN'S ACCUMULATORS, and that is the point: a teardown that had to join
+// the conn's frame worker first would need a lifecycle this package does not own.
+// It is safe for reapExpiredLocked's already-recorded reason — this body is
+// REMOVE-ONLY. A Deliver sitting between its look-up and its release holds a
+// pointer this may drop from the map; its Assemble still returns
+// integrity-verified bytes or none, and its Release is a documented no-op on an
+// already-absent key. Nothing here touches the accumulator, so the
+// one-appFrameWorker-per-conn precondition — which is about who FEEDS an
+// accumulator — is neither used nor weakened. This adds a SECOND third party to
+// the one that paragraph names: alongside another conn's Admit, the teardown
+// goroutine for your OWN conn. The residual stated there is unchanged — a late
+// Release deletes BY KEY and would take a successor's entry had the pair been
+// re-admitted in the gap — and whether a conn id can be reused across a teardown
+// is a question about the call site, so #1744's rather than this primitive's.
+func (r *Registry) ReleaseConn(connID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key := range r.uploads {
+		if key.connID == connID {
+			delete(r.uploads, key)
+		}
+	}
 }
 
 // ErrUnknownUpload reports a chunk for a conn-and-attachment_id pair the
