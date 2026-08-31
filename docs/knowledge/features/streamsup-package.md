@@ -826,6 +826,32 @@ emitted count. Producing is not publishing: `turnbridge.MapEvent` gains no arm a
 `interactiveTurnEmitterV2.Handle` gains no case, so the value is logged by kind and dropped — that's
 still #1720's.
 
+**The construction moved into its own emitter (#1886).** The cap, the `turnevent.SlashCommand`
+construction and the single emit no longer sit inline at `emitModelList`'s tail — they're
+`emitSlashCommandList`, a method on `*Parser` taking the already-decoded `[]commandEntryLine`, so a
+second classification rung (#1876) can reach the same construction instead of copying it. The
+`len == 0` gate moved in as the new emitter's precondition rather than staying a guard at the call
+site, making suppression a property of the callee; `emitModelList`'s tail call is unconditional. The
+record stays `logControlResponse`'s, written by `emitModelList` before the call — the new emitter logs
+nothing on any path. Behaviour is unchanged; only where the construction lives moved.
+
+*Lesson: a doc comment moved with its code has to split by each sentence's SUBJECT, and `make check`
+cannot see a wrong split.* Five sentences inside the moved block were deictic — "the models loop
+**above**", "declares its own `cut` **here**", "the precedent is in **this same function**" — pointing
+at surroundings rather than naming a symbol. None of the five named the function being moved out of,
+so a symbol-level cite sweep missed all of them, and a green `make check` (behaviour-identical by
+construction, no assertion touched) proved nothing about whether they still made sense in the new
+home. The falsified set for a move is "every sentence pointing at its surroundings," not "every
+sentence naming the moved symbol" — the second set is what tooling can check and the first is bigger.
+
+*Lesson: a cite that survives a move can sit immediately next to one that doesn't.* `commandEntryLine`'s
+doc has "`maxSlashCommandName` bounds Name at CONSTRUCTION in `emitSlashCommandList`" (repointed by
+the move) directly followed by "this slice still lives from `json.Unmarshal` until `emitModelList`
+returns" (unchanged — the decode and the frame holding the slice both stay in `emitModelList`, and the
+new emitter returns before its caller does). The unit a relocation sweep has to work at is the
+sentence, not the symbol or the paragraph; two adjacent sentences naming the same neighbouring symbol
+can disagree on whether the move falsifies them.
+
 *Lesson: a neighbouring rung's suppression argument can rest on a precondition this rung doesn't
 have.* Rung 3's false-negative asymmetry (why an empty `models` array suppresses rather than emits an
 empty `ModelList`) is justified by both outcomes — empty and missing — being observable to a client.
