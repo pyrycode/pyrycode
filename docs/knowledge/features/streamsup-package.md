@@ -228,4 +228,5 @@ search can reach it.
 - [Class-aware fan-in reserve (#1496)](streamsup-package-per-conversation-turn-busy-track-class-aware-fan-in-reserve.md) — `sinkFor`'s drop-newest was, until #1496, blind to class: on a full 256-slot channel it dropped whichever envelope arrived next,…
 - [Delivery-seam consumer, mid-turn hold (#1199)](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md) — The first — and, as of this ticket, only — production reader of `Busy`/`WaitIdle`. 
 - [Rotation-delivery gate (#1330)](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md) — Closes #1295's Open question 4 ("the clear-before-`RestartFresh` window … not structurally excluded"). 
+- [Resolve an in-flight tool call to its conversation (#1917)](streamsup-package-per-conversation-turn-busy-track-resolve-an-in-flight-tool-call.md) — A third feed, `inflight`, retains which `tool_use_id`s are in flight per conversation and reports membership only.
 - [Related](streamsup-package-related.md) — see the document
