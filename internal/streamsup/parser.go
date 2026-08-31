@@ -629,13 +629,18 @@ const maxModelListEntries = 10
 // trimming, no charset filtering, and no leading "/" added or removed. See
 // turnevent.SlashCommand.Name, which states the same rule for the consumer.
 //
-// THE PER-ENTRY TERM, stated so the later field slices add to it: today one entry
-// costs at most maxSlashCommandName = 256 bytes of workspace-derived text. THE
-// AGGREGATE IS DELIBERATELY NOT SETTLED HERE, unlike maxModelResolved's, and both
-// missing factors are named rather than left to be inferred. The field that will
-// dominate the per-entry budget is the description (#1833), and 51 * 24 = 1224 bytes
-// of name text decides nothing on its own; the entry-count factor arrives with the
-// count bound (#1826), exactly as maxModelListEntries supplied maxModelResolved's.
+// THE PER-ENTRY TERM, stated so the later field slices add to ONE derived figure
+// rather than each re-deriving it: today one entry costs at most
+// maxSlashCommandName + maxSlashCommandDescription = 256 + 256 = 512 bytes of
+// workspace-derived text. The field this paragraph named as the one that would
+// dominate the budget was the description, and it does — it arrived in #1904 with a
+// cap of its own, whose doc carries that cap's derivation and the arithmetic this
+// term hands forward. THE AGGREGATE IS STILL DELIBERATELY NOT SETTLED HERE, unlike
+// maxModelResolved's, and the ONE missing factor is now named rather than two: the
+// entry COUNT, which arrives with the count bound (#1826) exactly as
+// maxModelListEntries supplied maxModelResolved's. The two field slices still
+// outstanding — argumentHint (#1830) and aliases (#1825) — add their own caps to the
+// 512 above.
 //
 // TRANSIENT AND RETAINED ARE TWO DIFFERENT FIGURES HERE TOO, which is what makes this
 // bound the whole story rather than half of it. What is TRANSIENT is the unbounded
@@ -647,6 +652,101 @@ const maxModelListEntries = 10
 // differs from maxModelResolved, whose capped result cmd/pyry holds for the child's
 // life.
 const maxSlashCommandName = 256
+
+// maxSlashCommandDescription caps turnevent.SlashCommand.Description — claude's own
+// description of one entry of the initialize reply's commands array (#1904). Applied
+// at CONSTRUCTION in emitSlashCommandList, exactly as every cap above is, so an
+// oversized value never enters the event stream, the push queue, or any log.
+//
+// THE DOC-SHAPE PRECEDENT IS maxTaskRosterDescription, not the identifier-cap family
+// this constant's neighbour belongs to. That constant bounds the same SHAPE under the
+// same pressure — a prose description multiplied by a count claude chooses — and its
+// two arguments are the two this derivation weighs, one pushing down and one up.
+//
+// MEASURED against the committed capture (claude 2.1.239, byte-identical across all
+// three responding arms): fifty-one entries, `description` present and non-empty on
+// every one, longest 1145 bytes (dataviz), then 1078, 1075, 1023 and 797, mean 207.5,
+// median 69, 10,580 bytes in total. 10 are over 256 bytes, 16 over 128, 28 over 64.
+// The names, for contrast, total 494 with a 24-byte longest. So 256 is ~1.2x the mean
+// and ~3.7x the median — a far thinner multiple than maxSlashCommandName's 10.7x over
+// the same capture, and the thinness is the decision rather than an accident of it.
+//
+// WHY THINNER, and it is maxTaskRosterDescription's MULTIPLICATION argument with the
+// multiplier worse: a multiplied field earns a smaller unit budget than the same field
+// carried once. The roster multiplies its description by 8; this list multiplies by
+// claude's observed 51. That pushes BELOW the roster's 512, and 256 is where it lands.
+//
+// WHY NOT LOWER, and here maxTaskRosterDescription's ROLE argument INVERTS rather than
+// carrying: a roster description's authoritative full-length copy already crossed the
+// wire on the BackgroundTaskStarted its task_id joins back to, so a cut there loses
+// nothing a consumer holding that event cannot recover. A CUT SLASH-COMMAND
+// DESCRIPTION IS RECOVERABLE FROM NOTHING — no second copy of it exists on any lane.
+// The bound on how far that pushes is the named consumer, pyrycode-desktop#694's
+// type-ahead, which renders one row per command as a name, an argument hint and a
+// description: 128 would cut 16 of the capture's 51 and 64 would cut 28, so over half
+// the menu would arrive truncated for the one consumer the field exists for. 256 cuts
+// 10.
+//
+// THE MULTIPLICAND IS THE SUM OF CAPS, which is how maxModelListEntries derives its
+// own product and what makes the figure a worst case rather than a description of one
+// capture: maxSlashCommandName + maxSlashCommandDescription = 256 + 256 = 512 bytes
+// exactly, a unit a reader can hold — the virtue maxTaskRosterEntries' arithmetic
+// paragraph claims by name for its own 1024. No other candidate weighed here lands on
+// one: 64 gives 320, 128 gives 384, 512 gives 768.
+//
+// THE CEILING IS maxUnrecognizedRaw's whole-line 16 KiB, and 8192 is deliberately NOT
+// cited as one. maxModelListEntries' doc records why: 8192 is maxTaskRosterEntries'
+// PRODUCT, whose doc merely NOTICED that it lands on half of maxUnrecognizedRaw, and
+// inheriting a noticed landmark as a constraint is the mistake that paragraph undoes.
+// What survives is the RULE — a whole KNOWN event must not approach the cap on an
+// entire UNKNOWN line, measured retained-against-retained — with the fraction stated
+// PER SHAPE: the roster reads 1/2 and the model list 5/8.
+//
+// THIS SHAPE'S FRACTION IS NOT FIXED HERE, because it is not decidable without the
+// entry count, which is #1826's. What this doc owes instead is the arithmetic handed
+// forward, so that slice adds to one derived figure: at the 512-byte per-entry term,
+// 16384 * 1/2 = 8192 leaves 16 entries and 16384 * 5/8 = 10240 leaves 20. #1826 picks
+// the fraction and the count from those two.
+//
+// WHAT THE OBSERVED CAPTURE COSTS AT THIS CAP is the sharpest figure in the
+// derivation, and it is computed THROUGH truncateField — byte cut, then the
+// empty-replacement scrub — rather than as a naive byte-cut sum. Name plus description
+// across all 51 entries retains 6,117 bytes, which is under 8192 AND under 10240, so
+// today's real workspace fits inside BOTH established fractions after the cut. No
+// larger candidate does: 512 retains 8,233 and clears only 5/8.
+//
+// A CAP FIRING ON CLAUDE'S ORDINARY OUTPUT IS UNAVOIDABLE FOR THIS FIELD, and saying
+// so is honest where maxModelListEntries' NOT 8 paragraph could reject exactly that
+// outcome for the COUNT. The descriptions alone total 10,580 bytes — already past
+// 10240 and past 8192 before a single name is counted — and one of them is 1145 bytes
+// by itself. It is stated against the FRACTION and not against the whole 16 KiB
+// deliberately: uncut name+description is 11,074, over both established fractions but
+// UNDER 16384, so "past the whole ceiling uncut" would be false and would rest this
+// argument on a premise a reader can knock down. TruncatedFields is what makes the cut
+// honest rather than silent.
+//
+// MID-RUNE IS ON THE LIVE PATH for this field where it is a corner case for the name:
+// 14 of the 51 descriptions carry non-ASCII and no name does, so truncateField's
+// empty-replacement DELETION — a cut value landing 1-3 bytes under the limit — is
+// ordinary here. At 256 no entry in the capture is mid-rune reachable at all; at 128
+// dataviz is (losing 1 byte) and at 64 artifact-capabilities is (losing 2).
+//
+// Escaping is mild for maxUnrecognizedRaw's reason, verbatim: these are JSON string
+// values, so the growth is quotes and backslashes rather than a \u00XX expansion of
+// every byte. The one wrinkle measured here is narrow and must not be widened into a
+// claim about control characters: claude-api's description carries two 0x0a bytes, and
+// 0x0a is the ONLY sub-0x20 byte anywhere across the entries' string fields
+// (protocol.SlashCommand's doc carries that measurement). They arrive pre-escaped as
+// two printable bytes each, and they are NOT stripped — #1600's verbatim rule governs
+// and the client's render boundary owns sanitization.
+//
+// A separate constant even though it currently equals maxSlashCommandName — and
+// maxModelResolved, maxModelField and maxModelValue: maxRateLimitField's paragraph
+// applies verbatim, they bound different fields for different reasons, and folding
+// them into one would make a future change to one budget silently move this one. This
+// doc names its peers; theirs are left as written, #1877 having added
+// maxSlashCommandName without reopening them either.
+const maxSlashCommandDescription = 256
 
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
@@ -1185,13 +1285,25 @@ type modelOptionLine struct {
 // (#1853). "Entry" rather than modelOptionLine's "option": that word names a menu
 // choice the daemon publishes, and a slash command is not one.
 //
-// ONE FIELD, and the OMISSION is the point, exactly as it is on systemInitLine.
-// claude sends four keys per entry — name, argumentHint, description, aliases — and
-// three are deliberately absent, because a field that is never declared cannot reach
-// a log or an event. It is also the whole of the memory story: the captured array is
-// 14,277 bytes compact and the fifty-one `name` strings inside it total 494, so
-// declaring one field is what keeps 96% of a workspace-authored payload from ever
-// becoming a Go string. A later reader must not "complete" this struct.
+// TWO FIELDS OF FOUR, AND THE OMISSION IS STILL DELIBERATE — but it is SLICE-SCOPED
+// rather than a standing prohibition, and reading it as one is what this paragraph
+// now exists to prevent. claude sends four keys per entry — name, argumentHint,
+// description, aliases. Name arrived with the decode (#1853) and Description with
+// #1904; argumentHint is #1830's and aliases is #1825's, and each lands when a slice
+// has a consumer for it. What a later reader must not do is "complete" this struct
+// AHEAD of those slices: a field that is never declared cannot reach a log or an
+// event, and that is the whole of what the two remaining omissions still buy.
+//
+// THE MEMORY ARITHMETIC INVERTED WHEN THE SECOND FIELD LANDED, and what moved is the
+// ARGUMENT and not only the percentage. The captured array is 14,277 bytes compact;
+// the fifty-one `name` strings inside it total 494 and the fifty-one `description`
+// strings total 10,580, so 11,074 of 14,277 — 77.6% — now becomes a Go string and the
+// omission keeps 22.4% out. It was 96% when one field was declared, which is why the
+// omission USED to be the whole of the memory story and is now a minority of it. What
+// carries that weight instead is the per-field cap one step downstream, which bounds
+// what is RETAINED whatever this struct decodes: the 11,074 is transient, and the
+// capture's 51 entries retain 6,117 bytes of it after maxSlashCommandName and
+// maxSlashCommandDescription have run.
 //
 // EVERY STRING HERE IS WORKSPACE-AUTHORED. A slash command defined in a repository
 // was written by whoever wrote that repository, and the daemon reads it in whatever
@@ -1216,34 +1328,50 @@ type modelOptionLine struct {
 // sight: "these look like identifiers" would be the wrong argument for a string one
 // captured entry already spells __remote-workflow.
 //
-// THE RE-OPEN TRIGGER, named rather than left to be noticed: the first slice that
-// gives this value a SYNTAX sink — a path element, a match pattern, a regexp, an argv
-// element, a log attribute — or that renders it into an HTML sink, an attribute or a
-// URL inherits the question open again. #1720 is the nearest such slice, and what it
-// owes is the CLIENT-side render boundary turnevent.SlashCommandList's SECURITY
-// paragraph already assigns.
+// DESCRIPTION WAS WALKED THROUGH THAT ENUMERATION ON ITS OWN (#1904) rather than
+// inheriting Name's answer, because the enumeration above is a claim about Name
+// established by inspection and not a property of the path. It rides the same struct
+// field set, the same emit callback and the same two defaults, and it reaches the same
+// empty set of sinks — so the answer is the same and the REASON it is the same is the
+// re-walk, not the shared origin. What differs is only that the "these look like
+// identifiers" argument was never available for it at all: this field is prose, and 14
+// of the capture's 51 descriptions carry non-ASCII.
+//
+// THE RE-OPEN TRIGGER, named rather than left to be noticed and covering BOTH declared
+// strings: the first slice that gives either value a SYNTAX sink — a path element, a
+// match pattern, a regexp, an argv element, a log attribute — or that renders it into
+// an HTML sink, an attribute or a URL inherits the question open again. #1720 is the
+// nearest such slice, and what it owes is the CLIENT-side render boundary
+// turnevent.SlashCommandList's SECURITY paragraph already assigns.
 //
 // THE DECODED SLICE IS UNCAPPED HERE, and the bound is one level up rather than
 // added: defaultMaxParseBuf caps the whole line at 4 MiB before the decoder sees it,
 // which is already the whole of what bounds the models array's transient spike (see
-// controlResponseLine's neighbouring paragraph). The arithmetic favours this array on
-// both sides — this struct is ONE field where modelOptionLine is five, so per
-// densest-legal element the worst-case transient is a fraction of the already-accepted
-// one and a single 4 MiB line cannot maximise both.
+// controlResponseLine's neighbouring paragraph). The arithmetic still favours this
+// array on both sides — this struct is TWO fields where modelOptionLine is five, so
+// per densest-legal element the worst-case transient is a fraction of the
+// already-accepted one and a single 4 MiB line cannot maximise both. The second field
+// narrowed that fraction without changing its direction, which is why the conclusion
+// is restated rather than re-argued.
 //
-// A PER-FIELD CAP DOES EXIST, one step downstream, which is what narrows the
+// TWO PER-FIELD CAPS DO EXIST, one step downstream, which is what narrows the
 // transient/retained contrast this paragraph used to draw: maxSlashCommandName bounds
-// Name at CONSTRUCTION in emitSlashCommandList (#1877), where every cap in this package
-// is applied. The transience is unchanged — this slice still lives from json.Unmarshal
-// until emitModelList returns — but a BOUNDED COPY of each Name is now retained
+// Name and maxSlashCommandDescription bounds Description, both at CONSTRUCTION in
+// emitSlashCommandList (#1877, #1904), where every cap in this package is applied.
+// They are two constants rather than one shared limit for maxRateLimitField's reason,
+// and the description's is the larger contributor to what is retained. The transience
+// is unchanged — this slice still lives from json.Unmarshal until emitModelList
+// returns — but a BOUNDED COPY of each Name and each Description is now retained
 // inside the emitted turnevent.SlashCommandList for that event's lifetime. That is
 // still shorter than the models array's, whose CAPPED result is retained for the
 // child's life by cmd/pyry's sessionModelHold.
 //
 // The decode is all-or-nothing at the LINE, modelOptionLine's rule verbatim and at
 // the ELEMENT level too: a `commands` that is a number, a string or an object, an
-// element that is a bare string or a number, or a `name` that is not a string all
-// fail the WHOLE-LINE decode and take emitModelList's undecodable rung. The bare
+// element that is a bare string or a number, or a `name` or a `description` that is
+// not a string all fail the WHOLE-LINE decode and take emitModelList's undecodable
+// rung. The rule is the STRUCT's and not any one field's, which is why the second
+// declared key inherits it rather than earning its own branch. The bare
 // string is worth naming because it is the shape a future claude most plausibly
 // sends: systemInitLine's line already spells this same inventory as bare strings
 // under slash_commands.
@@ -1251,9 +1379,12 @@ type modelOptionLine struct {
 // JSON null is the one carve-out and it applies at BOTH positions, for
 // modelOptionLine's reason: encoding/json documents unmarshalling a null into a
 // non-pointer Go value as a NO-OP producing no error, so a null `commands` lands as a
-// nil slice and a null `name` lands as "" — a counted entry, not a failed line.
+// nil slice and a null `name` or a null `description` lands as "" — a counted entry,
+// not a failed line. For both strings that is also the reading an ABSENT key gets, so
+// absent, null and "" are one reading and no consumer can branch on the difference.
 type commandEntryLine struct {
-	Name string `json:"name"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 // Content is held as raw bytes, not []streamBlock, and each element is decoded
@@ -2197,9 +2328,12 @@ func (p *Parser) emitModelList(line []byte) {
 		// worth seeing at the site: before this, only a payload carrying BOTH arrays had
 		// its WORKSPACE-authored command names copied into turnevent.SlashCommand values
 		// and retained for the event's lifetime. The boundary itself does not move — one
-		// decode target (commandEntryLine), one construction site, one cap
-		// (maxSlashCommandName) — and the argument passed is the same expression rung 5
-		// passes, so there is no second decode, loop or cap to keep in step.
+		// decode target (commandEntryLine), one construction site, two caps
+		// (maxSlashCommandName and, since #1904, maxSlashCommandDescription) — and the
+		// argument passed is the same expression rung 5 passes, so there is no second
+		// decode, loop or cap to keep in step. The cap COUNT grew with the field set while
+		// the number of PLACES a cap is applied did not, which is what keeps this rung and
+		// rung 5 in step without either one repeating the other.
 		p.logControlResponse(controlResponseCommandsOnly, 0, 0, 0, commands)
 		p.emitSlashCommandList(cr.Response.Response.Commands)
 		return
@@ -2432,29 +2566,58 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 	// emitModelList.
 	slashCommands := make([]turnevent.SlashCommand, 0, len(entries))
 	for _, entry := range entries {
-		// No `bound` closure and no sequential-statements rule, emitModelAnnounced's
-		// reason verbatim: one field means there is no TruncatedFields ORDER for a
-		// composite literal to decide, which is the only thing either device protects.
-		// emitModelList's models loop needs both; a one-field entry needs neither.
-		name, truncated := truncateField(entry.Name, maxSlashCommandName)
 		// Declared INSIDE the loop, and that scope is the whole of what makes the report
 		// per entry: a cut on one entry cannot appear on the entries after it.
 		// emitModelList's models loop declares its own `cut` and `droppedLevels` inside
 		// its own loop for the same reason.
 		var cut []string
-		if truncated {
-			// The DAEMON's snake_case name, emitModelList's models loop's rule — and for this
-			// field it coincides with the wire name protocol.SlashCommand.TruncatedFields
-			// documents, so a later mapping is a copy rather than a translation. The
-			// distinction starts mattering at argument_hint (#1833).
-			cut = append(cut, "name")
+		// A `bound` closure since #1904, where a one-field entry needed none. The claim
+		// this comment used to carry — that one field means there is no TruncatedFields
+		// ORDER for a composite literal to decide, which was the only thing the device
+		// protected — stopped being true the moment there were two fields to order, so
+		// the premise went rather than the conclusion being defended. It is
+		// emitModelList's own closure in shape and in scope: declared INSIDE the loop
+		// because `cut` is, which is what keeps one entry's report off the entries after
+		// it, and closing over that slice rather than returning a second value. Two
+		// sequential truncateField calls would work equally well and were weighed; the
+		// closure wins on there being ONE place the append happens rather than one per
+		// field, so "declaration order == call order" is checked at the call sequence
+		// below and nowhere else. emitModelAnnounced's copy of the retired sentence is
+		// about ModelAnnounced.Model's own single field and is untouched by this.
+		bound := func(value, name string, limit int) string {
+			out, truncated := truncateField(value, limit)
+			if truncated {
+				cut = append(cut, name)
+			}
+			return out
 		}
+		// Sequential statements in DECLARATION ORDER, emitModelList's models loop's rule
+		// and now for its reason rather than by resemblance: TruncatedFields is ordered by
+		// these calls, so `[]string{"name", "description"}` on an entry with both cut is a
+		// property of the call sequence a reader sees. The names are the DAEMON's
+		// snake_case ones, not claude's camelCase keys — and for these two fields they
+		// coincide with the wire names protocol.SlashCommand.TruncatedFields documents, so
+		// a later mapping is a copy rather than a translation. The distinction starts
+		// mattering at argument_hint (#1830), whose claude key is argumentHint.
+		name := bound(entry.Name, "name", maxSlashCommandName)
+		description := bound(entry.Description, "description", maxSlashCommandDescription)
 		slashCommands = append(slashCommands, turnevent.SlashCommand{
 			// claude's name VERBATIM (#1600's rule): no lowercasing, no trimming, no
 			// charset filtering, no leading "/" added or removed. The cap is the only
 			// judgement made about it here and it is a BYTE cut — see maxSlashCommandName,
 			// and turnevent.SlashCommand.Name for the same rule stated at the consumer.
 			Name: name,
+			// claude's description VERBATIM under the same #1600 rule, with NO NEWLINE
+			// STRIPPING named explicitly because this is the field a captured value carries
+			// newlines in — see protocol.SlashCommand's doc for that measurement and its
+			// narrowness. Its cap is its OWN (maxSlashCommandDescription), not Name's, even
+			// though the two numbers currently agree.
+			//
+			// BETWEEN Name and TruncatedFields, which is protocol.SlashCommand's declaration
+			// order minus the fields the daemon type does not declare yet — see
+			// turnevent.SlashCommand, whose doc owns that promise and now cites this field as
+			// the first evidence it was kept.
+			Description: description,
 			// nil when nothing was cut: append never ran.
 			TruncatedFields: cut,
 		})
@@ -2554,9 +2717,19 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 // separation is the KEYWORD's, and this count qualifies it rather than carrying it.
 // Admissible on the other three counts' footing exactly — a DAEMON-computed
 // integer derived from a slice length, carrying none of claude's bytes. No name, no
-// argumentHint, no description and no alias reaches this record on any rung, and
-// commandEntryLine's single field is what makes three of those four unreachable
-// rather than merely unwritten.
+// argumentHint, no description and no alias reaches this record on any rung — and
+// SINCE #1904 THE DISTINCTION BEHIND THAT SENTENCE IS DRAWN DIFFERENTLY, which is
+// worth redrawing rather than renumbering. commandEntryLine declares two of the four
+// keys now, so only argumentHint and alias are UNREACHABLE by omission: they are not
+// on the decode target, and a value that never becomes a Go string cannot be written.
+// The description crossed into the other category — it is UNWRITTEN, held in a decoded
+// struct and in a constructed event, and kept out of this record by what this function
+// chooses to log rather than by what the decode target can hold. That is the weaker of
+// the two guarantees and it is the one #833's posture actually asks for elsewhere; on
+// the cmd/pyry lane it is pinned deterministically rather than left advisory, by
+// TestInteractiveTurnEmitterV2's log-leak negative over
+// emitterSlashCommandListSentinels. The record itself is unchanged: six attributes,
+// four daemon-computed integers, no decoded content on any rung.
 //
 // It is the LAST parameter and the LAST attribute, so the two orders are one order a
 // reader checks once. The existing three ints are one dimension — `models` with

@@ -853,17 +853,20 @@ type ModelList struct {
 // an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
 // for their reason.
 //
-// Its two fields are the FIRST TWO of protocol.SlashCommand's five (#1727), in
-// that type's own declaration order: the command's name, and the report naming
-// which of this entry's fields the producer cut. The three between them —
-// ArgumentHint, Description and Aliases — are deliberately absent and arrive
-// with their own slices, exactly as ModelOption grew a field at a time across
-// #1819 / #1827 / #1828.
+// Its three fields are THREE of protocol.SlashCommand's five (#1727), in that
+// type's own declaration order: the command's name, its description, and the
+// report naming which of this entry's fields the producer cut. The two still
+// missing — ArgumentHint between the first two, Aliases between the last two —
+// are deliberately absent and arrive with their own slices, exactly as
+// ModelOption grew a field at a time across #1819 / #1827 / #1828.
 //
 // FIXING THE ORDER BEFORE THE SECOND FIELD EXISTS is the whole point of choosing
-// it now. Each later field lands in its mirrored position rather than being
-// appended, so the eventual mapping onto the wire type stays a field-for-field
-// copy rather than a reordering a reader has to check.
+// it now, and Description (#1904) is the first evidence that the promise was
+// kept: it landed BETWEEN Name and TruncatedFields — its mirrored position,
+// leaving the gap ArgumentHint fills later — rather than being appended to the
+// end where a field added without this rule would have gone. Each later field
+// lands the same way, so the eventual mapping onto the wire type stays a
+// field-for-field copy rather than a reordering a reader has to check.
 type SlashCommand struct {
 	// Name is claude's command name, VERBATIM, per ModelAnnounced.Model's rule:
 	// no lowercasing, no canonicalisation, no prefix stripping, and no leading
@@ -878,6 +881,26 @@ type SlashCommand struct {
 	// SlashCommandList's SECURITY paragraph, which owns that statement for every
 	// string on this type rather than having it diluted into a restatement here.
 	Name string
+	// Description is claude's own description of the command, VERBATIM, per
+	// ModelAnnounced.Model's rule: no lowercasing, no trimming, no charset
+	// filtering — and NO NEWLINE STRIPPING, which is named rather than left under
+	// "verbatim" because this is the one string on this type a captured value
+	// actually carries newlines in. protocol.SlashCommand's doc carries that
+	// measurement and its narrowness, and this doc does not re-derive either.
+	//
+	// IT IS PROSE, NOT A LABEL, which is what separates it from Name rather than
+	// making it a second copy of Name's warning: 14 of the capture's 51
+	// descriptions carry non-ASCII where no name does, so a consumer rendering it
+	// as a single-line row is handling multi-line, non-ASCII text and not an
+	// identifier. It is also the field a truncation is least recoverable from —
+	// nothing else on this lane carries a second copy of it — which is the trade
+	// streamsup's maxSlashCommandDescription argues.
+	//
+	// Bounded by the producer AT CONSTRUCTION under its OWN cap
+	// (streamsup's maxSlashCommandDescription, not Name's) and never sanitized:
+	// see SlashCommandList's SECURITY paragraph, which owns that statement for
+	// every string on this type.
+	Description string
 	// TruncatedFields names THIS entry's fields the producer cut to fit their
 	// caps, in declaration order, using the DAEMON's snake_case names. They agree
 	// with protocol.SlashCommand.TruncatedFields' wire names, so a later mapping
@@ -885,9 +908,11 @@ type SlashCommand struct {
 	// empty non-nil slice; BackgroundTask.TruncatedFields is the convention's
 	// single source.
 	//
-	// TODAY THE ONLY NAME IT CAN CARRY IS "name", AND THE ENUMERATION GROWS WITH
-	// THE FIELD SET. Each field-adding slice extends it, exactly as
-	// ModelOption.TruncatedFields grew to include "effort_levels" in #1827.
+	// TODAY IT CAN CARRY "name" AND "description", IN THAT ORDER, AND THE
+	// ENUMERATION GROWS WITH THE FIELD SET. #1904 was the first slice to extend
+	// it, exactly as ModelOption.TruncatedFields grew to include "effort_levels"
+	// in #1827 — and it is what turned the declaration ORDER above into a claim a
+	// test can see, an enumeration of one having nothing to order.
 	//
 	// A NAME FOR A FIELD THIS TYPE DOES NOT DECLARE MUST NEVER APPEAR. A producer
 	// that cut a value this type does not carry has nothing to report here,

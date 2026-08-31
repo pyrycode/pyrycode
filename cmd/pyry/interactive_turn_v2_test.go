@@ -2858,10 +2858,12 @@ var emitterSlashCommandListFixture = turnevent.SlashCommandList{
 	Commands: []turnevent.SlashCommand{
 		{
 			Name:            "qq-name-alpha-sentinel",
+			Description:     "qq-description-alpha-sentinel",
 			TruncatedFields: []string{"qq-truncated-alpha-sentinel"},
 		},
 		{
 			Name:            "zz-name-beta-sentinel",
+			Description:     "zz-description-beta-sentinel",
 			TruncatedFields: nil,
 		},
 	},
@@ -2869,13 +2871,22 @@ var emitterSlashCommandListFixture = turnevent.SlashCommandList{
 
 // emitterSlashCommandListSentinels returns every workspace-authored string
 // emitterSlashCommandListFixture carries, for the log-leak negatives. Derived from
-// the fixture rather than re-listed beside it, so a sentinel added to an entry
-// cannot silently drop out of the assertions — and so the enumeration keeps
-// covering the fields turnevent.SlashCommand grows.
+// the fixture rather than re-listed beside it, so a sentinel added to an ENTRY
+// cannot silently drop out of the assertions.
+//
+// WHAT DERIVATION DOES NOT BUY, corrected in #1904 because this doc claimed it did:
+// the enumeration does NOT grow with turnevent.SlashCommand's FIELD set. The body
+// names fields one at a time, so a new field is simply not enumerated and its value
+// gets no log-leak assertion at all — and this lane is where "no log line carries
+// decoded content" is a deterministic test rather than an advisory sentence. Each
+// field-adding slice therefore owes a sentinel on every entry and a line here;
+// Description is the first one to pay it, and it is the proof the claim needed
+// correcting.
 func emitterSlashCommandListSentinels() []string {
 	var out []string
 	for _, c := range emitterSlashCommandListFixture.Commands {
 		out = append(out, c.Name)
+		out = append(out, c.Description)
 		out = append(out, c.TruncatedFields...)
 	}
 	return out
