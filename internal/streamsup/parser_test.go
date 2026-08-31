@@ -4949,13 +4949,18 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 	}
 }
 
-// TestParser_InitializeControlResponseAckReportsTheCommandCount is #1853's AC 2
-// second half and, since #1890, the proof of the keyword that second half handed
-// over: a success carrying commands and no models lands on its OWN rung and logs
-// controlResponseCommandsOnly, where a success carrying neither array logs the
-// narrowed `ack`. The count still says what decoded on both; what the split added is
-// that the KEYWORD says which payload arrived rather than leaving the count to carry
-// the distinction alone.
+// TestParser_InitializeControlResponseCommandsOnlyRungEmits is #1853's AC 2 second
+// half, #1890's proof of the keyword that second half handed over, and — since #1891 —
+// the liveness proof of the emit that rung now performs: a success carrying commands
+// and no models lands on its OWN rung, logs controlResponseCommandsOnly and emits ONE
+// turnevent.SlashCommandList, where a success carrying neither array logs the narrowed
+// `ack` and emits nothing. The count still says what decoded on all three rows.
+//
+// It was ...AckReportsTheCommandCount until #1891. "Ack" stopped describing what the
+// table covers when the rung it is organised around got its own keyword, and #1890
+// deliberately left the name so it would be renamed ONCE, here, where the premise it
+// was written on — that a commands-carrying payload with no models emits nothing —
+// is the thing being overturned.
 //
 // The fixture is HAND-BUILT because the capture cannot supply it: all three
 // responding arms carry both arrays, so no committed bytes exercise the
@@ -4966,16 +4971,36 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 // bool, a literal 1, or len(models) all read right against a one-entry fixture and
 // wrong against three.
 //
-// The `neither array` row is the PAIRED NEGATIVE and it is what makes the new keyword
-// a SPLIT rather than a rename: without it a mutant logging commands_only on every
-// success goes green. It is also the reason wantReason is a row field rather than a
-// literal in wantAttrs — the two rows disagree on it now.
+// TWO COUNTS AGAINST ONE LITERAL, and they are a cross-check rather than a
+// restatement: the record's `commands` is len(cr.Response.Response.Commands) taken
+// before any construction runs, while len(list.Commands) comes out of
+// emitSlashCommandList's own loop. They are computed in different places from
+// different values, so they are asserted separately and must not be collapsed.
+//
+// THE NAMES VERBATIM on the first row, and `__remote-workflow` is why they are
+// spelled out rather than counted: it is a committed capture's own name and the
+// standing proof that NO NAME CHARSET MAY BE ASSUMED. Together with the type
+// assertion — the single event must be a SlashCommandList and nothing else, so no
+// ModelList rides along — this is what pins "same construction, same verbatim name
+// (#1600), same per-field cap" at the new call site rather than at the models rung's.
+//
+// NOT a row here: any cap boundary. That whole matrix is
+// TestParser_SlashCommandNamesAreCapped's and it is measured on the models rung; the
+// construction is one emitter reached from two rungs, so duplicating a boundary row
+// here would buy a second copy of a bound rather than a second proof of it.
+//
+// The `neither array` row is the PAIRED NEGATIVE for BOTH halves now. It is what makes
+// the keyword a SPLIT rather than a rename — without it a mutant logging commands_only
+// on every success goes green — and it is equally what stops a mutant that emits on
+// every success from going green, since it is the only row on this table that reaches
+// an emitting-adjacent rung and must not emit. It is also the reason wantReason is a
+// row field rather than a literal in wantAttrs — the rows disagree on it.
 //
 // It is also the one rung where a swap between `commands` and any of the model trio
 // shows: the trio is all-zero here and this count is not. That sentence is scoped to
 // the rows that report a non-zero count, which after #1890 are the commands_only ones
 // — on the narrowed ack row all four ints are 0 and a swap is invisible.
-func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T) {
+func TestParser_InitializeControlResponseCommandsOnlyRungEmits(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -4983,6 +5008,8 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 		inner        map[string]any
 		wantReason   string
 		wantCommands int
+		wantEvents   int
+		wantNames    []string
 		why          string
 	}{
 		{
@@ -4994,13 +5021,17 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 			}},
 			wantReason:   "commands_only",
 			wantCommands: 3,
-			why:          "nothing is emitted yet, but the rung is no longer ack — the record names the payload it answered (#1890)",
+			wantEvents:   1,
+			wantNames:    []string{"deep-research", "design", "__remote-workflow"},
+			why:          "the rung's own discriminant is the commands array, so it reaches emitSlashCommandList and the inventory is emitted with no ModelList beside it (#1891)",
 		},
 		{
 			// THE NULL CARVE-OUT: encoding/json decodes a null into a non-pointer Go
 			// value as a NO-OP, so the entry lands with an empty Name and is COUNTED
 			// rather than failing the line. The well-formed sibling is what makes the
 			// count say 2 instead of agreeing with a decode that dropped the null entry.
+			// Since #1891 it says the same about the EMITTED count: the null entry
+			// becomes an entry with an empty Name, so both counts read 2.
 			//
 			// It lived in TestParser_InitializeControlResponseRejectBranches until #1890,
 			// which is where a row that decodes and reports 2 never really belonged: it
@@ -5011,13 +5042,15 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 				commandEntryFixture(nil), commandEntryFixture("deep-research")}},
 			wantReason:   "commands_only",
 			wantCommands: 2,
-			why:          "a null name is a no-op decode, so the entry is counted and the line is a commands-only success like the row above",
+			wantEvents:   1,
+			why:          "a null name is a no-op decode, so the entry is counted, emitted with an empty Name, and the line is a commands-only success like the row above",
 		},
 		{
 			name:       "neither array",
 			inner:      map[string]any{"mode": "default"},
 			wantReason: "ack",
-			why:        "the paired negative: a success carrying neither array is what `ack` NARROWED to, and it is what makes the rows above a split rather than a rename",
+			why: "the paired negative for both halves: a success carrying neither array is what `ack` NARROWED to, and it is what stops a mutant that logs commands_only " +
+				"— or emits — on every success",
 		},
 	}
 	for _, tt := range tests {
@@ -5030,8 +5063,32 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 				t.Fatalf("Write err = %v, want nil", err)
 			}
 
-			if len(events) != 0 {
-				t.Errorf("event count: got %d, want 0 (%s) — %#v", len(events), tt.why, events)
+			if len(events) != tt.wantEvents {
+				t.Fatalf("event count: got %d, want %d (%s) — %#v", len(events), tt.wantEvents, tt.why, events)
+			}
+			if tt.wantEvents == 1 {
+				// The type assertion is AC 1's "and no ModelList": a mutant that fell through
+				// to the shared models tail emits one of those instead of — or beside — this,
+				// and the count above plus this assertion catch it in either arrangement.
+				list, ok := events[0].(turnevent.SlashCommandList)
+				if !ok {
+					t.Fatalf("event 0: got %T, want turnevent.SlashCommandList (%s)", events[0], tt.why)
+				}
+				if len(list.Commands) != tt.wantCommands {
+					t.Errorf("emitted entries: got %d, want %d (%s) — the record's count is taken before "+
+						"construction and this one comes out of the emitter's loop",
+						len(list.Commands), tt.wantCommands, tt.why)
+				}
+				if tt.wantNames != nil {
+					var names []string
+					for _, entry := range list.Commands {
+						names = append(names, entry.Name)
+					}
+					if !reflect.DeepEqual(names, tt.wantNames) {
+						t.Errorf("emitted names: got %#v, want %#v (%s) — claude's names are carried "+
+							"VERBATIM and in claude's order", names, tt.wantNames, tt.why)
+					}
+				}
 			}
 			consumes := rec.withMessage(controlResponseConsumeMsgFixture)
 			if len(consumes) != 1 {
@@ -5087,13 +5144,14 @@ func slashCommandNamePreview(s string) string {
 // the halving on either side. What is this row's alone is the BOUNDARY OPERATOR, which
 // no input over the cap or well under it can see.
 //
-// The models array is carried by every row because the commands emit rides the
-// MODEL-LIST rung: a line with no models emits nothing at all, which
-// TestParser_InitializeControlResponseAckReportsTheCommandCount pins. Since #1890 the
-// rung such a line lands on depends on what else it carries — a commands array like
-// this test's rows puts it on commands_only, and only a line carrying neither array
-// reaches the narrowed ack — but the emit half is the same on both and is what makes
-// the models array load-bearing here. A row therefore never states the models half.
+// The models array is carried by every row because that is the rung this matrix was
+// MEASURED on, and since #1891 it is no longer the only rung that could carry it: a
+// line with no models lands on the commands_only rung, which emits an inventory of its
+// own (TestParser_InitializeControlResponseCommandsOnlyRungEmits pins that). Moving the
+// matrix there would buy nothing, because the construction is IDENTICAL on both — one
+// emitSlashCommandList, one loop, one maxSlashCommandName — so the bound is pinned
+// wherever it is exercised, and a second copy of these rows would be a second copy of a
+// cap rather than a second proof of it. A row therefore never states the models half.
 //
 // Not a row here, deliberately: that an over-cap name is DROPPED, reordered,
 // lowercased or trimmed. #1600's verbatim rule is carried by the exact equality on the
@@ -5231,9 +5289,12 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 // TestParser_SlashCommandListIsSuppressed is the suppression table: the second gate
 // on the MODEL-LIST rung is INDEPENDENT of the models one and decides on the
 // `commands` array alone, and the CALL to emitSlashCommandList sits below
-// logControlResponse, below the ModelList emit and below BOTH returns in the
-// empty-models block — the narrowed ack's and the commands_only rung's (#1890) — so no
-// non-emitting rung can reach it.
+// logControlResponse, below the ModelList emit and below the ONE remaining return in
+// the empty-models block, the narrowed ack's. The commands_only rung's return no
+// longer sits above it in the sense that mattered here: since #1891 that rung has its
+// own call to the emitter (which is why one return, not two), so what this rung's call
+// is unreachable from is rungs 1 through 3 — undecodable, nak, and the success
+// carrying neither array.
 //
 // The first three rows are ONE behaviour rather than three: controlResponseLine's
 // Commands is a plain slice precisely so an absent key, a JSON null and a published []
@@ -5254,12 +5315,15 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 // and a hoisted block would have a populated array available to it.
 //
 // THE COMMANDS-ONLY RUNG IS THIS TABLE'S SIXTH ROW AND IT LIVES ELSEWHERE:
-// TestParser_InitializeControlResponseAckReportsTheCommandCount's `commands and no
-// models` row already carries three entries, asserts zero events, and asserts the
-// record's six attributes besides — strictly stronger than anything here, so it is not
-// restated. It was on the ack rung until #1890 gave it a keyword of its own; what this
-// table needs from it is unchanged either way, because the ZERO-EVENTS half is what is
-// borrowed and no keyword moves it.
+// TestParser_InitializeControlResponseCommandsOnlyRungEmits owns it, and since #1891
+// this table borrows NOTHING from it — that row EMITS now, so it can no longer supply
+// a zero-events proof to stand in for a sixth row here. What makes the three
+// empty-`commands` rows below complete rather than merely representative is
+// STRUCTURAL: the commands_only rung's own discriminant is `commands != 0`, so it
+// cannot reach the emitter with an empty array by construction, and the narrowed ack
+// rung never calls the emitter at all. Rung 5's call — this table's — is therefore the
+// only one that can reach the precondition with an empty slice, and these three rows
+// are the whole of that reading.
 func TestParser_SlashCommandListIsSuppressed(t *testing.T) {
 	t.Parallel()
 
@@ -5970,14 +6034,18 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 				commandEntryFixture(commandCutSentinel),
 			}}),
 		capturedInitializeLine(t, initCaptureArmBase),
-		// The non-emitting rungs, each paired: once as it stood, and once carrying a
-		// `commands` array whose name is that rung's sentinel. The second of each pair is
-		// what makes the sweep cover a rung that DECODES command names and emits nothing.
-		// The nak and undecodable pairs stay on ONE rung each — the count is taken below
-		// the success gate, so a decoded array does not move them. The last pair does not
-		// stay on one rung: since #1890 its first line is the narrowed ack and its second
-		// is the commands_only rung, so that pair covers two rungs and the sweep gained a
-		// rung without gaining a line.
+		// The rungs BELOW the model-list one, each paired: once as it stood, and once
+		// carrying a `commands` array whose name is that rung's sentinel. The second of
+		// each pair is what makes the sweep cover a rung that DECODES command names. The
+		// nak and undecodable pairs stay on ONE rung each and emit nothing — the count is
+		// taken below the success gate, so a decoded array does not move them. The last
+		// pair does not stay on one rung: since #1890 its first line is the narrowed ack
+		// and its second is the commands_only rung, so that pair covers two rungs and the
+		// sweep gained a rung without gaining a line. Since #1891 those two rungs also
+		// disagree about emitting — the ack line emits nothing, the commands_only line
+		// emits its inventory — which is why "non-emitting" no longer names this block.
+		// The sweep is indifferent to that: it searches RECORDS, and an emit produces
+		// none.
 		`{"type":"control_response","response":{"subtype":"error","error":"` + nakSentinel + `"}}`,
 		initializeLineFixture(t, "error", map[string]any{
 			"commands": []any{commandEntryFixture(nakCommandSentinel)}}),
@@ -5995,14 +6063,16 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		}
 	}
 
-	// FIVE: the three model-carrying lines each emit a ModelList, and two of them carry
+	// SIX: the three model-carrying lines each emit a ModelList, and two of them carry
 	// a non-empty commands array, so each adds a SlashCommandList behind its ModelList
-	// (#1877). The three command-carrying lines on the NON-emitting rungs add nothing,
-	// which is those rungs' whole point and this count's own half of the suppression
+	// (#1877). The sixth is the LAST line's, whose commands array rides the
+	// commands_only rung — which emits one SlashCommandList of its own since #1891, and
+	// no ModelList. Only the nak and undecodable command-carrying lines add nothing,
+	// which is those two rungs' whole point and this count's own half of the suppression
 	// pin. What the emits do NOT change is the sweep below.
-	if len(events) != 5 {
-		t.Fatalf("event count: got %d, want 5 (the three model-carrying lines, plus a command "+
-			"inventory behind two of them) — %#v", len(events), events)
+	if len(events) != 6 {
+		t.Fatalf("event count: got %d, want 6 (the three model-carrying lines, a command "+
+			"inventory behind two of them, and the commands-only line's own) — %#v", len(events), events)
 	}
 	// One record per line, and every one of them this arm's: the count is the half
 	// the per-record assertions cannot see.

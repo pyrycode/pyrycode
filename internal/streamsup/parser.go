@@ -677,19 +677,22 @@ const controlResponseSuccess = "success"
 // and the set below is FIVE rather than four.
 //
 // WHAT DECIDES THE NEW KEYWORD'S NAME is that it must name the payload's SHAPE rather
-// than what the daemon did about it, and the constraint is two-sided. A name for the
-// emit — `command_list`, parallel to `model_list` — is false today, where that rung
-// emits nothing. A name spelling "ack" goes false the moment the rung starts emitting
-// (#1887's family). `commands_only` survives both states, so the set is decided ONCE
-// here and the slice that adds the emit re-authors a trailing comment rather than
-// moving a keyword.
+// than what the daemon did about it, and the constraint was two-sided: a name for the
+// emit — `command_list`, parallel to `model_list` — was false in the state #1890
+// shipped, where that rung emitted nothing, and a name spelling "ack" would have gone
+// false the moment the rung started emitting. #1891 IS THAT MOMENT, and it arrived
+// without touching this set: `commands_only` names the shape, so it survived the state
+// change that each of the two rejected spellings would have failed on one side of. The
+// set was decided ONCE, and the slice that added the emit re-authored a trailing
+// comment rather than moving a keyword. That is why this block is the place the
+// no-new-keyword boundary is READABLE rather than merely observed.
 const (
 	controlResponseMsg = "streamsup: consuming solicited control_response"
 
 	controlResponseNAK          = "nak"           // subtype was not controlResponseSuccess
 	controlResponseAck          = "ack"           // success, neither array on the line
 	controlResponseUndecodable  = "undecodable"   // the nested shape did not decode
-	controlResponseCommandsOnly = "commands_only" // success, a commands inventory and no model list
+	controlResponseCommandsOnly = "commands_only" // success, a commands inventory and no model list; one turnevent.SlashCommandList emitted
 	controlResponseModelList    = "model_list"    // one turnevent.ModelList emitted
 )
 
@@ -1982,8 +1985,9 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 }
 
 // emitModelList decodes one top-level control_response line and emits AT MOST ONE
-// turnevent.ModelList and, on that same rung and under a SECOND independent gate, AT
-// MOST ONE turnevent.SlashCommandList. It never emits an Unrecognized, and it returns
+// turnevent.ModelList, from one rung, and AT MOST ONE turnevent.SlashCommandList, from
+// either of two rungs. The two are decided INDEPENDENTLY under one shared subtype gate.
+// It never emits an Unrecognized, and it returns
 // nothing:
 // consumeLine's case arm consumes the line by MATCHING, exactly as emitRateLimit's
 // does, so unlike the emitSystemSubtype family there is no "did you handle it?" to
@@ -1992,19 +1996,37 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 //
 // THE DISCRIMINANT is the substance of this mapping; the field copying is routine.
 // claude answers three different requests on this one line type and only one of the
-// replies carries a payload the daemon reads, so the gate is CONJUNCTIVE —
-// subtype == controlResponseSuccess AND a non-empty decoded models array — and
-// each half is load-bearing on its own:
+// replies carries a payload the daemon reads, so there is ONE SHARED PRECONDITION and
+// then TWO INDEPENDENT DECISIONS. The precondition is
+// subtype == controlResponseSuccess. Below it the two arrays are read as a LATTICE
+// rather than a conjunction: a non-empty decoded models array decides the ModelList, a
+// non-empty decoded commands array decides the SlashCommandList, and NEITHER GATES THE
+// OTHER. It was a conjunction until #1891, when the commands-only corner stopped being
+// a non-emitting one.
 //
+//   - The subtype half is what stops a payload being read out of a response that
+//     reported FAILURE, and it is unchanged by the split into two decisions: it is
+//     the precondition of BOTH emits. It is what makes the classification total as
+//     well: every subtype that is not success — including an absent one — lands on
+//     the nak rung rather than falling through to a shape test.
 //   - The models half alone already excludes all three sibling shapes on record: a
 //     set_permission_mode success (whose inner response is `{"mode":"default"}`), a
 //     set_permission_mode NAK (which carries an `error` string and no inner
 //     response), and an interrupt ack (which carries no inner response at all).
-//     None of them has the key.
-//   - The subtype half is what stops a payload being read out of a response that
-//     reported FAILURE. It is what makes the classification total as well: every
-//     subtype that is not success — including an absent one — lands on the nak rung
-//     rather than falling through to a shape test.
+//     None of them has the key. That is a claim about which KEYS those shapes carry,
+//     so it is scoped to the MODELS emit and does not transfer to the second one by
+//     inheritance.
+//   - The commands half needs the same exclusion ESTABLISHED, not borrowed, and it
+//     holds: none of those three shapes carries a `commands` key either — the
+//     set_permission_mode success has `mode` alone, the NAK has `error` and no inner
+//     response, the interrupt ack has no inner response at all. So a non-empty
+//     commands array excludes all three on record exactly as a non-empty models one
+//     does, per key rather than by analogy.
+//
+// SO THE EMIT PARTITION IS NOT THE RUNG PARTITION: rungs 1-3 emit nothing, rung 4
+// emits one SlashCommandList, and rung 5 emits one ModelList and, under its second
+// gate, at most one SlashCommandList beside it. Exactly ONE rung can emit a ModelList;
+// TWO can emit a SlashCommandList.
 //
 // IT RECOGNISES A SHAPE, NOT A CORRELATED REPLY, and the limit is written here so a
 // later reader does not infer more than the code claims. This says "the line
@@ -2057,7 +2079,9 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 //  3. models absent, null, empty, or decoded empty, and NO commands either →
 //     controlResponseAck, no event. This rung is the narrow one: it now means
 //     "neither array", so its record is all-zero exactly as the two above it are.
-//     Its suppression is NOT settled by the emitting rung's naive reading:
+//     Its suppression is NOT settled by the MODEL-LIST rung's naive reading. That
+//     rung is named rather than called "the emitting rung", which since #1891 is two
+//     of them and no longer picks one out.
 //     emitRateLimit's rung 3 is the precedent, and its
 //     argument carries over unchanged — a ModelList carrying zero entries names no
 //     model, so it cannot serve the purpose the variant exists for, and emitting it
@@ -2071,18 +2095,21 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 //     a WRONG one, and that asymmetry is the footing. It is stronger now that
 //     either outcome is observable than it was when neither was.
 //  4. success, the same empty-models reading as rung 3, and a NON-EMPTY commands
-//     array → controlResponseCommandsOnly, no event. It differs from rung 3 in the
-//     KEYWORD alone: the models half is read identically, so the false-negative
-//     asymmetry argued on rung 3 is INHERITED here by reference rather than
-//     re-argued, and there is one copy of it to correct. What the split buys is that
-//     the record names the outcome instead of leaving the `commands` count to carry
-//     the distinction alone (#1890), and this rung is where a slice adding the
-//     slash-command emit lands without moving a keyword.
+//     array → controlResponseCommandsOnly, and ONE SlashCommandList (#1891). It
+//     differs from rung 3 in the keyword AND in the emit; what it shares with rung 3
+//     is that the MODELS HALF IS READ IDENTICALLY, which is what still lets rung 3's
+//     false-negative asymmetry be referenced rather than re-argued and keeps one copy
+//     of it to correct. What the keyword split bought (#1890) is that the record names
+//     the outcome instead of leaving the `commands` count to carry the distinction
+//     alone; what this rung's emit rests on is emitSlashCommandList's own SUPPRESSION
+//     RATHER THAN AN EMPTY EMIT paragraph, which travelled there with the construction,
+//     declines to inherit rung 3's asymmetry and already covers this rung.
 //  5. success and a non-empty models array → one ModelList. The `commands` array is
 //     then read on this same rung under a SECOND, INDEPENDENT gate: non-empty → one
 //     SlashCommandList beside it, absent / null / empty → the ModelList alone
 //     (#1877). A non-empty `commands` with NO models does not reach here at all — it
-//     is the controlResponseCommandsOnly rung above.
+//     is the controlResponseCommandsOnly rung above, which emits the same list from
+//     its own discriminant. What this rung has that rung 4 does not is the ModelList.
 //
 // A per-entry field is never validated beyond its cap. An entry whose value is
 // empty, whose resolvedModel is missing, or which carries no keys at all still
@@ -2148,9 +2175,30 @@ func (p *Parser) emitModelList(line []byte) {
 			p.logControlResponse(controlResponseAck, 0, 0, 0, 0)
 			return
 		}
-		// Rung 4. Still no event — what changed in #1890 is the keyword, so the record
-		// names this outcome rather than folding it into the ack above.
+		// Rung 4, and it EMITS since #1891: this rung was reached because the `commands`
+		// array is non-empty, which is its own discriminant, so it reaches the emitter on
+		// that array alone rather than behind a models list. The suppression is
+		// emitSlashCommandList's PRECONDITION and is not repeated here — the same reason
+		// rung 5's call is unconditional — and it cannot fire from this call site anyway,
+		// the guard above having proved the slice non-empty. Its argument for suppressing
+		// rather than emitting an empty list is that emitter's SUPPRESSION RATHER THAN AN
+		// EMPTY EMIT paragraph, which covers this rung and is not restated here.
+		//
+		// The call sits BELOW logControlResponse and INSIDE this branch. Below the record
+		// for the reason emitSlashCommandList's IT LOGS NOTHING paragraph rests on: the
+		// six attributes are written before anything below can run. Inside the branch
+		// because falling through to the shared tail would run the models loop and put a
+		// ModelList on a line that carries no models.
+		//
+		// It WIDENS which inputs reach the constructing-and-retaining path, which is
+		// worth seeing at the site: before this, only a payload carrying BOTH arrays had
+		// its WORKSPACE-authored command names copied into turnevent.SlashCommand values
+		// and retained for the event's lifetime. The boundary itself does not move — one
+		// decode target (commandEntryLine), one construction site, one cap
+		// (maxSlashCommandName) — and the argument passed is the same expression rung 5
+		// passes, so there is no second decode, loop or cap to keep in step.
 		p.logControlResponse(controlResponseCommandsOnly, 0, 0, 0, commands)
+		p.emitSlashCommandList(cr.Response.Response.Commands)
 		return
 	}
 
@@ -2299,15 +2347,19 @@ func (p *Parser) emitModelList(line []byte) {
 	// THE SECOND GATE, and it is INDEPENDENT of the models one: this rung was reached
 	// because the models array is non-empty, and whether a SlashCommandList joins the
 	// ModelList is decided on the `commands` array alone. The gate itself is
-	// emitSlashCommandList's PRECONDITION rather than a guard written here, which is
-	// what lets a second call site inherit the suppression instead of repeating it, so
-	// this call is unconditional.
+	// emitSlashCommandList's PRECONDITION rather than a guard written here, so a caller
+	// inherits the suppression instead of repeating it and this call is unconditional.
+	// The second call site that argument was written for EXISTS: rung 4 above calls the
+	// same emitter with the same expression and likewise writes no guard of its own.
 	//
-	// THE ORDER IS DELIBERATE, because it is observable in the captured-line
-	// assertions: the models array is this rung's own DISCRIMINANT — the rung exists
-	// because of it — so the rung's defining emit goes first and the second,
-	// independently gated one follows. Gate order and statement order are then one
-	// order a reader checks once.
+	// THE ORDER IS DELIBERATE, and it is ONE RULE COVERING BOTH CALL SITES rather than
+	// this rung's own arrangement: each rung emits its OWN DISCRIMINANT's event first,
+	// then any independently gated one. Here the discriminant is the models array — the
+	// rung exists because of it — so the ModelList goes first and the command inventory
+	// follows; on rung 4 the discriminant is the `commands` array and the rule is
+	// satisfied trivially, there being one event. On both rungs logControlResponse runs
+	// before any emit. Gate order and statement order are then one order a reader checks
+	// once, at two sites.
 	//
 	// The CALL sits BELOW logControlResponse, which is what makes "the record is
 	// unchanged" structural rather than merely intended: six attributes, the same
@@ -2423,7 +2475,8 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 // closed keyword set at controlResponseMsg; `models` is the emitted entry count,
 // `dropped` how many maxModelListEntries cut, and `levels_dropped` how many effort
 // levels maxModelEffortLevelCount cut in TOTAL across the RETAINED entries — all
-// three 0 on every non-emitting rung. Levels belonging to entries `dropped`
+// three 0 on every rung but the model-list one, which is the only rung that reads a
+// models array at all. Levels belonging to entries `dropped`
 // removed are not counted again there. No value, no resolvedModel, no displayName, no
 // level string, no request_id, no error string,
 // no unmarshal err, no line bytes. The three strings are precisely what #833's
@@ -2490,12 +2543,12 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 // that there is no ENTRY-COUNT cap on this array. So the decoded count IS the emitted
 // count, this attribute stays an unambiguous decode count with nothing to
 // disambiguate, and NO SEVENTH ATTRIBUTE IS ADDED. Nothing became unobservable
-// either: on the `model_list` rung a non-empty `commands` still always means emitted,
-// and the non-emitting half no longer rests on this count at all — #1890 took the
-// keyword decision this sentence used to defer, so a commands-only success logs
+// either: a non-empty `commands` now always means emitted on BOTH rungs that read the
+// array — the model-list one and the commands-only one (#1891) — and the rungs that
+// emit nothing no longer rest on this count at all. #1890 took the keyword decision
+// this sentence used to defer, so a commands-only success logs
 // controlResponseCommandsOnly and the narrowed `ack` means "neither array". The
-// separation is now the KEYWORD's, and this count qualifies it rather than carrying
-// it.
+// separation is the KEYWORD's, and this count qualifies it rather than carrying it.
 // Admissible on the other three counts' footing exactly — a DAEMON-computed
 // integer derived from a slice length, carrying none of claude's bytes. No name, no
 // argumentHint, no description and no alias reaches this record on any rung, and
@@ -2512,8 +2565,8 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 // four of its ints are 0 now and a swap is invisible there, so the pin moved with the
 // payload rather than being lost.
 //
-// The attribute set is FIXED at six on every rung, which is why the non-emitting ones
-// pass 0 rather than omitting the key.
+// The attribute set is FIXED at six on every rung, which is why a rung with no models
+// array to describe passes 0 rather than omitting the key.
 func (p *Parser) logControlResponse(reason string, models, dropped, levelsDropped, commands int) {
 	p.log.Debug(controlResponseMsg,
 		"type", "control_response", "reason", reason, "models", models, "dropped", dropped,
