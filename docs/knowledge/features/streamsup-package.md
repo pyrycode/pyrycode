@@ -949,6 +949,40 @@ hardcoded literal) was true and unaffected, but the "goes green" clause overstat
 uniqueness. A claim about what a mutant would do is an empirical claim; write it after running the
 mutant, not instead of running it.
 
+**The commands-only rung's emit lands (#1891).** Rung 4 now calls the same
+`emitSlashCommandList` rung 5 does, with the identical expression
+(`cr.Response.Response.Commands`), below its own `logControlResponse` and inside the
+empty-models branch — no second decode, loop or cap, and no keyword added or moved.
+`THE DISCRIMINANT` is no longer a conjunction (`subtype == success AND models
+non-empty`): `controlResponseSuccess` is now the shared precondition of both emits, and
+each array is decided independently below it. One rung (5) can emit a `ModelList`; two
+rungs (4 and 5) can emit a `SlashCommandList`.
+
+*Lesson: an enumerated sweep vocabulary is a floor, not a ceiling — a class-word claim
+can rot through a synonym the list never named.* #1890 taught this family to sweep for
+count words (`non-emitting`, `emits nothing`, `zero events`...); #1891's own sweep, run
+against that list, still missed a definite singular — `"the emitting rung's naive
+reading"` on rung 3 — because a singular article names no count at all and so matches
+none of those words. Code review then found a third shape neither list covers:
+`controlResponseSuccess`'s doc called itself "half of emitModelList's conjunctive gate,"
+true only while there was one array to conjoin with, and falsified by the very
+re-authoring the ticket required two screens away. "Conjunctive" is a structural word
+describing the *shape* of the gate, not a count or an article, and no finite grep
+vocabulary will anticipate every synonym a doc uses for "there used to be one path and
+now there are two." The durable defense isn't a longer word list — it's reading every
+doc block that touches the changed function whole, the way #1877's lesson above
+(`eventKind`'s "anything else the production producer emits") already established for
+tree-wide invariants.
+
+*Lesson: when a ticket's own doc premise, not just a row's `want` field, is what gets
+overturned, the test needs surgery, not an added row.* The liveness proof lived in a
+table whose single `len(events) != 0` assertion covered every row — adding a
+`wantEvents` row wasn't available piecemeal, because the shared assertion had to be
+replaced everywhere at once. The tell was in the test's own doc, not its rows: its
+stated premise ("a commands-carrying payload with no models emits nothing") was the
+exact claim the ticket falsified, which meant the table's shared assertion was built on
+that premise and had to go with it.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
