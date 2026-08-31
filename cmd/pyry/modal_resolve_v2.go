@@ -461,6 +461,11 @@ func truncateForLog(s string, n int) string {
 //   - retire (control-server handler goroutine, post-Await): the guaranteed
 //     cleanup + client-dismissal backstop for every terminal path (AC-3).
 //
+// That correlation exists for exactly as long as a request is parked on a person,
+// which makes it the daemon's direct answer to "is this conversation waiting on a
+// human?" — the question the delivery hold otherwise has to infer from elapsed
+// silence. ApprovalParked reads it (any goroutine, #1919).
+//
 // SECURITY: the bridge NEVER logs req.Input, the tool_name, the modal
 // prompt/title, or a deny message beyond the fixed reasonRemoteDeny constant.
 // Only content-free discriminants (event, modal_id, conn_id, env_id, class) and
@@ -473,6 +478,33 @@ type streamApprovalBridge struct {
 	activeConv func() string          // follow-active convID scoping (#1065)
 	ctx        context.Context        // daemon ctx captured at construction, for broadcasts
 	logger     *slog.Logger
+
+	// toolCallInFlight answers turnBusyTracker's conversation-keyed membership
+	// question (ToolCallInFlight, #1917) — "is this tool call in flight on this
+	// conversation?" — which is the half of ApprovalParked the correlation below
+	// cannot supply. It is SET AFTER CONSTRUCTION at the one production site
+	// (relay.go), not taken as a seventh constructor parameter: the constructor has
+	// 14 call sites and the adjacent modalResolver.activeConv / notifyBlocked pair
+	// is the in-tree precedent for keeping an optional dependency's blast radius at
+	// one site.
+	//
+	// nil ⇒ ApprovalParked reports negative for EVERY conversation, without calling
+	// out. The bridge and the tracker have different non-nil discriminants — the
+	// bridge is built under a non-nil approvals registry, which the composition root
+	// mints unconditionally, while the tracker exists only alongside streamSink — so
+	// in the daemon's PTY mode the bridge is live and holds no tracker, and
+	// answering negative there is what leaves that mode semantically unchanged.
+	//
+	// That short-circuit lives HERE, deliberately, and is not a nil-receiver guard
+	// on ToolCallInFlight: #1917 refused that guard on the record because it "would
+	// be the first step toward a consumer silently reading false in PTY mode instead
+	// of failing loudly". An absent DEPENDENCY answering negative and an absent
+	// TRACKER failing loudly are different questions with different answers.
+	//
+	// Read without mu, like perm/modal/bcast/activeConv/ctx: written once at wiring
+	// time before the manager's Run goroutine starts. mu guards byModal and nextID,
+	// and nothing else. #1919.
+	toolCallInFlight func(conversationID, toolCallID string) bool
 
 	// mu is a leaf lock guarding byModal + nextID ONLY: held around O(1) map ops
 	// and the counter bump, never across modal.Record, perm.Lookup/perm.Resolve,
@@ -566,6 +598,80 @@ func (b *streamApprovalBridge) ResolveStream(modalID string, allow bool, denyRea
 		b.perm.Resolve(toolUseID, permbridge.Deny(denyReason))
 	}
 	return true
+}
+
+// ApprovalParked reports whether conversationID currently has an approval parked
+// awaiting a human decision (#1919). It is a CONJUNCTION across two membership
+// sets — the correlation is parked here AND the call it names is in flight on the
+// asked-about conversation — so either side going empty makes the answer negative,
+// which is the fail-closed direction for a delivery hold.
+//
+// RESOLVED ON READ, never stamped when the approval parks. Stamping at Surface
+// time would reintroduce a race: the ToolStart travels child → parser → sink →
+// drain in-process while the approve travels claude → pyry mcp-approve → control
+// socket, and nothing orders the two. Answering on read removes it outright, and
+// lets retire — the sole correlation deleter, running on every terminal path —
+// carry "reports negative again" with no counter and no fifth path to pin.
+//
+// The conversation key is deliberately NOT activeConv(): that cursor is set at
+// enqueue by the session router, so a message enqueued for B while A sits parked
+// moves it to B and would misattribute every approval A parks afterwards. Good
+// enough for scoping a modal to a client's view; wrong for a report a delivery
+// hold trusts.
+//
+// SNAPSHOT UNDER mu, RELEASE, THEN ASK. mu is a leaf lock and ToolCallInFlight
+// takes the tracker's own; asking under mu would establish this file's first
+// nesting order, and one no other call site establishes — the shape that becomes a
+// deadlock the day an edge appears the other way. The snapshot allocation is the
+// price of keeping the lock a leaf, and byModal is bounded by the approvals
+// concurrently parked on a human, each of which holds a control-socket connection
+// blocked in Await.
+//
+// A retire or a Surface landing between the snapshot and the asks makes the answer
+// one call stale, and that is CORRECT rather than tolerated: the truth is changing
+// under any locking discipline, and a caller that read it under a global lock would
+// still act on it after releasing. The report is a level, not an edge — its
+// consumer re-reads it, so there is no transition to miss.
+//
+// MEMBERSHIP, mirroring Busy and ToolCallInFlight: THE SIGNATURE IS THE
+// EXISTENCE-ORACLE ENFORCEMENT, not a runtime branch. Unknown, never-seen and
+// empty values of either id reach one false through the same path — there is no
+// id-specific branch here, because an empty conversation key is never inserted into
+// the tracker (observe refuses an unresolvable session) and an empty tool-call id
+// is never inserted either (setBusy refuses it), so both empties are answered by
+// the identical lookups inside ToolCallInFlight. A later widening to (bool, error),
+// or any variant handing back a conversation id, a modal id or a count, would
+// reintroduce the oracle silently.
+//
+// It logs NOTHING. Every diagnostic worth emitting from here would carry either a
+// conversation id — withheld as a routing key treated as sensitive, per
+// clearForSession — or a tool_use id, so the correct count is zero.
+//
+// Callable from any goroutine: ResolveStream already reads byModal off the relay
+// Run goroutine while Surface and retire mutate it from control-server handlers.
+func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
+	if b.toolCallInFlight == nil {
+		return false // no tracker wired (PTY mode) — see the field's doc block
+	}
+
+	b.mu.Lock()
+	parked := make([]string, 0, len(b.byModal))
+	for _, toolUseID := range b.byModal {
+		parked = append(parked, toolUseID)
+	}
+	b.mu.Unlock()
+
+	// Asking about EVERY parked id, including ones belonging to other
+	// conversations, leaks nothing about them: the tracker's retention is nested
+	// per conversation, so another conversation's id is simply absent from this
+	// conversation's inner set and answers false. That confinement is #1917's
+	// property and the reason this iterate-and-ask shape is safe.
+	for _, toolUseID := range parked {
+		if b.toolCallInFlight(conversationID, toolUseID) {
+			return true
+		}
+	}
+	return false
 }
 
 // retire is the guaranteed cleanup + dismissal backstop the control server defers
