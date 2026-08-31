@@ -807,6 +807,48 @@ forbidding exactly what their ticket requires; the fix, when someone gets there,
 completeness claim to *today* — nothing reads the other three keys yet, and widening is #1720's
 decision to take together with a cap, not a violation of this one.
 
+**Producing `turnevent.SlashCommandList` (#1877).** `emitModelList`'s rung 4 gained a second,
+independent gate on `commands`, below the existing `ModelList` emit: non-empty → each entry's `Name`
+is cut at a new `maxSlashCommandName` (256 bytes, the family's usual multiple over the measured
+capture) at construction and the entries emit as one `turnevent.SlashCommandList` beside the
+`ModelList`; absent, null or empty emits nothing. No entry-count cap and no `DroppedCommands` —
+that's #1826's, one array over the #1811→#1812 precedent — so `logControlResponse` gains no seventh
+attribute: with no count cap the decoded count the sixth attribute already reports still equals the
+emitted count. Producing is not publishing: `turnbridge.MapEvent` gains no arm and
+`interactiveTurnEmitterV2.Handle` gains no case, so the value is logged by kind and dropped — that's
+still #1720's.
+
+*Lesson: a neighbouring rung's suppression argument can rest on a precondition this rung doesn't
+have.* Rung 3's false-negative asymmetry (why an empty `models` array suppresses rather than emits an
+empty `ModelList`) is justified by both outcomes — empty and missing — being observable to a client.
+Nothing publishes `SlashCommandList` yet, so that footing doesn't transfer, and taking the argument
+anyway would have left the empty-`commands` suppression resting on a premise that's false today. What
+actually decided it: `controlResponseLine.Commands` collapses absent, null and a published `[]` onto
+one nil slice before the gate ever runs, so the producer can't make the positive statement ("claude
+offered nothing") an empty emit would assert. Before reusing a sibling rung's reasoning for a new
+gate, check whether its premise still holds at the new call site — the shape of the argument
+transferring is not the same as the argument being true.
+
+*Lesson: a falsified `//` claim phrased about a category is the one grep won't find.* `eventKind`'s
+`ModelAnnounced` arm carried a clause reading "nor for anything else the production producer emits" —
+worded about *any* future producer rather than about `SlashCommandList` by name, sitting in the arm
+for a different variant entirely, one nothing about slash commands would lead a reader to open.
+Grepping the tree for `SlashCommandList` finds neither that clause nor the sentence justifying it.
+When a change makes something true tree-wide (here: "streamsup now produces a second event kind"),
+read each named doc block whole rather than grepping for the new type's name.
+
+*Lesson: a sink-reachability enumeration carried over from the spec still needs checking against the
+call graph, not just against the spec text.* The architect's own security review named the exact
+paragraph to verify, and the developer's version still credited `turnbridge.MapEvent`'s `default` arm
+with reach it doesn't have. Code review found `MapEvent` has exactly two production call sites,
+`emitMapped` (reached only from `Handle`'s typed arms, none of which is `SlashCommandList`) and
+`resolveBoundModelList` (which hands it a `ModelList` explicitly) — so `SlashCommandList` never
+reaches `MapEvent` at all; it stops at `Handle`'s own default. The same tree already said as much
+three files over, in a do-not-correct sentence this ticket preserved verbatim (`eventKind`'s
+`SlashCommandList` arm: "`emitMapped`'s unmapped drop, which nothing routes it to"). The
+spec-inherited enumeration and the surviving sentence disagreed, and only reading both caught it — an
+enumeration transcribed from a spec is not verified by transcription.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart

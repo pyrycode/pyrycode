@@ -87,14 +87,21 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   (`interactive_turn_v2.go`), `interactiveTurnEmitterV2.Handle`, or
   `turnbridge.MapEvent`, none of which are exhaustiveness-checked by the build.
   `SlashCommandList` (#1854) landed with all four walked by hand: `Handle`'s
-  `default` arm is a live drop site for it (no `case` claims the variant yet),
+  `default` arm is a live drop site for it (no `case` claims the variant),
   `eventKind` got a name-only arm, the totality row asserts the `turnMarkFor`
-  whitelist's existing answer, and `MapEvent`'s `default` correctly stays armless
-  since nothing produces the variant yet. Deriving which drop sites are reachable
-  for a new, unclaimed variant from its **turn mark** plus whether a `Handle` case
-  claims it is the reliable method — copying a neighbouring arm's site-list prose
-  is not: the `ModelList`/`ModelAnnounced` arms' own lists still name
-  `acp_turn_stream.go`, deleted with the terminal-driving path in #1348.
+  whitelist's existing answer, and `MapEvent`'s `default` stays armless. At
+  #1854 time all four were *reachable-but-unreached*, since nothing produced the
+  variant; `internal/streamsup` became the producer in #1877, and from that
+  ticket on `Handle`'s default and `MapEvent`'s default are both genuinely
+  reached in production — armless is no longer the same claim as unreached, and
+  the two doc paragraphs that conflated them (`eventKind`'s `ModelAnnounced` arm,
+  in a category clause naming "anything else the production producer emits"
+  rather than `SlashCommandList` by name) were the hardest of #1877's eight
+  corrections to find by grep. Deriving which drop sites are reachable for a new
+  variant from its **turn mark** plus whether a `Handle` case claims it is the
+  reliable method — copying a neighbouring arm's site-list prose is not: the
+  `ModelList`/`ModelAnnounced` arms' own lists still name `acp_turn_stream.go`,
+  deleted with the terminal-driving path in #1348.
 
 ## The outbound `Event` variants (`event.go`, `permission.go`)
 
@@ -113,16 +120,26 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
 | `Unrecognized` | `Site UnrecognizedSite`, `Kind string`, `Raw string`, `Truncated bool` | **internal-only** diagnostic, and the one variant that is not a claude sub-state: the stream parser met output it has no mapping for. `Site` is a closed enum (`line_type` / `assistant_block` / `user_block` / `undecodable`); `Kind` is the offending type, empty for `undecodable`; `Raw` is the offending JSON already truncated by the producer, a `string` and not `json.RawMessage` because a truncated blob is no longer valid JSON |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
-| `SlashCommandList` (#1854) | `Commands []SlashCommand` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Declared ahead of its producer; see below |
+| `SlashCommandList` (#1854, produced #1877) | `Commands []SlashCommand` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877; not yet published — see below |
 | `SlashCommand` (#1854, element type — not an `Event`, no marker) | `Name, TruncatedFields []string` | one inventory entry, mirroring `protocol.SlashCommand`'s field order |
 
-- **`SlashCommandList` / `SlashCommand` (#1854) are declared ahead of their
-  producer, and nothing publishes them yet.** `internal/streamsup` (unbuilt) owns
-  the decode, the byte caps and the entry-count bound; `turnbridge.MapEvent`'s
-  `default` drops the variant and `interactiveTurnEmitterV2.Handle` has no case
-  for it. `turnMarkFor` answers it correctly by construction (`turnMarkNone`,
-  same as `ModelList`): the inventory is reported once per `initialize` exchange,
-  which opens and closes no turn and is not even per-turn.
+- **`SlashCommandList` / `SlashCommand` (#1854) were declared ahead of their
+  producer; #1877 shipped the producer, and nothing publishes them yet.**
+  `internal/streamsup`'s `emitModelList` decodes `commands`, caps each entry's
+  `Name` at `maxSlashCommandName` (256 bytes) at construction, and emits one
+  `SlashCommandList` beside `ModelList` on the model-list rung — an absent, null
+  or empty `commands` array emits nothing (the decode collapses all three onto
+  one nil slice, so the producer can't make the positive statement an empty
+  emit would be making; see [streamsup-package.md](streamsup-package.md)).
+  `turnbridge.MapEvent`'s `default` drops the variant and
+  `interactiveTurnEmitterV2.Handle` has no case for it — both now genuinely
+  reached rather than merely armless, since a production path emits the
+  variant. No entry-count cap and no `DroppedCommands` yet; that bound is
+  #1826's, exactly as `ModelList`'s own count bound (`maxModelListEntries`)
+  arrived one ticket after its first emit (#1811 → #1812). `turnMarkFor`
+  answers it correctly by construction (`turnMarkNone`, same as `ModelList`):
+  the inventory is reported once per `initialize` exchange, which opens and
+  closes no turn and is not even per-turn.
 - **`SlashCommand`'s two fields are the first and the last of
   `protocol.SlashCommand`'s five**, in that type's own declaration order —
   `ArgumentHint`, `Description` and `Aliases` arrive with their own slices,
