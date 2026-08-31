@@ -89,7 +89,7 @@ Any other error (e.g. dial failure on a stopped daemon) flows through `fmt.Error
 
 ## References
 
-- [`features/control-plane.md` § `runSessionsRm` handler (1.1d-B2)](../features/control-plane.md#runsessionsrm-handler-11d-b2) — implementation walkthrough.
+- [`features/control-plane.md` § `runSessionsRm` handler (1.1d-B2)](../features/control-plane-sessions-cli-router-1-1a-b2.md#runsessionsrm-handler-11d-b2) — implementation walkthrough.
 - [ADR 010](010-sessions-cli-sub-router.md) — sub-router shape, the host this verb plugs into.
 - `internal/sessions/pool.go` — `Pool.ResolveID` reference implementation; the resolution-order contract this CLI mirrors.
 - `docs/specs/architecture/99-cli-sessions-rm.md` — full architect's spec.

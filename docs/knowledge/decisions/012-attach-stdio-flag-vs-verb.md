@@ -75,7 +75,7 @@ The flag is the explicit signal. `--stdio` is what an SDK passes; humans don't p
 
 ## References
 
-- [`features/control-plane.md` § Attach: stdio mode (1.3a)](../features/control-plane.md#attach-stdio-mode-13a) — implementation walkthrough.
+- [`features/control-plane.md` § Attach: stdio mode (1.3a)](../features/control-plane-attach-stdio-mode-1-3a.md#attach-stdio-mode-13a) — implementation walkthrough.
 - [ADR 010](010-sessions-cli-sub-router.md) — `flag.NewFlagSet` precedent for sub-flag parsing.
 - `docs/specs/architecture/154-attach-stdio-mode.md` — full architect's spec.
 - Issue [#154](https://github.com/pyrycode/pyrycode/issues/154); follow-on coverage: #161 (E2E harness), #162 (no-PTY-in-fd-table assertion).

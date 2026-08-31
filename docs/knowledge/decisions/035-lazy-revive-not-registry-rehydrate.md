@@ -46,7 +46,7 @@ The revived session lands at `stateEvicted` with an open `activeCh` and closed `
 ## Related
 
 - [codebase/1487.md](../codebase/1487.md) — implementation summary, lessons learned.
-- [features/sessions-package.md § Reviving a dropped session](../features/sessions-package.md#reviving-a-dropped-session-poolrevive-1487) — `Pool.Revive` / `materialise` mechanism.
+- [features/sessions-package.md § Reviving a dropped session](../features/sessions-package-key-types-reviving-a-dropped-session-pool-revive.md#reviving-a-dropped-session-poolrevive-1487) — `Pool.Revive` / `materialise` mechanism.
 - [features/conversation-session-binding.md § Restart scope](../features/conversation-session-binding.md#edge-cases--limitations) — the deferral this ADR closes, and the residues.
 - [ADR 030](030-plain-bool-failsafe-persisted-flag.md) — the persisted-`YOLO` fail-safe rationale this ADR extends to the revive path.
 - Ticket: [#1487](https://github.com/pyrycode/pyrycode/issues/1487).

@@ -61,7 +61,7 @@ Mirrors `runInstallService`'s precedent (it already runs its own `flag.NewFlagSe
 
 ### Neutral
 
-- **`runSessions` cannot return a typed exit code.** `os.Exit(2)` for usage errors (the convention `runAttach` uses for "too many positionals" — see [control-plane.md § Attach: CLI Surface](../features/control-plane.md#attach-cli-surface-11e-d)) is not used here; `errSessionsUsage` returns an error, which `main` prints and exits 1. The split was deliberate for `runAttach` (positionals are typed wrong = user error = exit 2); for the sub-verb router the missing/unknown-verb cases are arguably also user error, but exit 1 keeps `runSessions` returning a single error type and matches the rest of the file's error-propagation shape. Re-examine if shell scripts need to discriminate the cases.
+- **`runSessions` cannot return a typed exit code.** `os.Exit(2)` for usage errors (the convention `runAttach` uses for "too many positionals" — see [control-plane.md § Attach: CLI Surface](../features/control-plane-attach-cli-surface-1-1e-d.md#attach-cli-surface-11e-d)) is not used here; `errSessionsUsage` returns an error, which `main` prints and exits 1. The split was deliberate for `runAttach` (positionals are typed wrong = user error = exit 2); for the sub-verb router the missing/unknown-verb cases are arguably also user error, but exit 1 keeps `runSessions` returning a single error type and matches the rest of the file's error-propagation shape. Re-examine if shell scripts need to discriminate the cases.
 
 ## Alternatives considered
 
@@ -71,6 +71,6 @@ Mirrors `runInstallService`'s precedent (it already runs its own `flag.NewFlagSe
 
 ## References
 
-- [`features/control-plane.md` § Sessions: CLI Router (1.1a-B2)](../features/control-plane.md#sessions-cli-router-11a-b2) — implementation walkthrough.
+- [`features/control-plane.md` § Sessions: CLI Router (1.1a-B2)](../features/control-plane-sessions-cli-router-1-1a-b2.md#sessions-cli-router-11a-b2) — implementation walkthrough.
 - [ADR 003](003-session-addressable-runtime.md) — `internal/sessions` Pool wraps the supervisor (the seam this CLI consumes).
 - `docs/specs/architecture/76-cli-sessions-new.md` — full architect's spec.

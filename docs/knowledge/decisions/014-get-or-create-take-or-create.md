@@ -118,8 +118,8 @@ Two private helpers shipped alongside `GetOrCreate`:
 
 ## References
 
-- [`features/sessions-package.md` § Pool.GetOrCreate (1.3b)](../features/sessions-package.md#poolgetorcreate-13b) — implementation walkthrough.
-- [`features/control-plane.md` § Attach: --create-if-missing (1.3b)](../features/control-plane.md#attach---create-if-missing-13b) — handler branch + wire field.
+- [`features/sessions-package.md` § Pool.GetOrCreate (1.3b)](../features/sessions-package-key-types-pool-getorcreate-1-3b.md#poolgetorcreate-13b) — implementation walkthrough.
+- [`features/control-plane.md` § Attach: --create-if-missing (1.3b)](../features/control-plane-attach-create-if-missing-1-3b.md#attach---create-if-missing-13b) — handler branch + wire field.
 - [ADR 012](012-attach-stdio-flag-vs-verb.md) — sibling Phase 1.3a flag (`--stdio`).
 - [ADR 013](013-evict-activate-persist-ordering.md) — surfaced by `TestPool_GetOrCreate_PersistsPostDetach` from this ticket.
 - [`docs/specs/architecture/155-attach-create-if-missing.md`](../../specs/architecture/155-attach-create-if-missing.md) — full architect's spec.

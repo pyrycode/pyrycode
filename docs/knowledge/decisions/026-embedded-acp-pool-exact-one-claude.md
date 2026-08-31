@@ -185,7 +185,7 @@ queue).
 - Spec: [`docs/specs/architecture/761-acp-session-new-embedded-pool.md`](../../specs/architecture/761-acp-session-new-embedded-pool.md)
 - Per-ticket record: [`codebase/761.md`](../codebase/761.md)
 - Code: `internal/sessions/pool.go` (`Config.BootstrapEvicted`, `Pool.readyCh`/`readyOnce`, `Pool.Ready`, the `New` override, the `Run` close), `cmd/pyry/acp.go` (`runACP`, `serveACPWithPool`, `newSessionHandler`)
-- Feature docs: [`features/sessions-package.md`](../features/sessions-package.md#configbootstrapevicted--poolready-761), [`features/acp-package.md`](../features/acp-package.md#sessionnew-and-the-embedded-pool-761)
+- Feature docs: [`features/sessions-package.md`](../features/sessions-package.md#configbootstrapevicted--poolready-761), [`features/acp-package.md`](../features/acp-package-session-new-and-the-embedded-pool.md#sessionnew-and-the-embedded-pool-761)
 - Related ADRs: [016](016-bootstrap-ignores-persisted-lifecycle-state.md) (bootstrap lifecycle state), [023](023-activate-waits-pty-readiness.md) (readiness-gate pattern)
 - Epic: [#600](https://github.com/pyrycode/pyrycode/issues/600) `pyry acp`
 </content>
