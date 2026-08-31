@@ -849,6 +849,141 @@ type ModelList struct {
 	DroppedModels int
 }
 
+// SlashCommand is one entry of a SlashCommandList: the list's element type, NOT
+// an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
+// for their reason.
+//
+// Its two fields are the FIRST TWO of protocol.SlashCommand's five (#1727), in
+// that type's own declaration order: the command's name, and the report naming
+// which of this entry's fields the producer cut. The three between them —
+// ArgumentHint, Description and Aliases — are deliberately absent and arrive
+// with their own slices, exactly as ModelOption grew a field at a time across
+// #1819 / #1827 / #1828.
+//
+// FIXING THE ORDER BEFORE THE SECOND FIELD EXISTS is the whole point of choosing
+// it now. Each later field lands in its mirrored position rather than being
+// appended, so the eventual mapping onto the wire type stays a field-for-field
+// copy rather than a reordering a reader has to check.
+type SlashCommand struct {
+	// Name is claude's command name, VERBATIM, per ModelAnnounced.Model's rule:
+	// no lowercasing, no canonicalisation, no prefix stripping, and no leading
+	// "/" added or removed.
+	//
+	// IT IS NOT AN IDENTIFIER. One name in the committed capture is
+	// __remote-workflow, so no charset assumption belongs in this struct or in a
+	// consumer — protocol.SlashCommand's measured fact, carried to the daemon side
+	// because this is the type a daemon-side consumer reads.
+	//
+	// Bounded by the producer AT CONSTRUCTION and never sanitized: see
+	// SlashCommandList's SECURITY paragraph, which owns that statement for every
+	// string on this type rather than having it diluted into a restatement here.
+	Name string
+	// TruncatedFields names THIS entry's fields the producer cut to fit their
+	// caps, in declaration order, using the DAEMON's snake_case names. They agree
+	// with protocol.SlashCommand.TruncatedFields' wire names, so a later mapping
+	// is a copy rather than a translation. nil when nothing was cut, never an
+	// empty non-nil slice; BackgroundTask.TruncatedFields is the convention's
+	// single source.
+	//
+	// TODAY THE ONLY NAME IT CAN CARRY IS "name", AND THE ENUMERATION GROWS WITH
+	// THE FIELD SET. Each field-adding slice extends it, exactly as
+	// ModelOption.TruncatedFields grew to include "effort_levels" in #1827.
+	//
+	// A NAME FOR A FIELD THIS TYPE DOES NOT DECLARE MUST NEVER APPEAR. A producer
+	// that cut a value this type does not carry has nothing to report here,
+	// because the value is not on the type. That is the one way this partial field
+	// set could produce a lie: a report telling a consumer that text it holds is
+	// incomplete, when the type never held that text at all.
+	TruncatedFields []string
+}
+
+// SlashCommandList is claude's inventory of slash commands for this session in
+// this working directory: the commands array of the initialize reply (#1854),
+// the same exchange ModelList carries the models array of, which the daemon
+// solicits once per child with streamsup's WriteInitialize and claude answers on
+// a control_response line.
+//
+// It exists because it is the only thing that answers WHAT CAN BE INVOKED, and
+// it answers it per WORKING DIRECTORY rather than globally: a command defined in
+// a repository exists for that repository's sessions and nowhere else.
+//
+// DECLARED AHEAD OF ITS PRODUCER, which is this family's own sequencing — #1616
+// ahead of #1638, #1704 ahead of #1848, #1727 ahead of #1720. Nothing in the tree
+// constructs this type; internal/streamsup (#1719 / #1720) is what will, and the
+// decode, the byte caps, the entry-count bound and the emit are all its. The type
+// declaration is where the field set and the security posture get decided, and
+// deciding those in the same slice that also writes the decode is what makes such
+// a slice oversized.
+//
+// IT IS PUBLISHED BY NO PATH TODAY. turnbridge.MapEvent has no arm for it, so its
+// default drops it, and cmd/pyry's interactiveTurnEmitterV2.Handle has no case,
+// so an event of this variant is logged by kind and discarded. ModelList is NOT
+// the example of a variant the default drops any more — it grew its own MapEvent
+// arm in #1848 and its own Handle case in #1849 — so that precedent has to be
+// read off MapEvent itself rather than inherited from this family's earlier
+// tickets.
+//
+// It opens and closes no turn, exactly as the background-task variants do not,
+// and it is not even per-turn: one initialize exchange per child produces one of
+// these. cmd/pyry's turnMarkFor answers it correctly by construction — its opener
+// set is a whitelist and its default is turnMarkNone.
+//
+// THE COUNT IS WORKSPACE- AND VERSION-DEPENDENT and no consumer may assume one;
+// protocol.SlashCommandListPayload carries the measurement rather than this doc
+// re-deriving it. That variation is why the list is per session and per working
+// directory, and why a client must not cache one across working directories.
+//
+// NO DroppedCommands FIELD, and the asymmetry with the wire type is deliberate.
+// protocol.SlashCommandListPayload declared its count ahead of any counter
+// because a WIRE with nowhere to put a drop discards it silently, and adding a
+// key later is a compatibility event. A daemon-internal struct is not a
+// compatibility surface: adding a field to it is a local change. So the count
+// arrives with the ENTRY-COUNT BOUND that produces it, which is how
+// ModelList.DroppedModels arrived with streamsup's maxModelListEntries and
+// BackgroundTaskRoster.DroppedTasks with maxTaskRosterEntries. A reader who knows
+// the wire type would otherwise read the absence as an oversight.
+//
+// claude's session_id is deliberately not a field, for BackgroundTaskStarted's
+// reason: claude's session identity is NOT the daemon's conversation identity,
+// and like every variant here this one carries no conversation identity at all —
+// the bridge injects that.
+//
+// SECURITY: every string this type carries is WORKSPACE-AUTHORED and crossed the
+// subprocess trust boundary. That STRENGTHENS ModelOption's claude-authored
+// warning rather than restating it: a command defined in a repository was written
+// by whoever wrote that repository, which is a LOWER-trust origin than claude's
+// own strings. They are safe to RENDER as inert text and must never be fed to an
+// HTML sink, an attribute, or a URL; the daemon bounds them but does not sanitize
+// them — no control-character or terminal-escape stripping happens on this path —
+// so they stay untrusted text all the way out, and the render boundary owing the
+// sanitization is the CLIENT's.
+//
+// THE BOUND IS THE PRODUCER'S and is not decided here, so this type declares no
+// maximum and no charset check. A second cap would be a second place the limit is
+// decided and the two could disagree silently — protocol.SlashCommand's own
+// stated reason, holding identically one layer in.
+//
+// IT IS A REPORT, NEVER A CONTROL INPUT, with protocol.SlashCommand's amendment:
+// a client is meant to send a Name BACK, as the text of an ordinary message,
+// because sending the slash command IS the feature. Publishing a name does not
+// make it trusted. Nothing in the daemon may treat a value from this type as a
+// command vocabulary, and no field here may reach a child as an argv element.
+type SlashCommandList struct {
+	// Commands is the inventory in claude's own order, unchanged: no ranking is
+	// invented, its ordering semantics being unobserved. nil for a zero-length
+	// list, never an empty non-nil slice; BackgroundTask.TruncatedFields is the
+	// convention's single source.
+	//
+	// WHETHER AN EMPTY LIST IS EMITTED AT ALL IS THE PRODUCER'S GATE and is
+	// deliberately NOT decided here. Contrast ModelList.Models, which can claim
+	// "never empty" because #1811 declared the type and wrote the producer in one
+	// slice; here there is no producer, so a claim about what reaches this field
+	// would have nothing behind it. The WIRE's position is already declared —
+	// protocol.SlashCommandListPayload.MarshalJSON states that [] is a POSITIVE
+	// statement, that claude offered nothing — and is what a producer slice reads.
+	Commands []SlashCommand
+}
+
 // Stall is an internal-only onset marker: tui-driver raised a one-shot
 // stall_detected signal (no payload, no clearing edge). It carries no fields —
 // onset only, no "cleared" state, and (like every variant here) no
@@ -957,6 +1092,7 @@ func (ThinkingProgress) isTurnEvent()      {}
 func (RateLimited) isTurnEvent()           {}
 func (ModelAnnounced) isTurnEvent()        {}
 func (ModelList) isTurnEvent()             {}
+func (SlashCommandList) isTurnEvent()      {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
@@ -974,6 +1110,7 @@ var (
 	_ Event = ThinkingProgress{}
 	_ Event = RateLimited{}
 	_ Event = ModelAnnounced{}
+	_ Event = SlashCommandList{}
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}

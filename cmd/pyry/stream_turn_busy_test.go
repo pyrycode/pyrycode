@@ -567,6 +567,15 @@ func turnMarkName(m turnMark) string {
 // running says nothing about whether a turn is open, and it arrives once per turn
 // in every conversation, so opening a mark on it would wedge every one of them.
 //
+// SlashCommandList (#1854) is the same shape once more, and its wedge argument is
+// one step stronger than ModelAnnounced's. The slash-command inventory is neither
+// an opener nor a closer because it is reported once per initialize exchange,
+// which is not a turn boundary and not even per-turn; the whitelist's default
+// already returns turnMarkNone, so the row asserts an existing answer rather than
+// a new arm. Where an announcement at least rides a turn some TurnEnd will close,
+// a turn opened on an inventory has no turn end anywhere in its future to clear
+// the mark.
+//
 // PermissionRequest is the row the marker-derived guard ADDED: it is a variant
 // this fan-in cannot currently see at all, produced only on the PTY modal path
 // (modalbridge's `PermissionRequestForClass`) and never by streamsup.Parser. Its
@@ -597,6 +606,12 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// whitelist's default already answers it, so this row asserts that answer
 		// rather than a new arm — turnMarkFor is unchanged by that ticket.
 		{turnevent.ModelList{Models: []turnevent.ModelOption{{ResolvedModel: "claude-sonnet-5", Value: "sonnet"}}}, turnMarkNone},
+		// #1854. Neither an opener nor a closer, for the row above's reason and one
+		// step more strongly: the inventory is reported once per initialize
+		// exchange, which is not a turn boundary and not even per-turn. The
+		// whitelist's default already answers it, so this row asserts an existing
+		// answer rather than a new arm — turnMarkFor is unchanged by that ticket.
+		{turnevent.SlashCommandList{Commands: []turnevent.SlashCommand{{Name: "clear"}}}, turnMarkNone},
 		{turnevent.Stall{}, turnMarkNone},
 		{turnevent.ApiRetry{Active: true, Current: 1, Total: 3}, turnMarkNone},
 		{turnevent.Compacting{Active: true}, turnMarkNone},
