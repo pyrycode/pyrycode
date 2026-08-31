@@ -3858,6 +3858,12 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // how many levels one entry retains, not how many entries the list does. Written as
 // maxModelEffortLevelCount it would follow the constant green if someone halved it,
 // and halving that constant is the edit the exactly-at-the-cap row exists to redden.
+//
+// slashCommandNameCapFixture is the same literal rule one array over, for
+// maxSlashCommandName (#1877). Its own fixture even though the number matches the
+// three model ones, mirroring the production split: they bound different fields for
+// different reasons, and sharing one fixture would let a change to one silently
+// retarget the others' proof.
 const (
 	modelResolvedCapFixture         = 256
 	modelValueCapFixture            = 256
@@ -3865,6 +3871,7 @@ const (
 	modelEffortLevelCapFixture      = 32
 	modelEffortLevelCountCapFixture = 8
 	modelListEntriesCapFixture      = 10
+	slashCommandNameCapFixture      = 256
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -4059,8 +4066,15 @@ func TestParser_InitializeControlResponseDecodesTheCapturedModels(t *testing.T) 
 			}
 
 			events := collectEvents(capturedInitializeLine(t, arm))
-			if len(events) != 1 {
-				t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+			// TWO events, not one: every responding arm carries a commands array beside
+			// its models one, so the rung emits the SlashCommandList too (#1877). The
+			// ModelList stays at index 0 — the models array is the rung's own
+			// discriminant, so its emit goes first. This test asserts the models half
+			// only; TestParser_InitializeControlResponseCountsTheCapturedCommands asserts
+			// the other.
+			if len(events) != 2 {
+				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+					len(events), events)
 			}
 			list, ok := events[0].(turnevent.ModelList)
 			if !ok {
@@ -4204,6 +4218,13 @@ func commandNameIsPlainSlug(name string) bool {
 //
 // `models: 6` sits beside the command count deliberately — it is what kills an
 // argument swap between the two ints at the logControlResponse call site.
+//
+// It is ALSO #1877's captured-line pin for the emit: the same line now produces a
+// turnevent.SlashCommandList behind the ModelList, and its entry count is asserted
+// against the capture's own array length. `wantAttrs` is deliberately UNCHANGED —
+// the record keeps its six attributes and their values, which is what the
+// no-seventh-attribute decision buys. The per-name verbatim comparison over all
+// fifty-one is #1878's.
 func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T) {
 	t.Parallel()
 
@@ -4243,14 +4264,27 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 				t.Fatalf("Write err = %v, want nil", err)
 			}
 
-			// The arm carries both arrays, so it lands on the model-list rung and the
-			// event is the models one, unchanged: nothing about the command inventory
-			// reaches an event.
-			if len(events) != 1 {
-				t.Fatalf("event count: got %d, want 1 turnevent.ModelList — %#v", len(events), events)
+			// The arm carries both arrays, so it lands on the model-list rung and emits
+			// TWO events: the ModelList first — the rung's own discriminant — and the
+			// command inventory behind it as a turnevent.SlashCommandList (#1877).
+			if len(events) != 2 {
+				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+					len(events), events)
 			}
 			if _, ok := events[0].(turnevent.ModelList); !ok {
 				t.Fatalf("event[0] = %T, want turnevent.ModelList", events[0])
+			}
+			list, ok := events[1].(turnevent.SlashCommandList)
+			if !ok {
+				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+			}
+			// Against the capture's OWN array length, never a transcribed 51: there is no
+			// entry-count cap on this array (#1826 owns that), so every decoded entry is
+			// emitted and a re-capture moves this expectation with the fixture. The
+			// verbatim per-name comparison is #1878's.
+			if len(list.Commands) != len(want) {
+				t.Errorf("SlashCommandList carries %d entries, want %d — one per array element, in claude's own order",
+					len(list.Commands), len(want))
 			}
 			consumes := rec.withMessage(controlResponseConsumeMsgFixture)
 			if len(consumes) != 1 {
@@ -4955,6 +4989,69 @@ func TestParser_InitializeControlResponseAckReportsTheCommandCount(t *testing.T)
 	}
 }
 
+// TestParser_SlashCommandNamesAreCapped is #1877's liveness proof for the new bound:
+// the name is cut at its OWN cap at construction and the cut is REPORTED, by the
+// DAEMON's snake_case name for the field — which for this one field coincides with
+// the wire name protocol.SlashCommand.TruncatedFields documents.
+//
+// TWO entries in one list, and the second is what makes the row non-vacuous: with
+// only the over-cap entry, a mutant naming "name" on every entry regardless of the
+// cut stays green. The over-cap name is built FROM the cap fixture rather than from a
+// hand-written length, so the row moves with the cap.
+//
+// The models array is carried too because the commands emit rides the MODEL-LIST
+// rung: a line with no models lands on the ack rung and emits nothing at all, which
+// TestParser_InitializeControlResponseAckReportsTheCommandCount pins.
+//
+// The full boundary matrix — exactly at the cap, the mid-rune cut, the empty name,
+// the suppression table and the fifty-one-name verbatim pin — is #1878's. This is the
+// one row that keeps the bound from being unproven for a merge window.
+func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
+	t.Parallel()
+
+	const fits = "deep-research"
+	events := collectEvents(initializeLineFixture(t, "success", map[string]any{
+		"models": []map[string]any{modelEntryFixture("claude-sonnet-5", "sonnet", "Sonnet")},
+		"commands": []any{
+			commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
+			commandEntryFixture(fits),
+		},
+	}))
+	if len(events) != 2 {
+		t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+			len(events), events)
+	}
+	list, ok := events[1].(turnevent.SlashCommandList)
+	if !ok {
+		t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+	}
+	// Length first, so a producer that dropped the over-cap entry FAILS here rather
+	// than panicking on the index below: the cap cuts a NAME, never an entry.
+	if len(list.Commands) != 2 {
+		t.Fatalf("SlashCommandList carries %d entries, want 2 — %#v", len(list.Commands), list.Commands)
+	}
+
+	// The cap's VALUE, pinned on the emitted name: halve maxSlashCommandName and this
+	// is what goes red.
+	if got := len(list.Commands[0].Name); got != slashCommandNameCapFixture {
+		t.Errorf("a cut name came back %d bytes, want %d", got, slashCommandNameCapFixture)
+	}
+	// DeepEqual rather than a length or a contains check, for the models table's
+	// reason: nil and []string{} disagree here and only one of them is the contract.
+	if want := []string{"name"}; !reflect.DeepEqual(list.Commands[0].TruncatedFields, want) {
+		t.Errorf("entry 0 TruncatedFields: got %#v, want %#v", list.Commands[0].TruncatedFields, want)
+	}
+	// The entry that FITS, which is the half that makes the two assertions above
+	// non-vacuous: claude's name verbatim, and nil rather than an empty non-nil slice.
+	if list.Commands[1].Name != fits {
+		t.Errorf("entry 1 Name: got %q, want %q (verbatim, no repair)", list.Commands[1].Name, fits)
+	}
+	if list.Commands[1].TruncatedFields != nil {
+		t.Errorf("entry 1 TruncatedFields: got %#v, want nil — nothing was cut on it",
+			list.Commands[1].TruncatedFields)
+	}
+}
+
 // TestParser_ModelListFieldsAreCapped is AC 2: each of the three strings is bounded
 // by its OWN named cap, and the report names the fields that were cut on the entry
 // they were cut on.
@@ -5552,8 +5649,15 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 		}
 	}
 
-	if len(events) != 2 {
-		t.Fatalf("event count: got %d, want 2 (the two model-carrying lines) — %#v", len(events), events)
+	// THREE, not two: the two model-carrying lines each emit a ModelList, and only the
+	// CAPTURED one carries a commands array, so it alone adds a SlashCommandList behind
+	// its ModelList (#1877). The four synthetic lines carry no commands key, which is
+	// this count's own half of the suppression pin. What the emit does NOT change is
+	// the sweep below — the capturedCommand sentinel reddens if a bounded name ever
+	// reaches a record — which is why it stays exactly as it was.
+	if len(events) != 3 {
+		t.Fatalf("event count: got %d, want 3 (the two model-carrying lines, plus the captured "+
+			"line's command inventory) — %#v", len(events), events)
 	}
 	// One record per line, and every one of them this arm's: the count is the half
 	// the per-record assertions cannot see.

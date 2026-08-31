@@ -908,12 +908,19 @@ type SlashCommand struct {
 // a repository exists for that repository's sessions and nowhere else.
 //
 // DECLARED AHEAD OF ITS PRODUCER, which is this family's own sequencing — #1616
-// ahead of #1638, #1704 ahead of #1848, #1727 ahead of #1720. Nothing in the tree
-// constructs this type; internal/streamsup (#1719 / #1720) is what will, and the
-// decode, the byte caps, the entry-count bound and the emit are all its. The type
+// ahead of #1638, #1704 ahead of #1848, #1727 ahead of #1720. The type
 // declaration is where the field set and the security posture get decided, and
 // deciding those in the same slice that also writes the decode is what makes such
 // a slice oversized.
+//
+// THE PRODUCER HAS SINCE ARRIVED, and the work is split four ways — worth naming
+// because the attributions are the easy thing to get wrong here.
+// internal/streamsup's commandEntryLine holds the DECODE (#1853, in the tree); its
+// emitModelList applies the BYTE CAP, constructs the entries and EMITS this list
+// (#1877, in the tree); the ENTRY-COUNT BOUND, and the drop count that arrives
+// with it, is #1826's; and the PUBLISH — turnbridge.MapEvent's arm and cmd/pyry's
+// interactiveTurnEmitterV2.Handle case — is #1720's and is still open. #1719 is
+// CLOSED and was the decode, so it names no future producer.
 //
 // IT IS PUBLISHED BY NO PATH TODAY. turnbridge.MapEvent has no arm for it, so its
 // default drops it, and cmd/pyry's interactiveTurnEmitterV2.Handle has no case,
@@ -974,13 +981,18 @@ type SlashCommandList struct {
 	// list, never an empty non-nil slice; BackgroundTask.TruncatedFields is the
 	// convention's single source.
 	//
-	// WHETHER AN EMPTY LIST IS EMITTED AT ALL IS THE PRODUCER'S GATE and is
-	// deliberately NOT decided here. Contrast ModelList.Models, which can claim
-	// "never empty" because #1811 declared the type and wrote the producer in one
-	// slice; here there is no producer, so a claim about what reaches this field
-	// would have nothing behind it. The WIRE's position is already declared —
+	// WHETHER AN EMPTY LIST IS EMITTED AT ALL IS THE PRODUCER'S GATE and is still
+	// not decided here. It has been ANSWERED, one slice later than ModelList.Models
+	// answered its own — #1811 declared that type and wrote its producer together,
+	// where this one was declared first: streamsup's emitModelList SUPPRESSES the
+	// empty list (#1877), so nothing reaches this field with zero entries. The
+	// WIRE's position is what that producer slice READ, and it did not govern:
 	// protocol.SlashCommandListPayload.MarshalJSON states that [] is a POSITIVE
-	// statement, that claude offered nothing — and is what a producer slice reads.
+	// statement, that claude offered nothing, but the decode collapses an absent
+	// `commands`, a null one and a published [] onto one nil slice, so the producer
+	// cannot tell that from "claude said nothing about commands" and will not
+	// assert it. That position still governs how a list that WAS emitted
+	// serialises, which is what #1720 reads it for.
 	Commands []SlashCommand
 }
 
