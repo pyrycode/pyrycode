@@ -1,0 +1,27 @@
+# `noise_init` happy-and-failure path
+
+1. JSON-decode inner frame, validate `Version == 2` and `Type == "noise_init"`, base64-decode `Data` (size-cap 65535).
+2. Lazy-construct `noise.Responder` from `cfg.StaticPriv` (one per session).
+3. `Responder.ReadInit(data)` → early-data bytes. **On err: close(4426)** (MAC fail / wrong static pubkey / malformed IK message 1; no CipherStates exist, no AEAD-sealed error possible).
+3a. **Capture `s.peerStatic = s.resp.PeerStatic()`** (#452) — the initiator's static pub, pinned for the session's lifetime at the earliest authenticated point. By the time `ReadInit` returns nil, flynn has MAC-verified and DH-decrypted the static; the value is authentic regardless of whether subsequent steps accept the hello. Set exactly once per `V2Session`; a future re-key (added in #453) MUST NOT overwrite it. The field is inert in the current code (no production reader); #453's `handleRekeyInit` will compare a fresh-handshake initiator's `PeerStatic()` against it via `bytes.Equal` and reject mismatches at WS close code 4426.
+4. Decode early-data as a `protocol.Envelope`; require `Type == "hello"`. On decode failure or wrong type: **close(4421)** (handshake-layer protocol violation; CipherStates still don't exist).
+5. Decode `Envelope.Payload` as `protocol.HelloClientPayload`. On decode failure: close(4421).
+6. Marshal `HelloAckPayload{ProtocolVersion: "v2", ServerID: cfg.ServerID, ConnID: env.ConnID}` into an `Envelope{ID: 1, Type: hello_ack, InReplyTo: &hello.ID}`.
+7. `Responder.WriteResp(ackEnvJSON)` → response bytes + `(send, recv)` CipherStates. **On err: close(4426)** (practically unreachable under correct flynn/noise; defensive).
+8. Persist `send` / `recv` on the session. **State → `V2StateHandshakeComplete`** (the externally-observable substate, even though step 9 immediately advances or rejects).
+9. Marshal an `InnerFrameV2{Type: noise_resp, Data: base64(respMsg)}`.
+9a. **Registry reload (#782).** If `cfg.DevicesPath != ""`, call `cfg.Devices.Reload(cfg.DevicesPath)` so a device paired via `pyry pair` after daemon startup authenticates here without a restart (and a `pyry pair revoke` stops being accepted). On a reload error: log at Warn (`v2.devices.reload_failed`, `conn_id` + `path` + static reason — **never** the wrapped `err`, which can carry a `token_hash` from a corrupt file) and **proceed to step 10 against the retained in-memory set** (fail closed — accept set not widened, loaded devices not lost). See [`features/devices-registry.md`](devices-registry.md) § Reload and [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md).
+10. `cfg.Devices.Validate(hello.Token)`:
+    - **Hit**: emit `RoutingEnvelope{ConnID, Frame: noiseRespFrame}` via `Outbound`, **state → `V2StateOpen`**. Log `v2.handshake.accept` with `conn_id` + `device_name`.
+    - **Miss**: emit `noise_resp` first (so the AEAD channel exists on the wire), then AEAD-seal an `Envelope{Type: error, Payload: ErrorPayload{Code: auth.invalid_token, Message: MsgInvalidToken, Retryable: false}}` under `send`, wrap as an `InnerFrameV2{Type: noise_msg, Data: base64(ciphertext)}`, and emit one `RoutingEnvelope{ConnID, Frame: noiseMsgFrame, CloseCode: 4401}`. **State → `V2StateClosed`**, session deleted. Log `v2.handshake.reject.invalid_token` with `conn_id` only (NO device-name on reject — anti-enumeration, mirrors `auth.go:129-132`).
+
+The AEAD-error-then-close path emits the error frame AND the close code in a **single** outbound routing envelope — atomic at the wire layer. This is what guarantees the spec's MUST: the phone observes the error envelope *before* the WS close (`docs/protocol-mobile.md` § Failure modes line 436). Two-call sequencing (`Send` then `CloseConn`) would race the relay's output paths.
+
+### `noise_msg` in `V2StateHandshakeComplete` — the gating row
+
+Today the natural inbound-frame flow never reaches this cell: state transitions through `handshakeComplete` atomically inside the `noise_init` handler. The cell exists for two reasons:
+
+- **Future-proofing.** If a later slice introduces deferred token validation (e.g. network-backed registry lookup), `handshakeComplete` becomes observable to incoming frames between handshake completion and validation completion. The transition row defines the behaviour for that future world today.
+- **Same-package unit-test verifiability.** A gating test in `v2session_test.go` directly assigns `s.state = V2StateHandshakeComplete` and injects a hand-rolled `(send, recv)` pair to drive this row deterministically — the **structural** proof that the handler chain is unreachable from `handshakeComplete`. AC #4's load-bearing invariant.
+
+The implementation tries AEAD-decrypt-then-decode-as-`Envelope`. Decrypt failure → close(4421). Decrypt success → seal `auth.invalid_token` under the live `send` CipherState, emit + close(4401), regardless of envelope type. The handler chain in `internal/relay/handlers/` is **not** reached.
