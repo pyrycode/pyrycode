@@ -273,10 +273,14 @@ func (a *Accumulator) Add(chunk protocol.AttachmentChunkPayload) error {
 //
 // Dropping the map at the moment of refusal is what makes "discarded rather
 // than continued" true of the MEMORY and not only of the answers: without it a
-// hostile client could park held bytes behind a poisoned accumulator until
-// #1742's reaper runs. For an integrity refusal there is no reaper to fall back
-// on at all — a complete-but-corrupt transfer is not a PARTIAL upload, so
-// #1742 does not cover it, and this line is the only thing that frees it.
+// hostile client could park held bytes behind a poisoned accumulator until the
+// registry's idle reap took the entry a window later. Through Deliver no entry
+// outlives a refusal, but Admit hands the accumulator back off-lock and a caller
+// that feeds it directly and then stops parks exactly that. For an integrity
+// refusal there is no reaper to fall back on at all — a complete-but-corrupt
+// transfer is not a PARTIAL upload, Deliver releases its entry on the mismatch
+// so no entry survives for a reap to find, and this line is the only thing that
+// frees it.
 //
 // The wrapped message carries the index and the counts only, plus — for an
 // integrity refusal — the digest this receiver computed and the CHARACTER COUNT

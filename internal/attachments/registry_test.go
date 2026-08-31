@@ -1411,3 +1411,152 @@ func TestRegistry_NewRegistryReadsTheWallClock(t *testing.T) {
 		t.Errorf("lastChunkAt from a registry built by NewRegistry = %v, want a wall-clock reading inside [%v, %v]", stamp, before, after)
 	}
 }
+
+// TestRegistry_IdleUpload_NextChunkIsRefusedAsUnknown is AC 1, and its first arm
+// is the boundary: at EXACTLY uploadIdleTimeout the upload is still in flight,
+// because the window bounds how long silence may LAST rather than how long it
+// may be approached — the polarity CheckDeclaredSize already argues for its own
+// >. That arm alone reddens under >= in place of >, and the second arm reddens
+// under a reap placed after lookupAndStamp's map read, which would find the
+// expired entry, stamp it forward and resume exactly what the window exists to
+// end.
+func TestRegistry_IdleUpload_NextChunkIsRefusedAsUnknown(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+
+	clk.advance(uploadIdleTimeout)
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(0), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver at exactly uploadIdleTimeout since the last chunk: error = %v, want one wrapping %v", err, ErrIncomplete)
+	}
+
+	// Past the window with nothing delivered in between. The chunk is a
+	// perfectly good one for the transfer that was admitted, so nothing but the
+	// reap can be refusing it.
+	clk.advance(uploadIdleTimeout + time.Nanosecond)
+	out, err := r.Deliver(testConnA, withAttachmentID(boundChunk(1), testAttachmentID))
+	if !errors.Is(err, ErrUnknownUpload) {
+		t.Fatalf("Deliver after more than uploadIdleTimeout of silence: error = %v, want %v", err, ErrUnknownUpload)
+	}
+	if out != nil {
+		t.Errorf("Deliver for a reaped upload returned %d bytes, want none", len(out))
+	}
+	if _, ok := r.Lookup(testConnA, testAttachmentID); ok {
+		t.Errorf("Lookup still reports the reaped pair as held")
+	}
+}
+
+// TestRegistry_ExpiredUpload_GivesTheSlotBack is AC 2, and it is the test that
+// reddens if the reap sits in Admit rather than ahead of insertLocked's capacity
+// gate: the gate reads len(r.uploads) inside that body, so a reap anywhere else
+// under the same acquisition is a reap the gate cannot see.
+//
+// count() is read AFTER the Admit that drove the reap and never before. That
+// accessor deliberately does not reap, so a test that advanced the clock and
+// then read it would be measuring a change nothing has caused.
+func TestRegistry_ExpiredUpload_GivesTheSlotBack(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+	fillRegistry(t, r, maxInFlightUploads)
+
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); !errors.Is(err, ErrTooManyUploads) {
+		t.Fatalf("Admit of a new pair at the bound: error = %v, want one wrapping %v", err, ErrTooManyUploads)
+	}
+
+	clk.advance(uploadIdleTimeout + time.Nanosecond)
+
+	upload, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest)
+	if err != nil {
+		t.Fatalf("Admit of a new pair once every held upload had been idle past the window: %v", err)
+	}
+	if upload == nil {
+		t.Fatal("Admit answered a nil accumulator with a nil error")
+	}
+	if got := r.count(); got != 1 {
+		t.Errorf("count() after the reap and the admission = %d, want 1 — the newcomer alone", got)
+	}
+	if got, ok := r.Lookup(testConnA, testAttachmentID); !ok || got != upload {
+		t.Errorf("Lookup answered (%p, %v), want the accumulator the post-reap Admit returned", got, ok)
+	}
+}
+
+// TestRegistry_Window_RunsFromTheLastChunkNotFromAdmission is AC 3. Both
+// deliveries land inside the window measured from the PREVIOUS chunk while the
+// second one is well past it measured from admission, so it reddens both under a
+// reap that compares against an admission-time field and under a registry whose
+// deliveries never moved the stamp.
+func TestRegistry_Window_RunsFromTheLastChunkNotFromAdmission(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+
+	clk.advance(uploadIdleTimeout - time.Minute)
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(0), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver inside the window: error = %v, want one wrapping %v", err, ErrIncomplete)
+	}
+
+	clk.advance(uploadIdleTimeout - time.Minute)
+	// The fixture's own arithmetic, asserted rather than trusted: a window
+	// shorter than two minutes would leave both arms inside it and the test
+	// would go green having proved nothing.
+	if elapsed := clk.now().Sub(testClockStart); elapsed <= uploadIdleTimeout {
+		t.Fatalf("elapsed since admission = %v, want more than uploadIdleTimeout (%v)", elapsed, uploadIdleTimeout)
+	}
+	if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(1), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver still inside the window measured from the last chunk: error = %v, want one wrapping %v", err, ErrIncomplete)
+	}
+}
+
+// TestRegistry_Reap_LeavesAFedUploadOfAnotherPairInFlight is AC 4. The two pairs
+// share one attachment_id across two conns — uploadKey's own shape — so the
+// survivor claim is about the KEY and not merely about two unrelated entries. It
+// reddens under a reap that clears the map and under one that deletes on the
+// wrong side of the comparison.
+func TestRegistry_Reap_LeavesAFedUploadOfAnotherPairInFlight(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	for _, connID := range []string{testConnA, testConnB} {
+		if _, err := r.Admit(connID, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+			t.Fatalf("Admit of the bound declaration on %q: %v", connID, err)
+		}
+	}
+
+	// A is fed twice, each time inside the window since its own last chunk; B
+	// is never fed, so by the second delivery it has been silent for nearly two
+	// windows and that delivery's own reap takes it.
+	for i := 0; i < 2; i++ {
+		clk.advance(uploadIdleTimeout - time.Minute)
+		if _, err := r.Deliver(testConnA, withAttachmentID(boundChunk(i), testAttachmentID)); !errors.Is(err, ErrIncomplete) {
+			t.Fatalf("Deliver of chunk %d on %q: error = %v, want one wrapping %v", i, testConnA, err, ErrIncomplete)
+		}
+	}
+
+	stamp, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt on %q reported absent after the reap took %q's silent upload, want present", testConnA, testConnB)
+	}
+	if want := testClockStart.Add(2 * (uploadIdleTimeout - time.Minute)); !stamp.Equal(want) {
+		t.Errorf("lastChunkAt on %q = %v, want its last delivered chunk's reading %v", testConnA, stamp, want)
+	}
+	if _, ok := r.Lookup(testConnB, testAttachmentID); ok {
+		t.Errorf("%q's upload was silent past the window and is still held", testConnB)
+	}
+	if got := r.count(); got != 1 {
+		t.Errorf("count() after the reap = %d, want 1 — %q's upload alone", got, testConnA)
+	}
+}

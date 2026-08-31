@@ -3,6 +3,7 @@ package attachments
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -78,9 +79,16 @@ const maxUploadBytes = 16 << 20 // 16 MiB
 // per-session bound multiplies the byte product below by a session count
 // nothing bounds. The known cost is that one conn can occupy every slot and
 // starve its peers, accepted here because the peers are the user's own paired
-// devices, the refusal clears as other uploads finish, and #1742's reaper
-// reclaims abandoned slots. A per-conn sub-cap UNDER this ceiling is a later
-// refinement rather than this family's.
+// devices and the refusal clears as other uploads finish. A per-conn sub-cap
+// UNDER this ceiling is a later refinement rather than this family's.
+//
+// uploadIdleTimeout is what keeps that clearing honest, and the two constants
+// divide the job cleanly: this one bounds HOW MANY slots exist, that one bounds
+// HOW LONG one may be held without progress. Without it a client that admits
+// transfers and then stops holds every slot forever and ErrTooManyUploads —
+// published as transient — never clears. It bounds silence and not effort: a
+// client trickling one chunk per window still holds a slot indefinitely, a
+// residual that constant's own doc states.
 //
 // The byte arithmetic is INHERITED from maxUploadBytes rather than re-derived
 // here, which is also where 4 comes from: worst-case RESIDENT attachment bytes
@@ -94,6 +102,75 @@ const maxUploadBytes = 16 << 20 // 16 MiB
 // docs/protocol-mobile.md § Attachments deliberately leaves unpublished, so "a
 // client learns them by being rejected", and readers that want different types.
 const maxInFlightUploads = 4
+
+// uploadIdleTimeout is the bounded window ONE in-flight upload may go without a
+// chunk before Registry reaps its entry, measured from that upload's LAST
+// ACCEPTED CHUNK and never from its admission — so a transfer that keeps sending
+// stays in flight however long it runs. It is the third receiver bound this file
+// states and it closes what the other two cannot: a client that admits a
+// transfer and then stops holds its entry, its retained bytes and one of
+// maxInFlightUploads slots forever, and ErrTooManyUploads — a sentinel whose
+// whole published contract is that it clears BY ITSELF as other uploads finish —
+// starts lying.
+//
+// THE NUMBER IS INHERITED rather than re-derived: it is internal/relay's
+// idleTimeout, the transport's own per-session silence bound, whose derivation
+// is stated there — long enough not to tear down a foregrounded-but-momentarily-
+// quiet phone mid-read, short enough that a silently-gone phone's state does not
+// linger. That is a statement about the same client population sending these
+// same chunks, so restating it here would be a second copy free to drift. Same
+// discipline maxInFlightUploads takes with the byte arithmetic it inherits from
+// maxUploadBytes.
+//
+// THE TWO BOUNDS ARE NOT REDUNDANT, which is what makes equality the right pick
+// rather than a coincidence. Relay's measures silence on the SESSION; this one
+// measures silence on the TRANSFER, and neither implies the other — a client
+// that keeps its session noisy while abandoning one upload never trips relay's.
+// Shorter than relay's would reap a transfer whose session relay still holds
+// live and which could still resume. Longer would let an abandoned upload
+// outlive the transport session that carried its chunks, and that extra time is
+// dead time in which no chunk can arrive anyway.
+//
+// WHAT IT BOUNDS IS TIME, NOT BYTES, and the residual is worth stating plainly
+// rather than as a win. The worst-case resident product maxUploadBytes' doc
+// fixes at 64 MiB is unchanged; this bounds how long that case may persist UNDER
+// SILENCE. It does NOT bound a client that TRICKLES: one chunk per window
+// against a 373-chunk declaration holds a slot for hundreds of hours, and four
+// such conns hold the whole product. Closing that needs a cap on a transfer's
+// TOTAL lifetime measured from admission — a different policy, deliberately not
+// folded in here, since this window is defined to run from the last chunk. The
+// residual is tolerable for maxInFlightUploads' own stated reason and not
+// because trickling is benign: the sender is a paired device inside the user's
+// own trust domain (docs/protocol-mobile.md § Security model), the same basis on
+// which that constant already accepts one conn starving its peers.
+//
+// IT DOES NOT SUBSUME #1817, which releases a dropped conn's uploads AT THE
+// DROP. This one releases a window after the last chunk whether or not the conn
+// is alive; that it also happens to close the dropped-conn case today, at a
+// 15-minute latency, is a side effect and not a replacement.
+//
+// THERE IS NO TIMER, and a reader who sees Timeout will look for one. The
+// release is LAZY: Registry.reapExpiredLocked runs it inline at the head of the
+// two locked bodies that gate on the map's contents, and this package spawns no
+// goroutine and has no shutdown path.
+//
+// A CLOCK STEPPED BACKWARDS makes the reap's difference negative, which its
+// strict > reads as not-expired: such an entry survives a window it should have
+// been reaped in and is taken on a later pass once the clock has caught up. That
+// is the safe direction — a dead entry that looks live, bounded by the step,
+// never a live one reaped — and nothing here defends against it.
+//
+// Unexported for both neighbours' own reason: receiver policy that
+// docs/protocol-mobile.md § Attachments deliberately leaves unpublished, so "a
+// client learns them by being rejected". Nothing about the window goes on the
+// wire — an expired upload's next chunk is refused with the existing
+// ErrUnknownUpload. TYPED, unlike both neighbours, whose untypedness serves
+// readers wanting different types: this one has exactly one reader and one type.
+// A const and NOT a var: relay makes its idleTimeout a package var purely so its
+// own tests can substitute a sub-second value, and pays for it with tests that
+// cannot call t.Parallel(); this package has newRegistryWithClock's clock seam
+// instead, so a test advances time rather than shrinking the bound.
+const uploadIdleTimeout = 15 * time.Minute
 
 // ErrInvalidDeclaration reports a transfer declaration this receiver refuses
 // before an Accumulator exists. Every refusal CheckDeclaration returns wraps it

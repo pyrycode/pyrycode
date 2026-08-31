@@ -41,7 +41,9 @@ type uploadKey struct {
 // the guard rail: "activity" invites a later reader to stamp on a look-up, and a
 // read that moved the time would let any diagnostic or dispatch-site look-up
 // keep a dead upload alive indefinitely — re-opening at this layer the
-// slot-exhaustion path an idle window (#1881) exists to close.
+// slot-exhaustion path uploadIdleTimeout closes. That window makes the hazard
+// MORE live rather than less: the stamp is now the reap's only input, so a
+// stamping read would not merely blur a diagnostic, it would defeat expiry.
 //
 // Named entry and not upload because upload is already a named return in
 // insertLocked and insert and a local in Admit and Deliver, so a package-level
@@ -82,11 +84,15 @@ type entry struct {
 // Assemble — and never nested with another lock. NO METHOD TAKES mu AND THEN
 // CALLS ANOTHER THAT TAKES IT, because sync.Mutex is not reentrant: the seven
 // locked methods — Admit, insert, Lookup, lookupAndStamp, Release, count and
-// lastChunkAt — take mu for their whole body and never call one another. TWO
-// methods here take no lock, for OPPOSITE reasons. insertLocked runs with mu
-// held BY ITS CALLER, which is what lets Admit and insert run ONE critical
-// section rather than two copies free to drift; the Locked suffix is this repo's
-// signal for a caller-holds-the-lock body, as in sessions' saveLocked. Deliver
+// lastChunkAt — take mu for their whole body and never call one another. THREE
+// methods here take no lock, and the third is a second member of the first of
+// the two OPPOSITE reasons rather than a third reason. insertLocked and
+// reapExpiredLocked both run with mu held BY THEIR CALLERS: that is what lets
+// Admit and insert run ONE critical section rather than two copies free to
+// drift, and what lets the reap share the acquisition insertLocked's capacity
+// gate and lookupAndStamp's map read already hold, which a reap taking mu itself
+// could not. The Locked suffix is this repo's signal for a caller-holds-the-lock
+// body, as in sessions' saveLocked. Deliver
 // holds mu at NO POINT: it composes lookupAndStamp and Release, each of which
 // takes it for its own whole body, and feeds the accumulator between them
 // off-lock. That composer breaches nothing above —
@@ -106,10 +112,11 @@ type entry struct {
 // reach any one accumulator, which preserves Accumulator's mutex-free contract
 // rather than quietly widening it.
 //
-// THE CLOCK IS A SEAM, and it is read WITH mu HELD — at the admission store in
-// insertLocked and at the delivery stamp in lookupAndStamp — so the reading and
-// the store it lands in are one critical section and two stampers of one pair
-// cannot commit out of order. That is the type's only call out to a
+// THE CLOCK IS A SEAM, and it is read WITH mu HELD at every site: the admission
+// store in insertLocked, the delivery stamp in lookupAndStamp, and once per pass
+// in reapExpiredLocked, which each of those two bodies runs inside its own
+// acquisition. So the reading and the store it lands in are one critical section
+// and two stampers of one pair cannot commit out of order. That is the type's only call out to a
 // caller-supplied function under its only mutex, and the three constraints it
 // puts on that function are stated where one can be supplied:
 // newRegistryWithClock. The single lock order is Registry.mu → whatever the
@@ -161,6 +168,71 @@ func newRegistryWithClock(now func() time.Time) *Registry {
 	return &Registry{uploads: make(map[uploadKey]entry), now: now}
 }
 
+// reapExpiredLocked deletes every entry whose last chunk arrived longer ago than
+// uploadIdleTimeout and DELETES NOTHING ELSE. Caller MUST hold r.mu. It is the
+// whole of this package's expiry: there is no goroutine, no ticker and no
+// shutdown path, and the window's own doc says so where a reader meets the name.
+//
+// THE COMPARISON IS STRICT. An entry idle for EXACTLY the window is still in
+// flight, because the window bounds how long silence may LAST rather than how
+// long it may be approached — the polarity CheckDeclaredSize argues for its own
+// >.
+//
+// ONE CLOCK READING FOR THE WHOLE PASS, not one per entry, for two reasons. It
+// keeps this to a single call out to the caller-supplied now under mu, which
+// Registry's clock paragraph accounts for. And it makes every entry answer
+// against ONE instant, so the outcome cannot depend on Go's randomised map
+// iteration order — a per-entry read against an advancing clock could reap A and
+// spare B on one ordering and the reverse on another. Deleting from a map while
+// ranging over it is defined: an entry deleted before the iteration reaches it
+// is simply not produced, so one pass suffices and no key-collection slice is
+// needed.
+//
+// The Locked suffix is this repo's caller-holds-the-lock signal, as in
+// insertLocked and sessions' saveLocked, and taking no lock is what lets the two
+// bodies that call this share their own single acquisition with it. It is the
+// THIRD method here that takes none — see Registry's type doc, which names all
+// three and the opposite reasons.
+//
+// IT CALLS NOTHING ON Accumulator, and never reject. Dropping the map entry
+// drops the registry's last reference and the bytes become collectable; reject
+// is an UNLOCKED mutator on a type that carries no mutex by design, and mu does
+// not cover an accumulator — a pointer to one may already be held off-lock by a
+// goroutine that took it from Admit or Lookup, so a reject from here would be a
+// data race and not merely a leaf breach. That is the rule Deliver's doc states
+// from the other side, and this method must not be the first to break it.
+//
+// IT CALLS NOTHING ON Registry EITHER, Release included. Release takes mu and
+// sync.Mutex is not reentrant, so building this on it would deadlock rather than
+// race; it deletes directly, exactly as Release does under its own acquisition.
+//
+// IT IS SILENT, deliberately. The map key holds the client-chosen attachment_id,
+// one of the four strings protocol.AttachmentChunkPayload's SECURITY block bans
+// from ever reaching a log or an error string, so there is no logger and no
+// format string in this body — the rule stays structural here rather than a
+// discipline. It returns nothing for the same posture: nothing needs a count,
+// and a return value would invite a caller to branch on it.
+//
+// REMOVE-ONLY IS WHAT MAKES A MID-DELIVER REAP BENIGN. A goroutine sitting
+// between Deliver's look-up and its release holds a pointer this may drop from
+// the map; its Assemble still returns integrity-verified bytes or none, and its
+// Release is a no-op on an already-absent key. That rests on the one-goroutine-
+// per-conn precondition Admit and Deliver already hand accumulators back under,
+// because that late Release deletes BY KEY and would take a successor's entry
+// had the pair been re-admitted in the gap. This does not weaken that
+// precondition, but it does introduce a THIRD PARTY — another conn's Admit — that
+// can now remove your entry where before only your own conn could, so a later
+// change that widens the one-appFrameWorker-per-conn assumption must revisit it
+// here.
+func (r *Registry) reapExpiredLocked() {
+	now := r.now()
+	for key, u := range r.uploads {
+		if now.Sub(u.lastChunkAt) > uploadIdleTimeout {
+			delete(r.uploads, key)
+		}
+	}
+}
+
 // insertLocked stores a as the upload in flight for the pair, stamped with the
 // clock's reading, and answers (a, true, nil); or — when the pair is already
 // held — stores NOTHING and answers the incumbent with false; or — when the
@@ -190,7 +262,8 @@ func newRegistryWithClock(now func() time.Time) *Registry {
 // incumbent and leaves that incumbent's lastChunkAt exactly where it was, and a
 // capacity refusal writes nothing at all. Admit and insert inherit the stamp
 // from this one shared core, which is what keeps an insert-inserted entry from
-// carrying a zero stamp that an idle window would read as infinitely idle.
+// carrying a zero stamp that reapExpiredLocked would read as infinitely idle
+// and take on the very next pass.
 //
 // PRECONDITION: a is non-nil, unguarded.
 //
@@ -204,6 +277,25 @@ func newRegistryWithClock(now func() time.Time) *Registry {
 // maxInFlightUploads" is a property of the CONTAINER rather than of one entry
 // point, which is what makes count's meaning uniform.
 func (r *Registry) insertLocked(connID, attachmentID string, a *Accumulator) (upload *Accumulator, inserted bool, err error) {
+	// AHEAD OF BOTH the incumbent look-up and the capacity gate, and HERE rather
+	// than in Admit: this is the shared core, so one placement covers both
+	// callers at one reap per call where a reap in Admit as well would run twice
+	// per admission. The gate below reads len(r.uploads) inside this same
+	// acquisition, and that is a security property rather than tidiness — a reap
+	// under one acquisition of mu followed by a capacity check under another is
+	// the split-lock shape
+	// TestRegistry_ConcurrentAdmitAtTheBound_AdmitsExactlyTheFreeSlots exists to
+	// redden, in which two admissions each observe the same reclaimed slot and
+	// both take it.
+	//
+	// A repeat first chunk under an EXPIRED pair is therefore a FRESH admission,
+	// the incumbent having been reaped before the look-up runs. That is the right
+	// semantics and it agrees with Deliver's "A RE-ADMITTED PAIR IS A NEW
+	// TRANSFER": reaping after the look-up would instead hand back a dead
+	// accumulator whose every later chunk Add refuses, worse for the client and
+	// for the slot alike.
+	r.reapExpiredLocked()
+
 	key := uploadKey{connID: connID, attachmentID: attachmentID}
 	if held, ok := r.uploads[key]; ok {
 		return held.acc, false, nil
@@ -249,7 +341,8 @@ func (r *Registry) insert(connID, attachmentID string, a *Accumulator) (upload *
 // which never took one, and on the next Release for a capacity refusal.
 //
 // THE WHOLE DECISION RUNS UNDER ONE ACQUISITION of mu — declaration verdict,
-// incumbent look-up, capacity, construction, store — so the entry cap reads the
+// construction, the idle reap, incumbent look-up, capacity, store, in the order
+// the bodies run them — so the entry cap reads the
 // count and admits without releasing it in between, which is what a cap needs
 // and what a split acquisition cannot give it. mu stays a LEAF: both checks are
 // pure and stateless per their own docs, insertLocked takes no lock, and
@@ -353,10 +446,18 @@ func (r *Registry) Admit(connID, attachmentID string, totalChunks int, size int6
 //
 // IT DELIBERATELY DOES NOT STAMP. A look-up that moved the entry's lastChunkAt
 // would let a diagnostic, or a dispatch-site read that routes no bytes at all,
-// keep a dead upload alive indefinitely — the exact slot-exhaustion path an idle
-// window (#1881) exists to close. Only a chunk that actually arrived may move
-// that time, which is why the stamping look-up is a second method rather than a
-// flag on this one.
+// keep a dead upload alive indefinitely — the exact slot-exhaustion path
+// uploadIdleTimeout closes, and that window is what makes the hazard load-
+// bearing rather than merely untidy, since the stamp is the reap's only input.
+// Only a chunk that actually arrived may move that time, which is why the
+// stamping look-up is a second method rather than a flag on this one.
+//
+// IT DOES NOT REAP EITHER, so a true answer may name an entry the next Admit or
+// Deliver will reap. That is the same polarity as the paragraph above — a
+// look-up that reaped would be a look-up with a side effect — and it is
+// consistent with uploadKey's "MEMBERSHIP CERTIFIES NOTHING": the authoritative
+// answer to whether a chunk may resume a transfer is Deliver's, which reaps
+// before it looks.
 func (r *Registry) Lookup(connID, attachmentID string) (*Accumulator, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -379,6 +480,12 @@ func (r *Registry) Lookup(connID, attachmentID string) (*Accumulator, bool) {
 func (r *Registry) lookupAndStamp(connID, attachmentID string) (*Accumulator, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// AHEAD OF THE MAP READ, which is the whole of the placement: a reap that
+	// ran after would find the expired entry, stamp it forward and hand its
+	// accumulator back — resuming exactly what the window exists to end. It runs
+	// INSIDE the acquisition this body already holds, which is what keeps
+	// Deliver's "AT MOST TWO acquisitions per delivered chunk" true.
+	r.reapExpiredLocked()
 	key := uploadKey{connID: connID, attachmentID: attachmentID}
 	u, ok := r.uploads[key]
 	if !ok {
@@ -394,8 +501,16 @@ func (r *Registry) lookupAndStamp(connID, attachmentID string) (*Accumulator, bo
 // delivered chunk after that.
 //
 // Unexported because in-package tests are its only reader — count is the
-// precedent — and it is shaped for a single-pair read rather than for whatever
-// an idle sweep (#1881) turns out to want.
+// precedent — and it is shaped for a single-pair read, which reapExpiredLocked
+// has no use for: that sweep ranges r.uploads directly under mu, exactly as this
+// accessor reads it, and the two share nothing.
+//
+// IT DOES NOT REAP, and that is what the tests observing expiry through it rest
+// on: a reader that reaped would be causing the change it reports, and
+// TestRegistry_AdmitStampsTheClockReading — which advances an hour with nothing
+// delivered and then expects the entry present — is the alarm if that ever
+// changes. A test asserting expiry drives Admit or Deliver first and reads here
+// after.
 //
 // It reads r.uploads DIRECTLY under mu and must never be built on Lookup or
 // lookupAndStamp. That is a testability constraint rather than style: routed
@@ -412,8 +527,14 @@ func (r *Registry) lastChunkAt(connID, attachmentID string) (time.Time, bool) {
 // Release removes exactly the pair's entry, leaving another conn's transfer of
 // the same attachment_id untouched; releasing a pair the registry does not hold
 // is a no-op. It returns nothing because Deliver releases what it just looked up
-// and #1742 decides only when to call it, so a presence answer would invite a
-// caller to branch on it outside the lock.
+// and #1817, which releases a dropped conn's uploads, decides only when to call
+// it, so a presence answer would invite a caller to branch on it outside the
+// lock.
+//
+// THE IDLE REAP IS NOT BUILT ON THIS METHOD and a reader must not expect it to
+// be: this one takes mu and sync.Mutex is not reentrant, so a reap running
+// inside a body that already holds it would deadlock rather than race.
+// reapExpiredLocked deletes directly under its caller's acquisition instead.
 func (r *Registry) Release(connID, attachmentID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -538,12 +659,12 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 //     Cross-client contamination is foreclosed a level up, by the conn being in
 //     the key.
 //
-// Expiry of a stalled upload is #1742's and nothing here anticipates it: until
-// it lands, a client that admits a transfer and then stops holds its slot. When
-// it does land, an entry can vanish between this method's look-up and its
-// release, and both halves are already safe — Release on a pair the registry no
-// longer holds is a documented no-op, and a look-up that misses answers
-// ErrUnknownUpload, the honest answer for a transfer that has been reaped.
+// A STALLED UPLOAD EXPIRES, so an entry can vanish between this method's look-up
+// and its release — reaped by lookupAndStamp's own head, or by a concurrent
+// Admit — and both halves are safe: Release on a pair the registry no longer
+// holds is a documented no-op, and a look-up that misses answers
+// ErrUnknownUpload, the honest answer for a transfer that has been reaped. The
+// window is uploadIdleTimeout, measured from the last chunk this method routed.
 func (r *Registry) Deliver(connID string, chunk protocol.AttachmentChunkPayload) ([]byte, error) {
 	upload, ok := r.lookupAndStamp(connID, chunk.AttachmentID)
 	if !ok {
@@ -561,9 +682,17 @@ func (r *Registry) Deliver(connID string, chunk protocol.AttachmentChunkPayload)
 	return out, err
 }
 
-// count is how many uploads are in flight, which is exactly the set of live
-// admitted uploads: no refusal leaves an entry, and every insertion path in
-// this package runs the maxInFlightUploads gate, so this never exceeds it.
+// count is how many entries the registry holds: no refusal leaves one, and every
+// insertion path in this package runs the maxInFlightUploads gate, so this never
+// exceeds it.
+//
+// THAT IS NO LONGER EXACTLY THE SET OF LIVE ADMITTED UPLOADS, since
+// uploadIdleTimeout: an upload idle past the window is over but is still counted
+// until some Admit or Deliver reaps it, because THIS METHOD DOES NOT REAP. That
+// divergence is the right trade rather than an oversight — this accessor is how
+// the tests observe the reap, so it must report what the map holds instead of
+// causing the change it is measuring. A test asserting expiry drives Admit or
+// Deliver first and reads this after.
 //
 // Unexported because in-package tests are its only reader: an exported one
 // would publish exactly the TOCTOU shape the capacity gate must not be built
