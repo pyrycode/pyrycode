@@ -84,14 +84,19 @@ spec-stage security review verdict PASS). See [`codebase/725.md`](../codebase/72
 Unlike `modal_answer`/`modal_cancel`, a timeout is **not** an inbound frame — it
 originates internally and rides a new path:
 
-- **Arm (off `Run`).** The producer surfacer (`interactiveModalEmitterV2.Handle`,
-  cmd/pyry, live-wired by [#798](../codebase/798.md)) calls `(*V2SessionManager).ArmModalTimeout(ctx, modalID)`
-  **immediately after `reg.Record`** — before the marshal/broadcast, so a modal that
-  fails to marshal, or one surfaced to **zero** interactive conns, is still denied on
-  the window (claude is blocked regardless of who is watching). `ArmModalTimeout` only
-  calls `time.AfterFunc(modalDenyTimeout, cb)` and touches no `Run`-owned state, so it
-  is safe off the `Run` goroutine. `modalDenyTimeout` is a package var (2 min default,
-  test-overridable; ADR 025 specifies "a bounded window" but no number).
+- **Arm (off `Run`).** The design: a producer surfacer calls
+  `(*V2SessionManager).ArmModalTimeout(ctx, modalID)` **immediately after `reg.Record`**
+  — before the marshal/broadcast, so a modal that fails to marshal, or one surfaced to
+  **zero** interactive conns, is still denied on the window (claude is blocked
+  regardless of who is watching). From [#798](../codebase/798.md) until #1348
+  ("refactor: delete the terminal-driving interactive path and everything on it")
+  that producer was `interactiveModalEmitterV2.Handle` (`cmd/pyry`, PTY path); #1348
+  deleted it along with the rest of the terminal-driving interactive path, and nothing
+  has taken over as its production caller since — see the note in § Deny-on-timeout
+  below. `ArmModalTimeout` only calls `time.AfterFunc(modalDenyTimeout, cb)` and
+  touches no `Run`-owned state, so it is safe off the `Run` goroutine. `modalDenyTimeout`
+  is a package var (2 min default, test-overridable; ADR 025 specifies "a bounded
+  window" but no number).
 - **Funnel (`AfterFunc` callback → `Run`).** `cb` does
   `select { case m.modalTimeout <- modalID: case <-ctx.Done(): }` — the `armRekeyTimer`
   callback shape. `modalTimeout` is a **daemon-global** buffered (`wakeBufferSize`=16)
@@ -121,10 +126,7 @@ race cannot double-deny, double-broadcast, or double-audit; the registry mutex s
 guards `Record` (surfacer goroutine) against `Resolve` (`Run`). The timeout leg **only
 ever drives the deny keystroke**, never a grant — fail-closed by construction (ADR 025
 § Security model: "answered with the SAFE default (deny / ESC) … Never auto-grant").
-**Live in production since [#798](../codebase/798.md)** wired the surfacer: a real
-permission/trust modal now `Record`s an entry and arms this timer, so an unanswered modal is
-safe-denied on the window even if it reached zero phones (net-positive availability — before #798 nothing armed it in production). `TestV2Session_ModalTimeout_FanOut` proves the
-off-`Run`-arm → on-`Run`-fire crossing under `-race`.
+**No longer armed in production.** This was live from [#798](../codebase/798.md) — which wired the PTY-side surfacer (`interactiveModalEmitterV2.Handle` in the now-deleted `cmd/pyry/interactive_modal_v2.go`) to call `ArmModalTimeout` on every surfaced permission/trust modal — until #1348 deleted the terminal-driving interactive path and, with it, that call site. As of #1348, `ArmModalTimeout`'s only callers are three test files (`v2session_appframe_test.go`, `v2session_debugbundle_test.go`, `v2session_modal_test.go`); nothing production-side arms this timer, so an unanswered PTY-modal fail-closed deny does not currently fire on this window. Found and confirmed independently by both the architect and code-review while investigating #1909 (`docs/specs/architecture/1909-approval-window-ten-minutes.md`, which raises `mcpApprovalTimeout`, a different constant, and touches this file's neighboring `reconcileModals` doc, not this mechanism) — a gap worth closing, not that ticket's to close. The stream-json approval path is unaffected: it never used this timer in the first place (see § Stream-json approval bridge below) and fails closed via `permbridge`'s own registry-owned timer (`mcpApprovalTimeout`) instead. `TestV2Session_ModalTimeout_FanOut` still proves the off-`Run`-arm → on-`Run`-fire crossing under `-race`; it is just not production-reachable right now.
 
 #### Stream-json approval bridge — the verdict arm (#1080)
 

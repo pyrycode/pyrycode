@@ -131,7 +131,21 @@ resolvers rely on to reject stale/replayed answers (#727's `Resolve`, #717's `Lo
 mutex: no `modal_shown` is ever emitted without a recorded registry entry, and no entry
 without a successfully-minted id.
 
-## The surfacer (`cmd/pyry/interactiveModalEmitterV2`)
+## The surfacer (`cmd/pyry/interactiveModalEmitterV2`) — deleted by #1348
+
+**No longer in the tree.** #1348 ("delete the terminal-driving interactive path and
+everything on it") removed `cmd/pyry/interactive_modal_stream_v2.go` and
+`interactiveModalEmitterV2` along with the rest of the PTY-driven interactive path;
+`tuidriver.EventKindPtyModalShown`/`EventKindPtyModalHidden` and this emitter no
+longer exist in production. This also silently removed the sole production caller of
+`(*relay.V2SessionManager).ArmModalTimeout` — nothing arms the relay-side
+`modalDenyTimeout` deny-on-timeout in production anymore (only three test files call
+it; see [the deny-on-timeout doc](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md)).
+Found while investigating #1909 (unrelated ticket, different constant — it raises
+`mcpApprovalTimeout`, the stream-json path's own timeout, which this deletion does
+not touch). The design below is kept as a historical record of how the arming worked
+while it was live; treat every present-tense claim in this section and in § Live
+daemon wiring below as **pre-#1348**.
 
 A **passive state machine** — spawns no goroutine, owns no queue (the `Registry` mutex
 is its only synchronisation), same posture as `interactiveTurnEmitterV2`. The single
@@ -342,7 +356,9 @@ connect-time producer that calls `Snapshot()` and re-sends the payloads over the
 [`v2-session-manager.md` § Connect-time modal reconcile](v2-session-manager.md#connect-time-modal-reconcile-877--outstandingmodals-seam--reconcilemodals)
 and [codebase/877.md](../codebase/877.md).
 
-## Live daemon wiring (#798)
+## Daemon wiring (#798, deleted by #1348)
+
+**Pre-#1348 history, not current wiring** — see the note at § The surfacer above.
 
 The producer + registry + class mapping ship with a **unit test driving a scripted modal
 through a fake interactive push surface** (the [#632 emitter → #633 wiring] precedent — a
