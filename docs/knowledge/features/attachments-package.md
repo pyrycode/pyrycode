@@ -1,7 +1,7 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
 Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782,
-#1795, #1796, #1784), twelve slices of the family split from #1741/#1766:
+#1795, #1796, #1784, #1880), thirteen slices of the family split from #1741/#1766:
 holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
@@ -162,14 +162,40 @@ chunk's own bytes are the one transient "slack," bounded by the transport's
 The entry-count cap landed as `maxInFlightUploads` (#1796); see § "In-flight
 upload registry" below for the gate and its shape.
 
-## In-flight upload registry (#1787, #1788, #1795, #1796)
+## In-flight upload registry (#1787, #1788, #1795, #1796, #1880)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
-chunks: a map from `uploadKey{connID, attachmentID}` to the `*Accumulator` in
-flight for that pair, an unexported `insertLocked` core, a thin lock-taking
-`insert` wrapper kept for tests, comma-ok `Lookup`, `Release`, and an
-unexported `count`. Still unreachable from production — nothing calls it
-until #1744 wires the dispatch site, and #1744 lands last in the family.
+chunks: a map from `uploadKey{connID, attachmentID}` to an
+`entry{acc *Accumulator, lastChunkAt time.Time}`, held **by value** so the
+stamp can only move by storing into the map under `mu` — an unexported
+`insertLocked` core, a thin lock-taking `insert` wrapper kept for tests,
+comma-ok `Lookup`, an unexported stamping `lookupAndStamp`, `Release`, and two
+unexported test-only readers, `count` and `lastChunkAt` (#1880). Still
+unreachable from production — nothing calls it until #1744 wires the dispatch
+site, and #1744 lands last in the family.
+
+**Each entry carries `lastChunkAt`, the clock's reading at admission and at
+the last delivered chunk (#1880).** The clock is a nil-tolerant seam —
+`newRegistryWithClock(now func() time.Time)`, unexported, with `NewRegistry()`
+delegating `newRegistryWithClock(nil)` — copied verbatim from
+`newStallTracker`'s `if now == nil { now = time.Now }` idiom already used by
+streamsup and streamjson's emitter, so `NewRegistry`'s 19 existing call sites,
+all test-only, are untouched. `now` is read with `mu` held, the package's
+first caller-supplied call under its only mutex; the constructor's doc states
+the three constraints that keep that lock order total rather than cyclic — the
+function must not block, must not call back into the `Registry`, and must be
+safe for concurrent use. `insertLocked` stamps at the one store both `Admit`
+and `insert` share, behind both refusal branches, so **no refusal ever
+stamps** and a repeat `Admit` under an already-held pair leaves the
+incumbent's stamp untouched. Delivery stamps through the new unexported
+`lookupAndStamp`, which `Deliver`'s step 1 now calls in place of `Lookup` — on
+a hit it moves `lastChunkAt` forward and returns the accumulator, on a miss it
+stores nothing. **`Lookup` itself stays a pure read and deliberately does not
+stamp** — a look-up that moved the activity time would let a diagnostic or
+#1744's dispatch-site read keep a dead upload alive indefinitely, the exact
+exhaustion path this family is closing. Nothing here reaps an idle entry —
+that policy is #1881, wired blocked-by this ticket, and it inherits a
+truthful stamp rather than having to invent one.
 
 `Admit` is the registry's only exported way in, and now runs three checks
 under one acquisition of `mu` before admitting anything: `CheckDeclaration`,
@@ -231,14 +257,22 @@ one assertion — the repeat-`Admit`-under-a-held-pair clause of
 confirming the fix landed as a sole red rather than incidentally alongside
 other coverage.
 
-**`Registry.Deliver` (#1784)** is the routing half `Lookup` and `Release`
-were primitives for: given a conn and a chunk, it looks the `{conn,
-attachment_id}` pair up, feeds the chunk to the accumulator's `Add` off-lock,
-then asks `Assemble` — releasing the entry on every outcome except
-`ErrIncomplete`, which is the one answer that keeps it. A miss refuses with
-`ErrUnknownUpload` (below) and creates nothing. Three separate acquisitions
-of `mu` per delivered chunk (look up, release), never one held across `Add`
-or `Assemble` — the same off-lock-feed posture `Admit` already hands its
+**`Registry.Deliver` (#1784)** is the routing half `lookupAndStamp` and
+`Release` are primitives for (#1880 swapped the look-up step from `Lookup` to
+`lookupAndStamp`; see above): given a conn and a chunk, it looks the `{conn,
+attachment_id}` pair up and stamps it, feeds the chunk to the accumulator's
+`Add` off-lock, then asks `Assemble` — releasing the entry on every outcome
+except `ErrIncomplete`, which is the one answer that keeps it. A miss refuses
+with `ErrUnknownUpload` (below) and creates nothing. **At most two
+acquisitions of `mu` per delivered chunk, never three:** one
+(`lookupAndStamp`) on a miss or an `ErrIncomplete` outcome, two
+(`lookupAndStamp` then `Release`) on every releasing path. This corrects the
+doc's own prior "three separate acquisitions" claim, which #1880 re-derived
+and found was never true of any single delivered chunk — its likely origin
+was counting `Admit` + `Lookup` + `Release` across a whole single-chunk
+transfer, not what "per delivered chunk" means for a method that never calls
+`Admit`. Never one held across `Add` or `Assemble` — the same off-lock-feed
+posture `Admit` already hands its
 accumulator back under, safe for the same reason: the conn is in the key and
 `appFrameWorker` serialises one conn's frames, so exactly one goroutine can
 ever reach one accumulator. `Deliver` still has no production caller;
@@ -354,13 +388,16 @@ that.
   — because `Admit` took no lock of its own at the time. #1795 removed that
   composition entirely: `Admit` now takes `mu` itself and calls the unlocked
   `insertLocked` directly, never `insert`. The rule is back to its simpler,
-  original form — five locked methods (`Admit`, `insert`, `Lookup`,
-  `Release`, `count`), none calling another — with `insertLocked` as the one
-  shared, lock-free core that two of them wrap. A rule correction chasing a
-  composition that the next slice would go on to remove is why the type doc
-  now states the rule in the form least likely to need re-scoping again:
-  "no method takes `mu` and then calls another that takes it," which is true
-  whether or not any method currently composes with another.
+  original form — at that point five locked methods (`Admit`, `insert`,
+  `Lookup`, `Release`, `count`), none calling another — with `insertLocked`
+  as the one shared, lock-free core that two of them wrap. A rule correction
+  chasing a composition that the next slice would go on to remove is why the
+  type doc now states the rule in the form least likely to need re-scoping
+  again: "no method takes `mu` and then calls another that takes it," which
+  is true whether or not any method currently composes with another. **#1880
+  grew the roster to seven** (`Admit`, `insert`, `Lookup`, `lookupAndStamp`,
+  `Release`, `count`, `lastChunkAt`) without touching the rule itself —
+  exactly what the re-scope-proof phrasing was written to survive.
 
 ## Directory resolution and creation (#1781)
 
@@ -741,6 +778,34 @@ surfaced:
   proves it. The cost is real and one-directional: a sentinel added later and
   not appended to that slice weakens the claim silently, with no test going
   red to flag the drift.
+- **Predicting a mutant's red set means reading whether each assertion is
+  absolute or relative, not just which fixture executes the mutated line**
+  (#1880). The spec predicted the unstamped-admission mutant (`insertLocked`
+  stores a zero `lastChunkAt`) would redden AC 1, AC 2 and AC 4; measured, it
+  reddened AC 1, AC 3 and AC 4 instead — AC 2 stayed green. AC 2's
+  post-delivery assertions are relational ("the delivered pair's stamp now
+  equals the advanced reading; the untouched pair's stamp is what it was"),
+  and a zero pre-delivery stamp that stays zero satisfies both comparisons
+  unchanged; AC 3 reddens instead because it asserts the stamp equals the
+  admission-time reading outright. The mutant was caught either way, so
+  nothing about the shipped code was wrong — but a prediction built from
+  "which test's fixture touches the mutated line" gets the row wrong where
+  "what shape each assertion actually compares against" would not.
+- **One mutant built to defend a by-construction claim doesn't inoculate the
+  rest of the same doc against the same failure mode** (#1880, code review
+  SHOULD FIX). Mutant 4 in this slice's spec exists specifically to pin
+  `insertLocked`'s incumbent-before-store ordering — the same by-construction
+  gap #1796 shipped unpinned and paid for, two entries above. The very next
+  paragraph of that same spec claimed, also by construction and with no
+  mutant of its own, that `Admit` and `insert` "inherit the stamp from this
+  one shared core." Code review measured it: an overlay mutant moving the
+  stamp out of `insertLocked` into `Admit`'s body passes green across all 151
+  tests, because `insert` is unexported and test-only and no production path
+  can reach it today. Not a behaviour bug in shipped code, but the exact
+  invariant #1881's reaper depends on, parked unpinned rather than fixed.
+  Having already named the by-construction trap once in a spec is not
+  evidence the rest of that spec is safe from it — every by-construction
+  sentence needs its own mutant, not just the one already flagged as risky.
 
 All three properties #1769 shipped without a test pin are now pinned,
 landed alongside #1770's own checks rather than left for a third mutation
