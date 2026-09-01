@@ -11,10 +11,12 @@ depends on `internal/protocol` and the standard library only — not
 a `permbridge.Request`, so it never holds a `ToolUseID` it has no business
 reading.
 
-**This slice has no consumer.** `streamApprovalBridge.Surface`
-(`cmd/pyry/modal_resolve_v2.go`) still hard-codes the permission-modal class
-for every approval, question or not; #1973 is the call site that consults
-`questionbridge.ToolName`/`Parse` and wires the result onto the wire.
+**Consumed by `streamApprovalBridge.Surface`** (`cmd/pyry/modal_resolve_v2.go`,
+\#1973) — the discriminant branch there calls `ToolName`/`Parse` ahead of the
+unchanged permission path, and `Registry.Record`/`Resolve` back it with the
+`byQuestion` correlation and the single no-answer arbiter. See
+[the deny-on-timeout doc's question-arm section](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#the-question-arm-1973--a-second-discriminant-ahead-of-the-permission-path)
+for the wiring and its lessons.
 
 ```go
 const ToolName = "AskUserQuestion"
@@ -178,11 +180,12 @@ pass because there's nothing to alias.
   log-free registries/parsers at the same trust boundary).
 - Specs: [`specs/architecture/1965-questionbridge-parse.md`](../../specs/architecture/1965-questionbridge-parse.md),
   [`specs/architecture/1975-questionbridge-batch-registry.md`](../../specs/architecture/1975-questionbridge-batch-registry.md).
-- Open: nothing calls `Parse` or `Registry` yet, deliberately. #1973 is the
-  surfacer: it wires the discriminant into `streamApprovalBridge.Surface`,
-  calls `Registry.Record`, and broadcasts, plus the no-answer dismissal paths
+- Open: #1973 (landed) is the surfacer — wires the discriminant into
+  `streamApprovalBridge.Surface`, calls `Registry.Record`, and broadcasts
+  `question_shown`, plus the no-answer dismissal paths via `Registry.Resolve`
   (#1974's `question_dismissed`,
   [question-batch payload](protocol-package-question-batch-payload.md)).
   #1907 is the answer path (`Registry.Resolve`, and must be the sole
-  dismissal broadcaster for an answered batch). #1928 is the connect-time
-  reconcile (`Registry.Snapshot`, mints/retires nothing).
+  dismissal broadcaster for an answered batch — #1973's retire backstop only
+  fires when that `Resolve` misses). #1928 is the connect-time reconcile
+  (`Registry.Snapshot`, mints/retires nothing).

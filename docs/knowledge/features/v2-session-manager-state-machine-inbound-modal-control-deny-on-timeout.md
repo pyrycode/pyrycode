@@ -196,3 +196,64 @@ See [permbridge-package.md](permbridge-package.md) for the registry primitive
 this bridges, [control-plane.md § Approve](control-plane.md#approve-mcpapprove-verb--forward-to-permbridge-block-default-deny-1104)
 for the `handleApprove`/`SetApprovalSurfacer` side, and
 [codebase/1080.md](../codebase/1080.md) for the ticket record.
+
+#### The question arm (#1973) — a second discriminant ahead of the permission path
+
+`Surface` gained a branch ahead of the arm above: when a
+[`questionbridge.Registry`](questionbridge-package.md) is wired and
+`questionbridge.Parse(req.ToolName, req.Input)` reports a well-formed,
+in-bounds batch, `surfaceQuestion` records it (`Registry.Record` mints the
+nonce and stamps the daemon-asserted ids), stores the correlation, and
+broadcasts one `question_shown` instead of a permission `modal_shown`. A
+malformed or out-of-bounds `AskUserQuestion` input — `Parse`'s two negatives
+are deliberately undistinguished — falls through to the unchanged permission
+path, the fail-closed degrade for a batch nobody can render. `retireQuestion`
+mirrors `retire`: unconditional correlation delete, then the registry's
+one-shot `Resolve` decides whether this closure or #1907's answer path
+broadcasts the dismissal.
+
+**`byQuestion` is a second map, not a second key space inside `byModal`, and
+that is load-bearing, not a style choice.** `ResolveStream` treats *any*
+`byModal` hit as "resolve this parked completer" — so a batch id stored
+there would let a `modal_answer` naming it allow claude's `AskUserQuestion`
+call with nobody having answered it. Today that is also gated one level up
+(`ResolveAnswer` looks the id up in `modalbridge` first, and a batch is never
+recorded there), but that guarantee belongs to another caller and holds only
+until one changes; a separate map makes "a lookup can't become an
+authorization" structural instead of borrowed. Generalizes: when a lookup
+result is used to decide whether to *act* (not just whether to *find*),
+sharing its key space with a second identity class turns every future caller
+of that map into a place the two classes can be confused.
+
+**An "inherits X for free" claim is worth resolving at the seam X actually
+reads, not at the seam that raised the claim.** The ticket asserted a
+question inherits #1912's deny-deadline re-arm (`permbridge.Register`'s
+per-parked-approval extension for an approval a client can still answer)
+with "no question-specific work". That re-arm's `AnswerableFunc` is wired to
+`ApprovalAnswerable`, which scans `byModal`'s values — so with the
+correlation correctly kept out of that map, a batch parked only in
+`byQuestion` would read as unanswerable and every question would deny at the
+first elapsed window, the opposite of inheriting the extension. Both
+`ApprovalAnswerable` and `ApprovalParked` were widened to read `byModal` and
+`byQuestion` through one `parkedToolUseIDs` helper (snapshot both under `mu`,
+release, then ask) so the inheritance is actually true rather than merely
+asserted. A claim that a mechanism applies "for free" to a new case is only
+as good as the seam it's checked against — this one would have passed every
+test that never lets a timer fire.
+
+**The dismissal `source` is one sentinel (`no_answer`), not the published
+`timeout`.** § Question's carry-over table anticipated `source: timeout` for
+the window-elapsing path and something else for disconnect/shutdown, but
+`retireQuestion`'s closure runs identically on all three no-answer terminal
+paths and carries nothing that tells them apart — emitting `timeout` would
+name a cause that is wrong two paths out of three. Fixed in
+`docs/protocol-mobile.md` by this ticket. The general lesson: before
+mirroring a documented vocabulary at the call site, check whether that call
+site can actually observe the distinction the vocabulary assumes — a table
+written ahead of the producer can encode a discrimination the eventual code
+position structurally cannot make.
+
+No audit record is written on this arm — `audit.Entry`'s `ModalID`/
+`ModalClass` fields are modal-shaped, and a batch has neither. See
+[questionbridge-package.md](questionbridge-package.md) for the registry this
+arm records into.

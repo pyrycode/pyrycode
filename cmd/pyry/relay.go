@@ -20,6 +20,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/questionbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 )
@@ -548,6 +549,14 @@ func startRelayV2(
 	// this registry's Snapshot). All three sit on this same instance.
 	modalReg := modalbridge.New()
 
+	// Daemon-singleton store of surfaced-but-unretired clarifying-question batches
+	// (#1975). Minted HERE beside modalReg rather than inside the bridge, for the
+	// reason modalReg is: #1928's connect-time reconcile reads its Snapshot from
+	// the manager config assembled below, which is built before the bridge exists.
+	// Its only live producer today is that bridge's Surface, wired after
+	// construction below; the answer path (#1907) is the second consumer.
+	questionReg := questionbridge.New()
+
 	// Inbound modal-control resolver (#727). Constructed here (not inline in the
 	// config literal below) so its #1014 emit seams can be set: a trust deny /
 	// deny-on-timeout surfaces a folder-not-trusted session_error via the shared
@@ -749,6 +758,15 @@ func startRelayV2(
 	// approvals (foreground/v1) leaves streamApprovals nil ⇒ keystroke-only.
 	if w.approvals != nil {
 		bridge := newStreamApprovalBridge(w.approvals, modalReg, mgr, w.active.CurrentConversation, ctx, logger)
+		// The question arm (#1973), assigned after construction rather than passed
+		// in — the same shape toolCallInFlight and modalResolver.activeConv /
+		// notifyBlocked use, and the only way to keep the constructor's fifteen call
+		// sites untouched. NO NIL GUARD is needed or wanted: questionReg is minted
+		// unconditionally above. Leaving it unset is what every other construction in
+		// the tree does, and there a question surfaces as the permission modal it did
+		// before this slice. Set before mgr.Run's goroutine starts below, like
+		// streamApprovals — no data race on the field.
+		bridge.questions = questionReg
 		// The #1919 report's membership half, assigned after construction rather
 		// than passed in — the same shape modalResolver.activeConv/notifyBlocked use
 		// above, and the only way to keep the constructor's 14 call sites untouched.

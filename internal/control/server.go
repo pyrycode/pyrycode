@@ -231,9 +231,13 @@ type Server struct {
 	approvalTimeout time.Duration
 
 	// approvalSurfacer, when set, raises a parked approval to interactive clients
-	// as a modal_shown (the #1080 stream modal wiring) and returns a retire
-	// closure handleApprove defers to guarantee client-side cleanup + dismissal on
-	// EVERY terminal Await path (answer, timeout, disconnect, shutdown). Installed
+	// as a modal_shown (the #1080 stream modal wiring) or, when the approval is
+	// claude's clarifying-question tool call, as a question_shown (#1973), and
+	// returns a retire closure handleApprove defers to guarantee client-side
+	// cleanup + dismissal on EVERY terminal Await path (answer, timeout,
+	// disconnect, shutdown). Which frame family a request raises is entirely the
+	// surfacer's business; this package neither branches on it nor names it in the
+	// seam's signature, which is why that signature did not have to move. Installed
 	// Rekeyer-style via SetApprovalSurfacer so NewServer's signature stays frozen;
 	// read once per request under s.mu alongside approvals. Nil (v1/foreground/
 	// pre-#1080) leaves handleApprove parking-and-awaiting with no client modal —
@@ -347,9 +351,10 @@ func (s *Server) SetApprovalRegistry(reg *permbridge.Registry, timeout time.Dura
 }
 
 // SetApprovalSurfacer installs the optional surfacer that raises a parked
-// approval to interactive clients as a modal_shown and returns a retire closure
-// handleApprove defers to guarantee client-side cleanup + dismissal on every
-// terminal Await path (#1080). Safe to call from any goroutine; canonically
+// approval to interactive clients — as a modal_shown, or as a question_shown when
+// the approval is claude's clarifying-question tool call (#1973) — and returns a
+// retire closure handleApprove defers to guarantee client-side cleanup +
+// dismissal on every terminal Await path (#1080). Safe to call from any goroutine; canonically
 // called once between NewServer and Serve, after SetApprovalRegistry, as part of
 // daemon startup. A nil surfacer (never calling this, or v1/foreground/relay
 // disabled) leaves handleApprove parking-and-awaiting with no client-facing modal
@@ -918,10 +923,13 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 	// lost caller and terminates the approval.
 	_ = conn.SetDeadline(time.Time{})
 
-	// Surface the parked approval to interactive clients as a modal_shown, if a
-	// surfacer is wired (#1080). The deferred retire is the guaranteed cleanup +
-	// client-dismissal backstop: it fires on the post-Await return, covering
-	// resolver-answer / timeout / disconnect / shutdown uniformly. A nil surfacer
+	// Surface the parked approval to interactive clients as a modal_shown — or, for
+	// claude's clarifying-question tool call, as a question_shown (#1973) — if a
+	// surfacer is wired (#1080). Which one is the surfacer's decision, taken from
+	// the request this package hands it; nothing here branches on the tool. The
+	// deferred retire is the guaranteed cleanup + client-dismissal backstop for
+	// either family: it fires on the post-Await return, covering resolver-answer /
+	// timeout / disconnect / shutdown uniformly. A nil surfacer
 	// (v1/foreground/relay disabled) makes this a no-op — the completer still
 	// resolves, just without a phone prompt.
 	retire := func() {}
