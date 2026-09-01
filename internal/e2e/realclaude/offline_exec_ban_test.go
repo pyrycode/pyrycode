@@ -50,6 +50,58 @@ import (
 // A dotted entry is matched as a selector, so `os.Setenv` is banned in a file
 // that uses `t.Setenv` on purpose.
 var finOfflineExecBans = map[string][]string{
+	// #1943. initialize_control_record_test.go's entry, copied WHOLE — the same
+	// seventeen names, for the reason that entry states: like #1696's and #1701's
+	// files, this one performs no I/O in EITHER direction. It builds a record and
+	// asserts on its own literals. Copying whole rather than hand-picking is the
+	// point: the check is an AST identifier match, so banning packageDir while
+	// leaving its wrappers setModeFixturePath, writeSetModeFixture and writeFixture
+	// unlisted leaves the ban true and the property false.
+	//
+	// The first five keep a SKIP out — resolveClaudeBin and
+	// WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is
+	// printed, and a skip exits 0, which reads as a pass under `make
+	// e2e-realclaude`, so reaching either would convert this file's "runs and
+	// passes with no credentials" into a silent skip indistinguishable from a pass
+	// at the gate.
+	//
+	// captureClaudeVersion matters here for #1701's reason, sharpened. It is the
+	// package's own direct `claude --version` exec and it returns the raw line AND
+	// its leading token — which is precisely what BOTH of askQuestionFixtureRecord's
+	// version fields are minted from — so it is the single call a developer
+	// populating this fixture is most likely to reach for, and
+	// `versionRaw, versionToken := captureClaudeVersion(t)` is already the literal
+	// line four sibling files in this package use. It t.Fatalf's rather than
+	// skipping, so it would not fake a pass; what it would destroy is this file's
+	// defining property, that it settles with no claude binary at all — and a real
+	// version line is not what the slug-shape property is written against, so it
+	// would take that guard down with it while this check stayed green.
+	//
+	// The three environment readers are the credential guard: this process
+	// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// The packageDir group plus filepath.Glob and the four os read/write names
+	// fence the file off from the committed testdata/, where the eight
+	// permission_protocol_* captures live. That group is the one that matters and
+	// it is not tidiness: `go test` runs in the package source directory, so a
+	// RELATIVE os.WriteFile("testdata/…") reaches and overwrites those captures
+	// while naming no wrapper at all.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: this file writes
+	// nothing and needs no directory. versionSlug, compactRawMessages and
+	// fixtureFieldNonZero are all pure — a regexp substitution, a json.Compact and
+	// a reflect kind switch — and are banned nowhere; this file calls all three.
+	// The limit of that, stated so nobody over-reads the ban: this check is per-file
+	// SYNTAX, not a call graph, so a banned read stays reachable through a helper
+	// the file calls while the ban stays green. A fourth helper added later
+	// inherits no such check.
+	"ask_user_question_record_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 	"finding_run_record_test.go": {
 		"probeClaudeVersion", "resolveClaudeBin", "WithWorktreeAuthenticated",
 		"pinReadState", "pinExit1", "pinScanArgv", "probeProcessSnapshot",
