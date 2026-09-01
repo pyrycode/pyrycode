@@ -27,8 +27,8 @@ well-formed, in-bounds batch. The two negative outcomes — not the question
 tool, and the question tool but rejected — are deliberately not
 distinguished; a caller that needs to tell them apart compares against the
 exported `ToolName` itself. `ConversationID`/`QuestionBatchID` stay
-unfilled — both are daemon-asserted; #1973 fills them, and #1975 mints the
-nonce.
+unfilled — both are daemon-asserted; `Registry.Record` (#1975, below) mints
+and stamps them.
 
 ## Bounds
 
@@ -48,6 +48,87 @@ header bound and no rune-count bound at all — the four claude-authored
 strings are bounded transitively, only by `maxInputBytes`. See [the
 payload doc's header-cap note](protocol-package-question-batch-payload.md)
 for the full resolution.
+
+## `Registry` — parking a surfaced batch (#1975)
+
+```go
+type Registry struct { /* sync.Mutex + map[string]protocol.QuestionShownPayload */ }
+func New() *Registry
+func (r *Registry) Record(p protocol.QuestionShownPayload, convID string) (protocol.QuestionShownPayload, error)
+func (r *Registry) Lookup(batchID string) (protocol.QuestionShownPayload, bool)
+func (r *Registry) Resolve(batchID string) (protocol.QuestionShownPayload, bool)
+func (r *Registry) Snapshot() []protocol.QuestionShownPayload
+```
+
+`Record` is the single mint site: it draws a `crypto/rand` UUIDv4
+(`newQuestionBatchID`, `newModalID`'s shape), stamps it and the caller's
+`convID` onto the payload — overwriting whatever arrived on `p`
+unconditionally, since `p` traces back to claude's tool call and an adopted
+id would let the caller pick its own routing key — and parks the batch
+before returning. A mint failure stores nothing and returns the zero payload
+plus a wrapped error, mirroring `modalbridge.Registry.Record`'s untested RNG
+branch. `Resolve`'s read-and-delete is one critical section, which is what
+makes the one-shot consume — "exactly one broadcaster" between #1907's
+answer path and #1973's retire backstop — structural rather than agreed
+between tickets. `Lookup` and `Snapshot` are pure reads; nothing calls any of
+the four yet, deliberately, as #1965 landed with no caller.
+
+**No stored-entry type**, unlike `modalbridge.Outstanding`: the parked thing
+*is* the stamped `protocol.QuestionShownPayload`, so a second type would only
+buy a field-by-field copy in and out.
+
+**Clone-on-read goes one nesting level deeper than `modalbridge`'s.**
+`Question.Options` is itself a slice, so a plain `slices.Clone` over
+`[]protocol.Question` still leaves every option slice aliased to the stored
+backing array. `cloneQuestions` clones the outer slice and each element's
+`Options`; applied on write in `Record` and on read in `Lookup`/`Snapshot`,
+never in `Resolve` (the entry is deleted in the same critical section, so
+there's no kept copy left to alias).
+
+### Trap: a field-by-field composite literal for a same-typed map value silently drops a future field
+
+`Record` parks the batch as a fresh `protocol.QuestionShownPayload{...}`
+composite literal (`ConversationID`, `QuestionBatchID`, `Questions` named
+individually) rather than cloning `p` itself and overwriting just those
+three. Because the map's value type is the same `QuestionShownPayload` the
+caller handed in, this costs nothing today — it's field-complete against the
+current three-field struct — but nothing catches it if the struct grows a
+fourth field: the composite literal silently zeroes the new field in every
+parked copy while the broadcast frame (built from `p`) carries it, so
+`Lookup`/`Snapshot` hand back a batch that has quietly diverged from what was
+surfaced. Go gives no compiler warning for a keyed literal that omits a
+field, and a test fixture built the same way (a struct literal that also
+predates the new field) won't catch it either — the drift is only visible by
+reading `Record` against the current field list of
+[`protocol.QuestionShownPayload`](protocol-package-question-batch-payload.md).
+The next ticket that adds a field to that type should change `Record` to
+copy `p` and override only `Questions`, `ConversationID`, `QuestionBatchID`,
+rather than re-listing fields. (Flagged in code review on PR #1977 as
+non-blocking; shipped as-is.)
+
+### No expiry — deliberate, and owned elsewhere
+
+The registry has no TTL and nothing bounds how long a batch can stay
+outstanding. This is deliberate, not an oversight: the terminal no-answer
+paths (caller disconnect, daemon shutdown, timeout) belong to #1973's retire
+backstop, which calls `Resolve`. A TTL added here would be a second retire
+authority that could disagree with that one. Until something calls
+`Resolve`, a batch stays in the map — the growth bound is entirely "however
+many callers actually let go", enforced outside this package.
+
+### Testing: a shallow-clone regression needs a ≥2-element nested fixture to catch
+
+A `go test -overlay` mutant reducing `cloneQuestions` to a bare
+`slices.Clone` (dropping the per-element `Options` clone) reddens only the
+assertions that mutate a returned question's *nested* `Options` element — a
+fixture with one option per question, or an isolation test that only mutates
+a top-level `Question` field, ships the shallow clone green. The registry's
+isolation test uses a two-question / two-option fixture and mutates at both
+nesting levels across all three hand-out sites (`Record`'s return, `Lookup`,
+`Snapshot`). Generalizes past this package: any clone-on-read isolation claim
+over a nested slice needs ≥2 elements at the nested level in its fixture, or
+the test can't tell a correct deep clone from a shallow one that happens to
+pass because there's nothing to alias.
 
 ## Lessons
 
@@ -95,9 +176,13 @@ for the full resolution.
 - [permbridge-package.md](permbridge-package.md), [modalbridge-package.md](modalbridge-package.md) —
   the two sibling packages this one is named after and modeled on (self-contained,
   log-free registries/parsers at the same trust boundary).
-- Spec: [`specs/architecture/1965-questionbridge-parse.md`](../../specs/architecture/1965-questionbridge-parse.md).
-- Open: the always-split consumer half — wiring the discriminant into
-  `streamApprovalBridge.Surface`, minting `QuestionBatchID` (#1975), and
-  emitting the no-answer dismissal paths (#1974's `question_dismissed`,
-  [question-batch payload](protocol-package-question-batch-payload.md)) —
-  is #1973. The per-device answer gate and the answered dismissal are #1907.
+- Specs: [`specs/architecture/1965-questionbridge-parse.md`](../../specs/architecture/1965-questionbridge-parse.md),
+  [`specs/architecture/1975-questionbridge-batch-registry.md`](../../specs/architecture/1975-questionbridge-batch-registry.md).
+- Open: nothing calls `Parse` or `Registry` yet, deliberately. #1973 is the
+  surfacer: it wires the discriminant into `streamApprovalBridge.Surface`,
+  calls `Registry.Record`, and broadcasts, plus the no-answer dismissal paths
+  (#1974's `question_dismissed`,
+  [question-batch payload](protocol-package-question-batch-payload.md)).
+  #1907 is the answer path (`Registry.Resolve`, and must be the sole
+  dismissal broadcaster for an answered batch). #1928 is the connect-time
+  reconcile (`Registry.Snapshot`, mints/retires nothing).
