@@ -35,19 +35,31 @@ import (
 //	phone send_message(knownConvID) → ack
 //	  → fakeclaude receives the user turn → control.Approve (blocks)
 //	  → daemon parks in permbridge → streamApprovalBridge.Surface → modal_shown → phone
-//	  → [answer] phone modal_answer(allow_once|reject_once) → ResolveAnswer → ResolveStream
-//	     [timeout] phone sends nothing → permbridge timer denies (PYRY_APPROVAL_TIMEOUT=2s)
+//	  → [answer]   phone modal_answer(allow_once|reject_once) → ResolveAnswer → ResolveStream
+//	     [extended] phone waits past TWO windows, then answers — the daemon must not have denied
+//	     [timeout]  phone's session ENDS, nobody can answer → permbridge timer denies
 //	  → control.Approve returns the verdict → fakeclaude reflects a needle assistant echo
 //	  → daemon stream drain → assistant_delta{needle} + modal_dismissed → phone asserts
 //
-// THE TIMEOUT CASE IS LOAD-BEARING (fail-closed). fakeclaude blocks on control.Approve
-// with a ctx (30s) far ABOVE the daemon's shrunk window (2s), so the deny it receives
-// is the DAEMON's own permbridge time.AfterFunc firing — not a fakeclaude self-timeout.
-// The three needles are distinct: approve-allow (fail-open regression), approve-deny
-// (the genuine daemon deny), approve-error (a client-side control.Approve failure that
-// must NEVER appear). The timeout case asserts approve-deny specifically AND forbids
-// approve-allow / approve-error, so a gate that fails open, hangs, or masks a client
-// error goes red loudly rather than false-passing.
+// THE WINDOW IS A RE-CHECK INTERVAL, NOT A DEADLINE (#1932). The daemon asks its own
+// liveness report at every expiry and re-arms the same window while the approval is
+// still parked on a person AND an interactive client is still connected. That splits
+// the fail-closed proof in two:
+//
+//   - extended: an answerer stays connected and answers late. Nothing may deny in the
+//     meantime, so the late allow still lands. Without the report wired the approval
+//     denies at 2s and this case reflects the forbidden approve-deny needle.
+//   - timeout: the answerer is REMOVED first, and only then does the window deny. This
+//     is the end-to-end proof that losing every answerer still denies — the property
+//     the extension must not cost.
+//
+// Both rest on the same margin: fakeclaude blocks on control.Approve with a ctx (30s)
+// far ABOVE the shrunk window (2s), so a deny it receives is the DAEMON's own
+// permbridge time.AfterFunc firing rather than a fakeclaude self-timeout. The three
+// needles are distinct: approve-allow (fail-open regression), approve-deny (the
+// genuine daemon deny), approve-error (a client-side control.Approve failure that must
+// NEVER appear). Each case asserts one and forbids the others, so a gate that fails
+// open, hangs, or masks a client error goes red loudly rather than false-passing.
 //
 // WHY THE IDS MUST LINE UP (same invariant as the send / interrupt siblings). The
 // assistant_delta is gated by the stream drain: its sink tag (the runner's
@@ -75,17 +87,30 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 
 	cases := []struct {
 		name string
-		// approvalTimeout shrinks (timeout case) or leaves generous (answer cases) the
-		// daemon's fail-closed window via PYRY_APPROVAL_TIMEOUT.
+		// approvalTimeout sets the daemon's window via PYRY_APPROVAL_TIMEOUT. Since
+		// #1932 that window is a RE-CHECK INTERVAL, not a hard deadline: it denies
+		// only on a reading that says nobody can answer, and otherwise re-arms.
 		approvalTimeout string
 		// answer, when non-empty, is the OptionID the phone answers with; empty means
 		// send NO answer (the timeout case).
 		answer string
+		// answerDelay holds the answer back this long past modal_shown. Non-zero only
+		// in the extended case, where it must span MORE THAN ONE window so the answer
+		// lands on an approval the daemon's own timer would already have denied
+		// without the liveness report wired.
+		answerDelay time.Duration
+		// loseAnswerer drives the fail-closed arm: instead of answering, phone A's
+		// session ENDS, so nobody is left able to answer — the condition the window
+		// still denies on. A second, later conn witnesses the outcome (see the arm).
+		loseAnswerer bool
 		// wantNeedle is the assistant_delta text the daemon's verdict must reflect;
 		// forbidNeedles must never appear (fail-open / masked-error guards).
 		wantNeedle    string
 		forbidNeedles []string
-		// wantOutcome / wantSource are the corroborating modal_dismissed vocabulary.
+		// wantOutcome / wantSource are the corroborating dismissal vocabulary: the
+		// modal_dismissed payload for the answered cases, and — because that broadcast
+		// goes out while nobody is connected in the loseAnswerer arm — retire's audit
+		// record, which carries the same pair.
 		wantOutcome string
 		wantSource  string
 	}{
@@ -108,11 +133,28 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			wantSource:      "remote",
 		},
 		{
-			// The load-bearing fail-closed case: no answer, the DAEMON denies on its own
-			// timer, and the fake receives that deny (never allow, never a masked error).
+			// The extension case (#1932): the phone stays connected and answers only
+			// after MORE THAN ONE window has elapsed. Because an interactive client is
+			// connected to a surfaced approval, every expiry re-arms instead of
+			// denying, so the late answer still lands as the verdict.
+			name:            "extended",
+			approvalTimeout: "2s",
+			answer:          allowOnce,
+			answerDelay:     5 * time.Second,
+			wantNeedle:      "approve-allow",
+			forbidNeedles:   []string{"approve-deny", "approve-error"},
+			wantOutcome:     allowOnce,
+			wantSource:      "remote",
+		},
+		{
+			// The load-bearing fail-closed case: no answer AND nobody left who could
+			// give one, so the DAEMON denies on its own timer within one further
+			// window, and the fake receives that deny (never allow, never a masked
+			// error). Losing the answerer is what makes the deny reachable at all now.
 			name:            "timeout",
 			approvalTimeout: "2s",
 			answer:          "",
+			loseAnswerer:    true,
 			wantNeedle:      "approve-deny",
 			forbidNeedles:   []string{"approve-allow", "approve-error"},
 			wantOutcome:     "denied_timeout",
@@ -311,19 +353,99 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				t.Fatalf("modal_shown option IDs = %v, want %v (the fixed screen-independent permission set)", gotIDs, wantIDs)
 			}
 
-			// --- Answer arm: gated phone resolves the verdict. Timeout arm: send nothing —
-			// the daemon's permbridge timer denies at PYRY_APPROVAL_TIMEOUT (2s).
-			if tc.answer != "" {
-				sealSend(protocol.Envelope{
-					ID:   answerReqID,
-					Type: protocol.TypeModalAnswer,
-					TS:   time.Now().UTC(),
-					Payload: mustJSON(t, protocol.ModalAnswerPayload{
-						ModalID:     shown.ModalID,
-						OptionID:    tc.answer,
-						AnswerToken: "e2e-1139-answer-token",
-					}),
+			// --- Post-modal_shown arms. The approval is now parked AND answerable —
+			// the state the extension protects, and the "was answerable at the window"
+			// half of the fail-closed proof.
+			if tc.loseAnswerer {
+				// Step 1: END phone A's session. A plain WS close is NOT usable: the
+				// relay↔binary leg is one multiplexed socket with no per-connection
+				// disconnect frame (docs/protocol-mobile.md, close code 4408), so a
+				// vanished phone stays in the daemon's active set until the 15-minute
+				// idle sweep — far past fakeclaude's 30s dial ctx, which would land the
+				// forbidden approve-error needle. A daemon-initiated close is the one
+				// prompt, phone-driven way out: an inner frame whose type the daemon
+				// does not recognise is rejected and its session deleted on the relay
+				// manager's own goroutine. This case is honest that it ENDS the session
+				// rather than pretending a WS close was observed.
+				unknownFrame, err := json.Marshal(protocol.InnerFrameV2{
+					Version: protocol.V2Version,
+					Type:    "e2e-1932-not-a-real-inner-type",
 				})
+				if err != nil {
+					t.Fatalf("marshal unknown inner frame: %v", err)
+				}
+				if err := phone.SendBytes(unknownFrame); err != nil {
+					t.Fatalf("phone send unknown inner frame: %v", err)
+				}
+				// Gate on the daemon's own rejection so the next step cannot begin
+				// while the session is still open — a sleep here would turn the
+				// fail-closed proof into a flake. The reason field is deliberately not
+				// asserted: the inner-frame decoder's type allowlist rejects the frame
+				// before the dispatch switch's own default arm can, and both land the
+				// same v2.state.reject and the same protocol-mismatch close.
+				waitForLog(t, h.Stderr, "v2.state.reject", 10*time.Second)
+				_ = phone.Close()
+
+				// Step 2: the deny itself. retire writes a SINGLE audit line carrying
+				// both the outcome vocabulary and THIS case's modal_id, so an unrelated
+				// record cannot satisfy it. This is the proof AC-3 asks for: an
+				// approval that was answerable one window ago is denied within one
+				// further window of losing its last answerer, and never extended again.
+				waitForLogLineAll(t, h.Stderr, []string{
+					"modal_id=" + shown.ModalID,
+					"outcome=" + tc.wantOutcome,
+					"source=" + tc.wantSource,
+				}, 20*time.Second)
+
+				// Step 3: re-dial a FRESH interactive conn asking for the whole
+				// retained tail (last_event_id 0 — the fresh-consumer input the ring
+				// answers with everything it still holds, so no event-id bookkeeping is
+				// needed). A witness is needed at all because a conn that cannot answer
+				// also cannot observe: interactive is the daemon's only v2 capability,
+				// and the turn stream and the modal fan-out both skip conns without it,
+				// so there is no "observer that cannot answer" conn shape to lean on.
+				//
+				// Gating this on step 2 is what structurally excludes the re-extension
+				// hazard the ticket flags: a phone returning BEFORE the window boundary
+				// would be an answerer again and re-extend, but this one returns to an
+				// approval that is already resolved.
+				redialCtx, redialCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer redialCancel()
+				phone, err = fakephone.Dial(redialCtx, fr.URL(), serverID, payload.Token, "phone-a")
+				if err != nil {
+					t.Fatalf("phone re-dial: %v", err)
+				}
+				// FRESH CipherStates, rebound into nextEnv's closure. v2 has no session
+				// resumption, so this is a new Noise_IK handshake: carrying the first
+				// conn's cipher states across would desync the AEAD nonce and surface
+				// as a decrypt failure that reads like a daemon bug. The send half is
+				// unused — this conn only witnesses the replay.
+				var fromStart uint64
+				_, replayRecv := driveHandshakeToOpenDaemonInteractiveResuming(t, phone, pubKey, payload.Token, &fromStart)
+				recvCS = replayRecv
+			} else {
+				// The extension arm's delay is the stimulus, not a synchronisation
+				// hack: the point is that MORE THAN ONE window elapses on a parked,
+				// answerable approval before the answer is sent. There is nothing to
+				// gate on — permbridge is log-free and an extension re-arms silently —
+				// and the wait is race-free in the safe direction: the phone stays
+				// connected throughout, so a window landing after this sleep extends
+				// too rather than racing the answer.
+				if tc.answerDelay > 0 {
+					time.Sleep(tc.answerDelay)
+				}
+				if tc.answer != "" {
+					sealSend(protocol.Envelope{
+						ID:   answerReqID,
+						Type: protocol.TypeModalAnswer,
+						TS:   time.Now().UTC(),
+						Payload: mustJSON(t, protocol.ModalAnswerPayload{
+							ModalID:     shown.ModalID,
+							OptionID:    tc.answer,
+							AnswerToken: "e2e-1139-answer-token",
+						}),
+					})
+				}
 			}
 
 			// --- Drain until BOTH observables land (any order, bounded — no hang):
@@ -333,8 +455,16 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 			//   2. modal_dismissed{wantOutcome, wantSource} — the corroborating vocabulary.
 			// The deadline is generous over the 2s daemon window so the timeout case proves
 			// the deny arrives promptly, not that the test outlasted a hang.
+			// modal_dismissed is a bridge broadcast, not a ring event, so in the
+			// loseAnswerer arm it went out while nobody was connected and is genuinely
+			// unobservable on the replay conn. Its vocabulary is not lost — step 2
+			// above gated on retire's audit line, which carries the same
+			// denied_timeout/timeout pair — so that arm starts already satisfied. The
+			// needle is what step 3's re-dial exists for: only it separates a genuine
+			// daemon deny from a masked client-side approve-error, which would have
+			// written a byte-identical audit record.
 			sawNeedle := false
-			sawDismissal := false
+			sawDismissal := tc.loseAnswerer
 			drainDeadline := time.Now().Add(25 * time.Second)
 			for !(sawNeedle && sawDismissal) {
 				env, ok := nextEnv(drainDeadline)
@@ -351,6 +481,14 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 					t.Fatalf("unexpected error envelope during drain: %s", string(env.Payload))
 				}
 				switch env.Type {
+				case protocol.TypeResync:
+					// Only reachable on the loseAnswerer arm's replay conn: the ring
+					// evicted this conversation's tail before the witness re-dialed, so
+					// the verdict needle and the tool_use join are both unobservable.
+					// Asserted so a future retention change fails legibly here instead
+					// of as a confusing "never observed the verdict" timeout below.
+					t.Fatalf("replay returned a resync marker (payload=%s): the conversation's retained tail was evicted "+
+						"before the witness reconnected, so this case can no longer observe the verdict it proves", string(env.Payload))
 				case protocol.TypeAssistantDelta:
 					var d protocol.AssistantDeltaPayload
 					if err := json.Unmarshal(env.Payload, &d); err != nil {
@@ -415,5 +553,36 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 				t.Errorf("tool_use ConversationID = %q, want %q", toolUse.ConversationID, knownConvID)
 			}
 		})
+	}
+}
+
+// waitForLogLineAll blocks until ONE line of buf contains every substring in subs,
+// or timeout elapses. It is waitForLog's line-scanning counterpart, and the
+// distinction is load-bearing rather than stylistic: waitForLog's whole-buffer
+// strings.Contains would be satisfied by two unrelated lines, whereas the audit
+// record this gates on only proves anything if a single record carries both the
+// deny vocabulary and the caller's own modal_id.
+//
+// It lives here rather than beside waitForLog because it has exactly one caller.
+func waitForLogLineAll(t *testing.T, buf *safeBuffer, subs []string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, line := range strings.Split(buf.String(), "\n") {
+			matched := true
+			for _, sub := range subs {
+				if !strings.Contains(line, sub) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no single log line carried all of %v within %s; log=\n%s", subs, timeout, buf.String())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
