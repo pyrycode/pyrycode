@@ -306,3 +306,70 @@ func TestQuestion_NilOptionsNormalises(t *testing.T) {
 		t.Errorf("MarshalJSON mutated the receiver: Options is now %v", q.Options)
 	}
 }
+
+// TestQuestionDismissedPayload_RoundTrip pins the dismissal frame's encoding
+// against the committed fixture: the three wire keys, their order, and the
+// envelope type they ride under.
+//
+// The three VALUES are pairwise distinct on purpose, and that is what makes the
+// field-reordering mutant detectable at all. roundTripEnvelope compares canonical
+// bytes, so a struct whose fields are swapped re-encodes to a different byte
+// string only when the values it swaps differ — a fixture reusing one value
+// across two keys would let the swap through green. The #1964 lesson generalised:
+// pin coverage per key by running the mutant, not by reading the fixture.
+//
+// The values are otherwise PLACEHOLDERS, the way #1964 records the question_shown
+// ids as placeholders. "unanswered" is not a sentinel this slice declares — the
+// outcome vocabulary is the producer's (#1973), and nothing may be sized or
+// switched on from these bytes.
+func TestQuestionDismissedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "question_dismissed.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeQuestionDismissed {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeQuestionDismissed)
+	}
+
+	var payload QuestionDismissedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.QuestionBatchID != "qb-4c19" {
+		t.Errorf("QuestionBatchID: got %q, want %q", payload.QuestionBatchID, "qb-4c19")
+	}
+	if payload.Outcome != "unanswered" {
+		t.Errorf("Outcome: got %q, want %q", payload.Outcome, "unanswered")
+	}
+	if payload.Source != "timeout" {
+		t.Errorf("Source: got %q, want %q", payload.Source, "timeout")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestQuestionDismissedPayload_ZeroValue_KeysPresent is the omitempty pin, and it
+// is a marshalled zero value rather than a second fixture because this payload is
+// flat: every key is reachable from one all-zero struct, so the second file
+// question_shown needed to reach its nested keys buys nothing here.
+//
+// It has to exist separately from the round trip above: omitempty elides a key
+// only at its zero value, and the fixture's three values are all non-empty, so an
+// omitempty added to any of them leaves that test entirely green.
+func TestQuestionDismissedPayload_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(QuestionDismissedPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	for _, want := range []string{
+		`"question_batch_id":""`,
+		`"outcome":""`,
+		`"source":""`,
+	} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
+		}
+	}
+}

@@ -989,16 +989,35 @@ const (
 // wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
 // dispatchAppFrame switch, and this slice ships no handler — so a verb declared
 // here would be red by construction, and filing it under excludedTypes to dodge
-// that would be a lie to the guard. No question-DISMISSAL type is declared here
-// either: whether a dismissal is its own type or reuses modal_dismissed is #1927's
-// design call, and declaring a type before its semantics are settled is worse than
-// declaring it late.
+// that would be a lie to the guard. That still holds for TypeQuestionDismissed
+// below: both constants here are outbound-only, and the inbound answer verb is
+// #1907's, to be declared with the handler that serves it.
 //
-// The declaring ticket (#1962) is wire vocabulary only: #1963 declares the payload
-// and its nested per-question and per-option types, #1965 the parse that fills
-// them from claude's tool input, and #1927 the producer that emits the frame.
-// pyrycode-desktop#849 decodes what this family lands. Same declare-then-emit
-// sequencing as #1405→#1410, #1616→#1638, #1704→#1848 and #1726.
+// THE DISMISSAL IS ITS OWN TYPE (#1974), settling what TypeQuestionShown's own
+// slice deferred. ModalDismissedPayload identifies what it clears by modal_id, and
+// a client decoding modal_dismissed routes it to the modal panel — so a
+// question_batch_id arriving in that field clears the wrong panel, or none.
+// Reusing the modal frame would have made the routing depend on a value's shape
+// instead of on the frame's name. Its payload is QuestionDismissedPayload
+// (questions.go): question_batch_id, outcome and source, field for field with the
+// modal frame's, including the absent conversation_id.
+//
+// The source values do NOT carry over intact from modal_dismissed, and that is
+// published in docs/protocol-mobile.md § Question rather than left to be assumed.
+// Of the modal frame's closed set {remote, local, timeout}, only timeout is
+// emitted by a slice in flight; remote and local are answered outcomes belonging
+// to the answer half. Two of the producer's terminal paths — the caller
+// disconnecting and the daemon shutting down — have NO member in that set at all,
+// so source is declared a plain string whose vocabulary the producer owns, the
+// Outcome/Class posture rather than the modal source's.
+//
+// The declaring tickets are wire vocabulary only: #1963 declares the batch payload
+// and its nested per-question and per-option types, #1974 the dismissal payload,
+// #1965 the parse that fills the batch from claude's tool input, #1975 the nonce
+// mint, and #1973 the producer that emits both frames. pyrycode-desktop#849
+// decodes what this family lands. Same declare-then-emit sequencing as
+// #1405→#1410, #1616→#1638, #1704→#1848 and #1726.
 const (
-	TypeQuestionShown = "question_shown" // binary → phone, outbound v2 clarifying-question batch
+	TypeQuestionShown     = "question_shown"     // binary → phone, outbound v2 clarifying-question batch
+	TypeQuestionDismissed = "question_dismissed" // binary → phone, outbound v2 question-batch resolution event
 )

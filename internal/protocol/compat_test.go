@@ -137,6 +137,10 @@ func TestIsKnownAppType(t *testing.T) {
 		// is also what keeps the type off the inbound path — a phone must never be
 		// able to send a question_shown frame into dispatch.Route.
 		{"question_shown-rejected", TypeQuestionShown, false, ErrUnknownType},
+		// the v2-only question dismissal: outbound binary → phone like the batch
+		// it retires, so an old phone never receives it and a phone must never be
+		// able to send one into dispatch.Route.
+		{"question_dismissed-rejected", TypeQuestionDismissed, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,6 +248,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeAttachmentChunk: true,
 	// v2 clarifying-question batch.
 	TypeQuestionShown: true,
+	// v2 clarifying-question dismissal.
+	TypeQuestionDismissed: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -317,6 +323,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeAttachmentChunk,
 		// v2 clarifying-question batch.
 		TypeQuestionShown,
+		// v2 clarifying-question dismissal.
+		TypeQuestionDismissed,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
