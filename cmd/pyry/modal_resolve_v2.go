@@ -588,6 +588,119 @@ const (
 	sourceQuestionNoAnswer    = "no_answer"
 )
 
+// The refusal dismissal vocabulary (#1990), published beside the no-answer pair
+// in docs/protocol-mobile.md § question_dismissed. Compile-time constants for
+// that pair's reason: neither can ever carry a claude-authored option label.
+//
+// sourceQuestionRemote is a local constant rather than string(audit.SourceRemote)
+// even though the two spell the same wire value. ResolveCancel derives its source
+// from the audit vocabulary because one value has to feed both its wire dismissal
+// and its audit entry; this path writes NO audit record (retireQuestion's doc
+// block says why — audit.Entry is the modal vocabulary and a batch has neither a
+// modal id nor a class), so there is no second consumer to keep in agreement, and
+// the question family's dismissal vocabulary stays readable in one block.
+const (
+	outcomeQuestionRefused = "refused"
+	sourceQuestionRemote   = "remote"
+)
+
+// reasonQuestionRefused is the deny message a refused batch returns to claude. A
+// compile-time constant — never host-derived, never client-supplied — exactly
+// like reasonRemoteDeny and permbridge's own reasonTimeout, so nothing an
+// operator or a paired device authored can reach claude through it.
+//
+// IT IS AN INSTRUCTION, NOT A REASON STRING, and that is the point of the slice.
+// A bare deny leaves claude free to answer its own question and carry on, which
+// is precisely what the operator declined to let it do; the wording has to say
+// that they want to discuss the question and that claude is to wait for their
+// next message.
+const reasonQuestionRefused = "The user declined to choose an option. They want to discuss this question before answering it: do not answer it yourself, do not assume an answer, and do not continue with the work it was blocking. Stop and wait for their next message."
+
+// RefuseQuestion resolves the outstanding batch named by batchID as a refusal:
+// claude's parked AskUserQuestion call is denied with the instruction above, and
+// every interactive client is told the panel is dead. It reports whether it
+// consumed the batch — a diagnostic for the caller's log record, never a
+// broadcast trigger (relay.QuestionResolver's doc block), and deliberately not
+// re-derivable by a second Lookup, which would reintroduce the race the one-shot
+// exists to remove.
+//
+// IT APPLIES NO AUTHORIZATION AND IS NOT SELF-GUARDING. Possession of the batch
+// id is treated as sufficient here, which is safe only because the per-device
+// answer gate (#1986) sits above it and because nothing reaches this path from
+// the wire until that gate exists — relay.QuestionResolver is unimplemented and
+// V2SessionConfig.QuestionResolver is nil at every construction site. A wiring
+// site that calls this without gating first lets any paired device refuse.
+//
+// THE ORDER OF THE FIRST THREE STEPS IS LOAD-BEARING IN BOTH DIRECTIONS:
+//
+//  1. Read the byQuestion correlation WITHOUT deleting it. retireQuestion is the
+//     sole, unconditional deleter on every terminal path, and ResolveStream sets
+//     the resolve-without-deleting precedent. A miss ends the call: an unknown
+//     batch, or one whose retire already ran. That read is also why a nil
+//     b.questions needs no guard — byQuestion is written only by surfaceQuestion,
+//     which Surface reaches only under a non-nil registry, so a nil registry
+//     implies an empty map and this step has already returned.
+//  2. Consume the registry one-shot. Reading the correlation FIRST is what keeps
+//     a refusal from winning the one-shot inside retireQuestion's window between
+//     its delete and its own Resolve — two separate critical sections, by design
+//     — and then finding no tool_use_id: claude would never be denied AND the
+//     backstop, having lost the one-shot, would broadcast nothing, leaving every
+//     client's panel up until the approval window elapsed.
+//  3. Hand claude the verdict only AFTER that consume. The control server's
+//     deferred retireQuestion runs the instant permbridge.Pending.Await returns,
+//     so denying first would let the backstop win the one-shot and broadcast
+//     `unanswered` for a batch the operator actually refused. ResolveAnswer keeps
+//     the same shape — it consumes the modalbridge entry before ResolveStream.
+//
+// THE DISMISSAL FANS OUT ON ITS OWN GOROUTINE, the one deliberate deviation from
+// retireQuestion's otherwise identical shape. broadcast calls bcast.ActiveConns,
+// which funnels a request onto the relay manager's Run select — so a caller
+// already on Run blocks there until the daemon ctx is cancelled, stalling the
+// manager and every approval waiting on it (ApprovalAnswerable's doc block
+// carries this file's record of the same hazard). retireQuestion is safe because
+// it runs on a control-server handler goroutine; this primitive's caller is
+// #1986's QuestionResolver implementation, which relay documents as running on
+// Run and which cannot hand the work off itself — it owes its own caller this
+// bool synchronously. Steps 1-3 therefore stay synchronous: the consume, the
+// verdict and the return value are all settled before this returns, and only the
+// fan-out is detached. That goroutine ends when the fan-out finishes, or at the
+// latest when the daemon ctx is cancelled (ActiveConns returns nil on a done ctx
+// and broadcast's Push loop returns early on teardown); at most one exists per
+// consumed refusal, and a refusal requires a batch parked on a human, so a client
+// cannot drive the count.
+//
+// SECURITY: the batch id is the only value that crosses in, and it is used solely
+// as a key — never logged here, never rendered, never sent back toward claude.
+// The path emits NO log record of its own: the relay handler already logs the
+// outcome with the batch id (the one field internal/protocol marks safe), so a
+// record here would duplicate it while its only new material — the batch body or
+// the deny message — is exactly what must not be logged.
+func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
+	b.mu.Lock()
+	toolUseID, ok := b.byQuestion[batchID]
+	b.mu.Unlock()
+	if !ok {
+		return false
+	}
+
+	if _, ok := b.questions.Resolve(batchID); !ok {
+		return false // the backstop, or an earlier refusal, already consumed it
+	}
+
+	// A Resolve miss here means permbridge already resolved this approval on its
+	// own timer — nothing to do, and the client must still learn the panel is
+	// dead, so the dismissal below is unconditional.
+	b.perm.Resolve(toolUseID, permbridge.Deny(reasonQuestionRefused))
+
+	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
+		QuestionBatchID: batchID,
+		Outcome:         outcomeQuestionRefused,
+		Source:          sourceQuestionRemote,
+	}, "stream_question.refused_push_err")
+
+	return true
+}
+
 // Surface raises a permbridge-parked approval to interactive clients as the same
 // permission modal_shown they already answer, and returns a retire closure the
 // control server defers for guaranteed cleanup + dismissal (AC-1). The prompt body
