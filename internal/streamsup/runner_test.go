@@ -1521,6 +1521,40 @@ func waitSpawn(t *testing.T, spawned <-chan struct{}, which string) {
 	}
 }
 
+// waitReadyMarkers blocks until b holds at least n echo_lines READY markers.
+//
+// onSpawn is NOT a write barrier: spawnAndWait signals it right after cmd.Start
+// returns, before the child has run an instruction of its own, so it orders that
+// child's EXISTENCE and never its first write. helperChild's echo_lines arm emits
+// its marker only once a whole exec + Go runtime start has completed in the fresh
+// process. The only thing standing between the signal and a Restart-driven kill is
+// cmd.Cancel's reap, which forks ps and parses the process table first — an
+// accidental grace window that is wide enough for the child to usually win
+// (measured at ~17-22 ms of child uptime here) but is unbounded and unsynchronised,
+// so under full-suite load the child sometimes loses. cmd.Wait drains only what the
+// child actually WROTE, so a child killed before its marker never writes it at all:
+// the loss is permanent for that run, and a later count reads short rather than
+// late (#1968).
+//
+// So: call this before killing any child whose marker a later count assertion
+// needs. Waiting for at least n keeps it a precondition rather than an assertion —
+// the exact count that attributes an echo to a particular child stays at the call
+// site that cares.
+func waitReadyMarkers(t *testing.T, b *safeBuffer, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := strings.Count(b.String(), "READY"); got >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %d READY markers, saw %d; got:\n%s",
+				n, strings.Count(b.String(), "READY"), b.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestRunner_BeginRotation_RefusesTurnWhileChildIsLive is the core assertion: the
 // gate refuses a turn while Stdin() is STILL NON-NIL. That non-vacuity guard is
 // what distinguishes it from TestRunner_WriteUserTurn_NoLiveChild
@@ -1707,6 +1741,11 @@ func TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed(t *testing.T) {
 	// onSpawn fires AFTER setStdin, so every receive here is a happens-after edge on
 	// that child's release point — no polling, no window calibration.
 	waitSpawn(t, spawned, "the first spawn")
+	// The marker needs its own barrier on top of that edge: Restart below kills this
+	// child, and onSpawn does not order the child's own first write against the kill
+	// — see waitReadyMarkers. Without this the marker is lost outright and (b)'s
+	// count reads one short, intermittently and only under load (#1968).
+	waitReadyMarkers(t, out, 1)
 	r.BeginRotation()
 
 	t.Run("an unauthorised bind leaves the gate armed", func(t *testing.T) {
@@ -1717,6 +1756,13 @@ func TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed(t *testing.T) {
 		// the same position the crash/backoff respawn occupies in the row below.
 		r.Restart(nil)
 		waitSpawn(t, spawned, "the Restart respawn")
+		// ABOVE the assertions, not below them, and that placement is load-bearing:
+		// under the #1482 mutant the first assertion fatals, so a barrier under it
+		// would never run, (b)'s RestartFresh would kill this child at today's width,
+		// and (b) would redden on the mutant — destroying the per-row discrimination
+		// this test exists to record. The wait above already put the count at 1, so
+		// only this child's own marker can satisfy 2.
+		waitReadyMarkers(t, out, 2)
 
 		if r.Stdin() == nil {
 			t.Fatal("Stdin() is nil after the Restart respawn; both assertions below would collapse into the pre-existing no-live-child refusal, which passes with or without the authorisation")
@@ -1743,6 +1789,13 @@ func TestRunner_BeginRotation_UnauthorisedBindLeavesTheGateArmed(t *testing.T) {
 		// Three children have existed and the first two are dead, so the echo above
 		// can only be the successor's: the turn observably landed in the
 		// post-rotation child, not in a pre-rotation one.
+		//
+		// This child needs no waitReadyMarkers of its own: echo_lines writes its
+		// marker before entering the scan loop, both writes cross the same pipe, and
+		// one copier appends them to out in order — so the echo cannot be here unless
+		// the marker already is. The barriers above cover the two children whose
+		// markers a kill could beat; the count stays EXACT, so a fourth spawn the test
+		// never drove still reddens this row.
 		if got := strings.Count(out.String(), "READY"); got != 3 {
 			t.Errorf("saw %d READY lines, want 3 (first spawn, Restart respawn, successor); the echo cannot be attributed to the successor otherwise:\n%s", got, out.String())
 		}

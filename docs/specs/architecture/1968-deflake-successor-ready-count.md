@@ -154,3 +154,29 @@ nothing. Every claim below is settled by a forced interleaving or a mutant, run 
   `make check`, so it would be dead surface that reads as coverage; the structural repair is the
   regression protection. Confirm during implementation that the overlay reproduces cleanly, and
   record the outcome under `## Revisions` if it does not.
+
+## Revisions
+
+### 2026-09-01 — implementation
+
+The design shipped unchanged; both Open questions resolved as provisionally answered, and the
+overlays reproduced cleanly, so no permanent knob was added. Recorded here are the measurements,
+which turned two of the plan's arguments into runs.
+
+- **The grace window is now measured, not inferred.** Every forced run logs the doomed child's
+  uptime at 17–22 ms — the width of `cmd.Cancel`'s `ps` snapshot. That is the whole margin the
+  test was relying on, and it is named in `waitReadyMarkers`' doc.
+- **Testing strategy items 2–3 came back as predicted**, and settle § Context's ambiguity claim:
+  delaying only child 1's marker, and delaying only child 2's, each reproduce the reported message
+  byte-for-byte (`saw 2 READY lines, want 3`, one surviving marker then the successor's echo). The
+  two are indistinguishable from the artifact because each is independently sufficient. Delaying
+  all three yields `saw 1 READY lines, want 3`. All three pass on the fixed tree.
+- **The barrier-placement claim was measured rather than asserted**, which the plan did not
+  require. Under the `#1482` mutant plus the forced delay: with the barrier above row (a)'s
+  assertions (shipped) row (a) FAILS and row (b) PASSES; with the barrier moved below them, row
+  (b) reddens too and the per-row discrimination is destroyed. The counterfactual is why the
+  placement carries a comment rather than being left to look incidental.
+- **Item 4 was upgraded from a structural argument to a run.** Injecting a fourth spawn the test
+  never drives reddens `the successor bind drops the gate` under the shipped exact assertion; the
+  same injection passes once the assertion is weakened to a `>= 3` floor. The exactness the ticket
+  asked to preserve is therefore load-bearing under measurement, not only by construction.
