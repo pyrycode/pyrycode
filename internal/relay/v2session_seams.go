@@ -505,4 +505,64 @@ type V2SessionConfig struct {
 	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#1863 / foreground /
 	// existing-test posture. #1864 wires the daemon-side producer.
 	RetainedModelLists func() []protocol.ModelListPayload
+
+	// OutstandingQuestions enumerates the daemon's currently-outstanding clarifying-
+	// question batches as marshal-ready question_shown payloads (each already stamped
+	// with its own question_batch_id and conversation_id) for connect-time reconcile
+	// (#1979) — the fourth Mode B instance after OutstandingModals, OutstandingQueues
+	// and RetainedModelLists. Called on the Run goroutine from handleNoiseInit's
+	// interactive-open tail; the returned payloads are unicast to the just-opened conn
+	// only. A pure read: it mints no nonce and retires no batch, so it neither re-arms
+	// the approval window nor changes answerability — a re-sent question_batch_id stays
+	// answerable exactly once, governed by the registry's one-shot Resolve, which this
+	// path never calls.
+	//
+	// The reconcile exists because question_shown has no other path to a late client:
+	// the raise-time broadcast reaches only whoever is connected at the instant claude
+	// asks, and the frame carries no event id, so it is not in the #647 turn-event
+	// replay ring either. reconcileModals' doc block records the twist that makes the
+	// miss cost more than a plain miss — the daemon counts an approval answerable while
+	// ANY interactive conn is open, so a reconnected client that was never sent the
+	// batch re-arms the window at every expiry while being structurally unable to
+	// answer it.
+	//
+	// A closure returning []protocol.QuestionShownPayload, not a
+	// *questionbridge.Registry: internal/relay imports neither internal/questionbridge
+	// nor internal/modalbridge, and protocol is already imported, so the payload
+	// crosses the boundary with no new import and no cycle (matching the three seams
+	// above — define the dependency where it is consumed). modalbridge carries nothing
+	// for this batch: it is its own frame family (#1962), because denyByClass makes
+	// DefaultOptionID the deny option and a clarifying question has no deny option and
+	// no safe default.
+	//
+	// Enumerate-all, not conversation-keyed. A V2Session carries no conversation id —
+	// it holds connID, state, resp, send, recv, device, interactive and peerStatic — so
+	// there is no "this conn's conversation" to key on at connect time.
+	// RetainedModelLists' doc block states the same reasoning.
+	//
+	// Order is not part of the contract, and a caller MUST correlate a batch by its
+	// question_batch_id rather than by its position in the returned slice: the
+	// production producer walks a map, whose order Snapshot's own doc leaves
+	// unspecified.
+	//
+	// SECURITY: this seam accepts ALREADY-BOUNDED payloads only. The reconcile path
+	// applies no bound of its own — not on how many batches are returned, not on any
+	// entry's text — because the bound is decided upstream at parse time
+	// (questionbridge.Parse: 1-4 questions, 2-4 options per question, over a
+	// maxInputBytes-capped tool input). A second cap here would be a second place the
+	// limit is decided and the two could disagree silently, so the obligation stays the
+	// producer's. Note that the per-batch bounds above do NOT bound how many batches
+	// can be outstanding at once: the registry holds no cardinality cap, so the
+	// aggregate is bounded only by claude's own ask concurrency and by every terminal
+	// path retiring its batch (#1973). On this path pushQueue's byte ceiling is the
+	// backstop; a cardinality cap, if one is ever wanted, belongs to questionbridge and
+	// not to either half of this reconcile. The four strings a batch carries — a
+	// Question's Text and Header, a QuestionOption's Label and Description — are
+	// claude-authored, untrusted text (Question's own doc) and are NEVER logged on the
+	// reconcile path.
+	//
+	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#1979 / foreground /
+	// existing-test posture. #1980 wires the daemon-side producer to
+	// questionbridge.Registry.Snapshot.
+	OutstandingQuestions func() []protocol.QuestionShownPayload
 }
