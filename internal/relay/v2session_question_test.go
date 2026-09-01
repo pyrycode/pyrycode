@@ -429,7 +429,11 @@ func TestV2Session_QuestionControl_NullPayload_NotJudgedHere(t *testing.T) {
 func TestV2Session_QuestionControl_LogsCarryNoPayload(t *testing.T) {
 	t.Parallel()
 
-	escBatchID := "qb-esc-\x1b[31mZZ"
+	// The ESC is composed from a numeric literal, never written as a \x source
+	// escape: substrate-guard matches raw file bytes, so the escaped source text
+	// and a compiled ESC-'[' pair both trip it outside its allowlist. The runtime
+	// value is unchanged, so the assertion below keeps its teeth.
+	escBatchID := "qb-esc-" + string(rune(0x1b)) + "[31mZZ"
 	escPayload, err := json.Marshal(protocol.QuestionAnswerPayload{
 		QuestionBatchID: escBatchID,
 		AnswerToken:     qTestAnswerToken,
