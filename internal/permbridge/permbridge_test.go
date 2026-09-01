@@ -414,8 +414,11 @@ func TestRegistry_UnanswerableDeniesAtWindow(t *testing.T) {
 			install: func(*Registry, *scriptedAnswerable) {},
 		},
 		{
-			name:    "report cleared with nil",
-			install: func(r *Registry, _ *scriptedAnswerable) { r.SetAnswerable(nil) },
+			// Installed first, then cleared: a row that only ever called
+			// SetAnswerable(nil) is behaviourally identical to the row above and
+			// cannot separate "nil clears" from "nil is silently ignored".
+			name:    "installed report cleared with nil",
+			install: func(r *Registry, s *scriptedAnswerable) { r.SetAnswerable(s.ask); r.SetAnswerable(nil) },
 		},
 		{
 			name:      "report says nobody can answer",
@@ -449,7 +452,46 @@ func TestRegistry_UnanswerableDeniesAtWindow(t *testing.T) {
 			case tt.wantAsked && n == 0:
 				t.Fatal("report was never asked, want at least one ask at the window")
 			case !tt.wantAsked && n != 0:
-				t.Fatalf("report asked %d times with no report installed, want 0", n)
+				t.Fatalf("report asked %d times with no live report, want 0", n)
+			}
+		})
+	}
+}
+
+// TestRegistry_NonPositiveWindowIsNeverExtended pins the guard that keeps
+// Register's promise that a non-positive timeout denies ≈immediately. The
+// promise is reachable in production — approvalTimeout passes whatever
+// PYRY_APPROVAL_TIMEOUT parses to straight through — and without the guard an
+// always-true report re-arms a zero window, spinning on the report as fast as
+// the scheduler allows instead of ever delivering a verdict.
+func TestRegistry_NonPositiveWindowIsNeverExtended(t *testing.T) {
+	t.Parallel()
+	for _, window := range []time.Duration{0, -time.Second} {
+		t.Run(window.String(), func(t *testing.T) {
+			t.Parallel()
+			r := New()
+			s := &scriptedAnswerable{} // answers true forever: only the guard can deny
+			r.SetAnswerable(s.ask)
+			req := sampleRequest("nonpositive-1")
+
+			p, err := r.Register("nonpositive-1", req, window)
+			if err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			v := awaitWithin(t, p, 2*time.Second)
+			if v.Behavior != BehaviorDeny {
+				t.Fatalf("Behavior = %q, want %q (fail-closed)", v.Behavior, BehaviorDeny)
+			}
+			if v.Message != reasonTimeout {
+				t.Fatalf("Message = %q, want %q", v.Message, reasonTimeout)
+			}
+			waitRetired(t, r, "nonpositive-1", time.Second)
+
+			// The report is not even consulted: a non-positive window is denied
+			// beside the no-report case, before the ask.
+			if n := s.calls.Load(); n != 0 {
+				t.Fatalf("report asked %d times for a %v window, want 0", n, window)
 			}
 		})
 	}
@@ -531,8 +573,16 @@ func TestRegistry_ReportNotConsultedOffTheExpiryPath(t *testing.T) {
 // TestRegistry_ExtendedAllowVsTimeoutRace carries the one-shot proof across the
 // extension path: however many windows an approval survives, exactly one caller
 // writes its verdict. Runs under -race.
+//
+// The per-iteration jitter is what makes it a race across that path rather than
+// a duplicate of TestRegistry_AllowVsTimeoutRace. Resolving immediately wins
+// before the first window on every iteration, so the timer branch is never taken
+// and the report is never asked; staggering the resolve across the extension
+// windows lands it on both sides. totalAsks is the non-vacuity guard for exactly
+// that — it reads 0 if the resolve ever stops reaching the timer path.
 func TestRegistry_ExtendedAllowVsTimeoutRace(t *testing.T) {
 	t.Parallel()
+	var totalAsks int64
 	for i := 0; i < 300; i++ {
 		r := New()
 		s := &scriptedAnswerable{answers: []bool{true, true, false}}
@@ -550,11 +600,16 @@ func TestRegistry_ExtendedAllowVsTimeoutRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			time.Sleep(time.Duration(i%5) * time.Millisecond)
 			resolvedOK.Store(r.Resolve(id, Allow(req.Input)))
 		}()
 
-		v := p.Await()
+		// Bounded rather than a bare Await: now that iterations reach the timer
+		// path, a lock-discipline regression is a named failure, not a go test
+		// timeout with no attribution.
+		v := awaitWithin(t, p, 2*time.Second)
 		wg.Wait()
+		totalAsks += s.calls.Load()
 
 		if resolvedOK.Load() {
 			if v.Behavior != BehaviorAllow {
@@ -572,6 +627,10 @@ func TestRegistry_ExtendedAllowVsTimeoutRace(t *testing.T) {
 			t.Fatalf("iter %d: a second verdict was delivered: %+v", i, extra)
 		default:
 		}
+	}
+
+	if totalAsks == 0 {
+		t.Fatal("the report was never asked across 300 iterations: every resolve won before the first window, so no iteration raced the extension path")
 	}
 }
 
