@@ -22,7 +22,12 @@ child gives tests a FIFO barrier, but only for lines the child lives long enough
 `onSpawn`'s signal proves the daemon **wrote** the initialize line, not that the child **read** it,
 so a restart test that kills child 1 as soon as child 2's `onSpawn` fires can beat the read and lose
 child 1's ask from the transcript — the count reads 1 where 2 was expected, intermittently. The fix
-is to wait for the first ask's own echo before restarting. Separately, a single-turn test cannot
+is to wait for the first ask's own echo before restarting. **#1968 hit the same trap over a different
+marker** — a test counting `echo_lines`' own startup `READY` write, not an ask — and traced *why* the
+race was winnable at all: the package's [teardown reap forks `ps` before SIGTERM](streamsup-package.md#teardown-sigterm--sigkill-grace--descendant-group-reap),
+an accidental ~17–22ms grace window nothing asked for, which is what usually (not always) lets a
+doomed child finish starting up before its kill lands. `onSpawn` never orders that write either way;
+any assertion counting a child's own output needs a barrier on that output specifically. Separately, a single-turn test cannot
 distinguish "once per spawn" from "once per turn" — the two cardinalities agree until a second turn
 is delivered, so the second turn is the assertion, not padding, for the exact `system`/`init`
 mistake this design avoids.
