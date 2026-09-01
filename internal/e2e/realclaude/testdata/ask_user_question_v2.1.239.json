@@ -1,0 +1,24 @@
+{
+  "claude_version_raw": "2.1.239 (Claude Code)",
+  "claude_version_slug": "2.1.239",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "For the in-memory key-value cache, which write strategy should it use?",
+        "header": "Write strategy",
+        "options": [
+          {
+            "label": "Write-through",
+            "description": "Writes go to the cache and the backing store synchronously, together."
+          },
+          {
+            "label": "Write-behind",
+            "description": "Writes go to the cache immediately and are persisted to the backing store asynchronously."
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

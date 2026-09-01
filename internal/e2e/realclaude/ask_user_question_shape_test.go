@@ -34,8 +34,9 @@ package realclaude
 // a multiSelect value means is the tool's own semantics, and a shape assertion
 // reddening on a well-formed false would be reporting a defect in a perfectly good
 // capture. And whether claude NESTS options under each question or FLATTENS them
-// across the batch is still unmeasured; askQuestionInput's doc states that one,
-// and #1938's capture is what settles it.
+// across the batch was unmeasured when these checks were written; #1938's capture
+// settled it NESTED, so the eight checks read the shape claude actually sends. See
+// askQuestionInput's doc.
 //
 // Three counts, reconciled once so that no reader has to do it again: EIGHT shape
 // checks; NINE reported names, the eight plus the decode guard, which is not a
@@ -43,16 +44,15 @@ package realclaude
 // negatives plus the positive control. The sole-redness property below is over
 // that whole table, the guard's row included, and over no one slice's own rows.
 //
-// # This file is #1942's offline successor and execs nothing
+// # This file ships the shape assertion offline and execs nothing
 //
-// Nine shipped comments in this package name #1942 and eight describe it as a
-// live-capture slice. One argues that "finOfflineExecBans is per-file, and #1942's
-// and #1938's live capture files exec, so neither can ever carry an entry". That
-// sentence is not a ruling about THIS file: this slice is #1942's successor, it
-// starts no child and reads neither a directory nor a capture file, and its
-// finOfflineExecBans entry below proves it. Those comments are not corrected here —
-// that belongs with the slice that builds what they describe, the convention #1941
-// applied when it left #1943's stale sentence alone. #1938 corrects them.
+// ask_user_question_writer_test.go argues that "finOfflineExecBans is per-file,
+// and #1938's live capture file execs, so it can never carry an entry". That
+// sentence is about the live capture and is not a ruling about THIS file: this
+// slice starts no child and reads neither a directory nor a capture file, and its
+// finOfflineExecBans entry below proves it. The forward references that used to
+// call the live capture #1942's have been corrected to name #1938, the slice that
+// actually builds it.
 //
 // # Offline, and further: no I/O in either direction
 //
@@ -85,11 +85,13 @@ import (
 // askQuestionInput is an AskUserQuestion call's input: a batch of questions.
 //
 // Whether claude nests options under each question or FLATTENS them across the
-// batch is UNMEASURED — nothing in this repo holds a real AskUserQuestion tool_use
-// block, so this target is written against the tool's documented shape and #1938's
-// capture is what settles it. Do not add a second accepted form to absorb the
-// other spelling in advance: a target accepting both cannot redden on either, and
-// reddening is how the capture reports the divergence.
+// batch was UNMEASURED when this target was written against the tool's documented
+// shape. #1938's capture settled it: the committed
+// testdata/ask_user_question_v2.1.239.json carries options NESTED inside its one
+// question, so this target reads what claude sends rather than what the
+// documentation says it sends. Do not add a second accepted form to absorb the
+// flattened spelling: a target accepting both cannot redden on either, and
+// reddening is how a later release's divergence gets reported.
 type askQuestionInput struct {
 	Questions []askQuestionQuestion `json:"questions"`
 }
