@@ -98,7 +98,7 @@ type parseCase struct {
 // than a partial or a truncated one" is asserted by the same reflect.DeepEqual
 // that checks the accepted rows, and the zero payload's empty ConversationID
 // and QuestionBatchID also pin that this parse never fills those two
-// daemon-asserted ids from claude's tool input (#1927 mints them).
+// daemon-asserted ids from claude's tool input (Registry.Record asserts both).
 func parseCases(t *testing.T) []parseCase {
 	t.Helper()
 	rec := readCapture(t)

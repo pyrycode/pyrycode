@@ -1,5 +1,6 @@
-// Package questionbridge recognises claude's clarifying-question tool call and
-// parses its batch into the outbound wire payload. It is named after its two
+// Package questionbridge recognises claude's clarifying-question tool call,
+// parses its batch into the outbound wire payload, and records the surfaced
+// batch under a one-time nonce it mints (Registry). It is named after its two
 // neighbours, internal/permbridge and internal/modalbridge, and sits beside them
 // rather than inside internal/protocol, which enforces no bound by design, or
 // inside modalbridge, whose whole argument (TypeQuestionShown's doc block) is
@@ -32,10 +33,11 @@
 // carries the same property for the same reason. Content-free decision logging
 // belongs at the call site, where a conversation id is in hand.
 //
-// NOTHING CALLS THIS YET. #1927 is the consumer: it wires the discriminant into
-// the stream approval surfacer, mints QuestionBatchID from crypto/rand and fills
-// ConversationID, both of which this package leaves deliberately zero because
-// they are daemon-asserted and never come from claude's tool input.
+// NOTHING CALLS THIS YET. #1973 is the consumer: it wires the discriminant into
+// the stream approval surfacer, then hands the parsed batch and its conversation
+// id to Registry.Record, which mints QuestionBatchID from crypto/rand and stamps
+// both ids on. Parse leaves the pair deliberately zero because they are
+// daemon-asserted and never come from claude's tool input.
 package questionbridge
 
 import (
