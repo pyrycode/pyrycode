@@ -105,6 +105,7 @@ search can reach it.
 - [ask_user_question_writer_test.go](e2e-realclaude-ask-user-question-writer-test-go.md) — the writer half of the `AskUserQuestion` capture family: a directory-injectable writer that refuses a record before any filesystem call when its marshalled bytes carry a denied value, proved offline with no claude binary and no credentials.
 - [ask_user_question_shape_test.go](e2e-realclaude-ask-user-question-shape-test-go.md) — the shape half of the `AskUserQuestion` capture family: a findings-returning check over the decoded `tool_input`, its first two checks (tool name, at least one question) each with a negative row, proved offline with no claude binary and no credentials.
 - [ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md) — the live half of the `AskUserQuestion` capture family: spawns a real claude with the daemon's permission flags, taps the call on the approve path via a stub control socket, denies every call, and commits the record.
+- [ask_user_question_reader_test.go](e2e-realclaude-ask-user-question-reader-test-go.md) — the read half of the `AskUserQuestion` capture family: a deterministic, credential-free glob-and-scan-and-decode pass over the committed capture, closing the "gate ran green, artifact never landed" gap the live half alone can't.
 - [e2e-harness.md](e2e-realclaude-e2e-harness-md.md) — see the document
 - [1415](e2e-realclaude-related-tickets-1415-1439.md) — see the document
 - [1440](e2e-realclaude-related-tickets-1440-1447.md) — see the document

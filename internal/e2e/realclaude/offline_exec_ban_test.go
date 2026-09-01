@@ -262,6 +262,86 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1939. The read half of this family, and the entry a reader will most want to
+	// check against its siblings rather than skim: it is composed from
+	// initialize_control_compare_test.go's — the other offline file in this package
+	// that legitimately reads testdata/ — and NOT copied from any of the four
+	// ask_user_question_* entries above. Those four ban filepath.Glob and os.ReadFile
+	// because they touch no disk at all; this file's entire subject is a glob over
+	// the committed captures and a read of each match, so inheriting either name
+	// would be RED AGAINST CORRECT CODE. Nineteen names.
+	//
+	// The first five keep a SKIP out, as everywhere in this family —
+	// resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body, after
+	// `=== RUN` is printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`. That hazard is this file's fourth acceptance criterion
+	// in person: its whole claim is that it executes and passes with no claude binary
+	// and no credentials, and a skip is indistinguishable from a pass at the gate.
+	// captureClaudeVersion t.Fatalf's rather than skipping, so it would not fake a
+	// pass; what it would destroy is the glob. A file that could learn the live
+	// version token would address the family by exact name, which hard-codes a
+	// version and leaves a re-capture unvalidated until someone edits the code.
+	//
+	// The three environment readers are the credential guard: this process
+	// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// packageDir STAYS BANNED, and this is the one place this entry diverges from
+	// the compare entry it is composed from rather than from the family above — say
+	// so out loud, because a reviewer diffing the two will otherwise read it as a
+	// copy error. That entry drops it; this file resolves its fixtures through
+	// askQuestionFixtureGlob's relative testdata/ prefix and through nothing else, so
+	// the ban costs it nothing and closes the route by which a later edit could join
+	// a fixture-derived value onto an absolute path. Its three wrappers go with it
+	// for the reason every entry here states: the check is an AST identifier match,
+	// so a file calling a wrapper reaches packageDir transitively while never naming
+	// it.
+	//
+	// The relative-path hazard the sibling entries close is in the WRITE direction,
+	// and this file reads and must NEVER write — so os.WriteFile, os.Create,
+	// writeFixture, writeSetModeFixture and setModeFixturePath all stay banned, and
+	// writeAskQuestionFixture is added beside them exactly as the compare entry adds
+	// writeInitControlFixture: it is this family's own writer, it mints its own name
+	// internally, and a single call would overwrite a committed capture from the file
+	// whose entire claim is that it only reads.
+	//
+	// scanAskQuestionFixture is the one name with no precedent in either source
+	// entry, and it is the trap in this file's header made deterministic. It is the
+	// obvious-looking reuse — this file scans, that function scans — and it is the
+	// WEAKER scan: it marshals the decoded record and searches that, so an unknown or
+	// renamed key carrying a credential is silently absent from what it sees, which
+	// is precisely the class this reader exists to catch. It also t.Fatalf's from
+	// inside itself and so cannot be ordered ahead of the decode. Prose could not
+	// stop it arriving as a plausible reuse; an AST match can.
+	//
+	// newDropcapScanner and realHome come from ask_user_question_writer_test.go's
+	// entry, and the pull is STRONGER here than there: that file receives its scanner
+	// as a parameter, while this one constructs its own, so the constructor is the
+	// single call a developer here reaches for. It reads os.Getenv twice and
+	// realHome, satisfying this entry's os.Getenv ban to the letter while destroying
+	// the offline property that ban protects — a verdict that is green or red
+	// depending on whose machine ran it — and it would put two live credentials in a
+	// struct one %v away from a salvaged run log. The check matches a bare *ast.Ident
+	// as well as a dotted selector, so both the wrapper and the plain realHome
+	// reference are caught.
+	//
+	// os.ReadDir stays banned although filepath.Glob does not, on #1764's ground: the
+	// two are routes to the same listing, and the hazard is a second, unanchored one
+	// past the glob constant this file's discovery claims to go through entirely.
+	// t.TempDir is absent and os.TempDir is not added, matching both source entries:
+	// this file writes nothing and needs no directory. dropcapFixedNeedles,
+	// dropcapContains and requireAskQuestionShape are banned nowhere and this file
+	// calls all three. The limit of all of it, stated so nobody over-reads the ban:
+	// this check is per-file SYNTAX, not a call graph, so a banned name stays
+	// reachable through a helper this file calls while the entry stays green.
+	"ask_user_question_reader_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"writeAskQuestionFixture", "scanAskQuestionFixture",
+		"newDropcapScanner", "realHome",
+		"os.WriteFile", "os.Create", "os.ReadDir",
+	},
 	"finding_run_record_test.go": {
 		"probeClaudeVersion", "resolveClaudeBin", "WithWorktreeAuthenticated",
 		"pinReadState", "pinExit1", "pinScanArgv", "probeProcessSnapshot",
