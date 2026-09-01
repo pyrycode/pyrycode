@@ -419,3 +419,21 @@ JSON** — which is the partial-population hazard, the case that matters. Conseq
   `QuestionAnswerPayload`'s doc block and into `docs/protocol-mobile.md` § `question_answer`. That is
   an addition to those files rather than one of the falsified claims § Design listed, and it is there
   because the next reader of that contract would otherwise re-derive it.
+
+### 2026-09-02 — rework (verifier review of PR #1989)
+
+No design change. Three SHOULD FIX findings, all one defect: § Design step 4's sweep covered every
+claim the ticket and this plan *enumerated*, but not the claims the diff itself falsified in files it
+was already opening. The step's own words ("sweep every clause each slice falsifies, not just the
+ones the ticket enumerates") already asked for the wider reading; what was missing is that a claim
+becomes false by virtue of the diff, not only by virtue of being listed. Corrected:
+
+- `internal/relay/v2session_seams.go` file header — "six seam interfaces" and their list; this slice
+  adds `QuestionResolver` as the seventh. (The stale `~260-line V2SessionConfig` figure in the same
+  header was already wrong on `main` and is left alone as out of scope.)
+- `internal/relay/v2session.go` → `dispatchAppFrame` doc block — its parenthetical enumerated the
+  eight control families handled inline on `Run`; this slice adds a ninth to that same switch.
+- `internal/protocol/codes.go` → the `TypeQuestionShown` / `TypeQuestionDismissed` block's "no
+  inbound request verb" paragraph — it still described the interim state (`excludedTypes` under a
+  pending-handler label, `TypeAttachmentChunk`'s precedent, "#1984 supplies the cases" in the future
+  tense) and so contradicted the paragraph below it that this slice had already past-tensed.

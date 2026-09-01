@@ -771,7 +771,7 @@ func (m *V2SessionManager) handleFrame(ctx context.Context, env protocol.Routing
 }
 
 // dispatchAppFrame runs on the Run goroutine. It splits an open-state
-// plaintext two ways: a v2 control envelope (rekey/modal/interrupt/
+// plaintext two ways: a v2 control envelope (rekey/modal/question/interrupt/
 // new_session/dequeue/snapshot/debug_bundle/settings) is handled inline on
 // Run — those handlers touch s.send / session state / timers and are fast,
 // with one exception: handleDebugBundleRequest is fast only because #1491 moved

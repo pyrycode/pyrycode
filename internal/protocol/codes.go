@@ -985,16 +985,17 @@ const (
 // cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
 //
 // No inbound request verb is declared here, and that is not an omission. Both
-// constants in this block are outbound-only. The inbound pair now exists —
-// TypeQuestionAnswer / TypeQuestionRefused, declared by #1983 in the block below
-// — but under the TypeAttachmentChunk precedent rather than beside these:
-// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
-// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
-// dispatchAppFrame switch, so a verb declared without its handler is red by
-// construction, and filing it under excludedTypes AS A PUSH to dodge that would
-// be a lie to the guard. The honest classification is excludedTypes under its own
-// pending-handler label; #1984 supplies the dispatchAppFrame cases and moves both
-// entries to inboundTypes. See that block for the reasoning in full.
+// constants in this block are outbound-only. The inbound pair — TypeQuestionAnswer
+// / TypeQuestionRefused, declared by #1983 in the block below — sits in
+// cmd/pyry/relay_guard_test.go's inboundTypes as "switch-intercepted" since #1984
+// gave internal/relay/v2session.go's dispatchAppFrame a case for each. Between
+// those two slices it was filed in excludedTypes under its own pending-handler
+// label, because TestEveryInboundV2TypeHasHandler's Assertion #1 requires an
+// inbound type to be wired into cmd/pyry/relay.go's Handlers map or that switch —
+// a verb declared without its handler is red by construction — and filing it AS A
+// PUSH to dodge that would have been a lie to the guard. TypeAttachmentChunk is
+// the same shape one step earlier, still excluded until #1744 dispatches it. See
+// that block for the reasoning in full.
 //
 // THE DISMISSAL IS ITS OWN TYPE (#1974), settling what TypeQuestionShown's own
 // slice deferred. ModalDismissedPayload identifies what it clears by modal_id, and

@@ -12,10 +12,10 @@ import (
 
 // This file holds the V2SessionManager's dependency contracts and configuration,
 // carved out of v2session.go so they read in isolation from the manager core.
-// It collects the six seam interfaces the manager depends on — ScreenSnapshotter,
-// Interrupter, SessionStarter, QueueRemover, SettingsUpdater, and ModalResolver —
-// declared consumer-side per CODING-STYLE ("define interfaces where they are
-// consumed"), plus the SettingsUpdate and RunConfig value types, the
+// It collects the seven seam interfaces the manager depends on —
+// ScreenSnapshotter, Interrupter, SessionStarter, QueueRemover, SettingsUpdater,
+// ModalResolver, and QuestionResolver — declared consumer-side per CODING-STYLE
+// ("define interfaces where they are consumed"), plus the SettingsUpdate and RunConfig value types, the
 // ErrSessionUnknown sentinel, and the ~260-line V2SessionConfig struct. Pure
 // move: same package, no behaviour
 // change, no call-site change. This is the final #964 slice, after #1026
