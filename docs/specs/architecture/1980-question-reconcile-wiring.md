@@ -267,3 +267,44 @@ handled there (and never logs the payload).
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-01
+
+## Revisions
+
+### 2026-09-01 — Open questions resolved, and two findings from running the mutants
+
+**Open question 1 (mint count) — kept, and the check order changed.** The mint-count
+assertion stays; it is two lines and makes "exactly one registry in this composition root"
+structural. But running the second-registry mutant showed the guard reported the wrong thing
+first: `soleRegistryMint` must `Fatal` (it returns a name the caller compares), so it
+silenced the co-reference check, and the failure a reader saw was call-count arithmetic
+rather than *"the reconcile would enumerate a registry the producer never records into"*.
+The co-reference check now runs first and the mint count is the backstop behind it. Both
+messages surface on the mutant. This is a departure from the fact ordering the Design
+section's table lists, and the table's numbering is now the guard's.
+
+**Open question 2 (note placement) — after both framing paragraphs.** § Question has two
+(the intro and the "modelled whole" argument) where § Modal has one. The note went after
+both, keeping the frame-shape argument adjacent to the frame it argues about.
+
+**Open question 3 (Mode B "Mechanism internals" sentence) — added, one clause.** #1979 is
+named alongside #877 and #878. The same sentence's answer-once pointer was extended to
+§ Question, which now states its own invariants; that is the second clause and the only
+addition beyond what AC4 names.
+
+**Finding — `go test -overlay` cannot mutation-test this guard, and the first mutant run
+was a false green.** All three guard mutants "passed" under an overlay before anything was
+wrong with them. The overlay rewrites what the *compiler* reads; this guard reads `relay.go`
+from disk through `parser.ParseFile` at test runtime, which the overlay never touches, so
+every mutant ran against the pristine file. Any future guard in this AST-reading family has
+the same property. The mutants were re-run by writing each over the real `relay.go` and
+restoring it in the same shell invocation, which is what produced the three distinct
+reddenings recorded above.
+
+**Finding — AC2's mutant reddens at the compiler, not at the guard.** Binding a consuming
+read (`OutstandingQuestions: questionReg.Resolve`) does not reach the guard at all: `Resolve`
+is `func(string) (protocol.QuestionShownPayload, bool)` and the seam is
+`func() []protocol.QuestionShownPayload`, so the package fails to build. `Lookup` fails the
+same way. That is a stronger gate than the guard, not a weaker one, but it means the guard's
+method-name assertion is currently unfalsifiable by any compilable mutant — `Registry` has
+no second method with `Snapshot`'s signature. It is kept as the belt for the day one is
+added, and this note records that it is a belt rather than the load-bearing check for AC2.

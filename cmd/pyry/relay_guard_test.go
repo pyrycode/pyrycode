@@ -287,6 +287,219 @@ func TestEveryInboundV2TypeHasHandler(t *testing.T) {
 	}
 }
 
+// Structural guard: the connect-time question reconcile's daemon-side source
+// (#1980) must stay bound to the SAME questionbridge registry the stream-approval
+// bridge's surfacer records into, through the registry's non-retiring read. It
+// exists because startRelayV2 has no test and cannot cheaply get one
+// (TestBootstrapSnapshotUsage's doc comment records that), so without a gate that
+// reads the wiring instead of constructing it, deleting the assignment or
+// repointing it at a freshly-minted registry would ship a reconcile that
+// enumerates an empty store — silently, on every client, caught by no test.
+//
+// It is a first-of-its-kind guard rather than a copy of a working one: none of the
+// three sibling seams is pinned at its assignment today. Grepping the twin field
+// names suggests otherwise and should not be believed — TestOutstandingQueues_*
+// and TestRetainedModelLists_* exercise the adapter functions outstandingQueues
+// and retainedModelLists directly, and every one of them stays green if the
+// matching line is deleted from the V2SessionConfig literal.
+//
+// Bare presence is not enough, which is why three facts are tied together rather
+// than one asserted. A gate that only checks the field appears as a key stays
+// green against `OutstandingQuestions: questionbridge.New().Snapshot` — a second
+// registry, always empty, nothing ever recording into it:
+//
+//  1. The sole OutstandingQuestions element binds a method value on a plain
+//     identifier, and the method is Snapshot. A call expression as the receiver is
+//     a second registry; Resolve or Lookup in place of Snapshot is a consuming read
+//     that would retire a batch at reconcile time and break "answerable exactly
+//     once" in the opposite direction — the batch would stop being answerable at
+//     the moment it was re-sent.
+//  2. questionbridge.New() is called exactly once in the file, so a second registry
+//     cannot exist here at all, and the identifier it defines is that receiver.
+//  3. The surfacer's question arm is fed that same identifier.
+//
+// Together those pin "one registry, minted once, read without retiring, shared by
+// the producer and the reconcile". The extractors below are new rather than calls
+// into mapLiteralKeys: that one matches a field whose value is a composite map
+// literal and runs every key through a protocol.Type* check, and this assignment is
+// a plain selector expression. parseGoFile and relayPath are the reusable parts.
+//
+// Every extractor Fatals with an "update the guard" message when the shape it
+// expects is absent, following this file's convention — a moved surface must be
+// loud, never vacuously green.
+func TestOutstandingQuestionsWiredToSurfacerRegistry(t *testing.T) {
+	t.Parallel()
+
+	// Parsed once and shared, unlike the coverage guard's per-file helpers above:
+	// all three facts live in relay.go, so three parses would buy nothing.
+	file := parseGoFile(t, relayPath)
+
+	registry, read := configSeamSelector(t, file, relayPath, questionSeamField)
+
+	// Fact #1b (AC #2): the non-retiring current-truth read, not a consuming one.
+	// Snapshot leaves the batch parked, so a batch outstanding across a reconnect is
+	// re-sent and stays answerable exactly once (Registry.Resolve's one-shot consume
+	// is what governs that, and this path never calls it), and a batch resolved while
+	// the client was away is absent from the read rather than re-sent.
+	if read != questionSeamRead {
+		t.Errorf("%s is bound to %s.%s, want %s.%s — %s is the registry's non-retiring "+
+			"current-truth read; a consuming read would retire the batch at reconcile time, "+
+			"making a re-sent batch unanswerable rather than answerable exactly once.",
+			questionSeamField, registry, read, registry, questionSeamRead, questionSeamRead)
+	}
+
+	// Fact #2 (AC #1): the producer and the reconcile share one instance. This is the
+	// half bare presence cannot carry — a seam reading a registry nothing records into
+	// enumerates an empty store on every connect and reconciles nothing, forever.
+	//
+	// Checked BEFORE the mint count below, deliberately. Any mutant that points the seam
+	// at a second registry trips both, and soleRegistryMint has to Fatal (it returns a
+	// name), so whichever runs first is the only one that speaks. This is the assertion
+	// that names the actual failure; the call-count arithmetic below is the backstop.
+	surfaced := fieldAssignIdent(t, file, relayPath, surfacerQuestionField)
+	if surfaced != registry {
+		t.Errorf("the surfacer's .%s arm is fed %q but %s reads %q — the reconcile would "+
+			"enumerate a registry the producer never records into.",
+			surfacerQuestionField, surfaced, questionSeamField, registry)
+	}
+
+	// Fact #3 (AC #1): exactly one registry is minted in this composition root, so a
+	// second one cannot exist here even unwired, and the seam reads the one that does.
+	minted := soleRegistryMint(t, file, relayPath, questionBridgePkg, questionBridgeMint)
+	if minted != registry {
+		t.Errorf("%s reads %s.%s, but the sole %s.%s() in %s defines %q — the seam is pointed "+
+			"at something other than the daemon-singleton registry.",
+			questionSeamField, registry, read, questionBridgePkg, questionBridgeMint, relayPath, minted)
+	}
+}
+
+// Names the question-reconcile guard reads relay.go for. Kept beside the guard
+// rather than in the const block above, which addresses the dispatch-coverage
+// surfaces.
+const (
+	questionSeamField     = "OutstandingQuestions"
+	questionSeamRead      = "Snapshot"
+	questionBridgePkg     = "questionbridge"
+	questionBridgeMint    = "New"
+	surfacerQuestionField = "questions"
+)
+
+// configSeamSelector returns the receiver identifier and method name of the sole
+// composite-literal element keyed fieldName, asserting the value is a method value
+// on a plain identifier (`reg.Method`). Anything else — a call expression receiver,
+// a closure, a nil — is Fatal: those are the shapes that would leave the seam
+// pointed at a registry the producer never touches, or at no registry at all.
+func configSeamSelector(t *testing.T, file *ast.File, path, fieldName string) (recv, method string) {
+	t.Helper()
+	found := 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		kv, ok := n.(*ast.KeyValueExpr)
+		if !ok {
+			return true
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != fieldName {
+			return true
+		}
+		found++
+		sel, ok := kv.Value.(*ast.SelectorExpr)
+		if !ok {
+			t.Fatalf("%s in %s is bound to a %T, want a method value on the registry identifier "+
+				"(reg.Method) — update the guard if the wiring shape changed deliberately.",
+				fieldName, path, kv.Value)
+		}
+		ident, ok := sel.X.(*ast.Ident)
+		if !ok {
+			t.Fatalf("%s in %s selects on a %T rather than a plain identifier — a registry "+
+				"constructed inline here is not the one the surfacer records into.",
+				fieldName, path, sel.X)
+		}
+		recv, method = ident.Name, sel.Sel.Name
+		return true
+	})
+	if found != 1 {
+		t.Fatalf("found %d %q elements in %s, want exactly 1 — the connect-time question "+
+			"reconcile (#1979) has no daemon-side source, so a client that connects while "+
+			"claude is waiting on a question is never sent it (#1980).", found, fieldName, path)
+	}
+	return recv, method
+}
+
+// soleRegistryMint asserts pkg.fn() is called exactly once in the file and that the
+// call is a plain short variable declaration, returning the identifier it defines.
+// Counting the calls and the declarations separately is what makes an inline
+// `pkg.fn().Method` fail here too: it raises the call count without adding a
+// declaration.
+func soleRegistryMint(t *testing.T, file *ast.File, path, pkg, fn string) string {
+	t.Helper()
+	calls := 0
+	var defined []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && isPkgCall(call.Fun, pkg, fn) {
+			calls++
+			return true
+		}
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || assign.Tok != token.DEFINE || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		call, ok := assign.Rhs[0].(*ast.CallExpr)
+		if !ok || !isPkgCall(call.Fun, pkg, fn) {
+			return true
+		}
+		if ident, ok := assign.Lhs[0].(*ast.Ident); ok {
+			defined = append(defined, ident.Name)
+		}
+		return true
+	})
+	if calls != 1 || len(defined) != 1 {
+		t.Fatalf("found %d %s.%s() call(s) and %d short-var-decl(s) binding one in %s, want "+
+			"exactly 1 of each — a second registry in this composition root is one the surfacer "+
+			"never records into, so a seam reading it would reconcile an empty store forever.",
+			calls, pkg, fn, len(defined), path)
+	}
+	return defined[0]
+}
+
+// fieldAssignIdent returns the identifier fed to the sole `<x>.field = <ident>`
+// assignment in the file.
+func fieldAssignIdent(t *testing.T, file *ast.File, path, field string) string {
+	t.Helper()
+	var names []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+			return true
+		}
+		sel, ok := assign.Lhs[0].(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != field {
+			return true
+		}
+		ident, ok := assign.Rhs[0].(*ast.Ident)
+		if !ok {
+			t.Fatalf("the .%s assignment in %s is fed a %T rather than a plain identifier — "+
+				"update the guard.", field, path, assign.Rhs[0])
+		}
+		names = append(names, ident.Name)
+		return true
+	})
+	if len(names) != 1 {
+		t.Fatalf("found %d `.%s =` assignments in %s, want exactly 1 — did the surfacer's "+
+			"question arm move or rename? Update the guard.", len(names), field, path)
+	}
+	return names[0]
+}
+
+// isPkgCall reports whether fun is the selector `pkg.name`.
+func isPkgCall(fun ast.Expr, pkg, name string) bool {
+	sel, ok := fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == pkg
+}
+
 // toSet builds a set from a slice of names, deduping.
 func toSet(names []string) map[string]bool {
 	set := make(map[string]bool, len(names))
