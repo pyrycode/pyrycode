@@ -392,11 +392,19 @@ func (m *V2SessionManager) broadcastModalDismissed(ctx context.Context, modalID 
 // reconcileModals unicasts the current outstanding modal_shown set to a freshly
 // interactive-open conn (#877). A phone that connects or reconnects after a
 // permission prompt was raised never saw the raise-time broadcastInteractive
-// fan-out (EventID == nil, so it is not in the turn-event replay ring); without
-// this, the prompt silently rides unseen on the daemon's 10-minute
-// deny-on-timeout — cmd/pyry's mcpApprovalTimeout, the window permbridge parks the
-// approval for, NOT this file's modalDenyTimeout (nothing in production arms that
-// one).
+// fan-out (EventID == nil, so it is not in the turn-event replay ring) — and since
+// #1932 that costs MORE than it used to, not less. The daemon's liveness report
+// (cmd/pyry's streamApprovalBridge.ApprovalAnswerable) counts an approval
+// answerable while ANY interactive conn is open, not while a conn that has actually
+// SEEN this modal is open. So the reconnected phone is counted as an answerer it
+// structurally cannot be — never sent a modal_shown, it can never produce a
+// modal_answer — yet its mere presence re-arms the window at every expiry. Without
+// this, the prompt rides unseen on an EXTENDED wait rather than a bounded one,
+// parking for as long as that phone stays connected instead of denying at the
+// window. Reconciling is what turns the counted answerer into a real one. The
+// window meant here is cmd/pyry's mcpApprovalTimeout, the window permbridge parks
+// the approval for, NOT this file's modalDenyTimeout (nothing in production arms
+// that one).
 //
 // Structural sibling of broadcastModalDismissed, minus the fan-out: it addresses
 // exactly s.connID rather than every open interactive conn, and sources the
