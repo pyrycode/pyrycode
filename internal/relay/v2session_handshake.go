@@ -344,6 +344,18 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// history.
 	m.reconcileModals(ctx, s)
 
+	// Connect-time question reconcile (#1979): re-send the still-outstanding
+	// question_shown batches to this conn — the fourth Mode B instance — so a client
+	// that connected/reconnected after claude asked a clarifying question can answer
+	// it instead of leaving it to run out its window unseen. No-op for a
+	// non-interactive conn or an unwired seam. Correctness does not depend on where in
+	// this tail the call lands: the four reconciles carry distinct payload types and
+	// none reads another's effect. Placed beside the modal reconcile rather than after
+	// the model-list one because an outstanding batch rides the daemon's approval
+	// window — the same time-sensitivity that put the modal reconcile first and the
+	// model-list reconcile last.
+	m.reconcileQuestions(ctx, s)
+
 	// Connect-time queue reconcile (#878): re-send the current queue_state for each
 	// non-empty conversation to this conn — the queue twin of the modal reconcile
 	// above — so a phone that connected/reconnected between backlog changes sees
