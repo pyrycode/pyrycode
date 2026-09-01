@@ -2,9 +2,9 @@
 
 package realclaude
 
-// #1951 and #1952 — the shape assertion over an AskUserQuestion capture: the
-// decode target declared whole, the findings-returning check with its
-// undecodable-input guard, the thin fatal wrapper other tests call, and SEVEN
+// #1951, #1952 and #1950 — the shape assertion over an AskUserQuestion capture:
+// the decode target declared whole, the findings-returning check with its
+// undecodable-input guard, the thin fatal wrapper other tests call, and EIGHT
 // shape checks with a negative row apiece.
 //
 // Two later slices must decide whether a captured AskUserQuestion payload is
@@ -21,18 +21,27 @@ package realclaude
 //
 // # The limit of this file, stated rather than left to be inferred
 //
-// SEVEN SHAPE CHECKS SHIP HERE: the tool-name field, the presence of at least one
-// question, and #1952's five over the FIRST question's contents — its question
-// text, its header, its option count, its option labels and its option
-// descriptions. The multiSelect key is the slice after this one, and nothing here
-// asserts on it.
+// EIGHT SHAPE CHECKS SHIP HERE: the tool-name field, the presence of at least one
+// question, #1952's five over the FIRST question's contents — its question text,
+// its header, its option count, its option labels and its option descriptions —
+// and #1950's, that the first question carries a multiSelect KEY at all.
 //
-// Three counts, reconciled once so that no reader has to do it again: SEVEN shape
-// checks; EIGHT reported names, the seven plus the decode guard, which is not a
-// shape check though its negative row is additional; and NINE table rows, the
-// eight negatives plus the positive control. The sole-redness property below is
-// over that whole table, the guard's row included — not over the five rows #1952
-// added.
+// Three limits bound all eight, stated here so nothing downstream over-reads them.
+// ONLY THE FIRST QUESTION IS CHECKED, for the reason askQuestionShapeFindings
+// argues: checking each would make the finding count depend on batch width. THE
+// MULTISELECT CHECK IS PRESENCE, NOT TRUTH — it does not judge the value, so false
+// passes, true passes, and an explicit null passes because the key IS there. What
+// a multiSelect value means is the tool's own semantics, and a shape assertion
+// reddening on a well-formed false would be reporting a defect in a perfectly good
+// capture. And whether claude NESTS options under each question or FLATTENS them
+// across the batch is still unmeasured; askQuestionInput's doc states that one,
+// and #1938's capture is what settles it.
+//
+// Three counts, reconciled once so that no reader has to do it again: EIGHT shape
+// checks; NINE reported names, the eight plus the decode guard, which is not a
+// shape check though its negative row is additional; and TEN table rows, the nine
+// negatives plus the positive control. The sole-redness property below is over
+// that whole table, the guard's row included, and over no one slice's own rows.
 //
 // # This file is #1942's offline successor and execs nothing
 //
@@ -85,17 +94,22 @@ type askQuestionInput struct {
 	Questions []askQuestionQuestion `json:"questions"`
 }
 
-// askQuestionQuestion is one question of the batch. Header, Question and both
-// option fields are READ by the content checks in askQuestionShapeFindings;
-// MULTISELECT ALONE IS DECLARED-AND-UNREAD, deliberately rather than by oversight,
-// because the multiSelect slice decodes this same object and a target grown one
-// field per slice is three decodes of one shape.
+// askQuestionQuestion is one question of the batch. EVERY FIELD IS READ by
+// askQuestionShapeFindings now — Header, Question and both option fields by
+// #1952's content checks, MultiSelect by #1950's presence check. It was declared
+// WHOLE rather than grown one field per slice on the argument that growing it that
+// way is three decodes of one shape; two slices have since extended the checks
+// over it without touching the type at all, which is that argument vindicated
+// rather than merely asserted.
 //
-// MULTISELECT IS json.RawMessage AND NOT A bool. A bool collapses an ABSENT key
-// into false and destroys the distinction the multiSelect slice needs: a raw
-// message leaves an absent key nil and a present false as the four bytes `false`.
-// Nothing here asserts on it; the field exists so that distinction survives to the
-// slice that reads it.
+// MULTISELECT IS json.RawMessage AND NOT A bool, and that is a LIVE CONSTRAINT now
+// rather than a promise to a later slice. A bool collapses an ABSENT key into
+// false; a raw message leaves an absent key nil and a present false as the four
+// bytes `false`, and that is the only reason presence is distinguishable from
+// truth here at all. The presence check is a LENGTH TEST over these raw bytes, so
+// retyping this field bool does not COMPILE — the strongest form the rule can take
+// and stronger than this paragraph, which is why the paragraph says why rather
+// than merely forbidding it.
 type askQuestionQuestion struct {
 	Header      string              `json:"header"`
 	Question    string              `json:"question"`
@@ -125,10 +139,13 @@ type askQuestionOption struct {
 // consumes the strings: those names are JSON tags a downstream decoder reads, so a
 // second hand-written copy earns its keep; these are internal diagnostics no code
 // outside this file consumes.
-// THE LAST TWO NAMES ARE PLURAL DELIBERATELY. Their checks scan every option and
+// THE TWO OPTION NAMES ARE PLURAL DELIBERATELY. Their checks scan every option and
 // report ONE name each, so the plural is the reader's cue that a single finding
 // covers the whole option batch however wide it is. option_count carries no
 // _nonempty suffix for a related reason: it is a bound, not an emptiness test.
+// multi_select_present is SINGULAR and carries _present rather than _nonempty for
+// that same reason once more — it reports on one key of one question, and it is a
+// key-presence test rather than an emptiness test over a value.
 const (
 	askQuestionCheckToolName                   = "tool_name"
 	askQuestionCheckToolInputDecodes           = "tool_input_decodes"
@@ -138,14 +155,16 @@ const (
 	askQuestionCheckOptionCount                = "option_count"
 	askQuestionCheckOptionLabelsNonEmpty       = "option_labels_nonempty"
 	askQuestionCheckOptionDescriptionsNonEmpty = "option_descriptions_nonempty"
+	askQuestionCheckMultiSelectPresent         = "multi_select_present"
 )
 
 // askQuestionCheckNames lists every name askQuestionShapeFindings can report, in
 // emit order. It exists for the vacuity control below — without which AC 1's "each
 // missed check named individually" is unpinned, since two colliding constants
 // would leave the wrapper's message unable to say which check fired while every
-// row still passed. #1952 appended its five names here and inherited that control
-// for free, so it now covers all EIGHT rather than the original three.
+// row still passed. #1952 appended its five names here and #1950 appended its one,
+// each inheriting that control for free rather than building its own, so it now
+// covers all NINE rather than the original three.
 //
 // Nothing asserts that this listing matches the emit sites. A reviewer diffs them,
 // the same instrument #1943 relies on for its tags.
@@ -159,6 +178,7 @@ func askQuestionCheckNames() []string {
 		askQuestionCheckOptionCount,
 		askQuestionCheckOptionLabelsNonEmpty,
 		askQuestionCheckOptionDescriptionsNonEmpty,
+		askQuestionCheckMultiSelectPresent,
 	}
 }
 
@@ -266,6 +286,25 @@ func askQuestionShapeFindings(rec *askQuestionFixtureRecord) []string {
 		findings = append(findings, askQuestionCheckOptionDescriptionsNonEmpty)
 	}
 
+	// PRESENCE, NOT TRUTH, and a length test is what keeps the two apart: an absent
+	// key leaves the json.RawMessage nil, while a present false is the four bytes
+	// `false`. There is no present-but-empty raw value to worry about — the JSON
+	// scanner skips leading whitespace before handing the token over.
+	//
+	// THE LENGTH IS NOT APPENDED, and neither is the value. Both are claude-derived,
+	// this function's return type is the file's security property, and this check is
+	// the one place where a "just for diagnostics" excerpt would be one edit away:
+	// the raw bytes are sitting right here where a diagnostic wants them.
+	//
+	// APPENDED LAST rather than slotted in beside the other per-question checks.
+	// #1952's five content rows stay contiguous that way, so the comment on the
+	// first of them still describes the group it sits on; and emit order pins
+	// nothing here, since every row trips exactly one check, so appending is simply
+	// what keeps askQuestionCheckNames' "in emit order" claim true.
+	if len(first.MultiSelect) == 0 {
+		findings = append(findings, askQuestionCheckMultiSelectPresent)
+	}
+
 	return findings
 }
 
@@ -326,8 +365,10 @@ func askQuestionShapeRecord(toolName, input string) *askQuestionFixtureRecord {
 }
 
 // TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput is
-// #1951's AC 1 and AC 2 and #1952's: the fully-populated fixture reports nothing,
-// which it does unchanged across #1952's five content checks, each check
+// #1951's AC 1 and AC 2, #1952's and #1950's: the fully-populated fixture reports
+// nothing, which it does unchanged across #1952's five content checks and #1950's
+// presence check — its "multiSelect":false passing is #1950's AC 1 in full, the
+// half of presence-not-truth no negative row can carry — each check
 // has its own record failing that check and no other, and an undecodable
 // tool_input is reported under its own name with the decoded checks skipped rather
 // than reported beside it.
@@ -344,12 +385,12 @@ func askQuestionShapeRecord(toolName, input string) *askQuestionFixtureRecord {
 //   - Delete the guard entirely and that row returns one finding under the WRONG
 //     name and reddens alone.
 //
-// #1952's five content checks are uniform in exactly that way, so they are stated
-// once rather than five times: delete any one check's append and that check's own
-// row compares an empty result against a one-name want and reddens, while the
-// other eight rows return exactly their own findings and stay green. The positive
-// control stays green under every one of the eight, because deleting a check can
-// only REMOVE findings.
+// #1952's five content checks and #1950's multi-select presence check are uniform
+// in exactly that way, so they are stated once rather than six times: delete any
+// one check's append and that check's own row compares an empty result against a
+// one-name want and reddens, while the other nine rows return exactly their own
+// findings and stay green. The positive control stays green under all nine,
+// because deleting a check can only REMOVE findings.
 //
 // The STRUCTURAL mutants are the ones worth naming individually, because each is
 // pinned by one fixture choice a later editor could undo without noticing:
@@ -369,6 +410,20 @@ func askQuestionShapeRecord(toolName, input string) *askQuestionFixtureRecord {
 //     empty-batch row PANICS on the first question rather than reddening on a
 //     mismatch. That is a red, but one that takes the package down with it: that
 //     gate's early return is load-bearing in a way the decode guard's is not.
+//   - Weaken the multi-select check from PRESENCE into TRUTH — decode the field and
+//     require true, or compare the raw bytes against `true` — and this one is
+//     caught LOUDLY rather than precisely, so it is stated as what it is. The
+//     absent-key row still reports its own name and stays green; SEVEN rows redden,
+//     the positive control and the wrong-tool-name row (both carrying
+//     askQuestionFixtureInput's "multiSelect":false) and all five content rows,
+//     each returning one finding more than it wants. The row that names the mutant
+//     is the POSITIVE CONTROL: a record carrying "multiSelect":false and expecting
+//     NO finding is the only thing that can tell presence from truth, which is why
+//     that half of the property needs no row of its own.
+//   - Retype MultiSelect bool and the package does not BUILD — len does not compile
+//     against a bool. Stated here beside the batch-length panic for the same
+//     reason: it is a red that does not look like a table row failing, and a reader
+//     expecting every mutant to surface as one is the reader who misreads it.
 //
 // Over-determination is unshippable for the same reason: a fixture tripping two
 // checks returns two findings and fails its exact match on UNMUTATED code, so such
@@ -426,11 +481,12 @@ func TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput(
 			// this file's finOfflineExecBans entry say something untrue about the only
 			// helper it calls.
 			//
-			// EVERY ONE OF THEM CARRIES "multiSelect":false. No check here reads it and
-			// it is not key-order decoration: the multiSelect slice adds a check over
-			// that key, and a row omitting it would trip that check too, turning all
-			// five of these rows over-determined and forcing that slice to rewrite
-			// them.
+			// EVERY ONE OF THEM CARRIES "multiSelect":false, and the forward reference
+			// that used to explain why has arrived: the multi-select presence check
+			// reads that key now, so carrying it is what keeps these five rows at ONE
+			// finding each rather than two. The prediction held — no row here was
+			// rewritten when that check landed, and the absent-key row after this group
+			// is the only fixture it had to add.
 			//
 			// This row and the one below it are the pair that is easy to get wrong. A
 			// literal blanking BOTH the question text and the header trips two checks,
@@ -485,6 +541,31 @@ func TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput(
 			rec: askQuestionShapeRecord("AskUserQuestion",
 				`{"questions":[{"header":"Scope-FIXTURE","question":"Which synthetic -FIXTURE option?","multiSelect":false,"options":[{"label":"first-FIXTURE","description":"the first synthetic option"},{"label":"second-FIXTURE","description":""}]}]}`),
 			want: []string{askQuestionCheckOptionDescriptionsNonEmpty},
+		},
+		{
+			// #1950's row, and it sits AFTER the content group rather than inside it so
+			// that group's shared comment above still describes the five rows it sits
+			// on. ONLY THE KEY IS MISSING from this literal — the header, the question
+			// text and both fully-populated options are all still here, in
+			// askQuestionFixtureInput's key order minus the one key. A fixture that also
+			// blanked a header or dropped an option would return TWO findings, fail its
+			// own exact match on unmutated code, and pin neither reason.
+			//
+			// ABSENT, not null and not false. "multiSelect":false is what the positive
+			// control carries and must PASS; "multiSelect":null decodes to the four
+			// bytes `null` and is therefore PRESENT by this check, which is correct —
+			// see the presence-not-truth limit in this file's header.
+			//
+			// A LOCAL LITERAL, deliberately not askQuestionPlantedInput, for the reason
+			// the single-option row above states — and the pull is stronger here,
+			// because that helper's own literal happens to carry "multiSelect":false and
+			// so looks like a near-complete base for this row. It is not: its signature
+			// takes a plant and every call site hands it a credential-shaped or
+			// operator-path value.
+			name: "an absent multi-select key is reported alone",
+			rec: askQuestionShapeRecord("AskUserQuestion",
+				`{"questions":[{"header":"Scope-FIXTURE","question":"Which synthetic -FIXTURE option?","options":[{"label":"first-FIXTURE","description":"the first synthetic option"},{"label":"second-FIXTURE","description":"the second synthetic option"}]}]}`),
+			want: []string{askQuestionCheckMultiSelectPresent},
 		},
 	}
 
