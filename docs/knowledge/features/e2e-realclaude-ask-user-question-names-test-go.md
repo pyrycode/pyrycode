@@ -71,4 +71,4 @@ touched.
 
 See `docs/specs/architecture/1944-*.md` for the full design, the per-mutant
 table, and the security review. The writer is #1941; the live capture is
-#1938.
+\#1938.

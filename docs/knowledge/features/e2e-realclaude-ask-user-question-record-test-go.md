@@ -16,7 +16,7 @@ sibling records tag `claude_version`. Registered in `finOfflineExecBans`
 (`offline_exec_ban_test.go`) with the same seventeen names
 `initialize_control_record_test.go` bans, copied whole. Zero production files
 touched; no writer, no filename and no live claude land here — those are
-#1941, #1944 and the live run that follows.
+\#1941, #1944 and the live run that follows.
 
 **Lessons that outlive this ticket:**
 
