@@ -11,7 +11,7 @@ package realclaude
 //
 // It holds no writer — that is #1941, which reads this record and this listing
 // and adds a deny-scan. No file namer: that is #1944. No shape assertion over a
-// real call: that is #1942. No live run: that is the capture, which spends the
+// real call: that is #1951, #1952 and #1950. No live run: that is #1938, which spends the
 // tokens and fills these fields from a real child. This file builds a record and
 // asserts on its own literals. It settles with no claude binary and no
 // credentials, and it performs no I/O in either direction.
@@ -216,7 +216,7 @@ type askQuestionFixtureField struct {
 
 // askQuestionFixtureFields lists rec's four fields once, in declaration order.
 // The round trip below applies it to both the marshalled record and its decode
-// and zips the two rather than restating the fields; #1941 and #1942 reach it the
+// and zips the two rather than restating the fields; #1941 reaches it the
 // same way.
 //
 // THE ROWS ARE HAND-WRITTEN ON PURPOSE. Do not regenerate them by walking the
@@ -365,7 +365,7 @@ func TestAskQuestionFullRecord_PinsTheFourFieldsAndTheSlugShape(t *testing.T) {
 		// versionSlug of THIS raw line's leading token. Splitting that token out of
 		// the line is captureClaudeVersion's job and that helper execs, so
 		// re-deriving it here would be new logic with no consumer in this slice.
-		// #1941's fill site is where the two fields are minted from one call and
+		// #1938's fill site is where the two fields are minted from one call and
 		// where that coupling becomes checkable.
 		if got := versionSlug(rec.ClaudeVersionRaw); got == rec.ClaudeVersionRaw {
 			t.Errorf("#1943: claude_version_raw %q survives versionSlug unchanged (slugs to %q); "+

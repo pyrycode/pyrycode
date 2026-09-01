@@ -38,7 +38,7 @@ package realclaude
 // doc comment forward-references "#1941's fill site is where the two fields are
 // minted from one call", which was written before this ticket was refined and is
 // STALE. This slice is offline and mints nothing from a live call; the fill site
-// is #1942's and #1938's. Do not build one here to satisfy that sentence, and do
+// is #1938's. Do not build one here to satisfy that sentence, and do
 // not edit it here either — the comment is #1943's and correcting it belongs
 // with the slice that actually builds the thing it describes.
 //
@@ -130,7 +130,7 @@ import (
 // CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY through os.Getenv; on a
 // subscription-login machine both are unset, scan classes an empty dynamic needle
 // as not-applied, and a writer refusing on notApplied would refuse EVERY live
-// capture #1942 and #1938 attempt. The vacuity control in
+// capture #1938 attempts. The vacuity control in
 // TestAskQuestionFixture_ScanRefusesAPlantedValue is where notApplied is
 // consumed, and that is the right place: offline, over a fixed-only scanner,
 // where a non-empty list means a fixed needle was wrongly marked dynamic.
@@ -151,8 +151,7 @@ import (
 //
 // t.Fatalf requires the test goroutine. This step and the writer are both called
 // directly from one, so t.Helper() plus a direct call is the whole discipline. Do
-// not call either from a goroutine — including from #1942's and #1938's stdout
-// readers.
+// not call either from a goroutine — including from #1938's stdout reader.
 func scanAskQuestionFixture(t *testing.T, scanner dropcapScanner, rec *askQuestionFixtureRecord) []byte {
 	t.Helper()
 
@@ -184,7 +183,7 @@ func scanAskQuestionFixture(t *testing.T, scanner dropcapScanner, rec *askQuesti
 //
 // dir IS A PARAMETER, DELIBERATELY — unlike writeSetModeFixture and writeFixture,
 // which resolve the real testdata/ through packageDir. That is what lets this
-// writer settle here against a t.TempDir(), with #1942 and #1938 passing the
+// writer settle here against a t.TempDir(), with #1938 passing the
 // committed directory later. os.MkdirAll is a no-op against a t.TempDir() and
 // against the committed directory alike, and is kept for the sibling writer's
 // reason: a live slice's directory may not exist.
@@ -229,10 +228,10 @@ func scanAskQuestionFixture(t *testing.T, scanner dropcapScanner, rec *askQuesti
 // THIS WRITER IS THE ONLY SANCTIONED ROUTE TO A COMMITTED AskUserQuestion
 // ARTIFACT, and the scan is BYPASSABLE BY CONSTRUCTION: a caller that marshals
 // the record and calls os.WriteFile itself never reaches the step, and nothing in
-// this slice can detect that — finOfflineExecBans is per-file, and #1942's and
-// #1938's live capture files exec, so neither can ever carry an entry. Addressed
-// to those two: a direct marshal-and-write of this record is the defect to look
-// for at review, and it is the one failure mode this net cannot see.
+// this slice can detect that — finOfflineExecBans is per-file, and #1938's live
+// capture file execs, so it can never carry an entry. Addressed to it: a direct
+// marshal-and-write of this record is the defect to look for at review, and it is
+// the one failure mode this net cannot see.
 //
 // THE .tmp NAME IS DERIVED FROM THE TARGET NAME, so two writers minting the same
 // name into one directory race on it. The two offline callers here cannot collide
@@ -402,12 +401,12 @@ func TestAskQuestionFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 			if !reflect.DeepEqual(want[i].value, have[i].value) {
 				// Printing both values is safe HERE AND ONLY HERE: every value in
 				// askQuestionFullRecord is a #1943 synthetic literal, and the
-				// diagnostic is worth more than protecting a fixture string. #1942
-				// and #1938 fill this same record's tool_input FROM A LIVE CHILD, so
-				// a row that printed it there would move claude-supplied bytes out of
+				// diagnostic is worth more than protecting a fixture string. #1938
+				// fills this same record's tool_input FROM A LIVE CHILD, so a row
+				// that printed it there would move claude-supplied bytes out of
 				// the scanned, committed artifact and into an unbounded run log this
 				// pipeline salvages — the exact exposure the scan exists to prevent.
-				// They must not inherit an unqualified print pattern from here.
+				// It must not inherit an unqualified print pattern from here.
 				t.Errorf("#1941: %s did not survive the round trip: wrote %v, read back %v; "+
 					"this record is the capture's only durable trace",
 					want[i].name, want[i].value, have[i].value)
@@ -480,8 +479,8 @@ func TestAskQuestionFixture_RoundTripsEveryFieldIntoOneNamedEntry(t *testing.T) 
 //
 // The failure messages name class constants and the hits slice. They never print
 // a plant, the blob, the record, the scanner or a needle. Every value here is
-// synthetic, so printing one would leak nothing; the point is that #1942 and
-// #1938 inherit no pattern worth copying.
+// synthetic, so printing one would leak nothing; the point is that #1938
+// inherits no pattern worth copying.
 func TestAskQuestionFixture_ScanRefusesAPlantedValue(t *testing.T) {
 	t.Parallel()
 

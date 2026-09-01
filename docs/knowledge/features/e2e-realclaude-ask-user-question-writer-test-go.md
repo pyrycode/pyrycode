@@ -5,7 +5,9 @@
 [ask_user_question_record_test.go](e2e-realclaude-ask-user-question-record-test-go.md)
 (#1943, the record) and
 [ask_user_question_names_test.go](e2e-realclaude-ask-user-question-names-test-go.md)
-(#1944, the namer), and preceding the live capture (#1942/#1938).
+(#1944, the namer), and preceding the live capture,
+[ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md)
+(#1938).
 `scanAskQuestionFixture` marshals the caller's record and refuses via
 `dropcapScanner.scan` before any filesystem call — its signature carries no
 directory, so it cannot create an entry under one even in principle;
@@ -58,8 +60,5 @@ sibling writer's fourteen names. Zero production files touched.
 
 See `docs/specs/architecture/1941-*.md` for the full design and the security
 review. The live capture that fills `ToolInput` from a real child is
-#1942/#1938; the stale "#1941's fill site" forward references in
-`askQuestionFullRecord`'s doc comment and in
-[ask_user_question_record_test.go](e2e-realclaude-ask-user-question-record-test-go.md)
-belong to that ticket, not this one — this slice is offline and mints
-nothing from a live call.
+[ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md)
+(#1938) alone; this slice is offline and mints nothing from a live call.

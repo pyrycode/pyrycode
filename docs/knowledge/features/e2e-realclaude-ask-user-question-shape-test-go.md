@@ -89,9 +89,9 @@ names, not the fourteen-name entry beside it that
 See `docs/specs/architecture/1951-*.md` and
 `docs/specs/architecture/1952-ask-user-question-shape-content-checks.md` for
 the full design and security reviews. The live capture that fills
-`ToolInput` from a real child is #1938 alone; the stale "#1942 is a
-live-capture slice" forward references in `ask_user_question_writer_test.go`
-and
-[ask_user_question_record_test.go](e2e-realclaude-ask-user-question-record-test-go.md)
-belong to that ticket, not this one — this slice reads no file, resolves no
-directory, and starts no child process.
+`ToolInput` from a real child is
+[ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md)
+(#1938) alone — this slice reads no file, resolves no directory, and starts
+no child process. That capture confirmed `askQuestionInput`'s decode target
+against a real call: options arrive nested under each question, not
+flattened, and all eight checks below passed with no divergence to report.

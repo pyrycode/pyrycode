@@ -51,7 +51,7 @@ touched; no writer, no filename and no live claude land here — those are
   nothing in the round trip, the ordered-name literal or the distinctness
   check would catch two fields being reordered, even though
   `askQuestionFixtureFields`'s doc comment claims "in declaration order."
-  Worth knowing for the live fill site (#1942/#1938) before relying on it —
+  Worth knowing for the live fill site (#1938, below) before relying on it —
   #1941's own round trip (see the writer's document) reuses this same
   listing and inherits the same gap, unpinned by declaration order.
 
@@ -59,7 +59,11 @@ See `docs/specs/architecture/1943-*.md` for the full design and field-value
 table. The write half —
 [ask_user_question_writer_test.go](e2e-realclaude-ask-user-question-writer-test-go.md)
 (#1941) — refuses to write by scanning this record's marshalled bytes, but
-mints nothing from a live call; it is offline, with no fill site. The writer
-that fills `ToolInput` from a real child is #1942/#1938, not #1941 — this
-sentence previously named #1941 for that role, which was stale even before
-#1941 shipped.
+mints nothing from a live call; it is offline, with no fill site. The live
+run that fills `ToolInput` from a real child is
+[ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md)
+(#1938), which also found that claude's wire key order (`question, header,
+options, multiSelect`) does not match this file's `askQuestionFixtureFields`
+listing (`header, question, multiSelect, options`) — nothing asserts over
+captured key order today, so nothing here needs to change, but the offline
+reader (#1939) should not assume the two orderings match.
