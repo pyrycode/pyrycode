@@ -2080,3 +2080,56 @@ func TestQuestionShownType_IsNotClaudesVocabulary(t *testing.T) {
 		t.Errorf("wire type: got %q, want %q", TypeQuestionShown, "question_shown")
 	}
 }
+
+// TestQuestionDismissedType_IsNotClaudesVocabulary pins the dismissal frame's
+// name the way TestQuestionShownType_IsNotClaudesVocabulary pins its sibling's,
+// and inherits that pin's containment lattice wholesale: the SINGULAR question is
+// a substring of the correct name, so it cannot be a check, while the PLURAL
+// questions (claude's array key) and ask (the root every snake-cased derivation
+// of AskUserQuestion carries) both discriminate. ask is safe here for the reason
+// recorded there and re-checked here rather than assumed — ask is a substring of
+// task, and this name carries no task word.
+//
+// What is NEW is the modal check, and it is an EQUALITY rather than a
+// containment. dismissed is shared with modal_dismissed, so a
+// strings.Contains(…, "dismissed") would be RED against the correct name — the
+// same shape of trap the singular subject noun poses one step over, arriving from
+// the sibling frame instead of from claude.
+//
+// That equality is subsumed by the exact pin below it as a PREDICATE: anything
+// equal to question_dismissed is already unequal to modal_dismissed. It is not
+// subsumed as a standing bar, which is why it stays. A rename edits the exact
+// pin's literal — that is what renaming means — while a check written against the
+// other CONSTANT survives the edit and still refuses the one wrong answer that
+// silently clears the wrong client panel. It also names that failure in its own
+// message rather than reporting it as a generic got/want.
+//
+// Unlike the sibling pin, there is no claude-derived risk in the dismissal half
+// of the name: claude's AskUserQuestion has no dismissal concept and contributes
+// no vocabulary here. The two negative checks guard the question half, which this
+// frame inherits from the family.
+//
+// There is no payload-bytes half. The shape lands in the same slice as the name
+// (#1974), and its keys are pinned by TestQuestionDismissedPayload_RoundTrip and
+// TestQuestionDismissedPayload_ZeroValue_KeysPresent rather than restated here.
+func TestQuestionDismissedType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeQuestionDismissed == "AskUserQuestion" {
+		t.Errorf("wire type is claude's tool name %q; it must be the daemon's own name", TypeQuestionDismissed)
+	}
+	if strings.Contains(TypeQuestionDismissed, "ask") {
+		t.Errorf("wire type %q is derived from claude's tool name (contains %q)", TypeQuestionDismissed, "ask")
+	}
+	if strings.Contains(TypeQuestionDismissed, "questions") {
+		t.Errorf("wire type %q is derived from claude's array key (contains %q)", TypeQuestionDismissed, "questions")
+	}
+	// The dismissal must be its OWN type, not the modal frame's. A client routes
+	// modal_dismissed to the modal panel, so a question batch arriving under that
+	// name clears the wrong panel or none.
+	if TypeQuestionDismissed == TypeModalDismissed {
+		t.Errorf("wire type reuses the modal frame's name %q; the question dismissal is its own type", TypeModalDismissed)
+	}
+	// The exact pin, naming what the frame IS to a client.
+	if TypeQuestionDismissed != "question_dismissed" {
+		t.Errorf("wire type: got %q, want %q", TypeQuestionDismissed, "question_dismissed")
+	}
+}

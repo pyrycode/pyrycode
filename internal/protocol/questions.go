@@ -2,17 +2,18 @@ package protocol
 
 import "encoding/json"
 
-// Question-batch v2 wire payloads (#1963). These describe the clarifying-question
-// batch claude's AskUserQuestion tool call carries, surfaced to a client as one
-// frame whose Type is TypeQuestionShown. Wire vocabulary only: pure structs and
-// their serialization.
+// Question-batch v2 wire payloads (#1963, dismissal #1974). These describe the
+// clarifying-question batch claude's AskUserQuestion tool call carries, surfaced
+// to a client as one frame whose Type is TypeQuestionShown, and the frame that
+// retires it (TypeQuestionDismissed). Wire vocabulary only: pure structs and their
+// serialization.
 //
-// NOTHING CONSTRUCTS THEM. #1965 owns the parse that fills them from claude's
-// tool input, #1927 the producer that emits the frame and mints the nonce, and
-// pyrycode-desktop#849 the client that decodes them. Declared ahead of all three
-// so that client can be written against the shape — the sequencing #1405 used
-// ahead of #1410, #1616 ahead of #1638, #1704 ahead of #1848 and #1726 ahead of
-// #1727.
+// NOTHING CONSTRUCTS THEM. #1965 owns the parse that fills the batch from claude's
+// tool input, #1973 the producer that emits both frames, #1975 the nonce mint,
+// #1907 the inbound answer, and pyrycode-desktop#849 the client that decodes them.
+// Declared ahead of all of those so that client can be written against the shape —
+// the sequencing #1405 used ahead of #1410, #1616 ahead of #1638, #1704 ahead of
+// #1848 and #1726 ahead of #1727.
 //
 // The testdata fixtures and the docs/protocol-mobile.md section HAVE LANDED
 // (#1964): that section is where the field-by-field contract, the bounds and
@@ -66,14 +67,15 @@ import "encoding/json"
 // properties carry across: a one-time, opaque, UNGUESSABLE nonce minted per
 // surfaced batch, which an inbound answer is resolved against server-side rather
 // than trusting a phone-asserted conversation. "Unguessable" is what obliges
-// #1927's minting to crypto/rand, mirroring #703's for ModalID. Adding this
+// #1975's minting to crypto/rand, mirroring #703's for ModalID. Adding this
 // outbound key loosens no inbound guarantee.
 //
 // It is QuestionBatchID rather than QuestionID because this payload also declares
 // a nested Question type: a question_id key sitting beside a questions array
 // would read as that type's key, and Question carries no id at all, so the
 // misreading is not idle. The _batch_ is what makes the field self-describing to
-// #1927 and to pyrycode-desktop#849.
+// #1973 and to pyrycode-desktop#849. QuestionDismissedPayload below carries the
+// same key, which is what lets a client match a dismissal to the batch it clears.
 //
 // Questions is in claude's own order — the JSON-array order is the canonical
 // display order. The key is always present on the wire and never null; see
@@ -146,7 +148,7 @@ func (p QuestionShownPayload) MarshalJSON() ([]byte, error) {
 // — no control-character or terminal-escape stripping happens on this path — so
 // they stay untrusted text all the way to the client, and the render boundary
 // owing the sanitization is the CLIENT's. Their bound is the parse's (#1965) and
-// the producer's (#1927): this struct re-decides no maximum and declares no
+// the producer's (#1973): this struct re-decides no maximum and declares no
 // charset check, because a second cap here would be a second place the limit is
 // decided and the two could disagree silently.
 type Question struct {
@@ -198,15 +200,90 @@ func (q Question) MarshalJSON() ([]byte, error) {
 // not here.
 //
 // There is no id, unlike ModalOption's {id, label}: claude's answer protocol
-// selects an option by its LABEL. So whatever inbound answer #1927 designs will
+// selects an option by its LABEL. So whatever inbound answer #1907 designs will
 // identify an option by a claude-authored string, and publishing that string does
 // not make it trusted when it comes back — the amendment ModelOption.Value's
 // report-only convention sentence carries. This slice declares no inbound verb
 // and grants nothing; TypeQuestionShown's doc block has that reasoning.
+//
+// The same label is why QuestionDismissedPayload.Outcome is forbidden from
+// carrying one: see that field's paragraph.
 //
 // SECURITY: both strings are covered by Question's paragraph, which credits all
 // four of the batch's claude-authored strings at once.
 type QuestionOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
+}
+
+// QuestionDismissedPayload is the body of an Envelope whose Type ==
+// TypeQuestionDismissed. Binary → phone direction; the frame that retires a batch
+// a client is rendering, so no panel is left up for an ask that is already dead.
+// Declared by #1974, emitted by #1973 (the no-answer terminal paths) and #1907
+// (the answered one); nothing constructs it here.
+//
+// Field for field with ModalDismissedPayload, including the ABSENCES.
+// QuestionBatchID plays ModalID's role — the nonce QuestionShownPayload carries,
+// which is what matches a dismissal to the batch it clears.
+//
+// There is NO conversation_id, though question_shown carries one, and the modal
+// frame's reason transfers whole: the batch id is the sole correlation key, and a
+// shape carrying both would admit a disagreeing pair someone has to adjudicate. A
+// client holding the batch already knows its conversation.
+//
+// No omitempty on any field, § Modal's and QuestionShownPayload's discipline
+// unchanged, and NO MarshalJSON: there is no slice field here, so there is no
+// nil→[] normalisation to perform. QuestionShownPayload.MarshalJSON's
+// backing-array data-race argument is specific to a normaliser reaching through a
+// shared slice and does not transfer — do not add one here by analogy to the
+// sibling.
+//
+// SECURITY: this frame carries NO CLAUDE-AUTHORED BYTE, which is the property
+// that separates it from QuestionShownPayload's trust tier, and it holds only
+// because Outcome does what its paragraph says. All three fields are
+// daemon-asserted. Consequences worth having in one place: § Security model's
+// threat 1 (prompt injection reaching a remote render surface) does NOT land on
+// this frame; no field can carry a byte of the parked tool input into a log; and
+// the frame's length is daemon-determined rather than subprocess-influenced,
+// which matters in a family that ships no truncated_fields and so could not
+// report a cut.
+//
+// The nonce is DEAD once this frame lands, and receiving it is not a capability.
+// A retired batch resolves nothing server-side, the way a stale modal_id resolves
+// nothing under first-answer-wins (#703/#706). It is echoed to exactly the
+// interactive-capability-gated audience that received question_shown, so
+// disclosure widens nothing.
+type QuestionDismissedPayload struct {
+	// QuestionBatchID is the batch being cleared: QuestionShownPayload's own
+	// nonce, echoed back. A client matches on it and clears nothing when it does
+	// not recognise the value.
+	QuestionBatchID string `json:"question_batch_id"`
+
+	// Outcome is how the batch ended — a PRODUCER-DEFINED SENTINEL, plain string,
+	// vocabulary owned by #1973/#1907 and documented rather than enforced, exactly
+	// as ModalDismissedPayload.Outcome is #703's.
+	//
+	// IT MUST NEVER CARRY A CLAUDE-AUTHORED OPTION LABEL. The rule is stated
+	// positively because the natural implementation violates it: QuestionOption
+	// carries no id and claude's answer protocol selects by label, so an answer
+	// path reporting which option was chosen reaches for that string first — and
+	// it crossed the subprocess trust boundary. Putting it here would silently
+	// move this frame to question_shown's trust tier while its published
+	// provenance still said daemon-asserted, and a client would render it as
+	// trusted chrome. A client that needs the label reads it from the batch it
+	// already holds, keyed on QuestionBatchID.
+	Outcome string `json:"outcome"`
+
+	// Source is what resolved the batch. Plain string, NOT modal_dismissed's
+	// closed {remote, local, timeout} — that set is provably short here, because
+	// two of the producer's terminal paths (a caller disconnect, a daemon
+	// shutdown) have no member in it and neither is a timeout nor an answer.
+	// TypeQuestionDismissed's doc block carries the per-value carry-over reading;
+	// docs/protocol-mobile.md § Question publishes it.
+	//
+	// A client must read an UNRECOGNISED value as "resolved, cause unknown" and
+	// never as an answer. Getting that backwards renders a daemon safe-deny as the
+	// operator's own choice, and the values a client written today will not
+	// recognise are precisely the two the producer has yet to name.
+	Source string `json:"source"`
 }

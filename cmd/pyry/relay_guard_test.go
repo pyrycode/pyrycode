@@ -200,14 +200,22 @@ var excludedTypes = map[string]string{
 	// outbound push — the v2 clarifying-question batch (#1962). Outbound-only like
 	// the eight pushes above rather than bidirectional like the attachment chunk,
 	// and mandatory here from the moment the constant exists rather than from the
-	// moment something emits it (the producer is #1927) — Assertion #3 reports an
+	// moment something emits it (the producer is #1973) — Assertion #3 reports an
 	// unclassified constant, not an unemitted one. It is a push and not a reply
 	// because this slice declares no inbound request verb: an inbound type needs a
 	// handler in Handlers or dispatchAppFrame or Assertion #1 fails, and filing a
-	// handler-less verb here to dodge that would be a lie to the guard. If #1927
-	// picks request/reply, the verb and its handler land together and this entry
-	// becomes "reply".
+	// handler-less verb here to dodge that would be a lie to the guard. If the
+	// inbound answer (#1907) picks request/reply, the verb and its handler land
+	// together and that entry is filed then.
 	"TypeQuestionShown": "push",
+
+	// outbound push — the question dismissal that retires a batch (#1974). Same
+	// classification as the batch above and for the same reason: outbound-only,
+	// no inbound leg at all, so "push" is true rather than borrowed. Mandatory
+	// from the moment the constant exists — the producer is #1973 and the answer
+	// half #1907, and Assertion #3 reports an unclassified constant, not an
+	// unemitted one.
+	"TypeQuestionDismissed": "push",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

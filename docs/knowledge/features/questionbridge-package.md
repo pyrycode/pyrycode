@@ -13,7 +13,7 @@ reading.
 
 **This slice has no consumer.** `streamApprovalBridge.Surface`
 (`cmd/pyry/modal_resolve_v2.go`) still hard-codes the permission-modal class
-for every approval, question or not; #1927 is the call site that consults
+for every approval, question or not; #1973 is the call site that consults
 `questionbridge.ToolName`/`Parse` and wires the result onto the wire.
 
 ```go
@@ -27,7 +27,8 @@ well-formed, in-bounds batch. The two negative outcomes — not the question
 tool, and the question tool but rejected — are deliberately not
 distinguished; a caller that needs to tell them apart compares against the
 exported `ToolName` itself. `ConversationID`/`QuestionBatchID` stay
-unfilled — both are daemon-asserted, and #1927 mints/fills them.
+unfilled — both are daemon-asserted; #1973 fills them, and #1975 mints the
+nonce.
 
 ## Bounds
 
@@ -96,5 +97,7 @@ for the full resolution.
   log-free registries/parsers at the same trust boundary).
 - Spec: [`specs/architecture/1965-questionbridge-parse.md`](../../specs/architecture/1965-questionbridge-parse.md).
 - Open: the always-split consumer half — wiring the discriminant into
-  `streamApprovalBridge.Surface`, minting `QuestionBatchID`, and the
-  per-device answer gate / dismissed-batch fail-safe — is #1927.
+  `streamApprovalBridge.Surface`, minting `QuestionBatchID` (#1975), and
+  emitting the no-answer dismissal paths (#1974's `question_dismissed`,
+  [question-batch payload](protocol-package-question-batch-payload.md)) —
+  is #1973. The per-device answer gate and the answered dismissal are #1907.
