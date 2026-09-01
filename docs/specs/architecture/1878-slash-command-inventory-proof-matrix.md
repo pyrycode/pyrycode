@@ -16,7 +16,7 @@ neighbouring test already pins is the failure mode this list exists to prevent.
 | `internal/streamsup/parser.go` | `logControlResponse` | The six attributes, their types, and the closed reason set. AC 4's `wantAttrs` maps are unchanged; read this to confirm that rather than to change it. |
 | `internal/turnevent/event.go` | `SlashCommand` | The two fields, and `TruncatedFields`' nil-not-empty convention — the distinction every AC 1 row asserts with `reflect.DeepEqual` rather than a length check. |
 | `internal/turnevent/event.go` | `SlashCommandList` | Its `Commands` doc, which states that suppression is the producer's decision and that this field never carries zero entries. AC 3 is that statement's proof. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandNamesAreCapped` | **AC 1's home.** Read its doc block whole: it names exactly which rows it already carries and which ones it left to this ticket. |
+| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | **AC 1's home.** Read its doc block whole: it names exactly which rows it already carries and which ones it left to this ticket. |
 | `internal/streamsup/parser_test.go` | `TestParser_ModelListFieldsAreCapped` | The table idiom for a cap test in this package, and its `twoByteRune` mid-rune row — the shape AC 1's mid-rune rows copy one array over. |
 | `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCountsTheCapturedCommands` | **AC 2's home.** Its capture-shape guards run first and name the arm; its `wantAttrs` map stays untouched. |
 | `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseDecodesTheCapturedModels` | Read it, change **nothing**. Its per-entry byte-for-byte model comparison is AC 2's "model list unchanged" half — do not re-copy it and do not extend it. |
@@ -81,7 +81,7 @@ error branches. Estimated total written work, counting doc comments (which run
 
 | Work item | Lines |
 |---|---|
-| W1 — AC 1: `TestParser_SlashCommandNamesAreCapped` → table | ~140 |
+| W1 — AC 1: `TestParser_SlashCommandFieldsAreCapped` → table | ~140 |
 | W2 — AC 2: extend the captured-commands test | ~50 |
 | W3 — AC 3: new suppression table | ~95 |
 | W4 — AC 4: extend the content-free sweep | ~50 |
@@ -117,7 +117,7 @@ values in full.
 
 ### W1 — AC 1: the cap boundary, as a table
 
-Extend `TestParser_SlashCommandNamesAreCapped` into a table-driven test. **Keep the
+Extend `TestParser_SlashCommandFieldsAreCapped` into a table-driven test. **Keep the
 name.** Verified this pass: no `//` comment, no doc and no other test cites it, so a
 rename would be free — but it would buy nothing and the rows below are all about what
 the per-entry name transform does at and around the cap.
