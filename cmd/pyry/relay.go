@@ -692,6 +692,27 @@ func startRelayV2(
 		// nil ⇒ no-reconcile contract, which every foreground/v1 and test wiring relies
 		// on. A pure read: it mints no id and mutates no daemon state.
 		RetainedModelLists: w.retainedModelLists,
+		// Connect-time question reconcile source (#1980): enumerates the daemon's
+		// surfaced-but-unretired clarifying-question batches as marshal-ready
+		// question_shown payloads, so a client that connects or reconnects while claude
+		// is waiting on an AskUserQuestion is unicast the outstanding batch on open
+		// instead of never learning it exists. The raise-time broadcast (#1973) reaches
+		// only whoever was connected at that instant and the frame carries no event id,
+		// so it is not in the #647 replay ring either — this is the only path to a late
+		// client. questionReg is the same daemon-singleton minted above that the stream
+		// approval bridge's surfacer Records into and the answer path (#1907) resolves
+		// against, so enumerate-current-truth reflects live control state.
+		//
+		// Snapshot and not Resolve: the read retires nothing, so a batch outstanding
+		// across a reconnect is re-sent and stays answerable exactly once — the one-shot
+		// consume that governs answerability is Resolve's, and this path never calls it —
+		// while a batch resolved or dismissed meanwhile is simply absent from the read.
+		// Assigned straight through rather than wrapped in a closure, matching
+		// OutstandingModals above; RetainedModelLists' stated reason for the same choice
+		// (a wrapper stays non-nil when the underlying field is nil, defeating the seam's
+		// nil ⇒ no-reconcile contract) does NOT apply here, because questionReg is minted
+		// unconditionally and no nil is reachable at this site.
+		OutstandingQuestions: questionReg.Snapshot,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. The keystroker is nil-safe-wrapped (#1131): PTY mode
