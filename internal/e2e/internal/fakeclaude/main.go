@@ -2039,7 +2039,16 @@ const (
 // ABOVE the daemon's approval window (PYRY_APPROVAL_TIMEOUT, ~2s in the timeout case),
 // so the deny fakeclaude receives on a no-answer turn is the DAEMON's permbridge timer
 // firing — not a fakeclaude self-timeout that would mask the daemon verdict. This
-// margin is load-bearing for the fail-closed proof. control.Approve derives no read
+// margin is load-bearing for the fail-closed proof.
+//
+// Since #1932 that margin buys the proof only under the condition the timeout case now
+// arranges: NOBODY LEFT WHO COULD ANSWER. The daemon's window is a re-check interval,
+// re-armed for as long as an interactive client is connected to a surfaced approval, so
+// a no-answer turn with an answerer still attached never denies at all — it parks past
+// this ctx and reflects approve-error, which the e2e forbids. The window is the deny
+// deadline only once the last answerer is gone.
+//
+// control.Approve derives no read
 // deadline of its own (#1929), so this ctx deadline is the whole of the rider's bound —
 // it is what stops a wedged daemon parking fakeclaude for the length of a test run.
 const approveDialTimeout = 30 * time.Second

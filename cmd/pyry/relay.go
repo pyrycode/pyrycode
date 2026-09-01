@@ -777,6 +777,37 @@ func startRelayV2(
 			// approvalParkedReport's doc records for its unguarded field.
 			w.approvalParked.set(bridge.ApprovalParked)
 		}
+		// The approval-liveness report (#1932): permbridge's fail-closed window
+		// stops being a hard deadline and becomes a re-check interval — expire asks
+		// this on every expiry and re-arms the SAME window while somebody can still
+		// answer, so a prompt keeps waiting for the human walking to their desk and
+		// denies within one window of the last answerer going away.
+		//
+		// OUTER BRANCH, deliberately NOT beside the two assignments under the
+		// w.busy guard above. Those are guarded because a method value on a nil
+		// *turnBusyTracker is a non-nil func that panics on first call.
+		// ApprovalAnswerable reads only the bridge's own modal correlation and the
+		// broadcaster — never the turn-busy tracker — so gating it on w.busy would
+		// silently disable the extension in PTY mode for no reason at all.
+		//
+		// NO NIL GUARD AND NO WRAPPER CLOSURE. AnswerableFunc assigns the
+		// no-panic duty to its injection site, and it is discharged STRUCTURALLY
+		// here: bridge was constructed on the line above and is non-nil, and its
+		// bcast is mgr, also non-nil — the same reasoning that leaves
+		// ApprovalAnswerable carrying no b.bcast guard. A defensive
+		// `func(id string) bool { if bridge == nil { … } }` would be unreachable
+		// code that turns a future genuine nil into "nobody can answer", i.e. every
+		// approval silently denying, which is precisely the failure mode the seam's
+		// doc forbids. A moved assignment must stay after newStreamApprovalBridge.
+		//
+		// The registry outliving this leg is safe in both directions: startRelay
+		// returns early when relayURL is empty, so SetAnswerable is never called and
+		// the window stays the hard deadline it has always been; and at teardown
+		// ActiveConns returns nil once the daemon ctx is cancelled or Run has exited,
+		// so the report reads "nobody can answer" and every parked approval denies
+		// within one window. The installed method value is safe to call for the whole
+		// life of the registry, which is what the seam demands.
+		w.approvals.SetAnswerable(bridge.ApprovalAnswerable)
 		modalResolver.streamApprovals = bridge
 		surface = bridge.Surface
 	}

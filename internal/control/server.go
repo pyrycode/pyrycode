@@ -218,8 +218,11 @@ type Server struct {
 	// approvals is the optional pending-approval registry servicing
 	// VerbMCPApprove, installed Rekeyer-style via SetApprovalRegistry so
 	// NewServer's signature stays frozen. approvalTimeout is the
-	// human-approval window handed to permbridge.Register (the registry's
-	// own timer denies after it). Both are read once per request under
+	// human-approval window handed to permbridge.Register. Since #1932 wired
+	// the daemon's liveness report into the registry, that window is a
+	// RE-CHECK INTERVAL rather than a hard deadline: the registry denies on it
+	// only while nobody can answer the approval, and otherwise re-arms the same
+	// window and asks again. Both are read once per request under
 	// s.mu, before the lock is released for the (blocking) Await. Nil
 	// registry is the production state until the daemon composition wires
 	// it, and stays nil in v1/foreground — handleApprove then replies
@@ -328,10 +331,14 @@ func (s *Server) SetRekeyer(r Rekeyer) {
 // configured" — the same nil-dependency-degrades-cleanly shape as
 // SetRekeyer.
 //
-// timeout bounds every pending approval: permbridge's registry-owned timer
-// denies the request after it elapses, so a wait never outlives timeout.
-// Threading it through NewServer would cascade across every call site, so
-// it rides the setter like the Rekeyer (see #451 split rationale).
+// timeout bounds a pending approval NOBODY CAN ANSWER: permbridge's
+// registry-owned timer denies the request once that window elapses on an
+// approval its liveness report calls unanswerable. With a report installed
+// (#1932's daemon wiring) the bound is conditional — the wait ends within one
+// window of the FIRST reading that says nobody can answer — and with none
+// installed (v1/foreground/relay disabled) it stays the hard deadline it has
+// always been. Threading it through NewServer would cascade across every call
+// site, so it rides the setter like the Rekeyer (see #451 split rationale).
 func (s *Server) SetApprovalRegistry(reg *permbridge.Registry, timeout time.Duration) {
 	s.mu.Lock()
 	s.approvals = reg
@@ -902,8 +909,13 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 		return
 	}
 
-	// Clear the handshake deadline: the wait is bounded by permbridge's
-	// registry-owned timer, not the conn (mirrors handleAttach).
+	// Clear the handshake deadline: the conn deliberately carries no bound of
+	// its own for the length of a human decision (mirrors handleAttach). Since
+	// #1932 permbridge's registry-owned timer bounds the wait only once its
+	// liveness report reads unanswerable, so a conn deadline here would be the
+	// binding one — and #1929 removed the client's own per-call bound for the
+	// same reason, since a client close reads to watchApproveConn below as a
+	// lost caller and terminates the approval.
 	_ = conn.SetDeadline(time.Time{})
 
 	// Surface the parked approval to interactive clients as a modal_shown, if a
@@ -924,7 +936,7 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 	stop := make(chan struct{})
 	go s.watchApproveConn(conn, reg, payload.ToolUseID, stop)
 
-	verdict := pending.Await() // guaranteed to return within timeout
+	verdict := pending.Await() // returns within one window of the first unanswerable reading
 	close(stop)
 
 	_ = enc.Encode(Response{Approve: verdictToResult(verdict)})
@@ -935,8 +947,11 @@ func (s *Server) handleApprove(conn net.Conn, enc *json.Encoder, payload *Approv
 // watchApproveConn maps the two cancellation sources permbridge's ctx-free
 // Await cannot observe — caller disconnect and daemon shutdown — into a
 // fail-closed deny Resolve, so a lost caller or a shutting-down daemon does
-// not park a pending entry for the full approval timeout. Started before the
-// Await; the handler closes stop after Await returns.
+// not leave a pending entry parked. That matters MORE since #1932 made the
+// elapsed-time bound conditional: while somebody can still answer, the registry
+// re-arms its window instead of denying, so these two are the only bounds on an
+// approval whose caller vanished. Started before the Await; the handler closes
+// stop after Await returns.
 //
 // The inner reader blocks on conn.Read (the client sends nothing after its
 // request) until EOF/error on disconnect or handle's deferred conn.Close on
