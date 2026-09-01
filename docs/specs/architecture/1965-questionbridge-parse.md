@@ -116,3 +116,9 @@ Everything settles offline from committed bytes: no `needs-real-claude`, no cred
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-01
+
+## Revisions
+
+**2026-09-01 — an eighth reject row, for the same seventh branch.** The seven guards were run as `go test -overlay` mutants rather than reasoned about, per the repo's standing lesson that a sole-redness claim written from the prediction column ships wrong. Six were sole-red on their own row. The **decode guard survived**: swallow the `json.Unmarshal` error and the zero `toolInput` still fails the question-count bound, so the syntactically-malformed fixture cannot show that guard is load-bearing. Added one row — a wrong-*typed* question text — which exploits the fact that `encoding/json` **partially populates on a type error**: without the guard, a structurally valid batch reaches the wire with a silently empty question text. It kills the mutant and it is the same reject branch, so the branch count stays at seven. Testing strategy is otherwise as planned.
+
+**Open questions, resolved.** The 16 KiB cap stands as designed, with its arithmetic and its unit in the constant's doc comment and no new measurement to move it. The "not a question" / "rejected" distinction stays undistinguished, with `ToolName` exported so #1927 can draw it if it turns out to need one.
