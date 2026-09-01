@@ -146,6 +146,75 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1941. The write half of the same family, and the entry the two above warn
+	// against copying whole: FOURTEEN names rather than seventeen. It copies
+	// initialize_control_writer_test.go's entry — this table's only other writer
+	// entry — name for name.
+	//
+	// Do NOT copy the count sentence from that entry along with its names: its
+	// comment says "twelve names rather than seventeen" and then lists fourteen,
+	// because #1748 added newDropcapScanner and realHome without updating the
+	// prose. Fourteen is this entry's number, counted against the literal below.
+	//
+	// The first five keep a SKIP out, as everywhere in this family —
+	// resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body,
+	// after `=== RUN` is printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`, which is AC 5's real hazard. captureClaudeVersion
+	// t.Fatalf's rather than skipping, so it would not fake a pass; what it would
+	// destroy is this file's defining property, that it settles with no claude
+	// binary at all. It returns (raw, token) — both of the record's version fields
+	// AND the input askQuestionFixtureName takes — so it is the exec a developer
+	// minting a name here is most likely to reach for thinking "use the real
+	// token".
+	//
+	// The three environment readers are the credential guard: this process
+	// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// The packageDir group is the trio plus writeFixture, for the reason every
+	// entry above states: the check is a per-file AST identifier match and not a
+	// call graph, so a file calling a WRAPPER reaches packageDir transitively while
+	// never naming it, and a packageDir-only entry leaves the ban true and the
+	// property false. writeFixture matters most of the four here — it is the
+	// package's other fixture writer, it hardcodes permission_protocol_v%s.json,
+	// resolves the real testdata/ through packageDir and performs NO scan at all,
+	// so a single call would write an unscanned artifact over a committed capture
+	// from the file whose whole subject is refusing to.
+	//
+	// What is deliberately ABSENT, and where this entry copies the sibling writer's
+	// rather than its two nearer siblings': t.TempDir, os.WriteFile, os.Create,
+	// os.ReadFile, os.ReadDir and filepath.Glob all stay available. Those two files
+	// perform no I/O in either direction; this file's entire subject is a write, a
+	// read-back and a directory listing, so banning them would be red against
+	// shipped code. The relative-path hazard those bans close for them — `go test`
+	// runs in the package source directory, so a relative os.WriteFile("testdata/…")
+	// reaches the seventeen committed captures — is closed here differently, by
+	// TestAskQuestionFixture_RoundTripsEveryFieldIntoOneNamedEntry: a writer that
+	// sent its bytes to a relative testdata/ leaves the t.TempDir() holding ZERO
+	// entries, and the exactly-one-entry assertion goes red.
+	//
+	// newDropcapScanner and realHome are the deterministic fabric behind the
+	// scanner PARAMETER, and the ban is what makes that parameter mean something.
+	// The writer runs a deny-scan over the marshalled record before its first
+	// filesystem call and the scanner arrives from its caller; a file that built
+	// its own would call a constructor reading os.Getenv twice and realHome,
+	// satisfying this entry's os.Getenv ban to the letter while destroying the
+	// offline property it protects — a table built through it is green or red
+	// depending on whose machine ran it. The check matches a bare *ast.Ident as
+	// well as a dotted selector, so both the wrapper and the plain realHome
+	// reference are caught.
+	//
+	// os.TempDir is deliberately NOT added, matching the sibling writer's entry and
+	// unlike #1732's: newDropcapScanner takes tempHome, artifactDir and workdir as
+	// parameters and reads only realHome and the environment on its own, so
+	// os.TempDir is not a route to anything here and would be a ban name with no
+	// hazard behind it.
+	"ask_user_question_writer_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"newDropcapScanner", "realHome",
+	},
 	"finding_run_record_test.go": {
 		"probeClaudeVersion", "resolveClaudeBin", "WithWorktreeAuthenticated",
 		"pinReadState", "pinExit1", "pinScanArgv", "probeProcessSnapshot",
