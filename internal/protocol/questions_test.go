@@ -7,26 +7,25 @@ import (
 )
 
 // TestQuestionShownPayload_RoundTrip pins the wire shape at all three nesting
-// levels against an inline golden. The golden is a literal rather than a fixture
-// for two reasons: the testdata fixtures are #1964's, and the committed capture
-// this shape mirrors sits behind the e2e_realclaude build tag, which make check
-// never compiles. canonical compacts both sides, so the literal may be indented.
+// levels against a committed fixture. The bytes are on disk rather than inline
+// (#1964) because the user story is a client author mirroring them field for
+// field without reading Go, which a literal inside a _test.go file does not
+// serve; every other payload in this package is pinned the same way.
+//
+// The VALUES are hand-authored, and that is the one thing the committed capture
+// internal/e2e/realclaude/testdata/ask_user_question_v2.1.239.json cannot
+// supply: it is one question, two options and an explicit multiSelect:false, so
+// it settles none of the three arms this fixture exists to carry — more than one
+// question, multi_select true, and a question with more than two options. The
+// capture is also behind the e2e_realclaude build tag, which make check never
+// compiles. The BYTES are the encoder's own, marshalled through this package, so
+// the escaping is not a hand transcription.
 //
 // The bytes are what pin the wire keys, multi_select's snake-casing included:
 // it is an underscore where claude sends a capital S, and nothing else in the
 // tree would catch that flipping.
 func TestQuestionShownPayload_RoundTrip(t *testing.T) {
-	raw := []byte(`{"id":901,"type":"question_shown","ts":"2026-09-01T10:00:00Z","payload":{
-		"conversation_id":"conv-1","question_batch_id":"qb-7f3a","questions":[
-		{"question":"Which write strategy should the cache use?","header":"Write strategy",
-		 "options":[{"label":"Write-through","description":"Writes reach the cache and the store together."},
-		            {"label":"Write-behind","description":"Writes reach the cache first, the store later."}],
-		 "multi_select":false},
-		{"question":"Which eviction policies should it support?","header":"Eviction",
-		 "options":[{"label":"LRU","description":"Evict the least recently used entry."},
-		            {"label":"LFU","description":"Evict the least frequently used entry."},
-		            {"label":"TTL","description":"Evict entries after a fixed time to live."}],
-		 "multi_select":true}]}}`)
+	raw := readFixture(t, "question_shown.json")
 
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -93,13 +92,22 @@ func TestQuestionShownPayload_RoundTrip(t *testing.T) {
 // nested types' keys at all — a batch with no questions reaches none of them.
 // TestModelListPayload_ZeroValue_RoundTrip's reasoning, one nesting level deeper.
 //
+// One nesting level deeper is also where that reasoning STOPS transferring, so
+// the two-level siblings' arithmetic is not copied. Their all-zero entry reaches
+// their empty-array key; this shape's does not, because the entry has to carry
+// one option to reach label and description. So "options":[] appears in NO
+// fixture — decoding [] always yields a non-nil slice, and the only value that
+// produces those bytes is a constructed nil, which is what
+// TestQuestion_NilOptionsNormalises pins. The three fixtures still reach all
+// nine wire keys between them.
+//
 // The explicit-presence loop runs BEFORE the round trip on purpose: an omitempty
 // on header or multi_select would elide the key from both sides and the round
 // trip alone would go on passing, which is precisely the regression AC 4 names.
+// readFixture is called once, above the loop, so a failure still has raw to
+// print — reading per-key would leave the message with no bytes to show.
 func TestQuestionShownPayload_ZeroValue_RoundTrip(t *testing.T) {
-	raw := []byte(`{"id":902,"type":"question_shown","ts":"2026-09-01T10:00:01Z","payload":{
-		"conversation_id":"","question_batch_id":"","questions":[
-		{"question":"","header":"","options":[{"label":"","description":""}],"multi_select":false}]}}`)
+	raw := readFixture(t, "question_shown_zero.json")
 
 	for _, want := range []string{
 		`"conversation_id":""`,
@@ -146,6 +154,56 @@ func TestQuestionShownPayload_ZeroValue_RoundTrip(t *testing.T) {
 	}
 	if q.Options[0].Label != "" || q.Options[0].Description != "" {
 		t.Errorf("option strings: got %q / %q, want both empty", q.Options[0].Label, q.Options[0].Description)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestQuestionShownPayload_Empty_RoundTrip pins the DECODE side of the batch's
+// nil-to-[] normalisation, which is the arm #1963 could not reach: its
+// TestQuestionShownPayload_NilQuestionsNormalises proves nil marshals to [] on a
+// CONSTRUCTED value, and nothing pinned that a frame carrying no questions
+// arrives with the key present as [] rather than null or elided.
+//
+// An empty batch is OUT OF CONTRACT — the documented bounds are 1-4 questions —
+// and it is pinned anyway for QuestionShownPayload.MarshalJSON's reason: [] is
+// what keeps such a frame decodable by a client whose array type is
+// non-optional, where null fails that decode outright. A wire that only ever
+// stated the well-formed case would leave that client's behaviour on a producer
+// bug undefined.
+//
+// TestSlashCommandListPayload_Empty_RoundTrip's shape, one nesting level up: an
+// empty batch reaches the payload's three keys and none of the nested types'.
+func TestQuestionShownPayload_Empty_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "question_shown_empty.json")
+
+	if !bytes.Contains(canonical(t, raw), []byte(`"questions":[]`)) {
+		t.Errorf("fixture must carry the questions key as an empty array, got: %s", raw)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeQuestionShown {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeQuestionShown)
+	}
+
+	var payload QuestionShownPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "conv-1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "conv-1")
+	}
+	if payload.QuestionBatchID != "qb-0e21" {
+		t.Errorf("QuestionBatchID: got %q, want %q", payload.QuestionBatchID, "qb-0e21")
+	}
+	if payload.Questions == nil {
+		t.Errorf("Questions: decoded to nil; an empty array must decode to a non-nil empty slice")
+	}
+	if len(payload.Questions) != 0 {
+		t.Errorf("Questions: got %d entries, want 0", len(payload.Questions))
 	}
 
 	roundTripEnvelope(t, env, payload, raw)
