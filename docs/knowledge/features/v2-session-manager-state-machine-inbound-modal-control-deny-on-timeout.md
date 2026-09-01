@@ -209,7 +209,7 @@ malformed or out-of-bounds `AskUserQuestion` input — `Parse`'s two negatives
 are deliberately undistinguished — falls through to the unchanged permission
 path, the fail-closed degrade for a batch nobody can render. `retireQuestion`
 mirrors `retire`: unconditional correlation delete, then the registry's
-one-shot `Resolve` decides whether this closure or #1907's answer path
+one-shot `Resolve` decides whether this closure or #1985's answer path
 broadcasts the dismissal.
 
 **`byQuestion` is a second map, not a second key space inside `byModal`, and

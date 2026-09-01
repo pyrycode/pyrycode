@@ -984,14 +984,17 @@ const (
 // inboundAppTypeSet and v2OnlyTypes (this lives in the latter), and
 // cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
 //
-// No inbound request verb is declared here, and that is not an omission.
+// No inbound request verb is declared here, and that is not an omission. Both
+// constants in this block are outbound-only. The inbound pair now exists —
+// TypeQuestionAnswer / TypeQuestionRefused, declared by #1983 in the block below
+// — but under the TypeAttachmentChunk precedent rather than beside these:
 // TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
 // wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
-// dispatchAppFrame switch, and this slice ships no handler — so a verb declared
-// here would be red by construction, and filing it under excludedTypes to dodge
-// that would be a lie to the guard. That still holds for TypeQuestionDismissed
-// below: both constants here are outbound-only, and the inbound answer verb is
-// #1907's, to be declared with the handler that serves it.
+// dispatchAppFrame switch, so a verb declared without its handler is red by
+// construction, and filing it under excludedTypes AS A PUSH to dodge that would
+// be a lie to the guard. The honest classification is excludedTypes under its own
+// pending-handler label; #1984 supplies the dispatchAppFrame cases and moves both
+// entries to inboundTypes. See that block for the reasoning in full.
 //
 // THE DISMISSAL IS ITS OWN TYPE (#1974), settling what TypeQuestionShown's own
 // slice deferred. ModalDismissedPayload identifies what it clears by modal_id, and
@@ -1020,4 +1023,80 @@ const (
 const (
 	TypeQuestionShown     = "question_shown"     // binary → phone, outbound v2 clarifying-question batch
 	TypeQuestionDismissed = "question_dismissed" // binary → phone, outbound v2 question-batch resolution event
+)
+
+// Mobile Protocol v2 clarifying-question ANSWER vocabulary (#1983, split from
+// #1907). The frames a client sends back to resolve a batch the block above
+// surfaced: question_answer carries the operator's selections, question_refused
+// says the operator declined to choose. These are the question family's FIRST
+// INBOUND types — everything above is binary → phone.
+//
+// TWO TYPES, NOT ONE NULLABLE FLAG. A refusal carries no answers, and the
+// family's own precedent is that a distinct meaning gets its own type rather than
+// a nullable field on a shared one: TypeQuestionDismissed above is its own type
+// rather than a reused modal_dismissed (#1974) for exactly that reason. The pair
+// mirrors TypeModalAnswer / TypeModalCancel.
+//
+// SELECTIONS ARE POSITIONAL; ONLY THE VALUES ARE CLIENT-AUTHORED. An answer entry
+// names its question by its INDEX into the batch's questions array — the
+// canonical order the client already renders — rather than echoing the question
+// text back, and the daemon reads the text from its own parked copy.
+// QuestionOption carries no id and claude's protocol selects an option by its
+// LABEL, so the alternative would carry a claude-authored string back across the
+// trust boundary in both directions for no gain. QuestionShownPayload's warning
+// stands unchanged: publishing such a string outbound does not make it trusted
+// when it returns. The values an entry carries ARE genuinely client-authored —
+// claude's contract permits free text anywhere and requires no value to be one of
+// the offered labels — so they are opaque strings, checked against nothing.
+//
+// THE VENDOR response FIELD IS DELIBERATELY NOT CARRIED. claude's contract
+// (https://code.claude.com/docs/en/agent-sdk/user-input) offers an optional
+// top-level freeform reply that replaces answers entirely; both this repo and
+// pyrycode-desktop decided on 2026-08-31 not to use it. It stays available later
+// with no wire change, so nothing here forecloses it.
+//
+// THE GUARD CLASSIFIES THESE THE OPPOSITE WAY FROM THEIR INBOUND NEIGHBOURS, and
+// getting it wrong is a red build rather than a style question. TypeModalAnswer /
+// TypeModalCancel sit in cmd/pyry/relay_guard_test.go's inboundTypes as
+// "switch-intercepted" because internal/relay/v2session.go's dispatchAppFrame has
+// cases for them. THIS SLICE SHIPS NO HANDLER — the interception is #1984's — so
+// inboundTypes would fail Assertion #1 by construction, and "push", the reason
+// the eight outbound neighbours give, is false for a genuinely inbound frame.
+// TypeAttachmentChunk is the one honest precedent: excludedTypes under its own
+// label, with the reason that is actually true — the inbound leg has no handler
+// YET. Both entries are filed as "pending handler (#1984)" and MOVE to
+// inboundTypes when that ticket lands, which Assertion #2 makes mandatory rather
+// than tidy-up. Filing is required from the moment the constant exists: Assertion
+// #3 reports an unclassified constant, not an unemitted one.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: these
+// are v2 CONTROL envelopes intercepted before internal/dispatch.Route, exactly as
+// TypeModalAnswer and TypeInterrupt are, and there is no dispatch.Route handler
+// for either. A leak into that set would route an inbound control envelope into
+// the v1 handler chain. The drift detector in internal/protocol/compat_test.go
+// partitions Type* constants between inboundAppTypeSet and v2OnlyTypes; these two
+// live in the latter, and IsKnownAppType rejects both with ErrUnknownType.
+//
+// The NAMES are the daemon's, not claude's, for the reason TypeQuestionShown's
+// block gives: the wire type names what the frame IS to a client, so a claude
+// rename lands in one place. The subject-noun trap cuts here too — the SINGULAR
+// question is a substring of the tool name AskUserQuestion, so neither name may be
+// probed with a strings.Contains on it.
+//
+// DECLARING THESE CONSTANTS CHANGES NO RUNTIME PATH, and that is what makes a
+// vocabulary-only slice safe on an inbound surface. dispatchAppFrame's control
+// switch has no default arm, so a frame of either type falls through to
+// dispatch.Route and gets its unknown-type reply — identically to before this
+// commit, because a Go constant is not a registry. Nothing here grants an inbound
+// capability: the interactive capability gate and the per-device answer gate
+// (#702) both remain the handler's to apply, and the default is deny.
+//
+// The payloads are QuestionAnswerPayload (with its nested QuestionAnswerEntry)
+// and QuestionRefusedPayload in questions.go. #1984 adds the dispatchAppFrame
+// cases and #1985 resolves an answer against the daemon's parked batch;
+// pyrycode-desktop#853 is the client that sends these. Same declare-then-serve
+// sequencing as #1752→#1744.
+const (
+	TypeQuestionAnswer  = "question_answer"  // phone → binary, inbound v2 control (no handler yet — #1984)
+	TypeQuestionRefused = "question_refused" // phone → binary, inbound v2 control (no handler yet — #1984)
 )

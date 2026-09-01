@@ -2,15 +2,18 @@ package protocol
 
 import "encoding/json"
 
-// Question-batch v2 wire payloads (#1963, dismissal #1974). These describe the
-// clarifying-question batch claude's AskUserQuestion tool call carries, surfaced
-// to a client as one frame whose Type is TypeQuestionShown, and the frame that
-// retires it (TypeQuestionDismissed). Wire vocabulary only: pure structs and their
-// serialization.
+// Question-batch v2 wire payloads (#1963, dismissal #1974, the inbound answer and
+// refusal #1983). These describe the clarifying-question batch claude's
+// AskUserQuestion tool call carries, surfaced to a client as one frame whose Type
+// is TypeQuestionShown, the frame that retires it (TypeQuestionDismissed), and the
+// two a client sends back to resolve it (TypeQuestionAnswer, TypeQuestionRefused).
+// Wire vocabulary only: pure structs and their serialization.
 //
-// NOTHING CONSTRUCTS THEM. #1965 owns the parse that fills the batch from claude's
-// tool input, #1973 the producer that emits both frames, #1975 the nonce mint,
-// #1907 the inbound answer, and pyrycode-desktop#849 the client that decodes them.
+// NOTHING CONSTRUCTS OR DECODES THEM. #1965 owns the parse that fills the batch
+// from claude's tool input, #1973 the producer that emits both outbound frames,
+// #1975 the nonce mint, #1984 the interception of the two inbound ones, #1985
+// their resolution against the daemon's parked batch, and pyrycode-desktop#849 /
+// pyrycode-desktop#853 the clients that decode and send them.
 // Declared ahead of all of those so that client can be written against the shape —
 // the sequencing #1405 used ahead of #1410, #1616 ahead of #1638, #1704 ahead of
 // #1848 and #1726 ahead of #1727.
@@ -200,11 +203,13 @@ func (q Question) MarshalJSON() ([]byte, error) {
 // not here.
 //
 // There is no id, unlike ModalOption's {id, label}: claude's answer protocol
-// selects an option by its LABEL. So whatever inbound answer #1907 designs will
-// identify an option by a claude-authored string, and publishing that string does
-// not make it trusted when it comes back — the amendment ModelOption.Value's
-// report-only convention sentence carries. This slice declares no inbound verb
-// and grants nothing; TypeQuestionShown's doc block has that reasoning.
+// selects an option by its LABEL. The inbound answer (#1983) therefore does NOT
+// identify an option by echoing that claude-authored string back — a selection
+// names its question by INDEX and carries client-authored values, so no label
+// makes the return trip; see QuestionAnswerEntry. Publishing a label here would
+// not have made it trusted on the way back either way — the amendment
+// ModelOption.Value's report-only convention sentence carries — and the daemon
+// resolves an answer against its own parked copy regardless.
 //
 // The same label is why QuestionDismissedPayload.Outcome is forbidden from
 // carrying one: see that field's paragraph.
@@ -219,7 +224,7 @@ type QuestionOption struct {
 // QuestionDismissedPayload is the body of an Envelope whose Type ==
 // TypeQuestionDismissed. Binary → phone direction; the frame that retires a batch
 // a client is rendering, so no panel is left up for an ask that is already dead.
-// Declared by #1974, emitted by #1973 (the no-answer terminal paths) and #1907
+// Declared by #1974, emitted by #1973 (the no-answer terminal paths) and #1985
 // (the answered one); nothing constructs it here.
 //
 // Field for field with ModalDismissedPayload, including the ABSENCES.
@@ -260,7 +265,7 @@ type QuestionDismissedPayload struct {
 	QuestionBatchID string `json:"question_batch_id"`
 
 	// Outcome is how the batch ended — a PRODUCER-DEFINED SENTINEL, plain string,
-	// vocabulary owned by #1973/#1907 and documented rather than enforced, exactly
+	// vocabulary owned by #1973/#1985 and documented rather than enforced, exactly
 	// as ModalDismissedPayload.Outcome is #703's.
 	//
 	// IT MUST NEVER CARRY A CLAUDE-AUTHORED OPTION LABEL. The rule is stated
@@ -286,4 +291,188 @@ type QuestionDismissedPayload struct {
 	// operator's own choice, and the values a client written today will not
 	// recognise are precisely the two the producer has yet to name.
 	Source string `json:"source"`
+}
+
+// QuestionAnswerPayload is the body of an Envelope whose Type ==
+// TypeQuestionAnswer (#1983). PHONE → BINARY direction — the first inbound frame
+// in this family; everything above it is outbound. It carries the operator's
+// selections for a batch question_shown surfaced.
+//
+// Like ModalAnswerPayload this is an inbound v2 CONTROL envelope, structurally
+// like RequestSnapshotPayload / TypeRekeyRequest: it is meant to be intercepted
+// at internal/relay/v2session.go's dispatchAppFrame before dispatch.Route, and
+// there is no dispatch.Route handler for it. NOTHING INTERCEPTS IT YET — #1984
+// adds the case, #1985 resolves an answer against the daemon's parked batch. The
+// guard classification that follows from having no handler is argued in
+// TypeQuestionAnswer's doc block (codes.go); read it there.
+//
+// There is NO conversation_id, though question_shown carries one, and
+// QuestionDismissedPayload's reason transfers whole: the batch id is the sole
+// correlation key, and a shape carrying both would admit a disagreeing pair
+// someone has to adjudicate. Here that absence is also the SECURITY property —
+// ModalAnswerPayload's, unchanged: the daemon resolves QuestionBatchID against
+// its own outstanding-batch state and never trusts a phone-asserted conversation.
+//
+// AnswerToken is ModalAnswerPayload's field verbatim, including its reasons: a
+// CLIENT-MINTED IDEMPOTENCY KEY whose uniqueness and stability matter and whose
+// secrecy does not, and which is NOT the authorization. The daemon's actual dedup
+// is the one-shot consume of QuestionBatchID, exactly as modal_answer's is of
+// ModalID. Neither field here is a secret and both are safe to log — stated so
+// that #1984's handler neither invents a redaction rule nor assumes one exists.
+//
+// Answers is ordered, always present on the wire and never null; see MarshalJSON.
+// ARRAY ORDER IS NOT THE CORRELATION: a client should emit entries in batch
+// order, but QuestionAnswerEntry.QuestionIndex is what selects, so a decoder must
+// never infer the question from an entry's array position.
+//
+// No field carries omitempty, § Modal's and QuestionShownPayload's discipline
+// unchanged.
+//
+// THIS PACKAGE ENFORCES NO BOUNDS ON THIS SHAPE, by the same design that leaves
+// the outbound batch's bounds to questionbridge.Parse. Answers may be arbitrarily
+// long, an entry may repeat or omit an index, and a value may be arbitrarily
+// large; the only operative limit today is the transport's AEAD frame cap, which
+// bounds total bytes and not entry count. Those are obligations on whoever
+// decodes (#1984) and resolves (#1985), and they are enumerated on
+// QuestionAnswerEntry rather than implied here. One belongs to the decode itself:
+// a decode failure MUST be a rejected frame, never an empty-but-successful
+// answer, and its error must not embed the raw payload — those bytes are
+// remote-authored and nothing on this path strips terminal escape sequences.
+type QuestionAnswerPayload struct {
+	QuestionBatchID string                `json:"question_batch_id"`
+	AnswerToken     string                `json:"answer_token"`
+	Answers         []QuestionAnswerEntry `json:"answers"`
+}
+
+// MarshalJSON normalises a nil Answers to an empty array, so an answer always
+// serialises as "answers":[] and never as "answers":null.
+//
+// The reason is genuinely SHARED with QuestionAnswerEntry.MarshalJSON's Values,
+// so it is stated once here for both. Both empty arrays are OUT OF CONTRACT: an
+// answer with no entries says nothing a refusal does not say better, which is why
+// question_refused is its own type, and an entry with no values selects nothing.
+// [] is the encoding that leaves such a frame decodable by a client whose array
+// type is non-optional, where null fails that decode outright — the client-decode
+// half of BackgroundTaskRosterPayload.MarshalJSON's rationale, and the other half
+// ("an empty list is a positive statement") deliberately does not transfer, for
+// QuestionShownPayload.MarshalJSON's reason.
+//
+// Value receiver, so the substitution lands on a copy rather than on the caller's
+// slice, and the type alias keeps json.Marshal from recursing back into this
+// method — SlashCommandListPayload.MarshalJSON's reasons.
+func (p QuestionAnswerPayload) MarshalJSON() ([]byte, error) {
+	if p.Answers == nil {
+		p.Answers = []QuestionAnswerEntry{}
+	}
+	type alias QuestionAnswerPayload
+	return json.Marshal(alias(p))
+}
+
+// QuestionAnswerEntry is one question's answer inside a QuestionAnswerPayload:
+// which question, and the values chosen for it.
+//
+// It is QuestionAnswerEntry rather than QuestionAnswer because QuestionAnswer
+// beside QuestionAnswerPayload differs only by the family's frame-body suffix, so
+// the pair reads as "the payload of a QuestionAnswer" rather than "the body of a
+// question_answer frame". The nested types under question_shown did not need the
+// disambiguation — Question is not QuestionShown — so this suffix is bought
+// rather than inherited.
+//
+// QuestionIndex is the entry's index into the batch's questions array, the
+// canonical display order QuestionShownPayload publishes. The wire key is
+// question_index and not index because an entry quoted or logged on its own must
+// not read as "the index of this answer". The daemon reads the question text from
+// its own parked copy keyed on the payload's QuestionBatchID; nothing about the
+// question travels back.
+//
+// THE INDEX IS CARRIED, NEVER RANGE-CHECKED HERE, and the consequence has to be
+// loud because it is a panic rather than a wrong answer: subscripting the parked
+// batch with a negative or over-large index panics, so #1985 owes an EXPLICIT
+// range check before indexing. Two more obligations fall on the same reader and
+// are named here rather than left to be discovered — a duplicate or missing index
+// across entries must not resolve to a silently partial or last-write-wins
+// answer, and an Answers array far longer than the parked batch must not become
+// unbounded work per inbound frame. internal/protocol enforcing no bound is the
+// same design that leaves the outbound batch's bounds to questionbridge.Parse
+// (#1965); it is not a guarantee this type makes.
+//
+// It is a plain int rather than an unsigned type on purpose. A uint would reject
+// -1 at decode and still accept 1<<62 — half-closing the door while turning a
+// range problem into a decode-error surprise — and it would smuggle a bounds
+// decision into a package that makes none.
+//
+// Values are the strings chosen for this question, ordered, always present and
+// never null; see MarshalJSON. They are CLIENT-AUTHORED AND OPAQUE, and they are
+// NEVER CHECKED against the batch's offered labels: claude's contract permits
+// free text anywhere and requires no value to be one of the labels, so a
+// validator rejecting an unlisted value would reject a legal answer. More than
+// one value is the multi_select case; one is the ordinary one.
+//
+// SECURITY: these strings are REMOTE-AUTHORED — they crossed the network from a
+// paired but not trusted client, the opposite direction from Question's
+// claude-authored ones, so § Security model's threat 1 does not describe them.
+// What they do reach is claude's context, via #1985 feeding them back as the
+// blocked tool call's result. That grants nothing new: a paired client can
+// already put arbitrary text into the conversation with send_message, so an
+// answer sits at exactly that trust tier — recorded because the shape invites the
+// opposite reading, that an answer is somehow more constrained than a message.
+type QuestionAnswerEntry struct {
+	QuestionIndex int      `json:"question_index"`
+	Values        []string `json:"values"`
+}
+
+// MarshalJSON normalises a nil Values to an empty array, so an entry always
+// serialises as "values":[] and never as "values":null.
+//
+// The out-of-contract reason is QuestionAnswerPayload.MarshalJSON's, stated there
+// once for both arrays because it is genuinely the same one — read it there
+// rather than expecting a distinction this method does not have.
+//
+// The one reason that is this method's alone is Question.MarshalJSON's, and it
+// transfers verbatim: it CANNOT BE FOLDED into the payload's. A payload
+// marshaller normalising entries in place would reach through p.Answers[i] into
+// the caller's backing array, which for a payload shared between goroutines is a
+// data race as well as a correctness bug; and it would not fire at all when an
+// entry is marshalled on its own.
+//
+// Value receiver and the type alias, for QuestionAnswerPayload.MarshalJSON's
+// reasons.
+func (e QuestionAnswerEntry) MarshalJSON() ([]byte, error) {
+	if e.Values == nil {
+		e.Values = []string{}
+	}
+	type alias QuestionAnswerEntry
+	return json.Marshal(alias(e))
+}
+
+// QuestionRefusedPayload is the body of an Envelope whose Type ==
+// TypeQuestionRefused (#1983). Phone → binary direction; the operator declined to
+// choose, so the batch is resolved without any selection.
+//
+// It is its OWN TYPE rather than a QuestionAnswerPayload with an empty Answers
+// array or a nullable flag, mirroring TypeModalCancel beside TypeModalAnswer and
+// following the same precedent question_dismissed set: a distinct meaning gets a
+// distinct type, so a reader routes on the frame's name rather than on a value's
+// shape. A refusal carries no answers, and a shape able to express "answered with
+// nothing" would need someone to adjudicate it against a genuine refusal.
+//
+// Field for field with QuestionAnswerPayload minus Answers, INCLUDING THE
+// ABSENCE: no conversation_id, for that type's reasons. AnswerToken is carried —
+// a refusal is as replayable as an answer, and the daemon's dedup is the same
+// one-shot consume of QuestionBatchID. No omitempty on either field.
+//
+// NO MarshalJSON: there is no slice field here, so there is no nil→[]
+// normalisation to perform. QuestionAnswerPayload.MarshalJSON's backing-array
+// argument is specific to a normaliser reaching through a shared slice and does
+// not transfer — do not add one here by analogy to the sibling, the note
+// QuestionDismissedPayload carries for the same reason.
+//
+// SECURITY: this frame carries NO FREE TEXT AT ALL, which makes it the narrowest
+// surface in the family — both fields are ids a client echoes back. Like its
+// sibling it is intercepted by nobody yet, and declaring it grants no inbound
+// capability; the interactive gate and the per-device answer gate (#702) stay the
+// handler's (#1984) to apply, default deny.
+type QuestionRefusedPayload struct {
+	QuestionBatchID string `json:"question_batch_id"`
+	AnswerToken     string `json:"answer_token"`
 }
