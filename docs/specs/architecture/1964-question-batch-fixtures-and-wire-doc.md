@@ -129,3 +129,16 @@ The deliverable is a **published contract**, so the exploitable surface is not c
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-01
+
+## Revisions
+
+### 2026-09-01 — Open questions resolved in Phase B; no design change
+
+Both resolved from measurement rather than reasoning, and neither moved the design. Recorded here because the answers are what the changelog entry had to be written from.
+
+1. **The empty fixture is NOT sole-red for `questions`, and the section says so.** The nine-key `omitempty` sweep (plus three renames and one field reordering, thirteen mutants, all run over a `go test -overlay` scratch copy) confirmed the prediction: `omitempty` on `questions` reddens `TestQuestionShownPayload_Empty_RoundTrip` **and** `TestQuestionShownPayload_NilQuestionsNormalises`. The empty fixture's contribution is the **decode** side of the `[]` guarantee, which nothing pinned before — not a mutant nothing else catches. The sweep also measured what was not predicted in advance: the zero-value fixture is **sole**-red for six of the nine keys (`conversation_id`, `question_batch_id`, `question`, `header`, `label`, `description`), `multi_select` is red on both the populated and zero fixtures, and `options` is caught **only** by `TestQuestion_NilOptionsNormalises` — confirming the Design section's reachability finding that no fixture carries `"options":[]`. The changelog entry states each of these from the run's output, per #1718's lesson that a sole-redness claim written from a prediction column ships wrong.
+2. **`make docs-guard` does not bind `docs/protocol-mobile.md`.** `cmd/docs-guard` walks `docs/knowledge/features` only (`featuresDir`), so the 50000-byte cap and the false-heading check do not reach this file. No design change; the section is free to be as long as the contract needs.
+
+**Also found, filed, not fixed:** `docs-guard` is **already red on `main`** — three package overviews under `docs/knowledge/features/` carry a wrapped line beginning with a ticket reference, so each parses as a heading. All three files are unchanged by this branch (verified against the merge-base), and `docs/knowledge/features/` belongs to the documentation phase, so § Scope Discipline applies: filed as **#1970** (Inbox), not repaired here.
+
+The planned RED-on-a-wrong-byte check was satisfied by the reordering mutant rather than by editing a fixture in the worktree: swapping `Question`'s `Text` and `Header` fields changes only the marshalled key order, and `roundTripEnvelope` reddens both converted tests on the byte diff — the same evidence with nothing written into the tree.

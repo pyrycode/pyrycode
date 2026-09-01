@@ -8,12 +8,16 @@ import "encoding/json"
 // their serialization.
 //
 // NOTHING CONSTRUCTS THEM. #1965 owns the parse that fills them from claude's
-// tool input, #1927 the producer that emits the frame and mints the nonce, #1964
-// the testdata fixtures and the docs/protocol-mobile.md section, and
-// pyrycode-desktop#849 the client that decodes them. Declared ahead of all four
+// tool input, #1927 the producer that emits the frame and mints the nonce, and
+// pyrycode-desktop#849 the client that decodes them. Declared ahead of all three
 // so that client can be written against the shape — the sequencing #1405 used
 // ahead of #1410, #1616 ahead of #1638, #1704 ahead of #1848 and #1726 ahead of
 // #1727.
+//
+// The testdata fixtures and the docs/protocol-mobile.md section HAVE LANDED
+// (#1964): that section is where the field-by-field contract, the bounds and
+// their enforcement are published for a client author, and it is the copy to
+// keep true when this shape changes.
 //
 // Why this is its own frame family rather than a grown modal_shown, and why the
 // options nest under each question, are argued in TypeQuestionShown's doc block
