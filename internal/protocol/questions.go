@@ -9,11 +9,13 @@ import "encoding/json"
 // two a client sends back to resolve it (TypeQuestionAnswer, TypeQuestionRefused).
 // Wire vocabulary only: pure structs and their serialization.
 //
-// NOTHING CONSTRUCTS OR DECODES THEM. #1965 owns the parse that fills the batch
-// from claude's tool input, #1973 the producer that emits both outbound frames,
-// #1975 the nonce mint, #1984 the interception of the two inbound ones, #1985
-// their resolution against the daemon's parked batch, and pyrycode-desktop#849 /
-// pyrycode-desktop#853 the clients that decode and send them.
+// NOTHING IN THIS PACKAGE CONSTRUCTS OR DECODES THEM — every producer and
+// consumer is elsewhere. #1965 owns the parse that fills the batch from claude's
+// tool input, #1973 the producer that emits both outbound frames, #1975 the nonce
+// mint, #1985 the resolution of an answer against the daemon's parked batch, and
+// pyrycode-desktop#849 / pyrycode-desktop#853 the clients that decode and send
+// them. The two INBOUND shapes are decoded as of #1984, by the relay handlers
+// behind dispatchAppFrame's cases for them.
 // Declared ahead of all of those so that client can be written against the shape —
 // the sequencing #1405 used ahead of #1410, #1616 ahead of #1638, #1704 ahead of
 // #1848 and #1726 ahead of #1727.
@@ -299,12 +301,13 @@ type QuestionDismissedPayload struct {
 // selections for a batch question_shown surfaced.
 //
 // Like ModalAnswerPayload this is an inbound v2 CONTROL envelope, structurally
-// like RequestSnapshotPayload / TypeRekeyRequest: it is meant to be intercepted
-// at internal/relay/v2session.go's dispatchAppFrame before dispatch.Route, and
-// there is no dispatch.Route handler for it. NOTHING INTERCEPTS IT YET — #1984
-// adds the case, #1985 resolves an answer against the daemon's parked batch. The
-// guard classification that follows from having no handler is argued in
-// TypeQuestionAnswer's doc block (codes.go); read it there.
+// like RequestSnapshotPayload / TypeRekeyRequest: it is intercepted at
+// internal/relay/v2session.go's dispatchAppFrame BEFORE dispatch.Route, and there
+// is no dispatch.Route handler for it. #1984 added that case and the handler
+// behind it, which decodes this shape and hands it to a resolver seam; #1985
+// resolves an answer against the daemon's parked batch. The guard classification
+// that follows from being switch-intercepted is argued in TypeQuestionAnswer's doc
+// block (codes.go); read it there.
 //
 // There is NO conversation_id, though question_shown carries one, and
 // QuestionDismissedPayload's reason transfers whole: the batch id is the sole
@@ -334,10 +337,15 @@ type QuestionDismissedPayload struct {
 // large; the only operative limit today is the transport's AEAD frame cap, which
 // bounds total bytes and not entry count. Those are obligations on whoever
 // decodes (#1984) and resolves (#1985), and they are enumerated on
-// QuestionAnswerEntry rather than implied here. One belongs to the decode itself:
-// a decode failure MUST be a rejected frame, never an empty-but-successful
-// answer, and its error must not embed the raw payload — those bytes are
-// remote-authored and nothing on this path strips terminal escape sequences.
+// QuestionAnswerEntry rather than implied here. One belongs to the decode itself
+// and is DISCHARGED by #1984's handler: a decode failure MUST be a rejected frame,
+// never an empty-but-successful answer, and its error must not embed the raw
+// payload — those bytes are remote-authored and nothing on this path strips
+// terminal escape sequences. The rule stays stated as a rule because it binds
+// every future decoder of this shape, not only the first; note that it is a rule
+// about a decode ERROR, so a payload of `null` — which decodes cleanly into the
+// zero value — is not a rejected frame but an unknown batch, and judging it is the
+// resolver's, not the decoder's.
 type QuestionAnswerPayload struct {
 	QuestionBatchID string                `json:"question_batch_id"`
 	AnswerToken     string                `json:"answer_token"`
@@ -469,9 +477,11 @@ func (e QuestionAnswerEntry) MarshalJSON() ([]byte, error) {
 //
 // SECURITY: this frame carries NO FREE TEXT AT ALL, which makes it the narrowest
 // surface in the family — both fields are ids a client echoes back. Like its
-// sibling it is intercepted by nobody yet, and declaring it grants no inbound
-// capability; the interactive gate and the per-device answer gate (#702) stay the
-// handler's (#1984) to apply, default deny.
+// sibling it is switch-intercepted as of #1984, and being intercepted grants no
+// inbound capability: that handler applies no authorization, and what keeps it
+// fail-safe is a resolver seam left nil at every construction site. The interactive
+// gate and the per-device answer gate (#702) stay the resolver's to apply, default
+// deny, with #1986 installing the latter before anything is wired.
 type QuestionRefusedPayload struct {
 	QuestionBatchID string `json:"question_batch_id"`
 	AnswerToken     string `json:"answer_token"`

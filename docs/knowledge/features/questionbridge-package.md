@@ -186,7 +186,8 @@ pass because there's nothing to alias.
   (#1974's `question_dismissed`,
   [question-batch payload](protocol-package-question-batch-payload.md)).
   #1983 declared the inbound vocabulary (`question_answer` / `question_refused`,
-  vocabulary only); #1984 wires the interception and #1985 is the answer path
+  vocabulary only); #1984 (landed) wires the [inbound interception](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md)
+  through a nil-able `QuestionResolver` seam, and #1985 is the answer path
   (`Registry.Resolve`, and must be the sole dismissal broadcaster for an
   answered batch — #1973's retire backstop only fires when that `Resolve`
   misses). #1979 (landed) is the relay half of the
