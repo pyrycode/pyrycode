@@ -2024,3 +2024,59 @@ func TestSlashCommandListPayload_ZeroValue_RoundTrip(t *testing.T) {
 
 	roundTripEnvelope(t, env, payload, raw)
 }
+
+// TestQuestionShownType_IsNotClaudesVocabulary pins the translation layer this
+// frame exists to preserve, as its rate_limited, model_announced, model_list and
+// slash_command_list siblings do. The daemon is the ONE place a claude rename
+// lands; naming the wire type after claude's own tool would undo that.
+//
+// claude's words on this path are the tool name AskUserQuestion and the tool_input
+// keys questions, question, header, options and multiSelect (the committed capture
+// internal/e2e/realclaude/testdata/ask_user_question_v2.1.239.json). Only two of
+// them appear in code below, and the containment lattice is why.
+//
+// The SINGULAR subject noun cannot be a check at all. question is a substring of
+// the correct name, so a strings.Contains on it would be RED against it — the trap
+// TestSlashCommandListType_IsNotClaudesVocabulary records three words wide for
+// command, slash_command and slash, and the model siblings record one word wide
+// for the singular model. claude's array key differs from this frame's subject
+// noun by a trailing s, so the discriminating check is the PLURAL: questions is
+// not a substring of question_shown, which carries question_. That is also why the
+// name is not questions_shown — that spelling would make the plural check red by
+// construction.
+//
+// The ask check is NOT subsumed by the AskUserQuestion equality above it, unlike
+// the redundancy the sibling pins keep deliberately. strings.Contains is
+// case-sensitive, so the equality is GREEN against ask_user_question_shown — the
+// most plausible wrong name — while the containment check is red. ask is the root
+// every snake-cased derivation carries. One subtlety a future rename must
+// re-check: ask is a substring of task, so this check is safe only because the
+// correct name carries no task word.
+//
+// There is NO payload-bytes half here, which every sibling pin ends with. header,
+// options and multiSelect are per-entry keys and belong to that half, and the
+// shape they would be checked against does not exist until #1963; this ticket
+// (#1962) is names-only. TestSlashCommandListType_IsNotClaudesVocabulary's own
+// comment records that its half arrived with the shape (#1727), and this pin gains
+// one the same way.
+//
+// The exact-equality pin is the half that fails a WRONG name rather than merely a
+// claude-derived one: the negative checks alone leave every other wrong name
+// green. Naming is this ticket's whole deliverable and nothing downstream supplies
+// the string, so the pin is load-bearing.
+func TestQuestionShownType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeQuestionShown == "AskUserQuestion" {
+		t.Errorf("wire type is claude's tool name %q; it must be the daemon's own name", TypeQuestionShown)
+	}
+	if strings.Contains(TypeQuestionShown, "ask") {
+		t.Errorf("wire type %q is derived from claude's tool name (contains %q)", TypeQuestionShown, "ask")
+	}
+	if strings.Contains(TypeQuestionShown, "questions") {
+		t.Errorf("wire type %q is derived from claude's array key (contains %q)", TypeQuestionShown, "questions")
+	}
+	// The exact pin, naming what the frame IS to a client rather than anything of
+	// claude's.
+	if TypeQuestionShown != "question_shown" {
+		t.Errorf("wire type: got %q, want %q", TypeQuestionShown, "question_shown")
+	}
+}

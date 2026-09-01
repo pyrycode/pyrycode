@@ -132,6 +132,11 @@ func TestIsKnownAppType(t *testing.T) {
 		// upload leg really is inbound, so this is the structural bar against a v1
 		// client sending an attachment_chunk frame into dispatch.Route.
 		{"attachment_chunk-rejected", TypeAttachmentChunk, false, ErrUnknownType},
+		// the v2-only clarifying-question batch: an outbound binary → phone report
+		// an old phone never receives, so IsKnownAppType must reject it. Rejection
+		// is also what keeps the type off the inbound path — a phone must never be
+		// able to send a question_shown frame into dispatch.Route.
+		{"question_shown-rejected", TypeQuestionShown, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,6 +242,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeSlashCommandList: true,
 	// v2 attachment vocabulary.
 	TypeAttachmentChunk: true,
+	// v2 clarifying-question batch.
+	TypeQuestionShown: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -308,6 +315,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeSlashCommandList,
 		// v2 attachment vocabulary.
 		TypeAttachmentChunk,
+		// v2 clarifying-question batch.
+		TypeQuestionShown,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
