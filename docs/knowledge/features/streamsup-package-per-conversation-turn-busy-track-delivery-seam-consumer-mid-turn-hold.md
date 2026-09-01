@@ -49,9 +49,16 @@ separate `Busy` read would reintroduce the TOCTOU this closes.
 **`streamTurnHoldTimeout` (15 min, `main.go`, beside `inboundActivateTimeout`) bounds one delivery
 attempt**, not the message — msgqueue's own retry (1s) and give-up (2m) bounds mean a turn that never
 ends surfaces as a typed `session_error`/`CodeSessionBlocked` after ≈2× the timeout (≈30 min) rather than
-holding the conversation forever. Deliberately no `Pending`-style exemption (contrast
-`supervisor.ErrTrustModalPending`): that would reset the give-up streak forever, which a legitimate human
-decision may need and a running turn should not.
+holding the conversation forever, **unless a person is being asked about that conversation (#1911)**.
+`newInboundDeliver`'s hold branch is the sole producer of `errStreamTurnHold`; `markApprovalHolds`
+re-marks that error as `errHeldForApproval` only when `streamApprovalBridge.ApprovalParked` answers true
+for the conversation, and `Pending` (`approvalHoldPending`) is a pure `errors.Is` against that mark. What
+this exempts is the **person's deciding time**, not the turn: only the hold error is ever re-marked, so a
+`resolve` or `Activate` failure — a genuinely wedged conversation — stays on the give-up clock even while
+an approval happens to be parked on the same conversation. For a turn with nobody being asked, nothing
+changed: the arithmetic above still holds, and the better discriminator for that case is still staleness
+(no turn event for N minutes) rather than duration, which needs a per-conversation timestamp the tracker
+deliberately does not hold (#1201).
 
 **Trust boundary, restated honestly for this feed.** The tracker's SECURITY note previously claimed "the
 key is never taken from the wire" — true of `observe`/`clearForSession`, which key off a daemon-resolved
