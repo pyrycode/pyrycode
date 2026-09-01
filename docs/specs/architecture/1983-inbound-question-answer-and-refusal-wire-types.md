@@ -215,3 +215,15 @@ The category that bounds most of the others was checked against the tree rather 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — the mutant sweep refined one coverage claim
+
+Seven mutants were run over a `go test -overlay` scratch copy rather than predicted (`omitempty` on `question_index` / `values` / `answers` / `answer_token`, a `question_index` key rename, and each normaliser's substitution deleted). **All seven redden at least one test**, so the design's coverage claim holds. One result differs from what § Testing strategy predicted and is recorded rather than quietly absorbed:
+
+**`#1974`'s "a round trip is blind to every `omitempty`" does not hold here, and the reason is worth carrying.** That finding came from a payload whose every fixture value was non-empty. This fixture's first entry carries `question_index: 0` — a *legal and common* index rather than a placeholder — so `omitempty` on that key elides it from the fixture bytes too, and `TestQuestionAnswerPayload_RoundTrip` reddens alongside `TestQuestionAnswerEntry_ZeroValue_KeysPresent`. The two classes are therefore **overlapping on this one key and disjoint on the rest**, which is strictly more coverage than planned, not less.
+
+It changes nothing about the tests that shipped: the marshalled-zero pins are still the only route to the entry's keys when `answers` is empty, and they are still the only thing that catches `omitempty` on `answers`, `values` and `answer_token`, none of which the round trip touches. The generalisable version of the lesson is that a fixture's coverage against `omitempty` is decided per key by whether that key's fixture value happens to be its zero value — which is a property to *measure* with a mutant, never to infer from the sibling ticket's summary.
+
+**Open questions resolved.** (1) `question_index` over `index` — decided at design time, implemented as written. (2) The § Application message types placement — the `modal_answer` / `modal_cancel` rows turned out to be adjacent to the question rows anyway, so the two readings coincide and the new rows sit next to both. (3) No cap on `answers` is published: the § Contract bounds table names it as a gap owned by #1985, with the transport frame cap identified as the only operative limit, per § Attachments' rule.
