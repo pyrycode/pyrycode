@@ -102,6 +102,50 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #1944. The entry above, copied WHOLE — the same seventeen names, for the
+	// reason it states: like #1696's, #1701's and #1943's files, this one performs
+	// no I/O in EITHER direction. It builds two tables of literals and asserts on a
+	// pure namer's output. Copying whole rather than hand-picking is the point: the
+	// check is an AST identifier match, so banning packageDir while leaving its
+	// wrappers setModeFixturePath, writeSetModeFixture and writeFixture unlisted
+	// leaves the ban true and the property false.
+	//
+	// The first five keep a SKIP out — resolveClaudeBin and
+	// WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is
+	// printed, and a skip exits 0, which reads as a pass under `make
+	// e2e-realclaude`.
+	//
+	// captureClaudeVersion is the one a developer in THIS file is most likely to
+	// reach for, more so than in #1943's: it is the package's own `claude --version`
+	// exec and it returns exactly the token askQuestionFixtureName takes, so "use
+	// the real token" is one line away. It t.Fatalf's rather than skipping, so it
+	// would not fake a pass; what it would destroy is this file's defining property,
+	// that it settles with no claude binary at all. The token arrives as a PARAMETER
+	// here and #1938's live run is what supplies a real one.
+	//
+	// The three environment readers are the credential guard: this process
+	// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and no
+	// table row or failure message in that file may be sourced from it.
+	//
+	// The packageDir group plus filepath.Glob and the four os read/write names are
+	// what keep that file's pattern controls SYNTHETIC LITERALS rather than a
+	// directory listing, which is AC 3's own requirement rather than tidiness — and
+	// they close the shortest route besides: `go test` runs in the package source
+	// directory, so a RELATIVE os.WriteFile("testdata/…") reaches the seventeen
+	// committed captures while naming no wrapper at all.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: that file writes
+	// nothing and needs no directory. versionSlug, filepath.Match, filepath.Join,
+	// filepath.Dir, anchorFixtureName and strings.Repeat are all pure and banned
+	// nowhere; it calls all six. A dotted entry is matched as a selector, so
+	// filepath.Glob bans only filepath.Glob and leaves the other three alone.
+	"ask_user_question_names_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 	"finding_run_record_test.go": {
 		"probeClaudeVersion", "resolveClaudeBin", "WithWorktreeAuthenticated",
 		"pinReadState", "pinExit1", "pinScanArgv", "probeProcessSnapshot",
