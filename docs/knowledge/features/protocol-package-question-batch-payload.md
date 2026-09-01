@@ -132,11 +132,14 @@ rather than re-deriving it here.
 The family's first **inbound** frames — `TypeQuestionAnswer` / `TypeQuestionRefused` (see
 [Envelope types § v2 question-batch vocabulary](protocol-package-constants-codes-go-envelope-types.md)
 and [Drift detectors](protocol-package-drift-detectors.md) for the guard classification).
-Vocabulary only: nothing decodes or acts on either frame yet, checkably so —
-`dispatchAppFrame`'s control switch has no case and no `default` arm for
-either name, so both fall through to the ordinary application dispatch
-exactly as before #1983. #1984 adds the interception, #1985 resolves an
-answer against the daemon's parked batch.
+Vocabulary only as of #1983: nothing decoded or acted on either frame yet,
+checkably so — `dispatchAppFrame`'s control switch had no case and no
+`default` arm for either name, so both fell through to the ordinary
+application dispatch. **#1984 added the interception**: both cases now sit in
+`dispatchAppFrame`'s switch, decode into these types and hand off to a
+nil-able `QuestionResolver` seam — see [Inbound question control](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md).
+It resolves nothing on its own (the seam is nil at every construction site);
+\#1985 implements the seam against the daemon's parked batch.
 
 ```go
 type QuestionAnswerPayload struct {
@@ -331,4 +334,5 @@ nesting depth, not from the sibling with the closest type count.
 - [Slash-command-list payload](protocol-package-slash-command-list-payload.md) — the closest structural analogue: nested list payload declared ahead of its producer, same value-receiver + type-alias marshaller idiom
 - [Model-list payload](protocol-package-model-list-payload.md) — the two-normalisers-with-different-reasons counter-example this payload's shared-reason case contrasts with
 - [questionbridge-package.md](questionbridge-package.md) — the fail-closed bounded parse (#1965), landed with no consumer
-- Open, deliberately out of scope for every landed slice so far: the per-device answer gate (#702) extension to a question answer, `dispatchAppFrame` interception for the inbound pair (#1984), and resolution against the daemon's parked batch (#1985) — #1983 declared the inbound vocabulary but decides none of these
+- [Inbound question control](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md) — #1984's `dispatchAppFrame` interception and `QuestionResolver` seam, landed with nothing wired behind it
+- Open, deliberately out of scope so far: the per-device answer gate (#702) extension to a question answer, and resolution against the daemon's parked batch — #1985's `QuestionResolver` implementation, which #1986 must gate before anything is wired
