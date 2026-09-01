@@ -1693,10 +1693,18 @@ const streamTurnHoldTimeout = 15 * time.Minute
 
 // mcpApprovalTimeout is the DEFAULT human-approval window handed to the
 // pending-approval registry (permbridge.Register) for every VerbMCPApprove
-// request: after it elapses with no resolver decision, the registry's own timer
-// denies the request and deletes the entry. It is a default, not the value —
-// envApprovalTimeout overrides it, and approvalTimeout is the accessor every
-// consumer actually calls.
+// request. Since #1932 wired the daemon's liveness report into that registry —
+// which startRelayV2 does whenever a relay is configured, and startRelay skips
+// along with the whole leg when one is not — the window is a re-check interval
+// rather than a hard deadline: the registry's own
+// timer asks the report at every expiry and re-arms this SAME window while the
+// approval is still answerable, denying the request and deleting the entry only
+// once the answer comes back no. The bound is therefore one window from the daemon
+// OBSERVING the last answerer go away, which is not the moment it went — a vanished
+// phone stays in the daemon's active set until internal/relay's idle sweep notices
+// it, and docs/knowledge/features/permbridge-package.md carries what that costs.
+// It is a default, not the value — envApprovalTimeout overrides it, and
+// approvalTimeout is the accessor every consumer actually calls.
 //
 // Why ten and not two: waiting is not the unsafe state. The tool does not run
 // while the approval is outstanding, so denying early prevents nothing that
@@ -1715,17 +1723,23 @@ const streamTurnHoldTimeout = 15 * time.Minute
 const mcpApprovalTimeout = 10 * time.Minute
 
 // envApprovalTimeout overrides the human-approval window (mcpApprovalTimeout). A
-// plausibly-operational knob for tuning the window — the e2e (#1139) shrinks it to
-// ~2s to prove the daemon's fail-closed timer denies a no-answer approval within a
-// bounded deadline.
+// plausibly-operational knob for tuning the window — the e2e (#1139, rebuilt under
+// #1932) shrinks it to ~2s so both halves of the conditional bound are cheap to
+// exercise. One arm keeps the answering phone connected and answers past more than
+// one window, and nothing may deny in the meantime; the other ENDS that phone's
+// session first, so nobody is left able to answer, and only then does the window
+// deny. What the suite pins is a deny once nobody can answer it, and explicitly no
+// deny while somebody still can.
 const envApprovalTimeout = "PYRY_APPROVAL_TIMEOUT"
 
 // approvalTimeout is the approval window handed to the pending-approval registry:
 // mcpApprovalTimeout by default, overridable via PYRY_APPROVAL_TIMEOUT. An unset or
 // unparseable value falls back to the default, so production behaviour is
-// byte-identical when the env is absent. Only the timer's DURATION is tunable —
-// permbridge's deterministic deny-on-deadline logic (the fail-closed core) is
-// untouched.
+// byte-identical when the env is absent. The DURATION stays the only knob, and it
+// is the duration every arming uses, not just the first: permbridge.Register
+// re-arms the value it was handed and never a different one. What that value feeds
+// is the re-check interval the fail-closed core now applies while somebody can
+// still answer — not a deadline it applies unconditionally.
 func approvalTimeout() time.Duration {
 	if v := os.Getenv(envApprovalTimeout); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
