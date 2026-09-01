@@ -215,6 +215,53 @@ var finOfflineExecBans = map[string][]string{
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 		"newDropcapScanner", "realHome",
 	},
+	// #1951. ask_user_question_record_test.go's entry, copied WHOLE — the same
+	// seventeen names, for the reason that entry states: like #1943's and #1944's
+	// files, this one performs no I/O in EITHER direction. It builds synthetic
+	// literals and asserts on a pure check's returned findings. Do NOT copy the
+	// entry immediately above instead: that is #1941's FOURTEEN, deliberately
+	// narrower because that file writes a directory, and it is the entry its own
+	// comment calls the one the two above it warn against copying whole. This file
+	// is the same family and the wrong one to inherit from.
+	//
+	// The first five keep a SKIP out — resolveClaudeBin and
+	// WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is
+	// printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`.
+	//
+	// captureClaudeVersion returns the raw line AND its leading token at once —
+	// both of askQuestionFixtureRecord's version fields — so it is the exec a
+	// developer populating a fixture here reaches for first. It t.Fatalf's rather
+	// than skipping, so it would not fake a pass; what it would destroy is this
+	// file's defining property, that it settles with no claude binary at all.
+	//
+	// The three environment readers are the credential guard: this process
+	// environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// The packageDir group plus filepath.Glob and the four os names matter MORE
+	// here than in either entry this one copies, because a shape assertion is the
+	// one place where "prove it against a real capture" is the natural next
+	// thought. Two reasons it must not. First, AC 3: this file's whole claim is
+	// that it settles offline. Second, it would be RED ON ARRIVAL — no committed
+	// permission_protocol_* capture holds an AskUserQuestion tool_use block, only
+	// the tool's name in the `system`/`init` tools array. And `go test` runs in the
+	// package source directory, so a RELATIVE os.ReadFile("testdata/…") reaches
+	// those captures while naming no wrapper at all, which is why the wrappers are
+	// listed alongside packageDir itself.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: this file writes
+	// nothing and needs no directory. The only in-package helper it calls is
+	// askQuestionFullRecord, which is pure literals and is banned nowhere. The
+	// limit of all of it, stated so nobody over-reads the ban: this check is
+	// per-file SYNTAX, not a call graph, so a banned read stays reachable through a
+	// helper the file calls while the ban stays green.
+	"ask_user_question_shape_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 	"finding_run_record_test.go": {
 		"probeClaudeVersion", "resolveClaudeBin", "WithWorktreeAuthenticated",
 		"pinReadState", "pinExit1", "pinScanArgv", "probeProcessSnapshot",
