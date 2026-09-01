@@ -1,13 +1,14 @@
-# Question-batch payload (#1963 shape, #1964 fixtures + docs; parse #1965; producer #1927)
+# Question-batch payload (#1963 shape, #1964 fixtures + docs, #1965 parse; producer #1927)
 
 The v2 wire shape for claude's clarifying-question batch (`AskUserQuestion` tool
 call), riding `TypeQuestionShown` (#1962 — see [Envelope types § v2 question-batch
 vocabulary](protocol-package-constants-codes-go-envelope-types.md)). The
 committed fixtures and the `docs/protocol-mobile.md` § Question (v2) write-up
-landed in #1964; the parse (#1965) and the producer (#1927) are still ahead of
-pyrycode-desktop#849, the #1405→#1410 / #1616→#1638 / #1704→#1848 / #1726→#1727
-sequencing repeated a fifth time. Nothing constructs these types; nothing emits
-them.
+landed in #1964; the fail-closed parse landed in #1965
+([`internal/questionbridge`](questionbridge-package.md)), with no consumer yet
+— the producer (#1927) is still ahead, the pyrycode-desktop#849, #1405→#1410
+/ #1616→#1638 / #1704→#1848 / #1726→#1727 sequencing repeated a fifth time.
+Nothing constructs these types on a live path yet; nothing emits them.
 
 ```go
 type QuestionShownPayload struct {
@@ -53,12 +54,13 @@ rationale for each choice below — cite them rather than re-deriving.
   client to size for 14, naming runes (not bytes) as the unit and flagging
   that the observed header is pure ASCII, so nothing committed yet separates
   the two units — a coincidence, not a measurement of the byte case. **#1965
-  must not enforce 12 fail-closed**, since its own acceptance criteria pin it
-  against the same capture.
+  landed with no header bound of its own** — the header is bounded only
+  transitively, by `questionbridge`'s single pre-decode byte cap over the
+  whole input. See [questionbridge-package.md](questionbridge-package.md).
 - **No `TruncatedFields`, unlike `SlashCommand` and `ModelOption`.** Deliberate:
   a producer cutting an over-long question/header/label/description has
-  nowhere to report it, so **#1965 must reject an over-long field fail-closed
-  rather than truncate silently**, or a later ticket adds the field back.
+  nowhere to report it, so #1965's parse rejects an over-long input
+  fail-closed rather than truncating silently.
 - **`QuestionOption` has no id, unlike `ModalOption{id,label}`** — claude's
   answer protocol selects by label. Flagged for #1927: whatever inbound answer
   it designs returns a claude-authored string, and publishing that string does
@@ -152,4 +154,5 @@ nesting depth, not from the sibling with the closest type count.
 - [Envelope types § v2 question-batch vocabulary](protocol-package-constants-codes-go-envelope-types.md) — `TypeQuestionShown`'s frame-family security argument, nesting fact, and naming-trap record (#1962)
 - [Slash-command-list payload](protocol-package-slash-command-list-payload.md) — the closest structural analogue: nested list payload declared ahead of its producer, same value-receiver + type-alias marshaller idiom
 - [Model-list payload](protocol-package-model-list-payload.md) — the two-normalisers-with-different-reasons counter-example this payload's shared-reason case contrasts with
-- Open, deliberately out of this slice's scope: the fail-closed bounded parse (#1965); the per-device answer gate (#702) extension and the unanswered/dismissed-batch fail-safe (#1927)
+- [questionbridge-package.md](questionbridge-package.md) — the fail-closed bounded parse (#1965), landed with no consumer
+- Open, deliberately out of scope for both landed slices: the per-device answer gate (#702) extension and the unanswered/dismissed-batch fail-safe (#1927)
