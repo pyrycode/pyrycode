@@ -87,6 +87,8 @@ var inboundTypes = map[string]string{
 	"TypeRequestDebugBundle":     "switch-intercepted",
 	"TypeSetSessionSettings":     "switch-intercepted",
 	"TypeRequestSessionSettings": "switch-intercepted",
+	"TypeQuestionAnswer":         "switch-intercepted",
+	"TypeQuestionRefused":        "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -217,21 +219,13 @@ var excludedTypes = map[string]string{
 	// unemitted one.
 	"TypeQuestionDismissed": "push",
 
-	// pending handler — the v2 question answer and refusal (#1983), the question
-	// family's first INBOUND types. Not "push" like the two above: that reason
-	// ("this slice declares no inbound request verb") is exactly what stopped
-	// being true here, and copying it would put a lie in the guard. Not
-	// inboundTypes either, where the analogous modal_answer / modal_cancel sit as
-	// "switch-intercepted" — this slice ships no dispatch, so Assertion #1 would
-	// fail both by construction. Excluded under the reason that is actually true:
-	// the inbound leg has no handler YET. TypeAttachmentChunk above is the
-	// precedent, entry for entry. #1984 adds the dispatchAppFrame cases, at which
-	// point BOTH entries move to inboundTypes as "switch-intercepted" — mandatory
-	// rather than tidy-up, since Assertion #2 fails a wired type still sitting
-	// here. Mandatory now too: Assertion #3 reports an unclassified constant, not
-	// an unemitted one.
-	"TypeQuestionAnswer":  "pending handler (#1984)",
-	"TypeQuestionRefused": "pending handler (#1984)",
+	// The v2 question answer and refusal are NOT here. They were, as "pending
+	// handler (#1984)" while #1983 had declared the constants and nothing
+	// dispatched them; #1984 added the dispatchAppFrame cases, so both moved up to
+	// inboundTypes as "switch-intercepted", beside the analogous modal_answer /
+	// modal_cancel. That move was mandatory rather than tidy-up — Assertion #2
+	// fails a wired type still sitting in this map. TypeAttachmentChunk above is
+	// the same shape one step earlier: it stays excluded until #1744 dispatches it.
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

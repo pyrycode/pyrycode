@@ -818,6 +818,12 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeModalAnswer:
 			m.handleModalAnswer(ctx, s, probeEnv)
 			return
+		case protocol.TypeQuestionAnswer:
+			m.handleQuestionAnswer(s, probeEnv)
+			return
+		case protocol.TypeQuestionRefused:
+			m.handleQuestionRefusal(s, probeEnv)
+			return
 		case protocol.TypeInterrupt:
 			m.handleInterrupt(s)
 			return

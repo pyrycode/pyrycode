@@ -1055,19 +1055,19 @@ const (
 // pyrycode-desktop decided on 2026-08-31 not to use it. It stays available later
 // with no wire change, so nothing here forecloses it.
 //
-// THE GUARD CLASSIFIES THESE THE OPPOSITE WAY FROM THEIR INBOUND NEIGHBOURS, and
-// getting it wrong is a red build rather than a style question. TypeModalAnswer /
-// TypeModalCancel sit in cmd/pyry/relay_guard_test.go's inboundTypes as
-// "switch-intercepted" because internal/relay/v2session.go's dispatchAppFrame has
-// cases for them. THIS SLICE SHIPS NO HANDLER — the interception is #1984's — so
-// inboundTypes would fail Assertion #1 by construction, and "push", the reason
-// the eight outbound neighbours give, is false for a genuinely inbound frame.
-// TypeAttachmentChunk is the one honest precedent: excludedTypes under its own
-// label, with the reason that is actually true — the inbound leg has no handler
-// YET. Both entries are filed as "pending handler (#1984)" and MOVE to
-// inboundTypes when that ticket lands, which Assertion #2 makes mandatory rather
-// than tidy-up. Filing is required from the moment the constant exists: Assertion
-// #3 reports an unclassified constant, not an unemitted one.
+// THE GUARD CLASSIFIES THESE WITH THEIR INBOUND NEIGHBOURS, and getting it wrong
+// is a red build rather than a style question. Both sit in
+// cmd/pyry/relay_guard_test.go's inboundTypes as "switch-intercepted", beside
+// TypeModalAnswer / TypeModalCancel, because internal/relay/v2session.go's
+// dispatchAppFrame now has cases for them (#1984). Between #1983 and #1984 they
+// were filed in excludedTypes as "pending handler (#1984)" — inboundTypes would
+// have failed Assertion #1 with no dispatch, and "push", the reason the eight
+// outbound neighbours give, is false for a genuinely inbound frame. That entry had
+// to move the moment the cases landed, which Assertion #2 makes mandatory rather
+// than tidy-up. TypeAttachmentChunk is the same shape one step earlier, still
+// excluded until #1744 dispatches it. Filing is required from the moment the
+// constant exists: Assertion #3 reports an unclassified constant, not an
+// unemitted one.
 //
 // MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: these
 // are v2 CONTROL envelopes intercepted before internal/dispatch.Route, exactly as
@@ -1083,20 +1083,23 @@ const (
 // question is a substring of the tool name AskUserQuestion, so neither name may be
 // probed with a strings.Contains on it.
 //
-// DECLARING THESE CONSTANTS CHANGES NO RUNTIME PATH, and that is what makes a
-// vocabulary-only slice safe on an inbound surface. dispatchAppFrame's control
-// switch has no default arm, so a frame of either type falls through to
-// dispatch.Route and gets its unknown-type reply — identically to before this
-// commit, because a Go constant is not a registry. Nothing here grants an inbound
-// capability: the interactive capability gate and the per-device answer gate
-// (#702) both remain the handler's to apply, and the default is deny.
+// BOTH FRAMES ARE NOW INTERCEPTED (#1984) — dispatchAppFrame has a case for each,
+// so neither reaches dispatch.Route and neither draws the unknown-type reply it
+// drew while #1983's declaration stood alone. Declaring the constants had changed
+// no runtime path, which is what made that vocabulary-only slice safe on an
+// inbound surface; adding the cases is what changed it, since a Go constant is not
+// a registry. THE INTERCEPTION STILL GRANTS NO INBOUND CAPABILITY: the handler
+// applies no authorization at all, and what makes that fail-safe is that its
+// resolver seam is nil at every construction site, so no frame reaches an
+// actuator. The interactive capability gate and the per-device answer gate (#702)
+// remain the resolver's to apply, default deny, and #1986 installs the latter
+// before anything is wired.
 //
 // The payloads are QuestionAnswerPayload (with its nested QuestionAnswerEntry)
-// and QuestionRefusedPayload in questions.go. #1984 adds the dispatchAppFrame
-// cases and #1985 resolves an answer against the daemon's parked batch;
-// pyrycode-desktop#853 is the client that sends these. Same declare-then-serve
-// sequencing as #1752→#1744.
+// and QuestionRefusedPayload in questions.go. #1985 resolves an answer against the
+// daemon's parked batch; pyrycode-desktop#853 is the client that sends these. Same
+// declare-then-serve sequencing as #1752→#1744.
 const (
-	TypeQuestionAnswer  = "question_answer"  // phone → binary, inbound v2 control (no handler yet — #1984)
-	TypeQuestionRefused = "question_refused" // phone → binary, inbound v2 control (no handler yet — #1984)
+	TypeQuestionAnswer  = "question_answer"  // phone → binary, inbound v2 control (switch-intercepted — #1984)
+	TypeQuestionRefused = "question_refused" // phone → binary, inbound v2 control (switch-intercepted — #1984)
 )

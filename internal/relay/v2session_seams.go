@@ -161,6 +161,70 @@ type ModalResolver interface {
 	ResolveTimeout(modalID string) (ModalDismissal, bool)
 }
 
+// QuestionResolver resolves an inbound question-control frame — a question_answer
+// or a question_refused — against the daemon's outstanding clarifying-question
+// batches (#1984). Declared here (consumer side), beside ModalResolver, so
+// internal/relay imports neither internal/questionbridge nor cmd/pyry
+// (CODING-STYLE: define interfaces where they are consumed); #1985 implements it.
+// *devices.Device crosses the seam (the per-conn s.device); internal/relay already
+// imports internal/devices, so no new import. Both methods run on the manager's
+// single Run dispatch goroutine, so an implementation MUST return in bounded time
+// or it stalls the manager — ModalResolver's obligation, unchanged.
+//
+// The whole typed payload crosses rather than exploded fields, which is where this
+// seam departs from ModalResolver: that one explodes because its payloads are flat
+// strings, where QuestionAnswerPayload carries a nested array, so exploding it into
+// (batchID, token, entries) is the same thing spelled longer and invites a caller
+// to reassemble it wrongly.
+//
+// THE BOOL IS A DIAGNOSTIC, NEVER A BROADCAST TRIGGER. It reports whether the
+// implementation consumed the batch, and the relay handler's only use for it is
+// choosing between two content-free log records — QueueRemover.Remove's exact role
+// in handleDequeueMessage. The relay MUST NOT emit question_dismissed on it:
+// cmd/pyry's streamApprovalBridge.retireQuestion is that frame's sole broadcaster,
+// and a second one would be a second arbiter of whether a batch was consumed. This
+// is the other place ModalResolver is deliberately not followed — its
+// (ModalDismissal, bool) pair exists BECAUSE the manager broadcasts, and here it
+// must not.
+//
+// SECURITY — what crosses this seam is remote-authored and validated by nothing.
+// The handler decodes the frame and rejects malformed bytes; it judges nothing
+// else, so an implementation is the sole arbiter and inherits every obligation
+// QuestionAnswerEntry's doc block names. Restated here because this is where the
+// implementer meets them, and Go's type system cannot say "untrusted":
+//
+//   - QuestionIndex is CARRIED, NEVER RANGE-CHECKED. Subscripting the parked batch
+//     with a negative or over-large index PANICS, and any paired client can pick
+//     the index — so an explicit range check is owed before indexing.
+//   - Indices may DUPLICATE or be MISSING across entries; neither a silently
+//     partial answer nor a last-write-wins one is acceptable.
+//   - Answers may be ARBITRARILY LONG. The only limit today is the transport's AEAD
+//     frame cap, which bounds bytes and not entries, so per-frame work must not
+//     scale unbounded with entry count.
+//   - The payload's fields MUST NOT be logged beyond question_batch_id and
+//     answer_token, the two internal/protocol marks safe; the values are free text
+//     a client authored.
+//
+// ORDERING OBLIGATION: nothing may be wired to V2SessionConfig.QuestionResolver
+// until the per-device answer gate (#1986) exists. The relay handler applies no
+// authorization at all — no interactive check, no per-device check — exactly as
+// handleModalAnswer applies none, so what makes the #1984 slice fail-safe is
+// structural: the seam is nil at every construction site, so no answer reaches an
+// actuator. Wiring a resolver ahead of the gate opens a window in which any paired
+// device can answer.
+type QuestionResolver interface {
+	// ResolveAnswer resolves an inbound question_answer against the daemon's
+	// parked batch. Returns true iff it consumed an outstanding batch; an unknown
+	// or already-resolved question_batch_id is a safe no-op (false), the modal
+	// seam's unknown-id posture.
+	ResolveAnswer(p protocol.QuestionAnswerPayload, dev *devices.Device) bool
+
+	// ResolveRefusal resolves an inbound question_refused — the operator declined
+	// to choose, so the batch resolves with no selection. Same comma-ok-shaped
+	// report and same no-op posture as ResolveAnswer.
+	ResolveRefusal(p protocol.QuestionRefusedPayload, dev *devices.Device) bool
+}
+
 // V2SessionConfig parameterises V2SessionManager. The handshake/transport
 // fields are required; NewV2SessionManager validates and panics or errors on
 // missing required values per the documentation below. Handlers, Snapshotter,
@@ -389,6 +453,27 @@ type V2SessionConfig struct {
 	// simply unwired — foreground, or pre-#708 before the producer is live).
 	// Production wires the cmd/pyry resolver.
 	ModalResolver ModalResolver
+
+	// QuestionResolver resolves inbound question_answer / question_refused control
+	// frames against the daemon's outstanding clarifying-question batches (#1984).
+	// Optional: when nil, BOTH FRAMES ARE STILL CONSUMED by the interception —
+	// they no longer reach dispatch.Route and so no longer draw its unknown-type
+	// error reply — but nothing is decoded, nothing is handed off and nothing is
+	// broadcast. That is the whole of the nil behaviour, and it is why the #1984
+	// slice lands with no wiring site changed: every existing construction leaves
+	// this field nil.
+	//
+	// Its own field rather than a method grown onto ModalResolver, following
+	// OutstandingQuestions' reasoning (#1979): a question batch is its own frame
+	// family (#1962), and growing the neighbour would force every ModalResolver
+	// implementer to grow with it.
+	//
+	// SECURITY: the seam's own doc block carries the obligations — the payload is
+	// remote-authored and validated by nothing beyond the decode, the index is
+	// never range-checked, and NOTHING MAY BE WIRED HERE before the per-device
+	// answer gate (#1986) exists, since the relay handler applies no authorization
+	// and the nil seam is what makes the interception fail-safe today.
+	QuestionResolver QuestionResolver
 
 	// Interrupter routes an inbound interactive `interrupt` control frame to
 	// the supervised claude as one Esc (#707). Optional: nil ⇒ interrupt is

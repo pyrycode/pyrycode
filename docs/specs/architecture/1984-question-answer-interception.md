@@ -393,3 +393,29 @@ checklist re-walked before this section was written or the plan committed.)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — implementation
+
+The three § Open questions all resolved as expected and changed no design: the seam keeps its
+`bool` (implemented exactly as `handleDequeueMessage` uses `QueueRemover.Remove` — two content-free
+log records, no broadcast), neither handler needs a `ctx`, and the reject record stays at `Warn`,
+which the security pass agreed with.
+
+**One thing the plan did not anticipate, and it changed the test set.** § Design already fixed the
+behaviour for a `"payload":null` frame — it decodes cleanly into a zero value, so it is an unknown
+batch for the seam to judge and not a rejected frame. What implementation found is that this shape
+is *unreachable as a decode failure through the test harness at all*: `json.Marshal` validates a
+`json.RawMessage`, so an envelope carrying malformed payload bytes cannot be constructed, and
+`protocol.Envelope.Payload` has no `omitempty`, so an omitted payload marshals to `null` rather than
+to nothing. Every decode failure reachable over the wire is therefore a **type mismatch inside valid
+JSON** — which is the partial-population hazard, the case that matters. Consequences:
+
+- The planned "absent payload" reject case was dropped; it does not exist.
+- `TestV2Session_QuestionControl_NullPayload_NotJudgedHere` was added to pin the pass-through
+  positively, since it is the sharpest edge of the reject rule and nothing else covers it.
+- The distinction — the rule is about a decode *error*, not about an empty result — was written into
+  `QuestionAnswerPayload`'s doc block and into `docs/protocol-mobile.md` § `question_answer`. That is
+  an addition to those files rather than one of the falsified claims § Design listed, and it is there
+  because the next reader of that contract would otherwise re-derive it.
