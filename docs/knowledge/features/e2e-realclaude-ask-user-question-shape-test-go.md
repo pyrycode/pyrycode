@@ -11,14 +11,18 @@ failing the test from inside the helper, so a negative row can assert on the
 result; `requireAskQuestionShape` is the thin `t.Fatalf` wrapper other tests
 call. The decode target is declared whole — header, question text, options,
 and a multi-select key typed `json.RawMessage` rather than `bool` so an
-absent key stays distinguishable from `false`. It now reports **seven shape
+absent key stays distinguishable from `false`. It now reports **eight shape
 checks** (tool name and at least one question from #1951; question text,
 header, option count ≥ 2, every option's label and every option's
-description from #1952) across **eight reported names** (the seven plus the
+description from #1952; the first question's multi-select key being
+present, from #1950) across **nine reported names** (the eight plus the
 decode guard, which is not itself a shape check but whose negative row
-counts) and **nine table rows** (the eight negatives plus the positive
-control). The multi-select key stays unchecked — that's the slice after
-#1952. Registered in `finOfflineExecBans` with the record file's seventeen
+counts) and **ten table rows** (the nine negatives plus the positive
+control). The multi-select check is presence, not truth: it reads
+`len(first.MultiSelect) == 0` on the raw bytes, so an absent key (`nil`)
+reddens while a present `false` passes, and only the first question is
+checked — checking every question would make the finding count depend on
+batch width. Registered in `finOfflineExecBans` with the record file's seventeen
 names, not the fourteen-name entry beside it that
 [ask_user_question_writer_test.go](e2e-realclaude-ask-user-question-writer-test-go.md)
 (#1941) carries for writing a directory. Zero production files touched.
@@ -59,11 +63,28 @@ names, not the fourteen-name entry beside it that
   row in the table carries exactly one question, so nothing here would catch
   a mutant that looped over `in.Questions` and appended a finding per
   question instead of reading only the first — it would return identical
-  findings on all nine rows and stay green. Flagged in #1952's code review as
-  a deliberate non-fix: a tenth row would contradict the nine-row count the
-  header states, and a multi-question fixture belongs with whichever slice
-  first has a reason to carry one. #1950 and #1938 should know this property
-  is unpinned before assuming it's covered.
+  findings on all ten rows and stay green. Flagged in #1952's code review as
+  a deliberate non-fix, and #1950 left it deliberately unpinned rather than
+  closing it with an eleventh row (which would have contradicted the
+  ten-row count): a multi-question fixture belongs with whichever slice
+  first has a reason to carry one. #1938 should know this property is
+  unpinned before assuming it's covered.
+- **A mutant's predicted red count is worth measuring, not trusting.** #1950
+  predicted its presence-vs-truth mutant would redden six rows (the positive
+  control plus #1952's five content rows) but measured **seven**: the
+  wrong-tool-name row also reuses `askQuestionFixtureInput`, whose literal
+  already carries `"multiSelect":false`, so under the mutant it too returns
+  a second, unexpected finding. Any row built on a shared fixture input
+  inherits every mutation over that input's other keys — invisible if you
+  enumerate rows by what they were *written* to test rather than by what
+  they *contain*.
+- **A decode target left declared-and-unread on purpose is a forward
+  reference whose backstop is worth stating explicitly.** #1951 typed the
+  multi-select field `json.RawMessage` two slices before anything read it,
+  specifically so #1950's presence check — `len()` on the raw field —
+  would fail to compile if a later edit retyped the field `bool`. Naming
+  that compiler backstop at the declaration (not just "don't change this")
+  is what kept the design intact across two intervening slices.
 
 See `docs/specs/architecture/1951-*.md` and
 `docs/specs/architecture/1952-ask-user-question-shape-content-checks.md` for
