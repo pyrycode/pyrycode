@@ -141,6 +141,14 @@ func TestIsKnownAppType(t *testing.T) {
 		// it retires, so an old phone never receives it and a phone must never be
 		// able to send one into dispatch.Route.
 		{"question_dismissed-rejected", TypeQuestionDismissed, false, ErrUnknownType},
+		// the v2-only question answer and refusal: inbound control types that are
+		// never v1 types, so IsKnownAppType must reject both — the modal_answer /
+		// modal_cancel rows above are the pair being followed. Here that rejection
+		// is the load-bearing half rather than the incidental one, because these
+		// legs really are inbound: it is the structural bar against a v1 client
+		// sending either frame into dispatch.Route.
+		{"question_answer-rejected", TypeQuestionAnswer, false, ErrUnknownType},
+		{"question_refused-rejected", TypeQuestionRefused, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,6 +258,9 @@ var v2OnlyTypes = map[string]bool{
 	TypeQuestionShown: true,
 	// v2 clarifying-question dismissal.
 	TypeQuestionDismissed: true,
+	// v2 clarifying-question answer and refusal (inbound control).
+	TypeQuestionAnswer:  true,
+	TypeQuestionRefused: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -325,6 +336,9 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeQuestionShown,
 		// v2 clarifying-question dismissal.
 		TypeQuestionDismissed,
+		// v2 clarifying-question answer and refusal (inbound control).
+		TypeQuestionAnswer,
+		TypeQuestionRefused,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -367,6 +368,258 @@ func TestQuestionDismissedPayload_ZeroValue_KeysPresent(t *testing.T) {
 		`"question_batch_id":""`,
 		`"outcome":""`,
 		`"source":""`,
+	} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
+		}
+	}
+}
+
+// TestQuestionAnswerPayload_RoundTrip pins the answer frame's encoding at both
+// nesting levels against the committed fixture: the payload's three wire keys,
+// the entry's two, their order, and the envelope type they ride under.
+//
+// The fixture is POPULATED, and it has to be: TestQuestionAnswerEntry_ZeroValue_KeysPresent
+// below explains why a populated fixture is nonetheless not enough. Two entries
+// rather than one, one single-valued and one multi-valued, so the multi-select
+// arm claude's contract permits is carried by the bytes a client mirrors rather
+// than only by prose.
+//
+// Every value is PAIRWISE DISTINCT on purpose, QuestionDismissedPayload's
+// finding one level up: roundTripEnvelope compares canonical bytes, so a
+// field-reordering mutant re-encodes identically whenever the two swapped keys
+// share a value, and a fixture reusing one string across two keys lets the swap
+// through green.
+//
+// The ids and the answer text are PLACEHOLDERS. Nothing about a real nonce or a
+// real answer may be sized from them, and "Rewrite the parser" is not a value
+// this slice declares — values are opaque client-authored strings, checked
+// against nothing.
+func TestQuestionAnswerPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "question_answer.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeQuestionAnswer {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeQuestionAnswer)
+	}
+
+	var payload QuestionAnswerPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.QuestionBatchID != "qb-4c19" {
+		t.Errorf("QuestionBatchID: got %q, want %q", payload.QuestionBatchID, "qb-4c19")
+	}
+	if payload.AnswerToken != "at-7f3d" {
+		t.Errorf("AnswerToken: got %q, want %q", payload.AnswerToken, "at-7f3d")
+	}
+	if len(payload.Answers) != 2 {
+		t.Fatalf("Answers: got %d entries, want 2", len(payload.Answers))
+	}
+
+	if payload.Answers[0].QuestionIndex != 0 {
+		t.Errorf("Answers[0].QuestionIndex: got %d, want 0", payload.Answers[0].QuestionIndex)
+	}
+	if got, want := payload.Answers[0].Values, []string{"Rewrite the parser"}; !slices.Equal(got, want) {
+		t.Errorf("Answers[0].Values: got %v, want %v", got, want)
+	}
+	if payload.Answers[1].QuestionIndex != 1 {
+		t.Errorf("Answers[1].QuestionIndex: got %d, want 1", payload.Answers[1].QuestionIndex)
+	}
+	if got, want := payload.Answers[1].Values, []string{"Add a benchmark", "Add a fuzz target"}; !slices.Equal(got, want) {
+		t.Errorf("Answers[1].Values: got %v, want %v", got, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestQuestionAnswerPayload_ZeroValue_KeysPresent is the omitempty pin for the
+// payload's three keys, and it must exist separately from the round trip above:
+// omitempty elides a key only at its zero value, and every value in the fixture
+// is non-empty, so an omitempty added to any of the three leaves that test
+// entirely green. QuestionDismissedPayload's pair of tests is the shape being
+// copied, and the two stay sole-red for disjoint mutant classes.
+//
+// It also pins the nil→[] normalisation on the payload's own array, which is the
+// half of the []-never-null invariant a decoded fixture cannot reach: "answers":[]
+// bytes are produced by marshalling a constructed nil, never by decoding a
+// populated frame.
+func TestQuestionAnswerPayload_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(QuestionAnswerPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	for _, want := range []string{
+		`"question_batch_id":""`,
+		`"answer_token":""`,
+		`"answers":[]`,
+	} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
+		}
+	}
+	if bytes.Contains(b, []byte(`"answers":null`)) {
+		t.Errorf("a nil Answers must serialise as [], never null, got: %s", b)
+	}
+}
+
+// TestQuestionAnswerEntry_ZeroValue_KeysPresent is the same pin one level down,
+// and it is the one a populated fixture CANNOT buy no matter how it is authored.
+// #1964 recorded the arithmetic one level up and it holds again here: an empty
+// answers array reaches none of the entry's keys, so the only route to them is a
+// constructed zero value — and "values":[] bytes are likewise produced only by
+// marshalling a nil, never by decoding.
+//
+// question_index is pinned at its zero value on purpose: 0 is a LEGAL index (the
+// batch's first question), so an omitempty on it would silently drop the key for
+// exactly the answer a client is most likely to send.
+func TestQuestionAnswerEntry_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(QuestionAnswerEntry{})
+	if err != nil {
+		t.Fatalf("marshal zero entry: %v", err)
+	}
+	for _, want := range []string{
+		`"question_index":0`,
+		`"values":[]`,
+	} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("zero entry must carry %s explicitly, got: %s", want, b)
+		}
+	}
+	if bytes.Contains(b, []byte(`"values":null`)) {
+		t.Errorf("a nil Values must serialise as [], never null, got: %s", b)
+	}
+}
+
+// TestQuestionAnswerPayload_EmptyArraysDecodeNonNil pins the []-never-null
+// invariant in the INBOUND direction, which is the direction this frame actually
+// travels: a client that encodes [] must find that the daemon decodes it to an
+// empty-but-present slice and re-encodes it as [] rather than promoting it to
+// null on the way back out.
+//
+// The bytes are inline rather than a third committed fixture: a zero-answer
+// answer frame is OUT OF CONTRACT (a client with nothing to say sends
+// question_refused), so publishing it under testdata/ would offer a client author
+// a shape to mirror that it must never send.
+func TestQuestionAnswerPayload_EmptyArraysDecodeNonNil(t *testing.T) {
+	const raw = `{"question_batch_id":"qb-0","answer_token":"at-0","answers":[{"question_index":0,"values":[]}]}`
+
+	var payload QuestionAnswerPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Answers == nil {
+		t.Error("Answers: decoding [] must yield an empty non-nil slice, got nil")
+	}
+	if len(payload.Answers) != 1 {
+		t.Fatalf("Answers: got %d entries, want 1", len(payload.Answers))
+	}
+	if payload.Answers[0].Values == nil {
+		t.Error("Answers[0].Values: decoding [] must yield an empty non-nil slice, got nil")
+	}
+
+	out, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if string(out) != raw {
+		t.Errorf("re-encoding an empty array must be stable:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+// TestQuestionAnswerPayload_MarshalJSON_DoesNotMutateCaller pins the property
+// that makes both normalisers safe for a payload shared between goroutines, and
+// it covers BOTH receivers because they fail differently.
+//
+// QuestionShownPayload's test is the shape being copied and its reasoning
+// transfers whole: a payload marshaller normalising entries in place would reach
+// through p.Answers[i] into the caller's backing array, which is a data race as
+// well as a correctness bug, and would not fire at all when an entry is
+// marshalled on its own.
+func TestQuestionAnswerPayload_MarshalJSON_DoesNotMutateCaller(t *testing.T) {
+	e := QuestionAnswerEntry{QuestionIndex: 3}
+	p := QuestionAnswerPayload{Answers: []QuestionAnswerEntry{e}}
+
+	t.Run("payload", func(t *testing.T) {
+		b, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		if !bytes.Contains(b, []byte(`"values":[]`)) {
+			t.Errorf("a nested nil Values must serialise as [], got: %s", b)
+		}
+		if p.Answers[0].Values != nil {
+			t.Errorf("payload marshalling mutated the caller's backing array: Values is now %v", p.Answers[0].Values)
+		}
+	})
+
+	t.Run("payload-nil-answers", func(t *testing.T) {
+		q := QuestionAnswerPayload{}
+		if _, err := json.Marshal(q); err != nil {
+			t.Fatalf("marshal payload: %v", err)
+		}
+		if q.Answers != nil {
+			t.Errorf("MarshalJSON mutated the receiver: Answers is now %v", q.Answers)
+		}
+	})
+
+	// The entry's own normalisation must not write back through the receiver.
+	if _, err := json.Marshal(e); err != nil {
+		t.Fatalf("marshal entry: %v", err)
+	}
+	if e.Values != nil {
+		t.Errorf("MarshalJSON mutated the receiver: Values is now %v", e.Values)
+	}
+}
+
+// TestQuestionRefusedPayload_RoundTrip pins the refusal frame's encoding against
+// the committed fixture: its two wire keys, their order, and the envelope type.
+//
+// The refusal is a SEPARATE TYPE rather than an answer carrying an empty array or
+// a nullable flag, which is what makes this a two-key payload at all — the
+// family's own precedent (question_dismissed being its own type rather than a
+// reused modal_dismissed) applied to the inbound half. The two values are
+// distinct for the reordering-mutant reason the answer frame's test states.
+func TestQuestionRefusedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "question_refused.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeQuestionRefused {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeQuestionRefused)
+	}
+
+	var payload QuestionRefusedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.QuestionBatchID != "qb-91ae" {
+		t.Errorf("QuestionBatchID: got %q, want %q", payload.QuestionBatchID, "qb-91ae")
+	}
+	if payload.AnswerToken != "at-2c60" {
+		t.Errorf("AnswerToken: got %q, want %q", payload.AnswerToken, "at-2c60")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestQuestionRefusedPayload_ZeroValue_KeysPresent is the omitempty pin, a
+// marshalled zero value rather than a second fixture because this payload is
+// flat — QuestionDismissedPayload's reasoning exactly. The round trip above is
+// structurally blind to every omitempty, since both fixture values are non-empty.
+func TestQuestionRefusedPayload_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(QuestionRefusedPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	for _, want := range []string{
+		`"question_batch_id":""`,
+		`"answer_token":""`,
 	} {
 		if !bytes.Contains(b, []byte(want)) {
 			t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
