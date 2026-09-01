@@ -196,6 +196,18 @@ var excludedTypes = map[string]string{
 	// constant exists: Assertion #3 reports an unclassified constant, not an
 	// unemitted one.
 	"TypeAttachmentChunk": "pending handler (#1744)",
+
+	// outbound push — the v2 clarifying-question batch (#1962). Outbound-only like
+	// the eight pushes above rather than bidirectional like the attachment chunk,
+	// and mandatory here from the moment the constant exists rather than from the
+	// moment something emits it (the producer is #1927) — Assertion #3 reports an
+	// unclassified constant, not an unemitted one. It is a push and not a reply
+	// because this slice declares no inbound request verb: an inbound type needs a
+	// handler in Handlers or dispatchAppFrame or Assertion #1 fails, and filing a
+	// handler-less verb here to dodge that would be a lie to the guard. If #1927
+	// picks request/reply, the verb and its handler land together and this entry
+	// becomes "reply".
+	"TypeQuestionShown": "push",
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {

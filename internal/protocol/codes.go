@@ -921,3 +921,84 @@ const (
 const (
 	TypeAttachmentChunk = "attachment_chunk" // phone ↔ binary, one chunk of an attachment's bytes (both directions)
 )
+
+// Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The
+// questions claude asks mid-turn when it needs the operator to choose between
+// approaches, carried to a client as one frame per batch. The call rides the same
+// approval bridge a permission prompt does: it blocks on pyry mcp-approve,
+// handleApprove parks it in internal/permbridge keyed by tool_use_id, and
+// streamApprovalBridge.Surface raises it to clients. That surfacer hard-codes
+// tuidriver.ModalClassPermission and uses the tool name as the prompt body, which
+// is the defect this vocabulary exists to close — a clarifying question reaches a
+// remote client today as a modal titled "Permission required" whose body reads as
+// AskUserQuestion.
+//
+// Grouped alone rather than merged into the modal block above, and the deciding
+// argument is SECURITY rather than taste. denyByClass in
+// internal/modalbridge/modal.go makes ModalShownPayload.DefaultOptionID the DENY
+// option, so a careless confirm on a remote surface denies rather than allows, and
+// docs/protocol-mobile.md § Modal states as a hard invariant that
+// default_option_id MUST equal one of options[].id. That invariant is TOTAL on the
+// permission surface: every modal_shown frame satisfies it, so any client or test
+// may assert it unconditionally. A clarifying question has no deny option and no
+// safe default, so a question riding modal_shown would demote a total invariant to
+// a class-conditional one — every asserting site would have to learn a class
+// exemption, on precisely the field whose whole purpose is fail-safe. Two
+// supporting reasons, both re-checked against the tree: ModalAnswerPayload carries
+// exactly one OptionID, so a batch with per-question multi-select forks the
+// inbound leg either way and the claimed reuse is false at the joint that carries
+// the security contract; and ModalOption is flat {id, label} while the committed
+// capture internal/e2e/realclaude/testdata/ask_user_question_v2.1.239.json nests
+// options under each question and gives each a description, so growing the modal
+// shape would add a field that is always empty for permission and trust and would
+// rewrite every committed modal_shown golden on both sides of the wire. Sharing an
+// approval bridge is not sharing a subject.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give:
+// the wire type names what the frame IS to a client, so a claude rename lands in
+// one place instead of breaking every client at once. question_shown mirrors
+// modal_shown because the frame is the same KIND of thing — a prompt surfaced to a
+// client, answered or dismissed on a terminal path — while being a different
+// family.
+//
+// claude's words on this path are the tool name AskUserQuestion and the tool_input
+// keys questions, question, header, options and multiSelect. The sibling blocks'
+// subject-noun trap cuts here too: the SINGULAR question is a substring of the
+// correct name, so a strings.Contains check on it would be RED against it — the
+// same trap TypeSlashCommandList's block records three words wide for command,
+// slash_command and slash, and TypeModelAnnounced's block records for the singular
+// model. The discriminating words are therefore the PLURAL array key questions,
+// which question_shown does not contain (it carries question_, not questions), and
+// the tool name itself, whose snake-cased derivations all carry ask. That
+// containment is why the name is not questions_shown, which would make the plural
+// check red by construction. header, options and multiSelect are per-entry keys
+// and belong to the payload-bytes half that arrives with the shape. See
+// TestQuestionShownType_IsNotClaudesVocabulary.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is
+// an outbound binary → phone report an old phone never receives, and a leak into
+// that set would let a phone send a question_shown frame into dispatch.Route. Two
+// drift detectors classify it, both mandatory from the moment the constant exists
+// rather than from the moment something emits it: the partition in
+// internal/protocol/compat_test.go splits Type* constants between
+// inboundAppTypeSet and v2OnlyTypes (this lives in the latter), and
+// cmd/pyry/relay_guard_test.go's excludedTypes records it as a push.
+//
+// No inbound request verb is declared here, and that is not an omission.
+// TestEveryInboundV2TypeHasHandler's Assertion #1 requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame switch, and this slice ships no handler — so a verb declared
+// here would be red by construction, and filing it under excludedTypes to dodge
+// that would be a lie to the guard. No question-DISMISSAL type is declared here
+// either: whether a dismissal is its own type or reuses modal_dismissed is #1927's
+// design call, and declaring a type before its semantics are settled is worse than
+// declaring it late.
+//
+// The declaring ticket (#1962) is wire vocabulary only: #1963 declares the payload
+// and its nested per-question and per-option types, #1965 the parse that fills
+// them from claude's tool input, and #1927 the producer that emits the frame.
+// pyrycode-desktop#849 decodes what this family lands. Same declare-then-emit
+// sequencing as #1405→#1410, #1616→#1638, #1704→#1848 and #1726.
+const (
+	TypeQuestionShown = "question_shown" // binary → phone, outbound v2 clarifying-question batch
+)
