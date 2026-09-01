@@ -161,3 +161,20 @@ If the doc blocks are running long, the cause is restatement. Every item in § D
 
 **Reviewer:** architect (self-review per the security-review checklist)
 **Date:** 2026-09-01
+
+## Revisions
+
+### 2026-09-01 — implementation
+
+**The design shipped unchanged.** Three types, two value-receiver `MarshalJSON` normalisers, the file pair `internal/protocol/questions.go` + `questions_test.go`, no other file touched. All ten doc-block requirements and all four tests landed as specified.
+
+**§ Line budget was wrong, and it is the one thing the diff departs from.** Planned ≤ 190 production / ≤ 160 test / ≤ 350 total; actual **208 production / 250 test / 458 total**. Recorded rather than trimmed to fit, because everything over the line is load-bearing:
+
+- Production is ~25 executable lines against ~180 of doc block. The overage is the ten requirements themselves — each lands as three to eight wrapped comment lines at the package's 80-column habit, and the header-cap item (requirement 6) alone is 14. Cutting to 190 means dropping a requirement, not tightening prose.
+- Tests overran hardest (250 vs 160) for two reasons the plan under-counted: the round-trip's field-by-field assertions cost roughly three lines each across *three* nesting levels rather than the analogue's two, and the two goldens are inline literals rather than one-line `readFixture` calls — which is the plan's own choice, priced at ~20 lines it did not budget. The `_test.go` doc comments carrying the mutant evidence are a further ~25.
+
+The analogue (#1727, 375 insertions) undercounted for the same reason the plan's own § Doc-block requirements predicted: a second nesting level costs assertions at every level above it. **A declare-only slice's test file scales with nesting depth, not with type count** — worth carrying to #1964, whose fixtures land against the same three levels.
+
+**Open questions: none resolved here, all four correctly outside this slice.** The plan assigns them to #1964 (the documented-12/observed-14 disagreement in `docs/protocol-mobile.md`; whether the inline goldens survive fixtures) and #1927 (the unanswered-batch fail-safe; whether #702's per-device gate extends to answering). Nothing in the implementation bound any of them, and none was silently answered by the code. Requirement 6's doc block is the durable half of the first: it states the observed-14 measurement and names the unit, so #1964 and #1965 both read it before deciding.
+
+**Both mutants from § Testing strategy were run over `go test -overlay`, not predicted.** The in-place-normalising payload marshaller (entry marshaller left intact) fails exactly one assertion in the package — `TestQuestion_NilOptionsNormalises/nested_in_payload`'s trailing backing-array check — confirming the sole-redness claim written into that test's doc comment. The pointer-receiver mutant, carrying the `alias(*p)` deref so it compiles, reddens `TestQuestionShownPayload_NilQuestionsNormalises/value` plus the same test's trailing receiver-mutation check.
