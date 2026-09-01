@@ -187,5 +187,7 @@ pass because there's nothing to alias.
   [question-batch payload](protocol-package-question-batch-payload.md)).
   #1907 is the answer path (`Registry.Resolve`, and must be the sole
   dismissal broadcaster for an answered batch — #1973's retire backstop only
-  fires when that `Resolve` misses). #1928 is the connect-time reconcile
-  (`Registry.Snapshot`, mints/retires nothing).
+  fires when that `Resolve` misses). #1979 (landed) is the relay half of the
+  connect-time reconcile (`Snapshot`, mints/retires nothing) — see
+  [the reconcile doc](v2-session-manager-state-machine-connect-time-question-reconcile-outstanding.md).
+  #1980 wires `Snapshot` itself into the seam and is the client contract.
