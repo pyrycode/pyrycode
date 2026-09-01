@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/questionbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -995,5 +996,461 @@ func TestStreamApprovalBridge_ApprovalAnswerable_LogsNothing(t *testing.T) {
 
 	if s := logBuf.String(); s != "" {
 		t.Errorf("ApprovalAnswerable wrote to the log: %s", s)
+	}
+}
+
+// --- #1973: the question arm of the shared approval surfacer ------------------
+
+// questionInput builds one in-contract AskUserQuestion tool input whose four
+// claude-authored strings are the caller's, so a content assertion and the leak
+// probe drive the same shape with different values. Two questions — the first
+// multi-select with three options, the second single-select with two — sit inside
+// questionbridge's 1-4 questions / 2-4 options bounds and keep a flattened,
+// reordered or multi-select-dropping rebuild distinguishable from a faithful one.
+func questionInput(t *testing.T, text, header, label, desc string) json.RawMessage {
+	t.Helper()
+	in := map[string]any{
+		"questions": []any{
+			map[string]any{
+				"question":    text,
+				"header":      header,
+				"multiSelect": true,
+				"options": []any{
+					map[string]any{"label": label, "description": desc},
+					map[string]any{"label": "second", "description": "the second option"},
+					map[string]any{"label": "third", "description": "the third option"},
+				},
+			},
+			map[string]any{
+				"question":    "which branch should it target?",
+				"header":      "Branch",
+				"multiSelect": false,
+				"options": []any{
+					map[string]any{"label": "main", "description": "the default branch"},
+					map[string]any{"label": "next", "description": "the release train"},
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatalf("marshal question input: %v", err)
+	}
+	return b
+}
+
+// questionFixture is the question arm's bridge fixture: a bridge with the batch
+// registry wired the way relay.go's single production site assigns it — AFTER
+// construction, so newStreamApprovalBridge's call sites stay untouched. It hands
+// back the registry so a test can read what was parked without going through the
+// wire.
+type questionFixture struct {
+	bridge *streamApprovalBridge
+	perm   *permbridge.Registry
+	modal  *modalbridge.Registry
+	qreg   *questionbridge.Registry
+	bcast  *fakeInteractiveBcast
+}
+
+func newQuestionFixture(t *testing.T, convID string, logger *slog.Logger) questionFixture {
+	t.Helper()
+	perm := permbridge.New()
+	modal := modalbridge.New()
+	qreg := questionbridge.New()
+	bcast := oneInteractiveConn("c1")
+	bridge := newStreamApprovalBridge(perm, modal, bcast, func() string { return convID }, context.Background(), logger)
+	bridge.questions = qreg
+	return questionFixture{bridge: bridge, perm: perm, modal: modal, qreg: qreg, bcast: bcast}
+}
+
+// questionLen reads the bridge's live batch-correlation size under its own lock,
+// bridgeLen's sibling for byQuestion.
+func questionLen(b *streamApprovalBridge) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.byQuestion)
+}
+
+// lastQuestionShown decodes the most recent question_shown envelope, mirroring
+// lastModalShown.
+func lastQuestionShown(t *testing.T, pushes []recordedPush) protocol.QuestionShownPayload {
+	t.Helper()
+	for i := len(pushes) - 1; i >= 0; i-- {
+		if pushes[i].env.Type != protocol.TypeQuestionShown {
+			continue
+		}
+		var p protocol.QuestionShownPayload
+		if err := json.Unmarshal(pushes[i].env.Payload, &p); err != nil {
+			t.Fatalf("decode question_shown payload: %v", err)
+		}
+		return p
+	}
+	t.Fatal("no question_shown push found")
+	return protocol.QuestionShownPayload{}
+}
+
+// lastQuestionDismissed decodes the most recent question_dismissed envelope.
+func lastQuestionDismissed(t *testing.T, pushes []recordedPush) protocol.QuestionDismissedPayload {
+	t.Helper()
+	for i := len(pushes) - 1; i >= 0; i-- {
+		if pushes[i].env.Type != protocol.TypeQuestionDismissed {
+			continue
+		}
+		var p protocol.QuestionDismissedPayload
+		if err := json.Unmarshal(pushes[i].env.Payload, &p); err != nil {
+			t.Fatalf("decode question_dismissed payload: %v", err)
+		}
+		return p
+	}
+	t.Fatal("no question_dismissed push found")
+	return protocol.QuestionDismissedPayload{}
+}
+
+// AC-1: the whole batch reaches interactive clients in ONE frame carrying the
+// daemon-asserted conversation id and a batch id that is the daemon's own minted
+// nonce rather than anything read out of claude's tool input.
+//
+// The nonce check is the substring scan against the raw input, not just a
+// non-empty assertion: an implementation that adopted an id claude supplied would
+// pass "non-empty" and fail here. Both nesting levels are asserted in claude's own
+// array order, and the two questions carry OPPOSITE multi_select values, so a
+// producer hard-coding either one is caught.
+func TestStreamApprovalBridge_Surface_QuestionBroadcastsBatch(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	input := questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale")
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName, input)
+
+	if retire := f.bridge.Surface(req); retire == nil {
+		t.Fatal("Surface returned a nil retire closure")
+	}
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeQuestionShown {
+		t.Fatalf("pushes = %v, want exactly one question_shown", got)
+	}
+	p := lastQuestionShown(t, f.bcast.pushes)
+
+	if p.ConversationID != testConvID {
+		t.Errorf("conversation_id = %q, want the daemon-asserted %q", p.ConversationID, testConvID)
+	}
+	if p.QuestionBatchID == "" {
+		t.Fatal("question_batch_id is empty; the broadcast frame must be the STAMPED payload")
+	}
+	if strings.Contains(string(input), p.QuestionBatchID) {
+		t.Errorf("question_batch_id %q appears in claude's tool input; it must be the daemon's own nonce", p.QuestionBatchID)
+	}
+
+	if len(p.Questions) != 2 {
+		t.Fatalf("questions = %d, want 2", len(p.Questions))
+	}
+	if p.Questions[0].Text != "how should it write?" || p.Questions[0].Header != "Write strategy" {
+		t.Errorf("question[0] = {%q %q}, want claude's own text and header", p.Questions[0].Text, p.Questions[0].Header)
+	}
+	if !p.Questions[0].MultiSelect || p.Questions[1].MultiSelect {
+		t.Errorf("multi_select = {%v %v}, want {true false} (claude's own per-question flag)", p.Questions[0].MultiSelect, p.Questions[1].MultiSelect)
+	}
+	if len(p.Questions[0].Options) != 3 || len(p.Questions[1].Options) != 2 {
+		t.Fatalf("options = {%d %d}, want {3 2}", len(p.Questions[0].Options), len(p.Questions[1].Options))
+	}
+	if p.Questions[0].Options[0].Label != "rewrite" || p.Questions[0].Options[0].Description != "replace the file wholesale" {
+		t.Errorf("option[0][0] = {%q %q}, want claude's own label and description in array order",
+			p.Questions[0].Options[0].Label, p.Questions[0].Options[0].Description)
+	}
+
+	if _, ok := f.qreg.Lookup(p.QuestionBatchID); !ok {
+		t.Errorf("batch %q not parked in the registry", p.QuestionBatchID)
+	}
+	if n := questionLen(f.bridge); n != 1 {
+		t.Errorf("byQuestion len = %d, want 1 (correlation stored)", n)
+	}
+}
+
+// AC-2: a question no longer surfaces as a permission modal named after the tool.
+//
+// The ResolveStream arm is the structural half of the same claim: the batch id
+// lives in byQuestion and NOT in byModal, so a modal_answer naming a batch id
+// resolves nothing — it cannot allow claude's AskUserQuestion call with nobody
+// having answered it.
+func TestStreamApprovalBridge_Surface_QuestionIsNotAPermissionModal(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	f.bridge.Surface(req)
+
+	for _, ty := range pushTypes(f.bcast.pushes) {
+		if ty == protocol.TypeModalShown {
+			t.Fatal("a question surfaced as a modal_shown")
+		}
+	}
+	if n := bridgeLen(f.bridge); n != 0 {
+		t.Errorf("byModal len = %d, want 0; a batch id must never be a modal correlation", n)
+	}
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	if _, ok := f.modal.Lookup(batchID); ok {
+		t.Error("the batch id is recorded in modalbridge; a question is not a modal")
+	}
+	if handled := f.bridge.ResolveStream(batchID, true, reasonRemoteDeny); handled {
+		t.Error("ResolveStream(batchID) handled = true; a modal_answer must not resolve a question's completer")
+	}
+}
+
+// AC-3: every no-answer terminal path broadcasts exactly one dismissal naming the
+// same batch id the batch frame carried.
+//
+// retire is ONE closure the control server defers on every Await return, so the
+// three paths the criterion names — the window elapsing, the caller disconnecting,
+// the daemon shutting down — are three CALLERS of this deleter rather than three
+// branches to reconstruct. What is asserted here is what the arbiter does when it
+// runs. The sentinels are asserted by value because the vocabulary is published:
+// source is deliberately NOT modal_dismissed's `timeout`, which would name a cause
+// wrong on two of the three paths.
+func TestStreamApprovalBridge_Retire_QuestionBroadcastsDismissal(t *testing.T) {
+	t.Parallel()
+
+	logger, logBuf := auditLogger()
+	f := newQuestionFixture(t, testConvID, logger)
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	retire := f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.bcast.pushes = nil // isolate the dismissal broadcast
+
+	retire()
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeQuestionDismissed {
+		t.Fatalf("pushes = %v, want exactly one question_dismissed", got)
+	}
+	d := lastQuestionDismissed(t, f.bcast.pushes)
+	if d.QuestionBatchID != batchID {
+		t.Errorf("question_batch_id = %q, want the batch frame's %q", d.QuestionBatchID, batchID)
+	}
+	if d.Outcome != outcomeQuestionUnanswered || d.Source != sourceQuestionNoAnswer {
+		t.Errorf("dismissal = {%q %q}, want {%q %q}", d.Outcome, d.Source, outcomeQuestionUnanswered, sourceQuestionNoAnswer)
+	}
+	if _, ok := f.qreg.Lookup(batchID); ok {
+		t.Error("batch still outstanding after retire; Resolve must consume it")
+	}
+	if n := questionLen(f.bridge); n != 0 {
+		t.Errorf("byQuestion len = %d after retire, want 0 (no leak)", n)
+	}
+	if recs := auditRecords(t, logBuf); len(recs) != 0 {
+		t.Errorf("audit records = %d, want 0; audit.Entry is the MODAL vocabulary", len(recs))
+	}
+}
+
+// AC-3's "exactly one broadcaster per outstanding question": when the answer path
+// (#1907) has already consumed the batch, retire deletes the correlation
+// UNCONDITIONALLY but broadcasts no second dismissal. The registry's one-shot
+// Resolve is the single arbiter, which is what makes this structural rather than
+// an agreement between two tickets.
+func TestStreamApprovalBridge_Retire_QuestionAfterResolveNoSecondDismissal(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	retire := f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.bcast.pushes = nil
+
+	// Stand in for #1907's answer path consuming the batch before retire runs.
+	if _, ok := f.qreg.Resolve(batchID); !ok {
+		t.Fatal("batch not present to consume")
+	}
+
+	retire()
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+		t.Errorf("pushes = %v after consumed-then-retire, want none (single arbiter)", got)
+	}
+	if n := questionLen(f.bridge); n != 0 {
+		t.Errorf("byQuestion len = %d, want 0 (unconditional delete guards the leak)", n)
+	}
+}
+
+// retire over a batch id that was never recorded — the crypto/rand drop path's
+// no-op closure, or any absent id — deletes an absent key, finds nothing to
+// resolve, and broadcasts nothing.
+func TestStreamApprovalBridge_Retire_QuestionNoopWhenNothingSurfaced(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+
+	f.bridge.retireQuestion("never-surfaced")
+
+	if len(f.bcast.pushes) != 0 {
+		t.Errorf("pushes = %v, want none for an unsurfaced batch", pushTypes(f.bcast.pushes))
+	}
+	if n := questionLen(f.bridge); n != 0 {
+		t.Errorf("byQuestion len = %d, want 0", n)
+	}
+}
+
+// An AskUserQuestion call whose input fails questionbridge's bounds is NOT a batch
+// anybody can render, so it falls through to the fail-closed permission modal —
+// the only prompt that still gets claude an allow/deny decision. Parse
+// deliberately does not distinguish "not the question tool" from "the question
+// tool, rejected", and this is why that costs nothing.
+func TestStreamApprovalBridge_Surface_RejectedQuestionFallsBackToPermissionModal(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	// Five questions — outside questionbridge's documented 1-4.
+	oversized := json.RawMessage(`{"questions":[` +
+		`{"question":"a","header":"A","multiSelect":false,"options":[{"label":"x","description":"1"},{"label":"y","description":"2"}]},` +
+		`{"question":"b","header":"B","multiSelect":false,"options":[{"label":"x","description":"1"},{"label":"y","description":"2"}]},` +
+		`{"question":"c","header":"C","multiSelect":false,"options":[{"label":"x","description":"1"},{"label":"y","description":"2"}]},` +
+		`{"question":"d","header":"D","multiSelect":false,"options":[{"label":"x","description":"1"},{"label":"y","description":"2"}]},` +
+		`{"question":"e","header":"E","multiSelect":false,"options":[{"label":"x","description":"1"},{"label":"y","description":"2"}]}]}`)
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName, oversized)
+
+	f.bridge.Surface(req)
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeModalShown {
+		t.Fatalf("pushes = %v, want exactly one modal_shown for a batch that failed the parse", got)
+	}
+	if n := questionLen(f.bridge); n != 0 {
+		t.Errorf("byQuestion len = %d, want 0 for a rejected batch", n)
+	}
+	if n := bridgeLen(f.bridge); n != 1 {
+		t.Errorf("byModal len = %d, want 1 (the fail-closed permission fallback)", n)
+	}
+}
+
+// AC-4: a permission approval surfaces and retires exactly as it does today even
+// with the question registry wired. The permission tests above additionally cover
+// the nil-registry construction, which is every other call site in the tree.
+func TestStreamApprovalBridge_Surface_PermissionUnchangedWithQuestionRegistry(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, _ := parkApproval(t, f.perm, "tu-1", "Bash", json.RawMessage(`{"cmd":"ls"}`))
+	retire := f.bridge.Surface(req)
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeModalShown {
+		t.Fatalf("pushes = %v, want exactly one modal_shown", got)
+	}
+	shown := lastModalShown(t, f.bcast.pushes)
+	if len(shown.Options) != 4 || shown.Class != "permission" {
+		t.Errorf("modal = {%d options, class %q}, want the unchanged 4-option permission modal", len(shown.Options), shown.Class)
+	}
+	if n := questionLen(f.bridge); n != 0 {
+		t.Errorf("byQuestion len = %d, want 0 for a permission approval", n)
+	}
+	f.bcast.pushes = nil
+
+	retire()
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeModalDismissed {
+		t.Fatalf("pushes = %v, want exactly one modal_dismissed", got)
+	}
+}
+
+// AC-5: no log line on this path carries question text, a header, an option label
+// or description, or any other byte of the parked input.
+//
+// FOUR distinct sentinels, one per claude-authored string, because the input
+// CONTAINS all four: a single input-wide sentinel would pass while a log line
+// echoed only the header, only a label or only a description. The push is forced
+// to fail so broadcast's error arm runs on both frames, and the dismissal payload
+// itself is scanned — question_dismissed carries no claude-authored byte, and the
+// natural implementation of an answer path violates that by reaching for the
+// chosen option's label.
+func TestStreamApproval_NoQuestionBodyLeakInLogs(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secretText   = "SECRET-QUESTION-TEXT-1111"
+		secretHeader = "SECRET-HEADER-2222"
+		secretLabel  = "SECRET-LABEL-3333"
+		secretDesc   = "SECRET-DESCRIPTION-4444"
+	)
+
+	logger, logBuf := auditLogger()
+	f := newQuestionFixture(t, testConvID, logger)
+	f.bcast.pushErr = map[string]error{"c1": errors.New("push failed")}
+
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, secretText, secretHeader, secretLabel, secretDesc))
+	retire := f.bridge.Surface(req)
+	retire()
+
+	s := logBuf.String()
+	for _, secret := range []struct{ name, value string }{
+		{"question text", secretText},
+		{"header", secretHeader},
+		{"option label", secretLabel},
+		{"option description", secretDesc},
+		{"tool name", questionbridge.ToolName},
+	} {
+		if strings.Contains(s, secret.value) {
+			t.Errorf("%s leaked into a log field", secret.name)
+		}
+	}
+
+	d := lastQuestionDismissed(t, f.bcast.pushes)
+	for _, secret := range []string{secretText, secretHeader, secretLabel, secretDesc} {
+		if strings.Contains(d.Outcome, secret) || strings.Contains(d.Source, secret) {
+			t.Errorf("question_dismissed carries the claude-authored %q; both fields are daemon-asserted sentinels", secret)
+		}
+	}
+}
+
+// A parked question is parked on a human exactly as a permission is, so #1912's
+// re-arm must see it: permbridge asks ApprovalAnswerable on every elapsed window,
+// and a batch invisible to that report would be denied at the first one instead of
+// waiting for the operator walking to their desk.
+func TestStreamApprovalBridge_ApprovalAnswerable_CoversAParkedQuestion(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	retire := f.bridge.Surface(req)
+
+	if !f.bridge.ApprovalAnswerable("tu-q1") {
+		t.Error("ApprovalAnswerable = false with a question parked and an interactive client connected")
+	}
+	if f.bridge.ApprovalAnswerable("tu-never-parked") {
+		t.Error("ApprovalAnswerable = true for an id that was never parked")
+	}
+
+	retire()
+
+	if f.bridge.ApprovalAnswerable("tu-q1") {
+		t.Error("ApprovalAnswerable = true after the batch retired; the correlation is gone")
+	}
+}
+
+// ApprovalParked's half of the same claim: the conversation whose call is in
+// flight reports positive while its question sits on a human, and negative once
+// the batch retires. Keyed by the conversation the parked call is in flight on,
+// never by the follow-active cursor — so the cursor is pointed at B while A is the
+// conversation with the question.
+func TestStreamApprovalBridge_ApprovalParked_CoversAParkedQuestion(t *testing.T) {
+	t.Parallel()
+
+	f := newApprovalReport(t, testConvIDB, discardLogger())
+	f.bridge.questions = questionbridge.New()
+	f.tr.observe("sess-a", turnevent.ToolStart{ToolCallID: "tu-a1", Title: questionbridge.ToolName})
+
+	req, _ := parkApproval(t, f.perm, "tu-a1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	retire := f.bridge.Surface(req)
+
+	if !f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = false with A's own question parked on a human")
+	}
+	if f.bridge.ApprovalParked(testConvIDB) {
+		t.Error("ApprovalParked(B) = true; B has no approval parked")
+	}
+
+	retire()
+
+	if f.bridge.ApprovalParked(testConvID) {
+		t.Error("ApprovalParked(A) = true after the batch retired")
 	}
 }

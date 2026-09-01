@@ -16,6 +16,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
 	"github.com/pyrycode/pyrycode/internal/protocol"
+	"github.com/pyrycode/pyrycode/internal/questionbridge"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 	"github.com/pyrycode/tui-driver/pkg/tuidriver"
@@ -456,6 +457,11 @@ func truncateForLog(s string, n int) string {
 //     SAME permission modal_shown clients already answer, minted via modalbridge
 //     so the 4-option / reject-once-default payload is byte-compatible by
 //     construction (AC-1). Returns a retire closure the control server defers.
+//     Since #1973 it first asks questionbridge whether the approval is claude's
+//     clarifying-question batch, which surfaces as a question_shown instead and
+//     retires as a question_dismissed — a different frame family, a different
+//     registry and a different correlation map, joined here only because claude
+//     parks both through the same mcp-approve bridge.
 //   - ResolveStream (relay Run goroutine, via modalResolverV2.ResolveAnswer): a
 //     client's modal_answer resolves the parked completer to allow/deny (AC-2).
 //   - retire (control-server handler goroutine, post-Await): the guaranteed
@@ -506,13 +512,42 @@ type streamApprovalBridge struct {
 	// and nothing else. #1919.
 	toolCallInFlight func(conversationID, toolCallID string) bool
 
-	// mu is a leaf lock guarding byModal + nextID ONLY: held around O(1) map ops
-	// and the counter bump, never across modal.Record, perm.Lookup/perm.Resolve,
-	// modal.Resolve, or a Push — so bridge.mu → registry.mu never nests and there
-	// is no deadlock order to reason about.
+	// questions is the daemon-singleton store of surfaced-but-unretired
+	// clarifying-question batches (#1975). Set AFTER CONSTRUCTION at the one
+	// production site (relay.go), for toolCallInFlight's reason: the constructor
+	// has fifteen call sites and this file's precedent for an optional dependency
+	// is the adjacent modalResolver.activeConv / notifyBlocked pair.
+	//
+	// nil ⇒ EVERY approval takes the permission path, question or not, which is
+	// exactly the pre-#1973 behaviour — so the fourteen test constructions, the
+	// daemon's PTY mode and v1/foreground stay semantically unchanged without a
+	// second discriminant. It is minted beside modalReg rather than here because
+	// #1928's connect-time reconcile reads its Snapshot from a config assembled
+	// before this bridge exists.
+	//
+	// Read without mu, like perm/modal/bcast/activeConv/ctx: written once at
+	// wiring time before the manager's Run goroutine starts.
+	questions *questionbridge.Registry
+
+	// mu is a leaf lock guarding byModal + byQuestion + nextID ONLY: held around
+	// O(1) map ops and the counter bump, never across modal.Record,
+	// perm.Lookup/perm.Resolve, modal.Resolve, questions.Record/questions.Resolve,
+	// or a Push — so bridge.mu → registry.mu never nests and there is no deadlock
+	// order to reason about.
 	mu      sync.Mutex
 	byModal map[string]string // modalID → toolUseID
-	nextID  uint64            // per-bridge control-envelope counter
+	// byQuestion is the batch correlation, and it is a SECOND MAP rather than
+	// another key space inside byModal for a load-bearing reason: ResolveStream
+	// treats any byModal hit as "this id is a stream approval" and resolves the
+	// parked completer, so a batch id living there would let a modal_answer naming
+	// it allow claude's AskUserQuestion call with nobody having answered. Today
+	// that is also gated one level up — ResolveAnswer looks the id up in
+	// modalbridge first, and a batch is never recorded there — but the separate map
+	// makes the property structural rather than a consequence of another registry's
+	// contents. Both maps are read by ApprovalParked and ApprovalAnswerable, which
+	// ask about a parked approval and do not care which surface raised it.
+	byQuestion map[string]string // questionBatchID → toolUseID
+	nextID     uint64            // per-bridge control-envelope counter
 }
 
 // newStreamApprovalBridge constructs the bridge over the daemon-singleton
@@ -530,8 +565,28 @@ func newStreamApprovalBridge(perm *permbridge.Registry, modal *modalbridge.Regis
 		ctx:        ctx,
 		logger:     logger,
 		byModal:    make(map[string]string),
+		byQuestion: make(map[string]string),
 	}
 }
+
+// The question-dismissal vocabulary, and ONE sentinel covers the whole no-answer
+// class deliberately (#1973). The retire closure the control server defers runs
+// identically on all three no-answer terminal paths — the approval window
+// elapsing, the caller disconnecting, the daemon shutting down — and carries
+// nothing that tells them apart, so emitting modal_dismissed's `timeout` would
+// name a cause that is wrong on two paths out of three. A client reads an
+// unrecognised source as "resolved, cause unknown, never as an answer", which is
+// the fail-closed reading docs/protocol-mobile.md § question_dismissed publishes.
+//
+// Compile-time constants, like reasonRemoteDeny, so neither can ever carry a
+// claude-authored option label — the rule QuestionDismissedPayload.Outcome states
+// positively, because options carry no id and claude's answer protocol selects by
+// label, so an answer path reporting the chosen option reaches for that string
+// first and would move the frame to the batch's trust tier.
+const (
+	outcomeQuestionUnanswered = "unanswered"
+	sourceQuestionNoAnswer    = "no_answer"
+)
 
 // Surface raises a permbridge-parked approval to interactive clients as the same
 // permission modal_shown they already answer, and returns a retire closure the
@@ -543,7 +598,23 @@ func newStreamApprovalBridge(perm *permbridge.Registry, modal *modalbridge.Regis
 // nothing, broadcasts nothing, and returns a no-op retire — claude then times out
 // to deny via permbridge (fail-closed degrade, mirroring handleModalShown). Runs
 // on the control-server handler goroutine (concurrent across approve requests).
+//
+// Since #1973 the FIRST question asked is whether this approval is claude's
+// clarifying-question batch, because that surfaces as a different frame family
+// entirely (surfaceQuestion). questionbridge.Parse is the single trust boundary
+// between claude's tool input and the wire, and surfaceQuestion is reachable only
+// from a Parse that returned ok, so no unbounded or malformed batch reaches a
+// client. Parse deliberately does not distinguish "not the question tool" from
+// "the question tool, rejected", and that costs nothing here: a batch nobody can
+// render falls through to the permission modal below, which is the only prompt
+// that still gets claude an allow/deny decision.
 func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
+	if b.questions != nil {
+		if batch, ok := questionbridge.Parse(req.ToolName, req.Input); ok {
+			return b.surfaceQuestion(batch, req.ToolUseID)
+		}
+	}
+
 	permReq, wireClass, ok := modalbridge.PermissionRequestForClass(tuidriver.ModalClassPermission, req.ToolName)
 	if !ok {
 		// Unreachable: ModalClassPermission always maps. Defensive — never surface
@@ -568,6 +639,113 @@ func (b *streamApprovalBridge) Surface(req permbridge.Request) (retire func()) {
 	b.broadcast(protocol.TypeModalShown, payload, "stream_approval.push_err")
 
 	return func() { b.retire(modalID) }
+}
+
+// surfaceQuestion raises a parsed clarifying-question batch to interactive clients
+// as one question_shown and returns the retire closure the control server defers
+// (#1973). Surface's question arm, reachable only from a questionbridge.Parse that
+// accepted the batch.
+//
+// THE BROADCAST PAYLOAD IS Record's RETURN VALUE, NEVER THE PARSED ONE. Parse
+// leaves both ids zero because both are daemon-asserted, and Record is what mints
+// the nonce, stamps the conversation id and hands back the stamped copy.
+// Broadcasting the pre-record payload would ship an id-less frame that no
+// dismissal can ever correlate to — cheap to write, and invisible until a client
+// tries to clear the panel. Record also overwrites any id that did arrive on the
+// payload, so nothing out of claude's tool input can become a routing key.
+//
+// On the Record RNG failure it stores nothing, broadcasts nothing and returns a
+// no-op retire, mirroring Surface's modal.Record degrade: claude times out to deny.
+// That also leaves the approval invisible to ApprovalAnswerable, so its deadline
+// is not extended for a batch nobody has ever seen — the fail-closed direction.
+//
+// Runs on the control-server handler goroutine. SECURITY: the batch's four
+// claude-authored strings reach the marshalled payload and NOTHING else; no log
+// field here carries the question text, a header, an option label or description,
+// the tool name, or any other byte of the parked input.
+func (b *streamApprovalBridge) surfaceQuestion(batch protocol.QuestionShownPayload, toolUseID string) (retire func()) {
+	stamped, err := b.questions.Record(batch, b.activeConv())
+	if err != nil {
+		// crypto/rand failure — drop the batch (no question_shown, no
+		// correlation); claude times out to deny. Never echo err detail; no
+		// payload bytes.
+		b.logger.Warn("relay: stream question surface drop; batch id mint",
+			"event", "stream_question.rand_err")
+		return func() {}
+	}
+	batchID := stamped.QuestionBatchID
+
+	b.mu.Lock()
+	b.byQuestion[batchID] = toolUseID
+	b.mu.Unlock()
+
+	b.broadcast(protocol.TypeQuestionShown, stamped, "stream_question.push_err")
+
+	return func() { b.retireQuestion(batchID) }
+}
+
+// retireQuestion is the guaranteed cleanup + dismissal backstop for a surfaced
+// question batch, and the SINGLE ARBITER of the no-answer dismissal broadcast. It
+// runs on EVERY Await return — the approval window elapsing, the caller
+// disconnecting, the daemon shutting down, and the eventual answer (#1907) — in
+// two steps with separate arbiters, mirroring retire:
+//
+//  1. Unconditionally delete the batchID→toolUseID correlation under mu. Sole
+//     deleter, every terminal path, so byQuestion never leaks. Delete of an absent
+//     key is a safe no-op.
+//  2. questions.Resolve(batchID): a miss ⇒ the answer path already consumed and
+//     dismissed this batch → no second dismissal. A hit ⇒ a no-answer path →
+//     broadcast exactly one question_dismissed. The registry's read-and-delete is
+//     one critical section, which is what makes "exactly one broadcaster per
+//     outstanding question" structural rather than an agreement between this slice
+//     and #1907.
+//
+// The delete runs BEFORE the Resolve, matching retire's order: the window between
+// them reads "not parked" to ApprovalAnswerable, which is the fail-closed
+// direction for a deadline, rather than "parked but already gone".
+//
+// NO AUDIT RECORD, unlike retire's. audit.Entry carries ModalID and ModalClass —
+// the modal vocabulary. A batch has no class and its nonce is not a modal id, so
+// an entry here would file a question under field names that lie about it.
+//
+// Runs on the control-server handler goroutine after Await.
+func (b *streamApprovalBridge) retireQuestion(batchID string) {
+	b.mu.Lock()
+	delete(b.byQuestion, batchID)
+	b.mu.Unlock()
+
+	if _, ok := b.questions.Resolve(batchID); !ok {
+		return // the answer path already consumed + broadcast this batch's dismissal
+	}
+
+	b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
+		QuestionBatchID: batchID,
+		Outcome:         outcomeQuestionUnanswered,
+		Source:          sourceQuestionNoAnswer,
+	}, "stream_question.dismissed_push_err")
+}
+
+// parkedToolUseIDs snapshots every tool_use_id currently parked on a person,
+// across BOTH surfaces: a clarifying question parks on a human exactly as a
+// permission does, and the two liveness reports below ask about a parked approval
+// without caring which frame family raised it. Leaving byQuestion out would make
+// ApprovalAnswerable read false for every question, so #1912's re-arm would never
+// fire and each one would be denied at the first elapsed window.
+//
+// SNAPSHOT UNDER mu, RELEASE, THEN ASK — the discipline both callers document, and
+// the reason mu stays a leaf lock. Bounded by the approvals concurrently parked on
+// a human, each of which holds a control-socket connection blocked in Await.
+func (b *streamApprovalBridge) parkedToolUseIDs() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, 0, len(b.byModal)+len(b.byQuestion))
+	for _, toolUseID := range b.byModal {
+		out = append(out, toolUseID)
+	}
+	for _, toolUseID := range b.byQuestion {
+		out = append(out, toolUseID)
+	}
+	return out
 }
 
 // ResolveStream is modalResolverV2.ResolveAnswer's stream (verdict) arm: resolve a
@@ -619,13 +797,14 @@ func (b *streamApprovalBridge) ResolveStream(modalID string, allow bool, denyRea
 // enough for scoping a modal to a client's view; wrong for a report a delivery
 // hold trusts.
 //
-// SNAPSHOT UNDER mu, RELEASE, THEN ASK. mu is a leaf lock and ToolCallInFlight
-// takes the tracker's own; asking under mu would establish this file's first
-// nesting order, and one no other call site establishes — the shape that becomes a
-// deadlock the day an edge appears the other way. The snapshot allocation is the
-// price of keeping the lock a leaf, and byModal is bounded by the approvals
-// concurrently parked on a human, each of which holds a control-socket connection
-// blocked in Await.
+// SNAPSHOT UNDER mu, RELEASE, THEN ASK — through parkedToolUseIDs, which covers
+// BOTH surfaces because a parked clarifying question is parked on a human exactly
+// as a permission is. mu is a leaf lock and ToolCallInFlight takes the tracker's
+// own; asking under mu would establish this file's first nesting order, and one no
+// other call site establishes — the shape that becomes a deadlock the day an edge
+// appears the other way. The snapshot allocation is the price of keeping the lock
+// a leaf, and both maps are bounded by the approvals concurrently parked on a
+// human, each of which holds a control-socket connection blocked in Await.
 //
 // A retire or a Surface landing between the snapshot and the asks makes the answer
 // one call stale, and that is CORRECT rather than tolerated: the truth is changing
@@ -654,12 +833,7 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 		return false // no tracker wired (PTY mode) — see the field's doc block
 	}
 
-	b.mu.Lock()
-	parked := make([]string, 0, len(b.byModal))
-	for _, toolUseID := range b.byModal {
-		parked = append(parked, toolUseID)
-	}
-	b.mu.Unlock()
+	parked := b.parkedToolUseIDs()
 
 	// Asking about EVERY parked id, including ones belonging to other
 	// conversations, leaks nothing about them: the tracker's retention is nested
@@ -707,8 +881,13 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 // establishes in this file by taking mu INSIDE its ActiveConns loop, never around
 // it. mu is a leaf lock; holding it across the hand-off would block every concurrent
 // Surface, retire and ResolveStream for the manager's scheduling latency and would
-// retire the leaf-lock property outright. Here the snapshot is a single bool, so the
-// scan allocates nothing.
+// retire the leaf-lock property outright. The parked scan runs through
+// parkedToolUseIDs, so it covers a parked clarifying question as well as a modal —
+// without which #1912's re-arm would never see a question and every one of them
+// would be denied at the first elapsed window. That shared helper allocates the
+// snapshot the scan used to avoid; the allocation is bounded by the approvals
+// concurrently parked on a human, and it is the price of one discipline instead of
+// two.
 //
 // NEVER CALL THIS FROM THE RELAY Run GOROUTINE. ActiveConns funnels its request onto
 // Run and is documented safe only from other goroutines, so a call from Run
@@ -742,17 +921,7 @@ func (b *streamApprovalBridge) ApprovalParked(conversationID string) bool {
 //
 // Callable from any goroutine except the relay Run goroutine.
 func (b *streamApprovalBridge) ApprovalAnswerable(approvalID string) bool {
-	b.mu.Lock()
-	parked := false
-	for _, toolUseID := range b.byModal {
-		if toolUseID == approvalID {
-			parked = true
-			break
-		}
-	}
-	b.mu.Unlock()
-
-	if !parked {
+	if !slices.Contains(b.parkedToolUseIDs(), approvalID) {
 		return false // nobody is holding this approval — no round-trip needed
 	}
 
