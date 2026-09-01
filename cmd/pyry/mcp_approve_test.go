@@ -75,11 +75,41 @@ func replyPeer(resp control.Response, gotReq chan<- control.Request) func(net.Co
 	}
 }
 
-// holdPeer keeps the connection open and never replies, exercising the client
-// read-deadline path (a wedged daemon). It drains the conn until the client
-// closes it (control.Approve's request closes on return, at its read deadline),
-// so the handler goroutine ends without a separate release signal — keeping the
-// startApprovePeer wg.Wait cleanup deadlock-free.
+// delayReplyPeer decodes one control.Request, waits d, then writes back resp —
+// a daemon that takes its time reaching a verdict. Same error discipline as
+// replyPeer: peer-side errors are ignored and t.Errorf is never called from this
+// goroutine.
+func delayReplyPeer(d time.Duration, resp control.Response) func(net.Conn) {
+	return func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		var req control.Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			return
+		}
+		time.Sleep(d)
+		_ = json.NewEncoder(conn).Encode(resp)
+	}
+}
+
+// hangUpPeer decodes one control.Request and then closes without replying — the
+// daemon exiting or closing the conn mid-approval. Decoding first is what makes
+// it that case rather than "the dial lost": the request was accepted, and the
+// connection ends with no verdict on it.
+func hangUpPeer() func(net.Conn) {
+	return func(conn net.Conn) {
+		defer func() { _ = conn.Close() }()
+		var req control.Request
+		_ = json.NewDecoder(conn).Decode(&req)
+	}
+}
+
+// holdPeer keeps the connection open and never replies — a daemon that is alive
+// and holding the approval. It drains the conn until the client closes it. The
+// client no longer carries a read deadline, so the ONLY thing that ends this
+// handler is the client's ctx being cancelled (requestPatient's watcher wakes
+// the read, and its deferred Close releases the drain). Every test using holdPeer
+// must therefore cancel its ctx — an uncancelled one hangs the test and
+// deadlocks startApprovePeer's wg.Wait cleanup.
 func holdPeer() func(net.Conn) {
 	return func(conn net.Conn) {
 		defer func() { _ = conn.Close() }()
@@ -88,10 +118,11 @@ func holdPeer() func(net.Conn) {
 }
 
 // newApproveServer builds an approveServer pointed at sock with a discard
-// logger and a generous per-call timeout (the fail-fast dial and canned peers
-// resolve well inside it).
+// logger. It delegates to the production constructor so the tests exercise the
+// shape claude gets; that is safe for the parallel tests in this file because
+// construction reads no environment (the client carries no per-call bound).
 func newApproveServer(sock string) *approveServer {
-	return &approveServer{socketPath: sock, timeout: 5 * time.Second, log: testLogger(io.Discard)}
+	return newMCPApproveServer(sock, testLogger(io.Discard))
 }
 
 // callApprove invokes the tools/call handler directly with a well-formed
@@ -105,7 +136,14 @@ func callApprove(t *testing.T, s *approveServer, arguments string) mcpToolResult
 
 func invokeToolsCall(t *testing.T, s *approveServer, params json.RawMessage) mcpToolResult {
 	t.Helper()
-	res, err := s.toolsCall(context.Background(), params)
+	return invokeToolsCallCtx(t, context.Background(), s, params)
+}
+
+// invokeToolsCallCtx is invokeToolsCall with the caller's ctx — the ctx toolsCall
+// receives from Serve, carrying the signal cancellation in production.
+func invokeToolsCallCtx(t *testing.T, ctx context.Context, s *approveServer, params json.RawMessage) mcpToolResult {
+	t.Helper()
+	res, err := s.toolsCall(ctx, params)
 	if err != nil {
 		t.Fatalf("toolsCall returned error, want nil (fail-closed invariant): %v", err)
 	}
@@ -196,46 +234,48 @@ func driveMCP(t *testing.T, s *approveServer, frame string) (jsonrpcReply, []byt
 
 // --- construction -----------------------------------------------------------
 
-// TestMCPApproveServer_ClientDeadline pins the per-call client read deadline
-// newMCPApproveServer derives: approvalTimeout() + mcpApproveClientMargin, the
-// same env-aware source the daemon hands the pending-approval registry. Raising
-// PYRY_APPROVAL_TIMEOUT must raise both ends of the socket together instead of
-// truncating the client at the constant's 10m30s (#1507). The first two rows are
-// the production-unchanged pins: absent and unparseable both keep 10m30s.
+// daemonTimeoutMessage is the deny message permbridge's own approval timer
+// produces (its reasonTimeout, unexported). The whole point of #1507 — kept here
+// by different means — is that THIS message reaches claude rather than the
+// client's generic "approval unavailable" whenever the daemon denies on its
+// window.
+const daemonTimeoutMessage = "approval request timed out"
+
+// TestMCPApprove_DaemonMessageWinsAtEveryWindow pins AC-2. A daemon verdict that
+// lands several multiples past its own configured window still passes through
+// verbatim, because the client derives no bound from that window — at an
+// overridden window as well as at the default. It is the behavioural kill for any
+// mutant that reintroduces a client deadline from approvalTimeout(); the
+// structural kill (no duration field, no margin constant, no duration source in
+// the constructor) is what covers a bound too large to sit out in a test.
 //
-// Those two rows are also the tree's only NUMERIC pin on the default window
-// (#1909): TestApprovalTimeout's fallback rows compare against mcpApprovalTimeout
-// symbolically, so they cannot see a value regression. Combined with the margin
-// assertion below they force approvalTimeout() with the env absent to be exactly
-// ten minutes.
+// The production constructor is the subject: newMCPApproveServer is what a live
+// `pyry mcp-approve` builds.
 //
-// Serial by construction — t.Setenv forbids t.Parallel, the same constraint
-// TestApprovalTimeout carries. It coexists with this file's parallel tests
-// because those are released only after the package's serial phase.
-func TestMCPApproveServer_ClientDeadline(t *testing.T) {
+// Content only, never latency — there is no upper bound to assert, so machine
+// load cannot flake this. Serial by construction: t.Setenv forbids t.Parallel,
+// the same constraint TestApprovalTimeout carries.
+func TestMCPApprove_DaemonMessageWinsAtEveryWindow(t *testing.T) {
+	// Far above every override row below, so each of those rows has the daemon
+	// answering many multiples past its own window. Well under any plausible test
+	// timeout, so the "content only" rule costs nothing in wall clock.
+	const peerDelay = 250 * time.Millisecond
+
 	cases := []struct {
 		name  string
 		env   string
 		unset bool
-		want  time.Duration
 	}{
-		{name: "unset falls back to the default window", unset: true, want: 10*time.Minute + 30*time.Second},
-		{name: "unparseable falls back to the default window", env: "not-a-duration", want: 10*time.Minute + 30*time.Second},
-		{name: "short override 2s", env: "2s", want: 32 * time.Second},
-		// 12m, not the old 10m: an override row equal to the default proves nothing,
-		// because approvalTimeout() returns that value whether or not it reads the
-		// env. Above the default (so it also pins that the accessor does not clamp
-		// down to it) and below streamTurnHoldTimeout, so the fixture does not read
-		// as advice against the guide's fifteen-minute ceiling.
-		{name: "generous override 12m", env: "12m", want: 12*time.Minute + 30*time.Second},
+		{name: "default window", unset: true},
+		{name: "short override 20ms", env: "20ms"},
+		{name: "short override 60ms", env: "60ms"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// The deterministic half of "no row can pass by reading the default": an
-			// override row whose window equals mcpApprovalTimeout is vacuous, since
-			// approvalTimeout() returns it on both the env and the fallback path. The
-			// unset and unparseable rows fail to parse and are excluded by
-			// construction, so no special-casing is needed.
+			// Carried forward from the retired client-deadline table: an override row
+			// whose window equals mcpApprovalTimeout is vacuous, since approvalTimeout()
+			// returns that value whether or not it reads the env. The unset row fails to
+			// parse and is excluded by construction.
 			if d, err := time.ParseDuration(tc.env); err == nil && d == mcpApprovalTimeout {
 				t.Fatalf("override row env %q equals mcpApprovalTimeout (%v) — vacuous, it passes even if the env is ignored; pick a distinct window", tc.env, mcpApprovalTimeout)
 			}
@@ -251,19 +291,13 @@ func TestMCPApproveServer_ClientDeadline(t *testing.T) {
 				}
 			}
 
-			// Construction does no I/O — this socket is never dialled.
-			s := newMCPApproveServer("/nonexistent/p.sock", testLogger(io.Discard))
-			if s.timeout != tc.want {
-				t.Errorf("client read deadline = %v, want %v", s.timeout, tc.want)
-			}
-			// The ordering invariant the margin exists for: the client deadline sits
-			// exactly one margin PAST the daemon's window, so the daemon's informative
-			// "approval request timed out" deny keeps winning the race against our
-			// generic "approval unavailable". A negative delta here is the truncation
-			// this ticket fixes, stated as a number.
-			if got := s.timeout - approvalTimeout(); got != mcpApproveClientMargin {
-				t.Errorf("client read deadline - approvalTimeout() = %v, want exactly %v (mcpApproveClientMargin)", got, mcpApproveClientMargin)
-			}
+			sock := startApprovePeer(t, delayReplyPeer(peerDelay, control.Response{
+				Approve: &control.ApproveResult{Behavior: "deny", Message: daemonTimeoutMessage},
+			}))
+			s := newMCPApproveServer(sock, testLogger(io.Discard))
+
+			tr := callApprove(t, s, `{"tool_name":"Bash","input":{},"tool_use_id":"tu_window"}`)
+			assertVerdict(t, tr, `{"behavior":"deny","message":"`+daemonTimeoutMessage+`"}`)
 		})
 	}
 }
@@ -405,9 +439,11 @@ func TestMCPApprove_DenyRoundTrip(t *testing.T) {
 
 // --- fail-closed paths ------------------------------------------------------
 
-// TestMCPApprove_SocketUnreachable_Deny pins AC-3: with no daemon listening the
-// tool result is a default-deny returned well under the per-call timeout (the
-// dial fails fast, ~dialRetryBudget), so claude's turn never hangs.
+// TestMCPApprove_SocketUnreachable_Deny pins AC-3's first half: with no daemon
+// listening the tool result is a default-deny returned promptly, so claude's turn
+// never hangs. There is no client-side per-call bound to credit this to — the
+// dial carries its own (dialRetryBudget, ~1.5s, installed by dialWithRetry
+// regardless of the ctx), which is what keeps this reachable under a patient read.
 func TestMCPApprove_SocketUnreachable_Deny(t *testing.T) {
 	t.Parallel()
 	// A path with no listener → dial ENOENT → fast-fail deny.
@@ -420,7 +456,53 @@ func TestMCPApprove_SocketUnreachable_Deny(t *testing.T) {
 
 	assertVerdict(t, tr, `{"behavior":"deny","message":"approval unavailable"}`)
 	if elapsed >= 3*time.Second {
-		t.Errorf("unreachable-socket deny took %v, want fast-fail well under the 5s timeout", elapsed)
+		t.Errorf("unreachable-socket deny took %v, want fast-fail inside the dial's own budget", elapsed)
+	}
+}
+
+// TestMCPApprove_ConnEndsWithoutVerdict_Deny pins AC-3's second half: a
+// connection that ends with no verdict on it — the daemon exiting or closing
+// mid-approval — denies AS SOON AS IT ENDS rather than after any window. The
+// elapsed assertion is the criterion: what is being pinned here is the *when*.
+func TestMCPApprove_ConnEndsWithoutVerdict_Deny(t *testing.T) {
+	t.Parallel()
+	sock := startApprovePeer(t, hangUpPeer())
+	s := newApproveServer(sock)
+
+	start := time.Now()
+	tr := callApprove(t, s, `{"tool_name":"Bash","input":{},"tool_use_id":"tu_hangup"}`)
+	elapsed := time.Since(start)
+
+	assertVerdict(t, tr, `{"behavior":"deny","message":"approval unavailable"}`)
+	if elapsed >= 3*time.Second {
+		t.Errorf("conn-ended deny took %v, want it to land on the EOF rather than after a window", elapsed)
+	}
+}
+
+// TestMCPApprove_SignalCancelMidApproval_Deny pins AC-4 at the surface claude
+// sees: with the daemon still holding the approval, cancelling the Serve ctx (a
+// SIGTERM in production) unblocks the forwarded call into the generic deny.
+// It is the only test that catches a toolsCall which re-wraps the ctx in a way
+// that drops the cancellation.
+func TestMCPApprove_SignalCancelMidApproval_Deny(t *testing.T) {
+	t.Parallel()
+	sock := startApprovePeer(t, holdPeer())
+	s := newApproveServer(sock)
+
+	// No deadline — cancellation is the only bound, exactly as the Serve ctx
+	// carries it. holdPeer's handler ends when this cancel closes the conn.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	start := time.Now()
+	tr := invokeToolsCallCtx(t, ctx, s, json.RawMessage(
+		`{"name":"approve","arguments":{"tool_name":"Bash","input":{},"tool_use_id":"tu_signal"}}`))
+	elapsed := time.Since(start)
+
+	assertVerdict(t, tr, `{"behavior":"deny","message":"approval unavailable"}`)
+	if elapsed >= control.DialTimeout {
+		t.Errorf("signal deny took %v, want the cancellation to unblock the read (not a fallback bound)", elapsed)
 	}
 }
 
@@ -472,7 +554,7 @@ func TestMCPApprove_MalformedInput_NoByteLeak(t *testing.T) {
 	t.Parallel()
 	const secret = "SUPERSECRET_TOKEN_ac91"
 	var stderr bytes.Buffer
-	s := &approveServer{socketPath: "/nonexistent/p.sock", timeout: time.Second, log: testLogger(&stderr)}
+	s := newMCPApproveServer("/nonexistent/p.sock", testLogger(&stderr))
 
 	// Well-formed params, but arguments is an array carrying the secret — fails
 	// the ApprovePayload unmarshal → deny, and must not log the offending bytes.
@@ -483,26 +565,50 @@ func TestMCPApprove_MalformedInput_NoByteLeak(t *testing.T) {
 	}
 }
 
-// TestControlApprove_UndeadlinedCtxReturns documents the deadline requirement
-// control.Approve's doc-comment states: an undeadlined ctx falls back to
-// DialTimeout for the read rather than blocking forever against a wedged daemon.
-// Proves no-hang, not a specific latency.
-func TestControlApprove_UndeadlinedCtxReturns(t *testing.T) {
+// TestControlApprove_PatientPastDialTimeout is AC-1's direct pin on the client
+// helper: a verdict the daemon reaches later than the bound the call would
+// otherwise carry still comes back as that verdict.
+//
+// Non-vacuous by construction — the peer's delay is expressed AS
+// control.DialTimeout + 1s, which is exactly where the old undeadlined-ctx
+// fallback truncated the read, so the assertion tracks that constant rather than
+// a hand-picked number.
+func TestControlApprove_PatientPastDialTimeout(t *testing.T) {
+	t.Parallel()
+	sock := startApprovePeer(t, delayReplyPeer(control.DialTimeout+1*time.Second, control.Response{
+		Approve: &control.ApproveResult{Behavior: "allow"},
+	}))
+
+	res, err := control.Approve(context.Background(), sock, control.ApprovePayload{ToolUseID: "tu_patient"})
+	if err != nil {
+		t.Fatalf("Approve returned %v, want the daemon's late verdict", err)
+	}
+	if res == nil || res.Behavior != "allow" {
+		t.Fatalf("verdict = %+v, want the daemon's allow", res)
+	}
+}
+
+// TestControlApprove_CtxCancelUnblocks is AC-4's direct pin on the ctx watcher:
+// against a daemon that holds the conn open and never replies, cancelling the ctx
+// returns an error promptly. Without the watcher there is no mechanism at all to
+// wake a Decode parked on the control socket.
+func TestControlApprove_CtxCancelUnblocks(t *testing.T) {
 	t.Parallel()
 	sock := startApprovePeer(t, holdPeer())
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := control.Approve(context.Background(), sock, control.ApprovePayload{ToolUseID: "tu_hold"})
-		done <- err
-	}()
+	// No deadline: cancellation is the only thing that can end this call.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
 
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Error("want a read-deadline error from the wedged peer, got nil")
-		}
-	case <-time.After(control.DialTimeout + 3*time.Second):
-		t.Fatal("control.Approve blocked past the DialTimeout fallback — undeadlined ctx must not hang")
+	start := time.Now()
+	_, err := control.Approve(ctx, sock, control.ApprovePayload{ToolUseID: "tu_hold"})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Error("want an error once the ctx is cancelled, got nil")
+	}
+	if elapsed >= control.DialTimeout {
+		t.Errorf("Approve returned after %v, want the cancellation to wake the read well under %v", elapsed, control.DialTimeout)
 	}
 }

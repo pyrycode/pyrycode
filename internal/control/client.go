@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
@@ -256,21 +257,28 @@ func Rekey(ctx context.Context, socketPath, connID string) error {
 // subcommand, which re-frames the verdict as the MCP tool result claude blocks
 // on.
 //
-// Callers MUST pass a ctx whose deadline is >= the daemon's approval window.
-// request installs that deadline as the conn read deadline, so the read stays
-// patient while the daemon holds the conn open for the (human) decision. An
-// undeadlined ctx falls back to DialTimeout (5s) and would prematurely time out
-// a live approval — a safe but premature deny. This patient-read requirement is
-// the sole behavioural difference from the other client helpers, which are all
-// sub-second round-trips. The dial itself still fails fast (<= dialRetryBudget,
-// ~1.5s) on an unreachable socket even under a long-deadline ctx (see dial.go),
-// so a missing daemon yields a bounded error rather than a hang.
+// It is bounded by LIVENESS, not by duration — the sole behavioural difference
+// from the other client helpers, which are all sub-second round-trips. No read
+// deadline is derived from the ctx: an approval is held for as long as the
+// daemon holds it, and a client-side ceiling would not merely lose the race for
+// the verdict message but TERMINATE the approval, since closing the conn is what
+// the server reads as a lost caller (#1929). The only things that end the wait
+// are the caller cancelling ctx, the connection ending, and the daemon
+// answering. An undeadlined ctx is therefore genuinely patient here rather than
+// truncated at DialTimeout.
+//
+// The dial itself still fails fast (<= dialRetryBudget, ~1.5s) on an unreachable
+// socket, independently of the ctx's deadline or absence of one (see dial.go),
+// so a missing daemon yields a bounded error rather than a hang. A daemon that
+// is alive, holds the conn open and never resolves is knowingly NOT bounded
+// here; the daemon owns that guarantee (the pending-approval registry's timer,
+// plus watchApproveConn's disconnect and shutdown denies).
 //
 // Any error (dial/transport/decode, a server-side Response.Error, or an empty
 // verdict) is returned verbatim: the subcommand fail-closes to a deny on any
 // error, so no typed-sentinel mapping is warranted.
 func Approve(ctx context.Context, socketPath string, req ApprovePayload) (*ApproveResult, error) {
-	resp, err := request(ctx, socketPath, Request{Verb: VerbMCPApprove, Approve: &req})
+	resp, err := requestPatient(ctx, socketPath, Request{Verb: VerbMCPApprove, Approve: &req})
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +291,10 @@ func Approve(ctx context.Context, socketPath string, req ApprovePayload) (*Appro
 	return resp.Approve, nil
 }
 
-// request sends one Request and reads one Response over a fresh connection.
-// Used by all client verbs.
+// request sends one Request and reads one Response over a fresh connection,
+// bounded by the ctx's deadline or DialTimeout when it carries none. Used by
+// every client verb except Approve — all of them sub-second round-trips, whose
+// bound must not move when the approve path's does.
 func request(ctx context.Context, socketPath string, req Request) (*Response, error) {
 	conn, err := dial(ctx, socketPath)
 	if err != nil {
@@ -298,6 +308,44 @@ func request(ctx context.Context, socketPath string, req Request) (*Response, er
 	}
 	_ = conn.SetDeadline(deadline)
 
+	return exchange(conn, req)
+}
+
+// requestPatient sends one Request and blocks for the Response with NO conn
+// read deadline at all. Bounded by liveness rather than duration: the dial's own
+// budget (dialRetryBudget, installed by dialWithRetry even for an undeadlined
+// ctx), cancellation of ctx, and the conn ending. Approve is its only caller —
+// see that helper's doc comment for why an approval must not carry a client-side
+// ceiling.
+//
+// Cancellation reaches a parked read by poking the conn's deadline into the
+// past, which expires both parked and future I/O immediately; an already-cancelled
+// ctx makes the AfterFunc fire before the first write, which fails closed. The
+// watcher deliberately does not Close the conn — that would race the deferred
+// Close below into a double close on a conn still being read. SetDeadline and
+// Close are safe to call concurrently, and the error from a poke that lands on
+// an already-closing conn is discarded because there is nothing left to bound.
+//
+// No write deadline: the request is one small JSON object into a socket buffer,
+// and a blocked write means a peer that has stopped reading — the wedged-daemon
+// case this path knowingly does not bound, which the watcher wakes anyway.
+func requestPatient(ctx context.Context, socketPath string, req Request) (*Response, error) {
+	conn, err := dial(ctx, socketPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
+
+	return exchange(conn, req)
+}
+
+// exchange encodes req and decodes one Response on an already-dialled conn. The
+// two request helpers differ only in the deadline policy they install before
+// calling this, so that difference is the only thing that reads as different.
+func exchange(conn net.Conn, req Request) (*Response, error) {
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return nil, fmt.Errorf("send request: %w", err)
 	}

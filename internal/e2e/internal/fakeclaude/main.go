@@ -2039,8 +2039,9 @@ const (
 // ABOVE the daemon's approval window (PYRY_APPROVAL_TIMEOUT, ~2s in the timeout case),
 // so the deny fakeclaude receives on a no-answer turn is the DAEMON's permbridge timer
 // firing — not a fakeclaude self-timeout that would mask the daemon verdict. This
-// margin is load-bearing for the fail-closed proof; control.Approve also requires a ctx
-// deadline >= the daemon window (client.go), so it doubles as that patient-read line.
+// margin is load-bearing for the fail-closed proof. control.Approve derives no read
+// deadline of its own (#1929), so this ctx deadline is the whole of the rider's bound —
+// it is what stops a wedged daemon parking fakeclaude for the length of a test run.
 const approveDialTimeout = 30 * time.Second
 
 // approveToolName and approveToolInput describe the ONE gated call the rider
