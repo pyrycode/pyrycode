@@ -73,6 +73,17 @@ type ChangeFunc func(convID string)
 // to it, exactly as OnChange routes to the queue_state producer.
 type GiveUpFunc func(convID, reason string)
 
+// PendingFunc classifies a delivery error as a legitimate hold — the head is
+// being deliberately withheld awaiting an external decision — rather than a
+// delivery failure (#1014). While it returns true the drain retries WITHOUT
+// counting the elapsed window toward GiveUpAfter and RESETS the give-up streak.
+// It sees only the error, never the conversation, because msgqueue is a leaf
+// that must not import the delivery seam's package — a conversation-scoped
+// gating condition has to be folded into the error before it reaches here. MUST
+// be pure and non-blocking (called on the drain path). nil ⇒ every non-nil
+// delivery error counts (pre-#1014 behaviour).
+type PendingFunc func(error) bool
+
 // QueuedMessage is the engine-side projection of ADR 025's {queued_msg_id, text,
 // ts} record (#719); the element Snapshot returns. Text is untrusted phone
 // transit content — never log it, only surface it to the authorized conversation.
@@ -89,6 +100,7 @@ type Config struct {
     OnChange                 ChangeFunc    // optional (#719); nil ⇒ change notification disabled
     GiveUpAfter              time.Duration // #1000: <= 0 ⇒ defaultGiveUpAfter (2m); per-head persistent-failure bound
     OnGiveUp                 GiveUpFunc    // optional (#1000); nil ⇒ give-up notification disabled (unwired in production)
+    Pending                  PendingFunc   // optional (#1014); nil ⇒ no exemption from GiveUpAfter
     Logger                   *slog.Logger  // nil ⇒ slog.Default()
 }
 
@@ -315,6 +327,21 @@ to bridge.
   exactly as `OnChange` routes to the `queue_state` producer — a persistent
   delivery failure now surfaces as a typed, client-visible frame instead of a
   silently dropped head.
+
+- **The bound is conditionally exempt, gated per conversation, not per error type
+  (#1911).** `Config.Pending` was left unset from #1348 (which deleted the only
+  producer of `#1014`'s `supervisor.ErrTrustModalPending`) until the stream path
+  needed the same exemption for a head held behind an approval parked on a
+  person. Because `PendingFunc` is blind to the conversation, the composition
+  root cannot ask "is a person deciding on this conversation?" inside it — that
+  question is answered at the delivery seam, which re-marks *only* the hold
+  error (not every error the seam can return) before it reaches `Pending`. That
+  precision is what keeps the bound satisfiable: exempting every delivery error
+  during a parked approval would let a conversation that is separately and
+  genuinely wedged (a failing `resolve`, a dead `Activate`) ride along on
+  somebody else's decision time indefinitely. See
+  `cmd/pyry`'s `approvalParkedReport`/`markApprovalHolds`/`approvalHoldPending`
+  and [features/streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md](streamsup-package-per-conversation-turn-busy-track-delivery-seam-consumer-mid-turn-hold.md).
 
 See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007.md),
 [codebase/1008.md](../codebase/1008.md).
@@ -557,3 +584,9 @@ give-up-notification path as the injected `GiveUpFunc`.
   droppable, for the whole wait. `Remove`, `commitGate`, and the give-up bound above are consumed
   exactly as they stand; nothing in this package changed. On PTY the tracker is nil and both calls are
   no-ops — `newInboundDeliver`'s body is semantically unchanged there.
+- **#1911 gave `Config.Pending` its first live producer since #1348 removed
+  `supervisor.ErrTrustModalPending`'s.** A head held by #1199's stream-path hold is exempted from
+  `GiveUpAfter` for as long as a person is being asked to approve something on that conversation
+  (`streamApprovalBridge.ApprovalParked`, #1919) — see § Bounded give-up above for the gating
+  pattern. Engine-side unchanged apart from the doc comments on `PendingFunc` and `Config.Pending`,
+  which no longer name the deleted trust-modal producer as the wiring.
