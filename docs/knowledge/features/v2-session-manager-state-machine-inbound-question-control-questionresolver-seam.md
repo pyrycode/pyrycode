@@ -33,7 +33,8 @@ here it must not.
 - **Nil at every construction site is what makes this slice fail-safe on its
   own.** `V2SessionConfig.QuestionResolver` is optional, and no production
   wiring sets it — a paired-but-untrusted client's answer reaches no actuator
-  until #1985 implements the seam and #1986 lands the per-device answer gate.
+  until #1986 lands the per-device answer gate and implements this seam over
+  the daemon-side primitives #1990 (refusal, landed) and #1991 (answer) add.
   The field's own doc comment carries that ordering obligation (nothing may be
   wired ahead of #1986) so whoever wires it reads it at the crossing, and
   restates the obligations Go's type system can't express: `QuestionIndex` is
@@ -116,5 +117,5 @@ fully controls the bytes of.
 
 - [Inbound modal control](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md) — the discipline this slice mirrors (interception point, single dispatch goroutine, fire-and-forget) and the one place it deliberately diverges (no broadcast)
 - [Question-batch payload § `QuestionAnswerPayload` / `QuestionRefusedPayload`](protocol-package-question-batch-payload.md#questionanswerpayload--questionrefusedpayload-1983) — the wire shapes and the positional-index / never-range-checked contract this handler reads by
-- [questionbridge-package.md](questionbridge-package.md) — the registry #1985 resolves against
+- [questionbridge-package.md](questionbridge-package.md) — the registry #1990's refusal and #1991's (open) answer path resolve against
 - [Concurrency](v2-session-manager-concurrency.md) — both handlers run on the single `Run` dispatch goroutine, alongside the other inline control-envelope arms
