@@ -4329,9 +4329,12 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 				// longer empty on every entry and the old form would fail on a producer doing
 				// exactly what it should. Narrowing it to the one name keeps precisely the claim
 				// the message makes. How many captured descriptions report, and which, is the
-				// description's committed-capture pin — the sibling ticket's, and asserting it
-				// here would be that pin in the wrong test. The nil-not-empty-slice contract is
-				// unaffected: TestParser_SlashCommandNamesAreCapped's DeepEqual carries it.
+				// description's committed-capture pin, and asserting it here would be that pin in
+				// the wrong test — it is
+				// TestParser_InitializeControlResponseCutsTheCapturedDescriptions (#1905), whose
+				// subject is the ten entries a cap fired on where this test's is the whole
+				// fifty-one-entry inventory. The nil-not-empty-slice contract is
+				// unaffected: TestParser_SlashCommandFieldsAreCapped's DeepEqual carries it.
 				if slices.Contains(got.TruncatedFields, "name") {
 					t.Errorf("entry %d TruncatedFields: got %v, want no \"name\" — no captured name approaches the cap",
 						i, got.TruncatedFields)
@@ -4360,6 +4363,211 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
+			}
+		})
+	}
+}
+
+// TestParser_InitializeControlResponseCutsTheCapturedDescriptions is #1905's
+// committed-capture pin for the DESCRIPTION cap, and it is the pin
+// TestParser_InitializeControlResponseCountsTheCapturedCommands defers by name. It
+// replays each responding arm's REAL control_response line and asserts what
+// maxSlashCommandDescription does to claude's own descriptions: which entries report
+// the cut, that the longest arrives cut to the cap VERBATIM, and that the one control
+// character the capture contains crosses untouched.
+//
+// It runs inside `make check` for #1810's reason: the e2e_realclaude build tag governs
+// that package's Go FILES, not its testdata. No live claude and no credentials are
+// involved on any path here.
+//
+// A test of its own rather than three more assertions in the count pin, whose own
+// comment calls asserting them there "that pin in the wrong test": that test's subject
+// is the fifty-one-entry INVENTORY, name for name, and this one's is the ten entries a
+// cap fired on.
+//
+// The capture's own shape is guarded FIRST, naming the arm, before it is used as an
+// expectation — TestParser_InitializeControlResponseDecodesTheCapturedModels' idiom —
+// and each guard is a proof a re-capture could silently take away:
+//
+//   - EXACTLY the ten over-cap names in claude's array ORDER, so a re-capture that
+//     lengthened an eleventh description fails here rather than quietly turning the
+//     emitted-set comparison below into a comparison against whatever arrived;
+//   - every one of those ten cutting to exactly the cap, which IS the "at 256 no
+//     captured entry is mid-rune reachable" measurement maxSlashCommandDescription's
+//     doc records — asserted here rather than restated, and the precondition the
+//     verbatim-prefix comparisons below rest on;
+//   - claude-api's TWO 0x0a bytes straddling the cap.
+//
+// The newline claim is deliberately NARROW: 0x0a is the only sub-0x20 byte anywhere
+// across the entries' string fields, so what the capture can prove is that THIS
+// newline crosses verbatim at its own offset — never that "control characters
+// survive", a breadth these bytes do not show. protocol.SlashCommand's doc carries
+// that measurement and maxSlashCommandDescription's owns the cap's derivation; neither
+// is restated here.
+func TestParser_InitializeControlResponseCutsTheCapturedDescriptions(t *testing.T) {
+	t.Parallel()
+
+	// The over-cap names as a LITERAL, in claude's own array order, for
+	// nameOutsideSlug's reason: derived on both sides, the comparison below would
+	// follow a re-capture anywhere and assert nothing. Array order rather than
+	// longest-first because ONE pass over the capture produces it, and it pins claude's
+	// ordering as a side effect; the derivation beside it below builds the same order.
+	wantCut := []string{
+		"design", "dataviz", "artifact-capabilities", "update-config", "verify",
+		"code-review", "doctor", "claude-api", "run", "run-skill-generator",
+	}
+	// The two entries pinned BY NAME below rather than left to ride anonymously inside
+	// the set comparison, again for nameOutsideSlug's reason: one is the capture's
+	// longest description and the other is the only one carrying a control character,
+	// and a re-capture that swapped either out would fail the set comparison with a
+	// message saying nothing about what was lost.
+	const (
+		longestName = "dataviz"
+		newlineName = "claude-api"
+	)
+
+	for _, arm := range initCaptureArms {
+		if arm == initCaptureArmNoRequest {
+			continue
+		}
+		t.Run(initCaptureArmLabel(arm), func(t *testing.T) {
+			t.Parallel()
+
+			entries := capturedCommandEntries(t, arm)
+			var (
+				captureCut  []string
+				longestDesc string
+				newlineDesc string
+			)
+			for _, entry := range entries {
+				name := capturedCommandString(t, entry, "name")
+				description := capturedCommandString(t, entry, "description")
+				switch name {
+				case longestName:
+					longestDesc = description
+				case newlineName:
+					newlineDesc = description
+				}
+				if len(description) <= slashCommandDescriptionCapFixture {
+					continue
+				}
+				captureCut = append(captureCut, name)
+				// truncateField's body written OUT — the byte cut, then the empty-replacement
+				// scrub — rather than a call to it: this is a guard on the CAPTURE, so a
+				// production mutant must not be able to move it. Landing on exactly the cap for
+				// all ten is the mid-rune reachability measurement, and it is what lets the two
+				// comparisons below compare against a plain byte prefix of claude's own value.
+				cut := strings.ToValidUTF8(description[:slashCommandDescriptionCapFixture], "")
+				if len(cut) != slashCommandDescriptionCapFixture {
+					t.Fatalf("arm %q: captured %q cuts to %d bytes, want exactly %d — a re-capture put a "+
+						"multi-byte rune across the cap, so the reachability this test and "+
+						"maxSlashCommandDescription's doc both rest on has changed",
+						arm, name, len(cut), slashCommandDescriptionCapFixture)
+				}
+			}
+			if !slices.Equal(captureCut, wantCut) {
+				t.Fatalf("arm %q: the captured descriptions over %d bytes are %q, want exactly %q in "+
+					"claude's array order; a re-capture changed which entries the cap fires on and "+
+					"the comparison below was proven against that set",
+					arm, slashCommandDescriptionCapFixture, captureCut, wantCut)
+			}
+			// The offsets are DERIVED here and transcribed nowhere: the claim is that one
+			// newline sits below the cap and one at or above it, which is precisely what makes
+			// the emitted value carry exactly ONE of them.
+			var newlines []int
+			for i := 0; i < len(newlineDesc); i++ {
+				if newlineDesc[i] == '\n' {
+					newlines = append(newlines, i)
+				}
+			}
+			if len(newlines) != 2 || newlines[0] >= slashCommandDescriptionCapFixture ||
+				newlines[1] < slashCommandDescriptionCapFixture {
+				t.Fatalf("arm %q: captured %q carries newlines at %v, want exactly two straddling the "+
+					"%d-byte cap; a re-capture took away the one control-character proof this test "+
+					"rests on", arm, newlineName, newlines, slashCommandDescriptionCapFixture)
+			}
+
+			events := collectEvents(capturedInitializeLine(t, arm))
+			// TWO events: every responding arm carries a models array beside its commands one,
+			// so the ModelList — the rung's own discriminant — goes first and the inventory
+			// behind it.
+			if len(events) != 2 {
+				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+					len(events), events)
+			}
+			list, ok := events[1].(turnevent.SlashCommandList)
+			if !ok {
+				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+			}
+			// FATAL, the count test's reason: the cap cuts a DESCRIPTION and never an ENTRY,
+			// so a producer that dropped one must fail here rather than let the lookups below
+			// report a missing entry as an empty description.
+			if len(list.Commands) != len(entries) {
+				t.Fatalf("SlashCommandList carries %d entries, want %d — one per array element, in "+
+					"claude's own order", len(list.Commands), len(entries))
+			}
+			var (
+				gotCut     []string
+				longestGot turnevent.SlashCommand
+				newlineGot turnevent.SlashCommand
+			)
+			for _, got := range list.Commands {
+				if slices.Contains(got.TruncatedFields, "description") {
+					gotCut = append(gotCut, got.Name)
+				}
+				switch got.Name {
+				case longestName:
+					longestGot = got
+				case newlineName:
+					newlineGot = got
+				}
+			}
+			// EXACT equality over the whole set, never a per-entry Contains sweep: equality is
+			// what makes "and NO OTHERS" structural — a cut that fired on an eleventh entry
+			// reddens here without anything having to enumerate the forty-one that must not
+			// report, and a cut deleted altogether reddens here as an empty set.
+			if !slices.Equal(gotCut, wantCut) {
+				t.Errorf("arm %q: the emitted entries reporting \"description\" are %q, want exactly %q — "+
+					"the capture's own over-cap set, in claude's array order", arm, gotCut, wantCut)
+			}
+			// Over the cap by a WIDE margin, asserted against the capture's own length rather
+			// than a transcribed 1145: this entry is the committed proof that a real
+			// workspace value several times the cap arrives cut and self-reported, which the
+			// bare "it is over the cap" the set comparison already carries does not say.
+			if len(longestDesc) <= 4*slashCommandDescriptionCapFixture {
+				t.Fatalf("arm %q: captured %q is %d bytes, want more than 4x the %d-byte cap — it is "+
+					"this test's over-cap-by-a-wide-margin proof and a re-capture shortened it",
+					arm, longestName, len(longestDesc), slashCommandDescriptionCapFixture)
+			}
+			if len(longestGot.Description) != slashCommandDescriptionCapFixture {
+				t.Errorf("arm %q: emitted %q description: got %d bytes, want exactly %d (claude's own "+
+					"value is %d)", arm, longestName, len(longestGot.Description),
+					slashCommandDescriptionCapFixture, len(longestDesc))
+			} else if longestGot.Description != longestDesc[:slashCommandDescriptionCapFixture] {
+				t.Errorf("arm %q: emitted %q description: got %s, want the capture's own first %d bytes "+
+					"%s — a VERBATIM prefix and not merely a value of the right length",
+					arm, longestName, slashCommandNamePreview(longestGot.Description),
+					slashCommandDescriptionCapFixture,
+					slashCommandNamePreview(longestDesc[:slashCommandDescriptionCapFixture]))
+			}
+			// The SURVIVING newline and only it: the second sits above the cap and is cut
+			// away, which is what "exactly one" states. #1600's verbatim rule holding on the
+			// one control character the capture actually contains — not stripped, not
+			// escaped, not normalised, and at claude's own offset inside a value that is
+			// itself cut and self-reported.
+			if got := strings.Count(newlineGot.Description, "\n"); got != 1 {
+				t.Errorf("arm %q: emitted %q description carries %d newlines, want exactly 1 — claude's "+
+					"first (byte %d) is under the cap and survives, its second (byte %d) is above "+
+					"the cap and is cut away", arm, newlineName, got, newlines[0], newlines[1])
+			} else if at := strings.IndexByte(newlineGot.Description, '\n'); at != newlines[0] {
+				t.Errorf("arm %q: emitted %q carries its newline at byte %d, want %d — claude's own "+
+					"offset, the value being carried verbatim up to the cut", arm, newlineName, at, newlines[0])
+			}
+			if newlineGot.Description != newlineDesc[:slashCommandDescriptionCapFixture] {
+				t.Errorf("arm %q: emitted %q description: got %s, want the capture's own first %d bytes %s",
+					arm, newlineName, slashCommandNamePreview(newlineGot.Description),
+					slashCommandDescriptionCapFixture,
+					slashCommandNamePreview(newlineDesc[:slashCommandDescriptionCapFixture]))
 			}
 		})
 	}
@@ -4443,7 +4651,7 @@ func commandEntryFixture(name any) map[string]any {
 
 // commandEntryWithFixture returns a COPY of one `commands` entry carrying an extra
 // claude key. commandEntryFixture's one-parameter signature is deliberately not
-// widened — it has 26 calls across 21 lines of this file and none of them wants a
+// widened — it has 37 calls across 32 lines of this file and none of them wants a
 // second argument — which is modelEntryWithFixture's stated reason for
 // modelEntryFixture, one array over, and this helper is that one's shape verbatim.
 //
@@ -5045,13 +5253,13 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 // claim: every name on the row is far under maxSlashCommandName, so a byte-exact
 // comparison reddens a SECOND cap tighter than `__remote-workflow`'s 17 bytes and
 // never the bound itself. Where this rung's cap IS pinned is the commands-only row of
-// TestParser_SlashCommandNamesAreCapped, which since #1885 rides this rung with one
+// TestParser_SlashCommandFieldsAreCapped, which since #1885 rides this rung with one
 // over-cap name and one that fits. The structure — ONE emitter reached from two rungs,
 // so one loop and one maxSlashCommandName — is what makes that single row enough here,
 // and that row is what MEASURES the structure rather than inheriting it.
 //
 // NOT a row here: any cap boundary. That whole matrix is
-// TestParser_SlashCommandNamesAreCapped's, its boundary rows are still measured on the
+// TestParser_SlashCommandFieldsAreCapped's, its boundary rows are still measured on the
 // models rung, and this rung's cap already has its own single row in that same matrix;
 // duplicating a boundary row here would buy a second copy of a bound rather than a
 // second proof of it.
@@ -5193,26 +5401,36 @@ func slashCommandNamePreview(s string) string {
 	return fmt.Sprintf("%q…(%d bytes)", strings.ToValidUTF8(s[:head], ""), len(s))
 }
 
-// TestParser_SlashCommandNamesAreCapped is the per-name bound's whole boundary matrix
-// PLUS the description bound's LIVENESS rows (#1904): each field is cut at its OWN cap
-// at construction and the cut is REPORTED, by the DAEMON's snake_case name for the
-// field — which for both of these fields coincides with the wire name
-// protocol.SlashCommand.TruncatedFields documents. The description's own boundary
-// matrix — its exactly-at-cap row, its mid-rune rows and its committed-capture pin —
-// is the sibling ticket's and is deliberately not here.
+// TestParser_SlashCommandFieldsAreCapped is BOTH per-field bounds' whole boundary
+// matrices: each field is cut at its OWN cap at construction and the cut is REPORTED,
+// by the DAEMON's snake_case name for the field — which for both of these fields
+// coincides with the wire name protocol.SlashCommand.TruncatedFields documents. It is
+// named for the FIELDS since #1905, TestParser_ModelListFieldsAreCapped's shape one
+// array over: it covered one bound when #1877 built it and covers two now.
+//
+// The description's committed-capture pin is NOT here and is not missing either — it
+// is TestParser_InitializeControlResponseCutsTheCapturedDescriptions, which grades the
+// same cut against claude's own bytes rather than against constructed fixtures.
 //
 // #1877 shipped the first two rows as the bound's liveness proof, so it was never
 // unproven for a merge window; #1878 turned them into a table and added the rest.
-// What each row is FOR is in its own `why`, and the exactly-at-the-cap row carries
-// the ticket's reason for existing: it is the only row that reddens on truncateField's
-// <= becoming <.
+// #1904 repeated that sequencing one field over — liveness rows first — and #1905
+// added the description's boundary rows to match the name's. What each row is FOR is
+// in its own `why`, and the two exactly-at-the-cap rows carry the tickets' reason for
+// existing: they are the only rows that redden on truncateField's <= becoming <.
+//
+// TWO such rows rather than one, and neither is the sole red for that operator:
+// truncateField is SHARED by both fields, so a flip reddens both at-cap rows together.
+// What each of them IS the sole red for is an INLINED per-field cut — the emitter
+// replacing that one field's bound call with its own length test — and each row's
+// `why` states its own.
 //
 // MEASURED rather than reasoned, because the reasoning overshoots: a halved
-// maxSlashCommandName reddens this row, but it reddens the over-cap and mid-rune rows
-// too. Their INPUTS do follow the constant down, but their expected OUTPUT lengths are
-// written against slashCommandNameCapFixture as well, so the fixture literal catches
-// the halving on either side. What is this row's alone is the BOUNDARY OPERATOR, which
-// no input over the cap or well under it can see.
+// maxSlashCommandName reddens the name at-cap row, but it reddens the over-cap and
+// mid-rune rows too. Their INPUTS do follow the constant down, but their expected
+// OUTPUT lengths are written against slashCommandNameCapFixture as well, so the
+// fixture literal catches the halving on either side. What is the at-cap row's alone
+// is the BOUNDARY OPERATOR, which no input over the cap or well under it can see.
 //
 // The models array is carried by every row but ONE, because that is the rung this
 // matrix was MEASURED on, and since #1891 it is no longer the only rung that could
@@ -5233,7 +5451,7 @@ func slashCommandNamePreview(s string) string {
 // Not a row here, deliberately: that an over-cap name is DROPPED, reordered,
 // lowercased or trimmed. #1600's verbatim rule is carried by the exact equality on the
 // entries that fit, and the entry-count bound does not exist (#1826 owns it).
-func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
+func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 	t.Parallel()
 
 	// Runes whose UTF-8 encodings are two and four bytes, so a cut landing inside
@@ -5300,11 +5518,15 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 			name:    "exactly at the cap is NOT truncated",
 			entries: []any{commandEntryFixture(atCap), commandEntryFixture("design")},
 			want:    []turnevent.SlashCommand{{Name: atCap}, {Name: "design"}},
-			why: "THE row this matrix exists for: the only one that reddens on truncateField's <= " +
-				"becoming <, since every other row's input is either over the cap (cut under either " +
-				"operator) or far under it (untouched under either). A halved maxSlashCommandName " +
-				"reddens this row too — and the over-cap and mid-rune rows with it, their expected " +
-				"OUTPUT lengths being fixture literals — but the boundary operator is this row's alone",
+			why: "THE row this matrix exists for: the only NAME row that reddens on truncateField's <= " +
+				"becoming <, since every other name row's input is either over the cap (cut under " +
+				"either operator) or far under it (untouched under either). Not the sole red in the " +
+				"table since #1905 — truncateField is SHARED, so the description's at-cap row " +
+				"reddens on the same flip; what is this row's alone is an INLINED cut of the NAME " +
+				"written with <, under which every description row stays green. A halved " +
+				"maxSlashCommandName reddens this row too — and the over-cap and mid-rune rows with " +
+				"it, their expected OUTPUT lengths being fixture literals — but the boundary " +
+				"operator is this row's alone among the name rows",
 		},
 		{
 			name: "a cut landing mid-rune deletes the partial rune (two-byte)",
@@ -5390,6 +5612,61 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 				"entry OMITS the key entirely, which is the absent spelling landing on the same \"\", and " +
 				"the trailing position is what pins that neither one was skipped",
 		},
+		{
+			name: "a description exactly at the cap is NOT truncated",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "description", descAtCap),
+				commandEntryWithFixture(commandEntryFixture("design"), "description", "plan a change"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Description: descAtCap},
+				{Name: "design", Description: "plan a change"},
+			},
+			why: "the name at-cap row one field over, and it is NOT the sole red on truncateField's <= " +
+				"becoming <: that helper is SHARED, so the flip reddens the name's at-cap row with " +
+				"this one. What this row IS the sole red for is the emitter INLINING the " +
+				"description's cut — replacing its bound call with a length test of its own, written " +
+				"< or otherwise off by one at the boundary — under which every name row stays green " +
+				"while a 256-byte workspace description rides in reported as truncated when nothing " +
+				"was cut. Every other description row's input is over the cap (cut under either " +
+				"operator) or far under it (untouched under either). The trailing short entry is the " +
+				"name row's non-vacuity pin, one field over",
+		},
+		{
+			name: "a description cut landing mid-rune deletes the partial rune (two-byte)",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "description",
+					strings.Repeat("d", slashCommandDescriptionCapFixture-1)+twoByteRune+"z"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Description: strings.Repeat("d", slashCommandDescriptionCapFixture-1),
+					TruncatedFields: []string{"description"}},
+			},
+			why: "one byte UNDER the cap: truncateField's scrub is a DELETION, not a replacement — and " +
+				"the report still names the field, because the bool says only whether the cap cut. " +
+				"Sole red for the emitter INLINING the description's cut with a REPLACEMENT scrub or " +
+				"with none; the shared-truncateField version of that mutant reddens the name's " +
+				"mid-rune rows too, so this row is A red there and never the only one. CONSTRUCTED " +
+				"rather than drawn from the capture because at this cap no captured description " +
+				"reaches mid-rune at all — see maxSlashCommandDescription's doc, which owns that " +
+				"measurement and is not restated here",
+		},
+		{
+			name: "a description cut landing mid-rune deletes the partial rune (four-byte)",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "description",
+					strings.Repeat("d", slashCommandDescriptionCapFixture-3)+fourByteRune+"z"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Description: strings.Repeat("d", slashCommandDescriptionCapFixture-3),
+					TruncatedFields: []string{"description"}},
+			},
+			why: "THREE bytes under, which is what makes \"1-3 bytes under the cap\" a range rather than " +
+				"a one-byte anecdote for this field as well — and it is the row an inlined " +
+				"description cut replacing the partial rune instead of deleting it fails most " +
+				"visibly. Its CONSTRUCTED input has the row above's reason, and " +
+				"maxSlashCommandDescription's doc has the measurement",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5446,11 +5723,9 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 				if !utf8.ValidString(got.Name) {
 					t.Errorf("entry %d name is not valid UTF-8: %s", i, slashCommandNamePreview(got.Name))
 				}
-				// The name's two assertions again for the second capped field, and for their
-				// reason: the length is what identifies a cut landing at the wrong byte and the
-				// equality is what identifies a repair. No UTF-8 check beside them, deliberately
-				// — that assertion grades a mid-rune cut, and the description's mid-rune rows are
-				// the sibling ticket's, so one here would have nothing to grade.
+				// The name's assertions again for the second capped field, and for their reason:
+				// the length is what identifies a cut landing at the wrong byte and the equality
+				// is what identifies a repair.
 				if len(got.Description) != len(want.Description) {
 					t.Errorf("entry %d description: got %d bytes, want %d (%s)",
 						i, len(got.Description), len(want.Description), tt.why)
@@ -5458,6 +5733,14 @@ func TestParser_SlashCommandNamesAreCapped(t *testing.T) {
 					t.Errorf("entry %d description: got %s, want %s — same length, different bytes; "+
 						"claude's description is carried VERBATIM and the cut is a BYTE cut and nothing else",
 						i, slashCommandNamePreview(got.Description), slashCommandNamePreview(want.Description))
+				}
+				// The name's UTF-8 check in its place beside them since #1905, when this field
+				// got mid-rune rows for it to grade: live on those two rows and a no-op on the
+				// rest, and a scrub that replaced the partial rune would keep it green — which
+				// is why the byte length above is the assertion that carries them.
+				if !utf8.ValidString(got.Description) {
+					t.Errorf("entry %d description is not valid UTF-8: %s",
+						i, slashCommandNamePreview(got.Description))
 				}
 				// DeepEqual rather than a length or a contains check, for the models table's
 				// reason: nil and []string{} disagree here and only one of them is the contract.

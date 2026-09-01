@@ -35,7 +35,7 @@ that premise and had to go with it.
 
 **The commands-only rung's cap gets its own row (#1885).** #1891 gave rung 4 a call
 into the same `emitSlashCommandList` rung 5 uses, but every row in
-`TestParser_SlashCommandNamesAreCapped`'s cap matrix still rode rung 5 — so rung 4's
+`TestParser_SlashCommandFieldsAreCapped`'s cap matrix still rode rung 5 — so rung 4's
 per-name cut was inherited by construction, not pinned, and relocating the bound out of
 `emitSlashCommandList` onto rung 5's call site left the whole package green while
 workspace-authored command names rode uncut into a retained `turnevent.SlashCommandList`.
@@ -100,6 +100,35 @@ in doc prose — the emitter's own code change was ~15 lines. Two of the ten cor
 re-arguments (rewriting a memory-share-of-payload paragraph, redrawing an unreachable-vs-unwritten
 distinction) rather than sentence edits. Worth costing in before sizing #1830 and #1825, which
 correct a comparable number of paragraphs in these same functions.
+
+**The description cap's boundary matrix and capture pin land (#1905).**
+`TestParser_SlashCommandNamesAreCapped` is renamed `TestParser_SlashCommandFieldsAreCapped`
+(mirroring `TestParser_ModelListFieldsAreCapped`), gains the description's own at-cap and
+two mid-rune rows beside the name's, and `TestParser_InitializeControlResponseCutsTheCapturedDescriptions`
+is the committed-capture pin `TestParser_InitializeControlResponseCountsTheCapturedCommands`'s
+own comment had deferred by name.
+
+*Lesson: a "sole red" claim in a shared-helper matrix has to be re-graded down to sibling
+rows within the same addition, not just across the fields already in the table.* The name
+at-cap row's `why` claimed to be the only row that reddens on `truncateField`'s `<=`
+becoming `<` — true while one field used the shared helper, false once the description
+joined it, so both at-cap rows were rewritten to disclaim sole-redness for that mutant.
+Code review then found the same trap one level further in: the two new mid-rune rows are
+not mutually sole-red either. An inlined per-field cut that scrubs with a replacement
+character instead of deleting reddens *both* the two-byte and the four-byte row together,
+so a `why` claiming either alone is a mutant away from wrong. Adding a row to a matrix
+whose rows advertise sole-redness means measuring every row it could plausibly share a
+mutant with — the ones already in the table and the new siblings landing beside it — not
+reasoning from the shape of the change.
+
+*Lesson: a fatal capture guard hides the assertion that follows it from its own mutant.*
+The new capture-pin test guards its ten-name literal with `t.Fatalf`, so a mutant that
+drops a name from that literal reddens the guard and never reaches the emitted-set
+comparison below it — the guard short-circuits the subtest before that comparison runs.
+Proving "exactly those ten and no others" is live on its own needs a different mutant, one
+the guard's fixture doesn't touch: the emitter over-reporting the field on every entry. A
+fatal precondition guard grades itself, not what it protects; grading the protected
+assertion needs a mutant that passes the guard and fails past it.
 
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,

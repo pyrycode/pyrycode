@@ -24,7 +24,7 @@ classification's prose.**
 | `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseAckReportsTheCommandCount` | AC 4's home. Doc, three rows, and the table-wide `len(events) != 0`. Renamed and restructured here. |
 | `internal/streamsup/parser_test.go` | `TestParser_ModelListIsLoggedContentFree` | Its `lines` slice, the `FIVE:` assertion, and the `leaks` sweep. |
 | `internal/streamsup/parser_test.go` | `TestParser_SlashCommandListIsSuppressed` | Its opening paragraph and `THE COMMANDS-ONLY RUNG IS THIS TABLE'S SIXTH ROW AND IT LIVES ELSEWHERE`. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandNamesAreCapped` | The `models array is carried by every row` paragraph only. Rows untouched. |
+| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The `models array is carried by every row` paragraph only. Rows untouched. |
 | `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseRejectBranches` | Read to confirm it needs nothing — see § Checked non-items. |
 | `internal/streamsup/parser_test.go` | `TestParser_ControlResponseAckIsConsumedSilently` | Same: read to confirm, change nothing. |
 | `cmd/pyry/interactive_turn_v2.go` | `eventKind` | Its `turnevent.SlashCommandList` arm, `A PRODUCTION PRODUCER NOW EMITS THE VARIANT` paragraph. |
@@ -241,7 +241,7 @@ exactly what this ticket overturns, so this is surgery, not a row edit.
 **Rename to `TestParser_InitializeControlResponseCommandsOnlyRungEmits`.** "Ack" stops
 describing what it covers, and #1890 deliberately left the name so it is renamed once,
 here. Two in-file citations re-point with it — the docs of
-`TestParser_SlashCommandNamesAreCapped` and `TestParser_SlashCommandListIsSuppressed`,
+`TestParser_SlashCommandFieldsAreCapped` and `TestParser_SlashCommandListIsSuppressed`,
 both already being edited below, so the rename rides along for free. There are no
 citations outside this file.
 
@@ -263,7 +263,7 @@ per-row expectation:
   `__remote-workflow`. Three lines, and `__remote-workflow` is the committed proof that no
   name charset may be assumed. This is what pins "same construction, same verbatim name"
   at the new call site.
-- **Do not add cap-boundary rows.** That matrix is `TestParser_SlashCommandNamesAreCapped`'s
+- **Do not add cap-boundary rows.** That matrix is `TestParser_SlashCommandFieldsAreCapped`'s
   and the ticket forbids moving it.
 
 **The record assertions are unchanged.** All three rows keep the exact six-attribute
@@ -316,7 +316,7 @@ and pass after. That is AC 4.
   redden a hoisted emit, because rung 4's new call sits inside the empty-models block
   below the success gate and cannot be reached by either.
 
-### `TestParser_SlashCommandNamesAreCapped` — doc only, rows untouched
+### `TestParser_SlashCommandFieldsAreCapped` — doc only, rows untouched
 
 The load-bearing clause *"a line with no models emits nothing at all"* and *"the emit half
 is the same on both"* go false. The honest replacement: the construction is now reached

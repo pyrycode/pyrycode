@@ -21,7 +21,7 @@ Read these before writing anything. Every entry names a symbol; resolve it with 
 | `internal/protocol/interactive.go` | `SlashCommand` | Declaration order (`Name`, `ArgumentHint`, `Description`, `Aliases`, `TruncatedFields`) and the `description` JSON tag. Its SECURITY paragraph carries the newline measurement. |
 | `internal/streamsup/parser_test.go` | `commandEntryFixture` | **Do not widen it.** 26 calls across 21 lines. |
 | `internal/streamsup/parser_test.go` | `modelEntryWithFixture` | The sibling-helper pattern to copy, verbatim in shape and in the reason its doc states. |
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandNamesAreCapped` | The existing per-entry cap table. Liveness rows go here; read the row struct's `commandsOnly` / `entries` / `want` / `why` fields and the `slashCommandNameCapFixture` convention. |
+| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The existing per-entry cap table. Liveness rows go here; read the row struct's `commandsOnly` / `entries` / `want` / `why` fields and the `slashCommandNameCapFixture` convention. |
 | `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseRejectBranches` | Where AC 5's non-string case goes — the `"an entry's name is a number"` row is the template. |
 | `cmd/pyry/interactive_turn_v2_test.go` | `emitterSlashCommandListSentinels`, `emitterSlashCommandListFixture` | Item 10: the enumeration, the fixture's two entries, and the sentinel-shape rule (`qq-…-alpha-sentinel` / `zz-…-beta-sentinel`). |
 | `docs/knowledge/features/` | the streamsup package overview | Read-only. The documentation phase owns it; do **not** write one. |
@@ -149,7 +149,7 @@ Each is a symbol-anchored `//` comment carrying no line number, verified verbati
 - The three `"A separate constant even though it currently equals …"` peer enumerations. **Declaration-time only; do not reopen**, even though this cap lands on 256. #1877's precedent is exact.
 - `docs/specs/**`'s nine further `#1833` mentions. Specs are frozen per-ticket build artifacts; editing them would spend this budget on history. **Only the two in-tree `#1833` cites move**, both in `internal/streamsup/parser.go` (item 4's and the `argument_hint` one), confirmed by `git grep '#1833' -- internal/` returning exactly two hits.
 
-**One consequence of the developer's own test edit, and it is capped at one sentence.** `TestParser_SlashCommandNamesAreCapped`'s doc opens *"the per-name bound's whole boundary matrix"*. Adding description liveness rows makes that scope sentence incomplete, so keep it true: the table is the name's whole boundary matrix **plus** the description's liveness rows, the description's own boundary matrix being the sibling ticket's. This is not an eleventh enumerated item — it is the ordinary duty to keep the doc of a thing you edit accurate. One sentence; do not expand the table's doc further.
+**One consequence of the developer's own test edit, and it is capped at one sentence.** `TestParser_SlashCommandFieldsAreCapped`'s doc opens *"the per-name bound's whole boundary matrix"*. Adding description liveness rows makes that scope sentence incomplete, so keep it true: the table is the name's whole boundary matrix **plus** the description's liveness rows, the description's own boundary matrix being the sibling ticket's. This is not an eleventh enumerated item — it is the ordinary duty to keep the doc of a thing you edit accurate. One sentence; do not expand the table's doc further.
 
 ## Testing strategy
 
@@ -159,7 +159,7 @@ Scenarios, not test code. Write them in this package's existing idiom.
 
 `commandEntryFixture` has **26 calls across 21 lines** and must **not** be widened; that constraint is load-bearing for this ticket's size. Add a sibling in `modelEntryWithFixture`'s exact shape — returns a **copy** of one entry carrying an extra claude key, `value any` so a row can put a non-string where a string belongs. Its doc states the not-widening reason as `modelEntryWithFixture`'s does. A generic `(entry, key, value)` signature rather than a description-specific one, so #1830 and #1825 reuse it instead of adding a third helper.
 
-### `TestParser_SlashCommandNamesAreCapped` — liveness rows only
+### `TestParser_SlashCommandFieldsAreCapped` — liveness rows only
 
 Three rows. **The description's boundary matrix — the exactly-at-cap row, the mid-rune rows, the committed-capture pin — is deliberately NOT here.** It is the sibling ticket, blocked by this one. Add a `slashCommandDescriptionCapFixture` literal constant alongside `slashCommandNameCapFixture`, its own fixture for that constant's stated reason (a shared fixture would let a change to one silently retarget the other's proof).
 

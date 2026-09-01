@@ -10,7 +10,7 @@
 
 | Read | Symbol | What to extract |
 |---|---|---|
-| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandNamesAreCapped` | The table this ticket extends: its row struct, its assertion loop, and the `The models array is carried by every row` paragraph AC 3 corrects. **This is where the whole change lands.** |
+| `internal/streamsup/parser_test.go` | `TestParser_SlashCommandFieldsAreCapped` | The table this ticket extends: its row struct, its assertion loop, and the `The models array is carried by every row` paragraph AC 3 corrects. **This is where the whole change lands.** |
 | `internal/streamsup/parser_test.go` | `TestParser_InitializeControlResponseCommandsOnlyRungEmits` | What is already pinned on this rung — the record's six attributes, the verbatim names incl. `__remote-workflow`, the event count. Read to know what NOT to re-prove, and for the two doc paragraphs AC 3 corrects (`THE CAP IS NOT PINNED BY THAT`, `NOT a row here: any cap boundary`). |
 | `internal/streamsup/parser_test.go` | `initializeLineFixture`, `commandEntryFixture`, `modelEntryFixture`, `collectEvents` | The fixture set the new row is built from. `initializeLineFixture` is the only builder that can express a `commands` array with no `models` key. |
 | `internal/streamsup/parser_test.go` | `slashCommandNameCapFixture` | The literal `256`, deliberately NOT `maxSlashCommandName` — its doc says why. Every length in the new row comes from it. |
@@ -54,7 +54,7 @@ decided.
 Test-only. One file: `internal/streamsup/parser_test.go`. Three changes, in dependency
 order.
 
-### 1. `TestParser_SlashCommandNamesAreCapped` gains a rung axis
+### 1. `TestParser_SlashCommandFieldsAreCapped` gains a rung axis
 
 The table's rows currently hardcode the rung twice in the harness: the `models` key is
 always added to the fixture, and the harness reads `events[1]` after asserting
@@ -132,7 +132,7 @@ fitting sibling is the whole row.
 Two symbols, three paragraphs. All three are true of today's tree and false after change 2,
 which is exactly why they are in scope.
 
-- `TestParser_SlashCommandNamesAreCapped` — the paragraph from *"The models array is
+- `TestParser_SlashCommandFieldsAreCapped` — the paragraph from *"The models array is
   carried by every row…"* through *"A row therefore never states the models half."* Its
   new claim: most rows ride the models rung, which is where the matrix was measured and
   where the boundary rows stay; **one** row states its rung, because the identity of
@@ -249,7 +249,7 @@ Measured on today's tree, before the row exists:
   bytes, want 256` and `entry 0 TruncatedFields: got []string(nil), want []string{"name"}`.
 - The same probe on the unmutated tree → passes.
 
-Expected after the change: under M1, `TestParser_SlashCommandNamesAreCapped` reports
+Expected after the change: under M1, `TestParser_SlashCommandFieldsAreCapped` reports
 **exactly one failing subtest**, the new row, and no other test in the package fails.
 
 ### M2 — the unconditional report (AC 2; red, and not claimed sole)
@@ -283,7 +283,7 @@ build tag and no production behaviour changes.
 
 None blocking. Two judgement calls made here rather than deferred:
 
-1. **Where the row lands** — inside `TestParser_SlashCommandNamesAreCapped` rather than a
+1. **Where the row lands** — inside `TestParser_SlashCommandFieldsAreCapped` rather than a
    new table beside `TestParser_InitializeControlResponseCommandsOnlyRungEmits`. A second
    table would duplicate the four-assertion loop (byte length, byte equality,
    `utf8.ValidString`, `TruncatedFields` DeepEqual) for one row, and would put the cap's

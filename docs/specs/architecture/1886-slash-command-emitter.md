@@ -29,7 +29,7 @@ comment prose around it is what this ticket is actually about.
   rule at the consumer; the producer's restatement travels with the block unchanged.
 - `internal/streamsup/parser_test.go` → `TestParser_SlashCommandListIsSuppressed` — AC 2's placement
   sentence and AC 3's fifth cite, both in this one doc comment.
-- `internal/streamsup/parser_test.go` → `TestParser_SlashCommandNamesAreCapped`,
+- `internal/streamsup/parser_test.go` → `TestParser_SlashCommandFieldsAreCapped`,
   `TestParser_InitializeControlResponseCountsTheCapturedCommands`,
   `TestParser_InitializeControlResponseAckReportsTheCommandCount`,
   `TestParser_ModelListIsLoggedContentFree` — the four tables that between them are this ticket's whole
@@ -308,7 +308,7 @@ The proof is `make check` green with these four unchanged:
 - `TestParser_SlashCommandListIsSuppressed` — all four suppressing shapes plus the nak and undecodable
   rows. This is the table that would redden if the gate moved wrong or if the call site drifted above
   `logControlResponse`, the `ModelList` emit or rung 3's return.
-- `TestParser_SlashCommandNamesAreCapped` — the cap boundary at, either side of, and mid-rune around
+- `TestParser_SlashCommandFieldsAreCapped` — the cap boundary at, either side of, and mid-rune around
   `maxSlashCommandName`, plus the per-entry `TruncatedFields` report. Reddens if the cap call or the
   per-entry `cut` scope moved wrong.
 - `TestParser_InitializeControlResponseCountsTheCapturedCommands` — the committed capture's fifty-one
