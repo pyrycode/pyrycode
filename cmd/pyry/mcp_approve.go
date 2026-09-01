@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/pyrycode/pyrycode/internal/acp"
 	"github.com/pyrycode/pyrycode/internal/control"
@@ -33,23 +32,13 @@ const approveToolName = "approve"
 // supported" rule) and fall back to this pinned value otherwise.
 const defaultMCPProtocolVersion = "2025-06-18"
 
-// mcpApproveClientMargin is added to approvalTimeout() to form the client read
-// deadline, so the daemon's own approval timer fires first — its informative
-// "approval request timed out" deny passes through — rather than the client
-// read deadline (a generic transport error → our own "approval unavailable"
-// deny). Both are denies; the margin just prefers the daemon's message. Deriving
-// both ends of the socket from that one env-aware accessor is what keeps the
-// ordering at EVERY window rather than only at the default one (#1507).
-const mcpApproveClientMargin = 30 * time.Second
-
 // approveServer is the MCP stdio approve tool host. It is a pure forwarder: each
 // tools/call is re-framed into a control-socket mcp.approve request and the
 // daemon's verdict is re-framed into the MCP tool result claude blocks on. The
 // value is read-only after construction — no shared mutable state, no locks.
 type approveServer struct {
-	socketPath string        // resolved control socket to forward approvals to
-	timeout    time.Duration // per-call client read deadline (approval window + margin)
-	log        *slog.Logger  // stderr only — stdout is exclusively the JSON-RPC frame stream
+	socketPath string       // resolved control socket to forward approvals to
+	log        *slog.Logger // stderr only — stdout is exclusively the JSON-RPC frame stream
 }
 
 // runMCPApprove implements `pyry mcp-approve`: an MCP server speaking JSON-RPC
@@ -83,21 +72,22 @@ func runMCPApprove(args []string) error {
 }
 
 // newMCPApproveServer is the sole production construction site for approveServer.
-// The per-call client read deadline derives from approvalTimeout() — the same
-// env-aware accessor the daemon hands the pending-approval registry — so raising
-// PYRY_APPROVAL_TIMEOUT raises both ends of the control socket together instead
-// of freezing the client at the mcpApprovalTimeout constant plus the margin. The
-// env is read once per short-lived `pyry mcp-approve` process, mirroring the
-// daemon's single read when it installs the registry.
+// What it documents is an absence: the client carries NO per-call bound and reads
+// no duration source, so nothing here can cut short an approval the daemon is
+// still holding (#1929). The daemon owns the window — a client-side duration
+// could not tell an approval legitimately held for a person to answer from a
+// wedged one, and picking any ceiling here would truncate the first to protect
+// against the second. The bounds that remain are liveness-shaped and live in
+// control.Approve: the dial's own budget, ctx cancellation, and the conn ending.
 //
 // The literal lives here rather than inline in runMCPApprove, which ends in the
-// blocking serveJSONRPCStdio: nothing could observe the derived deadline without
-// starting a server. Named newMCPApproveServer because newApproveServer is
-// already taken by a fixed-timeout test helper in this package.
+// blocking serveJSONRPCStdio: this is the seam the at-every-window test builds
+// the production shape through without starting a server. Named
+// newMCPApproveServer because newApproveServer is already taken by a test helper
+// in this package.
 func newMCPApproveServer(socketPath string, log *slog.Logger) *approveServer {
 	return &approveServer{
 		socketPath: socketPath,
-		timeout:    approvalTimeout() + mcpApproveClientMargin,
 		log:        log,
 	}
 }
@@ -243,15 +233,15 @@ func (s *approveServer) toolsCall(ctx context.Context, params json.RawMessage) (
 		return s.deny("", "malformed approval request"), nil
 	}
 
-	// cctx carries both the per-call deadline and signal cancellation (ctx is the
-	// Serve ctx), so a mid-approval SIGTERM unblocks the control read → deny.
-	cctx, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	res, err := control.Approve(cctx, s.socketPath, payload)
+	// The Serve ctx goes to the daemon unwrapped: no per-call deadline, so an
+	// approval someone is still answering is never cut short from this end, and
+	// the signal cancellation it carries reaches the control read (control.Approve
+	// watches it) so a mid-approval SIGTERM unblocks into a deny.
+	res, err := control.Approve(ctx, s.socketPath, payload)
 	switch {
 	case err != nil:
-		// Socket unreachable, daemon Response.Error (nil registry / missing id),
-		// or a client read-deadline timeout — all fail-closed to deny.
+		// Socket unreachable, daemon Response.Error (nil registry / missing id), a
+		// conn that ended with no verdict, or a cancelled ctx — all fail-closed.
 		return s.deny(payload.ToolUseID, "approval unavailable"), nil
 	case res == nil:
 		// Belt-and-suspenders; control.Approve already errors on a nil verdict.
