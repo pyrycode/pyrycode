@@ -853,19 +853,23 @@ type ModelList struct {
 // an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
 // for their reason.
 //
-// Its three fields are THREE of protocol.SlashCommand's five (#1727), in that
-// type's own declaration order: the command's name, its description, and the
-// report naming which of this entry's fields the producer cut. The two still
-// missing — ArgumentHint between the first two, Aliases between the last two —
-// are deliberately absent and arrive with their own slices, exactly as
-// ModelOption grew a field at a time across #1819 / #1827 / #1828.
+// Its four fields are FOUR of protocol.SlashCommand's five (#1727), in that
+// type's own declaration order: the command's name, its argument hint, its
+// description, and the report naming which of this entry's fields the producer
+// cut. The one still missing — Aliases, between the last two — is deliberately
+// absent and arrives with its own slice, exactly as ModelOption grew a field at
+// a time across #1819 / #1827 / #1828.
 //
 // FIXING THE ORDER BEFORE THE SECOND FIELD EXISTS is the whole point of choosing
 // it now, and Description (#1904) is the first evidence that the promise was
 // kept: it landed BETWEEN Name and TruncatedFields — its mirrored position,
 // leaving the gap ArgumentHint fills later — rather than being appended to the
-// end where a field added without this rule would have gone. Each later field
-// lands the same way, so the eventual mapping onto the wire type stays a
+// end where a field added without this rule would have gone. ArgumentHint
+// (#1957) is the second, and it is the case the promise was actually WRITTEN
+// for: Description had one declared field to land after, so no reordering could
+// have got it wrong, where this field had to be INSERTED BETWEEN two that
+// already existed and appending it would have compiled just as well. Each later
+// field lands the same way, so the eventual mapping onto the wire type stays a
 // field-for-field copy rather than a reordering a reader has to check.
 type SlashCommand struct {
 	// Name is claude's command name, VERBATIM, per ModelAnnounced.Model's rule:
@@ -881,6 +885,31 @@ type SlashCommand struct {
 	// SlashCommandList's SECURITY paragraph, which owns that statement for every
 	// string on this type rather than having it diluted into a restatement here.
 	Name string
+	// ArgumentHint is claude's synopsis of what the command takes AFTER its
+	// name, VERBATIM, per ModelAnnounced.Model's rule: no lowercasing, no
+	// trimming, no charset filtering.
+	//
+	// AN EMPTY HINT IS THE ORDINARY CASE, NOT MISSING DATA, and a consumer must
+	// not read one as absent or as a defect: 33 of the committed capture's 51
+	// entries carry "" and NONE omits the key, so a command taking no argument
+	// is the majority row. That measurement is also why
+	// protocol.SlashCommand's wire tag carries no omitempty — eliding an empty
+	// hint would make the common row indistinguishable from a malformed one —
+	// and this doc does not re-derive it.
+	//
+	// IT IS A SYNOPSIS, NOT AN INVOCABLE TOKEN, which is what separates it from
+	// Name rather than making it a second copy of Name's warning. A client is
+	// meant to send a Name back as ordinary message text, sending the slash
+	// command being the feature; this string is never sent back at all. It is
+	// no more an identifier than Name is, and less: 13 of the capture's 18
+	// non-empty hints carry `[` and `]` and ten carry `<` and `>`, so a
+	// consumer rendering one is handling syntax-shaped text and not a slug.
+	//
+	// Bounded by the producer AT CONSTRUCTION under its OWN cap (streamsup's
+	// maxSlashCommandArgumentHint, not Name's or Description's) and never
+	// sanitized: see SlashCommandList's SECURITY paragraph, which owns that
+	// statement for every string on this type.
+	ArgumentHint string
 	// Description is claude's own description of the command, VERBATIM, per
 	// ModelAnnounced.Model's rule: no lowercasing, no trimming, no charset
 	// filtering — and NO NEWLINE STRIPPING, which is named rather than left under
@@ -908,11 +937,17 @@ type SlashCommand struct {
 	// empty non-nil slice; BackgroundTask.TruncatedFields is the convention's
 	// single source.
 	//
-	// TODAY IT CAN CARRY "name" AND "description", IN THAT ORDER, AND THE
-	// ENUMERATION GROWS WITH THE FIELD SET. #1904 was the first slice to extend
-	// it, exactly as ModelOption.TruncatedFields grew to include "effort_levels"
-	// in #1827 — and it is what turned the declaration ORDER above into a claim a
-	// test can see, an enumeration of one having nothing to order.
+	// TODAY IT CAN CARRY "name", "argument_hint" AND "description", IN THAT
+	// ORDER, AND THE ENUMERATION GROWS WITH THE FIELD SET. #1904 was the first
+	// slice to extend it and #1957 the second, exactly as
+	// ModelOption.TruncatedFields grew to include "effort_levels" in #1827 — and
+	// it is what turned the declaration ORDER above into a claim a test can see,
+	// an enumeration of one having nothing to order.
+	//
+	// "argument_hint" is the first name here that is NOT byte-identical to
+	// claude's own key for the field, which is argumentHint. These are the
+	// daemon's names, as the paragraph above says, and until this field landed
+	// that was a distinction with no difference to see.
 	//
 	// A NAME FOR A FIELD THIS TYPE DOES NOT DECLARE MUST NEVER APPEAR. A producer
 	// that cut a value this type does not carry has nothing to report here,

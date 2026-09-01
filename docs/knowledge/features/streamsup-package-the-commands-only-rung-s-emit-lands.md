@@ -130,6 +130,42 @@ the guard's fixture doesn't touch: the emitter over-reporting the field on every
 fatal precondition guard grades itself, not what it protects; grading the protected
 assertion needs a mutant that passes the guard and fails past it.
 
+**`ArgumentHint` joins the per-entry shape, and the per-entry term goes three-term (#1957).**
+`commandEntryLine` gains `ArgumentHint` (claude's camelCase `argumentHint`) between `Name` and
+`Description`, bound at construction under its own `maxSlashCommandArgumentHint` (256) through the
+same per-entry `bound` closure, the call **inserted between** the name's and the description's so
+`TruncatedFields` reports in declaration order. The per-entry term is now `256+256+256 = 768`
+(#1904's `256+256 = 512`); every figure that sum fed is re-derived rather than scaled — the `1/2`
+and `5/8` entry-count fractions move from 16/20 to 10/13, retained capture 6,117→6,647, uncut total
+11,074→11,604 (77.6%→81.3%).
+
+*Lesson: a cap's stated multiple needs its base named the moment a field can be legitimately empty.*
+`name` and `description` never had to say which population ("longest" vs. "mean/median of all 51")
+their multiple was taken over, because both are non-empty on every entry, so the two populations
+coincide. `argumentHint` is empty on 33 of the capture's 51 entries: "median 17.5" (over the 18
+non-empty hints) and "median 0" (over all 51 entries) are both true of the same field, and the
+all-51 median is 0, so no multiple exists over that population at all. The convention this ticket
+sets — name the population before stating the multiple — is inherited by `aliases` (#1825), whose
+version of the same problem is worse: absent on 42 of 51, not merely empty.
+
+*Lesson: an empty-valued fixture sentinel silently disarms a `strings.Contains` log-leak sweep.*
+`strings.Contains(s, "")` is always true, so a fixture built with an empty `ArgumentHint` would pass
+the `cmd/pyry` no-leak sweep whether the implementation leaked or not. `argumentHint` is the first
+field in this family whose ordinary captured value is `""`. The fix is a non-empty, conspicuous
+sentinel on every fixture entry, appended unconditionally — never a filter that skips empty
+needles, which would silently disarm the sweep for every later field whose fixture value happens to
+be empty (`aliases` will have the same shape, worse).
+
+*Lesson: only an exact-equality assertion catches an ordering mutant on an append sequence, and
+"sole red" has to be measured against every plausible ordering mistake, not just the one written
+down.* Inserting the new `bound` call between the existing two, versus appending it after
+`description`, both compile and both pass a membership check on `TruncatedFields`; only an
+exact-slice comparison (`reflect.DeepEqual`) sees the difference. Measured via `go test -overlay`:
+swapping the name/hint calls reddens exactly one subtest (the all-three-cut row), but appending the
+hint's call after the description's reddens two — so a sole-redness claim written against the swap
+does not transfer to the append variant, and had to be checked separately rather than assumed to
+generalize.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
