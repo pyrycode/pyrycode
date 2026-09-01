@@ -103,6 +103,7 @@ search can reach it.
 - [ask_user_question_record_test.go](e2e-realclaude-ask-user-question-record-test-go.md) — the record half of the `AskUserQuestion` capture family: a four-field fixture record, pinned by a hand-written ordered-name literal, proved offline with no claude binary and no credentials.
 - [ask_user_question_names_test.go](e2e-realclaude-ask-user-question-names-test-go.md) — the name half of the `AskUserQuestion` capture family: a one-input namer locked against all four committed fixture families, proved offline with no claude binary and no credentials.
 - [ask_user_question_writer_test.go](e2e-realclaude-ask-user-question-writer-test-go.md) — the writer half of the `AskUserQuestion` capture family: a directory-injectable writer that refuses a record before any filesystem call when its marshalled bytes carry a denied value, proved offline with no claude binary and no credentials.
+- [ask_user_question_shape_test.go](e2e-realclaude-ask-user-question-shape-test-go.md) — the shape half of the `AskUserQuestion` capture family: a findings-returning check over the decoded `tool_input`, its first two checks (tool name, at least one question) each with a negative row, proved offline with no claude binary and no credentials.
 - [e2e-harness.md](e2e-realclaude-e2e-harness-md.md) — see the document
 - [1415](e2e-realclaude-related-tickets-1415-1439.md) — see the document
 - [1440](e2e-realclaude-related-tickets-1440-1447.md) — see the document
