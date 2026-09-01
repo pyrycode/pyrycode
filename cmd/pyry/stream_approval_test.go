@@ -1050,6 +1050,7 @@ type questionFixture struct {
 	modal  *modalbridge.Registry
 	qreg   *questionbridge.Registry
 	bcast  *fakeInteractiveBcast
+	pushed chan struct{} // one signal per recorded push; see dismissalRecorder
 }
 
 func newQuestionFixture(t *testing.T, convID string, logger *slog.Logger) questionFixture {
@@ -1058,9 +1059,59 @@ func newQuestionFixture(t *testing.T, convID string, logger *slog.Logger) questi
 	modal := modalbridge.New()
 	qreg := questionbridge.New()
 	bcast := oneInteractiveConn("c1")
-	bridge := newStreamApprovalBridge(perm, modal, bcast, func() string { return convID }, context.Background(), logger)
+	rec := &dismissalRecorder{inner: bcast, pushed: make(chan struct{}, 8)}
+	bridge := newStreamApprovalBridge(perm, modal, rec, func() string { return convID }, context.Background(), logger)
 	bridge.questions = qreg
-	return questionFixture{bridge: bridge, perm: perm, modal: modal, qreg: qreg, bcast: bcast}
+	return questionFixture{bridge: bridge, perm: perm, modal: modal, qreg: qreg, bcast: bcast, pushed: rec.pushed}
+}
+
+// dismissalRecorder wraps the fixture's broadcaster so a test can wait for a
+// fan-out RefuseQuestion runs on its OWN goroutine (#1990). The signal is sent
+// after the inner Push returns, so a test that receives it has a happens-before
+// edge covering everything that goroutine did — which is what makes the inner
+// recorder's plain slice safe to read afterwards. The send is non-blocking: the
+// synchronous Surface/retire paths push through here too and no test waits on
+// their signals.
+type dismissalRecorder struct {
+	inner  *fakeInteractiveBcast
+	pushed chan struct{}
+}
+
+func (d *dismissalRecorder) ActiveConns(ctx context.Context) []relay.ActiveConn {
+	return d.inner.ActiveConns(ctx)
+}
+
+func (d *dismissalRecorder) Push(ctx context.Context, connID string, env protocol.Envelope) error {
+	err := d.inner.Push(ctx, connID, env)
+	select {
+	case d.pushed <- struct{}{}:
+	default:
+	}
+	return err
+}
+
+// isolate drops the pushes recorded so far AND any pending fan-out signal, so a
+// later waitPush cannot be satisfied by an earlier frame's push.
+func (f questionFixture) isolate() {
+	f.bcast.pushes = nil
+	for {
+		select {
+		case <-f.pushed:
+		default:
+			return
+		}
+	}
+}
+
+// waitPush blocks until the detached dismissal fan-out has pushed, or fails the
+// test. The generous deadline is a hang-catcher, not a timing assumption.
+func waitPush(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the dismissal fan-out")
+	}
 }
 
 // questionLen reads the bridge's live batch-correlation size under its own lock,
@@ -1452,5 +1503,181 @@ func TestStreamApprovalBridge_ApprovalParked_CoversAParkedQuestion(t *testing.T)
 
 	if f.bridge.ApprovalParked(testConvID) {
 		t.Error("ApprovalParked(A) = true after the batch retired")
+	}
+}
+
+// --- #1990: refusing an outstanding batch --------------------------------------
+
+// AC-1/AC-2: refusing an outstanding batch consumes the registry's one-shot,
+// hands claude a deny carrying the daemon's own instruction to wait, and
+// broadcasts exactly one question_dismissed with the refusal sentinels.
+//
+// The verdict is read off the parked approval's OWN handle, so what is asserted
+// is what claude receives rather than what this file believes was sent. The
+// constant is additionally asserted to tell claude to wait: an edit trimming it
+// to a bare "denied" satisfies every equality check here while letting claude
+// guess an answer and carry on, which is the failure the message exists to stop.
+func TestStreamApprovalBridge_RefuseQuestion_DeniesAndDismisses(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, pending := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.isolate()
+
+	if !f.bridge.RefuseQuestion(batchID) {
+		t.Fatal("RefuseQuestion = false for an outstanding batch")
+	}
+
+	v := pending.Await()
+	if v.Behavior != permbridge.BehaviorDeny {
+		t.Errorf("verdict behavior = %q, want deny", v.Behavior)
+	}
+	if v.Message != reasonQuestionRefused {
+		t.Errorf("deny message = %q, want the daemon constant", v.Message)
+	}
+	if !strings.Contains(reasonQuestionRefused, "wait") {
+		t.Error("the deny message must tell claude to wait for the user's message")
+	}
+
+	waitPush(t, f.pushed)
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeQuestionDismissed {
+		t.Fatalf("pushes = %v, want exactly one question_dismissed", got)
+	}
+	d := lastQuestionDismissed(t, f.bcast.pushes)
+	if d.QuestionBatchID != batchID {
+		t.Errorf("question_batch_id = %q, want the batch frame's %q", d.QuestionBatchID, batchID)
+	}
+	if d.Outcome != outcomeQuestionRefused || d.Source != sourceQuestionRemote {
+		t.Errorf("dismissal = {%q %q}, want {%q %q}", d.Outcome, d.Source, outcomeQuestionRefused, sourceQuestionRemote)
+	}
+	if outcomeQuestionRefused == outcomeQuestionUnanswered {
+		t.Error("the refusal outcome must be distinct from the no-answer one")
+	}
+	if _, ok := f.qreg.Lookup(batchID); ok {
+		t.Error("batch still outstanding; the refusal must consume the one-shot")
+	}
+	if n := questionLen(f.bridge); n != 1 {
+		t.Errorf("byQuestion len = %d, want 1; retireQuestion stays the sole correlation deleter", n)
+	}
+}
+
+// AC-3, one direction: a batch this path consumed leaves the no-answer backstop
+// broadcasting nothing when it later runs — which it always does, since the
+// control server defers it on every Await return and the refusal is what makes
+// Await return. The registry's one-shot is the single arbiter, so this holds
+// structurally rather than by agreement between the two call sites.
+func TestStreamApprovalBridge_RefuseQuestion_ThenRetireNoSecondDismissal(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+	retire := f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.isolate()
+
+	if !f.bridge.RefuseQuestion(batchID) {
+		t.Fatal("RefuseQuestion = false for an outstanding batch")
+	}
+	waitPush(t, f.pushed)
+	f.isolate()
+
+	retire()
+
+	if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+		t.Errorf("pushes = %v after refuse-then-retire, want none (single arbiter)", got)
+	}
+	if n := questionLen(f.bridge); n != 0 {
+		t.Errorf("byQuestion len = %d after retire, want 0 (no leak)", n)
+	}
+}
+
+// AC-3's other direction plus the unknown id: a batch the no-answer backstop
+// already consumed refuses nothing, and an unknown batch id is inert on both
+// counts. Each row additionally asserts the parked approval is STILL parked — a
+// refusal that lost the one-shot must not hand claude a verdict anyway, which is
+// the whole reason the correlation read comes before the consume.
+func TestStreamApprovalBridge_RefuseQuestion_InertPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		runRetire bool // let the no-answer backstop consume the batch first
+		batchID   func(surfaced string) string
+	}{
+		{name: "backstop already consumed", runRetire: true, batchID: func(s string) string { return s }},
+		{name: "unknown batch id", batchID: func(string) string { return "never-surfaced" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newQuestionFixture(t, testConvID, discardLogger())
+			req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+				questionInput(t, "how should it write?", "Write strategy", "rewrite", "replace the file wholesale"))
+			retire := f.bridge.Surface(req)
+			surfaced := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+			if tt.runRetire {
+				retire()
+			}
+			f.isolate()
+
+			if f.bridge.RefuseQuestion(tt.batchID(surfaced)) {
+				t.Error("RefuseQuestion = true; there was no outstanding batch to consume")
+			}
+			if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+				t.Errorf("pushes = %v, want none", got)
+			}
+			if _, ok := f.perm.Lookup("tu-q1"); !ok {
+				t.Error("the parked approval was resolved by a refusal that consumed nothing")
+			}
+		})
+	}
+}
+
+// AC-4: no byte of the batch and no byte of the refusal message reaches a log
+// field on this path. The strongest form of the claim is available here because
+// the refusal emits NO record of its own — the buffer is asserted EMPTY, so any
+// diagnostic later added anywhere on this path reddens whether or not it happens
+// to carry a secret. broadcast's push-error arm is shared, content-free and
+// already probed by the no-answer leak test above.
+//
+// FOUR distinct sentinels, one per claude-authored string, for that test's
+// reason: the input contains all four, so an input-wide sentinel would pass
+// while a field echoed only the header or only a label.
+func TestStreamApproval_NoQuestionBodyLeakOnRefusal(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secretText   = "SECRET-QUESTION-TEXT-1111"
+		secretHeader = "SECRET-HEADER-2222"
+		secretLabel  = "SECRET-LABEL-3333"
+		secretDesc   = "SECRET-DESCRIPTION-4444"
+	)
+
+	logger, logBuf := auditLogger()
+	f := newQuestionFixture(t, testConvID, logger)
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, secretText, secretHeader, secretLabel, secretDesc))
+	f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.isolate()
+
+	if !f.bridge.RefuseQuestion(batchID) {
+		t.Fatal("RefuseQuestion = false for an outstanding batch")
+	}
+	waitPush(t, f.pushed)
+
+	if s := logBuf.String(); s != "" {
+		t.Errorf("the refusal logged %q; this path emits no record of its own", s)
+	}
+	d := lastQuestionDismissed(t, f.bcast.pushes)
+	for _, secret := range []string{secretText, secretHeader, secretLabel, secretDesc, reasonQuestionRefused} {
+		if strings.Contains(d.Outcome, secret) || strings.Contains(d.Source, secret) {
+			t.Errorf("question_dismissed carries %q; both fields are daemon-asserted sentinels", secret)
+		}
 	}
 }

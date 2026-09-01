@@ -70,9 +70,9 @@ id would let the caller pick its own routing key — and parks the batch
 before returning. A mint failure stores nothing and returns the zero payload
 plus a wrapped error, mirroring `modalbridge.Registry.Record`'s untested RNG
 branch. `Resolve`'s read-and-delete is one critical section, which is what
-makes the one-shot consume — "exactly one broadcaster" between #1985's
-answer path and #1973's retire backstop — structural rather than agreed
-between tickets. `Lookup` and `Snapshot` are pure reads; nothing calls any of
+makes the one-shot consume — "exactly one broadcaster" between a resolution
+path (#1990's refusal, #1991's answer) and #1973's retire backstop —
+structural rather than agreed between tickets. `Lookup` and `Snapshot` are pure reads; nothing calls any of
 the four yet, deliberately, as #1965 landed with no caller.
 
 **No stored-entry type**, unlike `modalbridge.Outstanding`: the parked thing
@@ -187,10 +187,13 @@ pass because there's nothing to alias.
   [question-batch payload](protocol-package-question-batch-payload.md)).
   #1983 declared the inbound vocabulary (`question_answer` / `question_refused`,
   vocabulary only); #1984 (landed) wires the [inbound interception](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md)
-  through a nil-able `QuestionResolver` seam, and #1985 is the answer path
-  (`Registry.Resolve`, and must be the sole dismissal broadcaster for an
-  answered batch — #1973's retire backstop only fires when that `Resolve`
-  misses). #1979 (landed) is the relay half of the
+  through a nil-able `QuestionResolver` seam. #1985 split into #1990 (landed) —
+  the refusal path, `streamApprovalBridge.RefuseQuestion` — and #1991, the
+  still-open answer path; each must be the sole dismissal broadcaster for the
+  batch it consumes (#1973's retire backstop only fires when its own
+  `Resolve` call misses, which it does once either resolution path wins the
+  one-shot first). Neither is wired to `relay.QuestionResolver` yet — that is
+  #1986's per-device-gated seam. #1979 (landed) is the relay half of the
   connect-time reconcile (`Snapshot`, mints/retires nothing) — see
   [the reconcile doc](v2-session-manager-state-machine-connect-time-question-reconcile-outstanding.md).
   #1980 wires `Snapshot` itself into the seam and is the client contract.

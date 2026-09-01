@@ -209,8 +209,25 @@ malformed or out-of-bounds `AskUserQuestion` input — `Parse`'s two negatives
 are deliberately undistinguished — falls through to the unchanged permission
 path, the fail-closed degrade for a batch nobody can render. `retireQuestion`
 mirrors `retire`: unconditional correlation delete, then the registry's
-one-shot `Resolve` decides whether this closure or #1985's answer path
-broadcasts the dismissal.
+one-shot `Resolve` decides whether this closure or a resolution path (#1990's
+refusal, #1991's still-open answer) broadcasts the dismissal.
+
+**#1990 added the first deliberate resolution, `streamApprovalBridge.RefuseQuestion`,
+beside this backstop.** It reads `byQuestion` before consuming the one-shot
+(the reverse order lets a refusal win the race and then find no `tool_use_id`,
+denying nobody while also silencing the backstop) and hands claude its deny
+only after the consume (the reverse order lets `retireQuestion`'s
+control-server-deferred call win the one-shot first and broadcast
+`unanswered` for a batch the operator actually refused) — the same
+before/after shape `ResolveAnswer` already keeps around `modalbridge`. It
+also broadcasts from a **detached goroutine** rather than inline like
+`retireQuestion`: its only intended caller (#1986's gated resolver) runs on
+the `Run` goroutine and owes its own caller the `consumed` bool synchronously,
+so it cannot itself hop off `Run` before calling this method, and
+`broadcast`'s `ActiveConns` call would deadlock `Run` if made from it
+directly. See [questionbridge-package.md](questionbridge-package.md) for the
+registry and [`specs/architecture/1990-question-refusal.md`](../../specs/architecture/1990-question-refusal.md)
+for the full ordering argument.
 
 **`byQuestion` is a second map, not a second key space inside `byModal`, and
 that is load-bearing, not a style choice.** `ResolveStream` treats *any*
