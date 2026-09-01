@@ -3871,15 +3871,21 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // (#1904), and the pair is where it bites hardest: the two caps sit on adjacent fields
 // of the SAME entry and currently hold the same number, so one fixture for both would
 // let a change to either budget follow the other's proof green.
+//
+// slashCommandArgumentHintCapFixture (#1957) makes that pair a TRIO and the argument
+// stronger by one: three caps on three adjacent fields of one entry, all three holding
+// 256 today, so a single shared fixture would let a change to any one of the three
+// budgets follow the other two's proof green.
 const (
-	modelResolvedCapFixture           = 256
-	modelValueCapFixture              = 256
-	modelDisplayNameCapFixture        = 256
-	modelEffortLevelCapFixture        = 32
-	modelEffortLevelCountCapFixture   = 8
-	modelListEntriesCapFixture        = 10
-	slashCommandNameCapFixture        = 256
-	slashCommandDescriptionCapFixture = 256
+	modelResolvedCapFixture            = 256
+	modelValueCapFixture               = 256
+	modelDisplayNameCapFixture         = 256
+	modelEffortLevelCapFixture         = 32
+	modelEffortLevelCountCapFixture    = 8
+	modelListEntriesCapFixture         = 10
+	slashCommandNameCapFixture         = 256
+	slashCommandArgumentHintCapFixture = 256
+	slashCommandDescriptionCapFixture  = 256
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -4642,9 +4648,11 @@ func initializeLineFixture(t *testing.T, subtype string, inner map[string]any) s
 // decode reads. The value is `any` so a row can put a number or a null where a string
 // belongs, which is the undecodable rung's input and the null carve-out's.
 //
-// It still takes ONE parameter although the decode target declares two keys since
-// #1904: commandEntryWithFixture is how a row adds the second, for the reason stated
-// there.
+// It still takes ONE parameter although the decode target declares THREE keys since
+// #1957: commandEntryWithFixture is how a row adds the other two, for the reason stated
+// there. Building the name key ALONE is also why no existing row gained an argument
+// hint by accident when the third key landed — a row carries a hint only where it asks
+// for one.
 func commandEntryFixture(name any) map[string]any {
 	return map[string]any{"name": name}
 }
@@ -4655,8 +4663,9 @@ func commandEntryFixture(name any) map[string]any {
 // second argument — which is modelEntryWithFixture's stated reason for
 // modelEntryFixture, one array over, and this helper is that one's shape verbatim.
 //
-// The key is a PARAMETER rather than a description-specific signature, so #1830's
-// argumentHint and #1825's aliases reuse this instead of adding a third helper. The
+// The key is a PARAMETER rather than a description-specific signature, which is what
+// #1957's argumentHint rows USE rather than minting a third helper, and what #1825's
+// aliases will. The
 // value is `any` so a row can put a null or a non-string where a string belongs, which
 // is the null carve-out's input and the undecodable rung's.
 //
@@ -5160,6 +5169,18 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 			wantReason: "undecodable",
 		},
 		{
+			// The THIRD declared key, and the trio is what makes the rule the STRUCT's
+			// rather than any one field's: a non-string argumentHint takes the same rung as
+			// a non-string name, with no branch of its own written for it. What separates
+			// this from a null argumentHint, which the cap table pins as an ordinary counted
+			// entry, is the same thing that separates a number description from a null one.
+			name: "an entry's argumentHint is a number",
+			line: initializeLineFixture(t, "success", map[string]any{"commands": []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint", 5),
+			}}),
+			wantReason: "undecodable",
+		},
+		{
 			name:       "commands is null",
 			line:       initializeLineFixture(t, "success", map[string]any{"commands": nil}),
 			wantReason: "ack",
@@ -5401,12 +5422,20 @@ func slashCommandNamePreview(s string) string {
 	return fmt.Sprintf("%q…(%d bytes)", strings.ToValidUTF8(s[:head], ""), len(s))
 }
 
-// TestParser_SlashCommandFieldsAreCapped is BOTH per-field bounds' whole boundary
+// TestParser_SlashCommandFieldsAreCapped is ALL THREE per-field bounds' whole boundary
 // matrices: each field is cut at its OWN cap at construction and the cut is REPORTED,
-// by the DAEMON's snake_case name for the field — which for both of these fields
-// coincides with the wire name protocol.SlashCommand.TruncatedFields documents. It is
-// named for the FIELDS since #1905, TestParser_ModelListFieldsAreCapped's shape one
-// array over: it covered one bound when #1877 built it and covers two now.
+// by the DAEMON's snake_case name for the field — which for the first two coincides
+// with the wire name protocol.SlashCommand.TruncatedFields documents and for the third
+// (#1957) coincides with the wire name while DIFFERING from claude's own key,
+// argumentHint. It is named for the FIELDS since #1905,
+// TestParser_ModelListFieldsAreCapped's shape one array over: it covered one bound when
+// #1877 built it and covers three now.
+//
+// THE HINT'S ROWS CARRY THE KEY/NAME SPLIT and no other rows can, this being the first
+// field of the three where claude's key and the daemon's report name are different
+// strings: a fixture writing argumentHint against an expectation reading argument_hint
+// grades the JSON tag and the report name in one row, and getting either wrong is
+// otherwise silent.
 //
 // The description's committed-capture pin is NOT here and is not missing either — it
 // is TestParser_InitializeControlResponseCutsTheCapturedDescriptions, which grades the
@@ -5465,6 +5494,9 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 	// A different fill byte from the name's, so a row carrying both cut fields reddens
 	// on the two values being swapped as well as on their report names being.
 	descAtCap := strings.Repeat("d", slashCommandDescriptionCapFixture)
+	// A third fill byte for the same reason, which is what makes the all-three-cut row
+	// grade a swap of any TWO of the three values and not only of their report names.
+	hintAtCap := strings.Repeat("h", slashCommandArgumentHintCapFixture)
 
 	tests := []struct {
 		name string
@@ -5667,6 +5699,110 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 				"visibly. Its CONSTRUCTED input has the row above's reason, and " +
 				"maxSlashCommandDescription's doc has the measurement",
 		},
+		{
+			name: "an argument hint over the cap is cut and reported; one that fits is not",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint",
+					strings.Repeat("h", slashCommandArgumentHintCapFixture+1)),
+				commandEntryWithFixture(commandEntryFixture("design"), "argumentHint", "<topic> [--deep]"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", ArgumentHint: hintAtCap, TruncatedFields: []string{"argument_hint"}},
+				{Name: "design", ArgumentHint: "<topic> [--deep]"},
+			},
+			why: "the hint's LIVENESS row, and the ONE place claude's camelCase KEY is graded against the " +
+				"daemon's snake_case REPORT NAME at once: the fixture writes argumentHint and the " +
+				"expectation reads argument_hint, so a JSON tag spelled argument_hint decodes \"\" on both " +
+				"entries and a report name spelled argumentHint fails the first. Both names are far " +
+				"under their cap, so \"name\" appearing here would be the report naming a field nothing " +
+				"happened to. The second entry carries the bracket syntax a real hint is written in — 13 " +
+				"of the capture's 18 non-empty hints do — and is simultaneously the non-vacuity pin " +
+				"against a producer naming \"argument_hint\" on every entry and the \"a cut on one entry " +
+				"does not appear on the entries AFTER it\" pin for the third bound call",
+		},
+		{
+			name: "an argument hint exactly at the cap is NOT truncated",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint", hintAtCap),
+				commandEntryWithFixture(commandEntryFixture("design"), "argumentHint", "<topic>"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", ArgumentHint: hintAtCap},
+				{Name: "design", ArgumentHint: "<topic>"},
+			},
+			why: "the other two at-cap rows one field over, and NOT the sole red on truncateField's <= " +
+				"becoming <: that helper is SHARED by all three fields, so the flip reddens all three " +
+				"at-cap rows together. What this row IS the sole red for is the emitter INLINING the " +
+				"HINT's cut — replacing its bound call with a length test of its own, written < or " +
+				"otherwise off by one at the boundary — under which every name and description row stays " +
+				"green while a 256-byte workspace hint arrives reported as truncated when nothing was " +
+				"cut. Every other hint row's input is over the cap (cut under either operator) or far " +
+				"under it (untouched under either)",
+		},
+		{
+			name: "an absent argument hint is still an entry, spelled \"\", null or omitted",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint", ""),
+				commandEntryWithFixture(commandEntryFixture("design"), "argumentHint", nil),
+				commandEntryFixture("plan"),
+			},
+			want: []turnevent.SlashCommand{{Name: "deep-research"}, {Name: "design"}, {Name: "plan"}},
+			why: "AN EMPTY HINT IS THE ORDINARY CASE for this field rather than an absence — 33 of the " +
+				"capture's 51 entries carry \"\" and NONE omits the key — so what the first entry pins is " +
+				"that it arrives as an entry whose hint is EMPTY: not dropped, not defaulted, and not " +
+				"made indistinguishable from a missing key by a producer that skipped it. THREE " +
+				"spellings in ONE row because the claim is that they decode ALIKE, the null carve-out's " +
+				"reading and the absent key's being the empty string's. A producer skipping empty hints " +
+				"emits fewer entries and fails the count assertion above; the trailing entries pin that " +
+				"none of the three was skipped",
+		},
+		{
+			name: "the hint and the description cut on ONE entry report in DECLARATION order",
+			entries: []any{
+				commandEntryWithFixture(
+					commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint",
+						strings.Repeat("h", slashCommandArgumentHintCapFixture+1)),
+					"description", strings.Repeat("d", slashCommandDescriptionCapFixture+1)),
+				commandEntryFixture("design"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", ArgumentHint: hintAtCap, Description: descAtCap,
+					TruncatedFields: []string{"argument_hint", "description"}},
+				{Name: "design"},
+			},
+			why: "the hint's position stated with NO name in the slice, which is what separates a report " +
+				"built in CALL order from one built by a fixed sequence that happens to start at " +
+				"\"name\": this entry's name is far under its cap, so \"name\" appearing at all would name " +
+				"a field nothing happened to. It is A red and NOT the only one against the hint's bound " +
+				"call being appended after the description's — the three-name row below reddens on that " +
+				"too, and neither row can claim that mutant alone — and the two fill bytes differ so a " +
+				"swap of the two VALUES reddens here as well as a swap of their report names",
+		},
+		{
+			name: "all THREE fields cut on ONE entry report in DECLARATION order",
+			entries: []any{
+				commandEntryWithFixture(
+					commandEntryWithFixture(
+						commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
+						"argumentHint", strings.Repeat("h", slashCommandArgumentHintCapFixture+1)),
+					"description", strings.Repeat("d", slashCommandDescriptionCapFixture+1)),
+				commandEntryFixture("design"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: atCap, ArgumentHint: hintAtCap, Description: descAtCap,
+					TruncatedFields: []string{"name", "argument_hint", "description"}},
+				{Name: "design"},
+			},
+			why: "the WHOLE declaration order in one slice, and the SOLE red — measured, not reasoned — " +
+				"against the emitter's NAME and HINT bound calls being swapped: the row above cuts no " +
+				"name and the name+description row cuts no hint, so both stay green under that swap " +
+				"while this one reports [\"argument_hint\", \"name\", \"description\"]. Inserting the third " +
+				"bound call in the wrong place is the one plausible wrong edit in this slice and every " +
+				"placement of it COMPILES, which is why this matrix compares TruncatedFields by exact " +
+				"equality and not by membership: every ordering mutant passes a contains check. Three " +
+				"distinct fill bytes, so a swap of any two VALUES reddens here too. The uncut second " +
+				"entry is the first row's non-vacuity pin",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5722,6 +5858,22 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 				// the assertion that carries those rows.
 				if !utf8.ValidString(got.Name) {
 					t.Errorf("entry %d name is not valid UTF-8: %s", i, slashCommandNamePreview(got.Name))
+				}
+				// The name's assertions again for the third capped field, in the position the
+				// field holds on the type so a reader checks one order rather than two. An EMPTY
+				// expectation is live here rather than vacuous — it is the majority captured
+				// shape — so a producer defaulting an absent hint to anything at all fails the
+				// equality. No UTF-8 check beside them: this field has no mid-rune row for one
+				// to grade, no captured hint being cut at its cap at all (see
+				// maxSlashCommandArgumentHint), and a check green on every row is a check that
+				// says nothing.
+				if len(got.ArgumentHint) != len(want.ArgumentHint) {
+					t.Errorf("entry %d argument hint: got %d bytes, want %d (%s)",
+						i, len(got.ArgumentHint), len(want.ArgumentHint), tt.why)
+				} else if got.ArgumentHint != want.ArgumentHint {
+					t.Errorf("entry %d argument hint: got %s, want %s — same length, different bytes; "+
+						"claude's hint is carried VERBATIM and the cut is a BYTE cut and nothing else",
+						i, slashCommandNamePreview(got.ArgumentHint), slashCommandNamePreview(want.ArgumentHint))
 				}
 				// The name's assertions again for the second capped field, and for their reason:
 				// the length is what identifies a cut landing at the wrong byte and the equality

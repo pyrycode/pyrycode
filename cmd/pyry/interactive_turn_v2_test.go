@@ -2858,11 +2858,13 @@ var emitterSlashCommandListFixture = turnevent.SlashCommandList{
 	Commands: []turnevent.SlashCommand{
 		{
 			Name:            "qq-name-alpha-sentinel",
+			ArgumentHint:    "qq-hint-alpha-sentinel",
 			Description:     "qq-description-alpha-sentinel",
 			TruncatedFields: []string{"qq-truncated-alpha-sentinel"},
 		},
 		{
 			Name:            "zz-name-beta-sentinel",
+			ArgumentHint:    "zz-hint-beta-sentinel",
 			Description:     "zz-description-beta-sentinel",
 			TruncatedFields: nil,
 		},
@@ -2880,12 +2882,23 @@ var emitterSlashCommandListFixture = turnevent.SlashCommandList{
 // gets no log-leak assertion at all — and this lane is where "no log line carries
 // decoded content" is a deterministic test rather than an advisory sentence. Each
 // field-adding slice therefore owes a sentinel on every entry and a line here;
-// Description is the first one to pay it, and it is the proof the claim needed
-// correcting.
+// Description is the first one to pay it, ArgumentHint (#1957) the second, and the
+// first of them is the proof the claim needed correcting.
+//
+// EVERY ENTRY'S HINT IS NON-EMPTY, and that is a REQUIREMENT of these assertions
+// rather than a stylistic choice, because the needles are fed to strings.Contains
+// and strings.Contains(s, "") is ALWAYS TRUE. An entry carrying the field's ordinary
+// captured shape — 33 of the committed capture's 51 hints are "" — would make the
+// negative below fail against a CORRECT implementation. The repair is a non-empty
+// sentinel on every entry and NOT a filter that skips empty needles here: a filter
+// makes the sweep green again while silently disarming leak detection for every
+// future field whose fixture value happens to be empty, which is the advisory
+// posture this lane exists to replace.
 func emitterSlashCommandListSentinels() []string {
 	var out []string
 	for _, c := range emitterSlashCommandListFixture.Commands {
 		out = append(out, c.Name)
+		out = append(out, c.ArgumentHint)
 		out = append(out, c.Description)
 		out = append(out, c.TruncatedFields...)
 	}
