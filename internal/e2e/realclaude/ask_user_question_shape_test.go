@@ -2,10 +2,10 @@
 
 package realclaude
 
-// #1951 — the shape assertion over an AskUserQuestion capture: the decode target
-// declared whole, the findings-returning check with its undecodable-input guard,
-// the thin fatal wrapper other tests call, and the first TWO shape checks with a
-// negative row apiece.
+// #1951 and #1952 — the shape assertion over an AskUserQuestion capture: the
+// decode target declared whole, the findings-returning check with its
+// undecodable-input guard, the thin fatal wrapper other tests call, and SEVEN
+// shape checks with a negative row apiece.
 //
 // Two later slices must decide whether a captured AskUserQuestion payload is
 // well-formed — the live run (#1938), which must not report success on an empty
@@ -21,12 +21,18 @@ package realclaude
 //
 // # The limit of this file, stated rather than left to be inferred
 //
-// EXACTLY TWO SHAPE CHECKS SHIP HERE: the tool-name field, and the presence of at
-// least one question. The five content checks over the first question — question
-// text, header, option count, option labels, option descriptions — are #1952's,
-// and the multiSelect key is the slice after that. #1952's "SEVEN CHECKS" counts
-// shape checks only and stays correct: the decode guard is not one of them, though
-// its negative row is additional.
+// SEVEN SHAPE CHECKS SHIP HERE: the tool-name field, the presence of at least one
+// question, and #1952's five over the FIRST question's contents — its question
+// text, its header, its option count, its option labels and its option
+// descriptions. The multiSelect key is the slice after this one, and nothing here
+// asserts on it.
+//
+// Three counts, reconciled once so that no reader has to do it again: SEVEN shape
+// checks; EIGHT reported names, the seven plus the decode guard, which is not a
+// shape check though its negative row is additional; and NINE table rows, the
+// eight negatives plus the positive control. The sole-redness property below is
+// over that whole table, the guard's row included — not over the five rows #1952
+// added.
 //
 // # This file is #1942's offline successor and execs nothing
 //
@@ -79,11 +85,11 @@ type askQuestionInput struct {
 	Questions []askQuestionQuestion `json:"questions"`
 }
 
-// askQuestionQuestion is one question of the batch. ALL FOUR FIELDS ARE DECLARED
-// NOW even though this slice reads only len(Questions) — Header, Question,
-// MultiSelect and every option field are declared-and-unread here, deliberately
-// rather than by oversight, because #1952 and the multiSelect slice decode this
-// same object and a target grown one field per slice is three decodes of one shape.
+// askQuestionQuestion is one question of the batch. Header, Question and both
+// option fields are READ by the content checks in askQuestionShapeFindings;
+// MULTISELECT ALONE IS DECLARED-AND-UNREAD, deliberately rather than by oversight,
+// because the multiSelect slice decodes this same object and a target grown one
+// field per slice is three decodes of one shape.
 //
 // MULTISELECT IS json.RawMessage AND NOT A bool. A bool collapses an ABSENT key
 // into false and destroys the distinction the multiSelect slice needs: a raw
@@ -99,9 +105,10 @@ type askQuestionQuestion struct {
 
 // askQuestionOption is one offered answer.
 //
-// A NAMED TWO-FIELD STRUCT, NOT []json.RawMessage. #1952's five content checks
-// read option labels and descriptions; leaving the element type opaque here would
-// force that slice to redo this decode rather than extend it.
+// A NAMED TWO-FIELD STRUCT, NOT []json.RawMessage. The option-label and
+// option-description checks in askQuestionShapeFindings read both fields; leaving
+// the element type opaque would have forced #1952 to redo this decode rather than
+// extend it.
 type askQuestionOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
@@ -118,18 +125,27 @@ type askQuestionOption struct {
 // consumes the strings: those names are JSON tags a downstream decoder reads, so a
 // second hand-written copy earns its keep; these are internal diagnostics no code
 // outside this file consumes.
+// THE LAST TWO NAMES ARE PLURAL DELIBERATELY. Their checks scan every option and
+// report ONE name each, so the plural is the reader's cue that a single finding
+// covers the whole option batch however wide it is. option_count carries no
+// _nonempty suffix for a related reason: it is a bound, not an emptiness test.
 const (
-	askQuestionCheckToolName          = "tool_name"
-	askQuestionCheckToolInputDecodes  = "tool_input_decodes"
-	askQuestionCheckQuestionsNonEmpty = "questions_nonempty"
+	askQuestionCheckToolName                   = "tool_name"
+	askQuestionCheckToolInputDecodes           = "tool_input_decodes"
+	askQuestionCheckQuestionsNonEmpty          = "questions_nonempty"
+	askQuestionCheckQuestionTextNonEmpty       = "question_text_nonempty"
+	askQuestionCheckHeaderNonEmpty             = "header_nonempty"
+	askQuestionCheckOptionCount                = "option_count"
+	askQuestionCheckOptionLabelsNonEmpty       = "option_labels_nonempty"
+	askQuestionCheckOptionDescriptionsNonEmpty = "option_descriptions_nonempty"
 )
 
 // askQuestionCheckNames lists every name askQuestionShapeFindings can report, in
 // emit order. It exists for the vacuity control below — without which AC 1's "each
 // missed check named individually" is unpinned, since two colliding constants
 // would leave the wrapper's message unable to say which check fired while every
-// row still passed — and for #1952, which appends five entries and inherits that
-// control for free.
+// row still passed. #1952 appended its five names here and inherited that control
+// for free, so it now covers all EIGHT rather than the original three.
 //
 // Nothing asserts that this listing matches the emit sites. A reviewer diffs them,
 // the same instrument #1943 relies on for its tags.
@@ -138,6 +154,11 @@ func askQuestionCheckNames() []string {
 		askQuestionCheckToolName,
 		askQuestionCheckToolInputDecodes,
 		askQuestionCheckQuestionsNonEmpty,
+		askQuestionCheckQuestionTextNonEmpty,
+		askQuestionCheckHeaderNonEmpty,
+		askQuestionCheckOptionCount,
+		askQuestionCheckOptionLabelsNonEmpty,
+		askQuestionCheckOptionDescriptionsNonEmpty,
 	}
 }
 
@@ -159,6 +180,32 @@ func askQuestionCheckNames() []string {
 // the undecodable row reports TWO names, because a failed decode leaves the batch
 // empty and the questions check then fires too. AC 1's "skipped rather than
 // reported beside it" is that row.
+//
+// THE BATCH-LENGTH CHECK RETURNS EARLY TOO, and that one is FORCED rather than
+// stylistic. The tempting alternative — guard the index, leave a zero-valued
+// question in hand and let the content checks run over it — makes the empty-batch
+// row report FOUR names on unmutated code: the batch length, plus question text,
+// header and option count against that zero value. The row would be
+// over-determined, and deleting any one of those three would redden it alongside
+// its own row, destroying sole-redness for three checks at once.
+//
+// THE TWO OPTION CHECKS SCAN EVERY OPTION AND REPORT ONE NAME EACH, through one
+// loop with two flags rather than an append inside the loop. Three properties come
+// out of that shape and every one of them is load-bearing:
+//
+//   - The findings slice's length is independent of claude-supplied input.
+//     Appending inside the loop makes requireAskQuestionShape's message grow with
+//     the number of options a child chose to send, into a run log this pipeline
+//     salvages.
+//   - Emit order is fixed: labels always precede descriptions. Appending inside
+//     the loop emits them in whatever order the offending options happen to sit
+//     in, which breaks any exact-equality row tripping both.
+//   - No index of an offending option is ever computed, so no positional
+//     claude-derived value is in scope for a later edit to fold into a finding.
+//
+// ONLY THE FIRST QUESTION IS CHECKED. A real batch may carry several; checking
+// each would make the finding count depend on batch width, the same property the
+// option loop protects one level down.
 //
 // THE RETURN VALUE CARRIES NO BYTES FROM THE RECORD — only the fixed constants
 // above are ever appended. Not the decode error, not a field value, not an
@@ -187,7 +234,36 @@ func askQuestionShapeFindings(rec *askQuestionFixtureRecord) []string {
 	}
 
 	if len(in.Questions) == 0 {
-		findings = append(findings, askQuestionCheckQuestionsNonEmpty)
+		return append(findings, askQuestionCheckQuestionsNonEmpty)
+	}
+
+	first := in.Questions[0]
+	if first.Question == "" {
+		findings = append(findings, askQuestionCheckQuestionTextNonEmpty)
+	}
+	if first.Header == "" {
+		findings = append(findings, askQuestionCheckHeaderNonEmpty)
+	}
+	// A BOUND, not == 0 or == 1. The single-option row is what pins it, and pins
+	// nothing at all against a comparison that only rejects an empty slice.
+	if len(first.Options) < 2 {
+		findings = append(findings, askQuestionCheckOptionCount)
+	}
+
+	var labelMissing, descriptionMissing bool
+	for _, opt := range first.Options {
+		if opt.Label == "" {
+			labelMissing = true
+		}
+		if opt.Description == "" {
+			descriptionMissing = true
+		}
+	}
+	if labelMissing {
+		findings = append(findings, askQuestionCheckOptionLabelsNonEmpty)
+	}
+	if descriptionMissing {
+		findings = append(findings, askQuestionCheckOptionDescriptionsNonEmpty)
 	}
 
 	return findings
@@ -250,7 +326,8 @@ func askQuestionShapeRecord(toolName, input string) *askQuestionFixtureRecord {
 }
 
 // TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput is
-// #1951's AC 1 and AC 2: the fully-populated fixture reports nothing, each check
+// #1951's AC 1 and AC 2 and #1952's: the fully-populated fixture reports nothing,
+// which it does unchanged across #1952's five content checks, each check
 // has its own record failing that check and no other, and an undecodable
 // tool_input is reported under its own name with the decoded checks skipped rather
 // than reported beside it.
@@ -266,6 +343,32 @@ func askQuestionShapeRecord(toolName, input string) *askQuestionFixtureRecord {
 //     returns TWO findings and reddens alone.
 //   - Delete the guard entirely and that row returns one finding under the WRONG
 //     name and reddens alone.
+//
+// #1952's five content checks are uniform in exactly that way, so they are stated
+// once rather than five times: delete any one check's append and that check's own
+// row compares an empty result against a one-name want and reddens, while the
+// other eight rows return exactly their own findings and stay green. The positive
+// control stays green under every one of the eight, because deleting a check can
+// only REMOVE findings.
+//
+// The STRUCTURAL mutants are the ones worth naming individually, because each is
+// pinned by one fixture choice a later editor could undo without noticing:
+//
+//   - Append inside the option loop instead of flagging, and the both-blank-labels
+//     row returns TWO findings against a want of one and reddens alone. A row
+//     blanking a single label leaves that mutant green, which is why that row
+//     blanks both.
+//   - Narrow the loop to first.Options[:1] and the second-option empty-description
+//     row returns nothing and reddens alone. That is what pins the loop scanning
+//     past index 0, and it is why that row blanks the SECOND option's description.
+//   - Loosen the option-count bound to < 1 and the single-option row returns
+//     nothing and reddens alone. A row carrying ZERO options would trip
+//     option_count alone too — the option checks are vacuously satisfied over an
+//     empty loop — but it would leave that mutant green.
+//   - Drop the batch-length check's early return, keeping its finding, and the
+//     empty-batch row PANICS on the first question rather than reddening on a
+//     mismatch. That is a red, but one that takes the package down with it: that
+//     gate's early return is load-bearing in a way the decode guard's is not.
 //
 // Over-determination is unshippable for the same reason: a fixture tripping two
 // checks returns two findings and fails its exact match on UNMUTATED code, so such
@@ -311,6 +414,77 @@ func TestAskQuestionShape_ReportsEachMissedCheckAndSkipsAfterAnUndecodableInput(
 			name: "an undecodable tool_input is reported alone and skips the decoded checks",
 			rec:  askQuestionShapeRecord("AskUserQuestion", `{"questions":`),
 			want: []string{askQuestionCheckToolInputDecodes},
+		},
+		{
+			// The five content rows below share one base shape and each degrades
+			// exactly ONE value from it: one question, keys in askQuestionFixtureInput's
+			// order, "multiSelect":false present, two options, -FIXTURE markers
+			// throughout for #1701's reason. They are five flat literals rather than a
+			// builder because five independent statements are five things a reviewer
+			// diffs against the control and against each other, where a builder
+			// centralises the mistake — and because a new in-file helper would make
+			// this file's finOfflineExecBans entry say something untrue about the only
+			// helper it calls.
+			//
+			// EVERY ONE OF THEM CARRIES "multiSelect":false. No check here reads it and
+			// it is not key-order decoration: the multiSelect slice adds a check over
+			// that key, and a row omitting it would trip that check too, turning all
+			// five of these rows over-determined and forcing that slice to rewrite
+			// them.
+			//
+			// This row and the one below it are the pair that is easy to get wrong. A
+			// literal blanking BOTH the question text and the header trips two checks,
+			// fails its own exact match on unmutated code, and pins neither. Each
+			// blanks one and leaves the other populated — present-and-empty rather than
+			// an omitted key, the convention the empty-batch row above states.
+			name: "an empty question text is reported alone",
+			rec: askQuestionShapeRecord("AskUserQuestion",
+				`{"questions":[{"header":"Scope-FIXTURE","question":"","multiSelect":false,"options":[{"label":"first-FIXTURE","description":"the first synthetic option"},{"label":"second-FIXTURE","description":"the second synthetic option"}]}]}`),
+			want: []string{askQuestionCheckQuestionTextNonEmpty},
+		},
+		{
+			// The other half of that pair: the header is blank and the question text
+			// is populated, so this row trips the header check and nothing else.
+			name: "an empty header is reported alone",
+			rec: askQuestionShapeRecord("AskUserQuestion",
+				`{"questions":[{"header":"","question":"Which synthetic -FIXTURE option?","multiSelect":false,"options":[{"label":"first-FIXTURE","description":"the first synthetic option"},{"label":"second-FIXTURE","description":"the second synthetic option"}]}]}`),
+			want: []string{askQuestionCheckHeaderNonEmpty},
+		},
+		{
+			// ONE option, not zero, and its label and description are both non-empty,
+			// so the option-count check is the only one this row trips. One is also
+			// what pins the bound — see the loosen-to-< 1 mutant in this test's doc.
+			//
+			// A LOCAL LITERAL, deliberately not askQuestionPlantedInput. That helper is
+			// this package's only other one-option AskUserQuestion input and is the
+			// obvious thing to reach for, but its signature takes a plant and every
+			// call site hands it askQuestionPlantedKeyPrefix or askQuestionPlantedPath.
+			// Calling it here would put a credential-shaped literal into a record this
+			// file's wrapper is designed to be handed, in a file whose stated defining
+			// property is carrying none.
+			name: "a single option is reported alone",
+			rec: askQuestionShapeRecord("AskUserQuestion",
+				`{"questions":[{"header":"Scope-FIXTURE","question":"Which synthetic -FIXTURE option?","multiSelect":false,"options":[{"label":"only-FIXTURE","description":"the only synthetic option"}]}]}`),
+			want: []string{askQuestionCheckOptionCount},
+		},
+		{
+			// BOTH labels are blank, and both descriptions are populated. Blanking both
+			// still fails exactly one check, and it additionally pins "one name each":
+			// the append-inside-the-loop mutant returns two findings on this row and
+			// reddens alone, where a single blank label would leave it green.
+			name: "empty option labels are reported alone and once",
+			rec: askQuestionShapeRecord("AskUserQuestion",
+				`{"questions":[{"header":"Scope-FIXTURE","question":"Which synthetic -FIXTURE option?","multiSelect":false,"options":[{"label":"","description":"the first synthetic option"},{"label":"","description":"the second synthetic option"}]}]}`),
+			want: []string{askQuestionCheckOptionLabelsNonEmpty},
+		},
+		{
+			// The SECOND option's description alone, which is what pins the loop
+			// scanning past index 0. Paired with the both-blank-labels row above, the
+			// loop's two failure shapes are covered by two rows and no tenth one.
+			name: "a later option's empty description is reported alone",
+			rec: askQuestionShapeRecord("AskUserQuestion",
+				`{"questions":[{"header":"Scope-FIXTURE","question":"Which synthetic -FIXTURE option?","multiSelect":false,"options":[{"label":"first-FIXTURE","description":"the first synthetic option"},{"label":"second-FIXTURE","description":""}]}]}`),
+			want: []string{askQuestionCheckOptionDescriptionsNonEmpty},
 		},
 	}
 
