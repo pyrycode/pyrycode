@@ -1,4 +1,4 @@
-# Question-batch payload (#1963 shape, #1964 fixtures + docs, #1965 parse, #1974 dismissal; producer #1973)
+# Question-batch payload (#1963 shape, #1964 fixtures + docs, #1965 parse, #1974 dismissal, #1983 inbound answer/refusal vocabulary; producer #1973)
 
 The v2 wire shape for claude's clarifying-question batch (`AskUserQuestion` tool
 call), riding `TypeQuestionShown` (#1962 — see [Envelope types § v2 question-batch
@@ -127,6 +127,104 @@ rather than re-deriving it here.
   an unrecognised value (*resolved, cause unknown*, never an answer) — copying
   the closed set would have published a contract the code could not keep.
 
+## `QuestionAnswerPayload` / `QuestionRefusedPayload` (#1983)
+
+The family's first **inbound** frames — `TypeQuestionAnswer` / `TypeQuestionRefused` (see
+[Envelope types § v2 question-batch vocabulary](protocol-package-constants-codes-go-envelope-types.md)
+and [Drift detectors](protocol-package-drift-detectors.md) for the guard classification).
+Vocabulary only: nothing decodes or acts on either frame yet, checkably so —
+`dispatchAppFrame`'s control switch has no case and no `default` arm for
+either name, so both fall through to the ordinary application dispatch
+exactly as before #1983. #1984 adds the interception, #1985 resolves an
+answer against the daemon's parked batch.
+
+```go
+type QuestionAnswerPayload struct {
+    QuestionBatchID string                `json:"question_batch_id"`
+    AnswerToken     string                `json:"answer_token"`
+    Answers         []QuestionAnswerEntry `json:"answers"`
+}
+
+type QuestionAnswerEntry struct {
+    QuestionIndex int      `json:"question_index"`
+    Values        []string `json:"values"`
+}
+
+type QuestionRefusedPayload struct {
+    QuestionBatchID string `json:"question_batch_id"`
+    AnswerToken     string `json:"answer_token"`
+}
+```
+
+- **Selection is positional, not by echoing claude's text back.** `QuestionIndex`
+  is the entry's index into the batch's `questions` array — the order a
+  client already renders — rather than the question text. `QuestionOption`
+  carries no id and claude selects by label, so echoing a label back inbound
+  would be exactly the trap `QuestionOption`'s doc above flags: a
+  claude-authored string returning across the boundary is not trusted by
+  virtue of having been published. The daemon reads the question text from
+  its own parked copy instead.
+- **The index is carried, never range-checked in this package** — the same
+  "`internal/protocol` enforces no bounds" rule `questionbridge.Parse` (not
+  this package) applies to the outbound batch. The obligation this hands to
+  #1985 is concrete and stated in the Go doc rather than left implicit: a
+  negative or over-large `question_index` used to subscript the parked batch
+  panics. Plain `int`, not `uint` — an unsigned type would reject `-1` at
+  decode while still accepting `1<<62`, trading a range problem for a
+  decode-error surprise and smuggling a bounds decision into this package.
+- **`Values` are opaque and never checked against the batch's offered
+  labels.** claude's contract permits free text anywhere and requires no
+  value to match a label, so a validator rejecting an unlisted value would
+  reject a legal answer.
+- **`AnswerToken` is `ModalAnswerPayload`'s field verbatim**, idempotency key
+  rather than authorization — the daemon's actual dedup is the one-shot
+  consume of `question_batch_id`, as `modal_answer`'s is of `modal_id`. See
+  [Modal (v2) wire payloads](protocol-package-types-modal-v2-wire-payloads.md).
+- **No `conversation_id` on either payload**, `QuestionDismissedPayload`'s
+  reason unchanged: the batch id is the sole correlation key.
+- **The vendor `response` field (an optional top-level freeform reply that
+  replaces `answers` entirely) is deliberately not carried** — decided
+  2026-08-31, available later with no wire change.
+- **`QuestionAnswerEntry`, not `QuestionAnswer`.** Unlike `Question` /
+  `QuestionOption` beside `QuestionShownPayload`, `QuestionAnswer` next to
+  `QuestionAnswerPayload` would differ from the payload's own name only by
+  the family's frame-body suffix — read as "the payload of a
+  `QuestionAnswer`" rather than "the body of a `question_answer` frame". The
+  entry suffix buys the disambiguation the outbound nested types didn't need.
+- **The entry's normaliser is not folded into the payload's**, for the
+  concurrency reason `Question.MarshalJSON`'s split already carries: a
+  payload marshaller normalising `p.Answers[i]` in place would reach through
+  the caller's backing array — a data race for a payload shared across
+  goroutines, not just a correctness bug — and would not fire when an entry
+  is marshalled alone.
+
+### Testing (#1983)
+
+Two fixtures (`question_answer.json`, `question_refused.json`), each with
+pairwise-distinct values so a field-reordering mutant is detectable, plus
+marshalled-zero pins one level down for the keys a populated fixture cannot
+reach — `TestQuestionAnswerEntry_ZeroValue_KeysPresent` is the one: an empty
+`answers` array reaches none of the entry's keys, so `"values":[]` bytes come
+only from marshalling a constructed nil, never from decoding. #1964's finding
+recurring one level down, unchanged in shape.
+
+**The recurrence changed shape on `omitempty` coverage, and the reason is
+worth carrying past this ticket.** #1974 found that a populated fixture and
+its round trip are blind to *every* `omitempty` (every fixture value was
+non-empty, so nothing was elided). Here the first entry's `question_index`
+is `0` — a legal and common index, not a placeholder — so `omitempty` on
+that one key elides it from the *populated* fixture too, and
+`TestQuestionAnswerPayload_RoundTrip` reddens alongside the zero-value pin.
+The two test classes are sole-red and overlapping on exactly one key, and
+disjoint on the rest (`answers`, `values`, `answer_token` still catch
+`omitempty` only via the zero-value pins). **Whether a populated fixture's
+round trip happens to catch an `omitempty` mutant is a property of that
+field's chosen fixture value, not of the test shape** — a zero-looking value
+anywhere in a "populated" fixture (a `0`, an empty string, a `false`) buys
+coverage the fixture didn't intend to prove, and the reverse — every value
+deliberately non-zero, as #1974's was — buys none. Measure it per key with a
+mutant run; don't infer it from a sibling ticket's summary.
+
 ## Testing
 
 `questions_test.go`'s two round trips now read committed fixtures via
@@ -233,4 +331,4 @@ nesting depth, not from the sibling with the closest type count.
 - [Slash-command-list payload](protocol-package-slash-command-list-payload.md) — the closest structural analogue: nested list payload declared ahead of its producer, same value-receiver + type-alias marshaller idiom
 - [Model-list payload](protocol-package-model-list-payload.md) — the two-normalisers-with-different-reasons counter-example this payload's shared-reason case contrasts with
 - [questionbridge-package.md](questionbridge-package.md) — the fail-closed bounded parse (#1965), landed with no consumer
-- Open, deliberately out of scope for every landed slice so far: the per-device answer gate (#702) extension, the frames' producer (#1973), the nonce mint (#1975), and the answer frame (#1907) — #1974 settled only that the dismissal is its own type, not who emits it
+- Open, deliberately out of scope for every landed slice so far: the per-device answer gate (#702) extension to a question answer, `dispatchAppFrame` interception for the inbound pair (#1984), and resolution against the daemon's parked batch (#1985) — #1983 declared the inbound vocabulary but decides none of these

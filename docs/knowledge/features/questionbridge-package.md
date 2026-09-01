@@ -70,7 +70,7 @@ id would let the caller pick its own routing key — and parks the batch
 before returning. A mint failure stores nothing and returns the zero payload
 plus a wrapped error, mirroring `modalbridge.Registry.Record`'s untested RNG
 branch. `Resolve`'s read-and-delete is one critical section, which is what
-makes the one-shot consume — "exactly one broadcaster" between #1907's
+makes the one-shot consume — "exactly one broadcaster" between #1985's
 answer path and #1973's retire backstop — structural rather than agreed
 between tickets. `Lookup` and `Snapshot` are pure reads; nothing calls any of
 the four yet, deliberately, as #1965 landed with no caller.
@@ -185,9 +185,11 @@ pass because there's nothing to alias.
   `question_shown`, plus the no-answer dismissal paths via `Registry.Resolve`
   (#1974's `question_dismissed`,
   [question-batch payload](protocol-package-question-batch-payload.md)).
-  #1907 is the answer path (`Registry.Resolve`, and must be the sole
-  dismissal broadcaster for an answered batch — #1973's retire backstop only
-  fires when that `Resolve` misses). #1979 (landed) is the relay half of the
+  #1983 declared the inbound vocabulary (`question_answer` / `question_refused`,
+  vocabulary only); #1984 wires the interception and #1985 is the answer path
+  (`Registry.Resolve`, and must be the sole dismissal broadcaster for an
+  answered batch — #1973's retire backstop only fires when that `Resolve`
+  misses). #1979 (landed) is the relay half of the
   connect-time reconcile (`Snapshot`, mints/retires nothing) — see
   [the reconcile doc](v2-session-manager-state-machine-connect-time-question-reconcile-outstanding.md).
   #1980 wires `Snapshot` itself into the seam and is the client contract.
