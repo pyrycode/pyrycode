@@ -658,10 +658,11 @@ const maxModelListEntries = 10
 // decoded array, bounded one level up by defaultMaxParseBuf's 4 MiB whole-line cap
 // before the decoder ever sees it — commandEntryLine's own paragraph. What is
 // RETAINED is only this capped copy inside the emitted turnevent.SlashCommandList,
-// and nothing downstream retains THAT: there is no sessionModelHold analogue for this
-// array, so the retention is the event's own lifetime. That is the one place this cap
-// differs from maxModelResolved, whose capped result cmd/pyry holds for the child's
-// life.
+// and cmd/pyry's sessionSlashCommandHold now keeps THAT for the session's life (#2004),
+// replacing it on each report rather than accumulating. So this cap no longer differs
+// from maxModelResolved on the point it used to: what one child's initialize reply can
+// hold onto is a capped list either way, and the retained figure here is bounded by
+// this term times maxSlashCommandListEntries rather than by an event's lifetime.
 const maxSlashCommandName = 256
 
 // maxSlashCommandDescription caps turnevent.SlashCommand.Description — claude's own
@@ -1800,9 +1801,9 @@ type modelOptionLine struct {
 // to what is retained. The transience is unchanged — this slice still lives from
 // json.Unmarshal until emitModelList returns — but a BOUNDED COPY of each of the three
 // strings and of a bounded number of bounded aliases is now retained inside the emitted
-// turnevent.SlashCommandList for that event's lifetime. That is still shorter than the
-// models array's, whose CAPPED result is retained for the child's life by cmd/pyry's
-// sessionModelHold.
+// turnevent.SlashCommandList. That lifetime is the models array's since #2004 and no
+// longer shorter than it: cmd/pyry holds the CAPPED result of each for the session's
+// life, this one in sessionSlashCommandHold and that one in sessionModelHold.
 //
 // The decode is all-or-nothing at the LINE, modelOptionLine's rule verbatim and at
 // the ELEMENT level too: a `commands` that is a number, a string or an object, an
@@ -3048,9 +3049,10 @@ func (p *Parser) emitModelList(line []byte) {
 // that default returns, emitMapped never runs for it — and emitMapped is
 // turnbridge.MapEvent's only caller on this lane, resolveBoundModelList being handed a
 // ModelList explicitly — so the value never reaches MapEvent AT ALL. "It falls to
-// MapEvent's default" is the wrong reason for the right conclusion. NOTHING RETAINS
-// IT either: there is no sessionModelHold analogue for this array, which
-// maxSlashCommandName's doc already states and owns. MapEvent's arm has since LANDED
+// MapEvent's default" is the wrong reason for the right conclusion. IT IS ALSO RETAINED
+// since #2004, by cmd/pyry's sessionSlashCommandHold, for the session's life —
+// maxSlashCommandName's doc states and owns that, as it owned the absence before it.
+// MapEvent's arm has since LANDED
 // (#2001) and that does not change a word above: an arm is not a route, and nothing on
 // this lane calls MapEvent with this variant until Handle's case, which is #2003's and
 // still open. What the value DOES reach is eventKind, whose

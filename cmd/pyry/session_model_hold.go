@@ -68,9 +68,14 @@ func newSessionModelHold(next func(turnevent.Event)) *sessionModelHold {
 // The mutex is a LEAF lock and is never held across the call to next. Holding it
 // across a channel send would put a new edge into the daemon's lock order for no
 // benefit; as written it participates in no ordering with Pool.mu, Session.lcMu or
-// capMu. The lock is needed rather than defensive: across a respawn a new stdout
-// forwarder goroutine writes to the same hold and the two can briefly overlap
-// during teardown, and #1837's publisher reads on a relay-leg goroutine.
+// capMu. The lock is needed rather than defensive, and the pair it is needed for is
+// ONE WRITER AND MANY READERS. This doc used to claim two overlapping writers across
+// a respawn, which is false and is corrected here rather than left standing (#2004):
+// spawnAndWait blocks on cmd.Wait, which os/exec documents as joining the goroutine
+// copying the child's stdout into a non-*os.File Stdout, so forwarder N+1 cannot
+// start until forwarder N has finished — the serialisation streamsup.Parser's own
+// doc asserts. What the lock protects against is the READER, #1867's publisher on a
+// relay-leg goroutine, running while that one writer does.
 func (h *sessionModelHold) Sink(ev turnevent.Event) {
 	if list, ok := ev.(turnevent.ModelList); ok {
 		h.mu.Lock()
@@ -127,15 +132,27 @@ func cloneModelList(list turnevent.ModelList) turnevent.ModelList {
 	return out
 }
 
-// newSessionParser mints the hold and the parser bound to it in ONE call, and
-// returns both. It is the only production caller of streamsup.NewParser.
+// newSessionParser mints the per-session retentions and the parser bound to them in
+// ONE call, and returns all three. It is the only production caller of
+// streamsup.NewParser.
 //
-// The single call is what makes the two halves impossible to wire to different
-// holds, and what makes the wiring testable: a test can call this, write a real
-// control_response initialize line into the returned parser, and read the returned
-// hold — proving the production composition through the real decoder rather than
-// by inspection. next is the per-session downstream sink; logger is the parser's.
-func newSessionParser(next func(turnevent.Event), logger *slog.Logger) (*streamsup.Parser, *sessionModelHold) {
-	hold := newSessionModelHold(next)
-	return streamsup.NewParser(hold.Sink, logger), hold
+// The single call is what makes the halves impossible to wire to different holds, and
+// what makes the wiring testable: a test can call this, write a real control_response
+// initialize line into the returned parser, and read the returned hold — proving the
+// production composition through the real decoder rather than by inspection. next is
+// the per-session downstream sink; logger is the parser's.
+//
+// The two holds are CHAINED, each decorating the next, and #2004's slash-command hold
+// is a sibling type rather than a second retention inside sessionModelHold — that
+// type's doc argues the choice. The statements below are written INNERMOST FIRST,
+// because each link needs the one it forwards to; the event travels the other way, from
+// the parser's sink into the model hold, on into the slash-command hold, and out to
+// next. NOTHING DEPENDS ON THAT ORDER: both links store unconditionally and forward
+// unconditionally, and what puts each retention upstream of the droppable fan-in send
+// is that both sit on the parser's side of the channel — not where either sits in the
+// chain.
+func newSessionParser(next func(turnevent.Event), logger *slog.Logger) (*streamsup.Parser, *sessionModelHold, *sessionSlashCommandHold) {
+	commands := newSessionSlashCommandHold(next)
+	models := newSessionModelHold(commands.Sink)
+	return streamsup.NewParser(models.Sink, logger), models, commands
 }

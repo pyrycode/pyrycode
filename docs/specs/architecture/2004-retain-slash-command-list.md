@@ -297,6 +297,31 @@ Gate: `go test -race ./cmd/pyry/... ./internal/streamsup/...`, `go vet ./...`,
    function unless the producer turns out to reject a commands-only success response — the
    rung enumeration in `emitInitializeControlResponse`'s doc says it does not.
 
+## Revisions
+
+### 2026-09-02 — implementation
+
+Both Open Questions resolved as the plan predicted; neither changed the design.
+
+1. **Chain order.** Built inner-to-outer as planned — `commands` wraps `next`, `models`
+   wraps `commands.Sink`, the parser sinks into `models.Sink`. `newSessionParser`'s doc
+   states that the statements are written innermost-first because each link needs the one
+   it forwards to, and that the event travels the other way, so no reader infers that the
+   order carries meaning.
+2. **Wiring test fixture.** A separate commands-only `control_response` line and a separate
+   test function, as planned. The producer accepts a commands-only success response — the
+   test passes through the real decoder — so no coupling to #1840's fixture was needed.
+
+**One test added beyond the eight the plan listed:**
+`TestSessionSlashCommandHold_PreservesNilSlices`, pinning that a nil `Aliases` or nil
+`TruncatedFields` survives the clone as nil rather than as an empty non-nil slice. The plan
+already stated that contract under `cloneSlashCommandList` but left it unasserted; a
+hand-rolled `make`+`copy` clone would satisfy every other test in the suite and break it,
+and `protocol.SlashCommand.MarshalJSON` is a reader that distinguishes the two.
+
+**Not swept, and observed rather than caused:** `internal/streamsup/helper_test.go` is
+unformatted on `main` (`gofmt -l` flags it). Untouched by this branch.
+
 ## Security review
 
 **Verdict:** PASS
