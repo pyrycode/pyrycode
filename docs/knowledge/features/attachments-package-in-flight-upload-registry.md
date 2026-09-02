@@ -10,11 +10,10 @@ conn-keyed sibling `ReleaseConn` (#1817, removes every upload one conn holds
 in a single pass, for a teardown path that has the conn but never the list of
 attachment_ids it was admitted under), and two unexported test-only readers,
 `count` and `lastChunkAt` (#1880). `Intake` (#1896, see § "Chunk intake
-driver" below) is now the registry's caller — `#1744`, the ticket this doc
-used to cite, split into #1896 (this driver) and #1897 (the dispatch site).
-The registry itself is still unreachable from outside `internal/attachments`:
-`Intake` has no caller of its own yet, and #1897 is what wires
-`appFrameWorker` to it.
+driver" below) is the registry's caller — `#1744`, the ticket this doc used
+to cite, split into #1896 (this driver) and #1897 (the dispatch site). The
+registry is reachable from outside `internal/attachments` as of #1897, which
+wired `internal/relay`'s `appFrameWorker` to `Intake`.
 
 **Each entry carries `lastChunkAt`, the clock's reading at admission and at
 the last delivered chunk (#1880).** The clock is a nil-tolerant seam —
@@ -33,7 +32,7 @@ incumbent's stamp untouched. Delivery stamps through the new unexported
 `lookupAndStamp`, which `Deliver`'s step 1 now calls in place of `Lookup` — on
 a hit it moves `lastChunkAt` forward and returns the accumulator, on a miss it
 stores nothing. **`Lookup` itself stays a pure read and deliberately does not
-stamp** — a look-up that moved the activity time would let a diagnostic or #1744's dispatch-site read keep a dead upload alive indefinitely, the exact
+stamp** — a look-up that moved the activity time would let a diagnostic or #1897's dispatch-site read keep a dead upload alive indefinitely, the exact
 exhaustion path this family is closing.
 
 **#1881 landed the policy that reads the stamp: `uploadIdleTimeout` (15
@@ -97,7 +96,7 @@ of `ErrUploadTooLarge`: retryability inverts across them. The capacity
 refusal clears **by itself** once other uploads finish — `Release` frees a
 slot the moment a held pair's transfer completes or is discarded — while
 `ErrUploadTooLarge` never clears for that file. `internal/protocol`'s
-`CodeAttachmentTooManyUploads` (mapped at #1744's dispatch site, not here)
+`CodeAttachmentTooManyUploads` (mapped at #1897's dispatch site, not here)
 carries that transience on the wire; folding the two sentinels together
 would tell a client either to loop-retry an oversized file or to give up on
 a refusal that was about to clear on its own.
@@ -218,10 +217,10 @@ that.
   dispatch site) — not land ahead of the in-flight entry-count cap: wiring a
   caller first would have gone live with `Admit` bounding one upload's bytes
   but placing no bound on how many uploads may exist, so N distinct
-  `attachment_id` values on one conn would yield N entries. That gap is
-  closed: `maxInFlightUploads` (#1796) landed first, `Intake` (#1896) is now
-  the package's first production caller, and #1897 remains the package's
-  first caller from outside it.
+  `attachment_id` values on one conn would yield N entries. That gap was
+  closed in order: `maxInFlightUploads` (#1796) landed first, `Intake`
+  (#1896) became the package's first production caller, and #1897 is now
+  the package's first caller from outside it.
 
 - **Keyed by conn-and-attachment_id, not the bare id this doc used to sketch.**
   `docs/protocol-mobile.md` § Attachments documents `attachment_id` as "not a

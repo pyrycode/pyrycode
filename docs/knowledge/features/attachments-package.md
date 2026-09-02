@@ -28,11 +28,12 @@ still carries no lock; synchronisation lives in `Registry` alone.
 `Intake` (#1896, `intake.go`, see § "Chunk intake driver" below) is the
 package's composite entry point: it sequences `Admit`, `Deliver`, `EnsureDir`
 and `Store` into the one call the wire layer needs, and is the first
-production caller any primitive in this package has had. It maps nothing to
-the wire and has no caller of its own yet — #1897 is both: it declares the
+production caller any primitive in this package has had. #1897 is what maps
+its answers to the wire and gives it a caller of its own: it declares the
 seam interface `Intake.Receive`/`Intake.ReleaseConn` satisfy, builds the
-production conversation resolver, and wires `appFrameWorker` as this
-package's first caller from *outside* it.
+production conversation resolver, and wires `internal/relay`'s
+`appFrameWorker` as this package's first caller from *outside* it — see
+[Inbound `attachment_chunk`](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md).
 
 `SanitizeFilename` (#1772, `filename.go`) is unrelated in shape but shares the
 package: a pure, stateless function turning a client-supplied
