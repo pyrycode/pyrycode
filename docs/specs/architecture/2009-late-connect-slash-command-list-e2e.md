@@ -183,4 +183,8 @@ Quote the mutant's failure output in the PR body. The mutant must never be commi
 
 ## Revisions
 
-_None yet._
+### 2026-09-02 — both open questions resolved by observation; no design change
+
+- **The settle window sees no second frame.** `extraOnObserver` read 0 on the green run, and the reason is structural rather than lucky: one conversation is retained so `retainedSlashCommandLists` returns one payload, and the live lane's emit for the minted child fires when the `initialize` ack is parsed — strictly before `turn_end`, hence strictly before phone-b is dialled. The exact-count assertion stands as written.
+- **Phone-empty's dead socket perturbs nothing.** After its window times out the daemon still holds the conn and logs `binary referenced unknown conn_id` when the turn's broadcast reaches for it — six records on the green run. Phone-a and phone-b were unaffected, which is the per-conn independence the question asked about. No fatal, no coupling, nothing to change.
+- **`listsOnMinter` read 1, not 0 — and that is why it must stay unasserted.** The model-list twin predicts zero for its own variant, reasoning that the live lane's emit is dropped by the emitter's empty-conversation early return. That prediction does NOT transfer to this variant: the mutation run recorded one live-lane frame on the minting conn, because the mint spawns the child and the turn stamps the cursor close enough together that the ack can be parsed on either side of the stamp. The count is therefore 0 or 1 depending on timing, and an assertion on it would be flaky — which is exactly the diagnostic-only posture the plan already prescribed. **It also did the job it exists for:** on the mutant the minter read 1 while the observer read 0, so the two producers were visibly distinguished rather than assumed apart.
