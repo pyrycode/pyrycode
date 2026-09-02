@@ -147,10 +147,12 @@ claude version and working directory) already sits at 59% of the whole-line ceil
 fires, so no count clearing it keeps the worst-case product under the v2 envelope. The derivation that
 resolves this has to say which constraint gives — here, the worst-case-product convention, kept instead
 being the rule that a cap must not fire on ordinary output — and name it as spent rather than silently
-picking whichever candidate is closest to hand. The next slice to read this constant's doc (#1720, the
-wire producer) is the reason the "does not buy" half matters as much as the number: 128 entries is
-headroom over both observations, but its worst case is still 2.5x the 65,519-byte application-envelope
-cap, and nothing about the count being bounded means a frame built from it fits.
+picking whichever candidate is closest to hand. The "does not buy" half of this constant's doc matters
+as much as the number: 128 entries is headroom over both observations, but its worst case is still 2.5x
+the 65,519-byte application-envelope cap, and nothing about the count being bounded means a frame built
+from it fits. #1720 split before answering that; the frame axis it deferred landed as
+`turnbridge.maxSlashCommandListBytes` (#2002) — a second, measured cut at the mapping arm, not a second
+count cap here.
 
 *Lesson: an inherited amplification claim needs recomputing per struct, not citing.* This family's
 per-entry caps cross-reference `maxTaskRosterEntries`' "linear and near 1" transient-amplification

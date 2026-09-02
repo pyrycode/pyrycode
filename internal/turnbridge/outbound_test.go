@@ -1961,9 +1961,20 @@ func TestResultSummary(t *testing.T) {
 
 // maxV2AppEnvelope is the Mobile Protocol v2 application-envelope size cap
 // (docs/protocol-mobile.md § Application-envelope size cap). Test-local on
-// purpose, for the reason protocol's constant of the same name states: nothing in
-// internal/turnbridge enforces the cap — the transport does — so a package-level
-// constant here would imply an enforcement this package does not perform.
+// purpose, and the reason NEEDED AMENDING when #2002 put a frame bound in the
+// production file. The old one — "nothing in internal/turnbridge enforces the cap
+// — the transport does, so a package-level constant here would imply an
+// enforcement this package does not perform" — is now false for one payload:
+// maxSlashCommandListBytes enforces a frame bound on slash_command_list.
+//
+// It stays test-local anyway, and the distinction is the point rather than a
+// technicality. What outbound.go enforces is a BUDGET FOR ONE FIELD of one
+// payload, a different number derived from this one; THIS cap is still enforced by
+// the transport alone, and no other payload this file maps is bounded against it
+// here. A production constant carrying 65519 would say the package checks
+// envelopes, which it does not — maxDeltaTextBytes' "it bounds the INPUT text, not
+// the envelope — do not 'correct' it towards 65519" is the same rule stated from
+// the other side.
 const maxV2AppEnvelope = 65519
 
 // TestToolResultPayload_FitV2EnvelopeCap drives the REAL resultSummary with the
@@ -2028,6 +2039,322 @@ func TestToolResultPayload_FitV2EnvelopeCap(t *testing.T) {
 	}
 	t.Logf("tool_result at the result cap: %d B, %.1f%% of the %d-byte v2 application-envelope cap",
 		len(out), float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope)
+	if len(out) >= maxV2AppEnvelope {
+		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
+	}
+}
+
+// slashFillRow builds one worst-case slash-command row at the PRODUCER's own
+// per-field caps: streamsup's maxSlashCommandName, maxSlashCommandArgumentHint
+// and maxSlashCommandDescription at 256 bytes each, maxSlashCommandAlias at 64
+// with maxSlashCommandAliasCount aliases, and a TruncatedFields naming all four
+// wire names protocol.SlashCommand's doc enumerates. Those numbers are repeated
+// here rather than imported because they are unexported in another package; if
+// one of them moves, this fixture states a worst case that is no longer the
+// producer's, which is the failure mode to watch for.
+//
+// The fill is '<' for TestToolResultPayload_FitV2EnvelopeCap's reason:
+// encoding/json has SetEscapeHTML on by default, so one such byte costs six on
+// the wire. An 'a' fill would measure a sixth of this and pass a budget it has no
+// right to. Here it is not even the contrived case — a workspace author's command
+// description is prose, and prose in a repository contains markup.
+func slashFillRow() turnevent.SlashCommand {
+	fill := func(n int) string { return strings.Repeat("<", n) }
+	aliases := make([]string, 8)
+	for i := range aliases {
+		aliases[i] = fill(64)
+	}
+	return turnevent.SlashCommand{
+		Name:            fill(256),
+		ArgumentHint:    fill(256),
+		Description:     fill(256),
+		Aliases:         aliases,
+		TruncatedFields: []string{"name", "argument_hint", "description", "aliases"},
+	}
+}
+
+// mappedSlashRow is the row the arm builds for one event entry, with no cut
+// applied — the value a prefix assertion compares against.
+func mappedSlashRow(c turnevent.SlashCommand) protocol.SlashCommand {
+	return protocol.SlashCommand{
+		Name:            c.Name,
+		ArgumentHint:    c.ArgumentHint,
+		Description:     c.Description,
+		Aliases:         c.Aliases,
+		TruncatedFields: c.TruncatedFields,
+	}
+}
+
+// slashCommandsBytes measures what the `commands` array costs on the wire, which
+// is what maxSlashCommandListBytes budgets. It marshals the array on its own
+// rather than the whole payload, so the number is comparable to the constant
+// without the payload's other two keys folded in.
+func slashCommandsBytes(t *testing.T, commands []protocol.SlashCommand) int {
+	t.Helper()
+	b, err := json.Marshal(commands)
+	if err != nil {
+		t.Fatalf("marshal commands: %v", err)
+	}
+	return len(b)
+}
+
+// TestMapEventSlashCommandListUnderBudgetIsUnchanged pins the half of the frame
+// bound that is easy to lose: a list inside the budget maps to exactly the bytes
+// the unbounded arm produced, with nothing cut and DroppedCommands carried
+// through untouched.
+//
+// THE EQUALITY ALONE IS NOT A HEADROOM PROOF, which is why the precondition runs
+// first. "The mapped payload equals the whole input" holds against a budget of
+// 64000 exactly as well as against one ten times smaller — it says the cut did
+// not fire on THIS fixture, never that the fixture has room above it. So the
+// fixture's own measured size is asserted under the budget before the equality,
+// with a message that names the fixture as the cause: a future row grown large
+// enough to meet the budget then reddens HERE and says so, rather than surfacing
+// as an unexplained inequality that reads like a mapping regression
+// (docs/knowledge/features/streamsup-package-producing-turnevent-slashcommandlist.md).
+func TestMapEventSlashCommandListUnderBudgetIsUnchanged(t *testing.T) {
+	t.Parallel()
+
+	ev := turnevent.SlashCommandList{
+		Commands: []turnevent.SlashCommand{
+			{
+				Name:            "qq-name-alpha",
+				ArgumentHint:    "[qq-target]",
+				Description:     "qq-description-alpha with <markup> and an em dash — raw",
+				Aliases:         []string{"qq-reset", "qq-new"},
+				TruncatedFields: []string{"description"},
+			},
+			{Name: "qq-name-beta"},
+			{Name: "__qq-remote-workflow", Description: "qq-description-gamma"},
+		},
+		DroppedCommands: 4,
+	}
+
+	want := protocol.SlashCommandListPayload{
+		ConversationID:  "c1",
+		Commands:        []protocol.SlashCommand{mappedSlashRow(ev.Commands[0]), mappedSlashRow(ev.Commands[1]), mappedSlashRow(ev.Commands[2])},
+		DroppedCommands: 4,
+	}
+	if n := slashCommandsBytes(t, want.Commands); n >= maxSlashCommandListBytes {
+		t.Fatalf("precondition: this fixture's commands array serialises to %d B against the %d-byte budget, so it no longer exercises the nothing-is-cut path — the FIXTURE grew, not the mapping", n, maxSlashCommandListBytes)
+	}
+
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "c1"})
+	if !ok {
+		t.Fatal("the mapping suppressed a slash-command list; it must be forwarded")
+	}
+	got, isList := payload.(protocol.SlashCommandListPayload)
+	if !isList {
+		t.Fatalf("payload: got %T, want protocol.SlashCommandListPayload", payload)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("an under-budget list was altered:\n got %#v\nwant %#v", got, want)
+	}
+
+	gotBytes, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal got: %v", err)
+	}
+	wantBytes, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal want: %v", err)
+	}
+	if string(gotBytes) != string(wantBytes) {
+		t.Fatalf("an under-budget list did not map byte-identically:\n got %s\nwant %s", gotBytes, wantBytes)
+	}
+}
+
+// TestMapEventSlashCommandListOverBudgetCutsFromTheTail drives the cut itself.
+// Every row is at the producer's worst case, so the array is several times the
+// budget and the cut must fire.
+//
+// The count fed in is maxSlashCommandListEntries, a DAEMON constant, and no
+// assertion here names a length taken from a real claude: that count is workspace-
+// and version-dependent by design, so a fixture pinned to one would break on a
+// re-capture that changed nothing about this code.
+func TestMapEventSlashCommandListOverBudgetCutsFromTheTail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		droppedIn  int
+		entryCount int
+	}{
+		{name: "nothing dropped by the producer", droppedIn: 0, entryCount: 128},
+		{name: "producer already dropped some", droppedIn: 37, entryCount: 128},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			commands := make([]turnevent.SlashCommand, tt.entryCount)
+			for i := range commands {
+				commands[i] = slashFillRow()
+			}
+			ev := turnevent.SlashCommandList{Commands: commands, DroppedCommands: tt.droppedIn}
+
+			_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "c1"})
+			if !ok {
+				t.Fatal("the mapping suppressed a slash-command list; it must be forwarded")
+			}
+			got, isList := payload.(protocol.SlashCommandListPayload)
+			if !isList {
+				t.Fatalf("payload: got %T, want protocol.SlashCommandListPayload", payload)
+			}
+
+			if len(got.Commands) == 0 {
+				t.Fatal("every entry was cut; one entry's worst case is far under the budget, so at least one must fit")
+			}
+			if len(got.Commands) >= len(ev.Commands) {
+				t.Fatalf("nothing was cut: %d of %d entries kept, but the array is several times the %d-byte budget", len(got.Commands), len(ev.Commands), maxSlashCommandListBytes)
+			}
+
+			// The measured budget is the point: the retained array must actually
+			// fit, not merely be shorter.
+			if n := slashCommandsBytes(t, got.Commands); n > maxSlashCommandListBytes {
+				t.Errorf("retained commands array: got %d B, want <= %d B", n, maxSlashCommandListBytes)
+			}
+
+			// Cut from the TAIL: what survives is a prefix of the input in
+			// claude's own order, never a reordered or hole-punched selection.
+			for i, row := range got.Commands {
+				if want := mappedSlashRow(ev.Commands[i]); !reflect.DeepEqual(row, want) {
+					t.Fatalf("entry %d is not the input's entry %d; the cut is not a tail cut", i, i)
+				}
+			}
+
+			// ADDED TO, never replacing: the producer's count and this cut's sum,
+			// so len(commands) + dropped_commands is still the list's true size.
+			cutHere := len(ev.Commands) - len(got.Commands)
+			if want := tt.droppedIn + cutHere; got.DroppedCommands != want {
+				t.Fatalf("dropped_commands: got %d, want %d (%d from the producer + %d cut here)", got.DroppedCommands, want, tt.droppedIn, cutHere)
+			}
+			if want := len(ev.Commands) + tt.droppedIn; len(got.Commands)+got.DroppedCommands != want {
+				t.Fatalf("len(commands) + dropped_commands: got %d, want %d (the list's true size after both cuts)", len(got.Commands)+got.DroppedCommands, want)
+			}
+		})
+	}
+}
+
+// TestMapEventSlashCommandListCutEndsTheWalk pins the one property a list of
+// uniformly-sized rows CANNOT pin: that a row which does not fit ENDS the walk
+// rather than being skipped over in favour of a smaller row behind it.
+//
+// The fixture is deliberately decorrelated — worst-case rows first, small rows
+// after — because with every row the same size, ending the walk and skipping the
+// row produce the identical output, and an implementation that continued past the
+// first over-budget row would pass the sibling test above unnoticed. That was
+// MEASURED rather than assumed: mutating the cut's `break` to `continue` left the
+// whole package green until this fixture existed.
+//
+// The distinction matters to a client, not just to the code. A skip produces a
+// menu with a HOLE in claude's order, which a client diffing against the
+// names-only slash_commands twin reads as a command that vanished; ending the walk
+// produces a shortened menu, which is what dropped_commands then explains.
+func TestMapEventSlashCommandListCutEndsTheWalk(t *testing.T) {
+	t.Parallel()
+
+	const bigRows = 10
+	commands := make([]turnevent.SlashCommand, 0, bigRows+3)
+	for i := 0; i < bigRows; i++ {
+		commands = append(commands, slashFillRow())
+	}
+	// Three rows small enough to fit in whatever budget the big rows leave, so a
+	// skipping implementation would admit them behind the row that did not fit.
+	for _, name := range []string{"qq-tiny-alpha", "qq-tiny-beta", "qq-tiny-gamma"} {
+		commands = append(commands, turnevent.SlashCommand{Name: name})
+	}
+	ev := turnevent.SlashCommandList{Commands: commands}
+
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "c1"})
+	if !ok {
+		t.Fatal("the mapping suppressed a slash-command list; it must be forwarded")
+	}
+	got, isList := payload.(protocol.SlashCommandListPayload)
+	if !isList {
+		t.Fatalf("payload: got %T, want protocol.SlashCommandListPayload", payload)
+	}
+
+	if len(got.Commands) == 0 {
+		t.Fatal("every entry was cut; the leading rows are one worst-case entry each and far under the budget, so several must fit")
+	}
+	// The prefix check runs BEFORE the count precondition on purpose: a skipping
+	// implementation keeps MORE rows than a cutting one, so a count guard placed
+	// first would swallow the failure and report it as a stale fixture.
+	for i, row := range got.Commands {
+		if want := mappedSlashRow(ev.Commands[i]); !reflect.DeepEqual(row, want) {
+			t.Fatalf("entry %d is not the input's entry %d: a row behind the cut was admitted, so the walk SKIPPED rather than ENDED", i, i)
+		}
+	}
+	if len(got.Commands) >= bigRows {
+		t.Fatalf("precondition: %d of %d worst-case rows kept; this fixture only separates the two behaviours when the cut fires among them", len(got.Commands), bigRows)
+	}
+	if want := len(ev.Commands) - len(got.Commands); got.DroppedCommands != want {
+		t.Fatalf("dropped_commands: got %d, want %d — every row from the cut onward is dropped, the small ones included", got.DroppedCommands, want)
+	}
+}
+
+// TestSlashCommandListPayload_FitV2EnvelopeCap is the SUSPENDERS to
+// maxSlashCommandListBytes' belt, TestToolResultPayload_FitV2EnvelopeCap's shape
+// applied to this frame: it drives the REAL MapEvent with the largest list the
+// producer's caps permit and measures the serialised envelope rather than arguing
+// about it. maxSlashCommandListBytes is the conservative constant; this is the
+// deterministic per-frame measurement that catches it being wrong. If this ever
+// fails, LOWER the constant — never raise it.
+//
+// A per-field cap does not compose into an envelope guarantee, and for this frame
+// it composes into the OPPOSITE: 128 entries at the 1280-byte per-entry term is
+// 163,840 raw bytes before any escaping, so the unbounded arm's payload was
+// several times the cap by construction.
+//
+// The conversation id is filled hostilely, TestToolResultPayload_FitV2EnvelopeCap's
+// reason unchanged — it is daemon-supplied and nothing in this package bounds it,
+// so the reserve outside `commands` is validated against 64 escaped runes rather
+// than a 36-byte UUID.
+func TestSlashCommandListPayload_FitV2EnvelopeCap(t *testing.T) {
+	t.Parallel()
+
+	commands := make([]turnevent.SlashCommand, 128)
+	for i := range commands {
+		commands[i] = slashFillRow()
+	}
+	_, payload, ok := MapEvent(
+		turnevent.SlashCommandList{Commands: commands, DroppedCommands: 128},
+		TurnContext{ConversationID: strings.Repeat("<", 64)},
+	)
+	if !ok {
+		t.Fatal("the mapping suppressed a slash-command list; it must be forwarded")
+	}
+	got, isList := payload.(protocol.SlashCommandListPayload)
+	if !isList {
+		t.Fatalf("payload: got %T, want protocol.SlashCommandListPayload", payload)
+	}
+	if len(got.Commands) >= len(commands) {
+		t.Fatalf("precondition: %d of %d entries survived, so this measurement no longer exercises the cut", len(got.Commands), len(commands))
+	}
+
+	body, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	// Worst-case envelope too: max-uint64 ids and a populated EventID, so the
+	// outer frame costs as much as it ever can.
+	eventID := ^uint64(0)
+	out, err := json.Marshal(protocol.Envelope{
+		ID:      ^uint64(0),
+		Type:    protocol.TypeSlashCommandList,
+		TS:      time.Date(2026, 8, 21, 10, 33, 18, 0, time.UTC),
+		Payload: body,
+		EventID: &eventID,
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	t.Logf("slash_command_list at the frame budget: %d entries kept, commands array %d B, envelope %d B, %.1f%% of the %d-byte v2 application-envelope cap; reserve outside `commands` is %d B",
+		len(got.Commands), slashCommandsBytes(t, got.Commands), len(out),
+		float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope,
+		len(out)-slashCommandsBytes(t, got.Commands))
 	if len(out) >= maxV2AppEnvelope {
 		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
 	}

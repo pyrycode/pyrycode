@@ -1051,8 +1051,11 @@ type SlashCommand struct {
 // maxSlashCommandListEntries, cut in emitModelList above both rungs that read the
 // array, reported here as DroppedCommands; and the PUBLISH, which #1720 owned as one
 // piece and which was SPLIT — turnbridge.MapEvent's arm is #2001 and is IN THE TREE,
-// mapping this variant onto protocol.SlashCommandListPayload with DroppedCommands
-// carried; cmd/pyry's interactiveTurnEmitterV2.Handle case is #2003 and is still open.
+// mapping this variant onto protocol.SlashCommandListPayload, with the FRAME-LEVEL
+// byte bound that arm deliberately omitted added by #2002, also in the tree, which is
+// why the wire's DroppedCommands is this event's count plus that cut rather than this
+// count carried; cmd/pyry's interactiveTurnEmitterV2.Handle case is #2003 and is still
+// open.
 // #1719 is CLOSED and was the decode, so it names no future producer. What remains of
 // the four is the EMISSION alone, and it is the only piece that was ever a WIRE change
 // — the mapping is a daemon-internal translation onto a shape already declared.
@@ -1064,7 +1067,10 @@ type SlashCommand struct {
 // count by maxSlashCommandListEntries, reported here as DroppedCommands — which is
 // the factor a per-field cap alone cannot supply, exactly as maxModelListEntries
 // supplied it for ModelList. What that does NOT give is a bound the WIRE can rely
-// on; DroppedCommands' own doc states the gap and names #1720 as its owner.
+// on, and that one is no longer missing either: turnbridge's
+// maxSlashCommandListBytes (#2002) cuts the mapped list by MEASURED bytes where it
+// reaches the wire. DroppedCommands' own doc states how the two cuts compose and
+// why the count on this event is not the count on the wire.
 //
 // IT IS PUBLISHED BY NO PATH TODAY, AND THE REASON IS NOW THE HANDLE CASE ALONE.
 // turnbridge.MapEvent grew its arm for this variant in #2001, so MapEvent's default
@@ -1174,10 +1180,21 @@ type SlashCommandList struct {
 	//
 	// WHAT IT DOES NOT BOUND is worth stating where a reader will look for it: the
 	// count cap makes the retained size a function of a daemon constant instead of
-	// a workspace's, but 128 entries at the 1280-byte per-entry term is 163,840
-	// bytes, well past the 65519-byte v2 application-envelope cap. No count cap can
-	// close that gap — maxSlashCommandListEntries carries the arithmetic — so a
-	// FRAME-level bound is #1720's to decide when this list first reaches a wire.
+	// a workspace's, but 128 entries at the 1280-byte per-entry term is 163,840 raw
+	// bytes, well past the 65519-byte v2 application-envelope cap, and Go's escaping
+	// puts the wire worst case higher still. No count cap can close that gap —
+	// maxSlashCommandListEntries carries the arithmetic.
+	//
+	// THE FRAME-LEVEL BOUND IS turnbridge's maxSlashCommandListBytes (#2002), a
+	// MEASURED byte cut applied where this list is mapped onto the wire. It does not
+	// change what THIS field counts: the number here is still the producer's cut
+	// alone, entries streamsup dropped past its entry cap, because that is the only
+	// cut that has happened by the time this event exists. The mapping ADDS its own
+	// drops to protocol.SlashCommandListPayload.DroppedCommands rather than
+	// replacing this one, so len(Commands) + DroppedCommands is this event's true
+	// size here and the WIRE field is the true size after both cuts. A reader taking
+	// the two fields for the same number will misattribute a frame cut to the
+	// producer.
 	DroppedCommands int
 }
 

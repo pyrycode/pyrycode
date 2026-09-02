@@ -780,8 +780,10 @@ func (o ModelOption) MarshalJSON() ([]byte, error) {
 // and turnevent.SlashCommandList.DroppedCommands carries what it cut (#1826). What
 // is still missing is a PATH TO A CLIENT, so read the state of this key precisely
 // rather than by inference. SOMETHING NOW WRITES IT — turnbridge.MapEvent's arm
-// carries turnevent.SlashCommandList.DroppedCommands onto this field verbatim,
-// never recomputed from len(Commands) (#2001) — but cmd/pyry's
+// takes turnevent.SlashCommandList.DroppedCommands as its BASE, never recomputing
+// the count from len(Commands) (#2001), and ADDS whatever its own frame-size cut
+// drops on top (#2002), so this field is the sum of two cuts where the event-side
+// field is the producer's alone — but cmd/pyry's
 // interactiveTurnEmitterV2.Handle still has no case, so no frame of this type is
 // produced at all, which means every value a client could observe here today is
 // STILL the zero one and there is still no frame on which len(Commands) +

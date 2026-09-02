@@ -1070,10 +1070,19 @@ const maxSlashCommandAliasCount = 8
 // stops being a function of a number the workspace chooses and becomes a function of a
 // daemon constant, where before the only bound below it was defaultMaxParseBuf's 4 MiB;
 // and the cut is COUNTED, so a shortened menu says by how much. What it does NOT buy is
-// a frame that fits: 128 * 1280 = 163,840 bytes is 2.5x the 65519-byte envelope, and
-// NO count cap can close that gap. A FRAME-level bound is #1720's, which is where this
-// list first reaches a wire; a reader arriving from there must not read "the entry count
-// is bounded" as "the frame fits".
+// a frame that fits: 128 * 1280 = 163,840 raw bytes is 2.5x the 65519-byte envelope —
+// and that is raw-byte arithmetic rather than a wire measurement, since Go escapes '<',
+// '>', '&' and U+2028/U+2029 at six bytes each, so the true wire worst case is higher
+// still. NO count cap can close that gap either way.
+//
+// THAT FRAME-LEVEL BOUND NOW EXISTS, and it is not here: turnbridge's
+// maxSlashCommandListBytes (#2002) cuts the mapped list a second time, by MEASURED
+// bytes, at the one place both wire consumers pass through. The two cuts compose rather
+// than compete — this one bounds the RETAINED COUNT and reports it, that one bounds the
+// SERIALISED SIZE and adds its own drops to the same number, so len(commands) +
+// dropped_commands stays the list's true size after both. A reader arriving from there
+// must still not read "the entry count is bounded" as "the frame fits": it does not,
+// and a second, differently-shaped cut is exactly why.
 //
 // 128, AND THE THREE CONSTRAINTS LEAVE ONE SURVIVOR:
 //

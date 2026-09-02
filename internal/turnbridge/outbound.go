@@ -176,6 +176,57 @@ const (
 // not ride this frame and the two do not sum.
 const maxResultSummaryRunes = 10000
 
+// maxSlashCommandListBytes bounds the SERIALISED `commands` array of a
+// slash_command_list payload — the bytes that array actually costs on the wire,
+// its brackets and separators included — so the marshalled protocol.Envelope
+// stays under the 65519-byte v2 application-envelope cap (docs/protocol-mobile.md
+// § Application-envelope size cap). Like maxDeltaTextBytes (cmd/pyry) it bounds
+// the BOUNDED FIELD and not the envelope: do not "correct" it towards 65519, and
+// do not confuse it with outbound_test.go's maxV2AppEnvelope, which IS that cap.
+//
+// WHAT IT DEFENDS AGAINST, and this is the frame where the producer's caps compose
+// the wrong way. streamsup bounds every CONTENT dimension —
+// maxSlashCommandListEntries at 128 entries over a per-entry term of
+// maxSlashCommandName + maxSlashCommandArgumentHint + maxSlashCommandDescription +
+// maxSlashCommandAliasCount * maxSlashCommandAlias = 256 + 256 + 256 + 8 * 64 =
+// 1280 bytes — and 128 * 1280 = 163,840 is 2.5x the cap before anything else is
+// counted. THAT FIGURE IS RAW-BYTE ARITHMETIC, NOT A WIRE MEASUREMENT: encoding/json
+// has SetEscapeHTML on by default, so '<', '>', '&' and U+2028/U+2029 each cost six
+// bytes, and the true worst case on the wire is up to ~6x higher again. The
+// conclusion is the same either way — NO COUNT CAP CLOSES THE GAP, and
+// maxSlashCommandListEntries' own doc carries that derivation: the only count whose
+// worst case fits is 51, which is the committed capture's own size, so a
+// worst-case-derived count cap fires on claude's ordinary output. The cut is
+// therefore MEASURED against marshalled bytes rather than counted.
+//
+// THE RESERVE is 65519 - 64000 = 1519 B, for everything outside `commands`: the
+// payload's own conversation_id and dropped_commands keys with their punctuation,
+// and the envelope's id, type, ts, payload and event_id frame.
+// TestSlashCommandListPayload_FitV2EnvelopeCap measures that reserve at 567 B with
+// a HOSTILE 64-rune conversation_id — hostile because nothing in this package
+// bounds that field, maxResultSummaryRunes' stated assumption unchanged — so 1519
+// is roughly 2.7x an already-pessimistic worst case, and the measured worst-case
+// envelope is 63224 B, 96.5% of the cap. That is tighter than the sibling
+// constants' margins on purpose: what those reserve headroom against is an
+// UNBOUNDED input field, where here the only unbounded contributor left outside
+// the measurement is conversation_id, and 952 B of spare would take another 158
+// escaped runes of it to spend.
+//
+// ITS BRANCH IS UNREACHABLE ON CLAUDE'S ORDINARY OUTPUT, which is what makes it a
+// bound rather than dead code, and it is the property to preserve if the number
+// ever moves. The committed capture's 51-entry menu serialises to about 11,403
+// bytes DAEMON-SIDE — the figure taken after the producer's field caps and with
+// Go's escaping, not the raw-claude 14,277 for the same array — roughly 18% of this
+// budget. What the bound answers is the workspace that capture is not: a
+// command-heavy repository whose descriptions are markup-dense, where a menu that
+// would today be lost whole arrives truncated and counted instead.
+//
+// The invariant is ENFORCED by TestSlashCommandListPayload_FitV2EnvelopeCap; if
+// that ever fails, LOWER this constant — never raise it. The conservative constant
+// is the belt; the deterministic per-frame cap test is the suspenders (different
+// fabric), maxDeltaTextBytes' pairing unchanged.
+const maxSlashCommandListBytes = 64000
+
 // MapEvent maps one neutral turnevent.Event plus explicit turn context to the
 // matching v2 interactive wire payload and its envelope type discriminant.
 //
@@ -563,32 +614,55 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		//     WITH Aliases ONE FIELD UP IS THE POINT, in both directions: two list
 		//     fields of ONE struct, one normalised and one not, and a reader who takes
 		//     that for an accident will "fix" whichever of them they meet second.
-		//   - DroppedCommands is CARRIED, never recomputed from len(commands) and
-		//     never a constant. It is the count the decode recorded when streamsup's
-		//     maxSlashCommandListEntries fired: recomputing it from the payload's own
-		//     rows yields the wrong number by construction, and shipping 0 tells a
-		//     client that a capped menu is the whole menu. BackgroundTaskRoster's
-		//     DroppedTasks states the reason, unchanged.
+		//   - DroppedCommands is CARRIED and ADDED TO, never recomputed from
+		//     len(commands) and never a constant. The base is the count the decode
+		//     recorded when streamsup's maxSlashCommandListEntries fired, and the
+		//     frame cut below adds whatever IT drops on top, so len(commands) +
+		//     dropped_commands is the list's true size after BOTH cuts. Recomputing
+		//     it from the payload's own rows yields the wrong number by construction,
+		//     and shipping 0 tells a client that a capped menu is the whole menu.
+		//     BackgroundTaskRoster's DroppedTasks states the reason, unchanged — with
+		//     the one difference that this arm is itself a second cutter, where that
+		//     one only carries its producer's number.
 		//
-		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED. The
-		// producer bounded every dimension at construction —
-		// turnevent.SlashCommandList's own doc names them together, four field caps
-		// plus an alias-count cap plus an entry cap — so a second cap here would be a
-		// second place the limit is decided and the two could disagree silently.
-		// maxSummaryLen and maxResultSummaryRunes live in THIS file and are NOT
-		// applicable bounds; reaching for either is the specific mistake to avoid.
-		// Entry order is claude's and so is alias order, and NO CHARSET ASSUMPTION
-		// BELONGS HERE: Name is not an identifier — one name in the committed capture
-		// is __remote-workflow — and an alias is not a second entry, so expanding one
-		// into a synthetic row would invent a command claude never published.
+		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED ALONG ANY
+		// DIMENSION THE PRODUCER BOUNDS. The producer bounded every CONTENT dimension
+		// at construction — turnevent.SlashCommandList's own doc names them together,
+		// four field caps plus an alias-count cap plus an entry cap — so a second cap
+		// on any of those here would be a second place that limit is decided and the
+		// two could disagree silently. maxSummaryLen and maxResultSummaryRunes live in
+		// THIS file and are NOT applicable bounds; reaching for either is the specific
+		// mistake to avoid. Entry order is claude's and so is alias order, and NO
+		// CHARSET ASSUMPTION BELONGS HERE: Name is not an identifier — one name in the
+		// committed capture is __remote-workflow — and an alias is not a second entry,
+		// so expanding one into a synthetic row would invent a command claude never
+		// published.
 		//
-		// A FRAME-LEVEL SIZE BOUND IS DELIBERATELY ABSENT and is #2002's, which is
-		// blocked on this slice and amends this arm. It is not an oversight: the
-		// producer's caps leave a 128-entry list far above the v2 application-envelope
-		// cap, and #2002 is where that is answered. Nothing routes this variant to
-		// MapEvent yet, and both slices that would — #2003's Handle case and #2005's
-		// resolver — are themselves blocked behind #2002, so no over-cap frame can
-		// ship ahead of its bound.
+		// THE FRAME AXIS IS A DIFFERENT DIMENSION AND IT IS DECIDED HERE (#2002),
+		// which is why the paragraph above is scoped to the producer's dimensions
+		// rather than claiming this arm does nothing. No cap the producer applies
+		// bounds how many BYTES the array costs — 128 entries at its 1280-byte
+		// per-entry term is 163,840 raw, and Go's escaping puts the wire worst case
+		// higher still — and this is the one place both wire consumers pass through
+		// (#2003's live-lane emission and #2005's connect-time resolver), so one bound
+		// here covers both where a bound at either would be that second place.
+		// maxSlashCommandListBytes carries the arithmetic and the reserve.
+		//
+		// The cut is MEASURED rather than counted, for that constant's stated reason,
+		// and what it measures is the marshalled protocol.SlashCommand — not the
+		// turnevent one, since SlashCommand.MarshalJSON's nil-Aliases normalisation
+		// and the JSON key names are both inside the bytes that actually cross. It
+		// takes a PREFIX: entries go from the TAIL in claude's order, never reordered
+		// and never hole-punched, so a client sees a shortened menu rather than one
+		// with gaps, and a row that does not fit ENDS the walk rather than being
+		// skipped over in favour of a smaller one behind it. A row that cannot be
+		// marshalled at all ends it the same way and is counted as dropped — that is
+		// unreachable, since encoding/json coerces invalid UTF-8 rather than rejecting
+		// it, and it is fail-closed rather than a path invented for a reachable state:
+		// an entry that cannot be measured cannot be admitted to a measured budget.
+		// That branch builds no error value and writes no log line, because wrapping a
+		// row's Name into one would put a workspace-authored string on the exact path
+		// the paragraph below exists to keep it off.
 		//
 		// CARRY, NEVER MUTATE THROUGH, the ModelList arm's rule with its evidence one
 		// ticket away rather than in the tree. The loop copies slice HEADERS, so the
@@ -597,8 +671,11 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// that retention is #2004's — so the reason the rule binds NOW is #2005,
 		// which reads the mapped payload on a relay-leg goroutine. A sort, an
 		// in-place dedupe, a filter, or an append into a slice the event owns would
-		// therefore corrupt a retained menu across two goroutines. A read-only loop
-		// building a fresh OUTER slice holds the rule by construction, and
+		// therefore corrupt a retained menu across two goroutines. The frame cut holds
+		// the rule for the same reason and by the same means — it builds a fresh outer
+		// slice and STOPS EARLY, never reslicing or truncating e.Commands itself. A
+		// read-only loop building a fresh OUTER slice holds the rule by construction,
+		// and
 		// SlashCommandListPayload's MarshalJSON refuses to reach through into
 		// p.Commands[i] for the same reason and says so.
 		//
@@ -619,19 +696,35 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// the ThinkingProgress, RateLimited, ModelAnnounced and ModelList arms above
 		// each name. A zero-value SlashCommandList therefore maps.
 		var commands []protocol.SlashCommand
+		// size starts at 2, the array's own "[" and "]", so the running total is
+		// what json.Marshal(commands) will measure rather than a content-only sum.
+		size := 2
 		for _, c := range e.Commands {
-			commands = append(commands, protocol.SlashCommand{
+			row := protocol.SlashCommand{
 				Name:            c.Name,
 				ArgumentHint:    c.ArgumentHint,
 				Description:     c.Description,
 				Aliases:         c.Aliases,
 				TruncatedFields: c.TruncatedFields,
-			})
+			}
+			b, err := json.Marshal(row)
+			if err != nil {
+				break
+			}
+			cost := len(b)
+			if len(commands) > 0 {
+				cost++ // the comma separating this row from the last kept one
+			}
+			if size+cost > maxSlashCommandListBytes {
+				break
+			}
+			size += cost
+			commands = append(commands, row)
 		}
 		return protocol.TypeSlashCommandList, protocol.SlashCommandListPayload{
 			ConversationID:  tc.ConversationID,
 			Commands:        commands,
-			DroppedCommands: e.DroppedCommands,
+			DroppedCommands: e.DroppedCommands + (len(e.Commands) - len(commands)),
 		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
