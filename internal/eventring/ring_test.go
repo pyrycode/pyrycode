@@ -52,24 +52,49 @@ func TestNew_PanicsOnNonPositiveBound(t *testing.T) {
 	}
 }
 
-// AC-1: ids strictly increase from 1 within a conversation; conversations have
-// independent counters.
-func TestAppend_IDsStrictlyIncreasePerConversation(t *testing.T) {
+// #2022 AC-1: ids are unique daemon-wide. One counter serves the whole ring, so
+// no conversation can ever be assigned an id another conversation already holds,
+// and ids strictly increase in ring-wide append order however the conversations
+// are interleaved. This inverts the pre-#2022 assertion that each conversation
+// starts its own counter at 1 — that independence is exactly what let a
+// per-connection replay watermark taken for one conversation mute another's live
+// stream. Retention stays per-conversation; only the id space is shared.
+func TestAppend_IDsUniqueAndIncreasingRingWide(t *testing.T) {
 	t.Parallel()
 	r := New(MaxEventsPerConversation)
 
-	var gotA []uint64
-	for i := 0; i < 3; i++ {
-		gotA = append(gotA, r.Append("A", protocol.TypeTurnState, nil, time.Unix(int64(i), 0)))
-	}
-	if want := []uint64{1, 2, 3}; !equalU64(gotA, want) {
-		t.Fatalf("conv A ids: got %v, want %v", gotA, want)
+	// Interleave rather than appending per conversation in blocks: a block order
+	// is the one shape a per-conversation counter would also pass.
+	order := []string{"A", "B", "A", "C", "B", "A", "C", "C", "B"}
+	var all []uint64
+	perConv := map[string][]uint64{}
+	for i, convID := range order {
+		id := r.Append(convID, protocol.TypeTurnState, nil, time.Unix(int64(i), 0))
+		all = append(all, id)
+		perConv[convID] = append(perConv[convID], id)
 	}
 
-	// A second conversation starts its own counter at 1.
-	idB := r.Append("B", protocol.TypeTurnState, nil, time.Unix(0, 0))
-	if idB != 1 {
-		t.Fatalf("conv B first id: got %d, want 1 (independent counter)", idB)
+	if want := []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9}; !equalU64(all, want) {
+		t.Fatalf("ring-wide append order ids: got %v, want %v (one counter, no restart per conversation)", all, want)
+	}
+	seen := map[uint64]string{}
+	for i, id := range all {
+		if id < 1 {
+			t.Errorf("append %d (conv %s): id %d, want >= 1", i, order[i], id)
+		}
+		if prev, dup := seen[id]; dup {
+			t.Errorf("id %d assigned to both conv %s and conv %s — ids must be unique across conversations", id, prev, order[i])
+		}
+		seen[id] = order[i]
+	}
+	// Each conversation's own ids remain strictly increasing (a subsequence of a
+	// strictly increasing sequence), just no longer contiguous.
+	for convID, ids := range perConv {
+		for i := 1; i < len(ids); i++ {
+			if ids[i] <= ids[i-1] {
+				t.Errorf("conv %s ids %v: not strictly increasing at index %d", convID, ids, i)
+			}
+		}
 	}
 }
 
@@ -113,9 +138,12 @@ func TestAfter_CaughtUp(t *testing.T) {
 	}
 }
 
-// #1494: an afterID past the latest id assigned names an event this daemon
-// never issued — the post-daemon-restart shape, where per-conversation ids
-// restart at 1 while the phone still holds a high cursor. It is a gap (the
+// #1494: an afterID past the latest id assigned to this conversation names an
+// event this daemon never issued to it — the post-daemon-restart shape, where
+// the ring-wide counter restarts at 1 while the phone still holds a high cursor,
+// and since #2022 also the rotation shape, where the cursor came from a
+// conversation the daemon has left and sits above the new one's high-water
+// mark. It is a gap (the
 // consumer must resync), never caught-up: classifying it caught-up leaves the
 // phone dedup'ing every live event against a cursor the daemon can never reach.
 func TestAfter_GapBeyondIDSpace(t *testing.T) {
@@ -221,16 +249,23 @@ func TestNewestID(t *testing.T) {
 		}
 	})
 
-	t.Run("conversations are independent", func(t *testing.T) {
+	// #2022: each conversation still reports its OWN highest assigned id — that
+	// per-conversation view is what the #663 clamp reads — but the ids now come
+	// from the ring-wide counter, so B's do not restart at 1 behind A's.
+	t.Run("each conversation reports its own highest assigned id", func(t *testing.T) {
 		t.Parallel()
 		r := New(MaxEventsPerConversation)
-		appendControl(t, r, "A", 3)
-		appendControl(t, r, "B", 7)
+		appendControl(t, r, "A", 3) // ids 1..3
+		appendControl(t, r, "B", 7) // ids 4..10
 		if got := r.NewestID("A"); got != 3 {
 			t.Errorf("NewestID(A) = %d, want 3", got)
 		}
-		if got := r.NewestID("B"); got != 7 {
-			t.Errorf("NewestID(B) = %d, want 7", got)
+		if got := r.NewestID("B"); got != 10 {
+			t.Errorf("NewestID(B) = %d, want 10 (ring-wide counter, not a per-conversation restart)", got)
+		}
+		// Appending to A again resumes from the ring-wide counter, above B's.
+		if got := r.Append("A", protocol.TypeTurnState, nil, time.Unix(0, 0)); got != 11 {
+			t.Errorf("next A id = %d, want 11", got)
 		}
 	})
 }
@@ -334,6 +369,110 @@ func TestAfter_MiddleDeltaEvictionNoGap(t *testing.T) {
 	if want := []uint64{3, 4}; !equalU64(eventIDs(got), want) {
 		t.Fatalf("After(A, 1): got ids %v, want %v", eventIDs(got), want)
 	}
+}
+
+// afterCase is one row of an After classification table: the cursor, the ids
+// expected back, and the expected gap verdict.
+type afterCase struct {
+	name    string
+	afterID uint64
+	want    []uint64
+	wantGap bool
+}
+
+func runAfterCases(t *testing.T, r *Ring, convID string, cases []afterCase) {
+	t.Helper()
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, gap := r.After(convID, tc.afterID)
+			if gap != tc.wantGap {
+				t.Fatalf("After(%s, %d): gap = %v, want %v (events %v)", convID, tc.afterID, gap, tc.wantGap, eventIDs(got))
+			}
+			if !equalU64(eventIDs(got), tc.want) {
+				t.Fatalf("After(%s, %d): ids %v, want %v", convID, tc.afterID, eventIDs(got), tc.want)
+			}
+		})
+	}
+}
+
+// #2022 AC-3: with ids assigned ring-wide, a conversation's own ids are sparse
+// and its earliest id is normally well above 1. After must classify the aged-out
+// case against what was actually evicted from the back of the window, not infer
+// it from contiguity: the pre-#2022 `events[0].ID > afterID+1` test reads a
+// sparse-but-complete window as a gap, and a spurious gap is a spurious resync —
+// a full client reload for a connection that needed none.
+func TestAfter_SparseIDSpace(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nothing evicted", func(t *testing.T) {
+		t.Parallel()
+		r := New(MaxEventsPerConversation)
+		appendControl(t, r, "pad", 40) // ids 1..40 belong to another conversation
+		for i := 0; i < 3; i++ {       // B takes 41, 43, 45; pad takes 42, 44, 46
+			r.Append("B", protocol.TypeTurnState, nil, time.Unix(int64(i), 0))
+			r.Append("pad", protocol.TypeTurnState, nil, time.Unix(int64(i), 0))
+		}
+		runAfterCases(t, r, "B", []afterCase{
+			// The AC-3 case: B's whole history is retained, so a fresh cursor
+			// replays all of it. Contiguity inference called this a gap.
+			{"fresh cursor replays the whole retained history", 0, []uint64{41, 43, 45}, false},
+			{"at this conversation's earliest id", 41, []uint64{43, 45}, false},
+			{"at another conversation's id inside the window", 42, []uint64{43, 45}, false},
+			{"one below the latest", 44, []uint64{45}, false},
+			{"exactly at the latest is caught up", 45, nil, false},
+			{"just past the latest is a gap", 46, nil, true},
+			{"hostile max uint64 is a gap", math.MaxUint64, nil, true},
+		})
+	})
+
+	t.Run("front eviction", func(t *testing.T) {
+		t.Parallel()
+		r := New(2)
+		appendControl(t, r, "pad", 3)                                 // pad takes ids 1..3
+		r.Append("B", protocol.TypeTurnState, nil, time.Unix(0, 0))   // 4
+		r.Append("pad", protocol.TypeTurnState, nil, time.Unix(0, 0)) // 5
+		r.Append("B", protocol.TypeTurnState, nil, time.Unix(1, 0))   // 6
+		r.Append("pad", protocol.TypeTurnState, nil, time.Unix(1, 0)) // 7
+		r.Append("B", protocol.TypeTurnState, nil, time.Unix(2, 0))   // 8 — B at cap: evicts id 4
+		runAfterCases(t, r, "B", []afterCase{
+			// The consumer holds id 4 itself; everything B emitted after it is
+			// still retained, so its eviction costs this consumer nothing.
+			{"at the evicted id is replayable", 4, []uint64{6, 8}, false},
+			{"below the evicted id is a gap", 3, nil, true},
+			{"fresh cursor is a gap", 0, nil, true},
+			{"at another conversation's id above the eviction boundary", 5, []uint64{6, 8}, false},
+			{"caught up at the latest", 8, nil, false},
+		})
+	})
+}
+
+// #2022: the eviction bookkeeping distinguishes a front removal (the window's
+// back edge moved — the consumer may have missed something) from a middle delta
+// removal (older events still retained — never a gap, per the ring's contract).
+// This fixture does both in sequence, which is the one single-conversation case
+// where classification differs from the pre-#2022 contiguity inference: once the
+// front slides past a middle-evicted delta's hole, the old test could no longer
+// tell the hole from a back-edge loss and reported a gap for a cursor that was
+// still perfectly replayable.
+func TestAfter_FrontEvictionAfterMiddleDeltaDrop(t *testing.T) {
+	t.Parallel()
+	r := New(3)
+	r.Append("A", protocol.TypeTurnState, nil, time.Unix(0, 0))      // id 1 (control)
+	r.Append("A", protocol.TypeAssistantDelta, nil, time.Unix(1, 0)) // id 2 (delta)
+	r.Append("A", protocol.TypeTurnState, nil, time.Unix(2, 0))      // id 3 (control)
+	r.Append("A", protocol.TypeTurnState, nil, time.Unix(3, 0))      // id 4 — evicts delta 2 from the MIDDLE
+	r.Append("A", protocol.TypeTurnState, nil, time.Unix(4, 0))      // id 5 — no delta left: evicts id 1 from the FRONT
+
+	runAfterCases(t, r, "A", []afterCase{
+		// Only the middle-evicted delta 2 is missing above the cursor, and a
+		// missing delta is not a gap.
+		{"cursor at the front-evicted id replays the rest", 1, []uint64{3, 4, 5}, false},
+		// Id 1 itself is gone, so this consumer genuinely missed a control event.
+		{"cursor below the front-evicted id is a gap", 0, nil, true},
+		{"caught up at the latest", 5, nil, false},
+	})
 }
 
 // New(1) is the degenerate cap-1 ring: every append after the first evicts the
