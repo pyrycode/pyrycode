@@ -48,9 +48,11 @@ func buildHelloEarlyDataReplay(t *testing.T, token string, lastEventID *uint64) 
 	return envBytes
 }
 
-// appendRingEvents appends n events of type typ for convID, assigning ids
-// 1..n. Each payload is {"n":<id>} so a replay frame can be matched back to
-// the event it replays.
+// appendRingEvents appends n events of type typ for convID. Ids come from the
+// ring-wide counter (#2022), so they are 1..n only when this is the ring's first
+// use — every caller below appends for a single conversation per ring, which is
+// what keeps that true at each call site. Each payload is {"n":<i>} so a replay
+// frame can be matched back to the event it replays.
 func appendRingEvents(r *eventring.Ring, convID, typ string, n int) {
 	for i := 1; i <= n; i++ {
 		r.Append(convID, typ, json.RawMessage(fmt.Sprintf(`{"n":%d}`, i)), time.Now().UTC())
@@ -202,8 +204,8 @@ func TestV2Session_Reconnect_CaughtUp_NoReplay(t *testing.T) {
 
 // TestV2Session_Reconnect_BeyondNewest_EmitsResync is #1494: a last_event_id
 // past the conversation's newest retained id — the post-daemon-restart shape,
-// where the ring is wiped and per-conversation ids restart at 1 while the phone
-// still holds a high cursor — earns exactly one resync marker for the
+// where the ring is wiped and its ring-wide counter restarts at 1 while the
+// phone still holds a high cursor — earns exactly one resync marker for the
 // conversation. It previously produced ZERO frames: the daemon classified it
 // caught-up, and the phone, dedup'ing durably on event_id, silently dropped
 // every live event until the ids climbed back past its cursor.
@@ -552,9 +554,14 @@ func TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered(t *testin
 }
 
 // TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered is AC-3: after a
-// /clear rotates the active conversation to B (whose ring counter restarts low),
-// a phone reconnecting with a stale higher last_event_id carried over from A
-// must still receive B's live events (ids restarting at 1). cursor resolves to
+// /clear rotates the active conversation to B, a phone reconnecting with a stale
+// higher last_event_id carried over from A must still receive B's live events.
+// B's ids are low here because this ring has only ever served B — since #2022 a
+// second conversation's ids continue the ring-wide counter rather than restarting,
+// and the shape where the rotated-to conversation's live ids land AT OR BELOW an
+// in-range watermark is what
+// TestV2Session_Reconnect_InRangeCursor_OtherConversationLiveDelivered pins.
+// cursor resolves to
 // B, which already holds events 1..3; After(B, 100) sees 100 past B's latest id
 // 3. Under the #663 bug replayThrough = 100 dropped every B live frame <= 100.
 // Since #1494 that input classifies as a gap — B is real but 100 is an id this
@@ -596,6 +603,61 @@ func TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered(t *testing.T) {
 		if got.EventID == nil || *got.EventID != wantID {
 			t.Fatalf("live frame %d EventID = %v, want pointer to %d (B's live stream suppressed by stale watermark)", i, got.EventID, wantID)
 		}
+	}
+}
+
+// TestV2Session_Reconnect_InRangeCursor_OtherConversationLiveDelivered is
+// #2022's regression: the watermark the clamp writes is a per-connection scalar,
+// so before ring-wide ids it muted a *different* conversation's live stream.
+//
+// The scenario reaches the branch neither existing regression test does. Both
+// TestV2Session_Reconnect_OutOfRangeLastEventID_LiveStreamDelivered and
+// TestV2Session_Reconnect_ClearRotation_LiveStreamDelivered advertise a cursor
+// outside the resolved conversation's id space, so replayMissed emits a resync
+// and returns *before* the clamp, leaving replayThrough at 0 and the guard
+// inert. Here the cursor is legitimately in range for conversation A — exactly at
+// A's newest — so the clamp runs and replayThrough becomes 3. The daemon then
+// rotates to B and emits one structured event for it, exactly as
+// interactiveTurnEmitterV2.emit does: the id comes from the ring, and emit fans
+// out to every interactive connection regardless of conversation.
+//
+// With per-conversation counters B's first id was 1, so forwardEnvelope's guard
+// dropped it against A's watermark of 3 — no frame, no error, no resync, and
+// every B event up to id 3 muted for the life of the connection. With ring-wide
+// ids B's id is 4 and the frame flows; the guard is sound by construction and is
+// not itself changed.
+func TestV2Session_Reconnect_InRangeCursor_OtherConversationLiveDelivered(t *testing.T) {
+	t.Parallel()
+	const convB = "conv-rotated-B"
+	ring := eventring.New(eventring.MaxEventsPerConversation)
+	appendRingEvents(ring, v2TestConvID, protocol.TypeTurnState, 3) // A's newest id 3
+	cursor := func() string { return v2TestConvID }
+
+	last := uint64(3) // in range for A: caught up, so the clamp runs and no resync is emitted
+	// noise_resp only — caught-up means no replay tail and no resync marker.
+	mgr, rec, initRecv := reconnectOpenLive(t, ring, cursor, &last, 1)
+
+	// The active conversation rotates to B, which the connection's replay was
+	// never taken from, and B emits its first structured event.
+	eventID := ring.Append(convB, protocol.TypeTurnState, json.RawMessage(`{"n":"b1"}`), time.Now().UTC())
+	live := protocol.Envelope{
+		ID:      1,
+		Type:    protocol.TypeTurnState,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"n":"b1"}`),
+		EventID: &eventID,
+	}
+	if err := mgr.Push(context.Background(), v2TestConnID, live); err != nil {
+		t.Fatalf("Push conv-B live frame: %v", err)
+	}
+
+	envs := waitForEnvelopes(t, rec, 2) // noise_resp + B's live frame
+	got := decryptAppFrame(t, envs[1], initRecv)
+	if got.EventID == nil || *got.EventID != eventID {
+		t.Fatalf("conv-B live frame EventID = %v, want pointer to %d (B's stream muted by A's watermark)", got.EventID, eventID)
+	}
+	if string(got.Payload) != `{"n":"b1"}` {
+		t.Errorf("conv-B live frame payload = %s, want {\"n\":\"b1\"}", got.Payload)
 	}
 }
 

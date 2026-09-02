@@ -255,10 +255,19 @@ func (m *V2SessionManager) replayMissed(ctx context.Context, s *V2Session, after
 	// After reads: an Append landing there makes an afterID that was out of range
 	// at the first read caught-up at the second, and min holds the watermark at
 	// the stale-but-real newest so the concurrently appended event is not muted.
-	// min also preserves legitimate same-conversation dedup (afterID == newest in
-	// the caught-up case there); during the drain the watermark trails one event
-	// behind the frame being forwarded, so forwardEnvelope's guard never
-	// self-drops a replay envelope.
+	// min also preserves legitimate dedup (afterID == newest in the caught-up
+	// case); during the drain the watermark trails one event behind the frame
+	// being forwarded, so forwardEnvelope's guard never self-drops a replay
+	// envelope.
+	//
+	// The watermark this writes is a per-conn scalar with no conversation tag,
+	// while it is derived from one conversation — the one cursor() resolved. That
+	// mismatch was a real defect until #2022: ring ids restarted at 1 per
+	// conversation, so a rotation to another conversation produced live ids at or
+	// below this value and forwardEnvelope silently dropped them. Ids are now
+	// unique ring-wide, so newest is a point in a single ordering that every
+	// later event of every conversation is above. Nothing downstream re-checks
+	// the conversation, and nothing needs to.
 	s.replayThrough = min(afterID, newest)
 	if len(events) == 0 {
 		return // caught up: After returned no tail; the clamp above is all the work.
