@@ -33,6 +33,32 @@ func TestMapEventOutbound(t *testing.T) {
 	overCapValue := "QQ-OverCap-Value-" + strings.Repeat("V", 300)
 	overCapDisplay := "QQ-OverCap-Display-" + strings.Repeat("D", 300)
 
+	// The slash-command over-cap fixtures, the model-list ones' discipline applied
+	// to this variant's own four bounded dimensions. Each string is longer than
+	// EVERY bound a developer could reach for — the producer's own (streamsup's
+	// maxSlashCommandName / maxSlashCommandArgumentHint / maxSlashCommandDescription
+	// at 256, maxSlashCommandAlias at 64) and this file's maxSummaryLen (200) and
+	// maxResultSummaryRunes, neither of which is applicable here — so a re-cap
+	// mutant at any of them goes red. overCapAliasList is over the COUNT cap
+	// (maxSlashCommandAliasCount, 8) as well as carrying over-cap elements, because
+	// "aliases" is the one dimension a cut can shorten the LIST of and not only a
+	// value of.
+	//
+	// overCapAliases is a FUNCTION rather than a slice so the row below can hand ev
+	// and wantPayload separately-allocated values with equal contents — the
+	// separate-slice-literals rule those two carry everywhere else in this table,
+	// which a shared variable would quietly break.
+	overCapCommandName := "QQ-OverCap-Name-" + strings.Repeat("N", 300)
+	overCapCommandHint := "QQ-OverCap-Hint-" + strings.Repeat("H", 300)
+	overCapCommandDescription := "QQ-OverCap-Description-" + strings.Repeat("D", 300)
+	overCapAliases := func() []string {
+		out := make([]string, 0, 9)
+		for i := range 9 {
+			out = append(out, "QQ-OverCap-Alias-"+strings.Repeat(string(rune('a'+i)), 100))
+		}
+		return out
+	}
+
 	// One over-cap result fixture, used by a failed row and a completed row that
 	// differ ONLY in Status, so the pair pins the bound rather than the flag:
 	// is_error does not change how much of a result reaches the wire (#1680 AC 3).
@@ -734,6 +760,166 @@ func TestMapEventOutbound(t *testing.T) {
 			},
 			wantOK: true,
 		},
+		{
+			// Every field of every row, 1:1 — the ModelList row above's discipline
+			// applied to the OTHER inventory the same initialize reply carries.
+			// Mixed-case sentinels on all three strings and on both aliases, so a
+			// mapper that ran strings.ToLower goes red. The aliases are claude's own
+			// order, deliberately NOT alphabetical, so a sort or a dedupe is caught.
+			// The two entries differ in every dimension — one carries aliases and a
+			// cut report, the other neither — so a reversal or a re-sort of the outer
+			// slice is caught, and so is a mapper that copied row 0 twice.
+			// DroppedCommands is neither 0 nor len(Commands), so a constant and a
+			// recomputation from the payload's own row count are both caught.
+			//
+			// ev and wantPayload carry SEPARATE slice literals for the ModelList row's
+			// reason, and here it is the rule AC 4 states rather than a precaution:
+			// the arm shares Aliases and TruncatedFields backing arrays with the event
+			// BY DESIGN, so an in-place sort or dedupe would mutate the expectation
+			// alongside the input and stay green — while in production it would
+			// corrupt the list #2005 reads on a relay-leg goroutine.
+			name: "SlashCommandList -> slash_command_list, every field verbatim",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{
+					{
+						Name:            "QQ-Name-Alpha-ZZ",
+						ArgumentHint:    "QQ-Hint-Alpha-ZZ",
+						Description:     "QQ-Description-Alpha-ZZ",
+						Aliases:         []string{"QQ-Reset-ZZ", "QQ-New-ZZ"},
+						TruncatedFields: []string{"description", "aliases"},
+					},
+					{
+						Name:         "QQ-Name-Beta-ZZ",
+						ArgumentHint: "QQ-Hint-Beta-ZZ",
+						Description:  "QQ-Description-Beta-ZZ",
+					},
+				},
+				DroppedCommands: 3,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeSlashCommandList,
+			wantPayload: protocol.SlashCommandListPayload{
+				ConversationID: "c1",
+				Commands: []protocol.SlashCommand{
+					{
+						Name:            "QQ-Name-Alpha-ZZ",
+						ArgumentHint:    "QQ-Hint-Alpha-ZZ",
+						Description:     "QQ-Description-Alpha-ZZ",
+						Aliases:         []string{"QQ-Reset-ZZ", "QQ-New-ZZ"},
+						TruncatedFields: []string{"description", "aliases"},
+					},
+					{
+						Name:         "QQ-Name-Beta-ZZ",
+						ArgumentHint: "QQ-Hint-Beta-ZZ",
+						Description:  "QQ-Description-Beta-ZZ",
+					},
+				},
+				DroppedCommands: 3,
+			},
+			wantOK: true,
+		},
+		{
+			// AC 2 at the struct level, on BOTH of the entry's list fields at once.
+			// An allocating mapper goes red here because reflect.DeepEqual reports
+			// false for nil against []string{}, whatever slices.Equal would say for
+			// the same pair — the trap turnevent.SlashCommand.Aliases' doc names. The
+			// byte test below pins the same two nils where a phone sees them, and
+			// there they mean OPPOSITE things.
+			name: "SlashCommandList row with nothing cut keeps nil slices",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{
+					{
+						Name:         "QQ-Name-Bare-ZZ",
+						ArgumentHint: "QQ-Hint-Bare-ZZ",
+						Description:  "QQ-Description-Bare-ZZ",
+					},
+				},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeSlashCommandList,
+			wantPayload: protocol.SlashCommandListPayload{
+				ConversationID: "c1",
+				Commands: []protocol.SlashCommand{
+					{
+						Name:         "QQ-Name-Bare-ZZ",
+						ArgumentHint: "QQ-Hint-Bare-ZZ",
+						Description:  "QQ-Description-Bare-ZZ",
+					},
+				},
+			},
+			wantOK: true,
+		},
+		{
+			// AC 3's re-cap mutant, the ModelList over-cap row's discipline applied to
+			// all four of this variant's bounded text dimensions at once. Every
+			// fixture is longer than EVERY bound a developer could reach for — the
+			// producer's own (streamsup's maxSlashCommandName /
+			// maxSlashCommandArgumentHint / maxSlashCommandDescription at 256,
+			// maxSlashCommandAlias at 64) and this file's maxSummaryLen (200) and
+			// maxResultSummaryRunes, neither of which is applicable here. The alias
+			// COUNT is over maxSlashCommandAliasCount (8) as well, so a re-cap of the
+			// list's length and not just its elements goes red too.
+			name: "SlashCommandList over-cap strings and aliases cross uncut",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{
+					{
+						Name:            overCapCommandName,
+						ArgumentHint:    overCapCommandHint,
+						Description:     overCapCommandDescription,
+						Aliases:         overCapAliases(),
+						TruncatedFields: []string{"name", "argument_hint", "description", "aliases"},
+					},
+				},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeSlashCommandList,
+			wantPayload: protocol.SlashCommandListPayload{
+				ConversationID: "c1",
+				Commands: []protocol.SlashCommand{
+					{
+						Name:            overCapCommandName,
+						ArgumentHint:    overCapCommandHint,
+						Description:     overCapCommandDescription,
+						Aliases:         overCapAliases(),
+						TruncatedFields: []string{"name", "argument_hint", "description", "aliases"},
+					},
+				},
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under test: tc carries a conspicuous TurnID
+			// and a non-zero Seq, and the expected payload has no field either could
+			// land in. Mirrors the ModelList row above.
+			name: "SlashCommandList ignores turn addressing (not turn-scoped)",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{Name: "QQ-Name-Alpha-ZZ"}},
+			},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeSlashCommandList,
+			wantPayload: protocol.SlashCommandListPayload{
+				ConversationID: "c1",
+				Commands:       []protocol.SlashCommand{{Name: "QQ-Name-Alpha-ZZ"}},
+			},
+			wantOK: true,
+		},
+		{
+			// Zero value maps rather than dropping — the absence of an empty-Commands
+			// suppression branch, under test. The gate that decides whether the event
+			// exists at all is the producer's (streamsup's emitSlashCommandList
+			// suppresses the empty list); a second, differently-shaped filter here
+			// would silently diverge from it. AC 2's nil half at the struct level: the
+			// nil Commands stays NIL rather than becoming an allocated empty slice,
+			// SlashCommandListPayload.MarshalJSON owning nil→[] on the wire.
+			name:    "SlashCommandList zero value maps rather than dropping",
+			ev:      turnevent.SlashCommandList{},
+			tc:      tc,
+			wantTyp: protocol.TypeSlashCommandList,
+			wantPayload: protocol.SlashCommandListPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
 		// Drop cases: ThoughtChunk (ADR 025 — text not forwarded) and the
 		// zero/nil Event.
 		{
@@ -1142,6 +1328,295 @@ func TestMapEventModelListOnTheWire(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// slash_command_list carries BOTH nil polarities in adjacent rows of one table,
+// exactly as model_list does, and it carries them on ONE struct rather than
+// across two: protocol.SlashCommand owns both Aliases and TruncatedFields, and
+// its MarshalJSON normalises the first while deliberately exempting the second.
+//
+//   - "commands" and "aliases" want [] and forbid null. SlashCommandListPayload
+//     and SlashCommand each own a MarshalJSON that normalises its own nil, for
+//     two DIFFERENT reasons (read them there — the payload's is that [] is a
+//     positive statement, the entry's is that claude never sends an empty alias
+//     array at all, so absent and empty are one reading). The mapping's job is
+//     only to reach them with the nil intact.
+//   - "truncated_fields" wants null and forbids []. SlashCommand.MarshalJSON
+//     deliberately EXEMPTS it, so nothing normalises it afterwards:
+//     nothing-was-cut is an ABSENCE, and a mapper that helpfully allocated an
+//     empty slice — or appended into a fresh one — would emit [] and tell a
+//     client that claude's cut text is complete.
+//
+// So the polarity is per FIELD, not per test, and the neighbouring rows of this
+// table disagree on purpose: a reader who "fixes" whichever of the two they meet
+// second breaks the other.
+//
+// The assertion runs on json.Marshal of the value MapEvent RETURNED, never on a
+// test-built payload. With TWO MarshalJSON methods in play, a hand-built payload
+// would prove the marshallers work and say nothing whatever about whether the
+// mapping reached them with the nils intact.
+//
+// Needles are always the full "key":"value" or "key":[…] pair, never a bare value
+// — a bare-value needle passes against a mapping that swapped two same-typed
+// neighbours, and THREE of this row's four carried fields are strings, so that
+// hazard is acute. No sentinel here contains a digit, so the turn-addressing row
+// can forbid a bare seq without a false positive.
+func TestMapEventSlashCommandListOnTheWire(t *testing.T) {
+	t.Parallel()
+
+	const convSentinel = "cc-conv-sentinel"
+	tc := TurnContext{ConversationID: convSentinel, TurnID: "t-alpha", Seq: 7}
+
+	// claude's own order for `clear`'s two published aliases, beside what sorting
+	// them would produce — so the ordering row forbids the exact bytes a
+	// canonicalising mapper would emit. Prefixed so neither is a bare word another
+	// row could match by accident.
+	claudeAliasOrder := `"aliases":["qq-reset","qq-new"]`
+	sortedAliasOrder := `"aliases":["qq-new","qq-reset"]`
+
+	tests := []struct {
+		name    string
+		ev      turnevent.SlashCommandList
+		tc      TurnContext
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "nil commands reaches the wire as []",
+			ev:   turnevent.SlashCommandList{},
+			want: []string{
+				`"commands":[]`,
+				`"dropped_commands":0`,
+				`"conversation_id":"` + convSentinel + `"`,
+			},
+			notWant: []string{`"commands":null`},
+		},
+		{
+			// The control: [] is not what the mapping emits for everything, so the
+			// nil row above passes for the right reason.
+			name: "populated list carries the entry",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{
+					Name:         "qq-name-sentinel",
+					ArgumentHint: "qq-hint-sentinel",
+					Description:  "qq-description-sentinel",
+				}},
+			},
+			want: []string{
+				`"name":"qq-name-sentinel"`,
+				`"argument_hint":"qq-hint-sentinel"`,
+				`"description":"qq-description-sentinel"`,
+			},
+			notWant: []string{`"commands":[]`},
+		},
+		{
+			// AC 2. A row that had nothing cut reaches the wire as null, never [].
+			name: "row with nothing cut reaches the wire as null",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{Name: "qq-name-sentinel"}},
+			},
+			want:    []string{`"truncated_fields":null`},
+			notWant: []string{`"truncated_fields":[]`},
+		},
+		{
+			// The OTHER polarity, one field up: a nil alias list is a COLLAPSE, not
+			// an absence, so it reaches the wire as []. Adjacent to the row above on
+			// purpose — the two disagree, and both are right.
+			name: "nil aliases reach the wire as []",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{Name: "qq-name-sentinel"}},
+			},
+			want:    []string{`"aliases":[]`},
+			notWant: []string{`"aliases":null`},
+		},
+		{
+			// AC 3. Aliases are what make a consumer's grey-out correct, and their
+			// order is claude's: the desktop Actions menu's own reset entry is an
+			// ALIAS of clear rather than a command name, so a path that dropped or
+			// re-ordered them greys out a command that works.
+			name: "aliases cross in claude's own order",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{
+					Name:    "qq-name-sentinel",
+					Aliases: []string{"qq-reset", "qq-new"},
+				}},
+			},
+			want:    []string{claudeAliasOrder},
+			notWant: []string{sortedAliasOrder},
+		},
+		{
+			// AC 2, first isolating row: EXACTLY ONE name. A row carrying a second
+			// would pin neither — a whitelist mutant keeping only ("name",
+			// "description") would stay green against an over-determined fixture.
+			// "argument_hint" is the sharpest single name to isolate because it is
+			// the only one of the four that is NOT byte-identical to claude's own key
+			// (argumentHint), so a mapper translating names rather than copying them
+			// goes red here and nowhere else.
+			name: "only argument_hint cut survives the mapping",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{
+					Name:            "qq-name-sentinel",
+					TruncatedFields: []string{"argument_hint"},
+				}},
+			},
+			want:    []string{`"truncated_fields":["argument_hint"]`},
+			notWant: []string{`"truncated_fields":null`, `"truncated_fields":[]`},
+		},
+		{
+			// AC 2, second isolating row: "aliases", the one name that can mean two
+			// different cuts (a string in the list shortened, or the list itself
+			// shortened) and says the same thing either way. Alone, so a whitelist
+			// mutant dropping it cannot hide behind a neighbour.
+			name: "only aliases cut survives the mapping",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{
+					Name:            "qq-name-sentinel",
+					TruncatedFields: []string{"aliases"},
+				}},
+			},
+			want:    []string{`"truncated_fields":["aliases"]`},
+			notWant: []string{`"truncated_fields":null`, `"truncated_fields":[]`},
+		},
+		{
+			// All four the producer can record, in ITS order, as ONE needle — so
+			// member ORDER is pinned and not merely membership.
+			name: "all four cut names cross in producer order",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{
+					Name:            "qq-name-sentinel",
+					TruncatedFields: []string{"name", "argument_hint", "description", "aliases"},
+				}},
+			},
+			want:    []string{`"truncated_fields":["name","argument_hint","description","aliases"]`},
+			notWant: []string{`"truncated_fields":null`},
+		},
+		{
+			// AC 2. The drop count is the decode's, so the fixture's row count and
+			// drop count differ: a constant 0 and a recomputation from len(commands)
+			// are each a separate notWant.
+			name: "dropped_commands is the decode's count, not the row count",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{
+					{Name: "qq-name-alpha"},
+					{Name: "qq-name-beta"},
+				},
+				DroppedCommands: 3,
+			},
+			want:    []string{`"dropped_commands":3`},
+			notWant: []string{`"dropped_commands":0`, `"dropped_commands":2`},
+		},
+		{
+			// AC 1's addressing half, checked where a client would see it: a struct
+			// comparison cannot see a turn id that arrived through an embedded field
+			// or a marshaller. Both halves of the turn context are conspicuous.
+			name: "no turn addressing reaches the wire",
+			ev: turnevent.SlashCommandList{
+				Commands: []turnevent.SlashCommand{{Name: "qq-name-sentinel"}},
+			},
+			tc:      TurnContext{ConversationID: convSentinel, TurnID: "t-must-not-appear", Seq: 42},
+			want:    []string{`"conversation_id":"` + convSentinel + `"`},
+			notWant: []string{"t-must-not-appear", "42"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			evTC := tt.tc
+			if evTC.ConversationID == "" {
+				evTC = tc
+			}
+			typ, payload, ok := MapEvent(tt.ev, evTC)
+			if !ok {
+				t.Fatal("the mapping suppressed a slash-command list; it must be forwarded")
+			}
+			if typ != protocol.TypeSlashCommandList {
+				t.Fatalf("typ: got %q, want %q", typ, protocol.TypeSlashCommandList)
+			}
+			b, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatalf("marshal mapped payload: %v", err)
+			}
+			for _, want := range tt.want {
+				if !strings.Contains(string(b), want) {
+					t.Fatalf("mapped bytes missing %s:\n%s", want, b)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(string(b), notWant) {
+					t.Fatalf("mapped bytes carry %s:\n%s", notWant, b)
+				}
+			}
+		})
+	}
+}
+
+// AC 4's read-only half, which the two tests above cannot see between them. Both
+// compare the mapping's OUTPUT; this one asserts what the mapping did to its
+// INPUT.
+//
+// A DeepEqual against an independently-built twin catches an arm that wrote
+// through e.Commands[i] — an in-place sort, dedupe, filter, or a "normalise the
+// nils while we're here". The event is passed BY VALUE and its struct is copied,
+// but Commands is a slice header, so such a write reaches the caller's backing
+// array; and every output-comparing test in this file would still pass, the
+// mutation landing in the input and the expectation alike. The twin is built from
+// separate literals for exactly that reason: a snapshot taken by assigning the
+// event would share those same arrays and make the comparison vacuous. In
+// production that write would corrupt the list #2005 reads on a relay-leg
+// goroutine.
+//
+// AC 4's OTHER half — the payload's outer slice is freshly allocated rather than
+// the event's own — is deliberately NOT asserted here, because no assertion could
+// fail. protocol.SlashCommand and turnevent.SlashCommand are distinct types, so
+// assigning the event's slice across does not typecheck and every construction
+// that does allocates. A write-through-the-payload check would read as a pin and
+// be green against every possible arm, which is worse than no check at all.
+//
+// Nor is it asserted that the inner slices are copied. They are not: Aliases and
+// TruncatedFields cross as the slice headers they are and go on sharing backing
+// arrays with the event BY DESIGN. The contract is carry-never-mutate-through,
+// not copy, and a test demanding distinct inner arrays would forbid the design.
+func TestMapEventSlashCommandListDoesNotMutateTheEvent(t *testing.T) {
+	t.Parallel()
+
+	ev := turnevent.SlashCommandList{
+		Commands: []turnevent.SlashCommand{
+			{
+				Name:            "qq-name-alpha",
+				ArgumentHint:    "qq-hint-alpha",
+				Description:     "qq-description-alpha",
+				Aliases:         []string{"qq-reset", "qq-new"},
+				TruncatedFields: []string{"description"},
+			},
+			{Name: "qq-name-beta"},
+		},
+		DroppedCommands: 3,
+	}
+	twin := turnevent.SlashCommandList{
+		Commands: []turnevent.SlashCommand{
+			{
+				Name:            "qq-name-alpha",
+				ArgumentHint:    "qq-hint-alpha",
+				Description:     "qq-description-alpha",
+				Aliases:         []string{"qq-reset", "qq-new"},
+				TruncatedFields: []string{"description"},
+			},
+			{Name: "qq-name-beta"},
+		},
+		DroppedCommands: 3,
+	}
+
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "c1"})
+	if !ok {
+		t.Fatal("the mapping suppressed a slash-command list; it must be forwarded")
+	}
+	if _, isList := payload.(protocol.SlashCommandListPayload); !isList {
+		t.Fatalf("payload: got %T, want protocol.SlashCommandListPayload", payload)
+	}
+	if !reflect.DeepEqual(ev, twin) {
+		t.Fatalf("the mapping wrote to the event it was handed:\n got %#v\nwant %#v", ev, twin)
 	}
 }
 

@@ -1049,10 +1049,13 @@ type SlashCommand struct {
 // into an emitter of its own, so more than one call site reaches it); the ENTRY-COUNT
 // BOUND, and the drop count that arrives with it, is #1826's and is IN THE TREE —
 // maxSlashCommandListEntries, cut in emitModelList above both rungs that read the
-// array, reported here as DroppedCommands; and the PUBLISH — turnbridge.MapEvent's
-// arm and cmd/pyry's interactiveTurnEmitterV2.Handle case — is #1720's and is still
-// open. #1719 is CLOSED and was the decode, so it names no future producer. ONE of
-// the four remains, and it is the only one that was ever a WIRE change.
+// array, reported here as DroppedCommands; and the PUBLISH, which #1720 owned as one
+// piece and which was SPLIT — turnbridge.MapEvent's arm is #2001 and is IN THE TREE,
+// mapping this variant onto protocol.SlashCommandListPayload with DroppedCommands
+// carried; cmd/pyry's interactiveTurnEmitterV2.Handle case is #2003 and is still open.
+// #1719 is CLOSED and was the decode, so it names no future producer. What remains of
+// the four is the EMISSION alone, and it is the only piece that was ever a WIRE change
+// — the mapping is a daemon-internal translation onto a shape already declared.
 //
 // EVERY DIMENSION IS NOW BOUNDED and there is no unbounded one left to name. The
 // per-entry TEXT by streamsup's four field caps, reported per entry in
@@ -1063,13 +1066,18 @@ type SlashCommand struct {
 // supplied it for ModelList. What that does NOT give is a bound the WIRE can rely
 // on; DroppedCommands' own doc states the gap and names #1720 as its owner.
 //
-// IT IS PUBLISHED BY NO PATH TODAY. turnbridge.MapEvent has no arm for it, so its
-// default drops it, and cmd/pyry's interactiveTurnEmitterV2.Handle has no case,
-// so an event of this variant is logged by kind and discarded. ModelList is NOT
-// the example of a variant the default drops any more — it grew its own MapEvent
-// arm in #1848 and its own Handle case in #1849 — so that precedent has to be
-// read off MapEvent itself rather than inherited from this family's earlier
-// tickets.
+// IT IS PUBLISHED BY NO PATH TODAY, AND THE REASON IS NOW THE HANDLE CASE ALONE.
+// turnbridge.MapEvent grew its arm for this variant in #2001, so MapEvent's default
+// no longer drops it — but cmd/pyry's interactiveTurnEmitterV2.Handle still has no
+// case, so an event of this variant is logged by kind and discarded before anything
+// reaches that arm. The mapping is therefore reachable only by a caller that hands
+// MapEvent this variant explicitly, which is what #2003's Handle case and #2005's
+// connect-time resolver will each be. ModelList is NOT the example of a variant the
+// default drops any more — it grew its own MapEvent arm in #1848 and its own Handle
+// case in #1849 — and this variant is now the example of one MAPPED but not yet
+// EMITTED, a state the family had not previously had; both precedents have to be
+// read off MapEvent and Handle themselves rather than inherited from this family's
+// earlier tickets.
 //
 // It opens and closes no turn, exactly as the background-task variants do not,
 // and it is not even per-turn: one initialize exchange per child produces one of
@@ -1090,8 +1098,10 @@ type SlashCommand struct {
 // for the ENTRY-COUNT BOUND that produces it — which is how ModelList.DroppedModels
 // arrived with streamsup's maxModelListEntries and BackgroundTaskRoster.DroppedTasks
 // with maxTaskRosterEntries. The asymmetry a reader who knew the wire type would
-// once have read as an oversight is CLOSED, and what remains is the mapping between
-// the two fields, which is #1720's.
+// once have read as an oversight is CLOSED, and so is the mapping between the two
+// fields: turnbridge.MapEvent's arm carries this count onto
+// protocol.SlashCommandListPayload.DroppedCommands verbatim (#2001), never
+// recomputed from len(Commands) and never zeroed.
 //
 // claude's session_id is deliberately not a field, for BackgroundTaskStarted's
 // reason: claude's session identity is NOT the daemon's conversation identity,
