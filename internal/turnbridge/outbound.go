@@ -527,6 +527,112 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Models:         models,
 			DroppedModels:  e.DroppedModels,
 		}, true
+	case turnevent.SlashCommandList:
+		// The OTHER inventory the one initialize exchange carries, beside the
+		// ModelList arm above: that one answers what can be SELECTED, this one what
+		// can be INVOKED. Conversation identity only, for that arm's reason —
+		// tc.TurnID and tc.Seq are ignored, the payload has no field for either, and
+		// one initialize exchange per child produces one of these. It opens and
+		// closes no turn: cmd/pyry's turnMarkFor answers turnMarkNone by
+		// construction, and TestTurnMarkFor_TotalOverEveryVariant pins that
+		// independently.
+		//
+		// Every field crosses 1:1 and VERBATIM. This is translation, not policy, and
+		// nothing here is derived, defaulted or synthesised — ConversationID is the
+		// only value the mapping supplies. Specifically:
+		//
+		//   - A nil Commands is FORWARDED, not pre-allocated.
+		//     SlashCommandListPayload's MarshalJSON owns nil→[], and allocating here
+		//     would produce the same bytes while hiding which layer owns the
+		//     normalisation — the rule the ToolStart, BackgroundTaskRoster and
+		//     ModelList arms above all state.
+		//   - Aliases crosses as the SLICE IT IS, nil left nil, and
+		//     protocol.SlashCommand's MarshalJSON normalises it to []. Same shape as
+		//     Commands but NOT the same reason: that method's own doc argues the
+		//     collapse from a measurement (claude never sends an empty alias array,
+		//     so absent and empty are one reading), where the payload's argues that
+		//     [] is a positive statement. Note the hazard here is ONLY the
+		//     layer-ownership one: an allocation would produce identical bytes.
+		//   - TruncatedFields crosses as the slice it is too, and HERE the nil is
+		//     load-bearing. SlashCommand's MarshalJSON deliberately EXEMPTS this
+		//     field, so nothing normalises it afterwards: nothing-was-cut is an
+		//     ABSENCE and must reach the wire as null. A mapper that helpfully
+		//     allocated an empty slice — or appended into a fresh one — would emit []
+		//     and tell a client that claude's cut text is complete. That is the
+		//     RateLimited and ModelList arms' rule above, unchanged. THE ASYMMETRY
+		//     WITH Aliases ONE FIELD UP IS THE POINT, in both directions: two list
+		//     fields of ONE struct, one normalised and one not, and a reader who takes
+		//     that for an accident will "fix" whichever of them they meet second.
+		//   - DroppedCommands is CARRIED, never recomputed from len(commands) and
+		//     never a constant. It is the count the decode recorded when streamsup's
+		//     maxSlashCommandListEntries fired: recomputing it from the payload's own
+		//     rows yields the wrong number by construction, and shipping 0 tells a
+		//     client that a capped menu is the whole menu. BackgroundTaskRoster's
+		//     DroppedTasks states the reason, unchanged.
+		//
+		// NOTHING IS RE-CAPPED, RE-ORDERED, CANONICALISED OR CHARSET-CHECKED. The
+		// producer bounded every dimension at construction —
+		// turnevent.SlashCommandList's own doc names them together, four field caps
+		// plus an alias-count cap plus an entry cap — so a second cap here would be a
+		// second place the limit is decided and the two could disagree silently.
+		// maxSummaryLen and maxResultSummaryRunes live in THIS file and are NOT
+		// applicable bounds; reaching for either is the specific mistake to avoid.
+		// Entry order is claude's and so is alias order, and NO CHARSET ASSUMPTION
+		// BELONGS HERE: Name is not an identifier — one name in the committed capture
+		// is __remote-workflow — and an alias is not a second entry, so expanding one
+		// into a synthetic row would invent a command claude never published.
+		//
+		// A FRAME-LEVEL SIZE BOUND IS DELIBERATELY ABSENT and is #2002's, which is
+		// blocked on this slice and amends this arm. It is not an oversight: the
+		// producer's caps leave a 128-entry list far above the v2 application-envelope
+		// cap, and #2002 is where that is answered. Nothing routes this variant to
+		// MapEvent yet, and both slices that would — #2003's Handle case and #2005's
+		// resolver — are themselves blocked behind #2002, so no over-cap frame can
+		// ship ahead of its bound.
+		//
+		// CARRY, NEVER MUTATE THROUGH, the ModelList arm's rule with its evidence one
+		// ticket away rather than in the tree. The loop copies slice HEADERS, so the
+		// payload shares Aliases and TruncatedFields backing arrays with the event it
+		// was handed. There is no sessionModelHold analogue for this list today —
+		// that retention is #2004's — so the reason the rule binds NOW is #2005,
+		// which reads the mapped payload on a relay-leg goroutine. A sort, an
+		// in-place dedupe, a filter, or an append into a slice the event owns would
+		// therefore corrupt a retained menu across two goroutines. A read-only loop
+		// building a fresh OUTER slice holds the rule by construction, and
+		// SlashCommandListPayload's MarshalJSON refuses to reach through into
+		// p.Commands[i] for the same reason and says so.
+		//
+		// EVERY STRING HERE IS WORKSPACE-AUTHORED, a lower-trust origin than claude's
+		// own strings, and NONE OF THEM MAY REACH A LOG RECORD — so this arm writes
+		// no log line at all, which is what cmd/pyry's eventKind arm for this variant
+		// enforces on its own side by returning the variant NAME only. This slice
+		// adds exactly ONE sink to the enumeration streamsup's maxSlashCommandName
+		// owns: a field of a protocol.SlashCommandListPayload. No exec.Command
+		// argument, no filepath.Join, no filepath.Match, no regexp, no log attribute.
+		// The bytes are bounded but NOT sanitized, and the render boundary owing that
+		// is the CLIENT's, as both types' SECURITY paragraphs assign.
+		//
+		// No suppression branch, not even on an empty Commands. The gate that decides
+		// whether the event exists at all is the producer's — streamsup's
+		// emitSlashCommandList suppresses the empty list — so a second,
+		// differently-shaped filter here would silently diverge from it, the hazard
+		// the ThinkingProgress, RateLimited, ModelAnnounced and ModelList arms above
+		// each name. A zero-value SlashCommandList therefore maps.
+		var commands []protocol.SlashCommand
+		for _, c := range e.Commands {
+			commands = append(commands, protocol.SlashCommand{
+				Name:            c.Name,
+				ArgumentHint:    c.ArgumentHint,
+				Description:     c.Description,
+				Aliases:         c.Aliases,
+				TruncatedFields: c.TruncatedFields,
+			})
+		}
+		return protocol.TypeSlashCommandList, protocol.SlashCommandListPayload{
+			ConversationID:  tc.ConversationID,
+			Commands:        commands,
+			DroppedCommands: e.DroppedCommands,
+		}, true
 	default:
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false

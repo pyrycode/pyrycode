@@ -1795,9 +1795,11 @@ func TestSlashCommandListType_IsNotClaudesVocabulary(t *testing.T) {
 //   - dropped_commands. 2, non-zero so this fixture pins the value rather than
 //     the zero encoding. Something counts it since #1826 — streamsup's
 //     maxSlashCommandListEntries bounds the entry count and
-//     turnevent.SlashCommandList.DroppedCommands carries the cut — but nothing
-//     MAPS that onto this field, so the 2 here is still a fixture's number and
-//     not a producer's. #1720 is where the field and that counter meet.
+//     turnevent.SlashCommandList.DroppedCommands carries the cut, and since #2001
+//     turnbridge.MapEvent's arm MAPS that onto this field verbatim. The 2 here is
+//     nevertheless still a fixture's number rather than a producer's, because this
+//     is a decode fixture and no live frame carries either count yet — #2003 is
+//     what emits one.
 //
 // Row 1's description is asserted by measured property rather than as an exact
 // string — it is the only row too long for the table, and byte length, rune
@@ -1896,10 +1898,10 @@ func TestSlashCommandListPayload_RoundTrip(t *testing.T) {
 
 	// The count dimension, decided at the menu level and distinct from any row's
 	// text cut. A producer counts it since #1826 (streamsup's
-	// maxSlashCommandListEntries), but nothing maps that count onto this payload and
-	// no frame of this type is produced at all, so a client still cannot read
-	// len(commands) + dropped_commands as the menu's true size off any live frame —
-	// #1720 is what makes that reading true.
+	// maxSlashCommandListEntries) and turnbridge.MapEvent's arm now maps that count
+	// onto this payload verbatim (#2001), but no frame of this type is produced at
+	// all, so a client still cannot read len(commands) + dropped_commands as the
+	// menu's true size off any live frame — #2003 is what makes that reading true.
 	if payload.DroppedCommands != 2 {
 		t.Errorf("DroppedCommands: got %d, want 2", payload.DroppedCommands)
 	}

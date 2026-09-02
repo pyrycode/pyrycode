@@ -3041,11 +3041,13 @@ func (p *Parser) emitModelList(line []byte) {
 // ModelList explicitly — so the value never reaches MapEvent AT ALL. "It falls to
 // MapEvent's default" is the wrong reason for the right conclusion. NOTHING RETAINS
 // IT either: there is no sessionModelHold analogue for this array, which
-// maxSlashCommandName's doc already states and owns. Handle's case and MapEvent's arm
-// are both #1720's and still open. What the value DOES reach is eventKind, whose
+// maxSlashCommandName's doc already states and owns. MapEvent's arm has since LANDED
+// (#2001) and that does not change a word above: an arm is not a route, and nothing on
+// this lane calls MapEvent with this variant until Handle's case, which is #2003's and
+// still open. What the value DOES reach is eventKind, whose
 // SlashCommandList arm returns the variant NAME only — and that arm, not this doc,
 // carries the enumeration of which drop sites are reachable for it and which are not,
-// so there is one copy to correct when #1720's case lands.
+// so there is one copy to correct when #2003's case lands.
 func (p *Parser) emitSlashCommandList(entries []commandEntryLine, dropped int) {
 	if len(entries) == 0 {
 		return
@@ -3318,8 +3320,9 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine, dropped int) {
 // argument is `dropped`'s SIMPLER and STRONGER: this record is the ONLY observable
 // that decode has. The operator-versus-client half does not transfer — `dropped`
 // completes a client-facing wire field, and this number has no wire field to
-// complete, protocol.SlashCommandListPayload.DroppedCommands being unmapped until
-// #1720. What it no
+// complete — which is NOT what changed when turnbridge.MapEvent's arm mapped
+// `dropped` onto protocol.SlashCommandListPayload.DroppedCommands (#2001): that
+// mapping gave THAT counter its wire field, and this one still has none. What it no
 // longer lacks is an event, a daemon-internal value and a retention: since #1877 the
 // entries this counts are copied into a turnevent.SlashCommandList and retained for
 // that event's lifetime, each name under maxSlashCommandName. Without it a

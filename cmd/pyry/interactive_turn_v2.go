@@ -699,8 +699,11 @@ func eventKind(ev turnevent.Event) string {
 		// for 16 of turnevent.Event's 18 implementations, and the two without are
 		// PermissionRequest, which streamsup.Parser never produces (it is
 		// PTY/modalbridge-only, as TestTurnMarkFor_TotalOverEveryVariant states
-		// independently), and SlashCommandList, whose Handle case and wire mapping
-		// are #1720's; #1719 is closed and was the decode. The reachable eventKind
+		// independently), and SlashCommandList, whose wire mapping has since landed
+		// (#2001) and whose Handle case is #2003's; #1719 is closed and was the
+		// decode. Landing the mapping did not shrink that count of two — a
+		// turnbridge.MapEvent arm is not a Handle case, and this file's Debug stays a
+		// live call site for the variant until #2003. The reachable eventKind
 		// call site left on this lane for THIS variant is the no-cursor drop, which
 		// returns before the type switch. Without the arm every eventKind site —
 		// here, acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go —
@@ -733,8 +736,10 @@ func eventKind(ev turnevent.Event) string {
 		// neither is the entry count.
 		//
 		// Unlike the four arms above, NO Handle case claims this variant: #1854
-		// declares it, internal/streamsup's emitModelList produces it (#1877), and
-		// the Handle case that would claim it is #1720's, still open. So this file's
+		// declares it, internal/streamsup's emitModelList produces it (#1877),
+		// turnbridge.MapEvent maps it (#2001), and the Handle case that would claim it
+		// is #2003's, still open — so the mapping exists with nothing on this lane
+		// routing to it, which is why the arm below is unchanged. So this file's
 		// `interactive_turn.unknown` Debug IS a live call site for it, alongside the
 		// no-cursor drop that returns before the type switch, and
 		// stream_turn_drain.go's sink-full droppable drop and not-active-session
