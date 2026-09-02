@@ -387,3 +387,61 @@ above and re-walked from the top)
 **Date:** 2026-09-03
 </content>
 </invoke>
+
+## Revisions
+
+### 2026-09-03 — two test-side departures, both found by mutant measurement
+
+Neither changes the shipped contract; both change what the suite proves about
+it. Recorded here rather than folded silently into the plan above.
+
+- **AC 5 pins which file wins, not only that the answer is stable.** The
+  Testing strategy above says "the assertion is on *stability*, not on which of
+  the two wins". That is too weak to be worth writing: a selection rule that is
+  deterministic but wrong — newest-wins, or last-in-name-order — is stable
+  across any number of calls and passes it. The shipped test asserts the exact
+  path, and the fixture stores the lexicographically *smaller* name **first**
+  so those two neighbouring rules answer a different file. Measured: an overlay
+  mutant walking the entries in reverse reddens
+  `TestResolvePath_TwoFilesOneAttachmentDirectory` and nothing else in the
+  package.
+
+- **AC 3's shape refusal needed a row the plan did not have, because it shipped
+  unpinned without one.** The plan's invalid-id table is `EnsureDir`'s own rows,
+  and every one of them names a non-canonical id that *also* names a directory
+  that does not exist — so each refuses by absence, and the shape check the
+  table is named after is never the reason. Measured: an overlay mutant deleting
+  **both** `conversations.ValidID` calls passed the entire package green,
+  including all seven of those rows. This is precisely the trap this package's
+  mutation-testing lessons name — a property true by construction still needs
+  its own mutant, or it ships unpinned.
+
+  `TestResolvePath_CaseFoldedID` closes it. A case-folded id is the one
+  non-canonical shape that resolves anyway: `EvalSymlinks` deliberately does not
+  case-canonicalise, and APFS is case-insensitive by default, so on macOS the
+  uppercased pair reaches the directory the lowercase pair stored into and only
+  the shape check refuses. It is the mutant's sole red. The package-level test
+  ids are all digits and dashes and fold to themselves, so the row carries two
+  hex-lettered ids of its own. On a case-sensitive filesystem the row still
+  passes, by absence rather than by shape — correct there, just not the sole
+  red, which is stated in the test's own comment rather than left to be
+  rediscovered.
+
+**Mutants run, unfiltered across the whole package** (no `-run`, per this
+package's own lesson that a filter is exactly what would make a
+"nothing else reddens" claim look true regardless):
+
+| Mutant | Sole red | Also red |
+|---|---|---|
+| drop the `IsRegular` condition | `TestResolvePath_NonRegularEntry` (both rows) | nothing |
+| drop the leading-dot condition | `TestResolvePath_LeftoverTempFile` (both rows) | nothing |
+| `strings.HasPrefix(resolved, root)` in place of the equality | `TestResolvePath_SiblingConversationSymlink` | nothing |
+| reinstate `EnsureDir`'s `MkdirAll` of the anchor | `TestResolvePath_CreatesNothing/instance_directory_does_not_exist` | nothing |
+| walk the entries in reverse | `TestResolvePath_TwoFilesOneAttachmentDirectory` | nothing |
+| delete both `conversations.ValidID` calls | `TestResolvePath_CaseFoldedID` (both rows) | nothing |
+
+The escaping-conversation and attachment-directory symlink rows are
+deliberately *not* the prefix mutant's red: those targets land outside the
+resolved root, so a containment test refuses them too. Only the sibling row
+separates equality from containment, which is what `EnsureDir`'s doc block
+already says and what this measurement confirms rather than assumes.
