@@ -314,7 +314,7 @@ func TestPoolRevokeArms_PinLaunchPostureAndUpdateByName(t *testing.T) {
 			takesSettingsUpdate: true,
 			postureConsequence: "seeded WITHOUT bypass there is nothing to revoke: the stored posture " +
 				"already equals the update, so Pool.UpdateSettings returns at its no-change check " +
-				"having delivered nothing and reported success — no RevokeBypass is issued, no " +
+				"having delivered nothing and reported success — no posture send is issued, no " +
 				"delivery is attempted, and the arm measures nothing while staying green",
 			updateConsequence: "the measurement arm must take the settings update; without it no " +
 				"revocation is issued at all and the run compares three controls",

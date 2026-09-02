@@ -9,7 +9,10 @@ import (
 // known settings returns exactly those values, with the existence bool true.
 func TestPool_DefaultSettings_KnownSettings(t *testing.T) {
 	t.Parallel()
-	want := SessionSettings{Model: "opus", Effort: "high", YOLO: true}
+	// The posture is spelled out: a warm start derives it from the entry's yolo
+	// (settingsFromEntry), so a bypass session reads back as the escalation named
+	// rather than as an empty mode beside a true bit.
+	want := SessionSettings{Model: "opus", Effort: "high", YOLO: true, PermissionMode: permissionModeBypass}
 	dir := t.TempDir()
 	regPath := filepath.Join(dir, "sessions.json")
 	pool := helperPoolWithSettings(t, regPath, want)

@@ -15,14 +15,15 @@ package realclaude
 // control line itself.
 //
 // #1604 built the COMPOSED PATH — Pool.UpdateSettings → inBandDeliverable →
-// Pool.deliverSettingsInBand → Runner.RevokeBypass — and proved it hermetically
+// Pool.deliverSettingsInBand → Runner.SetPermissionMode (Runner.RevokeBypass
+// until #2043 collapsed the pair) — and proved it hermetically
 // through a fake runner. That proves the daemon ASKS. Nothing proved pyry emits
 // those bytes, on the stream it already holds open, to a real claude.
 //
 // The gap matters because the failure is silent in both directions. A child that
 // keeps auto-approving after a revocation is indistinguishable in the daemon log
 // from one that was never in bypass; and delivery is fire-and-forget —
-// deliverSettingsInBand logs a failed RevokeBypass at Info and swallows it, so
+// deliverSettingsInBand logs a failed posture send at Info and swallows it, so
 // UpdateSettings returns nil either way. This file makes that swallow a readable
 // field (see newRevokeLogRecorder) rather than silence.
 //
@@ -62,7 +63,7 @@ package realclaude
 //
 // # The response cannot be correlated by id
 //
-// Runner.RevokeBypass mints its request_id through nextControlID, an unexported
+// Runner.SetPermissionMode mints its request_id through nextControlID, an unexported
 // per-runner atomic counter. The test cannot read it, and setModeResponseIDMatches
 // is therefore not reusable here. Hard-coding "1" on the reasoning that this is
 // the runner's first control request would pin a private counter's start value as
@@ -296,10 +297,11 @@ func (r *revokeTap) droppedCount() int {
 // Dropping every other record is also what keeps the runner's lifecycle lines out
 // of the test output — a nil streamsup.Config.Logger would fall back to
 // slog.Default(). Nothing it retains is a secret, and since #2042 that rests on
-// two clauses rather than one: RevokeBypass — the method this path still calls —
-// takes no mode, AND the seam's mode-carrying sibling refuses an unsupported mode
-// without echoing the rejected string. Either way there is no settings value the
-// bypass record could carry, which is the structural guarantee
+// one clause since #2043 took the no-mode RevokeBypass off the seam: the
+// mode-carrying method this path now calls refuses an unsupported mode with a bare
+// sentinel that does not echo the rejected string, and the pool logs the constant
+// field name rather than the value. So there is no settings value the posture
+// record could carry, which is the structural guarantee
 // deliverSettingsInBand's doc already makes.
 type revokeLogHandler struct {
 	mu           *sync.Mutex

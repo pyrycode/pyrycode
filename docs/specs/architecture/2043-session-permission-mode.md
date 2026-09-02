@@ -392,6 +392,24 @@ files against #2042 (measured 602 lines of code and tests, 13 files, 5 productio
 package pair, one slice earlier); this sketch lands ~590 code-and-test, and the spec is the lever
 if it runs long.
 
+**Measured after implementation:** 808 insertions / 210 deletions of code and tests across 18
+files, 5 of them production — plus this 480-line spec, so ~1290 lines of total written work against
+the 800-line boundary and the ~780 estimated above. Both halves ran long and the shapes differ:
+
+- Code and tests came in at 808 against ~590 estimated, and the refiner's ~700. The overrun is
+  entirely test breadth — six tables where the sketch counted four, and the posture-derivation and
+  registry-tolerance tables are each seven rows because the invariant is what they exist to pin.
+  Production is ~190 as estimated.
+- The spec is 480 against ~190 estimated. It is not the design that grew: it is the `security-sensitive`
+  pass, which is 90 lines on its own and which the estimate did not carry as a line item at all.
+  #2042's spec measured 477 for the same reason, so this is the analogue's real shape rather than
+  an overrun peculiar to this ticket.
+
+The run finished at roughly a third of the turn budget and well inside wall clock, so the size was
+right for the budget even though the count was not right for the table. The lever for a future
+slice of this shape is the estimate, not the work: a `security-sensitive` ticket should be sized
+with ~90 lines of security-review spec already on the ledger.
+
 ## Security review
 
 **Verdict:** PASS

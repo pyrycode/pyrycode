@@ -37,7 +37,7 @@ func registerSessionWithSettings(t *testing.T, pool *Pool, settings SessionSetti
 // every mutant the rows below target, which is why it cannot stand alone.
 func TestPool_SettingsFor_KnownID(t *testing.T) {
 	t.Parallel()
-	want := SessionSettings{Model: "opus", Effort: "high", YOLO: true}
+	want := SessionSettings{Model: "opus", Effort: "high", YOLO: true, PermissionMode: permissionModeBypass}
 	regPath := filepath.Join(t.TempDir(), "sessions.json")
 	pool := helperPoolWithSettings(t, regPath, want)
 
@@ -56,8 +56,8 @@ func TestPool_SettingsFor_KnownID(t *testing.T) {
 // p.sessions[p.bootstrap] the way DefaultSettings does.
 func TestPool_SettingsFor_PerSessionNotBootstrap(t *testing.T) {
 	t.Parallel()
-	bootWant := SessionSettings{Model: "opus", Effort: "high", YOLO: true}
-	secondWant := SessionSettings{Model: "sonnet", Effort: "low", YOLO: false}
+	bootWant := SessionSettings{Model: "opus", Effort: "high", YOLO: true, PermissionMode: permissionModeBypass}
+	secondWant := SessionSettings{Model: "sonnet", Effort: "low", PermissionMode: permissionModeDefault}
 	regPath := filepath.Join(t.TempDir(), "sessions.json")
 	pool := helperPoolWithSettings(t, regPath, bootWant)
 	secondID := registerSessionWithSettings(t, pool, secondWant)
@@ -83,9 +83,14 @@ func TestPool_SettingsFor_PerSessionNotBootstrap(t *testing.T) {
 }
 
 // TestPool_SettingsFor_ZeroSettingsIsFound (AC-2, first half): a real session
-// whose settings happen to be at their zero values is reported as FOUND — the
-// zero value and a nil error. The value assertion alone proves nothing here, so
-// the nil error is asserted explicitly. Pairs with the unknown-id row.
+// whose settings happen to be at their zero values is reported as FOUND — those
+// values and a nil error. The value assertion alone proves nothing here, so the
+// nil error is asserted explicitly. Pairs with the unknown-id row.
+//
+// "Zero values" is the input, not the output: a Pool-held session never carries
+// the empty posture, because both construction sites normalise it to the default
+// mode (#2043). That is the same value spelled out, not a different one — the
+// argv it composes is still byte-identical to the zero value's.
 func TestPool_SettingsFor_ZeroSettingsIsFound(t *testing.T) {
 	t.Parallel()
 	regPath := filepath.Join(t.TempDir(), "sessions.json")
@@ -95,8 +100,8 @@ func TestPool_SettingsFor_ZeroSettingsIsFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SettingsFor(bootstrap at defaults): err = %v, want nil (the session exists)", err)
 	}
-	if got != (SessionSettings{}) {
-		t.Errorf("SettingsFor(bootstrap at defaults): got %+v, want zero value", got)
+	if want := (SessionSettings{PermissionMode: permissionModeDefault}); got != want {
+		t.Errorf("SettingsFor(bootstrap at defaults): got %+v, want %+v", got, want)
 	}
 }
 
