@@ -118,6 +118,7 @@ search can reach it.
 - [Screen-snapshot payloads (#617)](protocol-package-screen-snapshot-payloads.md) — The request/response pair behind ADR 025's always-available, parser-independent **screen snapshot** — the floor of the safe-degradation…
 - [Error codes (21)](protocol-package-constants-codes-go-error-codes-21.md) — Wire values for the `code` field of error payloads (spec § Error codes). 
 - [Envelope types](protocol-package-constants-codes-go-envelope-types.md) — Wire values for `Envelope.Type` (spec § Message types). 
+- [Attachment envelope types](protocol-package-constants-codes-go-envelope-types-attachments.md) — The `attachment_chunk` (#1752) / `attachment_stored` (#1895) / `request_attachment` (#2052) vocabulary family, split out of Envelope types for size. 
 - [Drift detectors](protocol-package-drift-detectors.md) — The v1 type list appears three times: in the `Type*` constants block (`codes.go`), in the `inboundAppTypeSet` map literal (`envelope.go`),…
 - [What's deliberately NOT in the package](protocol-package-what-s-deliberately-not-in-the-package.md) — see the document
 - [Related](protocol-package-related.md) — see the document

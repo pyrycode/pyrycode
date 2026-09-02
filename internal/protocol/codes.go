@@ -35,8 +35,10 @@ const (
 
 	// Attachment errors (#1751; docs/protocol-mobile.md § Attachments). The
 	// reject vocabulary both attachment_chunk legs answer with, declared in one
-	// place so #1741, #1743, #1744 and #1746 do not each invent a name. The
-	// reasoning is published in that section rather than duplicated here.
+	// place so #1741, #1743, #1897 and #2054 do not each invent a name (#1744 and
+	// #1746, the two this list named when it was written, were each split and no
+	// longer exist as work). The reasoning is published in that section rather
+	// than duplicated here.
 	//
 	// attachment.not_found is DELIBERATELY MERGED: it answers every request that
 	// yields no bytes — an unknown id, a non-canonical id, and an id resolving
@@ -929,9 +931,11 @@ const (
 // The declaring ticket (#1752) is wire vocabulary only: #1753 adds the per-chunk
 // size cap and the both-direction encoding fixtures, #1751 publishes the
 // client-facing contract and the attachment.* reject codes, #1741 reassembles
-// and checks the claims, #1743 stores, #1744 dispatches the inbound leg, and
-// #1746 serves retrieval. Same declare-then-emit sequencing as #1616→#1638 and
-// #1704→#1848.
+// and checks the claims, #1743 stores, and #1897 dispatches the inbound leg.
+// Retrieval landed as three slices rather than the one #1746 this block first
+// named: #2052 declares the request verb (TypeRequestAttachment below), #2053
+// builds the outbound stream, and #2054 answers the verb with one or the other.
+// Same declare-then-emit sequencing as #1616→#1638 and #1704→#1848.
 const (
 	TypeAttachmentChunk = "attachment_chunk" // phone ↔ binary, one chunk of an attachment's bytes (both directions)
 )
@@ -995,6 +999,74 @@ const (
 // as #1752→#1753 and #1616→#1638.
 const (
 	TypeAttachmentStored = "attachment_stored" // binary → phone, the upload leg's success reply, correlated via in_reply_to
+)
+
+// Mobile Protocol v2 attachment RETRIEVAL REQUEST verb (#2052, split from #1746;
+// docs/protocol-mobile.md § Attachments publishes it). The frame a client sends to
+// ask the daemon for a stored attachment — the one thing that section had
+// deliberately left unpublished, in its own words: "the retrieval request verb ...
+// (no such type exists in the daemon today)". Its payload is
+// RequestAttachmentPayload (attachments.go). It is the FIRST inbound type in the
+// attachment family that is inbound and nothing else — TypeAttachmentChunk's
+// upload leg is inbound, but that frame rides both directions.
+//
+// THE NAME follows the three inbound "ask the daemon for X" verbs already on this
+// wire — TypeRequestSnapshot, TypeRequestDebugBundle, TypeRequestSessionSettings —
+// rather than inventing a fourth idiom for the same act. It is fixed here rather
+// than left to the handler because a wire type string IS the contract: the desktop
+// client that consumes it writes its sender against the published name, and a name
+// chosen twice is a name chosen wrong once.
+//
+// IT NAMES A CONVERSATION AND AN ATTACHMENT, AND NOTHING ELSE, which is the one
+// place this family lets a client name a scope. AttachmentChunkPayload deliberately
+// carries no conversation_id because an upload lands in the conversation the
+// authenticated session is already on, so naming one there would only let a client
+// steer bytes elsewhere; a retrieval has to be able to say which conversation's
+// file it wants. That asymmetry was already published rather than decided here. The
+// safety is NOT in the id's shape or its randomness — it is CONFINEMENT: the id is
+// a lookup key validated against the daemon's own registry before it reaches a path
+// join, never a value trusted as sent, and naming a conversation is not
+// authorization. RequestAttachmentPayload's block carries that rule in full,
+// because the block is what the handler's author reads.
+//
+// CORRELATION RIDES THE ENVELOPE'S InReplyTo, so the payload carries NO REQUEST-ID
+// KEY — TypeAttachmentStored's block has that decision and the reasoning transfers
+// unchanged, since both terminals of this leg already correlate that way: the
+// answering chunks and the CodeAttachmentStreamAborted TypeError alike. The
+// committed testdata/attachment_chunk_retrieval.json settled it in bytes before
+// this constant existed, riding in_reply_to 91, and testdata/request_attachment.json
+// is the envelope 91 it answers. Inventing a request-id key here would leave that
+// landed fixture describing a different scheme.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is a
+// v2 CONTROL envelope intercepted before internal/dispatch.Route, exactly as
+// TypeRequestSessionSettings and TypeModalAnswer are. IsKnownAppType rejecting it
+// with ErrUnknownType is also the structural bar against a v1 client pushing one
+// into the v1 handler chain. The drift detector in internal/protocol/compat_test.go
+// partitions Type* constants between inboundAppTypeSet and v2OnlyTypes; this one
+// lives in the latter, and inboundAppTypeSet's asserted count does not move.
+//
+// THE GUARD FILES IT AS PENDING, and getting that wrong is a red build rather than
+// a style question. cmd/pyry/relay_guard_test.go's excludedTypes carries it as
+// "pending handler (#2054)". inboundTypes would fail Assertion #1, which requires an
+// inbound type to be wired into cmd/pyry/relay.go's Handlers map or
+// internal/relay/v2session.go's dispatchAppFrame, and this slice ships no dispatch;
+// "push", the reason the outbound neighbours give, is false for a genuinely inbound
+// frame, and filing it that way to dodge Assertion #1 would be a lie to the guard.
+// TypeQuestionAnswer / TypeQuestionRefused sat there under exactly this label
+// between #1983 and #1984, and TypeAttachmentChunk before #1897. Assertion #2 is
+// what then FORCES the entry up to inboundTypes as "switch-intercepted" the moment
+// #2054 adds its case — a wired type left in excludedTypes fails. Filing is required
+// from the moment the constant exists: Assertion #3 reports an unclassified
+// constant, not an unemitted one.
+//
+// The declaring ticket (#2052) is wire vocabulary and publication only — no
+// producer, no consumer, no validator, and NO ADMISSION-TIME CHECK. #2053 builds the
+// outbound chunk stream and #2054 answers this verb, owning the shape check, the
+// registry validation and the CodeAttachmentNotFound reject path. Same
+// declare-then-serve sequencing as #1752→#1897, #1895→#1897 and #1983→#1984.
+const (
+	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (pending handler — #2054)
 )
 
 // Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The

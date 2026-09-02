@@ -3,7 +3,7 @@ package protocol
 // Published byte bounds for one attachment_chunk frame (AttachmentChunkPayload
 // below). All four are producer-side CONTRACTS WITH NO VALIDATOR in this
 // package — the same posture the payload type itself ships with. Inbound
-// enforcement is #1741's, outbound is #1744's and #1746's; nothing here checks
+// enforcement is #1741's, outbound is #1897's and #2053's; nothing here checks
 // anything, so a reader must not mistake a declared bound for a checked one.
 //
 // The three metadata bounds count BYTES (len(s)), not runes. The escape ceiling
@@ -126,7 +126,7 @@ const (
 //   - AttachmentID identifies the attachment this chunk belongs to. Every chunk
 //     of one transfer repeats it: it is the key an in-flight upload accumulates
 //     under (#1741) and the identifier that later resolves to a path on the host
-//     (#1743, #1746).
+//     (#1743, #2037).
 //   - Index is the 0-based position of this chunk within the attachment, in
 //     [0, TotalChunks). It decides WHERE THE BYTES LAND, so a receiver addresses
 //     by it rather than appending.
@@ -177,8 +177,9 @@ const (
 // conversation the authenticated v2 session is already on, decided daemon-side
 // by #1744 from session context, so a client cannot steer bytes into another
 // conversation's directory by naming one. Retrieval's request verb does name a
-// conversation (#1746), but that is a different frame and its validation is
-// #1746's problem.
+// conversation — RequestAttachmentPayload below, declared by #2052 — but that is
+// a different frame, and validating the id it names against the daemon's registry
+// is #2054's problem.
 //
 // SECURITY: on the INBOUND leg every field is an unverified CLAIM, not a fact;
 // on the outbound leg the same fields are daemon-authored and trustworthy. One
@@ -205,7 +206,7 @@ const (
 // single byte is accumulated, and attachments.CheckDeclaration is where it runs.
 //
 // AttachmentID is validated for canonical shape BEFORE it is used as a path
-// component. It resolves to a file on the host in #1743 and #1746, and a
+// component. It resolves to a file on the host in #1743 and #2037, and a
 // client-chosen id reaching filepath.Join unvalidated is a traversal;
 // conversations.ValidID is the existing canonical-shape precedent, and the
 // deterministic check lands in #1741 / #1743. The id is also NOT a capability:
@@ -283,8 +284,8 @@ type AttachmentChunkPayload struct {
 //     records that its result is neither unique nor an identifier — distinct
 //     client names collide, and a case-insensitive host folds them further — so
 //     echoing it would hand a client something it cannot rely on. Retrieval
-//     (#1746) addresses by attachment id, and the client already knows the name it
-//     sent. Keeping it out also keeps this frame clear of the NEVER LOGGED rule
+//     addresses by attachment id — RequestAttachmentPayload names one, #2052 — and
+//     the client already knows the name it sent. Keeping it out also keeps this frame clear of the NEVER LOGGED rule
 //     AttachmentChunkPayload puts on Filename, SHA256 and Data: this payload
 //     carries none of the three and is safe to log whole.
 //   - No conversation_id, for AttachmentChunkPayload's reason: the upload landed
@@ -319,5 +320,110 @@ type AttachmentStoredPayload struct {
 	// Its canonical shape is conversations.ValidID's, published by #1895 —
 	// MaxAttachmentIDBytes is a ceiling for the cap arithmetic and not that
 	// shape.
+	AttachmentID string `json:"attachment_id"`
+}
+
+// RequestAttachmentPayload is the body of an Envelope whose Type ==
+// TypeRequestAttachment (docs/protocol-mobile.md § Attachments, published by
+// #2052). The frame a client sends to ask the daemon for a stored attachment.
+// Wire vocabulary only — nothing constructs, decodes or validates it here; #2054
+// answers it and #2053 streams the bytes back as AttachmentChunkPayload frames.
+//
+// ONE DIRECTION ONLY, phone → binary, and that is the whole difference from the
+// frame it is answered with. AttachmentChunkPayload rides both legs and nothing in
+// it reports which direction a value came from, so its SECURITY block has to make a
+// consumer decide trust from where the frame arrived. Here there is nothing to
+// decide: EVERY FIELD IS AN UNVERIFIED CLAIM, ALWAYS.
+//
+// TWO FIELDS, and no third. It names a conversation and an attachment; correlation
+// to the answer rides the envelope's InReplyTo, which is why there is no request-id
+// key — TypeAttachmentStored's block has that decision, and both terminals of this
+// leg already correlate that way (the answering chunks, and the
+// CodeAttachmentStreamAborted TypeError). The committed
+// testdata/attachment_chunk_retrieval.json rides in_reply_to 91 and
+// testdata/request_attachment.json is the envelope 91 it answers, so a request-id
+// key added here would leave a landed fixture describing a different scheme.
+// TestRequestAttachmentPayload_WireKeys pins the key set so this is checked rather
+// than reviewed.
+//
+// WHY THERE IS A conversation_id HERE when AttachmentChunkPayload deliberately has
+// none: an upload lands in the conversation the authenticated v2 session is already
+// on, so naming one there would only let a client steer bytes into another
+// conversation's directory; a retrieval has to be able to say which conversation's
+// file it wants. § Attachments committed to that asymmetry before this type existed.
+//
+// THE CONVERSATION ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED AS SENT, and this is
+// the security property the whole frame rests on. It is validated against the
+// daemon's own registry BEFORE IT REACHES A PATH JOIN — not merely before bytes go
+// out — and NAMING A CONVERSATION IS NOT AUTHORIZATION. § Naming a message's
+// attachments states the same rule for send_message's attachment_ids and says where
+// the safety lives: "Nothing about the id's shape or its randomness does this work —
+// confinement does." A reader who takes this field for a free-form selector has been
+// handed exactly the capability the rest of that section spends pages denying. A
+// client must not read "UUIDv4" as a claim of unguessability.
+//
+// BOTH IDS OBEY THE SAME SHAPE, the lowercase UUIDv4 § Attachments publishes under
+// "The attachment_id shape" — 36 bytes, '-' at 8/13/18/23, '4' at 14, one of 89ab at
+// 19 — which is conversations.ValidID's shape byte for byte. Lowercase is
+// load-bearing rather than cosmetic: an id becomes a directory name, and a
+// case-insensitive host (APFS by default) folds two ids into one directory
+// otherwise. Containment follows from that shape and NEVER from a length ceiling,
+// which is also why this type adds no Max* constant of its own: MaxAttachmentIDBytes
+// exists for attachment_chunk's envelope arithmetic, a ceiling there was read as the
+// shape once already, and a second one here would enforce nothing while inviting the
+// same mistake.
+//
+// NOTHING HERE ENFORCES ANY OF IT. internal/protocol declares shapes and validates
+// none, the posture both siblings ship with. The canonical-shape check on either id
+// and the registry validation the published contract promises are #2054's, which
+// owns the reject path and the CodeAttachmentNotFound code to answer with — a
+// deliberately merged code whose message is static and never echoes the requested id
+// or the resolved path, because two distinguishable answers would make this verb a
+// path-existence oracle for a traversal probe.
+//
+// A HOSTILE OR TRUNCATED PAYLOAD DECODES TO THE ZERO VALUE, NOT TO AN ERROR, since
+// every key is optional to encoding/json — AttachmentStoredPayload records the same
+// property. The result is two empty strings, and the empty string is not a valid id
+// under any published shape, so a consumer must resolve NOTHING from them. The
+// failure this warns about is silent and specific: filepath.Join(dir, "", "") is dir,
+// so a consumer that skips the shape check and joins the zero value addresses the
+// conversation directory root rather than erroring. QuestionAnswerPayload's published
+// obligation is the shape to follow — a decode failure is a rejected frame, never an
+// empty-but-successful request — and discharging it is #2054's.
+//
+// NO omitempty AND NO MarshalJSON. Both fields are always present in the one
+// direction this frame travels, so a decoder may rely on both;
+// TestRequestAttachmentPayload_ZeroValue_KeysPresent is the pin, and an omitempty
+// added later for tidiness would silently change the wire. There is no slice field,
+// so QuestionShownPayload.MarshalJSON's nil→[] argument does not transfer.
+//
+// THE ALLOCATION HAZARD AttachmentChunkPayload WARNS ABOUT IS ABSENT BY SHAPE: there
+// is no count and no length field here, so NEVER ALLOCATE FROM A CLAIM has nothing
+// to bite on. Stated so the absence reads as a property of the shape rather than as
+// an omission. This type declares no bound of its own either — the transport's
+// envelope cap is the only byte limit, and a client learns any receiver limit by
+// being rejected rather than by reading a figure published ahead of the code that
+// enforces it.
+//
+// SECURITY: SENDING THIS FRAME IS NOT A CAPABILITY, and neither is receiving an
+// answer to it. Authorization is pairing, enforced structurally at the Noise IK
+// handshake, exactly as § Attachments records for both existing legs; there is no
+// per-verb gate on this one and none is invented here. What bounds a paired but
+// hostile client is confinement, not secrecy. Both fields are client-supplied strings
+// and are LOGGABLE ONLY AFTER THEIR SHAPE IS VALIDATED — raw, either is the
+// log-injection shape § Attachments already forbids for Filename. The payload carries
+// no content-bearing bytes, so once validated it is safe to log whole. Nothing here
+// is claude-authored and nothing here becomes prompt content, so § Security model's
+// threat 1 does not land on this frame — the opposite of SendMessagePayload's
+// AttachmentIDs, which does reach claude.
+type RequestAttachmentPayload struct {
+	// ConversationID names the conversation whose attachment is wanted. A lookup
+	// key validated against the daemon's registry before it resolves anything, and
+	// not authorization; the empty string names nothing and resolves nothing.
+	ConversationID string `json:"conversation_id"`
+
+	// AttachmentID names the attachment wanted within that conversation. The
+	// client's own id, the one it repeated on every chunk of the upload; the empty
+	// string is not a valid id under any published shape.
 	AttachmentID string `json:"attachment_id"`
 }

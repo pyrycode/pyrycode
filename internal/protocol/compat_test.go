@@ -155,6 +155,12 @@ func TestIsKnownAppType(t *testing.T) {
 		// sending either frame into dispatch.Route.
 		{"question_answer-rejected", TypeQuestionAnswer, false, ErrUnknownType},
 		{"question_refused-rejected", TypeQuestionRefused, false, ErrUnknownType},
+		// the v2-only attachment retrieval request verb: an inbound control type
+		// an old phone never sends, so IsKnownAppType must reject it. As on the
+		// attachment_chunk row above, the rejection's load-bearing half is the
+		// inbound one — this leg really is inbound, so this is the structural bar
+		// against a v1 client sending a request_attachment into dispatch.Route.
+		{"request_attachment-rejected", TypeRequestAttachment, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -269,6 +275,8 @@ var v2OnlyTypes = map[string]bool{
 	// v2 clarifying-question answer and refusal (inbound control).
 	TypeQuestionAnswer:  true,
 	TypeQuestionRefused: true,
+	// v2 attachment retrieval request verb (inbound control).
+	TypeRequestAttachment: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -349,6 +357,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 clarifying-question answer and refusal (inbound control).
 		TypeQuestionAnswer,
 		TypeQuestionRefused,
+		// v2 attachment retrieval request verb (inbound control).
+		TypeRequestAttachment,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
