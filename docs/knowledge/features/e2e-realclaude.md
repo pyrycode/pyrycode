@@ -106,6 +106,7 @@ search can reach it.
 - [ask_user_question_shape_test.go](e2e-realclaude-ask-user-question-shape-test-go.md) — the shape half of the `AskUserQuestion` capture family: a findings-returning check over the decoded `tool_input`, its first two checks (tool name, at least one question) each with a negative row, proved offline with no claude binary and no credentials.
 - [ask_user_question_capture_test.go](e2e-realclaude-ask-user-question-capture-test-go.md) — the live half of the `AskUserQuestion` capture family: spawns a real claude with the daemon's permission flags, taps the call on the approve path via a stub control socket, denies every call, and commits the record.
 - [ask_user_question_reader_test.go](e2e-realclaude-ask-user-question-reader-test-go.md) — the read half of the `AskUserQuestion` capture family: a deterministic, credential-free glob-and-scan-and-decode pass over the committed capture, closing the "gate ran green, artifact never landed" gap the live half alone can't.
+- [interactive_stream_question_answer_test.go](e2e-realclaude-interactive-stream-question-answer-test-go.md) — the answer half of the `AskUserQuestion` round trip: drives a real claude to ask, answers it through the daemon's own inbound path, and proves the answers (not just an allow) reached claude.
 - [e2e-harness.md](e2e-realclaude-e2e-harness-md.md) — see the document
 - [1415](e2e-realclaude-related-tickets-1415-1439.md) — see the document
 - [1440](e2e-realclaude-related-tickets-1440-1447.md) — see the document
