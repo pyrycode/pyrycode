@@ -620,3 +620,507 @@ func TestEnsureDir_DanglingConversationSymlink(t *testing.T) {
 		t.Errorf("stat %q = %v, want the dangling target left uncreated", target, err)
 	}
 }
+
+// wantPath composes the FILE path ResolvePath must answer, textually beneath
+// the resolved root. Sibling to wantDir, and built the same way and for the
+// same reason: the assertion is on the full path, so a build that anchored
+// somewhere else or dropped a component fails it.
+func wantPath(root string, conv conversations.ConversationID, attachmentID, name string) string {
+	return filepath.Join(wantDir(root, conv, attachmentID), name)
+}
+
+// assertNoPath is every ResolvePath refusal assertion in one place: no path,
+// ErrNotFound, and NEITHER of the two sentinels a reader would expect this
+// function to reuse from EnsureDir. That second half is not stylistic — #1897
+// maps ErrInvalidID and ErrNotContained to CodeAttachmentStorageFailed, and the
+// retrieval leg answers attachment.not_found, so a refusal wrapping either
+// would be mapped to the wrong wire code by a dispatch site sharing any part of
+// that table.
+func assertNoPath(t *testing.T, got string, err error) {
+	t.Helper()
+
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ResolvePath() error = %v, want ErrNotFound", err)
+	}
+	for _, sentinel := range []error{ErrInvalidID, ErrNotContained} {
+		if errors.Is(err, sentinel) {
+			t.Errorf("ResolvePath() error = %v also wraps %v, want the retrieval leg's own sentinel alone", err, sentinel)
+		}
+	}
+	if got != "" {
+		t.Errorf("ResolvePath() = %q, want no path on refusal", got)
+	}
+}
+
+// plantFile writes a file directly into dir, creating dir if absent. Used for
+// the fixtures Store cannot produce: a leftover temp file, and a file parked
+// under a symlink target outside the instance directory.
+func plantFile(t *testing.T, dir, name string, data []byte) string {
+	t.Helper()
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("create %q: %v", dir, err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write %q: %v", path, err)
+	}
+	return path
+}
+
+// TestResolvePath_RoundTrip is AC 1: the path answered is the path Store wrote,
+// and reading it yields the bytes that were stored.
+func TestResolvePath_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		filename string
+		stored   string
+	}{
+		// Vacuous on its own: here the client name and the stored component
+		// are the same string, so a build that joined the CLIENT name onto the
+		// directory instead of answering the entry it found passes this row.
+		{"unchanged by the sanitiser", "report.pdf", "report.pdf"},
+		// The row that makes AC 1 non-vacuous. The two strings differ, so the
+		// joined-client-name build answers a path that does not exist and the
+		// read-back fails.
+		{"rewritten by the sanitiser", "../../etc/passwd", "_.._.._etc_passwd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			instanceDir, root := resolvedInstanceDir(t)
+			dir, err := EnsureDir(instanceDir, convA, aid1)
+			if err != nil {
+				t.Fatalf("EnsureDir() error = %v, want nil", err)
+			}
+			data := []byte("bytes for " + tt.name)
+			if _, err := Store(dir, tt.filename, data); err != nil {
+				t.Fatalf("Store() error = %v, want nil", err)
+			}
+
+			got, err := ResolvePath(instanceDir, convA, aid1)
+			if err != nil {
+				t.Fatalf("ResolvePath() error = %v, want nil", err)
+			}
+			if want := wantPath(root, convA, aid1, tt.stored); got != want {
+				t.Fatalf("ResolvePath() = %q, want %q", got, want)
+			}
+			body, err := os.ReadFile(got)
+			if err != nil {
+				t.Fatalf("read the resolved path: %v", err)
+			}
+			if !bytes.Equal(body, data) {
+				t.Errorf("the resolved path holds %q, want %q", body, data)
+			}
+		})
+	}
+}
+
+// TestResolvePath_CreatesNothing is AC 2. Each row names the paths that must
+// still be absent afterwards, which is what a build reinstating EnsureDir's
+// MkdirAll of the anchor — or walking to the longest existing ancestor and
+// creating the rest — fails.
+func TestResolvePath_CreatesNothing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T) (instanceDir string, absent []string)
+	}{
+		{
+			"instance directory does not exist",
+			func(t *testing.T) (string, []string) {
+				instanceDir := filepath.Join(t.TempDir(), "instance")
+				return instanceDir, []string{instanceDir}
+			},
+		},
+		{
+			"instance directory exists, nothing beneath it",
+			func(t *testing.T) (string, []string) {
+				instanceDir, _ := resolvedInstanceDir(t)
+				return instanceDir, []string{filepath.Join(instanceDir, "conversations")}
+			},
+		},
+		{
+			"conversation exists, attachment directory does not",
+			func(t *testing.T) (string, []string) {
+				instanceDir, _ := resolvedInstanceDir(t)
+				attachments := filepath.Join(instanceDir, "conversations", string(convA), "attachments")
+				if err := os.MkdirAll(attachments, 0o700); err != nil {
+					t.Fatalf("create attachments dir: %v", err)
+				}
+				return instanceDir, []string{filepath.Join(attachments, aid1)}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			instanceDir, absent := tt.setup(t)
+
+			got, err := ResolvePath(instanceDir, convA, aid1)
+			assertNoPath(t, got, err)
+
+			for _, path := range absent {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("stat %q = %v, want it left uncreated", path, err)
+				}
+			}
+		})
+	}
+}
+
+// TestResolvePath_InvalidID is AC 3's shape refusal, over the same rows
+// EnsureDir's own table carries. Every row stores the CANONICAL pair first and
+// asserts it still resolves, so a row's refusal is attributable to the shape
+// check rather than to a fixture that holds nothing to find.
+func TestResolvePath_InvalidID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		conversation conversations.ConversationID
+		attachment   string
+	}{
+		{"empty conversation id", "", aid1},
+		{"conversation id spelling a traversal", "../../etc", aid1},
+		{"conversation id one character short", conversations.ConversationID(convA[:35]), aid1},
+		{"conversation id in uppercase hex", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA", aid1},
+		{"empty attachment id", convA, ""},
+		{"attachment id spelling a traversal", convA, "../../etc/passwd"},
+		// Fits protocol.MaxAttachmentIDBytes, which is documented as explicitly
+		// NOT the containment mechanism. The shape check is.
+		{"attachment id at the byte ceiling", convA, strings.Repeat("a", protocol.MaxAttachmentIDBytes)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			instanceDir, _ := resolvedInstanceDir(t)
+			dir, err := EnsureDir(instanceDir, convA, aid1)
+			if err != nil {
+				t.Fatalf("EnsureDir() error = %v, want nil", err)
+			}
+			if _, err := Store(dir, "report.pdf", []byte("the canonical pair's bytes")); err != nil {
+				t.Fatalf("Store() error = %v, want nil", err)
+			}
+
+			got, err := ResolvePath(instanceDir, tt.conversation, tt.attachment)
+			assertNoPath(t, got, err)
+
+			if _, err := ResolvePath(instanceDir, convA, aid1); err != nil {
+				t.Errorf("the canonical pair no longer resolves (%v), so this row's refusal proves nothing", err)
+			}
+		})
+	}
+}
+
+// TestResolvePath_UnknownPair is AC 3's unknown-id refusal, in both directions
+// that matter: an id nobody stored, and an id stored under a DIFFERENT
+// conversation. The second is the confinement property from the caller's side —
+// naming another conversation must not reach its file.
+func TestResolvePath_UnknownPair(t *testing.T) {
+	t.Parallel()
+
+	instanceDir, _ := resolvedInstanceDir(t)
+	dir, err := EnsureDir(instanceDir, convA, aid1)
+	if err != nil {
+		t.Fatalf("EnsureDir() error = %v, want nil", err)
+	}
+	if _, err := Store(dir, "report.pdf", []byte("stored under convA/aid1")); err != nil {
+		t.Fatalf("Store() error = %v, want nil", err)
+	}
+
+	t.Run("attachment id nobody stored", func(t *testing.T) {
+		got, err := ResolvePath(instanceDir, convA, aid2)
+		assertNoPath(t, got, err)
+	})
+	t.Run("attachment id stored under another conversation", func(t *testing.T) {
+		got, err := ResolvePath(instanceDir, convB, aid1)
+		assertNoPath(t, got, err)
+	})
+}
+
+// TestResolvePath_EscapingConversationSymlink is the criterion an anchor on the
+// resolved CONVERSATION directory would make vacuous. The target is POPULATED
+// with a file the build under test could answer, so the refusal is a real
+// refusal rather than an empty directory answering nothing either way.
+func TestResolvePath_EscapingConversationSymlink(t *testing.T) {
+	t.Parallel()
+
+	instanceDir, _ := resolvedInstanceDir(t)
+	// A second t.TempDir(), so the target EXISTS: EvalSymlinks on a dangling
+	// link answers an OS error and the row would refuse for the wrong reason.
+	outside := t.TempDir()
+	plantFile(t, filepath.Join(outside, "attachments", aid1), "secret.pdf", []byte("another conversation's bytes"))
+
+	if err := os.MkdirAll(filepath.Join(instanceDir, "conversations"), 0o700); err != nil {
+		t.Fatalf("create conversations dir: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(instanceDir, "conversations", convA)); err != nil {
+		t.Fatalf("symlink conversation out of the instance dir: %v", err)
+	}
+
+	got, err := ResolvePath(instanceDir, convA, aid1)
+	assertNoPath(t, got, err)
+	assertDirEntries(t, filepath.Join(outside, "attachments", aid1), "secret.pdf")
+}
+
+// TestResolvePath_SiblingConversationSymlink is the criterion an instance-dir
+// anchor with a mere "is it under the root" containment test would make
+// vacuous: the sibling stays inside the instance directory and passes any such
+// test. Equality against the textually expected destination refuses it. The
+// sibling's own attachment is stored through the real path, so a
+// containment-only build answers convB's bytes for a convA request.
+func TestResolvePath_SiblingConversationSymlink(t *testing.T) {
+	t.Parallel()
+
+	instanceDir, _ := resolvedInstanceDir(t)
+	siblingDir, err := EnsureDir(instanceDir, convB, aid1)
+	if err != nil {
+		t.Fatalf("EnsureDir(convB) error = %v, want nil", err)
+	}
+	if _, err := Store(siblingDir, "report.pdf", []byte("convB's bytes")); err != nil {
+		t.Fatalf("Store(convB) error = %v, want nil", err)
+	}
+
+	sibling := filepath.Join(instanceDir, "conversations", string(convB))
+	if err := os.Symlink(sibling, filepath.Join(instanceDir, "conversations", convA)); err != nil {
+		t.Fatalf("symlink conversation at its sibling: %v", err)
+	}
+
+	got, err := ResolvePath(instanceDir, convA, aid1)
+	assertNoPath(t, got, err)
+	assertDirEntries(t, siblingDir, "report.pdf")
+}
+
+// TestResolvePath_AttachmentDirIsSymlink proves the check is on the FULL path
+// rather than on the conversation component alone: every ancestor here is a
+// real directory inside the instance dir and only the leaf redirects.
+func TestResolvePath_AttachmentDirIsSymlink(t *testing.T) {
+	t.Parallel()
+
+	instanceDir, _ := resolvedInstanceDir(t)
+	outside := t.TempDir()
+	plantFile(t, outside, "secret.pdf", []byte("bytes outside the instance dir"))
+
+	attachments := filepath.Join(instanceDir, "conversations", string(convA), "attachments")
+	if err := os.MkdirAll(attachments, 0o700); err != nil {
+		t.Fatalf("create attachments dir: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(attachments, aid1)); err != nil {
+		t.Fatalf("symlink attachment dir out of the instance dir: %v", err)
+	}
+
+	got, err := ResolvePath(instanceDir, convA, aid1)
+	assertNoPath(t, got, err)
+	assertDirEntries(t, outside, "secret.pdf")
+}
+
+// TestResolvePath_LeftoverTempFile is AC 4. The leftover is reachable because
+// Store creates its temp file INSIDE the destination directory — that is what
+// makes the rename intra-filesystem and therefore atomic — and its
+// defer os.Remove does not survive a kill.
+//
+// The row below is non-vacuous only because '.' sorts ahead of every character
+// SanitizeFilename can emit, so the leftover is what a build selecting the
+// first entry in name order answers.
+func TestResolvePath_LeftoverTempFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("beside a stored file", func(t *testing.T) {
+		t.Parallel()
+
+		instanceDir, root := resolvedInstanceDir(t)
+		dir, err := EnsureDir(instanceDir, convA, aid1)
+		if err != nil {
+			t.Fatalf("EnsureDir() error = %v, want nil", err)
+		}
+		data := []byte("the stored attachment")
+		if _, err := Store(dir, "report.pdf", data); err != nil {
+			t.Fatalf("Store() error = %v, want nil", err)
+		}
+		plantFile(t, dir, ".attachment-1234567.tmp", []byte("a killed upload's leftover"))
+		assertDirEntries(t, dir, ".attachment-1234567.tmp", "report.pdf")
+
+		got, err := ResolvePath(instanceDir, convA, aid1)
+		if err != nil {
+			t.Fatalf("ResolvePath() error = %v, want nil", err)
+		}
+		if want := wantPath(root, convA, aid1, "report.pdf"); got != want {
+			t.Errorf("ResolvePath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("alone in the directory", func(t *testing.T) {
+		t.Parallel()
+
+		instanceDir, _ := resolvedInstanceDir(t)
+		dir, err := EnsureDir(instanceDir, convA, aid1)
+		if err != nil {
+			t.Fatalf("EnsureDir() error = %v, want nil", err)
+		}
+		plantFile(t, dir, ".attachment-7654321.tmp", []byte("a killed upload's leftover"))
+
+		got, err := ResolvePath(instanceDir, convA, aid1)
+		assertNoPath(t, got, err)
+	})
+}
+
+// TestResolvePath_TwoFilesOneAttachmentDirectory is AC 5: Intake.Receive calls
+// Store(dir, chunk.Filename, data), so one attachment id uploaded twice under
+// two client filenames leaves two files in one directory. The published
+// contract makes that last-writer-wins and explicitly not a privilege boundary,
+// so what is required here is a deterministic answer rather than a refusal.
+//
+// The fixture stores the lexicographically SMALLER name FIRST, which is what
+// separates the shipped rule from the two neighbouring ones: a newest-wins
+// selection and a last-entry-in-name-order selection both answer zebra.pdf.
+func TestResolvePath_TwoFilesOneAttachmentDirectory(t *testing.T) {
+	t.Parallel()
+
+	instanceDir, root := resolvedInstanceDir(t)
+	dir, err := EnsureDir(instanceDir, convA, aid1)
+	if err != nil {
+		t.Fatalf("EnsureDir() error = %v, want nil", err)
+	}
+	alpha := []byte("uploaded first, under alpha.pdf")
+	if _, err := Store(dir, "alpha.pdf", alpha); err != nil {
+		t.Fatalf("Store(alpha.pdf) error = %v, want nil", err)
+	}
+	if _, err := Store(dir, "zebra.pdf", []byte("uploaded second, under zebra.pdf")); err != nil {
+		t.Fatalf("Store(zebra.pdf) error = %v, want nil", err)
+	}
+	assertDirEntries(t, dir, "alpha.pdf", "zebra.pdf")
+
+	want := wantPath(root, convA, aid1, "alpha.pdf")
+	for call := range 3 {
+		got, err := ResolvePath(instanceDir, convA, aid1)
+		if err != nil {
+			t.Fatalf("ResolvePath() call %d error = %v, want nil", call, err)
+		}
+		if got != want {
+			t.Fatalf("ResolvePath() call %d = %q, want %q on every call", call, got, want)
+		}
+	}
+	body, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("read the resolved path: %v", err)
+	}
+	if !bytes.Equal(body, alpha) {
+		t.Errorf("the resolved path holds %q, want %q", body, alpha)
+	}
+}
+
+// TestResolvePath_NonRegularEntry is the leaf half of the containment property,
+// which the directory-level symlink rows above cannot reach: an entry that is
+// not a plain file is skipped rather than followed or answered. Without it the
+// DIRECTORY is confined and the FILE it answers is not, and #1746 streams
+// whatever the link points at.
+func TestResolvePath_NonRegularEntry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		plant func(t *testing.T, dir string)
+	}{
+		{
+			"a symlink pointing outside the instance directory",
+			func(t *testing.T, dir string) {
+				target := plantFile(t, t.TempDir(), "secret.pdf", []byte("bytes outside the instance dir"))
+				if err := os.Symlink(target, filepath.Join(dir, "linked.pdf")); err != nil {
+					t.Fatalf("symlink into the attachment dir: %v", err)
+				}
+			},
+		},
+		{
+			"a subdirectory",
+			func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, "nested.pdf"), 0o700); err != nil {
+					t.Fatalf("create a subdirectory: %v", err)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			instanceDir, _ := resolvedInstanceDir(t)
+			dir, err := EnsureDir(instanceDir, convA, aid1)
+			if err != nil {
+				t.Fatalf("EnsureDir() error = %v, want nil", err)
+			}
+			tt.plant(t, dir)
+
+			got, err := ResolvePath(instanceDir, convA, aid1)
+			assertNoPath(t, got, err)
+		})
+	}
+}
+
+// TestResolvePath_CaseFoldedID is what makes AC 3's shape refusal load-bearing
+// rather than incidental. Measured, not assumed: with every other row in
+// TestResolvePath_InvalidID the non-canonical id also names a directory that
+// does not exist, so an overlay mutant deleting BOTH conversations.ValidID
+// calls passes the whole package green — those rows refuse for absence, and the
+// shape check they are named after is never the reason.
+//
+// A case-folded id is the one shape that resolves anyway. EnsureDir's doc block
+// states why: ValidID's lowercase-only alphabet is what keeps the id-to-
+// directory mapping injective on a case-insensitive filesystem, which APFS is
+// by default, and filepath.EvalSymlinks deliberately does not case-canonicalise
+// (that is the property separating it from agentrun.ResolveWorkdir). So on
+// macOS the uppercased pair resolves to the very directory the lowercase pair
+// stored into, and only the shape check refuses it. On a case-sensitive
+// filesystem the row still passes, by absence rather than by shape — correct
+// either way, just not the mutant's sole red there.
+func TestResolvePath_CaseFoldedID(t *testing.T) {
+	t.Parallel()
+
+	// Local to this test because the package-level ids are all digits and
+	// dashes, which fold to themselves.
+	const (
+		convHex = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+		aidHex  = "bcdefabc-defa-4bcd-9efa-bcdefabcdefa"
+	)
+
+	tests := []struct {
+		name         string
+		conversation conversations.ConversationID
+		attachment   string
+	}{
+		{"conversation id case-folded to uppercase", conversations.ConversationID(strings.ToUpper(convHex)), aidHex},
+		{"attachment id case-folded to uppercase", convHex, strings.ToUpper(aidHex)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			instanceDir, _ := resolvedInstanceDir(t)
+			dir, err := EnsureDir(instanceDir, convHex, aidHex)
+			if err != nil {
+				t.Fatalf("EnsureDir() error = %v, want nil", err)
+			}
+			if _, err := Store(dir, "report.pdf", []byte("the lowercase pair's bytes")); err != nil {
+				t.Fatalf("Store() error = %v, want nil", err)
+			}
+
+			got, err := ResolvePath(instanceDir, tt.conversation, tt.attachment)
+			assertNoPath(t, got, err)
+
+			if _, err := ResolvePath(instanceDir, convHex, aidHex); err != nil {
+				t.Errorf("the canonical pair no longer resolves (%v), so this row's refusal proves nothing", err)
+			}
+		})
+	}
+}

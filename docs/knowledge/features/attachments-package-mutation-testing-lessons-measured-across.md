@@ -1,4 +1,4 @@
-# Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, and #1796)
+# Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, #1796, and #2037)
 
 This package's sole-redness claims are measured with `go test -overlay`
 (mutants applied via an absolute-path JSON manifest, no worktree write), not
@@ -243,6 +243,35 @@ surfaced:
   `cite-guard` to anchor — the one rot shape that guard cannot see. Widening
   `fillRegistry` to take a conn parameter was the alternative and is worse:
   several existing capacity tests depend on it staying single-conn.
+
+- **A validate-then-look-up table built entirely from absent-and-invalid
+  fixtures can refuse every row for the wrong reason** (#2037). `EnsureDir`'s
+  seven invalid-id rows, reused as `ResolvePath`'s own shape-refusal table,
+  each name an id that *also* names a directory that doesn't exist — so every
+  row refuses by absence, and the shape check the table is named after is
+  never the reason it went red. An overlay mutant deleting both
+  `conversations.ValidID` calls passed the whole package green against it.
+  The fix was one row where the invalid shape still *resolves*: a
+  case-folded id, since `EvalSymlinks` doesn't case-canonicalise and APFS is
+  case-insensitive by default, so the uppercased pair reaches the directory
+  the lowercase pair stored into on macOS (`TestResolvePath_CaseFoldedID`,
+  that mutant's sole red). Any table pairing a validator with a lookup needs
+  at least one row where the invalid input still finds something, or the
+  validator is never actually exercised by the table at all.
+- **A "stable across repeated calls" assertion is satisfied by any
+  deterministic rule, including the wrong one** (#2037). `ResolvePath`'s
+  requirement that two files in one attachment directory resolve to the same
+  path on every call reads as a pure stability property, and a reverse-order
+  or write-order tie-break is just as stable as the shipped lexicographic
+  rule — every deterministic rule passes a same-answer-every-call test.
+  Pinning it needed the exact expected path, from a fixture whose
+  lexicographically smaller name is written *first* so the neighbouring
+  wrong rules answer a different file than the shipped one. Measured: an
+  overlay mutant walking the directory entries in reverse reddens
+  `TestResolvePath_TwoFilesOneAttachmentDirectory` alone. A criterion phrased
+  as a property ("the same answer every time") often needs a fixture built
+  to separate the intended rule from its neighbours, not one that merely
+  exhibits the property.
 
 All three properties #1769 shipped without a test pin are now pinned,
 landed alongside #1770's own checks rather than left for a third mutation

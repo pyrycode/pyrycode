@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 )
@@ -314,4 +315,161 @@ func EnsureDir(instanceDir string, conversationID conversations.ConversationID, 
 		return "", fmt.Errorf("%w: %q resolves to %q", ErrNotContained, want, final)
 	}
 	return final, nil
+}
+
+// ErrNotFound reports that a (conversation id, attachment id) pair does not
+// resolve to a stored file — whether nothing was ever stored under it, either
+// id is not of canonical shape, or the directory the pair names resolves
+// somewhere other than the destination it maps to. Callers distinguish it with
+// errors.Is; the wrapped message names which step failed, for the operator.
+//
+// ONE sentinel covers all of those, and unlike ErrInvalidID's single-sentinel
+// argument this one is a contract requirement rather than a judgement call.
+// docs/protocol-mobile.md § Error codes makes attachment.not_found deliberately
+// indistinguishable across an unknown id, a non-canonical id and an id
+// resolving outside the named conversation's directory — a disclosure decision,
+// so an asking verb is not a path-existence oracle for a traversal probe. A
+// single sentinel makes that structural: a consumer cannot branch on what it
+// cannot distinguish, so the decision survives a careless dispatch site rather
+// than depending on one.
+//
+// It is deliberately NOT ErrInvalidID or ErrNotContained reused, though two of
+// its causes are exactly theirs. #1897 maps both of those to
+// CodeAttachmentStorageFailed for the upload leg; a retrieval dispatch site
+// sharing any part of that table would answer storage_failed where the contract
+// says attachment.not_found.
+//
+// Like the three sentinels above, and unlike the six latching sentinels in
+// accumulator.go, it carries no discard semantics: there is no accumulator
+// state here to latch or drop.
+var ErrNotFound = errors.New("attachments: no stored attachment for this conversation and attachment_id")
+
+// ResolvePath returns the on-host path of the file stored under one
+// conversation's one attachment — EnsureDir's read-side counterpart, and the
+// reason a consumer need not re-derive the storage layout for itself.
+// Intake.Receive deliberately discards the path Store answers and reports the
+// attachment id alone, and the client filename is retained nowhere else, so the
+// path cannot be re-derived from the id without reading the directory back.
+//
+// PRECONDITION, and it carries the whole security property: conversationID MUST
+// be the conversation the authenticated session is already on, never one a
+// client asserted. This function cannot check that, and a caller that gets it
+// wrong defeats every check below — the pair then genuinely does resolve inside
+// the conversation it named. docs/protocol-mobile.md § Naming a message's
+// attachments is explicit that confinement to the message's own conversation —
+// not attachment_id's shape, and not its randomness — is what keeps an
+// identifier that document repeatedly calls NOT a capability from becoming one.
+// It is also why attachment_chunk carries no conversation_id at all. Intake
+// reaches its own conversation through a resolver callback rather than off the
+// wire, which is the shape to copy.
+//
+// IT CREATES NOTHING, and that is the shape of the function rather than a guard
+// inside it: where EnsureDir creates the anchor before resolving it, this one
+// resolves what is there, so an absent instance, conversation or attachment
+// directory simply fails to resolve. A lookup that MkdirAll'd what it failed to
+// find would turn every miss into a state change on disk, and #1746's
+// attachment.not_found path would then leave an empty directory behind for
+// every traversal probe it refuses.
+//
+// Containment is EnsureDir's discipline minus the creation: the resolved
+// instance directory is the anchor, the destination is built TEXTUALLY beneath
+// it, and the comparison is full-path EQUALITY rather than a filepath.Rel-style
+// "is it under the root" test. Equality is strictly stronger and is what
+// refuses a conversation directory symlinked at a SIBLING conversation, which
+// stays inside the instance directory and passes any containment test. Only
+// plain files are eligible, so a symlink parked in an attachment directory is
+// skipped rather than followed — the leaf half of the same property, without
+// which the directory is confined and the file answered is not.
+//
+// A directory holding more than one file answers the lexicographically smallest
+// eligible name, on every call. Intake.Receive calls Store(dir, chunk.Filename,
+// data), so one attachment id uploaded twice under two client filenames leaves
+// two files in one directory; the published contract treats that as
+// last-writer-wins and explicitly not a privilege boundary, so what is owed here
+// is a deterministic answer rather than a refusal.
+//
+// An entry beginning with '.' is never eligible. Store creates its temp file
+// inside the destination directory — which is what makes the rename
+// intra-filesystem and therefore atomic — and the defer os.Remove that normally
+// clears it does not survive a kill, so a leftover .attachment-*.tmp is
+// reachable. The exclusion is written against SanitizeFilename's guarantee that
+// a stored component never begins with '.', not against Store's temp pattern,
+// because that guarantee is the invariant making the exclusion sound.
+//
+// The check-then-use window between reading the directory here and a caller
+// opening the path is real, and accepted on EnsureDir's bound: exploiting it
+// needs write access inside the daemon's own 0o700 state directory, and anyone
+// holding that can already rewrite devices.json. Answering an open handle would
+// close the window and is declined because #2038 needs a path as prompt text
+// and never opens it.
+//
+// No state, no lock, no goroutine, and nothing written, so it is safe for
+// concurrent use by construction — including against a concurrent Store on the
+// same pair, whose rename is atomic.
+//
+// LOGGING OBLIGATION on the consumer. The returned path is NOT fully
+// daemon-authored: its leaf is SanitizeFilename's rendering of a client
+// filename, and docs/protocol-mobile.md § Attachments bans logging a filename
+// for a privacy reason sanitising does not lift. Do not log the returned path.
+// No error built here names it either, nor any directory entry — every refusal
+// names directory paths only, which are built from two canonical-shape-checked
+// ids and carry no client text, exactly as ErrNotContained's already are.
+func ResolvePath(instanceDir string, conversationID conversations.ConversationID, attachmentID string) (string, error) {
+	// Validated before the filesystem is touched, matching EnsureDir. The
+	// ordering buys less here than it does there — nothing below creates
+	// anything either way — and it is kept so the two functions read the same
+	// way side by side.
+	if !conversations.ValidID(string(conversationID)) {
+		return "", fmt.Errorf("%w: conversation id %q", ErrNotFound, string(conversationID))
+	}
+	if !conversations.ValidID(attachmentID) {
+		return "", fmt.Errorf("%w: attachment id %q", ErrNotFound, attachmentID)
+	}
+
+	abs, err := filepath.Abs(instanceDir)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve instance directory %q: %w", ErrNotFound, instanceDir, err)
+	}
+	// The MkdirAll EnsureDir performs here is the one line this function must
+	// not have. An instance directory that does not exist fails to resolve, and
+	// that refusal IS the creates-nothing criterion rather than a check on it.
+	root, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve instance directory %q: %w", ErrNotFound, abs, err)
+	}
+
+	// Built TEXTUALLY beneath the resolved root; nothing under root is resolved
+	// to build it. This is the value the resolved destination must equal.
+	want := filepath.Join(root, "conversations", string(conversationID), "attachments", attachmentID)
+
+	// A pair that was never stored has no directory, so this step is where the
+	// unknown-id refusal comes from: no separate existence probe, and none of
+	// EnsureDir's walk to the longest existing ancestor, which exists there to
+	// resolve what is about to be created beneath a missing one.
+	resolved, err := filepath.EvalSymlinks(want)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve attachment directory %q: %w", ErrNotFound, want, err)
+	}
+	if resolved != want {
+		return "", fmt.Errorf("%w: %q resolves to %q", ErrNotFound, want, resolved)
+	}
+
+	entries, err := os.ReadDir(want)
+	if err != nil {
+		return "", fmt.Errorf("%w: read attachment directory %q: %w", ErrNotFound, want, err)
+	}
+	// os.ReadDir answers entries sorted by filename, so the first eligible one
+	// is already the lexicographically smallest and no comparison is needed.
+	// Type() reports Lstat bits, which is what makes a symlink non-regular here
+	// rather than resolved and followed.
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".") || !entry.Type().IsRegular() {
+			continue
+		}
+		return filepath.Join(want, entry.Name()), nil
+	}
+	// The directory exists and holds nothing answerable: empty, or holding only
+	// leftovers and non-files. The message names the directory and deliberately
+	// not what it found, since an entry's name carries the client's filename.
+	return "", fmt.Errorf("%w: no eligible file in %q", ErrNotFound, want)
 }
