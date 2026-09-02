@@ -455,3 +455,44 @@ Each is resolved in Phase B and recorded under `## Revisions` if it changed the 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — Open questions resolved, and two test claims corrected by measurement
+
+**Open question 1 (is 64 right for the byte cap?)** — resolved as 64, design unchanged. The
+name-population argument survived re-reading and was strengthened by a measurement made during
+implementation: five of the eleven captured aliases are LONGER than the name they alias, so "an alias is
+a short form of the name" is false and the alias population cannot be its own base. Both bases are stated
+on `maxSlashCommandAlias`.
+
+**Open question 2 (the `Count` suffix)** — kept, on `maxModelEffortLevelCount`'s naming argument
+verbatim. The one-character difference between the two constants is real and a swap at the call site
+compiles.
+
+**Open question 3 (external constructions)** — confirmed: `emitSlashCommandList` is the only production
+construction site. `cmd/pyry`'s `emitterSlashCommandListFixture` needed a change, and it is the security
+review's own SHOULD FIX rather than a surprise — `emitterSlashCommandListSentinels` is field-enumerated
+by design and its doc says each field-adding slice owes it a sentinel. Every entry of that fixture now
+carries at least one NON-EMPTY alias: an entry with an empty list contributes no needle at all and would
+have been silently exempt from the leak sweep, which is a second under-sweep mode the scalar fields have
+no analogue for.
+
+**Two `why` claims in the boundary matrix were written as predictions and corrected by mutation**, per
+the package's own recorded lesson that a sole-redness claim is empirical. Eight mutants were run through
+`go test -overlay`:
+
+- The **both-dimensions row** was predicted to be the sole red against the report being appended inside
+  the per-element loop. It is the sole red for nothing measured. An unconditional in-loop append reddens
+  the byte-liveness and count rows too; the faithful once-per-cut-element append reddens the COUNT row
+  alone and leaves this row green; a second report raised inside the count block reddens this row and the
+  count row together. The `why` now states the coverage it gives rather than a unique kill.
+- The **at-cap byte row** was credited with catching a bound call that read `maxSlashCommandName` instead
+  of `maxSlashCommandAlias`. Measured, that mutant leaves this row GREEN — its 64-byte input is untouched
+  under a 256-byte cap, which is exactly what the row expects — and reddens the over-cap, both mid-rune
+  and both multi-field rows instead. The `why` now says so, because the wrong guess is the plausible one.
+
+Two claims were **confirmed** rather than corrected: the count-cap boundary row is the sole red for the
+count bound's `>` becoming `>=`, and the four-name declaration-order row is the sole red for the alias
+bound call moved before the description's. The count-liveness row picked up a measured claim it had not
+been credited with: it is the sole red for both mutants that make a count cut SILENT.

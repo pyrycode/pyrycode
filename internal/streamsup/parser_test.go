@@ -3876,6 +3876,16 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // stronger by one: three caps on three adjacent fields of one entry, all three holding
 // 256 today, so a single shared fixture would let a change to any one of the three
 // budgets follow the other two's proof green.
+//
+// slashCommandAliasCapFixture and slashCommandAliasCountCapFixture (#1825) are that
+// rule for the entry's LIST-valued field, and they are TWO because the production
+// constants are two: one bounds a single alias's bytes and one bounds how many aliases
+// an entry retains. They are modelEffortLevelCapFixture and
+// modelEffortLevelCountCapFixture one array over, and the swap hazard
+// maxSlashCommandAliasCount's naming paragraph spends itself on lives here too — a row
+// written against the wrong one of the two still compiles. Unlike the trio above these
+// two agree with no sibling's number, which is the one thing that makes them easier to
+// keep apart than the caps they sit beside.
 const (
 	modelResolvedCapFixture            = 256
 	modelValueCapFixture               = 256
@@ -3886,6 +3896,8 @@ const (
 	slashCommandNameCapFixture         = 256
 	slashCommandArgumentHintCapFixture = 256
 	slashCommandDescriptionCapFixture  = 256
+	slashCommandAliasCapFixture        = 64
+	slashCommandAliasCountCapFixture   = 8
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -4221,10 +4233,23 @@ func commandNameIsPlainSlug(name string) bool {
 //
 //   - fifty-one entries, every one carrying a STRING name, which is what the count
 //     below is a count OF;
-//   - some entry carrying `aliases`, the committed proof that an UNDECLARED fourth
-//     key is tolerated rather than a decode failure (nine of the fifty-one do);
+//   - EXACTLY TWO distinct key sets across the fifty-one, nine entries carrying
+//     `aliases` and forty-two omitting it, which is the shape the decode rests on;
 //   - some name outside [a-z0-9-], the committed proof that NO CHARSET may be
 //     assumed (`__remote-workflow` supplies it today).
+//
+// THE SECOND GUARD USED TO SAY SOMETHING ELSE AND #1825 FALSIFIED IT, which is recorded
+// rather than quietly edited. It asserted that SOME entry carried `aliases`, as the
+// committed proof that an UNDECLARED fourth key decodes rather than failing the line.
+// Declaring the field makes that claim false about this key, and the capture holds
+// exactly two key sets — so there is no other key to re-point the witness at and the
+// claim cannot be re-stated from these bytes at all. It is REPLACED by the capture's
+// own two-key-set shape, which is what the new decode actually rests on and is a
+// stronger proof a re-capture could take away; the TOLERANCE claim it carried moved to
+// a CONSTRUCTED row of TestParser_SlashCommandFieldsAreCapped, where an entry carrying a
+// key the daemon does not declare is still shown to decode. Moving a witness from the
+// capture to a fixture is the honest edit here; deleting the claim would drop coverage
+// this slice did not earn the right to drop.
 //
 // The guards read the capture only. Nothing here cross-checks the count against
 // anything the RECORD supplies: this test is the pin, and a reader that enforced the
@@ -4265,21 +4290,42 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 				t.Fatalf("the capture carries %d command entries, want 51; a re-capture changed "+
 					"claude's reply and this count was proven against the fifty-one-entry shape", len(want))
 			}
-			var sawUndeclaredKey, sawNameOutsideSlug bool
+			var (
+				sawNameOutsideSlug bool
+				aliasCarriers      int
+				keySets            = map[string]bool{}
+			)
 			for _, entry := range want {
 				name := capturedCommandString(t, entry, "name")
 				if _, ok := entry["aliases"]; ok {
-					sawUndeclaredKey = true
+					aliasCarriers++
 				}
+				keys := make([]string, 0, len(entry))
+				for k := range entry {
+					keys = append(keys, k)
+				}
+				slices.Sort(keys)
+				keySets[strings.Join(keys, ",")] = true
 				if !commandNameIsPlainSlug(name) {
 					sawNameOutsideSlug = true
 				}
 			}
-			if !sawUndeclaredKey || !sawNameOutsideSlug {
-				t.Fatalf("captured entries supply an undeclared `aliases` key on some entry = %v and a "+
-					"name outside [a-z0-9-] on some entry = %v; both are needed for the count below to "+
-					"prove what it claims — that an undeclared key decodes rather than failing, and that "+
-					"no charset is assumed", sawUndeclaredKey, sawNameOutsideSlug)
+			// The counts as LITERALS, nameOutsideSlug's reason: derived on both sides these
+			// guards would follow a re-capture anywhere and assert nothing.
+			if aliasCarriers != 9 || len(want)-aliasCarriers != 42 {
+				t.Fatalf("captured entries: %d carry `aliases` and %d omit it, want 9 and 42 — the decode "+
+					"of the fourth key was proven against that split, and a re-capture that moved it "+
+					"changed claude's own reply", aliasCarriers, len(want)-aliasCarriers)
+			}
+			if len(keySets) != 2 {
+				t.Fatalf("captured entries span %d distinct key sets %v, want exactly 2 (the three scalar "+
+					"keys, and those plus `aliases`) — a third set means claude added a key this decode "+
+					"target does not declare, which is the documented gap protocol.SlashCommand's own "+
+					"measurement exists to make visible", len(keySets), keySets)
+			}
+			if !sawNameOutsideSlug {
+				t.Fatalf("captured entries supply no name outside [a-z0-9-]; it is needed for the count " +
+					"below to prove what it claims — that no charset is assumed")
 			}
 
 			rec := &logRecorder{}
@@ -4784,6 +4830,240 @@ func TestParser_InitializeControlResponseCarriesTheCapturedArgumentHints(t *test
 	}
 }
 
+// TestParser_InitializeControlResponseCarriesTheCapturedAliases is #1825's
+// committed-capture pin for the ALIAS field, and it is the third of the family:
+// TestParser_InitializeControlResponseCutsTheCapturedDescriptions grades a cut that
+// fires on ten of the fifty-one entries and
+// TestParser_InitializeControlResponseCarriesTheCapturedArgumentHints one that fires on
+// none. This one grades a cap that fires on none EITHER, in TWO dimensions, over a key
+// that is present on only nine entries — so what it asserts is SURVIVAL, and the shape
+// it survives as.
+//
+// It runs inside `make check` for #1810's reason: the e2e_realclaude build tag governs
+// that package's Go FILES, not its testdata. No live claude and no credentials are
+// involved on any path here.
+//
+// A test of its own for the argument-hint pin's two reasons, unchanged: the inventory
+// test's subject is the fifty-one entries name for name and #1904 NARROWED its
+// TruncatedFields assertion precisely so a whole-slice cap claim would not live there,
+// and what this pin needs is EXACT SET EQUALITY rather than a per-entry Contains sweep.
+//
+// The capture's own shape is guarded FIRST, naming the arm, before it is used as an
+// expectation, and each guard is a proof a re-capture could silently take away:
+//
+//   - fifty-one entries, NINE carrying `aliases` and forty-two omitting the key;
+//   - ZERO carrying an EMPTY array, which is the measurement the collapse decision on
+//     turnevent.SlashCommand.Aliases rests on and the reason it costs nothing observed;
+//   - ELEVEN aliases in total, none over the byte cap and no entry over the count cap.
+//     This is what makes the empty expected report set below a measurement of "nothing
+//     was cut" instead of a coincidence, and it is where a changed CAPTURE is separated
+//     from a broken CUT: a re-capture that lengthened an alias past the cap, or gave one
+//     entry nine of them, fails HERE saying exactly that;
+//   - `clear` and `usage` pinned BY NAME, nameOutsideSlug's idiom. They are the capture's
+//     only TWO-alias entries, so they are the whole of its evidence that a list arrives
+//     as a list and in claude's own order, and a re-capture that dropped one would leave
+//     the fifty-one comparisons below passing with nothing multi-element in them.
+//
+// THE COLLAPSE CANNOT BE ASSERTED WITH slices.Equal AND THAT IS THIS PIN'S SHARPEST
+// TRAP, named here rather than left for a reader to fall into: slices.Equal(nil,
+// []string{}) reports TRUE, so a per-entry slices.Equal against a nil expectation passes
+// unchanged against a producer that emits an empty non-nil slice for the forty-two
+// omitters — and the collapse turnevent.SlashCommand.Aliases decides would be untested
+// while looking covered. The explicit `!= nil` check below is what carries it, and it is
+// the reason that check exists beside an equality that appears to subsume it.
+//
+// THE EMPTY EXPECTED REPORT SET IS THIS PIN'S OTHER VACUITY RISK, the argument-hint
+// pin's unchanged: an exact equality against a nil set also passes against a producer
+// that reports nothing at all, for any field. What makes it a measurement is
+// TestParser_SlashCommandFieldsAreCapped's alias LIVENESS rows, which prove the report
+// CAN fire under "aliases" on either dimension.
+//
+// What the verbatim comparisons prove is deliberately NARROW: across all eleven aliases
+// the capture carries no byte below 0x20 and NO non-ASCII codepoint at all, the longest
+// being 9 bytes. So what these assertions show is that THOSE bytes cross untouched —
+// never that "any byte survives", a breadth these values do not exhibit, and never that
+// an alias is ASCII by nature, which maxSlashCommandAlias's doc refuses as an argument.
+func TestParser_InitializeControlResponseCarriesTheCapturedAliases(t *testing.T) {
+	t.Parallel()
+
+	// The capture's counts as LITERALS, for nameOutsideSlug's reason: derived on both
+	// sides, every guard below would follow a re-capture anywhere and assert nothing.
+	const (
+		wantEntries  = 51
+		wantCarriers = 9
+		wantAliases  = 11
+	)
+	// The two-alias entries by name, with claude's OWN order inside each. Written out
+	// rather than read from the capture for the same reason, and they are the only place
+	// this pin can show that ORDER survives at all.
+	twoAlias := map[string][]string{
+		"clear": {"reset", "new"},
+		"usage": {"cost", "stats"},
+	}
+
+	for _, arm := range initCaptureArms {
+		if arm == initCaptureArmNoRequest {
+			continue
+		}
+		t.Run(initCaptureArmLabel(arm), func(t *testing.T) {
+			t.Parallel()
+
+			entries := capturedCommandEntries(t, arm)
+			if len(entries) != wantEntries {
+				t.Fatalf("arm %q carries %d command entries, want %d; a re-capture changed claude's "+
+					"reply and every count below was proven against the fifty-one-entry shape",
+					arm, len(entries), wantEntries)
+			}
+			// want holds the capture's own aliases per entry, nil for an entry omitting the
+			// key. Built here so the comparison loop reads the capture once and index i means
+			// the same thing on both sides.
+			want := make([][]string, len(entries))
+			var carriers, total int
+			for i, entry := range entries {
+				name := capturedCommandString(t, entry, "name")
+				raw, ok := entry["aliases"]
+				if !ok {
+					continue
+				}
+				carriers++
+				list, ok := raw.([]any)
+				if !ok {
+					t.Fatalf("arm %q: captured %q carries an `aliases` that is %T, want an array — the "+
+						"decode target declares []string and a re-capture that changed the shape breaks "+
+						"the whole line rather than this entry", arm, name, raw)
+				}
+				// ZERO empty arrays is the collapse decision's own premise, so it is guarded
+				// rather than assumed: an empty one here would mean the distinction the design
+				// discards has started being observed.
+				if len(list) == 0 {
+					t.Fatalf("arm %q: captured %q carries an EMPTY `aliases` array — zero of the fifty-one "+
+						"did when turnevent.SlashCommand.Aliases decided to collapse absent and empty "+
+						"onto nil, and that decision's whole measurement was this count being zero", arm, name)
+				}
+				for _, v := range list {
+					s, ok := v.(string)
+					if !ok {
+						t.Fatalf("arm %q: captured %q carries a non-string alias %T", arm, name, v)
+					}
+					// Per entry rather than over a maximum, so the failure names the entry that
+					// moved. An alias over the cap would be CUT, and the empty expected report set
+					// below is exactly the claim that none is.
+					if len(s) > slashCommandAliasCapFixture {
+						t.Fatalf("arm %q: captured %q carries a %d-byte alias %s, over the %d-byte cap — a "+
+							"re-capture lengthened claude's own output past this cap, so what changed is "+
+							"the CAPTURE and not the cut, and the empty expected report set below was "+
+							"proven against a capture nothing was cut in",
+							arm, name, len(s), slashCommandNamePreview(s), slashCommandAliasCapFixture)
+					}
+					want[i] = append(want[i], s)
+					total++
+				}
+				if len(list) > slashCommandAliasCountCapFixture {
+					t.Fatalf("arm %q: captured %q carries %d aliases, over the %d cap — the COUNT dimension's "+
+						"half of the same separation: what changed is the capture and not the bound",
+						arm, name, len(list), slashCommandAliasCountCapFixture)
+				}
+				if pinned, isPinned := twoAlias[name]; isPinned && !slices.Equal(want[i], pinned) {
+					t.Fatalf("arm %q: captured %q aliases are %q, want %q in claude's own order — this is "+
+						"one of the capture's only two multi-alias entries and the whole of its evidence "+
+						"that a list arrives as a list", arm, name, want[i], pinned)
+				}
+			}
+			if carriers != wantCarriers || total != wantAliases {
+				t.Fatalf("arm %q: %d entries carry aliases and %d aliases in total, want %d and %d — the "+
+					"nine-carrier, eleven-alias shape is what the comparisons below are a proof ABOUT",
+					arm, carriers, total, wantCarriers, wantAliases)
+			}
+
+			events := collectEvents(capturedInitializeLine(t, arm))
+			// TWO events: every responding arm carries a models array beside its commands one,
+			// so the ModelList — the rung's own discriminant — goes first and the inventory
+			// behind it.
+			if len(events) != 2 {
+				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+					len(events), events)
+			}
+			list, ok := events[1].(turnevent.SlashCommandList)
+			if !ok {
+				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+			}
+			// FATAL, the siblings' reason: a cap cuts an ALIAS and never an ENTRY, so a producer
+			// that dropped one must fail here rather than let the index below run off the end.
+			if len(list.Commands) != len(entries) {
+				t.Fatalf("SlashCommandList carries %d entries, want %d — one per array element, in "+
+					"claude's own order", len(list.Commands), len(entries))
+			}
+			var (
+				gotCut       []string
+				sawOmitter   bool
+				gotTwoAlias  = map[string][]string{}
+				emittedTotal int
+			)
+			for i, got := range list.Commands {
+				// The capture's own strings on the right-hand side and index i on BOTH, which is
+				// what pins claude's ORDER across entries as well as inside a list.
+				if !slices.Equal(got.Aliases, want[i]) {
+					t.Errorf("arm %q entry %d (%q) aliases: got %q, want %q verbatim and in claude's own "+
+						"order — no lowercasing, no trimming, no deduplication, no sorting",
+						arm, i, got.Name, got.Aliases, want[i])
+				}
+				emittedTotal += len(got.Aliases)
+				// THE COLLAPSE, and the one assertion slices.Equal above cannot make: it reports
+				// TRUE for (nil, []string{}), so without this an emitter returning an empty
+				// non-nil slice for the forty-two omitters passes every comparison in this test.
+				if want[i] == nil {
+					sawOmitter = true
+					if got.Aliases != nil {
+						t.Errorf("arm %q entry %d (%q) omits `aliases` in the capture but arrived with a "+
+							"non-nil %#v — absent, null and a published [] are ONE reading spelled nil "+
+							"(turnevent.SlashCommand.Aliases), and slices.Equal cannot see this",
+							arm, i, got.Name, got.Aliases)
+					}
+				}
+				if _, isPinned := twoAlias[got.Name]; isPinned {
+					gotTwoAlias[got.Name] = got.Aliases
+				}
+				if slices.Contains(got.TruncatedFields, "aliases") {
+					gotCut = append(gotCut, got.Name)
+				}
+			}
+			if !sawOmitter {
+				t.Fatalf("arm %q: no emitted entry corresponds to a captured entry omitting `aliases`, so "+
+					"the collapse check above never ran; forty-two of the fifty-one should", arm)
+			}
+			if emittedTotal != wantAliases {
+				t.Errorf("arm %q: the emitted entries carry %d aliases in total, want %d — a producer "+
+					"dropping or duplicating one inside a list that still compares equal per entry is "+
+					"what this total catches", arm, emittedTotal, wantAliases)
+			}
+			// The two multi-alias entries again BY NAME. The per-entry equality above already
+			// covers them, so what this adds is a failure MESSAGE that names them —
+			// nameOutsideSlug's argument exactly: the capture's only evidence that ORDER inside a
+			// list survives should not fail anonymously as "entry 12".
+			for name, pinned := range twoAlias {
+				if !slices.Equal(gotTwoAlias[name], pinned) {
+					t.Errorf("arm %q: emitted %q aliases: got %q, want the capture's own %q IN ORDER — one "+
+						"of only two entries carrying more than one alias, and the reason a consumer "+
+						"matching a menu entry against this list finds %q as well as the command name",
+						arm, name, gotTwoAlias[name], pinned, pinned[0])
+				}
+			}
+			// EXACT equality against a NIL set, never a per-entry Contains sweep, for the
+			// siblings' reason: equality is what makes "and NO OTHERS" structural — a cut that
+			// fired on any entry reddens here without anything having to enumerate the fifty that
+			// must not report. See this test's doc for why an empty expectation is a measurement
+			// here and not a tautology.
+			var wantCut []string
+			if !slices.Equal(gotCut, wantCut) {
+				t.Errorf("arm %q: the emitted entries reporting \"aliases\" are %q, want NONE — no captured "+
+					"alias reaches the %d-byte cap and no captured entry reaches the %d-alias cap (the "+
+					"guards above hold both), so a report here is a cap firing on a value that fits",
+					arm, gotCut, slashCommandAliasCapFixture, slashCommandAliasCountCapFixture)
+			}
+		})
+	}
+}
+
 // TestParser_InitializeControlResponseAbsentPayloadEmitsNothing is AC 3's absent
 // case, and its fixture is COMMITTED rather than synthetic: initCaptureArmNoRequest
 // is the arm of #1763's measurement that sent no initialize request, so its record
@@ -4870,9 +5150,11 @@ func commandEntryFixture(name any) map[string]any {
 //
 // The key is a PARAMETER rather than a description-specific signature, which is what
 // #1957's argumentHint rows USE rather than minting a third helper, and what #1825's
-// aliases will. The
+// aliases rows use in turn. The
 // value is `any` so a row can put a null or a non-string where a string belongs, which
-// is the null carve-out's input and the undecodable rung's.
+// is the null carve-out's input and the undecodable rung's — and, since #1825, an
+// []any where an array of strings belongs, which is what lets one helper build both a
+// well-formed alias list and an element-level decode failure.
 //
 // Its own function rather than a call to modelEntryWithFixture, which is
 // map-shaped identically: the two build entries of two different arrays with two
@@ -5386,6 +5668,32 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 			wantReason: "undecodable",
 		},
 		{
+			// The FOURTH and last declared key at the OUTER level. It completes the rule as
+			// the STRUCT's rather than any one field's — no branch is written for it — and
+			// it is the row that records this key's own transition: `aliases` was the
+			// capture's undeclared key until #1825 and was silently ignored on every shape,
+			// including this one.
+			name: "an entry's aliases is a string",
+			line: initializeLineFixture(t, "success", map[string]any{"commands": []any{
+				commandEntryWithFixture(commandEntryFixture("clear"), "aliases", "reset"),
+			}}),
+			wantReason: "undecodable",
+		},
+		{
+			// The INNER level, and the only row in this table that has one: `aliases` is the
+			// only declared key with an inside, so it is the only one where a value of the
+			// right OUTER shape can still fail. The whole line goes, so no partial alias list
+			// survives carrying only the elements that happened to decode — the element-level
+			// rule of the `commands` array itself, one level further in. What separates this
+			// from a NULL aliases, which the cap table pins as an ordinary counted entry, is
+			// what separates a number description from a null one.
+			name: "an element of an entry's aliases is a number",
+			line: initializeLineFixture(t, "success", map[string]any{"commands": []any{
+				commandEntryWithFixture(commandEntryFixture("clear"), "aliases", []any{"reset", 5}),
+			}}),
+			wantReason: "undecodable",
+		},
+		{
 			name:       "commands is null",
 			line:       initializeLineFixture(t, "success", map[string]any{"commands": nil}),
 			wantReason: "ack",
@@ -5627,14 +5935,20 @@ func slashCommandNamePreview(s string) string {
 	return fmt.Sprintf("%q…(%d bytes)", strings.ToValidUTF8(s[:head], ""), len(s))
 }
 
-// TestParser_SlashCommandFieldsAreCapped is ALL THREE per-field bounds' whole boundary
-// matrices: each field is cut at its OWN cap at construction and the cut is REPORTED,
-// by the DAEMON's snake_case name for the field — which for the first two coincides
-// with the wire name protocol.SlashCommand.TruncatedFields documents and for the third
-// (#1957) coincides with the wire name while DIFFERING from claude's own key,
-// argumentHint. It is named for the FIELDS since #1905,
-// TestParser_ModelListFieldsAreCapped's shape one array over: it covered one bound when
-// #1877 built it and covers three now.
+// TestParser_SlashCommandFieldsAreCapped is ALL FOUR per-field bounds' whole boundary
+// matrices — FIVE dimensions, the fourth field having two — where each field is cut at
+// its OWN cap at construction and the cut is REPORTED, by the DAEMON's snake_case name
+// for the field. Three of the four names coincide with the wire name
+// protocol.SlashCommand.TruncatedFields documents AND with claude's own key; the hint's
+// (#1957) coincides with the wire name while DIFFERING from claude's argumentHint. It is
+// named for the FIELDS since #1905, TestParser_ModelListFieldsAreCapped's shape one
+// array over: it covered one bound when #1877 built it and covers five now.
+//
+// THE ALIAS ROWS (#1825) ARE THE FIRST HERE TO GRADE A LIST, and three of their claims
+// have no analogue among the scalar rows: that a COUNT cut takes the TAIL so claude's
+// order survives, that ONE report name covers TWO cut dimensions and appears at most
+// once, and that absent, null and a published [] collapse onto nil. The last of those
+// is why the runner compares this field with reflect.DeepEqual and never slices.Equal.
 //
 // THE HINT'S ROWS CARRY THE KEY/NAME SPLIT and no other rows can, this being the first
 // field of the three where claude's key and the daemon's report name are different
@@ -5707,6 +6021,22 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 	// A third fill byte for the same reason, which is what makes the all-three-cut row
 	// grade a swap of any TWO of the three values and not only of their report names.
 	hintAtCap := strings.Repeat("h", slashCommandArgumentHintCapFixture)
+	// A fourth, and the argument holds one more time. This one is a different LENGTH as
+	// well as a different byte, its cap being 64 where the other three are 256, so a row
+	// carrying it reddens on a bound call reading the wrong CONSTANT and not only on the
+	// values or the report names being swapped.
+	aliasAtCap := strings.Repeat("l", slashCommandAliasCapFixture)
+	// atCountCap is a full-length alias list, distinct per element so a producer that
+	// truncated from the HEAD, reversed, sorted or deduplicated is separated from one
+	// that truncated from the tail. Built from the CAP fixture, so the count rows below
+	// follow a halved constant to red rather than green.
+	atCountCap := make([]any, 0, slashCommandAliasCountCapFixture)
+	wantAtCountCap := make([]string, 0, slashCommandAliasCountCapFixture)
+	for i := 0; i < slashCommandAliasCountCapFixture; i++ {
+		a := fmt.Sprintf("alias-%d", i)
+		atCountCap = append(atCountCap, a)
+		wantAtCountCap = append(wantAtCountCap, a)
+	}
 
 	tests := []struct {
 		name string
@@ -6027,29 +6357,211 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 				"swap of the two VALUES reddens here as well as a swap of their report names",
 		},
 		{
-			name: "all THREE fields cut on ONE entry report in DECLARATION order",
+			name: "an alias over the byte cap is cut and reported; one that fits is not",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases",
+					[]any{strings.Repeat("l", slashCommandAliasCapFixture+1), "dr"}),
+				commandEntryWithFixture(commandEntryFixture("design"), "aliases", []any{"plan"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Aliases: []string{aliasAtCap, "dr"},
+					TruncatedFields: []string{"aliases"}},
+				{Name: "design", Aliases: []string{"plan"}},
+			},
+			why: "the alias field's BYTE-dimension LIVENESS row, and the report the whole empty expected " +
+				"set of TestParser_InitializeControlResponseCarriesTheCapturedAliases is a measurement " +
+				"against. The SECOND element is what makes the cut an ELEMENT cut rather than a list " +
+				"one: it fits, it survives at full length, and it stays in claude's position — so a " +
+				"producer that DROPPED the over-long element instead of cutting it fails on the list's " +
+				"length. The second ENTRY is the non-vacuity pin against a producer naming \"aliases\" " +
+				"on every entry and the \"a cut on one entry does not appear on the entries AFTER it\" " +
+				"pin for the fourth bound call",
+		},
+		{
+			name: "an alias exactly at the byte cap is NOT truncated",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases", []any{aliasAtCap}),
+				commandEntryWithFixture(commandEntryFixture("design"), "aliases", []any{"plan"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Aliases: []string{aliasAtCap}},
+				{Name: "design", Aliases: []string{"plan"}},
+			},
+			why: "the other three at-cap rows one field over, and NOT the sole red on truncateField's <= " +
+				"becoming <: that helper is SHARED by all four fields, so the flip reddens all four " +
+				"at-cap rows together. What this row IS the sole red for is the emitter INLINING the " +
+				"ALIAS element cut with its own length test written < or otherwise off by one, under " +
+				"which every scalar row stays green while a 64-byte workspace alias arrives reported " +
+				"as truncated when nothing was cut. It is NOT the row that catches a bound call " +
+				"reading the wrong CONSTANT, which is worth saying because that is the plausible " +
+				"guess: MEASURED, passing maxSlashCommandName here leaves this row green — its " +
+				"64-byte input is untouched under a 256-byte cap, which is exactly what the row " +
+				"expects — and reddens the over-cap, both mid-rune and both multi-field rows instead",
+		},
+		{
+			name: "an alias cut landing mid-rune deletes the partial rune (two-byte)",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases",
+					[]any{strings.Repeat("l", slashCommandAliasCapFixture-1) + twoByteRune + "z"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Aliases: []string{strings.Repeat("l", slashCommandAliasCapFixture-1)},
+					TruncatedFields: []string{"aliases"}},
+			},
+			why: "one byte UNDER the cap: truncateField's scrub is a DELETION, not a replacement — and " +
+				"the report still names the field, because the bool says only whether the cap cut. " +
+				"CONSTRUCTED rather than drawn from the capture, and by the widest margin of the four " +
+				"fields: no captured alias carries non-ASCII at all and the longest is 9 bytes against " +
+				"64, so mid-rune is not merely unreached here but unreachable twice over — see " +
+				"maxSlashCommandAlias's doc, which owns that measurement",
+		},
+		{
+			name: "an alias cut landing mid-rune deletes the partial rune (four-byte)",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases",
+					[]any{strings.Repeat("l", slashCommandAliasCapFixture-3) + fourByteRune + "z"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Aliases: []string{strings.Repeat("l", slashCommandAliasCapFixture-3)},
+					TruncatedFields: []string{"aliases"}},
+			},
+			why: "THREE bytes under, which is what makes \"1-3 bytes under the cap\" a range rather than " +
+				"a one-byte anecdote for this field as well. What it adds over the row above is the " +
+				"RANGE and nothing else — the two redden together under every scrub mutant — and its " +
+				"CONSTRUCTED input has the row above's reason",
+		},
+		{
+			name: "more aliases than the count cap are cut FROM THE TAIL and reported",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases",
+					append(append([]any{}, atCountCap...), "overflow-a", "overflow-b")),
+				commandEntryWithFixture(commandEntryFixture("design"), "aliases", []any{"plan"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Aliases: wantAtCountCap, TruncatedFields: []string{"aliases"}},
+				{Name: "design", Aliases: []string{"plan"}},
+			},
+			why: "the alias field's COUNT-dimension LIVENESS row, the second dimension no other field " +
+				"in this entry has. TWO elements over rather than one, so a bound cutting to cap-1 or " +
+				"cap+1 is separated from one cutting to cap. The survivors are DISTINCT and in " +
+				"claude's own order, which is what separates a tail cut from a head cut, a reversal, " +
+				"a sort and a dedup — none of which any equal-length row could see, and a HEAD cut " +
+				"is measured to redden here. It is also, MEASURED, the SOLE red for the two mutants " +
+				"that make the count cut SILENT: the count bound not raising the report flag at all, " +
+				"and the report moved inside the per-element loop where a count-only cut never " +
+				"reaches it. Both leave every byte-dimension row green while a workspace's aliases " +
+				"go missing from a menu with nothing saying so. The second entry is the non-vacuity " +
+				"pin: it carries one alias and must not report",
+		},
+		{
+			name: "exactly at the alias count cap is NOT reported",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases", atCountCap),
+				commandEntryWithFixture(commandEntryFixture("design"), "aliases", []any{"plan"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", Aliases: wantAtCountCap},
+				{Name: "design", Aliases: []string{"plan"}},
+			},
+			why: "the COUNT dimension's boundary row, and it is the sole red for the count bound's > " +
+				"becoming >= — which no byte-dimension row can see, truncateField's own <= being a " +
+				"different operator in a different statement. Under >= this entry reports \"aliases\" " +
+				"on a list nothing happened to, the exact mistake boundEach's own doc names one array " +
+				"over. It also reddens on a halved count cap, its input being built from the fixture",
+		},
+		{
+			name: "both alias dimensions cut on ONE entry report \"aliases\" exactly ONCE",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "aliases",
+					append([]any{strings.Repeat("l", slashCommandAliasCapFixture+1)},
+						append(append([]any{}, atCountCap[1:]...), "overflow-a")...)),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research",
+					Aliases:         append([]string{aliasAtCap}, wantAtCountCap[1:]...),
+					TruncatedFields: []string{"aliases"}},
+			},
+			why: "ONE report name for TWO cut dimensions, which is the property that separates this " +
+				"field from the three scalars: the list is over the count cap AND its first element " +
+				"is over the byte cap, and \"aliases\" appears exactly once. Its exclusivity was " +
+				"CLAIMED and then MEASURED, and the measurement corrected the claim rather than " +
+				"confirming it — this row is the SOLE red for nothing tried. An unconditional " +
+				"append inside the per-element loop reddens the byte-liveness and count rows too; " +
+				"the more faithful once-per-CUT-ELEMENT append reddens the COUNT row ALONE and " +
+				"leaves this one green, the count cut being the report it drops; a second report " +
+				"raised inside the count block reddens this row and the count row together. So what " +
+				"this row adds is COVERAGE of the coincidence, not a unique kill, and every one of " +
+				"those mutants is caught by the exact-equality comparison rather than by a " +
+				"membership check, which would pass all three",
+		},
+		{
+			name: "absent, null and an empty array all arrive as nil and report nothing",
+			entries: []any{
+				commandEntryFixture("deep-research"),
+				commandEntryWithFixture(commandEntryFixture("design"), "aliases", nil),
+				commandEntryWithFixture(commandEntryFixture("plan"), "aliases", []any{}),
+				commandEntryWithFixture(commandEntryFixture("loop"), "aliases", []any{"proactive"}),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research"}, {Name: "design"}, {Name: "plan"},
+				{Name: "loop", Aliases: []string{"proactive"}},
+			},
+			why: "THE COLLAPSE, and the three spellings are in ONE row because the claim is that they " +
+				"read ALIKE: an absent key and a JSON null leave the decoded slice nil, a published " +
+				"[] leaves it empty and non-nil, and the emitter normalises all three to nil " +
+				"(turnevent.SlashCommand.Aliases). The runner's reflect.DeepEqual is what carries " +
+				"this row — slices.Equal reports TRUE for (nil, []string{}) and would pass against " +
+				"an emitter that kept the distinction, which is the whole trap the collapse decision " +
+				"names. None of the three reports, so the zero-length arm returning BEFORE the count " +
+				"bound is graded here too: an [] counted against the cap would still not report, but " +
+				"one falling through to the element loop would allocate a non-nil empty slice. The " +
+				"trailing real alias pins that no entry was skipped",
+		},
+		{
+			name: "an entry carrying a key the daemon does not declare still decodes",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "somethingClaudeAddsLater",
+					"whatever"),
+				commandEntryFixture("design"),
+			},
+			want: []turnevent.SlashCommand{{Name: "deep-research"}, {Name: "design"}},
+			why: "the tolerance claim that used to be witnessed by the CAPTURE's `aliases` key, moved " +
+				"here when #1825 declared that key and falsified the witness. encoding/json ignores " +
+				"an unknown key rather than failing, so a key claude adds later costs the daemon a " +
+				"gap and not a line — which is what makes commandEntryLine's all-or-nothing rule a " +
+				"claim about DECLARED keys specifically. The capture can no longer prove it: its " +
+				"fifty-one entries span exactly two key sets and all four keys are now declared",
+		},
+		{
+			name: "all FOUR fields cut on ONE entry report in DECLARATION order",
 			entries: []any{
 				commandEntryWithFixture(
 					commandEntryWithFixture(
-						commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
-						"argumentHint", strings.Repeat("h", slashCommandArgumentHintCapFixture+1)),
-					"description", strings.Repeat("d", slashCommandDescriptionCapFixture+1)),
+						commandEntryWithFixture(
+							commandEntryFixture(strings.Repeat("a", slashCommandNameCapFixture+1)),
+							"argumentHint", strings.Repeat("h", slashCommandArgumentHintCapFixture+1)),
+						"description", strings.Repeat("d", slashCommandDescriptionCapFixture+1)),
+					"aliases", []any{strings.Repeat("l", slashCommandAliasCapFixture+1)}),
 				commandEntryFixture("design"),
 			},
 			want: []turnevent.SlashCommand{
 				{Name: atCap, ArgumentHint: hintAtCap, Description: descAtCap,
-					TruncatedFields: []string{"name", "argument_hint", "description"}},
+					Aliases:         []string{aliasAtCap},
+					TruncatedFields: []string{"name", "argument_hint", "description", "aliases"}},
 				{Name: "design"},
 			},
 			why: "the WHOLE declaration order in one slice, and the SOLE red — measured, not reasoned — " +
-				"against the emitter's NAME and HINT bound calls being swapped: the row above cuts no " +
-				"name and the name+description row cuts no hint, so both stay green under that swap " +
-				"while this one reports [\"argument_hint\", \"name\", \"description\"]. Inserting the third " +
-				"bound call in the wrong place is the one plausible wrong edit in this slice and every " +
-				"placement of it COMPILES, which is why this matrix compares TruncatedFields by exact " +
-				"equality and not by membership: every ordering mutant passes a contains check. Three " +
-				"distinct fill bytes, so a swap of any two VALUES reddens here too. The uncut second " +
-				"entry is the first row's non-vacuity pin",
+				"against the emitter's NAME and HINT bound calls being swapped: the hint+description " +
+				"row cuts no name and the name+description row cuts no hint, so both stay green under " +
+				"that swap while this one reports [\"argument_hint\", \"name\", ...]. Placing a bound " +
+				"call wrongly is the one plausible wrong edit in each of these slices and every " +
+				"placement COMPILES, which is why this matrix compares TruncatedFields by exact " +
+				"equality and not by membership: every ordering mutant passes a contains check. It " +
+				"grew a fourth name in #1825, where the alias call is APPENDED after the three rather " +
+				"than inserted between them — the first of the three field slices for which the " +
+				"correct placement is the end of the sequence. FOUR distinct fill bytes, so a swap of " +
+				"any two VALUES reddens here too. The uncut second entry is the first row's " +
+				"non-vacuity pin",
 		},
 	}
 	for _, tt := range tests {
@@ -6148,6 +6660,28 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 				if !utf8.ValidString(got.Description) {
 					t.Errorf("entry %d description is not valid UTF-8: %s",
 						i, slashCommandNamePreview(got.Description))
+				}
+				// reflect.DeepEqual and deliberately NOT slices.Equal, which is the one place
+				// this field's assertions diverge from the three scalars' rather than repeating
+				// them: slices.Equal reports TRUE for (nil, []string{}), so it cannot see the
+				// collapse turnevent.SlashCommand.Aliases decides, and the absent/null/empty row
+				// would pass against an emitter that kept the distinction. It carries the LENGTH,
+				// the ORDER and the per-element bytes in one comparison, so the count rows'
+				// tail-cut claim and the byte rows' verbatim claim both rest on it.
+				if !reflect.DeepEqual(got.Aliases, want.Aliases) {
+					t.Errorf("entry %d aliases: got %#v, want %#v (%s) — claude's aliases are carried "+
+						"VERBATIM and in claude's order, each cut is a BYTE cut, a count cut is from the "+
+						"TAIL, and nil is the one spelling of empty",
+						i, got.Aliases, want.Aliases, tt.why)
+				}
+				// The scalars' UTF-8 check per ELEMENT, live on the two mid-rune rows and a no-op
+				// on the rest. As there, it is not what CARRIES them — the equality above is, a
+				// scrub that REPLACED the partial rune changing the bytes — so what it adds is the
+				// narrower claim that no cut of this field leaves an invalid encoding behind.
+				for j, alias := range got.Aliases {
+					if !utf8.ValidString(alias) {
+						t.Errorf("entry %d alias %d is not valid UTF-8: %s", i, j, slashCommandNamePreview(alias))
+					}
 				}
 				// DeepEqual rather than a length or a contains check, for the models table's
 				// reason: nil and []string{} disagree here and only one of them is the contract.
