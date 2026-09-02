@@ -73,7 +73,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 |---|---|---|---|
 | `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678) | true |
-| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, straight-through, no cap here — see below) | true |
+| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below) | true |
 | `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |
@@ -273,16 +273,22 @@ capability** hazard § `tool_use` states for `Input` — a tool result is raw
 command output or file contents, so a `'<'`-dense result is the ordinary case,
 not the contrived one.
 
-**The measured worst case moved with #2024's `ResultDetail` field** (see
+**The measured worst case moved with #2024's `ResultDetail` field, and stayed put when #2025
+extended it to five shapes** (see
 [protocol-package-interactive-event-payloads.md](protocol-package-interactive-event-payloads.md)):
-`TestToolResultPayload_FitV2EnvelopeCap` now carries it at its own 48-byte
+`TestToolResultPayload_FitV2EnvelopeCap` carries it at its own 48-byte
 constructed worst case alongside the capped `ResultSummary`, measuring
 **61430 B, 93.8%** of the 65519-byte cap — up from 61363 B / 93.7%, exactly
-the field's 48 bytes plus 19 B of key and punctuation. `ResultDetail` needed
-no rune cap of its own (see the protocol doc) because it is formatted digits,
-not claude's text carried through — but it still eats headroom on this
-payload, now **~4.1 KB** rather than ~4.2 KB. The next field added here
-inherits the smaller number.
+the field's 48 bytes plus 19 B of key and punctuation. The 48-byte bound is
+re-derived across all five of #2025's forms (edit 43, write 36, shell/search
+25) and the read shape stays the longest, so this measurement did not move a
+second time. `ResultDetail` needed no rune cap of its own (see the protocol
+doc) because every count formats through `strconv.FormatInt` plus fixed
+literals — never claude's text carried through — even though two of those
+literals (U+2212, U+00B7, #2025) are non-ASCII; `encoding/json` escapes
+neither, so the wire-cost arithmetic survives unchanged. It still eats
+headroom on this payload, **~4.1 KB**. The next field added here inherits the
+smaller number.
 
 ### Per-field input extraction (`inputFields` / `inputValue`, #1678)
 

@@ -108,19 +108,60 @@ location, and #1839 (below) put the consumer inside this same file rather than i
 reason (in-package caller, no cross-package dispatch to satisfy) rather than for having no caller
 at all. This slice writes the line and stops; nothing reads the ack.
 
-**Tool-result sidecar decode — fail-closed is a confinement control, not just AC hygiene (#2024).**
-`consumeLine`'s `user` arm hands `emitUser` the raw line bytes (the `emitRateLimit(line)` shape), which
-decodes the line's `tool_use_result` sidecar a second time into `json.RawMessage`-typed fields, the
-`systemTaskUpdatedLine.Patch` precedent. The read shape (`file.numLines`/`file.totalLines`) is the only
-one this slice recognises; every other shape — absent, non-object, one-key, non-integer counts — sends no
-count. That default earns more than "no second unrecognized outcome": `emitUnrecognized` puts the
-offending line's bytes on the wire (truncated to `maxUnrecognizedRaw`) for the phone to render, and a read
-sidecar's undeclared `file.content` is **the entire contents of the file claude read**. Routing an
-unrecognised sidecar through that path would exfiltrate the leading bytes of any file claude reads to the
-relay — so no sidecar path may ever emit `Unrecognized`, structurally, not just by test coverage. The
-second control is what `toolResultSidecar`/`sidecarFile` leave out: `file.content` and `file.filePath` are
-never declared on the decode target, a stronger guarantee than a confinement test sweep — a field that
-doesn't exist on the struct can't leak regardless of what future code does with the decoded value.
+**Tool-result sidecar decode — fail-closed is a confinement control, not just AC hygiene (#2024, extended
+to all five shapes by #2025).** `consumeLine`'s `user` arm hands `emitUser` the raw line bytes (the
+`emitRateLimit(line)` shape), which decodes the line's `tool_use_result` sidecar a second time into
+`json.RawMessage`-typed fields, the `systemTaskUpdatedLine.Patch` precedent. #2024 shipped only the read
+shape and named #2025 as the ticket that would add the rest, predicting a dispatch with arms; #2025 found
+that prediction wrong — `readLineCount` was a single-shape composer, not a dispatch — and restructured it
+into `toolResultDetail`, five composers tried in a fixed order (read → shell → edit → write → search, each
+returning `""` on non-match, `""` at the end when none matched). That fixed order is what makes the
+fail-closed default hold for a shape recognised only in part: a `structuredPatch` sidecar matching neither
+the edit nor the write arm, or a write whose `type` is neither `create` nor `update`, both run off the end
+with no count. The reason the default matters this much: `emitUnrecognized` puts the offending line's
+bytes on the wire (truncated to `maxUnrecognizedRaw`) for the phone to render, and an undeclared field can
+be **the entire contents of a file claude read or edited**, an absolute path, or raw grep output — so no
+sidecar path may ever emit `Unrecognized`, structurally, not just by test coverage.
+
+**Identify by presence of keys, never by exact key set — and presence-only decoding is what lets an
+unbounded confinement rule scale to five shapes.** #1794's census found 288 of 4883 observed shell
+sidecars (5.9%) carry a sixth key (`gitOperation`, `persistedOutputPath`, …) and 90 edit/write sidecars
+carry an extra one; an arm keyed on "exactly these keys" would silently lose all of them. `toolResultSidecar`
+is widened into a **shape discriminator**: safe scalars by value, everything else — `structuredPatch`,
+`oldString`/`newString`, `content`, `mode` — decoded only for *presence*, via a `*jsonKey` field whose
+`UnmarshalJSON` retains no byte of the value. That is what lets `structuredPatch: []` (**every observed
+create, 240 of 240**) be recognised as present without decoding a single hunk — extending `sidecarFile`'s
+pointer-so-absent-differs-from-present-zero rule from a scalar to a whole sub-document.
+
+**Two shapes spelling a key the same are not the same field.** `content` is a write sidecar's full file
+text *and* a search sidecar's whole grep output; a shared decode field between them would put the search
+arm's grep output on the write arm's target (or vice versa) the moment either shape carried the other's
+key. Every arm that needs an unbounded claude-supplied value for its count — shell's `stdout`, the write's
+`content`, the edit's hunk `lines` — gets its **own narrow stage-2 target**, re-decoded from the same
+`json.RawMessage` and never returned from its composer: every composer returns a `string`, never a decoded
+value, so a stage-2 struct can never escape into a caller that might hold claude's bytes.
+
+**The plausible-wrong edit-arm implementation was caught only by mutation, not by review.** A hunk's
+`oldLines`/`newLines` are its *spans*, context lines included; differencing them looks like it should
+yield `+10 −3` and does not — the count has to come from the `+`/`-` prefixes of the hunk's `lines`
+instead. A fixture whose context lines don't outnumber its changed ones agrees with either implementation;
+only forcing the span-differencing mutant under `go test -overlay` proved the fixture (and the acceptance
+criterion built around it) non-vacuous.
+
+**The two separator glyphs are the first non-ASCII bytes this field has ever carried, and the doc-comment
+sweep for it missed one place that said so.** `+10 −3` uses U+2212 MINUS SIGN (not a hyphen);
+`created · 54 lines` uses U+00B7 MIDDLE DOT. #2025 named and corrected four doc comments asserting
+"digits, spaces and ASCII letters" or equivalent — `maxResultDetailBytes` here, plus one each in
+`internal/turnevent/event.go`, `internal/turnbridge/outbound.go` and `internal/protocol/interactive.go` —
+but a fifth carried the identical claim and wasn't on that list:
+`internal/turnbridge/outbound_test.go`'s `TestToolResultPayload_FitV2EnvelopeCap`, whose 48-byte ASCII
+fill was justified with "that IS the producer's alphabet." Only #2025's own security review caught it,
+by asking the general question ("what else claims this field is ASCII?") rather than re-checking the
+ticket's own enumerated list. **The load-bearing half of every one of those claims survives unchanged: no
+claude-authored byte reaches the field.** Only the alphabet, the composer count and the function name
+moved — grepping for the four places a fact was *stated* is not the same audit as grepping for every place
+it was *relied on*.
+
 Confirmed non-vacuous by mutation: forcing the envelope key from `tool_use_result` back to the
 transcript's `toolUseResult` — precisely the dead-code decoder [#2023's stdout capture](e2e-realclaude-tool-result-sidecar-probe-test-go.md)
 exists to have prevented — turns 6 subtests red under `go test -overlay`, so the fixtures pin the observed

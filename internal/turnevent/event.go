@@ -61,19 +61,21 @@ type ToolStart struct {
 // nil for a status-only update.
 //
 // ResultDetail is a short, DAEMON-COMPOSED précis of the call's structured
-// outcome — "265 lines", "110 of 1676 lines" — derived from the tool_use_result
-// sidecar claude writes alongside each result (#2024). Empty means "no count",
-// which is the answer for about 95% of calls and for every shape the producer
-// does not recognise.
+// outcome — "265 lines", "110 of 1676 lines", "+10 −3", "created · 54 lines",
+// "5 files" — derived from the tool_use_result sidecar claude writes alongside
+// each result (#2024, #2025). Empty means "no count", which is the answer for
+// every shape the producer does not recognise.
 //
 // Its provenance is the opposite of Content's and the distinction matters to
 // every consumer. Content carries claude's own bytes, so it needs a cap
 // downstream (turnbridge's maxResultSummaryRunes). ResultDetail contains NO
-// claude-supplied byte at all: streamsup's readLineCount formats two decoded
-// integers, so the alphabet is digits, spaces and ASCII letters and the length
-// is bounded by int64's range at construction. Treat it as display text — render
-// it, never parse it; the unit words live here precisely so a client need not
-// switch on a tool name to know what the number counts.
+// claude-supplied byte at all: streamsup's toolResultDetail formats decoded
+// integers and its own literals, so the alphabet is digits, spaces, ASCII
+// letters and exactly two further runes — U+2212 MINUS SIGN and U+00B7 MIDDLE
+// DOT, which the edit and write forms use as separators — and the length is
+// bounded by int64's range at construction. Treat it as display text — render it
+// verbatim, never parse it; the unit words and both glyphs live here precisely
+// so a client need not switch on a tool name to know what the number counts.
 type ToolUpdate struct {
 	ToolCallID   string
 	Status       ToolStatus

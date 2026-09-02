@@ -116,20 +116,26 @@ func (p ToolUsePayload) MarshalJSON() ([]byte, error) {
 // ResultSummary is a human-readable précis of the result, not the raw
 // output.
 //
-// ResultDetail (#2024) is a short précis of the call's STRUCTURED outcome —
-// "265 lines", "110 of 1676 lines" — composed by the daemon from the
-// tool_use_result sidecar. Empty means "no count", which is the answer for most
-// tools and for every sidecar shape the producer does not recognise; a client
-// renders it beside the row and never parses it. The unit words are carried
-// here on purpose, because a client cannot tell a read from a search without
-// switching on a tool name.
+// ResultDetail (#2024, #2025) is a short précis of the call's STRUCTURED outcome
+// — "265 lines", "110 of 1676 lines", "+10 −3", "created · 54 lines", "5 files"
+// — composed by the daemon from the tool_use_result sidecar. Empty means "no
+// count", which is the answer for every sidecar shape the producer does not
+// recognise; a client renders it beside the row and never parses it. The unit
+// words are carried here on purpose, because a client cannot tell a read from a
+// search without switching on a tool name.
+//
+// RENDER IT VERBATIM. The separators are U+2212 MINUS SIGN (not a hyphen) and
+// U+00B7 MIDDLE DOT spaced on both sides; they are part of the contract, so a
+// client that substitutes ASCII lookalikes is showing something this daemon did
+// not send.
 //
 // The two summary fields do NOT share a provenance, and a reader who assumes
 // they do will reason wrongly about both. ResultSummary is claude's own text
 // passed through under a rune cap (turnbridge's maxResultSummaryRunes).
 // ResultDetail contains no claude-supplied byte: its producer formats decoded
-// integers, so its alphabet is digits, spaces and ASCII letters and its length
-// is bounded at construction rather than by a cap here.
+// integers and its own literals, so its alphabet is digits, spaces, ASCII
+// letters and the two glyphs named above, and its length is bounded at
+// construction rather than by a cap here.
 //
 // It carries no omitempty, per this file's rule: absence and "" mean the same
 // thing (no count), and always emitting the key keeps the testdata fixture

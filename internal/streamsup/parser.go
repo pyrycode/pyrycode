@@ -1936,19 +1936,120 @@ type userToolResultLine struct {
 	ToolUseResult json.RawMessage `json:"tool_use_result"`
 }
 
-// toolResultSidecar is the second-stage decode of that sidecar, narrowed to the
-// ONE shape this ticket maps: a read. Each sidecar shape is self-identifying by
-// its KEY SET, so no correlation back to the tool_use and no tool-name switch is
-// needed — #1678's rule again, be driven by the available data and not by the
-// names. #2025 adds the remaining four shapes as further arms.
+// jsonKey is a presence-only decode target: a *jsonKey field is non-nil exactly
+// when its key is present with a non-null value, and retains NO BYTE of it.
 //
-// Deliberately NOT keyed on the sidecar's own `type`: measured, a read carries
-// type "text" and a write carries type "create", so `type` identifies nothing
-// here. The keys that identify a read are file.numLines and file.totalLines,
-// BOTH of them, and nothing else.
+// That is what lets a shape be recognised by a key whose VALUE must never be
+// read into daemon state. `oldString` and `newString` identify an edit and are
+// the entire pre- and post-edit text; `content` identifies a write and, on a
+// SEARCH sidecar spelled identically, is the whole grep output. Declaring any of
+// them as a string to test for presence would put claude's bytes on the decode
+// target for no gain — the rule sidecarFile's doc states, applied to keys that
+// are discriminators rather than values.
+//
+// It also answers the present-but-EMPTY question the write shape turns on:
+// `structuredPatch: []` is a present non-null value, so it is distinguishable
+// from an absent key, which is the pointer-vs-present-zero rule again.
+type jsonKey struct{}
+
+// UnmarshalJSON discards the value. encoding/json still scans it for
+// well-formedness before calling this, so a malformed value fails the whole
+// decode rather than being silently accepted as present.
+func (*jsonKey) UnmarshalJSON([]byte) error { return nil }
+
+// toolResultSidecar is the second-stage decode of that sidecar: the SHAPE
+// DISCRIMINATOR for all five shapes (#2025 added four to #2024's one). Each
+// sidecar shape is self-identifying by its KEY SET, so no correlation back to
+// the tool_use and no tool-name switch is needed — #1678's rule again, be driven
+// by the available data and not by the names.
+//
+// IDENTIFY BY THE PRESENCE OF THE NAMED KEYS, NEVER BY AN EXACT KEY SET. 288 of
+// 4883 observed shell sidecars (5.9%) carry a sixth key — gitOperation,
+// persistedOutputPath, backgroundTaskId and others — and 90 edit/write sidecars
+// carry an extra one. An arm keyed on "exactly these five keys" silently loses
+// every one of them.
+//
+// Deliberately NOT keyed on the sidecar's own `type` except where a write's two
+// verbs are the news: measured, a read carries type "text" and a write carries
+// type "create", so `type` alone identifies nothing. What identifies each shape:
+//
+//	read    file.numLines AND file.totalLines
+//	shell   stdout AND interrupted
+//	edit    structuredPatch AND oldString AND newString
+//	write   structuredPatch AND content AND type in {create, update}
+//	search  mode, then numLines before numFiles
+//
+// The two structuredPatch arms are separated by their OTHER keys, not by their
+// type. Note that numLines here is the SEARCH shape's top-level count; the read's
+// identically-spelled one is nested under `file` and is a different field.
+//
+// Only safe scalars are held by value. Everything else is a *jsonKey, so this
+// struct can recognise every shape while holding almost none of claude's bytes.
 type toolResultSidecar struct {
 	File *sidecarFile `json:"file"`
+
+	Stdout      *jsonKey `json:"stdout"`
+	Interrupted *jsonKey `json:"interrupted"`
+
+	StructuredPatch *jsonKey `json:"structuredPatch"`
+	OldString       *jsonKey `json:"oldString"`
+	NewString       *jsonKey `json:"newString"`
+	Content         *jsonKey `json:"content"`
+	Type            *string  `json:"type"`
+
+	Mode     *jsonKey `json:"mode"`
+	NumLines *int64   `json:"numLines"`
+	NumFiles *int64   `json:"numFiles"`
 }
+
+// sidecarStdout, sidecarPatch and sidecarContent are the third-stage targets for
+// the three arms that need an unbounded claude-supplied value because a count is
+// computed from it. Each arm decodes the sidecar AGAIN into its own narrow
+// struct rather than sharing fields on toolResultSidecar, and that separation is
+// a security control rather than tidiness: `content` is spelled the same on a
+// write sidecar (where it is the file being written, and is counted) and on a
+// SEARCH sidecar (where it is the whole grep output, and must not be read at
+// all). One shared field would put the grep output on the search arm's decode
+// target. filePath, originalFile, filenames and stderr are declared on NONE of
+// these, so no arm can reach them.
+//
+// None of these values outlives its composer: every arm returns formatted
+// integers and literals, never a sub-slice of what it decoded, so nothing here
+// pins the decode's allocation the way a "capped" substring silently would.
+type sidecarStdout struct {
+	Stdout string `json:"stdout"`
+}
+
+type sidecarPatch struct {
+	StructuredPatch []patchHunk `json:"structuredPatch"`
+}
+
+// patchHunk is one hunk of a structuredPatch, narrowed to its `lines`.
+//
+// oldStart/oldLines/newStart/newLines are deliberately absent: oldLines and
+// newLines are the hunk's SPANS with context lines included, so differencing
+// them yields the net change and not "+10 −3". The two numbers can only come
+// from the +/- prefixes of `lines`, and an undeclared span cannot be reached for
+// by a later edit.
+type patchHunk struct {
+	Lines []string `json:"lines"`
+}
+
+type sidecarContent struct {
+	Content string `json:"content"`
+}
+
+// minusSign and middleDot are the row separators, and they are CONTRACT rather
+// than formatting preference: the client renders this text verbatim. Written as
+// literals rather than \u escapes so that a search for either glyph finds its
+// declaration; the trailing comment names the codepoint, because a U+002D typed
+// in place of the U+2212 would otherwise be invisible in a diff. They are the
+// first non-ASCII bytes this field has ever carried — see maxResultDetailBytes,
+// which is where that fact is load-bearing.
+const (
+	minusSign = "−" // MINUS SIGN, NOT U+002D HYPHEN-MINUS
+	middleDot = "·" // MIDDLE DOT, spaced on both sides
+)
 
 // sidecarFile is the read shape's `file` object, narrowed to its two counts.
 //
@@ -1964,7 +2065,7 @@ type toolResultSidecar struct {
 //
 // The two fields are POINTERS so an absent key is distinguishable from a present
 // zero: a sidecar carrying only one of the two counts is not a read, while 0/0
-// is present-and-zero and takes its own arm in readLineCount.
+// is present-and-zero and takes its own arm in readDetail.
 //
 // They are int64 rather than float64 or any, and that choice is what makes the
 // composed string's length STRUCTURAL rather than a second cap to keep correct.
@@ -1977,26 +2078,52 @@ type sidecarFile struct {
 	TotalLines *int64 `json:"totalLines"`
 }
 
-// maxResultDetailBytes is the longest string readLineCount can compose, and it
-// is a DERIVED FACT rather than a cap that is enforced anywhere — nothing checks
-// a composed string against it, because nothing can exceed it.
+// maxResultDetailBytes is the longest string toolResultDetail can compose across
+// ALL FIVE shapes, and it is a DERIVED FACT rather than a cap enforced anywhere
+// — nothing checks a composed string against it, because nothing can exceed it.
 //
-// Both counts are non-negative int64, so each formats to at most 19 digits, and
-// the longest form is 19 + len(" of ") + 19 + len(" lines") = 48. Every byte is
-// a digit, a space or an ASCII letter, none of which encoding/json escapes, so
-// 48 bytes is the wire cost too. That is why turnbridge maps the field through
-// UNCAPPED while capping its ResultSummary neighbour: the bound here is over
-// int64's RANGE, not over claude's input length, so no hostile or absurd line
-// count can grow the frame. Against the ~4.2 KB of headroom
-// turnbridge.maxResultSummaryRunes' doc measures on this payload, 48 bytes is
-// under 1.6%, and TestToolResultPayload_FitV2EnvelopeCap measures the envelope
-// with the field present rather than taking that on trust.
+// Every count formats through strconv.FormatInt over a non-negative int64, so
+// each is at most 19 digits. Re-derived per form (#2025 added the last four):
+//
+//	read    19 + len(" of ") + 19 + len(" lines")              = 48
+//	edit    len("+") + 19 + len(" ") + len(minusSign) + 19     = 43
+//	write   len("updated") + 1 + len(middleDot) + 1 + 19 + 6   = 36
+//	shell   19 + len(" lines")                                 = 25
+//	search  19 + len(" lines") / 19 + len(" files")            = 25
+//
+// The read's two-part form is still the longest, so the value does not move.
+// WHAT MOVED IS THE ALPHABET: it is digits, spaces, ASCII letters and TWO
+// MULTI-BYTE RUNES, minusSign (3 bytes) and middleDot (2), whose lengths are
+// already counted above. encoding/json escapes neither — it escapes only HTML
+// delimiters, control bytes and U+2028/U+2029 — so 48 bytes is still the wire
+// cost. That is why turnbridge maps the field through UNCAPPED while capping its
+// ResultSummary neighbour: the bound here is over int64's RANGE, not over
+// claude's input length, so no hostile or absurd count can grow the frame.
+// Against the ~4.2 KB of headroom turnbridge.maxResultSummaryRunes' doc measures
+// on this payload, 48 bytes is under 1.6%, and
+// TestToolResultPayload_FitV2EnvelopeCap measures the envelope with the field
+// present rather than taking that on trust.
 const maxResultDetailBytes = 48
 
-// readLineCount composes a read's row text from one tool_use_result sidecar, or
-// returns "" for every shape that is not a read. It is the ONLY crossing in this
-// package from the sidecar's untrusted bytes into daemon state, and it is total:
-// there is no error return, because every failure has the same answer.
+// toolResultDetail composes one tool row's result text from a tool_use_result
+// sidecar, or returns "" for every shape it does not recognise. It is the ONLY
+// crossing in this package from the sidecar's untrusted bytes into daemon state,
+// and it is total: there is no error return, because every failure has the same
+// answer.
+//
+// FIVE ARMS, TRIED IN A FIXED ORDER: read, shell, edit, write, search. The order
+// is stated so it is deterministic rather than incidental; the observed key sets
+// are disjoint, so no sidecar reaches a second arm having matched a first.
+// Falling off the end is what makes the partially-recognised shapes correct for
+// free — a structuredPatch matching neither patch arm, a write whose type is
+// neither create nor update, a `mode` with no count — each simply runs out of
+// arms and sends nothing.
+//
+// The four arms after the read decode the sidecar a THIRD time into their own
+// narrow targets (see sidecarStdout). That is four json.Unmarshal sites where
+// #2024 had one, and they stay ONE trust boundary because all of them live in
+// this function's arms, none is exported, no arm receives a *slog.Logger, and no
+// arm returns a decoded value — every one returns a freshly formatted string.
 //
 // FAILING CLOSED IS THE DESIGN, NOT A FALLBACK. An absent sidecar, a non-object
 // one, and an object with no read keys are the same case — send nothing. About
@@ -2015,11 +2142,11 @@ const maxResultDetailBytes = 48
 // shape we have few observations of is what #1380 declined to do, and
 // systemTaskUpdatedLine.Patch carries the same reasoning in this file.
 //
-// The composed string contains NO claude-supplied byte — it is two formatted
-// integers and two literals — so it has no injection surface and, unlike a
+// The composed string contains NO claude-supplied byte — every arm returns
+// formatted integers and literals — so it has no injection surface and, unlike a
 // "capped" substring, retains no sub-slice of the decoded sidecar to pin its
 // allocation.
-func readLineCount(sidecar json.RawMessage) string {
+func toolResultDetail(sidecar json.RawMessage) string {
 	if len(sidecar) == 0 {
 		return ""
 	}
@@ -2029,10 +2156,31 @@ func readLineCount(sidecar json.RawMessage) string {
 	if err := json.Unmarshal(sidecar, &sc); err != nil {
 		return ""
 	}
-	if sc.File == nil || sc.File.NumLines == nil || sc.File.TotalLines == nil {
+	if d := readDetail(sc.File); d != "" {
+		return d
+	}
+	if d := shellDetail(&sc, sidecar); d != "" {
+		return d
+	}
+	if d := editDetail(&sc, sidecar); d != "" {
+		return d
+	}
+	if d := writeDetail(&sc, sidecar); d != "" {
+		return d
+	}
+	return searchDetail(&sc)
+}
+
+// readDetail composes a read's row text: "265 lines", or "110 of 1676 lines"
+// when only a slice of a longer file was returned.
+//
+// NO RELATIONAL VALIDATION, per toolResultDetail's contract: a returned count
+// larger than its total renders as given.
+func readDetail(f *sidecarFile) string {
+	if f == nil || f.NumLines == nil || f.TotalLines == nil {
 		return ""
 	}
-	n, total := *sc.File.NumLines, *sc.File.TotalLines
+	n, total := *f.NumLines, *f.TotalLines
 	if n < 0 || total < 0 {
 		return ""
 	}
@@ -2053,6 +2201,148 @@ func readLineCount(sidecar json.RawMessage) string {
 	// glance that only a slice of a longer file was seen. Reads are partial 56.5%
 	// of the time across 93227 measured calls.
 	return strconv.FormatInt(n, 10) + " of " + strconv.FormatInt(total, 10) + " lines"
+}
+
+// shellDetail composes a shell call's row text from the line count of STDOUT.
+//
+// stderr is not counted into it and is not declared anywhere, so it cannot be:
+// the confinement rule doing double duty as a correctness one. Empty stdout
+// sends NO count rather than "0 lines" — a call that produced nothing has
+// nothing worth saying, which is the fail-closed principle the dispatch already
+// applies. The write arm makes the opposite call for a stated reason.
+func shellDetail(sc *toolResultSidecar, sidecar json.RawMessage) string {
+	if sc.Stdout == nil || sc.Interrupted == nil {
+		return ""
+	}
+	var out sidecarStdout
+	if err := json.Unmarshal(sidecar, &out); err != nil {
+		return ""
+	}
+	n := countLines(out.Stdout)
+	if n == 0 {
+		return ""
+	}
+	return strconv.FormatInt(n, 10) + " lines"
+}
+
+// editDetail composes an edit's row text — "+10 −3", either half omitted when it
+// is zero, nothing when both are.
+//
+// THE TWO NUMBERS CAN ONLY COME FROM THE +/- PREFIXES OF THE HUNKS' LINES; see
+// patchHunk for why the hunk spans cannot give them. Those prefixes are the
+// diff's own ASCII bytes and are read as data: the U+2212 in the output is
+// display text this function composes, never a byte that came from claude.
+//
+// Both halves zero is unobserved — of 632 measured edits, 425 changed both
+// halves, 190 added only and 17 removed only — so dropping it is a fail-closed
+// decision about a shape with no observations, not a measured rule.
+func editDetail(sc *toolResultSidecar, sidecar json.RawMessage) string {
+	if sc.StructuredPatch == nil || sc.OldString == nil || sc.NewString == nil {
+		return ""
+	}
+	var p sidecarPatch
+	if err := json.Unmarshal(sidecar, &p); err != nil {
+		return ""
+	}
+	var added, removed int64
+	for _, h := range p.StructuredPatch {
+		for _, l := range h.Lines {
+			switch {
+			case strings.HasPrefix(l, "+"):
+				added++
+			case strings.HasPrefix(l, "-"):
+				removed++
+			}
+		}
+	}
+	switch {
+	case added > 0 && removed > 0:
+		return "+" + strconv.FormatInt(added, 10) + " " + minusSign + strconv.FormatInt(removed, 10)
+	case added > 0:
+		return "+" + strconv.FormatInt(added, 10)
+	case removed > 0:
+		return minusSign + strconv.FormatInt(removed, 10)
+	}
+	return ""
+}
+
+// writeDetail composes a write's row text — "created · 54 lines".
+//
+// The `type` is checked BEFORE the content is decoded, so a verb this row cannot
+// name never materialises the file being written. structuredPatch is required to
+// be PRESENT but not non-empty: it is [] on every one of the 240 observed
+// creates, so an arm demanding hunks would be dead code on 97% of writes.
+//
+// An empty content still sends "created · 0 lines", which is the opposite of the
+// shell arm's empty-stdout drop and deliberately so: here the VERB is the news,
+// and an empty file that was created is something that happened.
+func writeDetail(sc *toolResultSidecar, sidecar json.RawMessage) string {
+	if sc.StructuredPatch == nil || sc.Content == nil || sc.Type == nil {
+		return ""
+	}
+	var verb string
+	switch *sc.Type {
+	case "create":
+		verb = "created"
+	case "update":
+		verb = "updated"
+	default:
+		return ""
+	}
+	var c sidecarContent
+	if err := json.Unmarshal(sidecar, &c); err != nil {
+		return ""
+	}
+	return verb + " " + middleDot + " " + strconv.FormatInt(countLines(c.Content), 10) + " lines"
+}
+
+// searchDetail composes a search's row text — "78 lines" when the call asked for
+// lines, "5 files" when it asked for files.
+//
+// numLines takes precedence by PRESENCE, and a present-but-invalid one sends
+// nothing rather than falling back to numFiles: a fallback would let a malformed
+// field silently change which quantity the row reports, and a wrong count is the
+// one outcome this design refuses.
+//
+// One number, not the read's two-part form, even though totalLines rides along
+// on all 200 observed numLines shapes. The read sends both because reads are
+// partial 56.5% of the time and a partial read is a surprise; no equivalent has
+// been measured for search.
+func searchDetail(sc *toolResultSidecar) string {
+	if sc.Mode == nil {
+		return ""
+	}
+	switch {
+	case sc.NumLines != nil:
+		if *sc.NumLines < 0 {
+			return ""
+		}
+		return strconv.FormatInt(*sc.NumLines, 10) + " lines"
+	case sc.NumFiles != nil:
+		if *sc.NumFiles < 0 {
+			return ""
+		}
+		return strconv.FormatInt(*sc.NumFiles, 10) + " files"
+	}
+	return ""
+}
+
+// countLines pins the counting rule for the two arms that COUNT rather than
+// being told: a trailing newline does not add a line, so "a\nb\n" and "a\nb" are
+// both 2, and "" is 0. The read and search arms take their numbers from claude
+// and never come here.
+//
+// It returns an int64 rather than a sub-slice or a []string, which is what keeps
+// the composed string from pinning the decoded value's allocation.
+func countLines(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	n := int64(strings.Count(s, "\n"))
+	if !strings.HasSuffix(s, "\n") {
+		n++
+	}
+	return n
 }
 
 // countToolResultBlocks counts the tool_result blocks of one user message.
@@ -3743,9 +4033,9 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 	var utl userToolResultLine
 	// The error is dropped, not classified: the line has already decoded once in
 	// consumeLine, and a json.RawMessage target accepts any valid JSON value, so
-	// there is no second undecodable outcome to report. See readLineCount.
+	// there is no second undecodable outcome to report. See toolResultDetail.
 	_ = json.Unmarshal(line, &utl)
-	detail := readLineCount(utl.ToolUseResult)
+	detail := toolResultDetail(utl.ToolUseResult)
 	if detail != "" && countToolResultBlocks(msg) != 1 {
 		detail = ""
 	}

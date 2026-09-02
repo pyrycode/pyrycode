@@ -279,11 +279,15 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// that asymmetry with ResultSummary beside it is the point. resultSummary
 		// needs maxResultSummaryRunes because its producer (streamsup's
 		// toolResultContent) returns claude's text verbatim with no bound of its
-		// own. ResultDetail's producer (streamsup's readLineCount) formats two
-		// decoded int64s, so it is bounded at CONSTRUCTION — where every cap in
-		// that package is applied — at 48 bytes, and carries no claude-supplied
-		// byte to cap. A second cap here would be a number to keep correct
-		// against a string that cannot grow.
+		// own. ResultDetail's producer (streamsup's toolResultDetail) formats
+		// decoded int64s and its own literals across five shapes, so it is
+		// bounded at CONSTRUCTION — where every cap in that package is applied —
+		// at 48 bytes, and carries no claude-supplied byte to cap. Since #2025
+		// two of those literals are multi-byte (U+2212, U+00B7); encoding/json
+		// escapes neither, and both are already counted in the 48. A second cap
+		// here would be a number to keep correct against a string that cannot
+		// grow — and, now that the alphabet is no longer pure ASCII, a rune cap
+		// that could split one of those two glyphs for no reason.
 		return protocol.TypeToolResult, protocol.ToolResultPayload{
 			ConversationID: tc.ConversationID,
 			TurnID:         tc.TurnID,
