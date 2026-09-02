@@ -1,4 +1,4 @@
-# Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610)
+# Session settings read payloads (#491/#1214, `ConversationID` field #1586, conversation-keyed reply #1610, permission mode #1687)
 
 The READ half the #844 cluster shipped without: `set_session_settings`
 changes the values and `session_settings_updated` only echoes the id back, so
@@ -15,12 +15,13 @@ type RequestSessionSettingsPayload struct {
 }
 
 type SessionSettingsPayload struct {
-    SessionID    string `json:"session_id"`
-    Model        string `json:"model"`
-    Effort       string `json:"effort"`
-    YOLO         bool   `json:"yolo"`
-    UsedTokens   int    `json:"used_tokens"`
-    WindowTokens int    `json:"window_tokens"`
+    SessionID      string `json:"session_id"`
+    Model          string `json:"model"`
+    Effort         string `json:"effort"`
+    YOLO           bool   `json:"yolo"`
+    PermissionMode string `json:"permission_mode"`
+    UsedTokens     int    `json:"used_tokens"`
+    WindowTokens   int    `json:"window_tokens"`
 }
 ```
 
@@ -55,6 +56,17 @@ type SessionSettingsPayload struct {
   `RunConfig` `RunConfigFor` returns — a client can never read one session's
   values and write to another. There is no bootstrap-scoped fallback for this
   verb; that route was retired with `BootstrapSessionID` (#678 AC#4).
+- **`PermissionMode` (#1687) reports a sixth value the write half's
+  `permission_mode` field cannot accept: `bypassPermissions`.** A resolved
+  session's `PermissionMode` and `YOLO` always agree, because
+  `sessions.canonicalSettings` derives both together at every construction
+  and update site — a session in bypass reports `permission_mode:
+  "bypassPermissions"` and `yolo: true`. Deliberate, not a gap: the read
+  half exists so a client's menu label comes from the daemon's own state,
+  and suppressing the true posture would make that label lie. `""` on this
+  field means "nothing resolved", the same as `session_id: ""` — never an
+  unnamed mode, since `canonicalSettings` normalises every resolved session
+  to one of the six.
 
 Golden round-trips in `settings_test.go`: `TestRequestSessionSettingsPayload_RoundTrip`
 against `testdata/request_session_settings.json` (non-empty fixture id — this
@@ -62,4 +74,8 @@ one does **not** pin the no-`omitempty` decision, since the key survives
 omission when non-empty) plus `TestRequestSessionSettingsPayload_EmptyConversationID`,
 the sole pin on that decision (asserts the empty key stays on the wire rather
 than being dropped); and `TestSessionSettingsPayload_RoundTrip` against
-`testdata/session_settings.json` for the reply.
+`testdata/session_settings.json` for the reply — updated to carry
+`"permission_mode":"default"` by #1687, which fails the byte-equal
+re-marshal until the fixture catches up: the "no `omitempty`" rule on this
+struct means a fixture missing a new field is a drift the test itself
+catches, not something a new field needs its own guard for.
