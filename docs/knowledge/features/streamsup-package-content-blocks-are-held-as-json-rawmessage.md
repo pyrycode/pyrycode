@@ -60,36 +60,67 @@ discipline, not a new one. `Interrupt` is a **concrete method on `*Runner`, deli
 `SendEsc` (#726) off the interface; the interrupt *routing* sibling (#1121) reaches it via its own
 narrow interface or a type assertion. See [codebase/1120.md](../codebase/1120.md).
 
-**Bypass revocation send primitive (#1603).** `(*Runner).RevokeBypass() error` writes a single
-structured `control_request` line —
-`{"type":"control_request","request_id":"<id>","request":{"subtype":"set_permission_mode","mode":"default"}}`
-— onto the live child's held-open stdin, dropping a running child's bypass posture with **no
-respawn** (#1595 measured this live against claude 2.1.220: `success` ack, next `init` reporting
-`permissionMode: default`, and turn-2 behaviour matching a `default`-launched control child
-exactly). `WriteBypassRevocation(w io.Writer, requestID string) error` (`envelope.go`) is the
-free-function marshal+write half, mirroring `WriteInterrupt` field-for-field.
-`controlRequestInner` — previously carrying only `Subtype` — gained a second field, `Mode`
-(tagged `mode,omitempty`), declared **after** `Subtype` so the wire order matches the measured
-line; `omitempty` keeps every interrupt line byte-identical to before (`TestMarshalInterruptEnvelope`'s
-`want` is unmodified and is the sole detector if that tag is ever dropped). **Neither
-`WriteBypassRevocation` nor `RevokeBypass` takes a mode** — no parameter, field, or option
-anywhere on the surface selects one. This is deliberate: the opposite direction (granting bypass
-over this channel) would be a privilege escalation reachable over the daemon's own stdin, and
-claude refuses it anyway on the launch argv (#1595). Re-granting bypass stays on the
-`Restart(newArgs)` respawn path. `request_id` now comes from `nextControlID`, the renamed,
-**shared** counter (`interruptSeq` → `controlSeq`) — one sequence, not one per subtype, because
-`request_id` must be unique across all in-flight control requests on the stream, not merely within
-one subtype. Unlike `Interrupt`, `RevokeBypass` **is** on `sessions.Runner` (#1604 widened the
-interface) — the contrast is the rule, not an exception: `Interrupt`'s dispatch lives in `cmd/pyry`,
-which can type-assert, whereas `RevokeBypass`'s consumer is `Pool.UpdateSettings` inside
-`internal/sessions`, with no such dispatch site. A structural assertion there would fail *open* —
-its unmatched arm is a silent no-op, leaving the posture un-revoked while the update reports
-success — so the interface method makes a runner that cannot revoke a build failure instead. No
-production caller existed at #1603; #1604 is that caller, routing a bypass *revoke* through the
-in-band branch (an *enable* still takes `Restart`). The
-`control_response` ack (no reader needed — see the event-catalog row above, #1500) is unaffected.
-See [codebase/1603.md](../codebase/1603.md) and
-[set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md).
+**Permission-mode send primitive (#1603, generalised #2042).** `(*Runner).SetPermissionMode(mode
+string) error` writes a single structured `control_request` line —
+`{"type":"control_request","request_id":"<id>","request":{"subtype":"set_permission_mode","mode":"<mode>"}}`
+— onto the live child's held-open stdin, switching a running child's permission posture with **no
+respawn** (#1595 measured the `default` line live against claude 2.1.220; #2041 measured
+`acceptEdits`/`dontAsk`/`plan`/`auto` the same way against 2.1.239 — all five acked `success` with
+the next turn's `init.permissionMode` echoing the new mode). `WritePermissionMode(w io.Writer,
+requestID, mode string) error` (`envelope.go`) is the free-function marshal+write half, mirroring
+`WriteInterrupt` field-for-field. `controlRequestInner` — previously carrying only `Subtype` —
+gained a second field, `Mode` (tagged `mode,omitempty`), declared **after** `Subtype` so the wire
+order matches the measured line; `omitempty` keeps every interrupt line byte-identical to before
+(`TestMarshalInterruptEnvelope`'s `want` is unmodified and is the sole detector if that tag is ever
+dropped).
+
+`WritePermissionMode` replaced #1603's `WriteBypassRevocation`, which took no mode at all. That
+writer's actual safety property was never "one literal" but "no escalation reachable from this
+surface", and #2042 keeps it under a wider parameter via `permissionModeAllowed`, a **closed
+allow-list** (`default`, `acceptEdits`, `plan`, `auto`, `dontAsk`) refused by **non-membership**
+rather than a deny-list entry — `bypassPermissions` never appears in production source under
+`internal/streamsup`, and every unanticipated spelling (wrong case, a trailing space, a homoglyph)
+is refused for free along with it. Three lessons from that widening, each a security-review finding
+rather than a style choice:
+
+- **The allow-list is a `switch`, not a package-level slice or map.** A mutable list holding a
+  security allow-list can be `append`ed to by anything sharing the package — a test included —
+  dissolving the carve-out globally, and a test that did so ahead of its parallel siblings would
+  not reliably trip `-race`. Control flow cannot be appended to.
+- **Refusal order is a contract, not an accident.** `WritePermissionMode` checks the allow-list
+  *before* the nil-writer check. Both orders write zero bytes, but reversed, a caller naming an
+  escalation against an unbound runner would get back the *retryable* `ErrNoLiveChild` and could
+  reasonably retry forever a request that can never succeed. `ErrUnsupportedPermissionMode` is
+  permanent, `errors.Is`-distinguishable from `ErrNoLiveChild`, and returned as a **bare
+  sentinel** — never wrapped with the rejected mode — because `Pool.deliverSettingsInBand` logs it
+  verbatim and #833 keeps settings values out of the daemon log.
+- **Vocabulary check, not an authorisation check.** The allow-list answers "will claude parse this
+  mode?", never "may this caller change this session's posture?" — three of its five members
+  (`acceptEdits`, `auto`, `dontAsk`) genuinely *loosen* a child launched in `default` behind the
+  daemon's approval flags, and claude accepts each of them in-band (#2041) precisely because the
+  daemon asked, not because claude vetted them. A future caller taking a mode from a wire frame
+  (#1687) owns the authorisation decision itself — reading this gate as "refuses unsafe modes"
+  would be the wrong takeaway to carry into that ticket.
+
+The allow-list also bounds the emitted line's length: the longest member (`acceptEdits`) keeps the
+envelope near 110 bytes, well under `PIPE_BUF`, preserving the single-`write(2)`-per-line
+atomicity `Interrupt` already relies on to avoid tearing against a concurrent `WriteTurn` on the
+same fd — an unbounded caller-supplied mode would have reopened that hazard.
+
+`request_id` still comes from `nextControlID`, the shared counter (`interruptSeq` → `controlSeq`
+at #1603) — one sequence, not one per subtype. `RevokeBypass() error` is **kept**, re-expressed as
+`SetPermissionMode(permissionModeDefault)` rather than subsumed: the slice that introduces the
+general form is deliberately not the slice that migrates the consumer
+(`Pool.deliverSettingsInBand`, left to #2043), so the revocation's wire bytes stay provably
+unchanged and the delegation mints exactly one id per call, not two. `sessions.Runner` gained
+`SetPermissionMode(mode string) error` beside `RevokeBypass` for the placement reason `RevokeBypass`
+was already on it (#1604): both methods' consumers are inside `internal/sessions`, where a
+structural type assertion would fail *open* rather than a build failure. The
+`control_response` ack (no reader needed — see the event-catalog row above, #1500) is unaffected;
+claude's per-model refusal of `auto` (#2041) lands there, unread for now.
+See [codebase/1603.md](../codebase/1603.md),
+[set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md), and
+[permission-mode-switch-inband-probe.md](permission-mode-switch-inband-probe.md).
 
 **Initialize send primitive (#1689).** `(*Runner).RequestInitialize() error` writes a single
 structured `control_request` line —
