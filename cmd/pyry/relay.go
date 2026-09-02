@@ -574,6 +574,24 @@ func startRelayV2(
 	modalResolver.activeConv = w.active.CurrentConversation
 	modalResolver.notifyBlocked = w.blockedNotify
 
+	// Inbound question-control resolver (#1986): the per-device authorization gate
+	// for an inbound question_answer / question_refused, and the audit record of
+	// every decision it makes. Constructed here over the batch registry minted
+	// above — which exists before the manager, where its actuator cannot — and its
+	// bridge field is assigned once that bridge exists, the split modalResolver's
+	// streamApprovals uses for the same ordering reason.
+	//
+	// CONSTRUCTED AND ASSIGNED UNCONDITIONALLY, deliberately. Building it only
+	// under a non-nil w.approvals and assigning the (typed-nil) pointer into the
+	// interface field below would make relay's `QuestionResolver == nil` guard read
+	// FALSE — the handler would call methods on a nil receiver instead of treating
+	// the frame as inert. That is the typed-nil hazard bridge.toolCallInFlight's
+	// guard documents, arriving through an interface rather than a method value.
+	// Inertness therefore lives inside the resolver, where a nil actuator is a plain
+	// field compare: with no stream-approval bridge (foreground / PTY) both arms
+	// resolve nothing and nothing panics.
+	questionResolver := newQuestionResolverV2(questionReg, logger)
+
 	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply. session_settings read it too between #491 and #1610,
@@ -722,6 +740,15 @@ func startRelayV2(
 		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
 		// Constructed above so its #1014 folder-not-trusted emit seams are set first.
 		ModalResolver: modalResolver,
+		// Inbound question-control resolver (#1986), discharging the seam's
+		// written ordering obligation: nothing may be wired here until the
+		// per-device answer gate exists, because the relay handler applies no
+		// authorization at all and what kept the #1984 interception fail-safe was
+		// this field being nil at every construction site. The resolver
+		// constructed above IS that gate — it looks the batch up, denies an
+		// ineligible device before anything is consumed, records the decision, and
+		// only then hands the batch to the daemon-side primitives.
+		QuestionResolver: questionResolver,
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
 		// supervisor. The activeInterrupter adapter (main.go) resolves active →
@@ -848,6 +875,14 @@ func startRelayV2(
 		// life of the registry, which is what the seam demands.
 		w.approvals.SetAnswerable(bridge.ApprovalAnswerable)
 		modalResolver.streamApprovals = bridge
+		// The question resolver's actuator (#1986): the same bridge, whose
+		// AnswerQuestion / RefuseQuestion own the batch consume, claude's verdict
+		// and the single question_dismissed. Assigned here rather than passed to
+		// newQuestionResolverV2 because the bridge is built after the manager and
+		// the manager already holds the resolver. Set before mgr.Run's goroutine
+		// starts below — the only reader — so there is no data race on the field,
+		// the edge modalResolver.streamApprovals relies on one line up.
+		questionResolver.bridge = bridge
 		surface = bridge.Surface
 	}
 

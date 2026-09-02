@@ -30,17 +30,26 @@ here it must not.
   reassemble it wrongly. `*devices.Device` crosses too, exactly as
   `ModalResolver.ResolveCancel` takes it — the handler passes the connection's
   device through and decides nothing about it.
-- **Nil at every construction site is what makes this slice fail-safe on its
-  own.** `V2SessionConfig.QuestionResolver` is optional, and no production
-  wiring sets it — a paired-but-untrusted client's answer reaches no actuator
-  until #1986 lands the per-device answer gate and implements this seam over
-  the daemon-side primitives #1990 (refusal, landed) and #1991 (answer) add.
-  The field's own doc comment carries that ordering obligation (nothing may be
-  wired ahead of #1986) so whoever wires it reads it at the crossing, and
+- **`V2SessionConfig.QuestionResolver` stayed nil at every construction site
+  until #1986 implemented and wired it.** The field's own doc comment carried
+  the ordering obligation this slice discharged (nothing may be wired ahead of
+  the per-device gate) so whoever wired it read that at the crossing, and it
   restates the obligations Go's type system can't express: `QuestionIndex` is
   carried but never range-checked and panics on a hostile index, indices may
   duplicate or be missing, `Answers` may be arbitrarily long, and nothing
-  beyond `question_batch_id` / `answer_token` may be logged.
+  beyond `question_batch_id` / `answer_token` may be logged. `cmd/pyry`'s
+  `questionResolverV2` (#1986) is now that implementation: `admit` runs the
+  Lookup → fail-closed-gate steps both arms share, gating strictly before the
+  delegate consumes the batch — burning the batch on an ineligible device's
+  frame first would leave claude blocked until the approval window elapsed —
+  and `AuthorizeRemotePermission` re-checks the same eligibility as defence in
+  depth on the answer arm only, since it reads as "allow the tool call" and is
+  therefore false, correctly, for an eligible device's refusal. `relay.go`
+  constructs and assigns it **unconditionally** rather than leaving it nil
+  under `w.approvals == nil`: a nil `*questionResolverV2` behind the
+  interface field is a **typed nil** — the handler's `!= nil` guard reads true
+  and calls a method on a nil receiver — so the actuator itself, not the
+  resolver, is what goes nil-and-inert on a foreground/PTY daemon.
 - **`handleQuestionAnswer` / `handleQuestionRefusal`** take `(s, env)` with no
   `ctx` — `handleDequeueMessage`'s established deviation from the `(ctx, s,
   env)` siblings, since neither handler does cancellable work (no `Push`, no
@@ -113,9 +122,28 @@ pins that an escape-bearing `question_batch_id` reaches the log as `slog`'s
 assumed, since this is the first inbound handler to log a field an attacker
 fully controls the bytes of.
 
+## Testing
+
+`cmd/pyry/question_resolve_v2_test.go`'s six tests prove all five ACs at the
+`admit`/delegate boundary, but one branch inside `ResolveAnswer` /
+`ResolveRefusal` has no test that isolates it: a **false** return from
+`bridge.AnswerQuestion` / `RefuseQuestion` *after* `admit` already passed —
+the one-shot lost to a concurrent retire or refusal, or entries the answer
+primitive rejected — must skip the audit write. Every fixture that reaches
+the delegate in the existing suite also gets a **true** back from it, so an
+overlay mutation deleting `if !r.bridge.{Answer,Refuse}Question(...) { return
+false }` and letting the audit call run unconditionally survives the whole
+`cmd/pyry` package under `-race` (found by #1986's own verifier pass; shipped
+as a SHOULD FIX, not closed, because the code reads correctly and the gap is
+in coverage, not behaviour). Closing it needs a `questionActuator` stub that
+returns `false` from an eligible-device call — the real `streamApprovalBridge`
+in the existing fixtures cannot be coaxed into that return without also
+losing the one-shot, which is a different, already-covered branch.
+
 ## Related
 
 - [Inbound modal control](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md) — the discipline this slice mirrors (interception point, single dispatch goroutine, fire-and-forget) and the one place it deliberately diverges (no broadcast)
 - [Question-batch payload § `QuestionAnswerPayload` / `QuestionRefusedPayload`](protocol-package-question-batch-payload.md#questionanswerpayload--questionrefusedpayload-1983) — the wire shapes and the positional-index / never-range-checked contract this handler reads by
-- [questionbridge-package.md](questionbridge-package.md) — the registry #1990's refusal and #1991's (open) answer path resolve against
+- [questionbridge-package.md](questionbridge-package.md) — the registry #1990's refusal and #1991's answer path resolve against
 - [Concurrency](v2-session-manager-concurrency.md) — both handlers run on the single `Run` dispatch goroutine, alongside the other inline control-envelope arms
+- `cmd/pyry/question_resolve_v2.go` (#1986) — `questionResolverV2`, the seam's implementation: the per-device gate (`admit`), the terminal-decision audit record, and the composition-root wiring in `cmd/pyry/relay.go`. See [audit-package.md](audit-package.md) for the `classQuestion` record and [the question arm](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#the-question-arm-1973--a-second-discriminant-ahead-of-the-permission-path) for the delegates it gates.
