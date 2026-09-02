@@ -11,6 +11,24 @@ import "time"
 // mirroring the phone's claims) lives in the consumer, #608, not here.
 const CapabilityInteractive = "interactive"
 
+// CapabilityQuestion is the wire vocabulary string a client advertises in its
+// hello.payload.capabilities to say it understands inbound question batches,
+// and that the daemon echoes in hello_ack.payload.capabilities when it supports
+// them (docs/protocol-mobile.md § Capability negotiation). Because the daemon
+// echoes only the intersection with its own supported set, a client detects
+// question support by advertising this string and reading it back: a daemon
+// built before #2020 drops it, which is the stale-daemon signal a cross-repo
+// test needs when a commit sha gives it no ordering.
+//
+// Detection only — this string grants no access. The interactive event stream,
+// the TypeQuestionShown/TypeQuestionDismissed fan-out and the connect-time
+// question reconcile all gate on CapabilityInteractive alone, so a client
+// advertising only this one is negotiated as non-interactive and receives none
+// of them.
+// Like its neighbour this is pure vocabulary; the trust decision lives in the
+// consumer, internal/relay, not here.
+const CapabilityQuestion = "question"
+
 // HelloServerPayload is the body of a "hello" envelope sent by the binary
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "server".

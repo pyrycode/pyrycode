@@ -242,6 +242,34 @@ func TestHelloAckPayload_CapabilitiesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCapability_Constants_MatchSpec pins each capability constant to its exact
+// wire string, the same shape TestErrorCode_Constants_MatchSpec uses for the
+// Code* block and for the same reason: every other test in this repo passes
+// these constants symbolically on both the advertise and the expect side, so a
+// fat-fingered value is self-consistent and stays green everywhere. That is
+// worse than a typo in most constants, because the capability set is a
+// cross-repo contract — a client outside this module compares against the
+// literal string, and the whole point of `question` (#2020) is letting it detect
+// which daemon build it is talking to. Add a line here with every new capability.
+func TestCapability_Constants_MatchSpec(t *testing.T) {
+	got := map[string]string{
+		"CapabilityInteractive": CapabilityInteractive,
+		"CapabilityQuestion":    CapabilityQuestion,
+	}
+	want := map[string]string{
+		"CapabilityInteractive": "interactive",
+		"CapabilityQuestion":    "question",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("capability constant count: got %d, want %d", len(got), len(want))
+	}
+	for name, spec := range want {
+		if got[name] != spec {
+			t.Errorf("%s = %q, want %q", name, got[name], spec)
+		}
+	}
+}
+
 func TestErrorPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "error.json")
 
