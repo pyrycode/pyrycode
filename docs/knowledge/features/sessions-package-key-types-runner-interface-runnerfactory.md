@@ -92,8 +92,11 @@ because a `_test.go` reference counts — verified empirically against the `stat
 caller in #1867: `retainedModelLists` (`cmd/pyry/session_model_list.go`), the enumerator that adapts it
 to the relay's connect-time reconcile seam (see [v2-session-manager.md § Connect-time
 model-list reconcile](v2-session-manager.md#connect-time-model-list-reconcile-1863--retainedmodellists-seam--reconcilemodellists)).
-`resolveBoundSlashCommandList` (#2005) shipped into the same no-caller state; its consumer is the
-already-open #2007.
+`resolveBoundSlashCommandList` (#2005) shipped into the same no-caller state. It gained its first
+production caller in #2007: `retainedSlashCommandLists` (`cmd/pyry/session_slash_command_list.go`),
+the enumerator that adapts it to the relay's connect-time reconcile seam (see
+[v2-session-manager.md § Connect-time slash-command-list
+reconcile](v2-session-manager-state-machine-connect-time-slash-command-list-reconcile-retain.md)).
 
 **A twin's stated reason does not transfer just because its conclusion does (#2005).** When
 `resolveBoundSlashCommandList` was built arm-for-arm off `resolveBoundModelList` (#1857), the

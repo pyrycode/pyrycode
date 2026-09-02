@@ -246,6 +246,18 @@ type relayWiring struct {
 	// already primitive to internal/relay (protocol is imported both sides), so it
 	// crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒ no reconcile.
 	retainedModelLists func() []protocol.ModelListPayload
+	// retainedSlashCommandLists enumerates the daemon's currently-retained
+	// slash-command inventories as marshal-ready slash_command_list payloads — one
+	// per conversation whose bound session holds one — for the relay's connect-time
+	// reconcile seam (#2007 fills #2006's
+	// V2SessionConfig.RetainedSlashCommandLists). retainedModelLists above is the
+	// twin in every respect including this placement: built at main.go over the
+	// conversations registry and *sessions.Pool so the internal/sessions dependency
+	// stays at the composition root, since this file deliberately does not import
+	// it. The value is already primitive to internal/relay (protocol is imported
+	// both sides), so it crosses into V2SessionConfig unwrapped. nil in
+	// foreground/v1 ⇒ no reconcile.
+	retainedSlashCommandLists func() []protocol.SlashCommandListPayload
 	// approvals is the daemon-singleton pending-approval registry (#1103). The
 	// stream-approval bridge (#1080) constructed in startRelayV2 Lookups/Resolves
 	// parked completers against this SAME instance the control server parks into,
@@ -731,6 +743,19 @@ func startRelayV2(
 		// nil ⇒ no-reconcile contract) does NOT apply here, because questionReg is minted
 		// unconditionally and no nil is reachable at this site.
 		OutstandingQuestions: questionReg.Snapshot,
+		// Connect-time slash-command-list reconcile source (#2007): enumerates the
+		// command menu each conversation's bound session retained from its child's
+		// initialize reply (#2004/#2005) as marshal-ready slash_command_list payloads,
+		// so a client that attaches AFTER that exchange is unicast the current menu on
+		// open instead of showing an empty command list until a turn that may never
+		// come. The live turn lane reaches only a client that was already connected —
+		// three independent loss points sit in front of it (reconcileSlashCommandLists
+		// names them). Assigned straight through rather than wrapped in a closure, for
+		// RetainedModelLists' stated reason: a wrapper would be non-nil even when the
+		// field is nil and would silently defeat the seam's nil ⇒ no-reconcile
+		// contract, which every foreground/v1 and test wiring relies on. A pure read:
+		// it mints no id and mutates no daemon state.
+		RetainedSlashCommandLists: w.retainedSlashCommandLists,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. The keystroker is nil-safe-wrapped (#1131): PTY mode
