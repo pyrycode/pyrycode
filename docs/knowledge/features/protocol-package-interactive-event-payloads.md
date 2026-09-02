@@ -139,15 +139,23 @@ type CompactingPayload struct {
   presence is also what makes `ToolUsePayload` non-comparable with `==`; every
   existing comparison already goes through `reflect.DeepEqual` or byte
   equality.
-- **`ToolResultPayload.ResultDetail` (#2024) needs no rune cap of its own, unlike its sibling
-  `ResultSummary`.** The producer (`internal/streamsup`'s `readLineCount`) formats only two
-  bounded `int64`s plus fixed ASCII literals — never claude's text carried through — so its
-  alphabet is `[0-9]`, space, and letters: no JSON escape, no multibyte rune, nothing for a
-  cap to defend against. `resultSummary`'s cap exists because that field *is* claude's text,
-  verbatim, with no bound of its own; a claude-derived field needs the same treatment only
+- **`ToolResultPayload.ResultDetail` (#2024, four more sidecar shapes folded in by #2025) needs
+  no rune cap of its own, unlike its sibling `ResultSummary`.** The producer
+  (`internal/streamsup`'s `toolResultDetail`, renamed from the single-shape `readLineCount`
+  when #2025 turned it into a five-arm dispatch) formats bounded `int64`s and fixed literals —
+  never claude's text carried through — so no byte decoded from claude's own bytes ever reaches
+  the field. Its alphabet is no longer ASCII-only: `+10 −3` and `created · 54 lines` (#2025) use
+  U+2212 MINUS SIGN and U+00B7 MIDDLE DOT, the field's first non-ASCII bytes. `encoding/json`
+  escapes neither rune, so no JSON-escape cost enters the wire-size arithmetic and the field
+  still needs no cap — the load-bearing claim was never "ASCII", it was "no claude-authored
+  byte", and that one still holds. `resultSummary`'s cap exists because that field *is* claude's
+  text, verbatim, with no bound of its own; a claude-derived field needs the same treatment only
   when the daemon is forwarding claude's bytes rather than formatting its own. The field is
-  named generically rather than after the read shape because #2025 adds four more sidecar
-  shapes onto the same field, none of them minting a new wire type.
+  named generically rather than after the read shape because it now composes five shapes onto
+  one wire field without minting a new type — see
+  [streamsup-package-content-blocks-are-held-as-json-rawmessage.md](streamsup-package-content-blocks-are-held-as-json-rawmessage.md)
+  for the dispatch itself and the fifth stale ASCII-alphabet claim #2025's security review found
+  beyond the four the ticket had named.
 - **`TestToolUsePayload_FitV2EnvelopeCap` (#1678) is a second instance of the
   measured-envelope pattern the background-task section below established:**
   fills every value with `'<'`, plus the two upstream-unbounded identity
