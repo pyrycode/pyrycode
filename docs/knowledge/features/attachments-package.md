@@ -1,6 +1,6 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782, #1795, #1796, #1784, #1880, #1817, #1896), fifteen slices of the family split from #1741/#1766:
+Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782, #1795, #1796, #1784, #1880, #1817, #1896, #2037), sixteen slices of the family split from #1741/#1766:
 holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
@@ -20,9 +20,11 @@ rather than a lifetime quota.
 Accumulation and admission stay in-memory — no disk, no wire codes, no
 logger — but the package is no longer in-memory-only end to end: `EnsureDir`
 (#1781, see § "Directory resolution and creation" below) resolves and creates
-the on-host directory one attachment is filed under, and `Store` (#1782, see
-§ "Writing attachment bytes" below) writes the verified bytes into it — the
-package's only two functions that touch a filesystem. `Accumulator` itself
+the on-host directory one attachment is filed under, `Store` (#1782, see §
+"Writing attachment bytes" below) writes the verified bytes into it, and
+`ResolvePath` (#2037, same section as `EnsureDir`) reads that layout back to
+the path of the file stored there, creating nothing on the way — the
+package's only three functions that touch a filesystem. `Accumulator` itself
 still carries no lock; synchronisation lives in `Registry` alone.
 
 `Intake` (#1896, `intake.go`, see § "Chunk intake driver" below) is the
@@ -142,7 +144,7 @@ search can reach it.
 
 - [Per-upload byte bound (#1777)](attachments-package-per-upload-byte-bound.md) — Two rungs enforce one constant, `maxUploadBytes` (16 MiB, `admission.go`), and share one sentinel, `ErrUploadTooLarge`: `CheckDeclaredSize`…
 - [In-flight upload registry (#1787, #1788, #1795, #1796, #1880, #1881, #1817)](attachments-package-in-flight-upload-registry.md) — `Registry` (`registry.go`) gives `Accumulator` somewhere to live between chunks: a map from `uploadKey{connID, attachmentID}` to an…
-- [Directory resolution and creation (#1781)](attachments-package-directory-resolution-and-creation.md) — `EnsureDir` (`storage.go`) resolves and creates the on-host directory one attachment of one conversation is filed under —…
+- [Directory resolution and creation (#1781, #2037)](attachments-package-directory-resolution-and-creation.md) — `EnsureDir` (`storage.go`) resolves and creates the on-host directory one attachment of one conversation is filed under, and `ResolvePath` reads that same layout back without creating anything —…
 - [Writing attachment bytes (#1782)](attachments-package-writing-attachment-bytes.md) — `Store` (`storage.go`) takes the directory `EnsureDir` returned, a client-supplied filename, and already-verified bytes, and writes them…
 - [Sentinels and discard semantics](attachments-package-sentinels-and-discard-semantics.md) — Eight exported sentinels, `errors.New("attachments: …")` house style, in three families plus two non-discarding outliers. 
 - [Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, and #1796)](attachments-package-mutation-testing-lessons-measured-across.md) — This package's sole-redness claims are measured with `go test -overlay` (mutants applied via an absolute-path JSON manifest, no worktree…

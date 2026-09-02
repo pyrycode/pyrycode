@@ -1,4 +1,4 @@
-# Directory resolution and creation (#1781)
+# Directory resolution and creation (#1781, #2037)
 
 `EnsureDir` (`storage.go`) resolves and creates the on-host directory one
 attachment of one conversation is filed under —
@@ -54,3 +54,61 @@ containment-only test would pass.
   dangling-symlink case still deserves its own test (`EnsureDir` returns a
   wrapped OS error and neither sentinel for one — broken host state is not a
   containment breach), just not as that mutant's proof.
+
+## `ResolvePath` (#2037): read the same layout back, creating nothing
+
+`ResolvePath` is `EnsureDir`'s read-side counterpart, added to the same file
+because it reuses `EnsureDir`'s whole containment discipline minus the
+creation: resolve the instance directory as the anchor, build the destination
+textually beneath it, and compare for **equality** rather than an "is it
+under" test — then extends that discipline to the leaf, where `os.ReadDir`
+selects the lexicographically smallest entry that is both a regular file and
+not dot-prefixed. The exclusion is anchored on `SanitizeFilename`'s published
+guarantee that a stored name never begins with `.`, not on a pattern match
+against `Store`'s private temp-file shape. Every refusal — bad id shape, an
+absent pair, or a pair resolving outside the named conversation's own
+directory — wraps one sentinel, `ErrNotFound`. `docs/protocol-mobile.md` §
+Error codes makes those three cases deliberately indistinguishable on the
+wire, so one shared sentinel makes that a property of the type rather than a
+discipline a future dispatch site has to keep. Reusing `ErrInvalidID` or
+`ErrNotContained` was rejected for a concrete reason, not tidiness:
+`internal/relay/v2session_attachment.go`'s `attachmentRejectFor` already maps
+both of those to `rejectStorageFailed`, and a retrieval dispatch site sharing
+either mapping would answer the wrong wire code for a lookup refusal.
+
+**The precondition this function cannot check is the one that matters most.**
+`conversationID` must be the conversation the authenticated session is
+already on, never one a client asserted — every containment step still
+passes for a client-supplied conversation id, because the pair genuinely
+resolves inside the conversation it names. `docs/protocol-mobile.md` § Naming
+a message's attachments is explicit that confinement to the message's own
+conversation, not `attachment_id`'s shape or randomness, is what keeps it
+from becoming a capability; `Intake`'s resolver-callback shape (see § "Chunk
+intake driver" in the package overview) is the pattern a caller should copy
+rather than taking a conversation id off the wire directly.
+
+- **A containment fixture that leaves the escaped target empty can pass for
+  the wrong reason.** The sibling-conversation symlink row — the one row that
+  separates full-path equality from a `filepath.Rel`-style containment test,
+  per the `EnsureDir` note above — has to populate its target with a real
+  stored file before the row means anything; against an empty target, a
+  correct build refuses by containment and a broken build refuses by finding
+  nothing to answer, and outside the test the two reasons look identical.
+  `EnsureDir`'s own containment rows assert `assertEmptyDir` because that
+  function *creates*; the analogous assertion for a function that only reads
+  is `assertDirEntries(target, "<planted name>")` — the target is unchanged,
+  which is the property actually under test.
+
+Concurrency is unguarded by design, on the same bound `EnsureDir` states: the
+check-then-use window between `ReadDir` and a caller's later `os.Open` is
+real and accepted rather than closed, because closing it would mean
+answering an open file handle instead of a path, and the consumer this
+ticket was written for (#2038, prompt composition) needs the path as text and
+never opens the file at all. Exploiting the window needs write access inside
+the daemon's own `0o700` state directory, which already permits rewriting
+`devices.json` — strictly worse than redirecting one attachment read.
+
+See [Mutation-testing lessons](attachments-package-mutation-testing-lessons-measured-across.md)
+for two more traps this ticket's suite found: a validate-then-look-up table
+built entirely from fixtures that are also absent, and a "stable across
+calls" assertion that a wrong deterministic rule satisfies just as well.
