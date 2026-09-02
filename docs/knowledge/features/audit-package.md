@@ -9,9 +9,17 @@ modal. Landed in #712 (EPIC #597 Phase 3 — mobile remote head, ADR 025 §6
 "Audit").
 
 This slice is the **writer primitive only** — it ships with **no caller**. The
-sole consumer is the modal control loop (#703), which constructs an `Entry` and
-calls `audit.Log` once per decision it resolves. The package does **not** own
-the loop, the deny-on-timeout timer, the modal nonce, or the decision logic.
+package does **not** own any calling loop, timer, nonce, or decision logic; it
+only records an already-decided `Entry`. Two callers construct one today: the
+modal control loop (#703) and, since #1986, `cmd/pyry`'s `questionResolverV2`
+— the per-device gate for an inbound `question_answer` / `question_refused`.
+Both reuse the same `ModalID`/`ModalClass` pair rather than the package
+growing a question-specific field: the batch id rides `ModalID` and the
+compile-time constant `classQuestion = "question"` rides `ModalClass`, so a
+forensic reader tells a question record from a modal one by that field alone.
+Adding a dedicated field was considered and rejected in #1986 — it would be a
+third production file in this package and would move its shared no-leak test,
+and the existing id/class pair already says which batch and what kind.
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   § "Security model — remote permission granting", item 6 "Audit" — *"Each
@@ -133,6 +141,16 @@ does **not** perform it (it records the already-classified `Outcome`):
 it is a not-yet-resolved state; #703 audits only the *resolved* decision, at
 which point no-answer has become a timeout.
 
+`questionResolverV2` (#1986) maps onto the same three-row subset an eligible
+device can reach — `OutcomeAllowed`/`OutcomeDenied`/`OutcomeDeniedUnauthorized`,
+always `SourceRemote` — because a question batch has no desktop-TTY resolution
+path and no deny-on-timeout audit of its own (the no-answer backstop,
+`retireQuestion`, deliberately writes no record at all: a dismissal has no
+security decision behind it, where a resolution does). An eligible device's
+*rejected* answer — wrong count, an out-of-range index, a malformed entry —
+is not audited either: the gate admitted the device, but nothing was consumed
+and no verdict reached claude, so there is no decision to record.
+
 ## Data flow
 
 ``` #703 modal control loop (the ONLY caller; owns the modal, the timer, the decision)
@@ -187,6 +205,11 @@ internal/audit/
   "Security model" item 6 "Audit" — the governing requirement.
 - **Consumer (deferred — none wired in #712):** #703 — the modal control loop
   that constructs the `Entry` and calls `Log` on every resolved decision branch.
+- **Second consumer — #1986** (landed): `cmd/pyry/question_resolve_v2.go`'s
+  `questionResolverV2` is the per-device gate for an inbound question batch —
+  a second, independent caller of `audit.Log`, distinguished from #703's
+  modal records purely by `ModalClass: classQuestion` on the shared `Entry`
+  shape. See [features/v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md).
 - **Two-heads ownership — #706** (landed): the **first live `SourceLocal` consumer** —
   the surfacer's local resolution arm (`cmd/pyry/interactive_modal_v2.go`'s
   `handleModalHidden`) logs exactly one `{OutcomeDismissedLocal, SourceLocal}` entry, with

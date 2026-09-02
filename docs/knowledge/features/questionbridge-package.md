@@ -195,8 +195,10 @@ pass because there's nothing to alias.
   either resolution path wins the one-shot first). See [the question-arm
   section](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#the-question-arm-1973--a-second-discriminant-ahead-of-the-permission-path)
   for both primitives' ordering and the answer path's assembly/testing traps.
-  Neither is wired to `relay.QuestionResolver` yet — that is #1986's
-  per-device-gated seam. #1979 (landed) is the relay half of the
+  #1986 (landed) implements `relay.QuestionResolver` — the per-device gate,
+  the terminal-decision audit record and the composition-root wiring — see
+  [the seam doc](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md).
+  #1979 (landed) is the relay half of the
   connect-time reconcile (`Snapshot`, mints/retires nothing) — see
   [the reconcile doc](v2-session-manager-state-machine-connect-time-question-reconcile-outstanding.md).
   #1980 wires `Snapshot` itself into the seam and is the client contract.

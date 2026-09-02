@@ -262,9 +262,10 @@ so nothing establishes a happens-before edge between the two — forcing the
 failure both fails `-race` and leaves the buffer non-empty, so an
 empty-buffer claim can only be tested with that arm left unforced. #1990's
 refusal probe already made this choice; #1991's answer probe kept the same
-split rather than trying to cover both in one test. Whatever #1986 adds on
-top of this detached-broadcast pattern should keep the push-failure coverage
-and the log-emptiness claim as two separate tests.
+split rather than trying to cover both in one test. #1986's gated-resolver
+suite kept the same split: its content-free-audit test runs with the push
+arm unforced, and leaves the push-failure arm covered where #1990/#1991
+already cover it rather than re-proving it a third time.
 
 **`byQuestion` is a second map, not a second key space inside `byModal`, and
 that is load-bearing, not a style choice.** `ResolveStream` treats *any*
