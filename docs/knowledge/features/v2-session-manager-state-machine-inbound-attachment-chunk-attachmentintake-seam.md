@@ -80,6 +80,25 @@ the id itself was not done here: the same exposure already ships for
 capping a client-chosen id would be a house-wide rule rather than one
 handler's to invent.
 
+### An e2e-level never-log scan needs three renderings per `[]byte` field (#1898)
+
+The unit-tier `TestV2Session_AttachmentChunk_CarriesNoBannedStrings` checks
+the banned-string set against a fake intake that builds no path; #1898 adds
+the same scan at the e2e tier, over the real daemon's captured stderr, and
+found that one needle isn't enough to make the bytes claim non-vacuous. A
+`[]byte` field like `AttachmentChunkPayload.Data` renders three different
+ways depending on what's doing the rendering — base64 through
+`encoding/json`, a bracketed decimal slice through `slog`'s default handler,
+and never as raw ASCII through either — so a single-form needle greens
+against leaks in the other two forms. The base64 needle is additionally
+alignment-sensitive: base64 encodes independent 3-byte groups, so the
+encoding of a byte range appears inside the encoding of an enclosing buffer
+only when both the range's offset and length are multiples of three: off
+that boundary the needle can never match, leak or no leak. A positive pin —
+asserting the loggable attachment id *does* appear in the captured log — is
+what stops the negatives from greening against an empty or wrong-window
+buffer instead of a genuinely clean one.
+
 ## Related
 
 - [Chunk intake driver](attachments-package-intake-driver.md) — the seam's
