@@ -275,12 +275,22 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Input:          inputFields(e.RawInput),
 		}, true
 	case turnevent.ToolUpdate:
+		// ResultDetail maps straight through, deliberately UNCAPPED here, and
+		// that asymmetry with ResultSummary beside it is the point. resultSummary
+		// needs maxResultSummaryRunes because its producer (streamsup's
+		// toolResultContent) returns claude's text verbatim with no bound of its
+		// own. ResultDetail's producer (streamsup's readLineCount) formats two
+		// decoded int64s, so it is bounded at CONSTRUCTION — where every cap in
+		// that package is applied — at 48 bytes, and carries no claude-supplied
+		// byte to cap. A second cap here would be a number to keep correct
+		// against a string that cannot grow.
 		return protocol.TypeToolResult, protocol.ToolResultPayload{
 			ConversationID: tc.ConversationID,
 			TurnID:         tc.TurnID,
 			ToolUseID:      e.ToolCallID,
 			IsError:        e.Status == turnevent.ToolStatusFailed,
 			ResultSummary:  resultSummary(e.Content),
+			ResultDetail:   e.ResultDetail,
 		}, true
 	case turnevent.TurnEnd:
 		return protocol.TypeTurnEnd, protocol.TurnEndPayload{

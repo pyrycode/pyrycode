@@ -115,12 +115,34 @@ func (p ToolUsePayload) MarshalJSON() ([]byte, error) {
 // reports the outcome of the tool_use with the matching ToolUseID.
 // ResultSummary is a human-readable précis of the result, not the raw
 // output.
+//
+// ResultDetail (#2024) is a short précis of the call's STRUCTURED outcome —
+// "265 lines", "110 of 1676 lines" — composed by the daemon from the
+// tool_use_result sidecar. Empty means "no count", which is the answer for most
+// tools and for every sidecar shape the producer does not recognise; a client
+// renders it beside the row and never parses it. The unit words are carried
+// here on purpose, because a client cannot tell a read from a search without
+// switching on a tool name.
+//
+// The two summary fields do NOT share a provenance, and a reader who assumes
+// they do will reason wrongly about both. ResultSummary is claude's own text
+// passed through under a rune cap (turnbridge's maxResultSummaryRunes).
+// ResultDetail contains no claude-supplied byte: its producer formats decoded
+// integers, so its alphabet is digits, spaces and ASCII letters and its length
+// is bounded at construction rather than by a cap here.
+//
+// It carries no omitempty, per this file's rule: absence and "" mean the same
+// thing (no count), and always emitting the key keeps the testdata fixture
+// pinning the full shape. A client built before this landed ignores the unknown
+// key; one built after it decodes a frame that lacks the key to "" without
+// error, so the field is optional in the sense that binds.
 type ToolResultPayload struct {
 	ConversationID string `json:"conversation_id"`
 	TurnID         string `json:"turn_id"`
 	ToolUseID      string `json:"tool_use_id"`
 	IsError        bool   `json:"is_error"`
 	ResultSummary  string `json:"result_summary"`
+	ResultDetail   string `json:"result_detail"`
 }
 
 // TurnEndPayload is the body of an Envelope whose Type == TypeTurnEnd

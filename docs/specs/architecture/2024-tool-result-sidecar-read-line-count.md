@@ -388,3 +388,41 @@ a relay. Everything below is measured against that.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — implementation
+
+**Correction to the security review's [Network & I/O] finding.** The committed text said a
+complete `'\n'`-delimited line "is handed to `consumeLine` whole at any size". That is
+wrong as stated: `Parser.Write` caps its accumulator at `defaultMaxParseBuf` (4 MiB), so
+while the check runs *after* the complete-line loop — meaning one line can reach roughly
+4 MiB plus a single `Write` chunk — a line is bounded, not unbounded. The finding's
+conclusion is unchanged and slightly stronger: the transient sidecar copy this slice adds
+is proportional to an allocation that is already bounded. Nothing in the design moved; the
+claim was over-stated and is corrected here rather than quietly left in place.
+
+**The design shipped as planned.** No interface changed shape between the plan and the
+code, and all three Open questions resolved as written: no `omitempty` (the declaring
+file's convention over the ticket's phrasing), `result_detail` / `ResultDetail` as the
+name, and a block that fails its own decode does not suppress the count.
+
+**Measurements the plan predicted, now taken.**
+
+- `TestToolResultPayload_FitV2EnvelopeCap` measures **61430 B, 93.8%** of the 65519-byte
+  cap, up from 61363 B / 93.7%. That is +67 B — the field's 48-byte worst case plus 19 B
+  of key and punctuation — matching § The bound's arithmetic exactly.
+- The producer's worst case is 48 bytes, asserted against `maxResultDetailBytes` by
+  `TestReadLineCount_BoundedByConstruction` rather than assumed by the cap test.
+
+**Non-vacuity, established by mutation rather than by argument.** Three mutants were run
+under `go test -overlay` (no worktree writes) and each was caught:
+
+- envelope key `tool_use_result` → `toolUseResult`: **6 subtests red.** This is the mutant
+  that matters — it is precisely the dead-code decoder #2023 was run to prevent, and it
+  confirms the stdout-captured fixtures pin the spelling rather than agreeing with it.
+- `file.filePath` folded into the composed string: the confinement test caught the leak by
+  marker, which is the security control of AC1 proven live rather than argued from the
+  undeclared field set.
+- multi-block guard forced off: the two-block case went red while the one-block control
+  stayed green, so AC4 is not passing merely because nothing composes a count.

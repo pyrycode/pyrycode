@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
@@ -1902,6 +1903,184 @@ type streamBlock struct {
 	IsError   bool   `json:"is_error"`
 }
 
+// userToolResultLine carries the tool_use_result SIDECAR of one user line: the
+// structured outcome claude writes as a TOP-LEVEL field, a sibling of type and
+// message rather than something inside the message (#2024).
+//
+// Kept separate from streamLine for systemTaskStartedLine's reason — streamLine
+// is the line-level SEGMENTATION struct and stays at Type/Subtype/Message, and a
+// field belonging to one line type would blur that boundary. The line is decoded
+// a second time instead, which is systemTaskUpdatedLine.Patch's shape.
+//
+// THE KEY IS snake_case, AND THAT IS THE FINDING #2023 EXISTS TO HAVE BOUGHT.
+// The TRANSCRIPT (internal/agentrun/jsonl fixtures) spells this payload
+// `toolUseResult`. This package does not read the transcript — it parses
+// claude's stdout, spawned --output-format stream-json — and on that surface the
+// same payload is keyed `tool_use_result`. A decoder keyed on the camelCase name
+// is DEAD CODE here, and no hermetic test built from transcript-lifted fixtures
+// can catch it: the fixture would carry the same wrong key and agree with it.
+// #2023's first live run searched only the camelCase name and reported
+// "sidecar-absent" — literally true, materially the inverse of the truth; the
+// re-run recorded a spelling census of {"tool_use_result": 2} against zero
+// camelCase on claude 2.1.239. THE RENAME STOPS AT THE ENVELOPE: every key
+// INSIDE the sidecar stays camelCase (see sidecarFile). "Correcting" those to
+// match this one is the second way to write a decoder that never fires.
+//
+// json.RawMessage accepts ANY valid JSON value — object, string, number, null —
+// which is required, not merely convenient: one captured teardown carries the
+// sidecar as the bare string "Error: Exit code 1". emitSlashCommandList's
+// objection to a second json.Unmarshal ("it would add a second undecodable
+// outcome to classify") does not transfer, because consumeLine has already
+// decoded this line once and a RawMessage target cannot fail.
+type userToolResultLine struct {
+	ToolUseResult json.RawMessage `json:"tool_use_result"`
+}
+
+// toolResultSidecar is the second-stage decode of that sidecar, narrowed to the
+// ONE shape this ticket maps: a read. Each sidecar shape is self-identifying by
+// its KEY SET, so no correlation back to the tool_use and no tool-name switch is
+// needed — #1678's rule again, be driven by the available data and not by the
+// names. #2025 adds the remaining four shapes as further arms.
+//
+// Deliberately NOT keyed on the sidecar's own `type`: measured, a read carries
+// type "text" and a write carries type "create", so `type` identifies nothing
+// here. The keys that identify a read are file.numLines and file.totalLines,
+// BOTH of them, and nothing else.
+type toolResultSidecar struct {
+	File *sidecarFile `json:"file"`
+}
+
+// sidecarFile is the read shape's `file` object, narrowed to its two counts.
+//
+// WHAT IS ABSENT HERE IS THE SECURITY CONTROL. The observed object also carries
+// `content` — THE ENTIRE CONTENTS OF THE FILE CLAUDE READ — and `filePath`, an
+// absolute path disclosing the operator's home directory and project layout.
+// Neither is declared, so neither can be read into daemon state at all: absent
+// from the DECODE TARGET is a stronger guarantee than any test sweep, because a
+// field that is never declared cannot leak (systemTaskUpdatedLine's doc states
+// the same rule for uuid/session_id). `startLine` is absent for a plainer
+// reason: the row names what was returned and what exists, and an offset adds
+// nothing to that.
+//
+// The two fields are POINTERS so an absent key is distinguishable from a present
+// zero: a sidecar carrying only one of the two counts is not a read, while 0/0
+// is present-and-zero and takes its own arm in readLineCount.
+//
+// They are int64 rather than float64 or any, and that choice is what makes the
+// composed string's length STRUCTURAL rather than a second cap to keep correct.
+// numLines is a JSON number of arbitrary precision; a count that does not decode
+// as a fixed-width whole number — 4.5, "40", a value past int64 — fails the
+// decode and sends nothing. Note the camelCase: the envelope rename stops at
+// userToolResultLine.
+type sidecarFile struct {
+	NumLines   *int64 `json:"numLines"`
+	TotalLines *int64 `json:"totalLines"`
+}
+
+// maxResultDetailBytes is the longest string readLineCount can compose, and it
+// is a DERIVED FACT rather than a cap that is enforced anywhere — nothing checks
+// a composed string against it, because nothing can exceed it.
+//
+// Both counts are non-negative int64, so each formats to at most 19 digits, and
+// the longest form is 19 + len(" of ") + 19 + len(" lines") = 48. Every byte is
+// a digit, a space or an ASCII letter, none of which encoding/json escapes, so
+// 48 bytes is the wire cost too. That is why turnbridge maps the field through
+// UNCAPPED while capping its ResultSummary neighbour: the bound here is over
+// int64's RANGE, not over claude's input length, so no hostile or absurd line
+// count can grow the frame. Against the ~4.2 KB of headroom
+// turnbridge.maxResultSummaryRunes' doc measures on this payload, 48 bytes is
+// under 1.6%, and TestToolResultPayload_FitV2EnvelopeCap measures the envelope
+// with the field present rather than taking that on trust.
+const maxResultDetailBytes = 48
+
+// readLineCount composes a read's row text from one tool_use_result sidecar, or
+// returns "" for every shape that is not a read. It is the ONLY crossing in this
+// package from the sidecar's untrusted bytes into daemon state, and it is total:
+// there is no error return, because every failure has the same answer.
+//
+// FAILING CLOSED IS THE DESIGN, NOT A FALLBACK. An absent sidecar, a non-object
+// one, and an object with no read keys are the same case — send nothing. About
+// 5% of calls are tools with no meaningful count and they should have none, and
+// a shape this decoder does not recognise costs a missing count, never a wrong
+// one. Nothing here emits an Unrecognized, and that is a CONFINEMENT control
+// rather than a tidiness one: emitUnrecognized does not merely log, it puts the
+// offending bytes on the wire as turnevent.Unrecognized.Raw (cut by
+// truncateRaw), so surfacing an unrecognised sidecar that way would ship the
+// first maxUnrecognizedRaw bytes of every file claude reads to the phone.
+//
+// NO RELATIONAL VALIDATION. The daemon does not second-guess claude's
+// arithmetic: it requires only that both counts decode as non-negative whole
+// numbers and picks the form by whether they are equal, so a returned count
+// larger than its total renders as given. Inventing a validation rule for a
+// shape we have few observations of is what #1380 declined to do, and
+// systemTaskUpdatedLine.Patch carries the same reasoning in this file.
+//
+// The composed string contains NO claude-supplied byte — it is two formatted
+// integers and two literals — so it has no injection surface and, unlike a
+// "capped" substring, retains no sub-slice of the decoded sidecar to pin its
+// allocation.
+func readLineCount(sidecar json.RawMessage) string {
+	if len(sidecar) == 0 {
+		return ""
+	}
+	var sc toolResultSidecar
+	// The error is deliberately swallowed rather than classified. The line has
+	// already decoded once, so this cannot be news; see the fail-closed note above.
+	if err := json.Unmarshal(sidecar, &sc); err != nil {
+		return ""
+	}
+	if sc.File == nil || sc.File.NumLines == nil || sc.File.TotalLines == nil {
+		return ""
+	}
+	n, total := *sc.File.NumLines, *sc.File.TotalLines
+	if n < 0 || total < 0 {
+		return ""
+	}
+	if n == 0 && total == 0 {
+		// A read that returned no lines from an empty file has nothing worth
+		// saying. A zero returned count against a NON-zero total is not this case
+		// and still sends both, because "0 of 1676 lines" says something true.
+		return ""
+	}
+	if n == total {
+		// Not pluralised: "1 lines" is the form. #1794 measured the shortest value
+		// at 7 characters, which is "4 lines", so the family's own measurement is
+		// of the unpluralised form and a singular arm would be a rule the design
+		// does not carry.
+		return strconv.FormatInt(n, 10) + " lines"
+	}
+	// Returned before total — the whole point of the two-part form is telling at a
+	// glance that only a slice of a longer file was seen. Reads are partial 56.5%
+	// of the time across 93227 measured calls.
+	return strconv.FormatInt(n, 10) + " of " + strconv.FormatInt(total, 10) + " lines"
+}
+
+// countToolResultBlocks counts the tool_result blocks of one user message.
+//
+// It decodes each block into a type-only struct rather than reusing streamBlock,
+// whose Content is `any` and would materialise a whole file read's text just to
+// read a type. Its caller gates on having a count to place at all, so the ~95%
+// of lines with no count pay nothing for this.
+//
+// A block that will not decode is not counted: it is not a tool_result as far as
+// anything here can tell, and the main loop in emitUser still surfaces it as an
+// Unrecognized on its own terms.
+func countToolResultBlocks(msg *streamMessage) int {
+	n := 0
+	for _, raw := range msg.Content {
+		var block struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &block); err != nil {
+			continue
+		}
+		if block.Type == "tool_result" {
+			n++
+		}
+	}
+	return n
+}
+
 // consumeLine decodes one complete line and emits the events it maps to. A blank
 // line emits nothing. A line on the measured known-ignored list emits nothing and
 // is Debug-logged by type only — never content. A line that fails to decode, and
@@ -1925,7 +2104,9 @@ func (p *Parser) consumeLine(line []byte) {
 	case "assistant":
 		p.emitAssistant(sl.Message)
 	case "user":
-		p.emitUser(sl.Message)
+		// The line bytes ride along so emitUser can decode the tool_use_result
+		// sidecar, a sibling of `message` rather than a field inside it (#2024).
+		p.emitUser(sl.Message, line)
 	case "result":
 		// The turn boundary. The subtype selects the reason: an interrupted turn
 		// (subtype error_during_execution, spike T1 #1075) → cancelled; a clean
@@ -3540,9 +3721,33 @@ func (p *Parser) decodeBlock(raw json.RawMessage) (streamBlock, bool) {
 // emitUser maps one user message's tool_result blocks to ToolUpdate. A nil
 // message emits nothing; any non-tool_result block emits an Unrecognized, with
 // the single exception of the harness nudge, which is dropped in silence.
-func (p *Parser) emitUser(msg *streamMessage) {
+//
+// It takes the RAW LINE BYTES as well as the message because the tool_use_result
+// sidecar is a sibling of `message` on the LINE, not a field inside it, so this
+// type-switch call site is the only place the two can meet (#2024).
+// consumeLine's rate_limit_event arm, which hands emitRateLimit(line) the same
+// way, is the in-file precedent.
+func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 	if msg == nil {
 		return
+	}
+	// One line carries one sidecar; a message may carry many tool_result blocks.
+	// MORE THAN ONE BLOCK DROPS THE COUNT FROM ALL OF THEM: the sidecar cannot be
+	// attributed to a particular block, and a count on the wrong row is worse than
+	// no count. The capture's block histogram is {"0": 1, "1": 2}, so no
+	// multi-block line was observed — this is a fail-closed decision about an
+	// unobserved case rather than a measured shape.
+	//
+	// Composed FIRST and gated on being non-empty, so the ~95% of lines with no
+	// count never pay for the block-count pre-pass.
+	var utl userToolResultLine
+	// The error is dropped, not classified: the line has already decoded once in
+	// consumeLine, and a json.RawMessage target accepts any valid JSON value, so
+	// there is no second undecodable outcome to report. See readLineCount.
+	_ = json.Unmarshal(line, &utl)
+	detail := readLineCount(utl.ToolUseResult)
+	if detail != "" && countToolResultBlocks(msg) != 1 {
+		detail = ""
 	}
 	for _, raw := range msg.Content {
 		block, ok := p.decodeBlock(raw)
@@ -3573,9 +3778,10 @@ func (p *Parser) emitUser(msg *streamMessage) {
 			continue
 		}
 		p.emit(turnevent.ToolUpdate{
-			ToolCallID: block.ToolUseID,
-			Status:     toolStatus(block.IsError),
-			Content:    toolResultContent(block.Content),
+			ToolCallID:   block.ToolUseID,
+			Status:       toolStatus(block.IsError),
+			Content:      toolResultContent(block.Content),
+			ResultDetail: detail,
 		})
 	}
 }

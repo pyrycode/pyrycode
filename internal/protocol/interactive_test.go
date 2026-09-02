@@ -160,8 +160,43 @@ func TestToolResultPayload_RoundTrip(t *testing.T) {
 	if payload.ResultSummary != "4°C, light snow showers in the afternoon." {
 		t.Errorf("ResultSummary: got %q, want %q", payload.ResultSummary, "4°C, light snow showers in the afternoon.")
 	}
+	// The fixture pins result_detail present-and-empty, which is this file's rule
+	// (no field carries omitempty) rather than an oversight: empty means "no
+	// count", which is the answer for most tools, and always emitting the key
+	// keeps the fixture a full-shape reference for a client author (#2024).
+	if payload.ResultDetail != "" {
+		t.Errorf("ResultDetail: got %q, want empty", payload.ResultDetail)
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestToolResultPayload_ResultDetailIsOptional covers #2024's wire criterion: the
+// new field's ABSENCE is a value, not an error. A frame minted by a daemon built
+// before this landed carries no result_detail key at all, and must still decode —
+// to "", which means exactly what an explicit "" means, no count.
+//
+// The reverse direction needs no test to be safe and cannot get one here: a
+// client built before this landed decodes into a struct without the field, and
+// encoding/json ignores unknown keys. This asserts the half that lives in this
+// repo.
+func TestToolResultPayload_ResultDetailIsOptional(t *testing.T) {
+	t.Parallel()
+	// The pre-#2024 payload shape, byte for byte.
+	const legacy = `{"conversation_id":"c1","turn_id":"t7","tool_use_id":"tu1","is_error":false,"result_summary":"done"}`
+
+	var payload ToolResultPayload
+	if err := json.Unmarshal([]byte(legacy), &payload); err != nil {
+		t.Fatalf("a payload without result_detail must decode, got: %v", err)
+	}
+	if payload.ResultDetail != "" {
+		t.Errorf("ResultDetail: got %q, want empty", payload.ResultDetail)
+	}
+	// The rest of the payload must survive unchanged — a decode that "worked" but
+	// dropped a sibling field would pass the check above.
+	if payload.ResultSummary != "done" || payload.ToolUseID != "tu1" {
+		t.Errorf("sibling fields: got %+v", payload)
+	}
 }
 
 func TestTurnEndPayload_RoundTrip(t *testing.T) {
