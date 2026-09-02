@@ -166,6 +166,38 @@ hint's call after the description's reddens two — so a sole-redness claim writ
 does not transfer to the append variant, and had to be checked separately rather than assumed to
 generalize.
 
+**The argument hint's boundary matrix and captured-survival pin land (#1958).**
+`TestParser_SlashCommandFieldsAreCapped` gains the hint's two mid-rune rows beside the name's
+and description's — the at-cap row already shipped with #1957 — and its `utf8.ValidString`
+check joins the same per-entry assertion loop. Unlike the description's
+`TestParser_InitializeControlResponseCutsTheCapturedDescriptions`, the hint's new pin,
+`TestParser_InitializeControlResponseCarriesTheCapturedArgumentHints`, is a **survival** pin:
+at the shipped 256-byte cap none of the 51 captured hints is cut, so it asserts the array
+crosses whole rather than that a cut lands correctly.
+
+*Lesson: a survival pin and a cut pin fail differently on a re-capture, and only one of them
+is quiet about it.* The description's pin asserts against whatever the capture holds, so a
+re-capture retargets it silently. The hint's expected-report set is empty by design, so a
+re-capture that lengthens a hint past the cap reddens the pin — but reads as though the
+emitter regressed, not as though the capture moved. The fix is a capture-shape guard ("none
+over the cap") that fires first and names the capture as the cause; an empty expected-report
+set is not automatically the safe choice.
+
+*Lesson: a constructed mid-rune row cannot cover the uncut multi-byte case, and the gap is
+invisible by inspection.* Every mid-rune row's surviving output is ASCII by construction — the
+wide rune is exactly what the cut deletes — so no row in the cap table carries a multi-byte
+rune through **uncut**. Measured by mutation: stripping non-ASCII from a hint that fits under
+the cap was caught only by the captured-survival pin, across the whole package. Where every
+row in a matrix cuts, the uncut-wide-rune path belongs to whichever pin asserts survival, and
+nothing else can claim it.
+
+*Lesson: a "defaults an empty value" mutant can redden far more of a matrix than the row that
+names emptiness.* `commandEntryFixture` omits any field a row doesn't explicitly ask for, so an
+"absent hint defaults to a placeholder" mutant reddened the captured pin and most of the cap
+table at once — nearly every row is silently an empty-hint row already. A `why` block claiming
+a mutant's redness belongs to one row needs checking against how many other rows share the
+same silent default, not just the row's own stated input.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart
