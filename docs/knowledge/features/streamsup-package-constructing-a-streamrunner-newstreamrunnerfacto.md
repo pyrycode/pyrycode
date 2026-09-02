@@ -11,19 +11,40 @@ newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)` (#1840, below); `scfg
 `streamsup.New(scfg)`; on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil
 `sessions.Runner`; on success, `streamRunner{r: r, models: held}`.
 
-**`withApprovalArgs(args []string, mcpApprovePath string) []string` (#1168)** is the interactive-stream
-twin of `agent_run.go`'s non-yolo `permissionArgs` wiring (#1106) — the first live consumer of
-`permissionArgs`/`writeMCPApproveConfig` on the interactive path. Reads `--dangerously-skip-permissions`
-off `args` as the single deterministic per-spawn yolo signal (both the bootstrap operator pass-through and
-`sessions.claudeSettingsArgs`'s per-session YOLO funnel through that one flag): present → return `args`
-unchanged (byte-identical to pre-#1168, no duplicate flag); absent → `append(slices.Clone(args),
-permissionArgs(false, mcpApprovePath)...)`. Runs inside the shared factory closure, so it covers **both**
-the bootstrap runner and per-conversation runners — a per-conversation stream session cannot silently
-bypass the approval gate. `mcpApprovePath` is the daemon-global `--mcp-config` file `runSupervisor` writes
-once at startup via `writeMCPApproveConfig` (gated on `cfg.InteractiveRunner == "stream-json"`,
-fail-closed on write error, removed at shutdown); on the `""`/`"pty"` path the factory is never built, so
-the PTY interactive argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) and
+**`withApprovalArgs(args []string, mcpApprovePath string) []string` (#1168, extended #2043)** is the
+interactive-stream twin of `agent_run.go`'s non-yolo `permissionArgs` wiring (#1106) — the first live
+consumer of `permissionArgs`/`writeMCPApproveConfig` on the interactive path. Reads
+`--dangerously-skip-permissions` off `args` as the single deterministic per-spawn yolo signal (both the
+bootstrap operator pass-through and `sessions.claudeSettingsArgs`'s per-session YOLO funnel through that
+one flag): present → return `args` unchanged (byte-identical to pre-#1168, no duplicate flag); absent →
+append the approval set, dropping its own `--permission-mode default` pair first when `args` already
+names a mode (below). Runs inside the shared factory closure, so it covers **both** the bootstrap runner
+and per-conversation runners — a per-conversation stream session cannot silently bypass the approval
+gate. `mcpApprovePath` is the daemon-global `--mcp-config` file `runSupervisor` writes once at startup
+via `writeMCPApproveConfig` (gated on `cfg.InteractiveRunner == "stream-json"`, fail-closed on write
+error, removed at shutdown); on the `""`/`"pty"` path the factory is never built, so the PTY interactive
+argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) and
 [codebase/1168.md](../codebase/1168.md).
+
+**Since #2043, `args` can already name a permission mode, and this function runs at runner
+CONSTRUCTION on top of it — the path a daemon restart takes to rebuild a session from the registry.**
+A session storing `plan` composes `--permission-mode plan` through
+`sessions.claudeSettingsArgs`, and injecting the approval set unmodified would spawn it as
+`--permission-mode plan … --permission-mode default`. `withApprovalArgs` now drops **only its own**
+`--permission-mode default` pair in that case (`namesPermissionMode` checks both the two-token and the
+joined `--permission-mode=` forms — the operator's bootstrap pass-through args can spell it either way,
+mirroring `stripSessionIDFlags`'s two-form handling; `dropPermissionMode` scans for the pair rather than
+slicing a known offset, so `permissionArgs`' own ordering is not load-bearing).
+
+**Rejected shortcut — a second early return, mirroring the yolo arm above
+(`if namesPermissionMode(args) { return args }`).** This looks like the natural sibling of the
+yolo-present early return but is a privilege escalation: it would spawn every mode-carrying session
+with **no** `--permission-prompt-tool`, `--mcp-config`, or `--strict-mcp-config` at all — the daemon's
+approval gate entirely absent — reachable from a stored setting alone, no operator action beyond
+setting a permission mode. The yolo early return is safe only because a bypass child has no approval
+gate to lose in the first place; a mode-carrying child (`plan`, `acceptEdits`, `auto`, `dontAsk`) still
+needs one. Caught in the #2043 spec's mandated security review before any code shipped; a test asserts
+the three approval flags survive a mode-carrying spawn.
 
 **No PTY fallback, structurally.** The function has no branch that calls `supervisor.New` — a
 `streamsup.New` failure (missing binary, absent work dir; an empty `SessionID` is impossible at the pool

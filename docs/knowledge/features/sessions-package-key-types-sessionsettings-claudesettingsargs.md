@@ -1,33 +1,83 @@
-# `SessionSettings` + `claudeSettingsArgs` (#833)
+# `SessionSettings` + `claudeSettingsArgs` (#833, `PermissionMode` #2043)
 
-The per-session model / reasoning-effort / YOLO (bypass-permissions) triple —
-the storage + spawn **primitive** the wire verb (#841) builds on. No wire
-message ships with this primitive.
+The per-session model / reasoning-effort / permission-posture set — the
+storage + spawn **primitive** the wire verb (#841) builds on. No wire message
+ships with this primitive.
 
 ```go
 type SessionSettings struct {
-    Model  string
-    Effort string
-    YOLO   bool
+    Model          string
+    Effort         string
+    YOLO           bool
+    PermissionMode string
 }
 ```
 
 Zero value inherits the daemon template for `Model`/`Effort` and enforces
-permissions (`YOLO` off) — the fail-safe default. Stored on `Session.settings`,
-set initially in `Pool.New` (bootstrap) or `Pool.buildSession` (minted) and
-mutated post-construction by `Pool.UpdateSettings` (#840, below) under
-`Pool.mu` (write); read under `Pool.mu` (same discipline as `label`).
+permissions (`YOLO` off, mode `default`) — the fail-safe default. Stored on
+`Session.settings`, set initially in `Pool.New` (bootstrap) or
+`Pool.buildSession` (minted) and mutated post-construction by
+`Pool.UpdateSettings` (#840, below) under `Pool.mu` (write); read under
+`Pool.mu` (same discipline as `label`).
+
+**`YOLO` and `PermissionMode` express one posture, not two settings.** A
+`Pool`-held `Session` always satisfies
+`YOLO == (PermissionMode == "bypassPermissions")`. `YOLO` stays the
+authoritative half for the escalation — `claudeSettingsArgs` derives the
+bypass flag from it alone, never from the mode string — so the fail-safe stays
+enforced in exactly one place even if a hand-built `SessionSettings` literal
+in a test breaks the invariant. Three writers keep it true: `Pool.UpdateSettings`
+rejects an unrecognised mode (`ErrUnsupportedPermissionMode`) or a
+self-contradictory frame (`ErrPermissionModeConflict`) before mutating
+anything (see below); the two construction sites and the registry read
+(`settingsFromEntry`, [sessions-registry.md](sessions-registry.md)) normalise
+through `canonicalPermissionMode(mode, yolo)` — `yolo:true` → `bypassPermissions`;
+otherwise an in-band member (`default`, `acceptEdits`, `plan`, `auto`,
+`dontAsk`) → itself; otherwise (`""`, unknown, or `bypassPermissions` paired
+with `yolo:false`) → `default`. The last arm is a normalisation of *trusted*
+input (construction sites, registry read) — operator input is rejected
+loudly by `Pool.UpdateSettings`, never silently downgraded. `yolo` is not
+being phased out: the mobile client speaks it, and #1687 settles what the two
+mean together on the wire.
+
+`permissionModeInBand(mode)` — the five claude accepts on a held-open stream,
+mirroring `internal/streamsup`'s writer-side allow-list character for
+character since `internal/sessions` may not import that package — and
+`permissionModeKnown(mode)` — those five plus `bypassPermissions`, the
+storable set — are both `switch` statements, never a package-level slice or
+map: a `var` holding a security vocabulary is mutable state anything in the
+package, a test included, could `append` the escalation onto; control flow
+cannot be appended to. Both are **vocabulary** gates ("will claude parse
+this?"), not authorisation gates — three in-band members (`acceptEdits`,
+`auto`, `dontAsk`) genuinely loosen a child launched behind the daemon's
+approval flags, and who may request that is #1687's decision, not this
+primitive's.
+
+`Pool.mintSettings` keeps its two-field literal (`Model`/`Effort` only) and
+gains no `PermissionMode` line — a posture is not inherited by a freshly-minted
+session, the same structural fail-safe already applied to `YOLO`;
+`canonicalSettings` (called from `Pool.buildSession`) then gives the minted
+session `default` because the field is absent, not because a downgrade rescues
+it.
 
 ```go
 func claudeSettingsArgs(s SessionSettings) []string
 ```
 
 Pure helper, unexported. `Model != ""` → `--model <x>`; `Effort != ""` →
-`--effort <x>`; `YOLO == true` → `--dangerously-skip-permissions`, in that
-deterministic order. `YOLO == false` appends nothing — absence of the flag is
-what enforces permissions, so the function can never emit a
-permission-*disabling* flag. Zero value → `nil`, so both call sites append
-nothing and the argv is byte-identical to pre-#833 behaviour.
+`--effort <x>`; then a **mutually exclusive posture slot**, in that
+deterministic order:
+
+- `YOLO == true` → `--dangerously-skip-permissions` and nothing else — never
+  `--permission-mode bypassPermissions`, so the escalation keeps exactly one
+  spelling and the flag can never be composed from a mode string.
+- else a non-`default` in-band mode → `--permission-mode <mode>`.
+- else (`default` or `""`) → nothing. `default` **is** claude's own default,
+  so emitting no flag is the equivalent of an empty `Model`, and it is what
+  keeps every argv this function composed before #2043 byte-identical.
+
+Zero value → `nil`, so both call sites append nothing and the argv is
+byte-identical to pre-#833 behaviour.
 
 **Two spawn sites, both appending to a cloned slice:**
 
@@ -71,8 +121,18 @@ nothing and the argv is byte-identical to pre-#833 behaviour.
 
 **Persistence.** `registryEntry` (`registry.go`) gains `Model string`,
 `Effort string`, `YOLO bool`, all `json:"...,omitempty"`, following the
-`Bootstrap`/`LifecycleState` field precedent exactly. `saveLocked` copies
-`s.settings` into the outgoing entry under the held `Pool.mu`.
+`Bootstrap`/`LifecycleState` field precedent exactly; `PermissionMode string`
+(#2043) joins them with the same tag but a closed on-disk vocabulary — see
+[sessions-registry.md](sessions-registry.md) for `permissionModeForDisk` /
+`settingsFromEntry`. `saveLocked` copies `s.settings` into the outgoing entry
+under the held `Pool.mu`.
+
+A test helper that pre-writes a `registryEntry` literal by hand (rather than
+going through `saveLocked`) has to build the `PermissionMode` field the same
+way `permissionModeForDisk` would, or a stored non-default mode silently reads
+back as `default` in that fixture. #2043 caught this in two of the package's
+own pool-construction test helpers, which pre-date the field and built the
+entry by hand.
 
 **Only the bootstrap round-trips settings across a live daemon restart** —
 `Pool.New` only re-materialises the bootstrap entry from disk; a minted
