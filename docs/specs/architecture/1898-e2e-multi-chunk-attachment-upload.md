@@ -160,3 +160,20 @@ This ticket adds no production code, so no category can find an exploitable desi
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — Phase B
+
+**Open question 1 resolved (no design change).** The un-drained turn's own pushes do reach the phone during the upload phase; the classification loop's `default:` arm tolerates them exactly as designed, and the run is green with them. Nothing about the design depended on the answer.
+
+**Open question 2 resolved.** The quiet window is 1500ms rather than the ~1s the plan estimated. The clean run is stable at that value and the mutant runs show the transfer's whole reply sequence lands inside the first second, so the window bounds scheduling latency with margin rather than waiting on anything real.
+
+**Third never-log needle added, beyond the two the security review's [Error messages, logs, telemetry] finding described.** The finding named an ASCII sentinel and a base64 rendering and stated the residual as "a leak rendered in some third form neither needle spells". `slog`'s default handler renders a `[]byte` as a bracketed decimal slice, which is a *nameable* third form rather than an open-ended residual, so `assertNoAttachmentLeakInLogs` scans that rendering of the same aligned window as well. The residual is now a fourth form none of the three spells.
+
+**Both mutation checks the Testing strategy called for were run** (via `go build -overlay` into a scratch binary passed through `PYRY_E2E_BIN`; nothing was written into the worktree), and each killed the run at its intended assertion:
+
+- `attachments.Store` reporting success without writing → failed at the directory read, "attachment directory holds 0 entries". This is the exact quiet failure the slice exists to catch: reply, log record and `EnsureDir` all green, no bytes on the host.
+- `attachments.Intake.Receive` reporting every chunk as completing → failed at the barrier, the daemon never logging `chunk.accepted`. This is what makes AC-3's "answered with no frame at all" falsifiable rather than decorative.
+
+The planned nil-`AttachmentIntake` mutant was replaced by these two. It would have proved only that the seam is wired; each of these proves a specific acceptance criterion has teeth, and the second subsumes the wiring check (an unwired seam logs `chunk.inert` and fails the same barrier).
