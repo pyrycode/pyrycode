@@ -74,7 +74,19 @@
   `resolvedModel`, with a message distinguishing a claude-side inconsistency
   from a defect in this change if the two disagree; one child pid across the
   phase). See [`v2-session-manager.md`](v2-session-manager.md)'s `validModel`
-  entry for the grammar the hermetic tests pin.
+  entry for the grammar the hermetic tests pin. **Observed 2026-09-02 (#2041,
+  filed as #2045):** a real-claude gate run flagged
+  `TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel` as newly
+  red on a branch that touched zero production source files, because claude's
+  own model-menu row changed between the branch run and the base re-run eight
+  minutes later — `claude-fable-5-1[1m]` (not applied in band) vs.
+  `claude-fable-5[1m]` (applied), same binary version, a drifted published
+  value. Re-running the single test on the branch three times passed 3/3.
+  Generalises past this one test: a live-claude gate's before/after comparison
+  assumes claude's own responses hold still between the two runs, and when
+  they don't, the diff attributes the flap to whichever side ran second —
+  compare the two runs' *observed inputs*, not just their verdicts, before
+  accepting a live-gate regression as branch-caused.
 
 - `set_permission_mode_probe_test.go` (#1595) — **does the bypass posture have
   an in-band form, the way #1581/#1582 proved the model does?** Four direct
@@ -103,6 +115,50 @@
   production files touched; no writer for the subtype is added — #1596 decides
   that. See [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md)
   for the full measurement writeup and [`codebase/1595.md`](../codebase/1595.md).
+
+- `permission_mode_switch_probe_test.go` (#2041) — **the sequel measuring the
+  four modes #1595 left uncovered**: `acceptEdits`, `dontAsk`, `plan` and
+  `auto` all switch on a running child in-band at 2.1.239, and `auto` is
+  refused per **model**, never per mechanism (verbatim: `Cannot set
+  permission mode to auto: auto mode unavailable for this model`). Full
+  measurement in
+  [`permission-mode-switch-inband-probe.md`](permission-mode-switch-inband-probe.md).
+  `runSetModeChild` gained a `setModeChildConfig` parameter (model, prompts,
+  turn bound, fixture family) so the model is a property of the measurement
+  rather than the package-level `setModeModel` constant #1595 hardcoded to
+  `claude-haiku-4-5` — one of the two 2.1.239 rows publishing no
+  `supportsAutoMode` at all; reused unchanged, the `auto` arm would have
+  measured a refusal on a model that never supported auto and reported it as
+  "auto no longer switches in-band". The model is instead picked out of a
+  throwaway discovery child's own live `initialize` model list, never a
+  table — the concrete reason: the live list published
+  `claude-fable-5-1[1m]` where the *committed* `initialize_control_v2.1.239.json`
+  capture records `claude-fable-5[1m]`, same binary version, a drifted value.
+  `supportsAutoMode: false` is spelled by **absence** at this version (no row
+  carries the literal `false`), so the capture's `SupportsAutoMode` /
+  `KeyPresent` fields are written unconditionally, no `omitempty` — that
+  field is exactly the trap the ticket exists to make visible. **Two traps a
+  plan predicted but only a running test caught:** the new fixture family's
+  version token goes through `versionSlug`, but the arm token didn't, until
+  hostile-literal rows (`a/b`, `/abs`, `..`) in the offline names test
+  reddened — a minted name for `a/b` resolved outside `testdata/`, the one
+  directory the writer creates; `modeSwitchNameToken` now maps every byte
+  outside `[A-Za-z0-9_-]` to `_` and caps at 32, sanitising rather than
+  rejecting so containment is a property of the name and no caller has to
+  validate first. Separately, `runSetModeChild`'s stderr-scrub guard
+  (`initControlScrubbed`) sat *after* a `t.Fatalf` that printed raw stderr
+  through `truncateString` — a cap, not a redaction — so a credential-bearing
+  auth failure would have reached a run log the dispatcher salvages; fixed by
+  reordering to match `runModeSwitchDiscovery`'s already-correct order in the
+  same file. Reading a model `value` off one child's stdout and passing it as
+  `--model <value>` to the *next* child is flag injection, not shell
+  injection — no shell is involved, but a value beginning with `-` parses as
+  a flag, so `modeSwitchModelValueOK` (non-empty, ≤64 bytes, no leading `-`,
+  restricted charset) is the one gate every candidate passes before
+  selection, worth the pattern for any future probe that round-trips a
+  claude-published value back into an argv. Zero production files touched.
+  See `docs/specs/architecture/2041-inband-mode-switch-probe.md` for the full
+  design and security review.
 
 - `interactive_stream_inband_bypass_revoke_test.go` (#1622) — **live proof of the
   composed path #1604 built, not of the wire format #1595 already proved.** #1595

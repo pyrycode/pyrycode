@@ -107,3 +107,9 @@ out of the log and the evidence out of the fixtures. Run `go vet -tags e2e_realc
 `make check` never compiles this package. The whole-value verdict is not perfectly stable run to
 run: one earlier run classified `enable` INCONCLUSIVE because claude retried the denied tool, and
 the test file's header comment and per-field breakdown explain how to read that case.
+
+## See also
+
+[`permission-mode-switch-inband-probe.md`](permission-mode-switch-inband-probe.md) — #2041's
+sequel, measuring `acceptEdits`/`dontAsk`/`plan`/`auto` at 2.1.239 with the same argv shape and
+recorder. All four switch; `auto` is refused per model.
