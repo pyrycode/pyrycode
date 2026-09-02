@@ -80,9 +80,10 @@ separate arm from `ModelList`'s despite an identical two-statement body
 share a *reason*, and these two come closer to sharing one than any other pair — both are properties
 of the child reported once per `initialize` exchange — but what the two arms' bodies *argue about* in
 their doc comments differs on every axis that matters: what sits above the fan-in drop
-(`sessionModelHold` retains the menu; nothing analogous exists for commands until #2004), what the
-reliable fallback path is (#1846 for the menu, #2005 for commands), and the trust origin of the
-carried strings (claude-authored vs. workspace-authored, which is what makes the log posture
+(`sessionModelHold` retains the menu; `sessionSlashCommandHold` retains the commands since #2004,
+see [`streamsup-package-retaining-the-decoded-model-list-for-the-session.md`](streamsup-package-retaining-the-decoded-model-list-for-the-session.md)),
+what the reliable fallback path is (#1846 for the menu, #2005 for commands), and the trust origin of
+the carried strings (claude-authored vs. workspace-authored, which is what makes the log posture
 stricter here). An identical body is not sufficient grounds to merge when the surrounding argument
 is per-variant — the same basis the switch already keeps `ThinkingProgress` and `RateLimited` apart
 on.

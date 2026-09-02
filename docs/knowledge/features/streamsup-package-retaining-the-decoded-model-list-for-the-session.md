@@ -1,5 +1,7 @@
 # Retaining the decoded model list for the session (#1840)
 
+_See also: [the twin retention for the slash-command list](#retaining-the-decoded-slash-command-list-the-twin-2004), below._
+
 `emitModelList` (above) mints one `turnevent.ModelList` per child and hands it to the parser's sink —
 but that sink is `sink.sinkFor(cfg.SessionID)`, the droppable-class send into the turn-busy fan-in
 (`turnMarkFor`'s default arm answers `turnMarkNone` for `ModelList`), and one `initialize` reply per
@@ -61,3 +63,58 @@ error that reads like a type error (`modelListFixture(...) — not a function`) 
 same-package name collision across files. Prefixing a package-level test fixture with the consumer it
 belongs to (`emitterModelListFixture`, for the emitter tests) is what keeps siblings in one ticket
 sequence from colliding on the name each reaches for first.
+
+## Retaining the decoded slash-command list, the twin (#2004)
+
+`sessionSlashCommandHold` applies the identical placement to `turnevent.SlashCommandList`: a second
+sink decorator, chained beside `sessionModelHold` inside `newSessionParser` (which now mints and wires
+both in one call, so neither half can end up bound to the other's hold), storing before forwarding on
+the parser's side of `sinkFor`'s droppable send. `streamRunner` exposes the read as a fifth concrete
+method off `sessions.Runner`, alongside `ModelList`, for the same interface-placement reason: the
+consumer (#2005) is in `cmd/pyry`, not `internal/sessions`.
+
+Two things differ from the sibling rather than being copied from it, deliberately:
+
+- **The clone is three levels, not two.** `Commands`, and within each entry both `Aliases` and
+  `TruncatedFields`, all need `slices.Clone`; `DroppedCommands` is an int and copies by assignment.
+  This variant has no top-level `TruncatedFields` field the way `ModelList` does — the count dimension
+  is reported per entry instead — so the level `cloneModelList` clones does not exist here to clone.
+- **The unreported-state bool has a different justification.** `ModelList.Models` is documented "never
+  empty"; `SlashCommandList` has no such doc guarantee. What makes an empty list unreachable is the
+  *producer*: `emitSlashCommandList` returns before emitting on a zero-length entry list (#1877), so no
+  reader can ever be handed an empty-but-reported list. Copying the sibling's "never empty" justification
+  across without checking would have cited a doc guarantee that doesn't exist on this type.
+
+**Read the package overview before trusting a ticket's own technical notes — it may already have
+disproven them.** #2004's ticket body repeated this file's own already-corrected mutex justification
+("a respawn's new stdout-forwarder goroutine can overlap the outgoing one") almost verbatim, unaware
+this doc had measured it false three paragraphs above. The build caught it by reading this file first
+and wrote the correct premise (needed for the *reader*, concurrent with the sole serial writer, not for
+two writers) on the new type — and, since it was already touching the sibling file, corrected the one
+sentence here too. The general shape: a ticket's Technical Notes are written by a refiner working from
+the ticket text, not from this file, so a claim here that already contradicts a shipped comment can
+still get re-asserted by the next ticket that copies that comment's reasoning instead of this file's.
+
+**A security review's capped-string footprint claim needs the same care as the code, and #2004's
+shipped one is still wrong.** `docs/specs/architecture/2004-retain-slash-command-list.md`'s
+`## Security review` states the retained `SlashCommandList` costs "O(one capped list) per session,"
+computing that from the per-field caps' product. It doesn't: `truncateField`'s
+`strings.ToValidUTF8(s[:limit], "")` returns its input slice unchanged for already-valid UTF-8 (Go's
+`strings` package makes no copy in that case), so a "capped" field is a slice header into the *whole*
+pre-cap `json.Unmarshal` line — the real bound is one parse line under `defaultMaxParseBuf` (4 MiB),
+not the cap product (~164 KB), a ~25x understatement code review flagged as a non-blocking SHOULD FIX.
+The same aliasing applies to `sessionModelHold`'s retained `ModelList` for the identical reason — its
+strings are truncated through the same helper — so this file's own footprint reasoning inherits the
+same correction if it is ever written down explicitly. `slices.Clone` on the read side does not fix
+this: it copies the slice header, not the string's backing bytes, since Go strings are immutable and
+`slices.Clone` of a `[]string` copies pointers-and-lengths, not string contents.
+
+**Two stale ticket-number references remain in shipped comments, flagged and not yet corrected.**
+`sessionModelHold.Sink`'s doc and the compile-time assertion comment in `streamsup_runner_test.go`
+both cite `#1867` as "the shape the publisher reaches by type assertion." The actual production type
+assertion (`resolveBoundModelList`) shipped in **#1857**; `#1867` is `retainedModelLists`, which calls
+that resolver, not the assertion site itself. #2004's branch touched both comments (rewriting them from
+the correct `#1837` to the incorrect `#1867`) while fixing the mutex-justification sentence next to one
+of them — an unrelated, undeclared edit code review caught as a non-blocking SHOULD FIX. Whoever next
+edits either file should correct both sites to `#1857` (or revert to `#1837`, the ticket that originally
+named the publisher) rather than propagate a third number.

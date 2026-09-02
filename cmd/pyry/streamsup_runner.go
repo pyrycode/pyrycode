@@ -26,12 +26,14 @@ import (
 // the turnevent sink) — the interactive_runner selection that injects it on
 // sessions.Config.RunnerFactory is #1081.
 //
-// models is the per-session retention added by #1840. It is a pointer, so the
-// adapter stays a value type and the compile-time sessions.Runner assertion below
-// is unaffected.
+// models is the per-session model-list retention added by #1840 and commands the
+// slash-command-list retention added by #2004. Both are pointers, so the adapter
+// stays a value type and the compile-time sessions.Runner assertion below is
+// unaffected.
 type streamRunner struct {
-	r      *streamsup.Runner
-	models *sessionModelHold
+	r        *streamsup.Runner
+	models   *sessionModelHold
+	commands *sessionSlashCommandHold
 }
 
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
@@ -104,6 +106,26 @@ func (a streamRunner) BeginRotation() func() { return a.r.BeginRotation() }
 // and cmd/pyry into the diff.
 func (a streamRunner) ModelList() (turnevent.ModelList, bool) { return a.models.ModelList() }
 
+// SlashCommandList reports the slash-command inventory this session's child last named
+// in its initialize reply (#2004), or ok == false when no child has reported one. It
+// reads the hold newSessionParser bound to this runner's parser, so it answers outside
+// a turn, on any goroutine, with no turn in flight — and a runner whose retention was
+// never minted answers the unreported state rather than panicking, the read being
+// nil-receiver-safe.
+//
+// It is the FIFTH concrete method OFF the sessions.Runner interface (un-widened,
+// #1077), after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330) and
+// ModelList (#1840), and it is off for ModelList's reason exactly rather than by
+// resemblance to it: the rule those docs state is that the interface carries a method
+// when its consumer sits INSIDE internal/sessions, where a structural assertion would
+// fail open. This one's consumer is #2005's resolver in cmd/pyry, which reaches it by
+// type assertion off Session.Runner the way interruptRunner already does — so widening
+// the interface would buy no compile-time guarantee and would drag every fake runner
+// under internal/sessions and cmd/pyry into the diff.
+func (a streamRunner) SlashCommandList() (turnevent.SlashCommandList, bool) {
+	return a.commands.SlashCommandList()
+}
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
@@ -143,10 +165,12 @@ func mapStreamState(s streamsup.State) sessions.State {
 // #1840 puts the per-session model-list retention INSIDE that install: the Parser
 // and its sessionModelHold come from one newSessionParser call, so the parser's
 // sink is the hold's decorator and the hold reaches the returned adapter on the
-// next line. The two halves are minted together precisely so they cannot be bound
-// to different holds, and the decorator stores BEFORE forwarding to sinkFor —
+// next line. The halves are minted together precisely so they cannot be bound
+// to different holds, and each decorator stores BEFORE forwarding to sinkFor —
 // which is what keeps the retention upstream of the droppable send that can
-// otherwise discard the one initialize reply a child ever sends.
+// otherwise discard the one initialize reply a child ever sends. #2004 adds the
+// slash-command retention as a SECOND decorator on that same chain, on the same
+// argument and from the same call.
 //
 // #1109 constructed the runner via streamsup.New (the first caller tree-wide) and
 // deliberately left Config.Stdout nil for this ticket to fill. It is the arm the
@@ -173,14 +197,14 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath)
-		parser, held := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		parser, heldModels, heldCommands := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
 		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
 		r, err := streamsup.New(scfg)
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
-		return streamRunner{r: r, models: held}, nil
+		return streamRunner{r: r, models: heldModels, commands: heldCommands}, nil
 	}
 }
 

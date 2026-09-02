@@ -423,6 +423,14 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 			if _, reported := sr.ModelList(); reported {
 				t.Errorf("ModelList() ok = true on a freshly constructed runner, want false — no child has reported")
 			}
+			// #2004: the same for the slash-command retention, the second decorator on
+			// the chain newSessionParser builds.
+			if sr.commands == nil {
+				t.Errorf("streamRunner.commands is nil, want the hold newSessionParser minted")
+			}
+			if _, reported := sr.SlashCommandList(); reported {
+				t.Errorf("SlashCommandList() ok = true on a freshly constructed runner, want false — no child has reported")
+			}
 		})
 	}
 }
@@ -439,7 +447,7 @@ func TestNewSessionParser_DecodesAndRetains(t *testing.T) {
 	t.Parallel()
 
 	var next recordingSink
-	parser, hold := newSessionParser(next.sink, discardLogger())
+	parser, hold, _ := newSessionParser(next.sink, discardLogger())
 
 	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-1840",` +
 		`"response":{"models":[` +
@@ -473,12 +481,72 @@ func TestNewSessionParser_DecodesAndRetains(t *testing.T) {
 	}
 }
 
-// Assert at compile time that streamRunner carries the shape #1837 will reach by
+// TestNewSessionParser_DecodesAndRetainsSlashCommands is the #2004 twin of the test
+// above and proves the same thing for the second link of the chain: the parser
+// newSessionParser returned consumes one real control_response initialize line and the
+// slash-command hold it returned holds the decoded inventory, with the downstream sink
+// still seeing the event.
+//
+// The line is COMMANDS-ONLY — no `models` key — so it takes the producer's
+// commands-only rung and exercises this variant in isolation, rather than coupling
+// this ticket's fixture to #1840's. Its keys are commandEntryLine's, claude's camelCase
+// `argumentHint` among them, which is the one that differs from the daemon's own name
+// for the field.
+func TestNewSessionParser_DecodesAndRetainsSlashCommands(t *testing.T) {
+	t.Parallel()
+
+	var next recordingSink
+	parser, _, hold := newSessionParser(next.sink, discardLogger())
+
+	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-2004",` +
+		`"response":{"commands":[` +
+		`{"name":"clear","argumentHint":"","description":"Clear the transcript","aliases":["reset","new"]},` +
+		`{"name":"compact","argumentHint":"[instructions]","description":"Compact the transcript"}]}}}`
+	if _, err := parser.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("parser.Write(initialize reply) error = %v, want nil", err)
+	}
+
+	got, ok := hold.SlashCommandList()
+	if !ok {
+		t.Fatalf("SlashCommandList() ok = false after the initialize reply, want true")
+	}
+	if len(got.Commands) != 2 {
+		t.Fatalf("retained list carries %d entries, want the line's 2 — %#v", len(got.Commands), got.Commands)
+	}
+	if got.Commands[0].Name != "clear" || got.Commands[1].Name != "compact" {
+		t.Errorf("retained names = %q, %q; want %q, %q",
+			got.Commands[0].Name, got.Commands[1].Name, "clear", "compact")
+	}
+	if !slices.Equal(got.Commands[0].Aliases, []string{"reset", "new"}) {
+		t.Errorf("Commands[0].Aliases = %q, want the line's [reset new]", got.Commands[0].Aliases)
+	}
+	if got.Commands[1].ArgumentHint != "[instructions]" {
+		t.Errorf("Commands[1].ArgumentHint = %q, want %q", got.Commands[1].ArgumentHint, "[instructions]")
+	}
+
+	seen := next.events()
+	if len(seen) != 1 {
+		t.Fatalf("downstream saw %d events, want the 1 SlashCommandList forwarded through the chain", len(seen))
+	}
+	if _, isList := seen[0].(turnevent.SlashCommandList); !isList {
+		t.Errorf("downstream saw %T, want turnevent.SlashCommandList", seen[0])
+	}
+}
+
+// Assert at compile time that streamRunner carries the shape #1867 reaches by
 // type assertion. ModelList is deliberately NOT on sessions.Runner — see the
 // method's own doc — so this is the only compile-time statement of its existence,
 // and the var _ sessions.Runner assertion in streamsup_runner.go is untouched.
 var _ interface {
 	ModelList() (turnevent.ModelList, bool)
+} = streamRunner{}
+
+// The #2004 twin, for the shape #2005 will reach by type assertion. It stands BESIDE
+// the assertion above rather than being folded into one interface literal, so each
+// ticket's asserted shape can be read, moved or removed on its own — and so a failure
+// names which reader lost its shape.
+var _ interface {
+	SlashCommandList() (turnevent.SlashCommandList, bool)
 } = streamRunner{}
 
 // TestStreamRunnerFactory_ErrorPropagation proves AC-3: a streamsup.New failure
