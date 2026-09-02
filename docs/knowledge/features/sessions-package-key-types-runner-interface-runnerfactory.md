@@ -27,7 +27,10 @@ package. The other five implementations are all test doubles: `fakeRunner`/`life
 (`cmd/pyry/inbound_deliver_rotation_test.go`), `modelListRunner`
 (`cmd/pyry/session_model_list_test.go` — `stubRunner` plus the one method
 `resolveBoundModelList` asserts for, so `stubRunner` itself stays the
-ready-made not-implemented fixture for that resolver's refusal case, #1857).
+ready-made not-implemented fixture for that resolver's refusal case, #1857),
+and `slashCommandListRunner` (`cmd/pyry/session_slash_command_list_test.go` —
+the same `stubRunner`-plus-one-method shape, for `resolveBoundSlashCommandList`'s
+refusal case, #2005).
 
 `Config.RunnerFactory` has **no default**: it is mandatory, and a nil factory is a construction error out
 of `sessions.New` (`"sessions: Config.RunnerFactory is required"`) — there is no implicit PTY
@@ -46,7 +49,9 @@ interface, e.g. `interface{ Interrupt() error }` (`interruptRunner`),
 `cmd/pyry/session_model_list.go` rather than `main.go`: a fourth twin in the conversation-keyed resolver
 family (alongside `resolveBoundRunner` / `resolveBoundSession` / `resolveBoundRunSettings`), placed in a
 topic file the way `outstandingQueues` is, so adding it manufactures no merge conflict in the
-high-churn wiring file. None of these assert to the concrete `*streamsup.Runner` type; `Session.Runner()`
+high-churn wiring file. #2005 added a fifth: `interface{ SlashCommandList() (turnevent.SlashCommandList, bool) }`
+(`resolveBoundSlashCommandList`, its own `cmd/pyry/session_slash_command_list.go`), same placement
+reason. None of these assert to the concrete `*streamsup.Runner` type; `Session.Runner()`
 holds the value-typed `streamRunner` adapter in production, so a literal `.(*streamsup.Runner)` assertion
 would be `ok == false` always and fall through silently to an inert default — the same class of hazard AC
 5's #1580 review round caught in this file's own first-draft correction. `Interrupt`/`RestartFresh`/
@@ -76,16 +81,35 @@ a visibly wrong (leaked) answer instead of an empty one that could pass unnotice
 method, because a method reachable only from its own test still counts as "used", and the
 assertion (not an interface implementation) is the only thing that made it reachable at all.
 Deleting the resolver that held the assertion (#1550) is what stranded it, and finding that
-required a by-hand repo-wide grep, not a gate failure. The five capability interfaces above
+required a by-hand repo-wide grep, not a gate failure. The six capability interfaces above
 share the same structural blind spot: removing `interruptRunner`, `startFreshRunner`,
-`beginRotationOrNoop`, or `resolveBoundModelList` would not, by itself, surface any strandable
-method on `*streamsup.Runner` via a build or vet failure — that has to be checked by hand at
-deletion time, the same way #1550's spec did. `resolveBoundModelList` (#1857) shipped with
-**no production caller at all**, and stayed reported as "used" purely because a `_test.go`
-reference counts — verified empirically against the `staticcheck` version `make check`
-installs before relying on it, rather than assumed. It gained its first production caller in #1867: `retainedModelLists` (`cmd/pyry/session_model_list.go`), the enumerator that adapts it
+`beginRotationOrNoop`, `resolveBoundModelList`, or `resolveBoundSlashCommandList` would not, by
+itself, surface any strandable method on `*streamsup.Runner` via a build or vet failure — that has
+to be checked by hand at deletion time, the same way #1550's spec did. `resolveBoundModelList`
+(#1857) shipped with **no production caller at all**, and stayed reported as "used" purely
+because a `_test.go` reference counts — verified empirically against the `staticcheck` version
+`make check` installs before relying on it, rather than assumed. It gained its first production
+caller in #1867: `retainedModelLists` (`cmd/pyry/session_model_list.go`), the enumerator that adapts it
 to the relay's connect-time reconcile seam (see [v2-session-manager.md § Connect-time
 model-list reconcile](v2-session-manager.md#connect-time-model-list-reconcile-1863--retainedmodellists-seam--reconcilemodellists)).
+`resolveBoundSlashCommandList` (#2005) shipped into the same no-caller state; its consumer is the
+already-open #2007.
+
+**A twin's stated reason does not transfer just because its conclusion does (#2005).** When
+`resolveBoundSlashCommandList` was built arm-for-arm off `resolveBoundModelList` (#1857), the
+conclusion both share — "the bool is the only spelling of 'nothing to send', no arm returns true
+with an empty payload" — held, but the *reason* the twin's doc gives for it did not:
+`resolveBoundModelList`'s doc leans on `turnevent.ModelList.Models` being documented "Never
+empty," a type-level guarantee `turnevent.SlashCommandList.Commands` does not carry (it's
+documented nil for a zero-length list, deferring to its producer). Carrying the twin's sentence
+across verbatim would have made a doc comment state something false. The actual guarantee here
+comes from the *producer* — streamsup's `emitSlashCommandList` suppresses the empty list before it
+ever reaches retention — and that producer-sourced reason is what
+`sessionSlashCommandHold.SlashCommandList`'s own doc states, so the resolver inherited that
+wording instead of the twin's. The general rule for the next twin in this family: mirror the
+twin's *shape* freely, but verify each doc-comment *justification* against the new type's own
+contract before copying it — a shared conclusion is not proof the reasoning under it survived the
+swap.
 
 **Typed-nil-in-interface trap for downstream consumers (#1101).** A call site that assigns `w.sup` (the `*supervisor.Supervisor` returned by `Supervisor()`) straight into a consumer-declared interface field inherits a footgun on the stream-json path: a nil `*supervisor.Supervisor` wrapped in an interface value is a **non-nil interface holding a nil pointer**, so the consumer's `== nil` guard silently fails and any method call on it panics on the nil receiver. `cmd/pyry/relay.go`'s `Snapshotter: w.sup` wiring hit exactly this and was fixed by a `screenSnapshotterOrNil` helper that returns a genuine nil when `sup == nil` — see [codebase/1101.md](../codebase/1101.md). Two sibling wiring sites carry the same unfixed trap as of #1101: `SessionStarter: w.sup` and the modal resolver's `w.sup` argument (both `cmd/pyry/relay.go`) — flagged out of scope there, not yet guarded.
 
