@@ -1,8 +1,9 @@
-# `internal/eventring` — durable per-conversation event ring
+# `internal/eventring` — durable, daemon-wide-unique event ring
 
 In-memory, daemon-resident, bounded store of the recent structured turn events
-the interactive emitter fans out, keyed by a **durable per-conversation event
-id**. It is the **replay source** for the mid-turn-reconnect path (#647): a phone
+the interactive emitter fans out, keyed by a **durable, daemon-wide-unique event
+id** (retention is still per-conversation — only the id space is shared; #2022).
+It is the **replay source** for the mid-turn-reconnect path (#647): a phone
 that reconnects mid-turn catches up from the ring without a gap, or is told to
 resync. Landed in #646 (EPIC #596 Phase 2 structured streaming, ADR 025
 § Backpressure / replay).
@@ -28,7 +29,7 @@ path:
   event carries a *different* id on each connection, and the counter resets on
   every reconnected session. A replay key must be **connection-independent**,
   assigned **once per logical event**, and survive a reconnect. So the ring keeps
-  its own per-conversation counter; `nextID` is **not** overloaded.
+  its own counter, unique daemon-wide since #2022; `nextID` is **not** overloaded.
 - **The ring is the only replay source.** `internal/conversations` holds metadata
   only (id, session history, archive state — no message content); there is no
   message-history store, and the v1 `backfill_since` wire flow that could have read
@@ -57,13 +58,13 @@ The ring is **in-memory and keyed to the `pyry` daemon lifetime**, not the child
 const MaxEventsPerConversation = 1024 // the named per-conversation bound
 
 type Event struct {
-    ID      uint64          // durable per-conversation event id (>= 1, strictly increasing)
+    ID      uint64          // durable event id, unique ring-wide (>= 1, strictly increasing in append order; #2022)
     Type    string          // protocol.Type* wire type
     Payload json.RawMessage // the already-marshalled envelope payload
     TS      time.Time       // the logical event's timestamp
 }
 
-type Ring struct { /* sync.Mutex + map[convID]*convRing */ }
+type Ring struct { /* sync.Mutex + ring-wide nextID counter + map[convID]*convRing */ }
 
 func New(maxPerConversation int) *Ring                                  // panics if < 1
 func (r *Ring) Append(convID, typ string, payload json.RawMessage, ts time.Time) uint64
@@ -71,17 +72,29 @@ func (r *Ring) After(convID string, afterID uint64) (events []Event, gap bool)
 func (r *Ring) NewestID(convID string) uint64                           // nextID-1, or 0 if unknown (#663)
 ```
 
-`NewestID` ([#663]) returns `nextID - 1` (the highest id ever assigned) for a known
-conversation, `0` for an unknown one — mutex-guarded like `After`. It surfaces
-`After`'s internal `latestID` classification boundary so the #647 reconnect consumer
+`NewestID` ([#663]) returns the highest id ever assigned to a known conversation
+(`convRing.latestID`), `0` for an unknown one — mutex-guarded like `After`. It
+surfaces `After`'s internal classification boundary so the #647 reconnect consumer
 can **clamp** its per-conn dedup watermark to `min(afterID, NewestID(convID))` (see
 [codebase/663.md](../codebase/663.md)). Since #1494 an untrusted `last_event_id`
 beyond the conversation's id space classifies as a **gap** and returns before that
 clamp, so ruling out the silent mute is now the gap branch's job, not the clamp's;
 what the clamp still covers is the window *between* the consumer's `NewestID` and
 `After` calls, where a concurrent `Append` can leave the read one or more ids stale.
-Sound because the newest event is never evicted (below) and `nextID` advances
-independent of retention, so `nextID - 1` is always the highest *retained* id.
+Sound because the newest event is never evicted (below) and `latestID` advances
+independent of retention, so it is always the highest *retained* id.
+
+Before #2022, `NewestID` read `nextID - 1` off a **per-conversation** counter, so
+every conversation's ids started at 1 and the id spaces overlapped. That let a
+per-**connection** cursor (`V2Session.replayThrough`) taken from one conversation's
+watermark silently suppress a *different* conversation's live events whose ids
+happened to fall at or below it — no frame, no error, no resync, for the life of
+the connection. #2022 moved the counter onto `Ring` itself: ids are now unique and
+strictly increasing across the whole ring, ascending-but-not-contiguous within any
+one conversation, so no future event in any conversation can ever carry an id a
+watermark has already passed. The per-connection guard
+(`internal/relay/v2session.go`'s `forwardEnvelope`) needed no change — see
+[Reconnect replay](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
 
 `Ring` deliberately does **not** store `protocol.Envelope`: the envelope's `ID`
 is the per-conn `nextID`, meaningless for replay across connections. It stores the
@@ -145,14 +158,36 @@ fabricate a gap — see below.
 |---|---|---|---|
 | **Gap** (beyond the id space) | `afterID > latestID` (#1494) | `(nil, true)` | resync (full backfill) |
 | **Caught up** | `afterID == latestID` | `(nil, false)` | nothing to send |
-| **Gap** (aged out) | next-expected `afterID+1` fell off the back: `oldestRetainedID > afterID+1` | `(nil, true)` | resync (full backfill) |
+| **Gap** (aged out) | `afterID < evictedThrough` (#2022) | `(nil, true)` | resync (full backfill) |
 | **Replay** | otherwise | `(events with ID > afterID, ascending; false)` | replay these |
 
-`latestID` is `convRing.nextID - 1` (the highest id ever assigned). The two
-`latestID` comparisons are checked first, in the order shown — beyond-the-id-space
-before caught-up — and both precede the aged-out check. The AC-5 distinction "you
-missed some" vs "you're caught up" is exactly **`gap=true` vs `(gap=false, empty
-events)`**.
+`latestID` is `convRing.latestID` (the highest id ever assigned to this
+conversation). The two `latestID` comparisons are checked first, in the order
+shown — beyond-the-id-space before caught-up — and both precede the aged-out
+check. The AC-5 distinction "you missed some" vs "you're caught up" is exactly
+**`gap=true` vs `(gap=false, empty events)`**.
+
+**The aged-out test used to *infer* the back edge from contiguity; #2022 replaced
+the inference with the fact it was inferring.** Before #2022, `oldestRetainedID >
+afterID+1` was sound only because a conversation's own ids ran contiguously from 1
+— "the consumer's next id is `afterID+1`; if the oldest retained id is past it,
+that id fell off the back." Once ids are unique ring-wide, a conversation's
+retained ids are sparse by construction (another conversation's appends land
+between them), and the inference misfires exactly where it looks most
+innocuous: a conversation whose retained window is *complete* but starts at, say,
+41 reads `41 > afterID+1` as true for a perfectly replayable `afterID` of 0 or 40,
+and reports a spurious gap — a spurious `resync`, i.e. a full client reload, on a
+connection that needed no reload. `convRing.evictedThrough` now tracks the actual
+fact directly: `evictOldest` records it only when it removes from position 0
+(the oldest *retained* event, whatever its class), so it names the true back edge
+regardless of how sparse the id space is. The arithmetic on the untrusted cursor
+also disappears with it: the old branch's `afterID+1` wrapped to `0` at
+`math.MaxUint64`, so a hostile-max cursor reached its gap classification through a
+wrapped intermediate rather than through the `afterID > latestID` branch above it
+that was actually meant to catch it (see Security review, #2022 spec). **The
+lesson generalizes:** a boundary computed from "what the id sequence implies" is
+only as sound as the assumption that ids are contiguous — check that assumption
+explicitly before reusing this shape elsewhere in the ring.
 
 - **A missing *middle* delta is not a gap.** Gap is signalled only by the oldest
   *retained* id passing the consumer's cursor (falling off the *back*), never by a
@@ -254,5 +289,9 @@ integration tests live in `cmd/pyry/interactive_turn_v2_test.go` (additions only
 - [codebase/663.md](../codebase/663.md) — adds `NewestID` and consumes it to clamp
   the #647 caught-up watermark to `min(afterID, NewestID)`, closing a trust-boundary
   silent-suppression defect.
+- [`specs/architecture/2022-global-event-ids.md`](../../specs/architecture/2022-global-event-ids.md)
+  — #2022: moves the id counter from `convRing` onto `Ring`, closing the
+  cross-conversation silent-drop defect described in
+  [Reconnect replay](v2-session-manager-state-machine-reconnect-replay-hello-last-event-id-rin.md).
 
 [#663]: https://github.com/pyrycode/pyrycode/issues/663

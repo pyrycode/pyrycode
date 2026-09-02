@@ -10,7 +10,7 @@ type Envelope struct {
     Payload   json.RawMessage `json:"payload"`
     InReplyTo *uint64         `json:"in_reply_to,omitempty"`
 
-    // EventID — durable per-conversation event id (eventring); #649.
+    // EventID — durable, daemon-wide-unique event id (eventring); #649, #2022.
     EventID *uint64 `json:"event_id,omitempty"`
 
     PayloadEncrypted bool `json:"payload_encrypted,omitempty"`
