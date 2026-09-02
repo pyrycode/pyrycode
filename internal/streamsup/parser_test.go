@@ -3786,12 +3786,13 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 				// carries a commands array, and the attribute set is fixed rather than
 				// per-rung.
 				wantAttrs := map[string]string{
-					"type":           "control_response",
-					"reason":         tt.wantReason,
-					"models":         "0",
-					"dropped":        "0",
-					"levels_dropped": "0",
-					"commands":       "0",
+					"type":             "control_response",
+					"reason":           tt.wantReason,
+					"models":           "0",
+					"dropped":          "0",
+					"levels_dropped":   "0",
+					"commands":         "0",
+					"commands_dropped": "0",
 				}
 				if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 					t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -3886,6 +3887,15 @@ func TestParser_ControlResponseAckIsConsumedSilently(t *testing.T) {
 // written against the wrong one of the two still compiles. Unlike the trio above these
 // two agree with no sibling's number, which is the one thing that makes them easier to
 // keep apart than the caps they sit beside.
+//
+// slashCommandListEntriesCapFixture (#1826) is the rule once more for the bound on the
+// LIST rather than on an entry, and it is modelListEntriesCapFixture one array over. It
+// is the one fixture in this block that no sibling could be confused with by VALUE — 128
+// appears nowhere else here — but the swap hazard it does carry is with
+// slashCommandAliasCountCapFixture, the entry's OWN cardinality bound: both are counts,
+// both are ints, and a row written against the wrong one still compiles. The names say
+// which list each bounds, List against Alias, and that is the whole of what keeps them
+// apart.
 const (
 	modelResolvedCapFixture            = 256
 	modelValueCapFixture               = 256
@@ -3898,6 +3908,7 @@ const (
 	slashCommandDescriptionCapFixture  = 256
 	slashCommandAliasCapFixture        = 64
 	slashCommandAliasCountCapFixture   = 8
+	slashCommandListEntriesCapFixture  = 128
 )
 
 // capturedInitializeLine returns one arm's control_response line exactly as claude
@@ -4349,15 +4360,37 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 			if !ok {
 				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
 			}
-			// Against the capture's OWN array length, never a transcribed 51: there is no
-			// entry-count cap on this array (#1826 owns that), so every decoded entry is
-			// emitted and a re-capture moves this expectation with the fixture.
+			// THE CAP HAS HEADROOM OVER CLAUDE'S ORDINARY OUTPUT, and this guard is what
+			// makes the equality below EVIDENCE of that rather than a coincidence. Since
+			// #1826 an entry-count cap exists (maxSlashCommandListEntries), so "every
+			// decoded entry is emitted" is now a claim about THIS capture being under it,
+			// and the equality alone would hold just as well for a cap of 1 against a
+			// one-entry capture. Asserting the strict inequality FIRST is what separates
+			// the two readings, and it is the hermetic half of the proof that this cap
+			// was derived to clear claude's real workspace rather than only shown to fire
+			// on a synthesized one.
+			if len(want) >= slashCommandListEntriesCapFixture {
+				t.Fatalf("the capture carries %d entries, at or over the %d-entry cap: the assertions "+
+					"below would then be proving the CAP rather than the decode, and "+
+					"maxSlashCommandListEntries' derivation needs re-deriving against this capture",
+					len(want), slashCommandListEntriesCapFixture)
+			}
+			// Against the capture's OWN array length, never a transcribed 51: the guard
+			// above proves this capture under the cap, so every decoded entry is emitted
+			// and a re-capture moves this expectation with the fixture.
 			//
 			// FATAL rather than reported (#1878): the loop below indexes both sides at i,
 			// and indexing past the end would turn a producer bug into a panic.
 			if len(list.Commands) != len(want) {
 				t.Fatalf("SlashCommandList carries %d entries, want %d — one per array element, in claude's own order",
 					len(list.Commands), len(want))
+			}
+			// The other half of "the cap did not fire": a producer that cut AND reported
+			// the cut fails the length check above, but one that cut nothing and reported
+			// a drop anyway would pass it. 0 is the whole of that claim.
+			if list.DroppedCommands != 0 {
+				t.Errorf("DroppedCommands: got %d, want 0 — the captured list is under the entry cap",
+					list.DroppedCommands)
 			}
 			var sawNameOutsideSlugEmitted bool
 			for i, got := range list.Commands {
@@ -4406,12 +4439,13 @@ func TestParser_InitializeControlResponseCountsTheCapturedCommands(t *testing.T)
 					controlResponseConsumeMsgFixture, len(consumes), rec.all())
 			}
 			wantAttrs := map[string]string{
-				"type":           "control_response",
-				"reason":         "model_list",
-				"models":         "6",
-				"dropped":        "0",
-				"levels_dropped": "0",
-				"commands":       strconv.Itoa(len(want)),
+				"type":             "control_response",
+				"reason":           "model_list",
+				"models":           "6",
+				"dropped":          "0",
+				"levels_dropped":   "0",
+				"commands":         strconv.Itoa(len(want)),
+				"commands_dropped": "0",
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -5734,12 +5768,13 @@ func TestParser_InitializeControlResponseRejectBranches(t *testing.T) {
 					controlResponseConsumeMsgFixture, len(consumes), rec.all())
 			}
 			wantAttrs := map[string]string{
-				"type":           "control_response",
-				"reason":         tt.wantReason,
-				"models":         "0",
-				"dropped":        "0",
-				"levels_dropped": "0",
-				"commands":       "0",
+				"type":             "control_response",
+				"reason":           tt.wantReason,
+				"models":           "0",
+				"dropped":          "0",
+				"levels_dropped":   "0",
+				"commands":         "0",
+				"commands_dropped": "0",
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -5905,12 +5940,13 @@ func TestParser_InitializeControlResponseCommandsOnlyRungEmits(t *testing.T) {
 					controlResponseConsumeMsgFixture, len(consumes), tt.why, rec.all())
 			}
 			wantAttrs := map[string]string{
-				"type":           "control_response",
-				"reason":         tt.wantReason,
-				"models":         "0",
-				"dropped":        "0",
-				"levels_dropped": "0",
-				"commands":       strconv.Itoa(tt.wantCommands),
+				"type":             "control_response",
+				"reason":           tt.wantReason,
+				"models":           "0",
+				"dropped":          "0",
+				"levels_dropped":   "0",
+				"commands":         strconv.Itoa(tt.wantCommands),
+				"commands_dropped": "0",
 			}
 			if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 				t.Errorf("consume attrs: got %v, want exactly %v (%s)", consumes[0].attrs, wantAttrs, tt.why)
@@ -6003,7 +6039,11 @@ func slashCommandNamePreview(s string) string {
 //
 // Not a row here, deliberately: that an over-cap name is DROPPED, reordered,
 // lowercased or trimmed. #1600's verbatim rule is carried by the exact equality on the
-// entries that fit, and the entry-count bound does not exist (#1826 owns it).
+// entries that fit. The ENTRY-COUNT bound exists since #1826 and is deliberately not a
+// row here either: it lives one level up, cut in emitModelList rather than in the
+// construction loop this matrix measures, so a row would be asserting a different
+// mechanism through the same input. TestParser_SlashCommandEntryCountIsBounded owns it,
+// and the separation is what keeps a field-cap row from greening on a count bug.
 func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 	t.Parallel()
 
@@ -7134,12 +7174,205 @@ func TestParser_ModelListEntryCountIsBounded(t *testing.T) {
 		// level bound never runs — its non-zero case is
 		// TestParser_ModelListEffortLevelCountIsBounded's.
 		wantAttrs := map[string]string{
-			"type":           "control_response",
-			"reason":         "model_list",
-			"models":         strconv.Itoa(modelListEntriesCapFixture),
-			"dropped":        strconv.Itoa(100 - modelListEntriesCapFixture),
-			"levels_dropped": "0",
-			"commands":       "0",
+			"type":             "control_response",
+			"reason":           "model_list",
+			"models":           strconv.Itoa(modelListEntriesCapFixture),
+			"dropped":          strconv.Itoa(100 - modelListEntriesCapFixture),
+			"levels_dropped":   "0",
+			"commands":         "0",
+			"commands_dropped": "0",
+		}
+		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
+			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
+		}
+	})
+}
+
+// commandEntriesFixture builds n `commands` entries, each identifiable by its index so
+// tail-truncation is PINNED rather than assumed from a length. modelEntriesFixture's
+// shape, one array over, and []any rather than []map[string]any because that is what
+// initializeLineFixture's inner map already carries at every other commands call site.
+//
+// Every name is far under maxSlashCommandName, which is what lets a row built from this
+// exercise the COUNT bound ALONE: a row that wants a field cap too says so by replacing
+// a value, and then the two mechanisms are visibly two.
+func commandEntriesFixture(n int) []any {
+	out := make([]any, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, commandEntryFixture(fmt.Sprintf("command-%03d", i)))
+	}
+	return out
+}
+
+// TestParser_SlashCommandEntryCountIsBounded is #1826's central pin: how many entries
+// the list carries is bounded AT CONSTRUCTION and the overflow is reported as a COUNT,
+// so the true size stays recoverable as len(Commands) + DroppedCommands and a shortened
+// menu is never read as a whole one.
+//
+// The capture proves neither half and cannot: claude sends fifty-one entries, well under
+// the cap, which is exactly the headroom path
+// TestParser_InitializeControlResponseCountsTheCapturedCommands pins.
+// So these lines are SYNTHESIZED, which invents no field structure — the key is the
+// capture's, only the count varies.
+//
+// EVERY ROW IS ON THE COMMANDS-ONLY RUNG, carrying no models array, and that is the
+// choice rather than the default. The cut runs ONCE in emitModelList above both rungs
+// that read the array, so a second copy of this matrix on the model-list rung would be a
+// second copy of a cap rather than a second proof of it — TestParser_SlashCommandFieldsAreCapped
+// makes the same argument for the field caps. What the rung buys instead is AC 3 for
+// free: a row whose cap FIRED still reaches this rung, still emits exactly one list, and
+// still logs commands_only, so the cap is shown not to move a classification on the one
+// rung where a classification could move.
+//
+// Empty and absent arrays are deliberately NOT rows here. They return at the ack rung
+// before the cut ever runs, and TestParser_InitializeControlResponseRejectBranches
+// already covers them; a row here would assert the cap against an input it never sees.
+func TestParser_SlashCommandEntryCountIsBounded(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the entry count is bounded and the overflow is reported", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name        string
+			entries     []any
+			wantLen     int
+			wantDropped int
+		}{
+			{
+				name:    "one over the cap drops one",
+				entries: commandEntriesFixture(slashCommandListEntriesCapFixture + 1),
+				wantLen: slashCommandListEntriesCapFixture, wantDropped: 1,
+			},
+			{
+				// The <= boundary, matching truncateField's convention and both sibling
+				// count bounds'. What it discriminates is a cap that fires one entry EARLY:
+				// > and >= are indistinguishable here by construction, since at len == cap
+				// the block computes a 0 drop and slices to identity either way — unlike
+				// boundAliases', where >= would additionally raise the report flag.
+				name:    "exactly at the cap carries every entry",
+				entries: commandEntriesFixture(slashCommandListEntriesCapFixture),
+				wantLen: slashCommandListEntriesCapFixture, wantDropped: 0,
+			},
+			{
+				// The row that makes the report a COUNT rather than a flag: a flag cannot
+				// tell 1 lost from 172, and the true size is only recoverable as
+				// len(Commands) + DroppedCommands.
+				name:    "a large array reports how many were lost",
+				entries: commandEntriesFixture(300),
+				wantLen: slashCommandListEntriesCapFixture, wantDropped: 300 - slashCommandListEntriesCapFixture,
+			},
+			{
+				// Under the cap, so the bound is not proven only at its own boundary — and
+				// at the capture's own fifty-one, which is the count this cap is derived to
+				// clear. The hermetic capture test proves the same point against claude's
+				// real bytes; this row proves it against the cut in isolation.
+				name:    "the captured entry count is untouched",
+				entries: commandEntriesFixture(51),
+				wantLen: 51, wantDropped: 0,
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				line := initializeLineFixture(t, "success", map[string]any{"commands": tt.entries})
+				events := collectEvents(line)
+				// Exactly one: this is the commands-only rung, so no ModelList joins it. A
+				// cap that fired changes neither the count nor the variant.
+				if len(events) != 1 {
+					t.Fatalf("event count: got %d, want 1 turnevent.SlashCommandList — %#v", len(events), events)
+				}
+				list, ok := events[0].(turnevent.SlashCommandList)
+				if !ok {
+					t.Fatalf("event[0] = %T, want turnevent.SlashCommandList", events[0])
+				}
+
+				if len(list.Commands) != tt.wantLen {
+					t.Fatalf("len(Commands): got %d, want %d", len(list.Commands), tt.wantLen)
+				}
+				if list.DroppedCommands != tt.wantDropped {
+					t.Errorf("DroppedCommands: got %d, want %d", list.DroppedCommands, tt.wantDropped)
+				}
+				// Truncation is from the TAIL, preserving claude's order: no ranking is
+				// invented, because claude's ordering semantics are unobserved. Pinned per
+				// entry rather than assumed from the count, which is what a head-truncating
+				// entries[len(entries)-cap:] would otherwise pass.
+				for i, got := range list.Commands {
+					want := fmt.Sprintf("command-%03d", i)
+					if got.Name != want {
+						t.Errorf("Commands[%d].Name: got %q, want %q — the survivors are claude's first %d, in order",
+							i, got.Name, want, tt.wantLen)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("the record names both numbers on the commands-only rung", func(t *testing.T) {
+		t.Parallel()
+		// THE RUNG WHERE A PARAMETER SWAP IS VISIBLE, which is logControlResponse's own
+		// argument for putting these two last: here the model trio is all-zero and this
+		// pair is not, where on the ack rung all six integers are 0 and a swap shows
+		// nowhere. The two values DIFFER from each other (128 against 172), so a swap
+		// BETWEEN them reddens too — equal values would make the pair self-symmetric and
+		// the swap invisible again.
+		rec := &logRecorder{}
+		p := NewParser(func(turnevent.Event) {}, slog.New(rec))
+		line := initializeLineFixture(t, "success", map[string]any{"commands": commandEntriesFixture(300)})
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+
+		consumes := rec.withMessage(controlResponseConsumeMsgFixture)
+		if len(consumes) != 1 {
+			t.Fatalf("records with message %q: got %d, want 1 — all records: %+v",
+				controlResponseConsumeMsgFixture, len(consumes), rec.all())
+		}
+		// `commands` is the EMITTED count since #1826, mirroring `models`, where it was
+		// the decoded one — and the reason keyword is UNCHANGED by a cap that fired,
+		// which is AC 3 read off the record rather than off the event.
+		wantAttrs := map[string]string{
+			"type":             "control_response",
+			"reason":           "commands_only",
+			"models":           "0",
+			"dropped":          "0",
+			"levels_dropped":   "0",
+			"commands":         strconv.Itoa(slashCommandListEntriesCapFixture),
+			"commands_dropped": strconv.Itoa(300 - slashCommandListEntriesCapFixture),
+		}
+		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
+			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
+		}
+	})
+
+	t.Run("the record names both numbers on the model-list rung too", func(t *testing.T) {
+		t.Parallel()
+		// The SECOND rung that reads the array, and the one the cut is NOT written in.
+		// Without this the pair could be computed on the commands-only branch alone and
+		// every assertion above would stay green while a line carrying both arrays
+		// reported a decoded count and a permanent zero.
+		rec := &logRecorder{}
+		p := NewParser(func(turnevent.Event) {}, slog.New(rec))
+		line := initializeLineFixture(t, "success", map[string]any{
+			"models":   modelEntriesFixture(2),
+			"commands": commandEntriesFixture(300),
+		})
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write err = %v, want nil", err)
+		}
+
+		consumes := rec.withMessage(controlResponseConsumeMsgFixture)
+		if len(consumes) != 1 {
+			t.Fatalf("records with message %q: got %d, want 1 — all records: %+v",
+				controlResponseConsumeMsgFixture, len(consumes), rec.all())
+		}
+		wantAttrs := map[string]string{
+			"type":             "control_response",
+			"reason":           "model_list",
+			"models":           "2",
+			"dropped":          "0",
+			"levels_dropped":   "0",
+			"commands":         strconv.Itoa(slashCommandListEntriesCapFixture),
+			"commands_dropped": strconv.Itoa(300 - slashCommandListEntriesCapFixture),
 		}
 		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -7349,12 +7582,13 @@ func TestParser_ModelListEffortLevelCountIsBounded(t *testing.T) {
 				controlResponseConsumeMsgFixture, len(consumes), rec.all())
 		}
 		wantAttrs := map[string]string{
-			"type":           "control_response",
-			"reason":         "model_list",
-			"models":         "3",
-			"dropped":        "0",
-			"levels_dropped": "4",
-			"commands":       "0",
+			"type":             "control_response",
+			"reason":           "model_list",
+			"models":           "3",
+			"dropped":          "0",
+			"levels_dropped":   "4",
+			"commands":         "0",
+			"commands_dropped": "0",
 		}
 		if !reflect.DeepEqual(consumes[0].attrs, wantAttrs) {
 			t.Errorf("consume attrs: got %v, want exactly %v", consumes[0].attrs, wantAttrs)
@@ -7511,19 +7745,22 @@ func TestParser_ModelListIsLoggedContentFree(t *testing.T) {
 			t.Errorf("record %d message: got %q, want %q", i, r.msg, controlResponseConsumeMsgFixture)
 			continue
 		}
-		// Every line here is under both cardinality caps — the capture's entries carry
-		// five levels each, three under maxModelEffortLevelCount — so `dropped` and
-		// `levels_dropped` are 0 on all five; their non-zero cases are
-		// TestParser_ModelListEntryCountIsBounded's and
-		// TestParser_ModelListEffortLevelCountIsBounded's. What this sweep adds is that
-		// both count attributes are swept for leaks like the other three.
+		// Every line here is under all THREE cardinality caps — the capture's entries
+		// carry five levels each, three under maxModelEffortLevelCount, and its
+		// fifty-one commands are well under maxSlashCommandListEntries — so `dropped`,
+		// `levels_dropped` and `commands_dropped` are 0 on every row; their non-zero
+		// cases are TestParser_ModelListEntryCountIsBounded's,
+		// TestParser_ModelListEffortLevelCountIsBounded's and
+		// TestParser_SlashCommandEntryCountIsBounded's. What this sweep adds is that all
+		// five count attributes are swept for leaks like the other two.
 		wantAttrs := map[string]string{
-			"type":           "control_response",
-			"reason":         wantReasons[i],
-			"models":         wantCounts[i],
-			"dropped":        "0",
-			"levels_dropped": "0",
-			"commands":       wantCommandCounts[i],
+			"type":             "control_response",
+			"reason":           wantReasons[i],
+			"models":           wantCounts[i],
+			"dropped":          "0",
+			"levels_dropped":   "0",
+			"commands":         wantCommandCounts[i],
+			"commands_dropped": "0",
 		}
 		if !reflect.DeepEqual(r.attrs, wantAttrs) {
 			t.Errorf("record %d attrs: got %v, want exactly %v", i, r.attrs, wantAttrs)

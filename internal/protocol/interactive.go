@@ -773,13 +773,20 @@ func (o ModelOption) MarshalJSON() ([]byte, error) {
 // SlashCommand.TruncatedFields are for.
 //
 // DroppedCommands is how many entries the producer cut that this frame does NOT
-// carry; 0 when nothing was dropped. NOTHING COUNTS IT YET, and no entry cap is
-// enforced anywhere — so do NOT read len(Commands) + DroppedCommands as the
-// menu's true size today, and do not infer from the field's presence that a cap
-// exists. It is declared now anyway because a wire with nowhere to put a drop
-// discards it silently, while a permanent 0 reads as "nothing was dropped",
-// which is a lie rather than a gap. #1719 owns making the decode record it;
-// #1720 is where the field and a counter meet, and is also where the CAUSES are
+// carry; 0 when nothing was dropped. AN ENTRY CAP NOW EXISTS AND SOMETHING NOW
+// COUNTS IT: streamsup's maxSlashCommandListEntries bounds the decoded entry count
+// and turnevent.SlashCommandList.DroppedCommands carries what it cut (#1826). What
+// is still missing is the MAPPING onto this field, so read the state of this key
+// precisely rather than by inference. NOTHING WRITES IT — turnbridge.MapEvent has
+// no arm for the variant and cmd/pyry's interactiveTurnEmitterV2.Handle no case, so
+// no frame of this type is produced at all — which means every value a client could
+// observe here today is the zero one, and there is no frame on which
+// len(Commands) + DroppedCommands is the menu's true size. It becomes that the
+// moment #1720 lands the arm, and not before. It was declared ahead of all of this
+// because a wire with nowhere to put a drop discards it silently, while a permanent
+// 0 reads as "nothing was dropped", which is a lie rather than a gap. #1719 owned
+// the decode and is CLOSED; #1826 owned the cap and the count and is closed too;
+// #1720 is where the field and that counter meet, and is also where the CAUSES are
 // settled — the field says entries were cut without naming a cause, deliberately,
 // so that a drop for a shape reason lands in the same count. The count reports
 // here rather than as a name in a top-level truncated_fields — which is why this

@@ -644,10 +644,14 @@ const maxModelListEntries = 10
 // contributing 530 bytes across the whole capture against the descriptions' 10,580,
 // which is why the term grew by half again while the observation barely moved; aliases
 // joined in #1825 and cost 512 while contributing 64, the same disproportion one step
-// further. THE AGGREGATE IS STILL DELIBERATELY NOT SETTLED HERE, unlike
-// maxModelResolved's, and the ONE missing factor is now the entry COUNT alone, which
-// arrives with the count bound (#1826) exactly as maxModelListEntries supplied
-// maxModelResolved's. No field slice remains outstanding.
+// further. THE AGGREGATE IS SETTLED SINCE #1826 and no factor is outstanding. The one
+// that was missing here was the entry COUNT alone, and maxSlashCommandListEntries
+// supplied it exactly as maxModelListEntries supplied maxModelResolved's: 128 entries
+// against this 1280-byte term. What that constant does NOT do, and what makes this
+// aggregate unlike maxModelResolved's, is land under any ceiling the package cites —
+// its own doc records which convention it spent to keep the cap off claude's ordinary
+// output, and that arithmetic is cross-referenced rather than restated here. No field
+// slice remains outstanding either.
 //
 // TRANSIENT AND RETAINED ARE TWO DIFFERENT FIGURES HERE TOO, which is what makes this
 // bound the whole story rather than half of it. What is TRANSIENT is the unbounded
@@ -724,15 +728,19 @@ const maxSlashCommandName = 256
 // entire UNKNOWN line, measured retained-against-retained — with the fraction stated
 // PER SHAPE: the roster reads 1/2 and the model list 5/8.
 //
-// THIS SHAPE'S FRACTION IS NOT FIXED HERE, because it is not decidable without the
-// entry count, which is #1826's. What this doc owes instead is the arithmetic handed
-// forward, so that slice adds to one derived figure: at the 1280-byte per-entry term,
-// 16384 * 1/2 = 8192 leaves 6 entries and 16384 * 5/8 = 10240 leaves 8. #1826 picks
-// the fraction and the count from those two, and since #1957 it multiplies ONE derived
-// figure rather than re-deriving the term — which is the whole reason the term is
-// stated here at all. BOTH NUMBERS MOVED WITH #1825's fourth term, from 10 and 13 —
-// they are re-derived here rather than left to be recomputed, because a stale pair is
-// exactly what a slice reading "one derived figure" would inherit without noticing.
+// THIS SHAPE HAS NO FRACTION, and that is #1826's answer rather than a gap this doc
+// left open. What this paragraph used to owe was arithmetic handed forward: at the
+// 1280-byte per-entry term, 16384 * 1/2 = 8192 leaves 6 entries and 16384 * 5/8 = 10240
+// leaves 8, and #1826 was to pick the fraction and the count from those two. IT PICKED
+// NEITHER, and the candidate set is kept here rather than deleted because a reader
+// re-deriving it will reach those same two numbers and needs to be told they were
+// weighed and declined. Both CUT claude's ordinary output — a cap of 6 or 8 shortens
+// the capture's fifty-one-entry menu by 43 or 45 — which maxModelListEntries' NOT 8
+// paragraph rejects by name. maxSlashCommandListEntries took the OBSERVATION as its
+// base instead of this worst-case term, landed on 128, and records there which
+// convention it had to spend to do it; no fraction of maxUnrecognizedRaw survives the
+// move, so none is stated for this shape. The term above is still the one derived
+// figure a later slice multiplies, and it is why the term is stated here at all.
 //
 // WHAT THE OBSERVED CAPTURE COSTS AT THIS CAP is the sharpest figure in the
 // derivation, and it is computed THROUGH truncateField — byte cut, then the
@@ -952,7 +960,9 @@ const maxSlashCommandAlias = 64
 //     have different field sets and different multiplicands, and a variant re-deriving
 //     its own unit is not violating anything.
 //   - The aggregate is maxSlashCommandDescription's, which carries the per-entry term
-//     and the fraction table #1826 reads. Cross-referenced rather than restated.
+//     and the candidate fractions #1826 weighed and declined; that slice's own constant,
+//     maxSlashCommandListEntries, carries the count it took instead. Cross-referenced
+//     rather than restated.
 //
 // A THICKER MULTIPLE THAN THE FAMILY'S CARDINALITY CONVENTION, and that is the decision
 // rather than an accident of it. maxModelListEntries takes 1.67x and
@@ -987,6 +997,132 @@ const maxSlashCommandAlias = 64
 // defaultMaxParseBuf's 4 MiB whole-line cap bounding the input. This cap bounds what is
 // RETAINED, which is the property that matters.
 const maxSlashCommandAliasCount = 8
+
+// maxSlashCommandListEntries caps how many entries a turnevent.SlashCommandList carries
+// (#1826) — the LAST unbounded dimension of the initialize reply's commands array, and
+// the factor the four per-field caps above cannot supply between them: the array's
+// LENGTH is claude's, really the WORKSPACE's, to choose, so a per-entry text cap alone
+// leaves the total a function of a number the daemon does not control. It is
+// maxTaskRosterEntries' doctrine's third application after maxModelListEntries, and that
+// constant is its structural twin in every part except the one this doc spends itself
+// on. Applied at CONSTRUCTION like every cap above; truncation is FROM THE TAIL, so
+// claude's order is preserved and no ranking is invented. Overflow is REPORTED —
+// turnevent.SlashCommandList.DroppedCommands — rather than silent, which is the property
+// that makes a cardinality bound honest.
+//
+// MEASURED against the committed capture (claude 2.1.239, byte-identical across all
+// three responding arms): FIFTY-ONE entries. A second observation exists and is NOT from
+// the capture — SEVENTY-FOUR, a hand count against claude 2.1.220 in a different working
+// directory — and it is the binding one below. The count is working-directory AND
+// version dependent, which is the feature's whole point, so nothing here may hardcode
+// either figure; they are the population this cap is derived to clear, not a shape it
+// may assume.
+//
+// THE NUMBERS DO NOT ALL FIT, AND SPENDING ONE OF THEM IS THIS CONSTANT'S SUBSTANCE.
+// Three things this family holds true elsewhere cannot all hold here, and the derivation
+// is worthless unless it says which one it gives up.
+//
+// THE HANDED-FORWARD CANDIDATES ARE NOT AVAILABLE AS WRITTEN, and declining them is the
+// first step rather than an afterthought. maxSlashCommandDescription's fraction table
+// computes this slice's options against the 1280-byte per-entry WORST CASE: 16384 * 1/2
+// = 8192 leaves 6 entries and 16384 * 5/8 = 10240 leaves 8. Both CUT A 51-ENTRY MENU BY
+// 43 OR 45 ENTRIES — a cap firing on claude's ORDINARY output, which maxModelListEntries'
+// NOT 8 paragraph rejects by name and maxSlashCommandAliasCount's ROLE argument sharpens
+// one dimension up: a cut command is a WORKING command greyed out in the named consumer's
+// menu, pyrycode-desktop#694 rendering a type-ahead over the whole list. A candidate set
+// offered by a doc paragraph is still a candidate set, and taking one mechanically
+// because it was handed forward is the failure this paragraph exists to refuse.
+//
+// SO THE BASE MOVES FROM THE WORST CASE TO THE OBSERVATION, and the figure is the
+// package's own rather than a new measurement: maxSlashCommandDescription computes what
+// the capture's 51 entries RETAIN through truncateField — name, argument hint,
+// description and aliases — at 6,711 bytes, which is 131.59 bytes per entry against the
+// 1280-byte worst case. Re-derived at that base the same ceiling gives 62 entries at 1/2
+// and 77 at 5/8, and 124 at the whole 16384.
+//
+// CHANGING THE BASE IS NOT ENOUGH, which is the result that decides everything below.
+// The 74-entry observation RETAINS about 9,738 bytes — 59% of maxUnrecognizedRaw's whole
+// UNKNOWN-line cap, before any cap fires and with nothing this constant can do about it.
+// 1/2 CUTS that observation by twelve entries. 5/8 clears it by THREE, a 1.04x margin on
+// a count that is workspace- and version-dependent by design, which is inside the
+// observation's own noise. And the family's power-of-two convention leaves exactly two
+// candidates above 74: 64, which cuts it, and 128, whose projected retained cost of
+// 16,844 bytes is past the WHOLE 16384 ceiling that fraction 1 already forbids
+// approaching.
+//
+// THAT IS maxModelListEntries' OWN SITUATION VERBATIM — "no pair of caps this family's
+// own doctrine permits fits the inherited ceiling, so the ceiling was the only lever
+// left rather than one of three" — and it is resolved the same way, by the ceiling
+// giving. What is NOT copied is that constant's resolution: it moved to a FRACTION of a
+// larger ceiling, and this shape has no ceiling it can meet at all. Both halves are
+// checkable. The worst-case product exceeds the 65519-byte v2 application-envelope cap
+// at any count clearing 74 (74 * 1280 = 94,720), the only count whose worst case fits
+// being 51, the observation itself. And maxUnrecognizedRaw's rule is an ORDERING rule —
+// a whole KNOWN event must not approach the bound on an entire UNKNOWN line — which
+// presupposes the known event is the cheaper thing; for this shape that presupposition is
+// already false at claude's ordinary output, at 0.59 of the ceiling, so applying it would
+// set this number by how large an UNKNOWN line may be rather than by how large claude's
+// KNOWN inventory actually is.
+//
+// WHAT IS SPENT, stated plainly because a derivation that hides its cost is worth
+// nothing: the WORST-CASE-PRODUCT convention. What is KEPT is the no-fire-on-ordinary-
+// output rule. What this cap therefore buys is exactly two things — the retained size
+// stops being a function of a number the workspace chooses and becomes a function of a
+// daemon constant, where before the only bound below it was defaultMaxParseBuf's 4 MiB;
+// and the cut is COUNTED, so a shortened menu says by how much. What it does NOT buy is
+// a frame that fits: 128 * 1280 = 163,840 bytes is 2.5x the 65519-byte envelope, and
+// NO count cap can close that gap. A FRAME-level bound is #1720's, which is where this
+// list first reaches a wire; a reader arriving from there must not read "the entry count
+// is bounded" as "the frame fits".
+//
+// 128, AND THE THREE CONSTRAINTS LEAVE ONE SURVIVOR:
+//
+//   - ABOVE THE LARGER OBSERVATION. 1.73x over 74 and 2.51x over the capture's 51. That
+//     is above the family's cardinality convention (maxModelListEntries 1.67x,
+//     maxModelEffortLevelCount 1.6x) and below maxSlashCommandAliasCount's 4x, and it
+//     earns the thicker end for that constant's own two reasons: this bounds a list a
+//     WORKSPACE author writes in a repository, whose growth direction nothing claude
+//     ships bounds, and a cut entry costs a working command greyed out in the consumer's
+//     menu rather than a truncated row.
+//   - A POWER OF TWO, matching every constant in this family except maxModelListEntries,
+//     whose own doc explains why it alone is decimal.
+//   - NOT GRATUITOUS. 256 is 3.5x the larger observation and projects 33,687 bytes
+//     retained — over twice the whole-line ceiling and past half the envelope — for
+//     headroom neither observation asks for. maxSlashCommandAliasCount's WHY NOT 16,
+//     one dimension up.
+//
+// THE CUT IS IN emitModelList, NOT IN THE EMITTER, and the placement is load-bearing
+// three ways. It runs ONCE above BOTH rungs that read the array, so there is no second
+// cap for the two to keep in step. It is available to logControlResponse, which both
+// rungs call BEFORE any emit, which is what lets the record report the drop at all.
+// And it BOUNDS THE ALLOCATION in emitSlashCommandList, whose make() is sized from
+// len(entries): moving this cut into that emitter's loop would compile, pass every
+// assertion about the emitted value, and silently restore an allocation sized by the
+// workspace.
+//
+// IT CANNOT MOVE A RUNG'S CLASSIFICATION, and that is structural rather than tested-in:
+// the cap is >= 1, so the emitted count is 0 exactly when the decoded count is, and the
+// ack rung's "neither array" test partitions against the commands-only rung exactly as
+// it did. Capping can neither create an empty list nor rescue one.
+//
+// THE RESLICE IS DELIBERATE where boundAliases refuses the same shape, and the two are
+// consistent rather than in tension. That closure must not return values[:n] because its
+// result IS retained by the emitted event; this cut MAY reslice because its result is
+// not — emitSlashCommandList appends CONSTRUCTED values into a fresh allocation, and the
+// resliced header dies with emitModelList. maxModelListEntries' block reslices for this
+// same reason.
+//
+// THE AMPLIFICATION IS COMPUTED HERE RATHER THAN INHERITED, because the paragraph this
+// family usually cross-references is FALSE for this struct. maxTaskRosterEntries reports
+// its own as "linear and near 1" on ~55 bytes of input per ~64-byte struct.
+// commandEntryLine's densest legal entry is `{},` — THREE bytes, every key being optional
+// and absence being claude's to choose — for a 72-byte struct (three string headers and
+// one slice header). So a single defaultMaxParseBuf-sized 4 MiB line yields ~1.4M decoded
+// entries and on the order of 100 MB of TRANSIENT allocation before this cut discards all
+// but 128: an amplification near 24x, not near 1. It is bounded rather than unbounded —
+// one line at a time, reclaimed, and nothing past emitModelList retains it — which is
+// maxTaskRosterEntries' accepted trade, but the FIGURE is this struct's own.
+const maxSlashCommandListEntries = 128
 
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
@@ -2609,11 +2745,11 @@ func (p *Parser) emitModelList(line []byte) {
 		// strings into the daemon log through a channel no per-attribute check can see.
 		// #1853 made that strictly more load-bearing: with commandEntryLine declared,
 		// the bytes a type error quotes are workspace-authored command names.
-		p.logControlResponse(controlResponseUndecodable, 0, 0, 0, 0)
+		p.logControlResponse(controlResponseUndecodable, 0, 0, 0, 0, 0)
 		return
 	}
 	if cr.Response.Subtype != controlResponseSuccess {
-		p.logControlResponse(controlResponseNAK, 0, 0, 0, 0)
+		p.logControlResponse(controlResponseNAK, 0, 0, 0, 0, 0)
 		return
 	}
 	// BELOW the success gate and ABOVE the empty-models block, and both halves are the
@@ -2623,9 +2759,30 @@ func (p *Parser) emitModelList(line []byte) {
 	// no longer only a number the record reports, it is the DISCRIMINANT between the
 	// ack rung and the controlResponseCommandsOnly one. Taking it below the block
 	// would not merely make a record read 0 — the branch could not be taken at all.
-	// Nothing but this int leaves the function; the decoded entries are never read,
-	// retained, bounded or emitted.
-	commands := len(cr.Response.Response.Commands)
+	// Since #1826 the block below is ALSO where the entry count is CUT, so the upper
+	// bound binds for a third reason: a cut taken above the subtype comparison would
+	// shorten an array off a response that announced FAILURE, on a path that emits
+	// nothing at all.
+	//
+	// The COUNT bound runs HERE, above every rung, and maxSlashCommandListEntries' own
+	// doc argues the placement: once rather than per rung, above the log call both
+	// emitting rungs make before any emit, and above the emitter whose allocation it
+	// bounds. Truncation is FROM THE TAIL — claude's order preserved, no ranking
+	// invented, its ordering semantics being unobserved. The reslice shares the
+	// decoder's backing array and that is deliberate; the constant's doc states why
+	// this cut may do what boundAliases must not.
+	commandEntries := cr.Response.Response.Commands
+	var commandsDropped int
+	if len(commandEntries) > maxSlashCommandListEntries {
+		commandsDropped = len(commandEntries) - maxSlashCommandListEntries
+		commandEntries = commandEntries[:maxSlashCommandListEntries]
+	}
+	// The EMITTED count since #1826, where it was the DECODED one — logControlResponse's
+	// `models` and `dropped` are the pair this copies, and the two counts now mean the
+	// same thing on both halves of the record. It is still the DISCRIMINANT between the
+	// ack rung and the controlResponseCommandsOnly one, and the cap cannot disturb that:
+	// being >= 1 it makes this int 0 exactly when the decoded length is 0.
+	commands := len(commandEntries)
 	entries := cr.Response.Response.Models
 	if len(entries) == 0 {
 		// An absent `models`, a null one, an empty array, and a response object
@@ -2635,8 +2792,12 @@ func (p *Parser) emitModelList(line []byte) {
 			// Rung 3, narrowed by #1890 to "neither array". The literal 0 rather than
 			// `commands`: the guard proves the two identical, so no test can tell them
 			// apart, and passing the literal says what this rung MEANS — an all-zero
-			// record, exactly like the undecodable and nak rungs above it.
-			p.logControlResponse(controlResponseAck, 0, 0, 0, 0)
+			// record, exactly like the undecodable and nak rungs above it. The SIXTH
+			// literal is the same choice for `commandsDropped` and rests on a proof one
+			// step longer: the cap is >= 1, so a non-zero drop implies an emitted count of
+			// at least the cap, which this guard has excluded. A test cannot tell the
+			// literal from the variable here either.
+			p.logControlResponse(controlResponseAck, 0, 0, 0, 0, 0)
 			return
 		}
 		// Rung 4, and it EMITS since #1891: this rung was reached because the `commands`
@@ -2650,7 +2811,7 @@ func (p *Parser) emitModelList(line []byte) {
 		//
 		// The call sits BELOW logControlResponse and INSIDE this branch. Below the record
 		// for the reason emitSlashCommandList's IT LOGS NOTHING paragraph rests on: the
-		// six attributes are written before anything below can run. Inside the branch
+		// seven attributes are written before anything below can run. Inside the branch
 		// because falling through to the shared tail would run the models loop and put a
 		// ModelList on a line that carries no models.
 		//
@@ -2664,8 +2825,8 @@ func (p *Parser) emitModelList(line []byte) {
 		// decode, loop or cap to keep in step. The cap COUNT grew with the field set while
 		// the number of PLACES a cap is applied did not, which is what keeps this rung and
 		// rung 5 in step without either one repeating the other.
-		p.logControlResponse(controlResponseCommandsOnly, 0, 0, 0, commands)
-		p.emitSlashCommandList(cr.Response.Response.Commands)
+		p.logControlResponse(controlResponseCommandsOnly, 0, 0, 0, commands, commandsDropped)
+		p.emitSlashCommandList(commandEntries, commandsDropped)
 		return
 	}
 
@@ -2808,7 +2969,7 @@ func (p *Parser) emitModelList(line []byte) {
 		})
 	}
 
-	p.logControlResponse(controlResponseModelList, len(models), dropped, levelsDropped, commands)
+	p.logControlResponse(controlResponseModelList, len(models), dropped, levelsDropped, commands, commandsDropped)
 	p.emit(turnevent.ModelList{Models: models, DroppedModels: dropped})
 
 	// THE SECOND GATE, and it is INDEPENDENT of the models one: this rung was reached
@@ -2829,10 +2990,10 @@ func (p *Parser) emitModelList(line []byte) {
 	// once, at two sites.
 	//
 	// The CALL sits BELOW logControlResponse, which is what makes "the record is
-	// unchanged" structural rather than merely intended: six attributes, the same
+	// unchanged" structural rather than merely intended: seven attributes, the same
 	// values and the same reason keyword, whatever happens below. emitSlashCommandList
 	// logs nothing on any path, so that holds through the callee too.
-	p.emitSlashCommandList(cr.Response.Response.Commands)
+	p.emitSlashCommandList(commandEntries, commandsDropped)
 }
 
 // emitSlashCommandList emits AT MOST ONE turnevent.SlashCommandList for one decoded
@@ -2844,7 +3005,7 @@ func (p *Parser) emitModelList(line []byte) {
 //
 // IT LOGS NOTHING, on any path. The one record every control_response produces is
 // logControlResponse's and is written by emitModelList BEFORE this call, which is what
-// keeps "six attributes, the same values, the same reason keyword" a structural
+// keeps "seven attributes, the same values, the same reason keyword" a structural
 // property of the caller rather than a promise this function has to keep.
 //
 // THE GATE IS THIS EMITTER'S PRECONDITION, so every caller inherits the suppression
@@ -2885,7 +3046,7 @@ func (p *Parser) emitModelList(line []byte) {
 // SlashCommandList arm returns the variant NAME only — and that arm, not this doc,
 // carries the enumeration of which drop sites are reachable for it and which are not,
 // so there is one copy to correct when #1720's case lands.
-func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
+func (p *Parser) emitSlashCommandList(entries []commandEntryLine, dropped int) {
 	if len(entries) == 0 {
 		return
 	}
@@ -3071,27 +3232,37 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 			TruncatedFields: cut,
 		})
 	}
-	// NO ENTRY-COUNT CAP and no DroppedCommands, deliberately: that bound is #1826's
-	// and turnevent.SlashCommandList's own doc fixes the sequencing, so this slice must
-	// not add the field. The precedent is exact and in this emitter's caller,
-	// emitModelList — #1811 emitted turnevent.ModelList with no entry-count cap and
-	// #1812 added maxModelListEntries and DroppedModels in the next slice — and the
-	// consequence that keeps the record at six attributes is logControlResponse's: with
-	// no count cap the decoded count IS the emitted count.
-	p.emit(turnevent.SlashCommandList{Commands: slashCommands})
+	// THE ENTRY-COUNT CAP IS THE CALLER'S AND THE DROP COUNT ARRIVES AS A PARAMETER
+	// (#1826), which is the one place this emitter is not self-contained and the reason
+	// is worth having at the site. logControlResponse's record is written by emitModelList
+	// BEFORE this call and this function logs nothing on any path, so a count computed
+	// HERE could not reach the record without threading it back out of a void-returning
+	// function with two call sites. Cutting in the caller instead puts the number where
+	// the record can read it, keeps ONE cut for BOTH rungs, and bounds the make() above —
+	// maxSlashCommandListEntries' doc argues all three. The precedent is exact and in
+	// this emitter's caller: #1811 emitted turnevent.ModelList with no entry-count cap
+	// and #1812 added maxModelListEntries and DroppedModels in the next slice.
+	//
+	// `dropped` is 0 whenever the precondition returned above, by construction rather
+	// than by a check here: the caller cuts to a cap of at least one, so an empty
+	// argument slice cannot have come with a non-zero drop.
+	p.emit(turnevent.SlashCommandList{Commands: slashCommands, DroppedCommands: dropped})
 }
 
 // logControlResponse writes emitModelList's ONE record, and it exists so the
 // content-free rule is decided in a single place rather than on each of the rungs.
 // Every control_response produces exactly one of these, whatever it was a reply to.
 //
-// Six attributes and NOTHING else. `type` is a constant here rather than
+// Seven attributes and NOTHING else. `type` is a constant here rather than
 // sl.Type, which the case arm's match makes byte-identical; `reason` comes from the
 // closed keyword set at controlResponseMsg; `models` is the emitted entry count,
 // `dropped` how many maxModelListEntries cut, and `levels_dropped` how many effort
 // levels maxModelEffortLevelCount cut in TOTAL across the RETAINED entries — all
 // three 0 on every rung but the model-list one, which is the only rung that reads a
-// models array at all. Levels belonging to entries `dropped`
+// models array at all. `commands` and `commands_dropped` are that first pair one array
+// over: the EMITTED slash-command count and how many maxSlashCommandListEntries cut,
+// both 0 on every rung but the two that read the commands array. Levels belonging to
+// entries `dropped`
 // removed are not counted again there. No value, no resolvedModel, no displayName, no
 // level string, no request_id, no error string,
 // no unmarshal err, no line bytes. The three strings are precisely what #833's
@@ -3147,17 +3318,19 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 // argument is `dropped`'s SIMPLER and STRONGER: this record is the ONLY observable
 // that decode has. The operator-versus-client half does not transfer — `dropped`
 // completes a client-facing wire field, and this number has no wire field to
-// complete, and #1826 still owns the drop count that would give it one. What it no
+// complete, protocol.SlashCommandListPayload.DroppedCommands being unmapped until
+// #1720. What it no
 // longer lacks is an event, a daemon-internal value and a retention: since #1877 the
 // entries this counts are copied into a turnevent.SlashCommandList and retained for
 // that event's lifetime, each name under maxSlashCommandName. Without it a
 // `commands` array that stopped decoding would be a change nobody could know
-// happened. It counts what DECODED, where `models` counts what was EMITTED after
-// maxModelListEntries cut: two counts with different meanings on one record, and what
-// separates them is no longer whether a cap exists — a per-FIELD cap now does — but
-// that there is no ENTRY-COUNT cap on this array. So the decoded count IS the emitted
-// count, this attribute stays an unambiguous decode count with nothing to
-// disambiguate, and NO SEVENTH ATTRIBUTE IS ADDED. Nothing became unobservable
+// happened. IT COUNTS WHAT WAS EMITTED, exactly as `models` does since #1826 gave this
+// array an entry-count cap of its own. That is a CORRECTION rather than a widening: this
+// paragraph argued for years that the two counts had different meanings, `models` being
+// post-cut and `commands` being a raw decode count, and concluded from the absence of an
+// entry-count cap that no seventh attribute was needed. maxSlashCommandListEntries
+// falsified the premise, so the conclusion went with it and the two halves of this record
+// now read alike. Nothing became unobservable
 // either: a non-empty `commands` now always means emitted on BOTH rungs that read the
 // array — the model-list one and the commands-only one (#1891) — and the rungs that
 // emit nothing no longer rest on this count at all. #1890 took the keyword decision
@@ -3184,35 +3357,46 @@ func (p *Parser) emitSlashCommandList(entries []commandEntryLine) {
 // TestInteractiveTurnEmitterV2's log-leak negative over
 // emitterSlashCommandListSentinels, whose own doc records that the enumeration does NOT
 // grow with the field set and that each field-adding slice therefore owes it a
-// sentinel. The record itself is unchanged: six attributes, four daemon-computed
-// integers, no decoded content on any rung.
+// sentinel. The record carries SEVEN attributes and five daemon-computed integers since
+// #1826, and no decoded content on any rung.
 //
-// NO SEVENTH ATTRIBUTE FOR THE ALIAS DROP EITHER, and it is declined on a different
-// footing from the one that declined it for `commands`. `levels_dropped` earns its
-// place because the magnitude reaches nowhere else AND this record is the emit's only
-// observable; here the record is written by emitModelList BEFORE emitSlashCommandList
-// is called, and that emitter logs nothing on any path, so a count would have to be
-// threaded back out of a void-returning function with two call sites in order to reach
-// a record that has already been written. The report channel is per ENTRY and already
-// exists — turnevent.SlashCommand.TruncatedFields names "aliases" — which is what the
-// cardinality bound's honesty rests on.
+// `commands_dropped` is how many entries maxSlashCommandListEntries cut, and it is
+// `dropped`'s argument one array over: without it `commands=128` on a reply that carried
+// a thousand reads as "the workspace offers 128 commands". It is the SEVENTH attribute
+// the paragraph above spent years declining, and the decline was correct while its
+// premise held — the premise was that no entry-count cap existed, so the decoded count
+// was the emitted count and there was nothing to disambiguate. What it never rested on
+// is a claim that seven attributes are too many.
 //
-// It is the LAST parameter and the LAST attribute, so the two orders are one order a
-// reader checks once. The existing three ints are one dimension — `models` with
-// `dropped` and `levels_dropped` qualifying it — and inserting a fourth between them
-// would split a trio that reads as a unit. Four adjacent ints is a swap hazard, and
-// it is PINNED rather than designed away: a swap shows on exactly one rung, the
-// controlResponseCommandsOnly one, where the model trio is all-zero and this count is
-// not. It was the ack rung until #1890 narrowed that rung to "neither array" — all
-// four of its ints are 0 now and a swap is invisible there, so the pin moved with the
-// payload rather than being lost.
+// STILL NO ATTRIBUTE FOR THE ALIAS DROP, and that decline is UNAFFECTED because it rests
+// on something else entirely. `levels_dropped` earns its place because the magnitude
+// reaches nowhere else AND this record is the emit's only observable; the alias drop's
+// report channel is per ENTRY and already exists, turnevent.SlashCommand.TruncatedFields
+// naming "aliases", which is what that cardinality bound's honesty rests on. The
+// threading objection that used to sit beside it — that a count computed inside
+// emitSlashCommandList could not reach a record already written — is what the ENTRY-COUNT
+// cut answers by living in emitModelList instead, and it answers it only for the count
+// that is cut there. An alias drop is decided per entry inside the emitter's loop and
+// would still have to be threaded back out.
 //
-// The attribute set is FIXED at six on every rung, which is why a rung with no models
+// THE TWO COMMAND INTS ARE THE LAST TWO PARAMETERS AND THE LAST TWO ATTRIBUTES, so the
+// two orders are one order a reader checks once. The record is now two pairs and a
+// qualifier: `models` with `dropped`, `commands` with `commands_dropped`, and
+// `levels_dropped` qualifying the first pair from inside its own dimension. Inserting
+// either new int between the model trio would split a group that reads as a unit. Five
+// adjacent ints is a swap hazard and it is PINNED rather than designed away, on the same
+// rung the four-int version was pinned on: the controlResponseCommandsOnly one, where
+// the model trio is all-zero and the command pair is not. Since #1826 that rung pins one
+// swap more, the pair against itself, and only because the two members can differ — a
+// fixture whose drop happens to equal its emitted count would make the pair
+// self-symmetric and that swap invisible again.
+//
+// The attribute set is FIXED at seven on every rung, which is why a rung with no models
 // array to describe passes 0 rather than omitting the key.
-func (p *Parser) logControlResponse(reason string, models, dropped, levelsDropped, commands int) {
+func (p *Parser) logControlResponse(reason string, models, dropped, levelsDropped, commands, commandsDropped int) {
 	p.log.Debug(controlResponseMsg,
 		"type", "control_response", "reason", reason, "models", models, "dropped", dropped,
-		"levels_dropped", levelsDropped, "commands", commands)
+		"levels_dropped", levelsDropped, "commands", commands, "commands_dropped", commandsDropped)
 }
 
 // truncateField cuts s to limit bytes, reporting whether it cut. Mirrors
