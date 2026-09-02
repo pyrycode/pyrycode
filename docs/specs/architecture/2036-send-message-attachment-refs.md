@@ -422,3 +422,42 @@ this section records the re-run.)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — Phase B
+
+**Open question 1 resolved: the bound lives in `messaging.go`.** As leaned. It bounds a
+`send_message` field, not an `attachment_chunk` one, and the three constants in `attachments.go`
+share an envelope-cap derivation this one deliberately does not use. No design change.
+
+**Open question 2 resolved: `[]` and `null` are published as tolerated-but-normalised.** As leaned.
+§ Attachments states the key is omitted when a message names no attachments, that a receiver also
+accepts `null` and `[]`, and that it cannot tell the three apart — one canonical encoding without
+making a conforming client of anyone who sends the other two. No design change.
+
+**A seventh test was added beyond the plan's six:
+`TestSendMessagePayload_MaxAttachmentIDs_FitV2EnvelopeCap`.** The plan asserted the bound's headroom
+arithmetic in prose and left it unchecked. That is the half of the `MaxAttachmentChunkBytes` idiom
+the ticket points at which the plan had dropped — that constant's own comment records that its
+budget table is *enforced* by `TestAttachmentChunkPayload_FitV2EnvelopeCap`, "which measures the real
+total rather than trusting this table". The new test mirrors it: it marshals a `send_message` naming
+`MaxAttachmentIDsPerMessage` canonical ids and asserts the envelope lands under a **tenth** of the
+cap, not merely under it — a bare "fits" would still pass at a bound of 1000 ids, which is the mutant
+it exists for. Measured: 1460 B, 2.2% of the cap.
+
+**Correction to the plan's testing strategy — `TestSendMessagePayload_RoundTrip` is NOT an
+`omitempty` pin.** The plan claimed dropping `omitempty` would redden it via the byte comparison.
+It does not, and the claim was wrong rather than imprecise: that test re-marshals the *envelope*
+while `env.Payload` still holds the fixture's own raw bytes, so the payload struct's tags never run.
+Established by mutation rather than by reading — an overlay build with the `omitempty` removed
+reddens `TestSendMessagePayload_ZeroValue_KeyAbsent` **alone**. `ZeroValue_KeyAbsent` is therefore
+the single `omitempty` pin in the file, which is exactly the load AC 2 assigned it, and the test's
+own comment now says so, so nobody weakens it believing the round trip overlaps it.
+
+**Mutation results (overlay, both mutants written and killed):**
+
+| Mutant | Killed by | Notes |
+|---|---|---|
+| drop the `[]`→`nil` collapse in `UnmarshalJSON` | `EmptyForms_Indistinguishable/empty_array` | Only that subtest reddens — the failure names which of the three forms regressed, as designed. |
+| drop `omitempty` from the field tag | `ZeroValue_KeyAbsent` | Only that test. Source of the correction above. |

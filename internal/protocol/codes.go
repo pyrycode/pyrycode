@@ -38,11 +38,25 @@ const (
 	// place so #1741, #1743, #1744 and #1746 do not each invent a name. The
 	// reasoning is published in that section rather than duplicated here.
 	//
-	// attachment.not_found is DELIBERATELY MERGED: it answers every retrieval
-	// that yields no bytes — an unknown id, a non-canonical id, and an id
-	// resolving outside the named conversation's directory alike. Two
-	// distinguishable codes would make the retrieval verb a path-existence
-	// oracle, so the merge is a disclosure decision, not an imprecision.
+	// attachment.not_found is DELIBERATELY MERGED: it answers every request that
+	// yields no bytes — an unknown id, a non-canonical id, and an id resolving
+	// outside the named conversation's directory alike. Two distinguishable codes
+	// would make the asking verb a path-existence oracle, so the merge is a
+	// disclosure decision, not an imprecision.
+	//
+	// IT SPANS BOTH VERBS as of #2036, no longer retrieval alone: a send_message
+	// naming an attachment id that does not resolve under the message's own
+	// conversation is answered with this same code. The predicate is identical —
+	// an id did not resolve to a file inside that conversation's directory — and
+	// so are the retryability, the static message and the client's repair, so a
+	// second code would carry nothing a client could act on differently. The
+	// merge argument applies with MORE force there, since send_message is the
+	// cheaper probe of the two.
+	//
+	// The message stays STATIC and, where a request names several ids, MUST NOT
+	// name WHICH of them failed — a per-id answer turns one message into a batch
+	// existence-probe for up to MaxAttachmentIDsPerMessage ids and rebuilds the
+	// oracle this merge exists to prevent.
 	//
 	// The three retryable members (too_many_uploads, storage_failed,
 	// stream_aborted) are published as retry-AFTER-A-BACKOFF: an immediate
