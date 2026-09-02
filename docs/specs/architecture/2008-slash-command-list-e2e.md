@@ -298,3 +298,28 @@ capture would spend budget on a claim the e2e already carries end to end.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — Phase B
+
+**The Open Question is resolved, and the design did not change.** The RED run observed
+`pre-kill slash_command_list=0` with both milestones met, so the pre-kill turn's own
+`initialize` reply put nothing on the wire — the bootstrap child reports before any
+conversation is routed and `Handle`'s no-cursor return takes it, exactly as predicted.
+The count stays COLLECTED rather than asserted, as planned: a zero there is a claim
+about that drop's timing rather than about this ticket's behaviour, and pinning it would
+make an unrelated timing change present as this test's failure.
+
+**Both `## Security review` SHOULD FIX items landed.** Assertions are per field with no
+payload dump — including the decode-failure path, where the model-list twin prints its
+raw bytes and this file deliberately does not, since the shape is what
+`internal/e2e/realclaude` siblings will copy. And `initializeCommands` carries the
+READ-ONLY discipline in its doc block, stated as a rule rather than rested on an
+observed green.
+
+**One thing the RED run proved that no assertion states.** The failing run took 32.5s
+and the passing one 3.0s, the difference being the full post-kill deadline the RED run
+waited out. So the frame arrives promptly rather than marginally, which is the honest
+reading of the droppable classification here: `turnMarkNone` makes delivery best-effort
+by construction, and a quiet hermetic run is nowhere near `droppableCap`.
