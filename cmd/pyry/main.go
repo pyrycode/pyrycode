@@ -103,6 +103,25 @@ func resolveRegistryPath(name string) string {
 	return filepath.Join(home, ".pyry", sanitizeName(name), "sessions.json")
 }
 
+// resolveInstanceDirPath returns ~/.pyry/<sanitized-name> — the per-instance
+// directory the two registry paths above are built under, and the anchor
+// attachments.EnsureDir files uploads beneath as
+// conversations/<conversation-id>/attachments/<attachment-id> (#1897). Falls back
+// to a CWD-relative path if $HOME can't be resolved (matches
+// resolveRegistryPath's contract).
+//
+// The name is the operator's own -name flag, routed through the same sanitizeName
+// as its siblings; nothing remote reaches this path. Containment for everything
+// beneath it is EnsureDir's, which resolves this directory as its anchor and
+// compares the destination against it.
+func resolveInstanceDirPath(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return sanitizeName(name)
+	}
+	return filepath.Join(home, ".pyry", sanitizeName(name))
+}
+
 // resolveConversationsRegistryPath returns
 // ~/.pyry/<sanitized-name>/conversations.json. Falls back to a CWD-relative
 // path if $HOME can't be resolved (matches resolveRegistryPath's contract).

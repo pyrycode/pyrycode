@@ -3,13 +3,17 @@
 `Intake` (`intake.go`) is this package's composite entry point: one type
 sequencing `Admit`, `Deliver`, `EnsureDir` and `Store` behind two methods,
 `Receive` and `ReleaseConn`, so the wire layer has one call and one set of
-sentinels to map rather than four primitives to order itself. It is the
+sentinels to map rather than four primitives to order itself. It was the
 package's first production caller (see § "In-flight upload registry" and
-the top-level overview), but only from *inside* the package — nothing
-outside `internal/attachments` calls it yet. #1897 is both: the seam
-interface `Receive`/`ReleaseConn` satisfy, the production conversation
-resolver, and the wiring that makes `appFrameWorker` this package's first
-caller from outside it.
+the top-level overview) before it had one of its own: #1897 declared the
+`AttachmentIntake` seam interface `Receive`/`ReleaseConn` satisfy, built the
+production conversation resolver, and wired `internal/relay`'s
+`appFrameWorker` as this package's first caller from *outside* it — see
+[Inbound `attachment_chunk`](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md).
+It also picked the two open sentinel→code mappings this package's doc blocks
+left for it, `ErrUnknownUpload` and `ErrNoConversation` below — see
+[Error codes § the seven `attachment.*` codes](protocol-package-constants-codes-go-error-codes-21.md)
+for the choices and their retryability rationale.
 
 `Intake` **owns** its `Registry` rather than taking one, and that ownership
 is a security property, not an ergonomics choice: `maxInFlightUploads` is a

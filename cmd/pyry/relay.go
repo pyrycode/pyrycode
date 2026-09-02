@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/pyrycode/pyrycode/internal/attachments"
 	"github.com/pyrycode/pyrycode/internal/config"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
@@ -604,6 +605,33 @@ func startRelayV2(
 	// resolve nothing and nothing panics.
 	questionResolver := newQuestionResolverV2(questionReg, logger)
 
+	// Inbound attachment-upload service (#1897): the one thing the v2 session
+	// manager calls for an attachment_chunk, and internal/attachments' first
+	// caller from outside its own package.
+	//
+	// EXACTLY ONE PER DAEMON, which is what makes the registry's in-flight
+	// ceiling a daemon-wide bound rather than a per-something one. Minted here
+	// beside modalReg / questionReg for the same reason those are: the manager
+	// config below needs it, and it must exist before the manager does.
+	//
+	// The conversation resolver is an adapter over the EXISTING follow-active
+	// cursor — the same one modalResolver.activeConv reads — not new state.
+	// attachments.NewIntake reads it once per COMPLETING chunk and never at
+	// admission, and the empty-cursor check is what makes comma-ok honest at this
+	// seam: Intake refuses the empty id itself, but a resolver answering
+	// ("", true) would be lying to a contract it does not own.
+	// boundSessionIDForActive is the precedent for adapting this cursor.
+	attachmentIntake := attachments.NewIntake(
+		resolveInstanceDirPath(w.instanceName),
+		func() (conversations.ConversationID, bool) {
+			id := w.active.CurrentConversation()
+			if id == "" {
+				return "", false
+			}
+			return conversations.ConversationID(id), true
+		},
+	)
+
 	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply. session_settings read it too between #491 and #1610,
@@ -774,6 +802,16 @@ func startRelayV2(
 		// ineligible device before anything is consumed, records the decision, and
 		// only then hands the batch to the daemon-side primitives.
 		QuestionResolver: questionResolver,
+		// Inbound attachment-upload seam (#1897), the intake constructed above.
+		// Wired unconditionally: the seam's whole security surface is inside
+		// internal/attachments — the declaration cross-check, both resource
+		// bounds, the id-shape validation and the containment check — and the
+		// relay handler adds no authorization of its own, deliberately, so there
+		// is no gate this must wait behind. The conversation a chunk lands under
+		// comes from this construction-time resolver and never from the frame,
+		// which is what makes "a client cannot steer bytes into another
+		// conversation" structural rather than checked.
+		AttachmentIntake: attachmentIntake,
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
 		// supervisor. The activeInterrupter adapter (main.go) resolves active →

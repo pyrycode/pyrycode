@@ -333,7 +333,7 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// s.done to stop the worker on teardown. This tail runs once per session
 	// (V2StateOpen noise_init routes to handleRekeyInit above, not here), so
 	// exactly one worker is spawned per conn.
-	s.appFrames = make(chan []byte, appFrameQueueDepth)
+	s.appFrames = make(chan appFrameJob, appFrameQueueDepth)
 	s.done = make(chan struct{})
 	go m.appFrameWorker(ctx, s)
 	s.rekeyTimer = m.armRekeyTimer(ctx, s)
