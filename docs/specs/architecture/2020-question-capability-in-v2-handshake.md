@@ -123,3 +123,17 @@ Note on AC-3's value: it is the only row that distinguishes the shipped `slices.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — Phase B
+
+Three departures from the plan above. None changes the design; all three are recorded because the verifier diffs the implementation against this document.
+
+1. **AC-2 gets no new test row.** The Testing strategy prescribed three new rows in `TestV2Session_Handshake_CapabilityNegotiation`, one per criterion. Only two were added. AC-2 ("advertises only `interactive` → ack carries `interactive` and not `question`") is already pinned by the table's pre-existing `advertise interactive` row: its assertion is `slices.Equal(ack.Capabilities, tc.wantAck)` against a one-element want, which is exactly the exact-equality check an unconditional-append implementation fails. A third row would have re-run an identical input for no additional discriminating power. The test's doc comment now states that this pre-existing row carries AC-2, so the coverage is findable rather than implied.
+
+2. **`question_resolved` does not exist — corrected to `question_shown` / `question_dismissed`.** The Design section's non-goal paragraph named `question_resolved` as an outbound wire type, taken from the ticket body. Grep found the string in no Go file, fixture or doc: the outbound pair is `TypeQuestionShown` = `question_shown` and `TypeQuestionDismissed` = `question_dismissed`, with `TypeQuestionAnswer` / `TypeQuestionRefused` inbound. The non-goal itself is unaffected — `reconcileQuestions` gates on `s.interactive` and stays that way — but the invented name was not propagated into the constant's doc comment or the spec table, both of which use the real type names.
+
+3. **Open question 3 resolved the other way: a protocol-package test was added.** The plan's intent was to add none. Phase B found the precedent it named as the trigger for revising — `TestErrorCode_Constants_MatchSpec` in `compat_test.go` pins every `Code*` constant to its exact spec string — and, more decisively, a real vacuity: every test in this repo passes `CapabilityQuestion` symbolically on both the advertise and the expect side, so a fat-fingered value would be self-consistent and green in all of them. That matters more here than for an ordinary constant, because the capability set is a cross-repo contract compared against a literal outside this module, and detection is the ticket's entire purpose. `TestCapability_Constants_MatchSpec` in `handshake_test.go` closes it, mirroring the `Code*` shape.
+
+**Also verified, not a departure.** The Testing strategy claimed AC-3's row is the only assertion in either capability table that separates the shipped `slices.Contains(negotiated, protocol.CapabilityInteractive)` reduction from a `len(negotiated) > 0` one. Confirmed by mutation rather than asserted: with that reduction replaced under a `go test -overlay`, exactly one subtest reddens — `question_alone_grants_no_interactive`, on `ActiveConns Interactive = true, want false` — and every other row in both tables stays green.

@@ -65,7 +65,19 @@ type InnerFrameV2Decoded struct {
 // negotiation output is built from THESE entries only — never from the phone's
 // advertised set — so an unsupported/spoofed advertisement can never be echoed
 // in the hello_ack or recorded on the session.
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive}
+//
+// Membership grants nothing on its own: every capability gate in this package
+// reads s.interactive, which handleNoiseInit derives with a value-specific
+// slices.Contains against protocol.CapabilityInteractive rather than from the
+// negotiated slice being non-empty. That distinction became load-bearing with
+// protocol.CapabilityQuestion (#2020), the first member a client can be granted
+// while remaining non-interactive; reducing it to a len() > 0 test would hand a
+// question-only client the whole interactive stream.
+//
+// Read-only after package init and read on the manager's Run goroutine; it is a
+// var only because a slice cannot be const. Nothing may assign to it or to its
+// backing array at runtime.
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}
 
 // negotiateCapabilities returns the phone's advertised set ∩
 // supportedV2Capabilities, in supported-set order. It iterates the supported

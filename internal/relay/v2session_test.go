@@ -4363,6 +4363,12 @@ func TestNegotiateCapabilities(t *testing.T) {
 		{"nil yields nil", nil, nil},
 		{"empty yields nil", []string{}, nil},
 		{"duplicates collapse", []string{protocol.CapabilityInteractive, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive}},
+		// #2020's second supported member. The last two rows advertise the same
+		// set in both orders and expect the same output, pinning that the result
+		// is ordered by the SUPPORTED set — the client's order never reaches it.
+		{"question granted", []string{protocol.CapabilityQuestion}, []string{protocol.CapabilityQuestion}},
+		{"both granted", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}},
+		{"both granted, advertised in reverse", []string{protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}},
 	}
 
 	for _, tc := range tests {
@@ -4382,6 +4388,13 @@ func TestNegotiateCapabilities(t *testing.T) {
 // byte-stability, AC#5), and (c) the per-conn negotiated flag surfaced by
 // ActiveConns matches the echo (AC#1/#2/#3). A spoofed "god-mode" is never
 // echoed nor flagged.
+//
+// #2020 added the question rows. Its AC#2 — the ack carries interactive and NOT
+// question when the client advertised interactive alone — is pinned by the
+// pre-existing "advertise interactive" row rather than by a new one: that row's
+// slices.Equal against a one-element want already fails against an
+// implementation that appends the daemon's supported strings unconditionally
+// instead of echoing the intersection.
 func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 	t.Parallel()
 
@@ -4395,6 +4408,14 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 		{"advertise nothing", nil, nil, false},
 		{"spoof drops unsupported", []string{protocol.CapabilityInteractive, "god-mode"}, []string{protocol.CapabilityInteractive}, true},
 		{"only unsupported granted nothing", []string{"god-mode"}, nil, false},
+		{"advertise interactive and question", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}, true},
+		// #2020 AC#3: question grants no interactive access. This is the only row
+		// in either capability table that separates the shipped value-specific
+		// reduction (slices.Contains(negotiated, CapabilityInteractive)) from an
+		// emptiness test — under `len(negotiated) > 0` every other row stays green.
+		// It is also the first state in which the ack carries a capabilities key
+		// on a non-interactive conn, so assertion (b) below is correctly skipped.
+		{"question alone grants no interactive", []string{protocol.CapabilityQuestion}, []string{protocol.CapabilityQuestion}, false},
 	}
 
 	for _, tc := range tests {
