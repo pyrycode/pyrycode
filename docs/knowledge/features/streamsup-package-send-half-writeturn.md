@@ -47,6 +47,20 @@ forge a turn boundary:
 | `control_response` | nothing, for every shape but one — consumed **content-free**, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500) — **except** a `success`-subtype response whose `response.response.models` decodes to a non-empty array, which emits one `turnevent.ModelList` (#1811, below). This is still the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority for the two content-free sibling shapes is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. CORRECTED 2026-08-27 (#1811): this used to say a `subtype:"error"` NAK is consumed indistinguishably from a success, deliberately, because discriminating it would cost a decode target for the nested object. #1811 built that decode target for an unrelated reason (publishing the model list) and the NAK gap closed as a side effect — the arm's one Debug record now carries a `reason` that names `nak` distinctly from `ack`/`commands_only`/`model_list`/`undecodable` — the fifth keyword, `commands_only`, split off `ack` by #1890 (below) |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
 
+**The `user` row reads nothing from the tool-result sidecar, and the sidecar is there under a different
+spelling than the one prior evidence used.** `emitUser` decodes each `tool_result` block for `is_error`
+and the string/array `Content` union; it does not look at a top-level sidecar the transcript
+(`internal/agentrun/jsonl` fixtures) calls `toolUseResult`. #2023 probed whether that sidecar reaches
+stdout at all — nothing in the tree had recorded a live stdout `user`/`tool_result` line before that
+ticket, only transcript captures, which this parser never reads. It does: on stdout the same payload is
+keyed `tool_use_result`, snake_case, not the transcript's camelCase — a first live run that searched only
+`toolUseResult` returned a false `sidecar-absent`. Both key sets the transcript predicts reproduce
+byte-shape intact (`[file, type]` for a Read, `[interrupted, isImage, noOutputExpected, stderr, stdout]`
+for a Bash), one sidecar per `tool_result` block. Any future decode of this sidecar off stdout must key
+on `tool_use_result`. See
+[tool_result_sidecar_probe_test.go](e2e-realclaude-tool-result-sidecar-probe-test-go.md) and
+`testdata/tool_result_sidecar_v2.1.239.json` in `internal/e2e/realclaude`.
+
 **Two tiers, and the split is the whole design.** Before this, everything outside the three mapped
 types was dropped with a `Debug` log. The production daemon runs at info level, so that drop left **no
 trace anywhere and no client was told** — fine for the types we ignore on purpose, useless for a type we
