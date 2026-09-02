@@ -92,16 +92,20 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   whitelist's existing answer, and `MapEvent`'s `default` stays armless. At
   #1854 time all four were *reachable-but-unreached*, since nothing produced the
   variant; `internal/streamsup` became the producer in #1877, and from that
-  ticket on `Handle`'s default and `MapEvent`'s default are both genuinely
+  ticket `Handle`'s default and `MapEvent`'s default were both genuinely
   reached in production — armless is no longer the same claim as unreached, and
   the two doc paragraphs that conflated them (`eventKind`'s `ModelAnnounced` arm,
   in a category clause naming "anything else the production producer emits"
   rather than `SlashCommandList` by name) were the hardest of #1877's eight
-  corrections to find by grep. Deriving which drop sites are reachable for a new
-  variant from its **turn mark** plus whether a `Handle` case claims it is the
-  reliable method — copying a neighbouring arm's site-list prose is not: the
-  `ModelList`/`ModelAnnounced` arms' own lists still name `acp_turn_stream.go`,
-  deleted with the terminal-driving path in #1348.
+  corrections to find by grep. #2003 gave `Handle` its `SlashCommandList` case,
+  so `Handle`'s default is no longer a drop site for this variant at all — it
+  now routes through `emitMapped` to `MapEvent`'s arm (landed #2001), which is
+  itself no longer merely reached-in-principle but actually called. Deriving
+  which drop sites are reachable for a new variant from its **turn mark** plus
+  whether a `Handle` case claims it is the reliable method — copying a
+  neighbouring arm's site-list prose is not: the `ModelList`/`ModelAnnounced`
+  arms' own lists still name `acp_turn_stream.go`, deleted with the
+  terminal-driving path in #1348.
 
 ## The outbound `Event` variants (`event.go`, `permission.go`)
 
@@ -120,24 +124,29 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
 | `Unrecognized` | `Site UnrecognizedSite`, `Kind string`, `Raw string`, `Truncated bool` | **internal-only** diagnostic, and the one variant that is not a claude sub-state: the stream parser met output it has no mapping for. `Site` is a closed enum (`line_type` / `assistant_block` / `user_block` / `undecodable`); `Kind` is the offending type, empty for `undecodable`; `Raw` is the offending JSON already truncated by the producer, a `string` and not `json.RawMessage` because a truncated blob is no longer valid JSON |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
-| `SlashCommandList` (#1854, produced #1877) | `Commands []SlashCommand`, `DroppedCommands int` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877, entry-count bounded and its drop counted since #1826; not yet published — see below |
+| `SlashCommandList` (#1854, produced #1877, published #2003) | `Commands []SlashCommand`, `DroppedCommands int` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877, entry-count bounded and its drop counted since #1826, reaching an interactive conn's wire since #2003 — see below |
 | `SlashCommand` (#1854, element type — not an `Event`, no marker) | `Name, ArgumentHint, Description string`, `Aliases, TruncatedFields []string` | one inventory entry, mirroring `protocol.SlashCommand`'s field order |
 
 - **`SlashCommandList` / `SlashCommand` (#1854) were declared ahead of their
-  producer; #1877 shipped the producer, and nothing publishes them yet.**
+  producer; #1877 shipped the producer, and #2003 gave them a publisher.**
   `internal/streamsup`'s `emitModelList` decodes `commands`, caps each entry's
   `Name` at `maxSlashCommandName` (256 bytes) at construction, and emits one
   `SlashCommandList` beside `ModelList` on the model-list rung — an absent, null
   or empty `commands` array emits nothing (the decode collapses all three onto
   one nil slice, so the producer can't make the positive statement an empty
   emit would be making; see [streamsup-package.md](streamsup-package.md)).
-  `interactiveTurnEmitterV2.Handle` has no case for it, so the value never
-  reaches `MapEvent` at all — genuinely reached-but-dropped rather than merely
-  armless, since a production path emits the variant. `turnbridge.MapEvent`
-  itself stopped being armless in #2001, which gave it an explicit
-  `SlashCommandList` arm (see [turnbridge-package.md](turnbridge-package.md));
-  that arm is unreached in production until `Handle` gains its case, #2003's.
-  The entry count is bounded and its drop counted since #1826
+  `turnbridge.MapEvent` stopped being armless for this variant in #2001, which
+  gave it an explicit `SlashCommandList` arm (see
+  [turnbridge-package.md](turnbridge-package.md)), but that arm stayed
+  genuinely unreached in production until #2003 gave `interactiveTurnEmitterV2.Handle`
+  a `SlashCommandList` case — before that, the value reached `Handle`'s
+  `default` and stopped there, never reaching `MapEvent` at all. Since #2003
+  `Handle`'s case forwards the event straight through `emitMapped` to that arm,
+  so a decoded inventory now reaches every interactive conn; `Handle`'s
+  `default` is no longer a drop site for this variant, and `MapEvent`'s own
+  `default` stays armless for it for a new reason — something routes to the
+  typed arm now, where before nothing did. The entry count is bounded and its
+  drop counted since #1826
   (`maxSlashCommandListEntries`, truncation from the tail, reported on
   `DroppedCommands`) — one ticket after the first emit, exactly the gap
   `ModelList`'s own count bound (`maxModelListEntries`) took after its first
