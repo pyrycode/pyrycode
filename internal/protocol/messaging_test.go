@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,22 @@ func TestSendMessagePayload_RoundTrip(t *testing.T) {
 	if !strings.HasPrefix(payload.Text, "what's the weather") {
 		t.Errorf("Text: got %q, want prefix %q", payload.Text, "what's the weather")
 	}
+	// The absent-key half of the attachment_ids contract (#2036). This fixture
+	// keeps its original three-key form deliberately: send_message is a
+	// v1-compatible inbound type, so a client predating the field sends exactly
+	// these three keys and always will, and that is the regression case. The
+	// paired populated fixture is send_message_attachments.json — the
+	// question_shown.json / question_shown_empty.json convention.
+	//
+	// The nil assertion is this test's whole contribution to the field, and the
+	// round trip below adds NOTHING to it: that comparison re-marshals env while
+	// env.Payload is still the fixture's own raw bytes, so the payload struct's
+	// tags never run and an omitempty mutant leaves it green (measured, not
+	// assumed). TestSendMessagePayload_ZeroValue_KeyAbsent is the only omitempty
+	// pin in this file — do not weaken it on the belief that this test overlaps it.
+	if payload.AttachmentIDs != nil {
+		t.Errorf("AttachmentIDs: got %v, want nil — an absent key is the no-attachments case", payload.AttachmentIDs)
+	}
 
 	out, err := json.Marshal(env)
 	if err != nil {
@@ -39,6 +56,243 @@ func TestSendMessagePayload_RoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
 		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+// TestSendMessagePayload_Attachments_RoundTrip pins the POPULATED form: the wire
+// key attachment_ids, its element order, and the canonical lowercase-UUIDv4
+// element shape § Attachments publishes.
+//
+// A committed fixture is the only thing that can catch a wire-STRING typo here.
+// The package's three compat_test.go registries all key on the Go symbol, so
+// renaming the json tag to "attachment_id_list" moves consistently through every
+// one of them and reddens none — the property #1895's mutant run established for
+// TypeAttachmentStored, applied to a field tag instead of a type constant.
+func TestSendMessagePayload_Attachments_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "send_message_attachments.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSendMessage {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSendMessage)
+	}
+
+	var payload SendMessagePayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	want := []string{
+		"3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67",
+		"8c1d5e92-4a03-4b7f-9e21-6d0fa3b85c14",
+	}
+	if len(payload.AttachmentIDs) != len(want) {
+		t.Fatalf("AttachmentIDs: got %d ids %v, want %d", len(payload.AttachmentIDs), payload.AttachmentIDs, len(want))
+	}
+	// Index-by-index rather than a set comparison: the array order is the
+	// client's own presentation order and a decoder must preserve it.
+	for i, id := range want {
+		if payload.AttachmentIDs[i] != id {
+			t.Errorf("AttachmentIDs[%d]: got %q, want %q", i, payload.AttachmentIDs[i], id)
+		}
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestSendMessagePayload_WireKeys pins the payload's COMPLETE key set on a
+// populated value, so a fourth key cannot be added and a fifth cannot appear
+// unnoticed. TestAttachmentStoredPayload_WireKeys records why this outlives the
+// round trips above: an added field reddens those too, but only until somebody
+// regenerates the fixture, and regenerating under the same mutant turns them
+// green again while this stays red.
+//
+// Two-sided on purpose — every expected key present AND no unexpected key —
+// since a one-sided containment check is exactly what lets an added field
+// through.
+//
+// It deliberately does NOT cover the empty case: attachment_ids carries
+// omitempty, so a populated value reaches the key whatever the empty-case
+// posture is. That is TestSendMessagePayload_ZeroValue_KeyAbsent's job, and the
+// division is the same one TestAttachmentStoredPayload_ZeroValue_KeysPresent
+// exists for, read in the opposite direction.
+func TestSendMessagePayload_WireKeys(t *testing.T) {
+	b, err := json.Marshal(SendMessagePayload{
+		ConversationID: "c1",
+		MessageID:      "m10",
+		Text:           "here are the two files from this morning",
+		AttachmentIDs:  []string{"3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67"},
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	want := map[string]bool{"conversation_id": true, "message_id": true, "text": true, "attachment_ids": true}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected wire key %q: the payload's key set is fixed at %v", k, want)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q, got: %s", k, b)
+		}
+	}
+}
+
+// TestSendMessagePayload_ZeroValue_KeyAbsent is the empty-case WIRE FORM pin:
+// a message naming no attachments carries no attachment_ids key at all.
+//
+// This is the inverse of TestAttachmentStoredPayload_ZeroValue_KeysPresent, and
+// it exists for that test's reason read the other way. omitempty changes a key's
+// presence only at the zero value, so the two round trips above and the key-set
+// check all marshal a non-empty list and stay entirely green if the omitempty is
+// dropped. Only a zero value reaches the question.
+//
+// The other three keys are asserted PRESENT in the same breath, so the test
+// cannot go green by marshalling nothing at all — they carry no omitempty and a
+// zero-valued send_message is still three keys on the wire.
+func TestSendMessagePayload_ZeroValue_KeyAbsent(t *testing.T) {
+	b, err := json.Marshal(SendMessagePayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	if _, ok := got["attachment_ids"]; ok {
+		t.Errorf("zero payload must omit attachment_ids entirely (a client naming no attachments sends no such key), got: %s", b)
+	}
+	for _, k := range []string{"conversation_id", "message_id", "text"} {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q: the other three carry no omitempty, got: %s", k, b)
+		}
+	}
+}
+
+// TestSendMessagePayload_EmptyForms_Indistinguishable is the AC that the three
+// empty wire forms — key absent, null, and [] — are one case a consumer cannot
+// branch on.
+//
+// The nil assertion is the whole test. len(x) == 0 already agrees across all
+// three with a plain []string, so a len-only check would pass against no
+// implementation at all; x == nil is where they disagree, because encoding/json
+// decodes [] to an EMPTY NON-NIL slice while an absent key and null both leave
+// nil. SendMessagePayload.UnmarshalJSON is what collapses the third, and
+// dropping it reddens exactly the "[]" row here while the other two stay green —
+// so the failure names which form regressed.
+func TestSendMessagePayload_EmptyForms_Indistinguishable(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{"key absent", `{"conversation_id":"c1","message_id":"m9","text":"hi"}`},
+		{"null", `{"conversation_id":"c1","message_id":"m9","text":"hi","attachment_ids":null}`},
+		{"empty array", `{"conversation_id":"c1","message_id":"m9","text":"hi","attachment_ids":[]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var p SendMessagePayload
+			if err := json.Unmarshal([]byte(tc.payload), &p); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if p.AttachmentIDs != nil {
+				t.Errorf("AttachmentIDs: got %#v, want nil — all three empty forms must decode to one value a consumer cannot tell apart", p.AttachmentIDs)
+			}
+			if len(p.AttachmentIDs) != 0 {
+				t.Errorf("AttachmentIDs: got %d ids, want 0", len(p.AttachmentIDs))
+			}
+			// The sibling fields must survive the custom decode path — an
+			// UnmarshalJSON that decodes only its own field would drop them.
+			if p.ConversationID != "c1" || p.MessageID != "m9" || p.Text != "hi" {
+				t.Errorf("sibling fields lost in the custom decode: %+v", p)
+			}
+		})
+	}
+}
+
+// TestSendMessagePayload_AttachmentIDsIllTyped_Rejected pins the decode-FAILURE
+// branch: an attachment_ids that is not an array of strings is a rejected frame,
+// never a silently-empty list.
+//
+// Without it, an UnmarshalJSON that swallowed its error would read "this message
+// names no attachments" off garbage input, and every other test in this file
+// would stay green. The one production decode site,
+// internal/relay/handlers/send_message.go's SendMessage, turns the returned
+// error into a protocol.malformed reply — the reading QuestionAnswerPayload's
+// doc block publishes for its own decoder.
+func TestSendMessagePayload_AttachmentIDsIllTyped_Rejected(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{"string", `{"conversation_id":"c1","attachment_ids":"3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67"}`},
+		{"object", `{"conversation_id":"c1","attachment_ids":{"id":"3f2a1c40"}}`},
+		{"number", `{"conversation_id":"c1","attachment_ids":7}`},
+		{"array of numbers", `{"conversation_id":"c1","attachment_ids":[7]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var p SendMessagePayload
+			err := json.Unmarshal([]byte(tc.payload), &p)
+			if err == nil {
+				t.Fatalf("decode must fail on an ill-typed attachment_ids, got payload %+v", p)
+			}
+			// The error is logged by the handler, so it must not carry the
+			// remote-authored bytes back into a line-oriented log.
+			if strings.Contains(err.Error(), tc.payload) {
+				t.Errorf("decode error must not embed the raw payload, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestSendMessagePayload_MaxAttachmentIDs_FitV2EnvelopeCap measures rather than
+// argues MaxAttachmentIDsPerMessage's headroom claim: a send_message naming the
+// bound's worth of canonical ids must leave the envelope overwhelmingly free for
+// text, so a client never trades attachments against message length.
+//
+// The shape and the statement are TestAttachmentChunkPayload_FitV2EnvelopeCap's:
+// a per-element bound does not compose into an envelope guarantee on its own.
+// The assertion is two-sided — under the cap, and under a tenth of it — because
+// "fits" alone would still pass at a bound of 1000 ids, which is the mutant this
+// test is for. If it ever fails, LOWER the constant.
+func TestSendMessagePayload_MaxAttachmentIDs_FitV2EnvelopeCap(t *testing.T) {
+	ids := make([]string, MaxAttachmentIDsPerMessage)
+	for i := range ids {
+		// Canonical shape, distinct per element; the alphabet is lowercase hex,
+		// so no element escapes and every one costs exactly 36 bytes.
+		ids[i] = fmt.Sprintf("3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d%04x", i)
+	}
+	ts := time.Date(2026, 9, 2, 11, 4, 22, 317000000, time.UTC)
+	payloadBytes, err := json.Marshal(SendMessagePayload{
+		ConversationID: "3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67",
+		MessageID:      "8c1d5e92-4a03-4b7f-9e21-6d0fa3b85c14",
+		AttachmentIDs:  ids,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	out, err := json.Marshal(Envelope{ID: 8, Type: TypeSendMessage, TS: ts, Payload: payloadBytes})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+
+	t.Logf("send_message naming %d ids: %d B (%.1f%% of the %d B cap)",
+		MaxAttachmentIDsPerMessage, len(out), float64(len(out))/float64(maxV2AppEnvelope)*100, maxV2AppEnvelope)
+	if len(out) >= maxV2AppEnvelope {
+		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
+	}
+	if len(out) >= maxV2AppEnvelope/10 {
+		t.Errorf("serialised envelope: got %d B, want < %d B — the bound must leave the envelope free for text, not merely fit inside it",
+			len(out), maxV2AppEnvelope/10)
 	}
 }
 

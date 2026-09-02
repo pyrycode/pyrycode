@@ -1,13 +1,159 @@
 package protocol
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+// MaxAttachmentIDsPerMessage bounds how many attachment ids one send_message may
+// name (SendMessagePayload.AttachmentIDs below, published by #2036 in
+// docs/protocol-mobile.md § Attachments).
+//
+// It is the FIRST of this family's two bound idioms — a published NUMBER, a
+// producer-side contract a client must obey to compose a conforming frame, the
+// posture MaxAttachmentChunkBytes and MaxAttachmentIDBytes ship with. It is
+// deliberately not the second: the per-upload byte bound and the concurrency
+// bound behind attachment.too_large / attachment.too_many_uploads are
+// receiver-configured and unpublished, learned by being rejected. A client
+// composing a message needs this one BEFORE it sends, not after.
+//
+// UNCHECKED, like every bound this package declares. internal/protocol is a
+// stdlib-only leaf data package with no producer, no consumer and no validator;
+// nothing here counts the list, and a reader must not mistake a declared bound
+// for an enforced one. Enforcement is #2038's, and no wire code is named here
+// for an over-bound list — ErrUnknownUpload's doc block is the precedent for
+// declining to publish a mapping this package does not own.
+//
+// The bound counts ELEMENTS, NOT DISTINCT IDS. A list may repeat one id 32
+// times; whether a receiver dedups or refuses is #2038's call, and publishing
+// the counting rule is what makes that a decision rather than an omission.
+//
+// Why 32, as arithmetic rather than taste. Each canonical id is exactly 36 bytes
+// and costs 39 inside a JSON array (two quotes and one separator), so 32 ids are
+// 1248 B — under 2% of the 65519-byte application-envelope cap — and the bound
+// never competes with Text for envelope budget. That is also why it is NOT
+// derived from the cap: that derivation yields roughly 1680 ids and would leave
+// no room for the message. The binding constraint is resource rather than bytes,
+// since every id named becomes a directory component the receiver resolves, so
+// 32 bounds that work at a number a receiver does inline without a queue while
+// sitting far above what a person attaches to one message.
+// TestSendMessagePayload_MaxAttachmentIDs_FitV2EnvelopeCap measures the real
+// total rather than trusting this paragraph; if it ever fails, LOWER this
+// constant.
+//
+// DO NOT OVERSELL IT. The envelope cap already limits an unbounded list to
+// roughly 1680 elements, and a paired device may already send messages that
+// spawn claude turns — orders of magnitude more expensive than 1680 directory
+// resolutions. This bound is contract clarity and bounded work, not a new
+// defence against anything the pairing boundary does not already permit.
+const MaxAttachmentIDsPerMessage = 32
 
 // SendMessagePayload is the body of an Envelope whose Type == TypeSendMessage
 // (docs/protocol-mobile.md § send_message). Phone → binary direction.
+//
+// AttachmentIDs names the uploaded attachments this message carries (#2036), so
+// the daemon can name them instead of inferring the set from upload order or
+// arrival timing. Wire vocabulary only: nothing produces, consumes or validates
+// it here, and composing the prompt from it is #2038. Element order is the
+// client's own presentation order and is NOT a correlation key — ids identify
+// attachments, positions identify nothing, QuestionAnswerEntry's rule.
+//
+// EVERY ELEMENT IS AN UNVERIFIED CLAIM, and it BECOMES A DIRECTORY COMPONENT
+// beneath the resolved conversation directory. Its canonical shape — the
+// lowercase UUIDv4 form docs/protocol-mobile.md § Attachments publishes under
+// "The attachment_id shape" — is validated BEFORE it reaches filepath.Join;
+// conversations.ValidID is that check, the one attachments.EnsureDir already
+// applies on the upload leg. An element reaching a path unvalidated is a
+// traversal, and MaxAttachmentIDBytes does not help: 64 bytes accommodates
+// "../../../../etc/passwd" several times over, so containment is a consequence
+// of the SHAPE and never of any length ceiling. No named type marks the
+// untrusted elements, matching AttachmentChunkPayload, which carries the same
+// hazard on a plain string field with a doc block rather than a wrapper type.
+//
+// THE SHAPE CHECK IS LOAD-BEARING A SECOND TIME, against § Security model threat
+// 1 (prompt injection). AttachmentStoredPayload is exempt from that threat
+// because it carries no client-authored byte; every element here is
+// client-authored and #2038 composes claude's input from it. A shape-validated
+// id draws from [0-9a-f-] only and CANNOT carry injection text, while an
+// unvalidated element reaches claude verbatim. The two hazards are independent
+// and one check answers both — which is why it is not optional even for a
+// consumer that never touches the filesystem.
+//
+// THE ELEMENTS ARE NOT A CAPABILITY. What keeps the field safe is CONFINEMENT: a
+// named id resolves only under the message's OWN conversation, the one the
+// authenticated v2 session is already on, decided daemon-side from session
+// context and never client-asserted. That is the property AttachmentChunkPayload's
+// deliberately absent conversation_id establishes for the upload leg, and it is
+// what stops "name any id, get its bytes into your prompt". Do NOT argue
+// UUIDv4-therefore-unguessable anywhere on this field: the family's published
+// stance is that the id is not secret, not unguessable and never the only thing
+// between a caller and a file, so an entropy claim would quietly promote it to
+// the capability it is documented not to be.
+//
+// LOGGABLE ONLY AFTER SHAPE VALIDATION. § Attachments permits logging an
+// attachment id — but for a value that has been checked. Raw, an element is an
+// arbitrary client-supplied string in a line-oriented log, the same
+// log-injection shape the section forbids for filename and for the same reason.
+//
+// It carries the package's ONLY omitempty, and the departure is the point rather
+// than an oversight. send_message is a v1-compatible inbound type, so a client
+// predating this field sends three keys and always will: the empty-case wire
+// form is the KEY ABSENT ENTIRELY, which is exactly what those clients already
+// emit. The nil→[] MarshalJSON that QuestionShownPayload, BackgroundTaskRosterPayload,
+// ModelListPayload and ToolUsePayload carry is a shape precedent and not a
+// placement one — every one of them is an outbound, daemon-authored v2 frame.
+// QuestionAnswerPayload is the near miss, genuinely inbound and still
+// normalising, but it is v2-only and has carried its array since it was minted,
+// so "always present" was true of every client that ever sent one. Here it would
+// be false on arrival. Do not add a MarshalJSON by analogy: omitempty already
+// elides nil and empty-non-nil alike, so the two directions are symmetric
+// without one, and TestSendMessagePayload_ZeroValue_KeyAbsent pins it.
 type SendMessagePayload struct {
-	ConversationID string `json:"conversation_id"`
-	MessageID      string `json:"message_id"`
-	Text           string `json:"text"`
+	ConversationID string   `json:"conversation_id"`
+	MessageID      string   `json:"message_id"`
+	Text           string   `json:"text"`
+	AttachmentIDs  []string `json:"attachment_ids,omitempty"` // optional (#2036); every element is an unverified claim that becomes a path component — validate its canonical shape before use
+}
+
+// UnmarshalJSON collapses the three empty wire forms — key absent, null, and []
+// — to one in-memory value, so no consumer can branch on which of them arrived.
+//
+// Without it that guarantee is FALSE, and the gap is the most common Go slice
+// trap: encoding/json decodes [] to an empty NON-NIL slice while an absent key
+// and null both leave nil. len(x) == 0 agrees across all three, but x == nil
+// does not — so a consumer can tell [] from the other two, and #2038 is the
+// consumer about to read this field.
+//
+// This is NORMALISATION AT THE DECODE BOUNDARY, not validation: nothing is
+// checked and nothing is rejected on content, so the package overview's "pure
+// DTOs, no methods, no Validate()" posture is departed from once, deliberately,
+// and only where a parser-differential ambiguity on an attacker-controlled
+// inbound frame belongs.
+//
+// A DECODE FAILURE IS PROPAGATED, NEVER SWALLOWED into an empty list — an
+// ill-typed attachment_ids must be a rejected frame rather than a silent "this
+// message names no attachments" read off garbage. The one production decode
+// site, SendMessage in internal/relay/handlers, answers protocol.malformed on
+// it; encoding/json's error carries the field path and the offending value's
+// KIND, never the remote-authored bytes, so the handler logging it satisfies the
+// rule QuestionAnswerPayload's doc block publishes for its own decoder.
+//
+// The alias type is a defined type with no methods, which is what keeps
+// json.Unmarshal from recursing back into this method — SlashCommandListPayload.MarshalJSON's
+// reason, in the decode direction. The receiver is a pointer, as encoding/json
+// requires for an Unmarshaler, so this writes only through the caller's own
+// value; the decoded strings are freshly allocated and alias nothing in b.
+func (p *SendMessagePayload) UnmarshalJSON(b []byte) error {
+	type alias SendMessagePayload
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	if len(a.AttachmentIDs) == 0 {
+		a.AttachmentIDs = nil
+	}
+	*p = SendMessagePayload(a)
+	return nil
 }
 
 // MessagePayload is the body of an Envelope whose Type == TypeMessage
