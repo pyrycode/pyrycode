@@ -8,7 +8,8 @@ that's #1826's, one array over the #1811→#1812 precedent — so `logControlRes
 attribute: with no count cap the decoded count the sixth attribute already reports still equals the
 emitted count. Producing is not publishing: at the time, `turnbridge.MapEvent` had no arm and
 `interactiveTurnEmitterV2.Handle` had no case, so the value was logged by kind and dropped.
-`MapEvent` gained its arm in #2001 (still an unreached one — see below); `Handle`'s case is #2003's.
+`MapEvent` gained its arm in #2001 (an unreached one until the paragraph below closed the gap);
+`Handle` gained its case in #2003, so a decoded inventory now reaches every interactive conn's wire.
 
 **The construction moved into its own emitter (#1886).** The cap, the `turnevent.SlashCommand`
 construction and the single emit no longer sit inline at `emitModelList`'s tail — they're
@@ -60,13 +61,45 @@ read each named doc block whole rather than grepping for the new type's name.
 call graph, not just against the spec text.* The architect's own security review named the exact
 paragraph to verify, and the developer's version still credited `turnbridge.MapEvent`'s `default` arm
 with reach it doesn't have. Code review found `MapEvent` has exactly two production call sites,
-`emitMapped` (reached only from `Handle`'s typed arms, none of which is `SlashCommandList`) and
-`resolveBoundModelList` (which hands it a `ModelList` explicitly) — so `SlashCommandList` never
-reaches `MapEvent` at all; it stops at `Handle`'s own default. The same tree already said as much
-three files over, in a do-not-correct sentence this ticket preserved verbatim (`eventKind`'s
-`SlashCommandList` arm: "`emitMapped`'s unmapped drop, which nothing routes it to"). The
-spec-inherited enumeration and the surviving sentence disagreed, and only reading both caught it — an
-enumeration transcribed from a spec is not verified by transcription.
+`emitMapped` (reached only from `Handle`'s typed arms, none of which was `SlashCommandList` at the
+time) and `resolveBoundModelList` (which hands it a `ModelList` explicitly) — so `SlashCommandList`
+reached `MapEvent` nowhere in production; it stopped at `Handle`'s own default. The same tree already
+said as much three files over, in a do-not-correct sentence this ticket preserved verbatim
+(`eventKind`'s `SlashCommandList` arm: "`emitMapped`'s unmapped drop, which nothing routes it to").
+The spec-inherited enumeration and the surviving sentence disagreed, and only reading both caught
+it — an enumeration transcribed from a spec is not verified by transcription. **Closed by #2003**,
+which gave `Handle` a `SlashCommandList` case routing through `emitMapped` to this arm — `MapEvent`'s
+arm is genuinely called in production since then, and the "stops at `Handle`'s own default" clause
+above is history, not current behavior.
+
+**The live lane gained its own consumer of this event (#2003).** `interactiveTurnEmitterV2.Handle`
+now carries a `turnevent.SlashCommandList` case, forwarding the same `ev` untouched straight through
+`emitMapped` to every interactive conn — no lifecycle mutation, no read of any field. Kept as a
+separate arm from `ModelList`'s despite an identical two-statement body
+(`e.flushDelta(ctx)`/`e.emitMapped(ctx, convID, ev)`): the switch's own rule is to merge arms that
+share a *reason*, and these two come closer to sharing one than any other pair — both are properties
+of the child reported once per `initialize` exchange — but what the two arms' bodies *argue about* in
+their doc comments differs on every axis that matters: what sits above the fan-in drop
+(`sessionModelHold` retains the menu; nothing analogous exists for commands until #2004), what the
+reliable fallback path is (#1846 for the menu, #2005 for commands), and the trust origin of the
+carried strings (claude-authored vs. workspace-authored, which is what makes the log posture
+stricter here). An identical body is not sufficient grounds to merge when the surrounding argument
+is per-variant — the same basis the switch already keeps `ThinkingProgress` and `RateLimited` apart
+on.
+
+*Lesson: a whole-log count needle is vacuous against a rig whose own records carry digits.* AC#3
+asked that no workspace-authored string *and no entry count* reach a log record on the emit path.
+The sentinel half landed in the existing push-error rig
+(`TestInteractiveTurnEmitterV2_NoAppOutputLogLeak`, extended with `emitterSlashCommandListFixture`
+and `emitterSlashCommandListSentinels()...`), but the entry-count half could not: every record that
+rig captures is a `push_err` carrying `env_id`, a small monotonic integer that runs 1..N across its
+event table, so a whole-log `strings.Contains` for a one- or two-digit count is **true against a
+correct implementation** — vacuous with its polarity inverted, since the assertion would redden for
+a reason unrelated to any leak. The count needle stays where it already worked: on the digit-free
+drop-site helper, `assertSlashCommandListKindLeaksNothing`, whose logger drops slog's own time attr
+and whose drop records carry no `env_id`. Before adding a numeric needle to an existing rig, check
+what else that rig's own records routinely carry — a rig built to prove one thing absent can already
+be carrying the very pattern a new needle is looking for.
 
 **Proving the bound with a matrix (#1878).** #1877's own liveness proof — one over-cap row, one that
 fits — became a full proof matrix, test-only, in the same file: the cap boundary at and either side of

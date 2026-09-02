@@ -476,6 +476,15 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 		// multiplied per entry. Driven through the same log-heavy rig, and paired
 		// with the payload-presence check at the bottom.
 		emitterModelListFixture,
+		// #2003 AC#3 one inventory further, and the trust origin is what makes it a
+		// tightening rather than a repeat: every string this one carries is
+		// WORKSPACE-authored — a command defined in a repository was written by
+		// whoever wrote that repository — so the posture covers it a fortiori. Same
+		// log-heavy rig, same payload-presence pairing at the bottom. This is where
+		// the EMIT-path half of AC#3 lives; the drop-path half is
+		// assertSlashCommandListKindLeaksNothing's, which cannot be aimed here
+		// because it Fatals on an empty log and this path writes no drop record.
+		emitterSlashCommandListFixture,
 		turnevent.ThoughtChunk{Text: secretThought},
 		turnevent.TextChunk{Text: secretAssistant},
 		turnevent.ToolStart{ToolCallID: "t1", Title: secretToolTitle, RawInput: json.RawMessage(`{"query":"` + secretToolInput + `"}`)},
@@ -491,6 +500,15 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	}
 	leakable := append([]string{secretThought, secretAssistant, secretToolTitle, secretToolInput, secretToolReslt, secretModel},
 		emitterModelListSentinels()...)
+	// NO COUNT NEEDLE HERE, and its absence is deliberate rather than an omission
+	// from AC#3's "no entry count". This rig keeps slog's time attr AND every
+	// push_err record carries env_id, a small monotonic integer, so a whole-log
+	// strings.Contains for a two-digit-or-shorter count is TRUE against a correct
+	// implementation — the vacuous-needle failure one polarity over. The count
+	// negative therefore lives where the record is digit-free: the drop-path
+	// helper, whose logger drops the time attr and whose records carry no env_id.
+	// Do not "complete" the sweep by adding it back here.
+	leakable = append(leakable, emitterSlashCommandListSentinels()...)
 	for _, secret := range leakable {
 		if strings.Contains(logs, secret) {
 			t.Fatalf("application output %q leaked into logs:\n%s", secret, logs)
@@ -562,6 +580,35 @@ func TestInteractiveTurnEmitterV2_NoAppOutputLogLeak(t *testing.T) {
 	if listed.Models[0].ResolvedModel != emitterModelListFixture.Models[0].ResolvedModel {
 		t.Fatalf("first row's resolved model on the wire: got %q, want %q",
 			listed.Models[0].ResolvedModel, emitterModelListFixture.Models[0].ResolvedModel)
+	}
+
+	// The same polarity pair for the slash-command list (#2003), and it is the half
+	// that makes this test AC#3's emit-path home rather than a second log negative:
+	// the sentinels are required ABSENT from the log above and PRESENT on the wire
+	// here, so a Handle arm that quietly dropped the event — which passes every
+	// log-absence check on its own — is red.
+	var invoked *protocol.SlashCommandListPayload
+	for _, p := range bcast.pushes {
+		if p.env.Type != protocol.TypeSlashCommandList {
+			continue
+		}
+		var pl protocol.SlashCommandListPayload
+		if err := json.Unmarshal(p.env.Payload, &pl); err != nil {
+			t.Fatalf("decode slash_command_list payload: %v", err)
+		}
+		invoked = &pl
+		break
+	}
+	if invoked == nil {
+		t.Fatalf("no %s envelope reached the wire; the Handle arm dropped the event", protocol.TypeSlashCommandList)
+	}
+	if len(invoked.Commands) != len(emitterSlashCommandListFixture.Commands) {
+		t.Fatalf("slash_command_list rows on the wire: got %d, want %d",
+			len(invoked.Commands), len(emitterSlashCommandListFixture.Commands))
+	}
+	if invoked.Commands[0].Name != emitterSlashCommandListFixture.Commands[0].Name {
+		t.Fatalf("first row's name on the wire: got %q, want %q",
+			invoked.Commands[0].Name, emitterSlashCommandListFixture.Commands[0].Name)
 	}
 }
 
@@ -2945,10 +2992,19 @@ func slashCommandListDropLogger(buf *bytes.Buffer) *slog.Logger {
 	}))
 }
 
-// assertSlashCommandListKindLeaksNothing is the shared half of the two drop-site
-// tests: the captured log names the variant, does not read as unknown, and carries
-// nothing derived from the event — no entry's Name, no entry's TruncatedFields,
-// and not the entry count.
+// assertSlashCommandListKindLeaksNothing is the drop-site half of AC#3: the
+// captured log names the variant, does not read as unknown, and carries nothing
+// derived from the event — no entry's Name, no entry's TruncatedFields, and not the
+// entry count.
+//
+// It had two callers until #2003 gave Handle a case for the variant, which retired
+// the live-cursor one; the surviving caller is the empty-cursor test below. Kept a
+// helper rather than inlined, because the drop sites it is shaped for outlive that
+// test — stream_turn_drain.go's sink-full and not-active-session drops route
+// through the same eventKind — and because this is where the ENTRY-COUNT needle
+// can live at all: its logger drops slog's time attr and its records carry no
+// env_id, so unlike the emit-path rig in TestInteractiveTurnEmitterV2_NoAppOutputLogLeak
+// there is no digit source for a small count to collide with.
 //
 // The negatives are the half that discriminates. An arm returning
 // "slash_command_list:" + Name, or + len(Commands), leaves
@@ -2980,12 +3036,14 @@ func assertSlashCommandListKindLeaksNothing(t *testing.T, logs string) {
 // variant NAME only.
 //
 // The empty cursor is load-bearing rather than incidental, exactly as it is in the
-// model_list test above: it makes Handle's no-cursor drop — which returns before
-// the type switch — a reachable eventKind call site. The arm exists for the other
-// live sites too: Handle's default arm (see the live-cursor test below), and
-// stream_turn_drain.go's sinkFor sink-full drop and startStreamTurnDrainV2
-// not-active-session drop, all of which would otherwise read kind=unknown for a
-// variant the daemon does recognize.
+// model_list test above, and since #2003 it is the ONLY thing keeping this
+// assertion reachable on this lane: with a live cursor the Handle case claims the
+// event and it reaches no eventKind call site at all. Handle's default arm is no
+// longer among the live sites — that is what the live-cursor test below became when
+// it was replaced by its positive twin. The ones that remain are the no-cursor drop
+// this test drives, which returns before the type switch, and stream_turn_drain.go's
+// sinkFor sink-full drop and startStreamTurnDrainV2 not-active-session drop, both of
+// which would otherwise read kind=unknown for a variant the daemon does recognize.
 //
 // The discipline matters MORE for this variant than for the model list rather than
 // less: every string it carries is WORKSPACE-authored, a lower-trust origin than
@@ -3013,30 +3071,197 @@ func TestInteractiveTurnEmitterV2_SlashCommandListEventKindNamesTheVariant(t *te
 	}
 }
 
-// #1854's scope boundary, pinned deterministically: with a conversation routed the
-// event reaches Handle's DEFAULT arm — no case claims it — so nothing in this slice
-// produces or publishes the variant.
+// #2003 AC#1: a slash-command list reaches every interactive conn as one
+// slash_command_list envelope carrying exactly what turnbridge.MapEvent produced
+// for the event, and reaches no non-interactive conn.
 //
-// This is a deliberate tripwire. The slice that finally gives Handle an arm for
-// this variant WILL redden it, and updating it is that slice's work — the same
-// lifecycle every arm-claiming ticket in this family has had.
-func TestInteractiveTurnEmitterV2_SlashCommandListIsNotPublished(t *testing.T) {
+// This is #1854's tripwire REPLACED BY ITS POSITIVE TWIN rather than deleted: that
+// test pinned "with a conversation routed the event reaches Handle's DEFAULT arm,
+// so nothing publishes it", and its own doc named this slice as the one that would
+// redden it. What it cannot keep is the drop-site log helper — with a live cursor
+// and an arm that claims the event there is NO drop record at all, so a helper that
+// Fatals on an empty log would be asserting the feature did not ship. The emit
+// path's log negative belongs to the push-error rig in
+// TestInteractiveTurnEmitterV2_NoAppOutputLogLeak, which is where AC#3 discharges
+// it; the surviving drop-site assertion is the empty-cursor test above.
+//
+// This is the ONLY test in the family that decodes payload fields; the rest assert
+// on pushTypes. The per-field want below is built from the fixture's own fields
+// rather than from re-typed literals, which keeps it honest about a swapped
+// assignment inside MapEvent's loop: every field of every entry holds a distinct
+// sentinel, so a Name/Description swap or an entry-index swap is red.
+//
+// dropped_commands is deliberately NOT asserted, and its absence is the assertion
+// this test would otherwise get wrong. #2002's byte cut composes with streamsup's
+// entry cut, so the count on the wire is the event's own DroppedCommands PLUS
+// whatever the frame bound dropped; internal/turnbridge already pins that
+// composition, and pinning it here against the fixture's own count would assert
+// the two cuts do not compose.
+func TestInteractiveTurnEmitterV2_SlashCommandListFansOutToEveryInteractiveConn(t *testing.T) {
 	t.Parallel()
-
-	var buf bytes.Buffer
 	cur := &stubCursor{}
 	cur.set(testConvID)
-	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
-	e := newInteractiveTurnEmitterV2(cur, bcast, slashCommandListDropLogger(&buf))
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: true},
+		{ConnID: "c", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
 
 	e.Handle(context.Background(), emitterSlashCommandListFixture)
 
-	assertSlashCommandListKindLeaksNothing(t, buf.String())
+	for _, connID := range []string{"a", "b"} {
+		got := pushesFor(bcast.pushes, connID)
+		if len(got) != 1 {
+			t.Fatalf("conn %s received %d envelopes; want exactly 1", connID, len(got))
+		}
+		if got[0].env.Type != protocol.TypeSlashCommandList {
+			t.Fatalf("conn %s envelope type: got %q, want %q", connID, got[0].env.Type, protocol.TypeSlashCommandList)
+		}
+	}
+	if got := pushesFor(bcast.pushes, "c"); len(got) != 0 {
+		t.Fatalf("non-interactive conn received %d envelopes; want 0", len(got))
+	}
 
-	if len(bcast.pushes) != 0 {
-		t.Fatalf("slash_command_list pushed %d envelopes; want 0 — nothing in this slice publishes it", len(bcast.pushes))
+	var pl protocol.SlashCommandListPayload
+	if err := json.Unmarshal(pushesFor(bcast.pushes, "a")[0].env.Payload, &pl); err != nil {
+		t.Fatalf("decode slash_command_list payload: %v", err)
+	}
+	if pl.ConversationID != testConvID {
+		t.Errorf("conversation_id: got %q, want %q", pl.ConversationID, testConvID)
+	}
+	src := emitterSlashCommandListFixture.Commands
+	want := []protocol.SlashCommand{
+		{
+			Name:            src[0].Name,
+			ArgumentHint:    src[0].ArgumentHint,
+			Description:     src[0].Description,
+			Aliases:         src[0].Aliases,
+			TruncatedFields: src[0].TruncatedFields,
+		},
+		{
+			Name:         src[1].Name,
+			ArgumentHint: src[1].ArgumentHint,
+			Description:  src[1].Description,
+			Aliases:      src[1].Aliases,
+			// nil, and it stays nil through the round trip: SlashCommand.MarshalJSON
+			// exempts this field from the nil -> [] normalisation it applies to
+			// Aliases one field up, so nothing-was-cut reaches the wire as null. The
+			// asymmetry is the wire contract; a test that "fixed" it would assert the
+			// opposite of it.
+			TruncatedFields: src[1].TruncatedFields,
+		},
+	}
+	if !reflect.DeepEqual(pl.Commands, want) {
+		t.Fatalf("slash_command_list rows on the wire:\n got %+v\nwant %+v", pl.Commands, want)
+	}
+}
+
+// #2003 AC#2: a slash_command_list frame opens and closes no turn. It is handled
+// bare before any turn and emits exactly one frame — no turn_state, no turn_end —
+// and the tracker's inTurn/turnID/currentState are asserted directly, then a
+// following content event is driven through to prove a fresh turn still opens.
+//
+// The lifecycle answer is the one TestTurnMarkFor_TotalOverEveryVariant already
+// pins for this variant as turnMarkNone; this is the emitter agreeing with it. It
+// matters here for the model_list test's reason above: the list is a property of
+// the CHILD, reported once per initialize exchange, so a turn opened on one has no
+// turn end anywhere in its future to clear it.
+func TestInteractiveTurnEmitterV2_SlashCommandListNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), emitterSlashCommandListFixture)
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so the exact single-frame sequence is the assertion.
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, []string{protocol.TypeSlashCommandList}) {
+		t.Fatalf("bare slash_command_list envelopes: got %v, want [%s]", got, protocol.TypeSlashCommandList)
 	}
 	if e.inTurn {
 		t.Error("slash_command_list opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("slash_command_list minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("slash_command_list set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeSlashCommandList,
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-slash_command_list envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+	if got := turnStateValues(t, bcast.pushes); !slices.Equal(got, []string{"responding"}) {
+		t.Fatalf("turn_state after slash_command_list: got %v, want [responding]", got)
+	}
+}
+
+// #2003 AC#2: mid-turn, buffered assistant text keeps its wire position AHEAD of
+// the frame, and the open turn survives the interleave untouched.
+//
+// The load-bearing part is the event driven PAST the frame. A frame-local check
+// passes even if the handler called endTurn, because an endTurn on an already-open
+// turn only shows its damage on the NEXT event, when a fresh turn gets minted. So
+// the second delta's turn_id and the unbroken seq are what actually bite here.
+func TestInteractiveTurnEmitterV2_SlashCommandListMidTurnDoesNotDisturbOpenTurn(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m1", Text: "a1"}) // opens turn, buffers a1
+	beforeTurnID, beforeState := e.turnID, e.currentState
+	if !e.inTurn {
+		t.Fatal("precondition: a turn must be open before the interleave")
+	}
+
+	e.Handle(context.Background(), emitterSlashCommandListFixture)
+
+	if !e.inTurn {
+		t.Error("slash_command_list closed the open turn; inTurn must stay true")
+	}
+	if e.turnID != beforeTurnID {
+		t.Errorf("slash_command_list changed turnID: got %q, want %q", e.turnID, beforeTurnID)
+	}
+	if e.currentState != beforeState {
+		t.Errorf("slash_command_list changed currentState: got %q, want %q", e.currentState, beforeState)
+	}
+
+	// Drive one event past the frame: this is what catches an endTurn.
+	e.Handle(context.Background(), turnevent.TextChunk{MessageID: "m2", Text: "a2"})
+	e.Handle(context.Background(), turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn})
+
+	wantTypes := []string{
+		protocol.TypeTurnState,        // responding
+		protocol.TypeAssistantDelta,   // a1, flushed AHEAD of the frame
+		protocol.TypeSlashCommandList, // no surrounding turn_state
+		protocol.TypeAssistantDelta,   // a2, flushed by turn_end
+		protocol.TypeTurnEnd,          //
+		protocol.TypeTurnState,        // idle
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("mid-turn slash_command_list envelope order:\n got %v\nwant %v", got, wantTypes)
+	}
+
+	deltas := assistantDeltas(t, bcast.pushes)
+	if len(deltas) != 2 {
+		t.Fatalf("want 2 assistant_delta, got %d", len(deltas))
+	}
+	if deltas[0].TurnID != beforeTurnID || deltas[1].TurnID != beforeTurnID {
+		t.Fatalf("slash_command_list split the turn: %q, %q want both %q", deltas[0].TurnID, deltas[1].TurnID, beforeTurnID)
+	}
+	if deltas[0].Seq != 0 || deltas[1].Seq != 1 {
+		t.Fatalf("slash_command_list disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
 	}
 }

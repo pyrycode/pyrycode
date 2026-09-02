@@ -415,6 +415,64 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// No capability gate in the arm, for the arm above's reason.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.SlashCommandList:
+		// The workspace's inventory of invocable slash commands (#2003), taking the
+		// same shape as the status peers above: NO turn-lifecycle mutation (no
+		// startTurnIfNeeded / transitionTo / endTurn; inTurn, turnID, currentState
+		// untouched).
+		//
+		// Kept a separate case from ModelList above despite the identical body, and
+		// this is the closest any pair in this switch has come to meeting the merge
+		// rule that arm states: both are properties of the CHILD reported once per
+		// initialize exchange, one step further out than per-turn, and
+		// turnbridge.MapEvent's own arm calls this "the OTHER inventory the one
+		// initialize exchange carries". The rule is still not met, because what the
+		// two arms actually argue about is where they differ. What sits ABOVE the
+		// fan-in drop: sessionModelHold retains the menu, and there is no analogue for
+		// commands until #2004. What the reliable fallback is: #1846 for the menu,
+		// #2005 for these. And the trust origin of the carried strings: claude's own
+		// there, the WORKSPACE's here — a command defined in a repository was written
+		// by whoever wrote that repository — which is what makes the logging posture
+		// stricter here rather than merely equal. A merged arm would have to state
+		// both sets side by side and would lose the per-variant argument, which is the
+		// same basis on which ThinkingProgress and RateLimited stay apart.
+		// TestTurnMarkFor_TotalOverEveryVariant already pins the lifecycle answer as
+		// turnMarkNone and this arm agrees with it.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position ahead
+		// of the inventory. The event is passed through UNTOUCHED and no field of it
+		// is read here — the ModelList arm's carry-never-mutate rule, with its
+		// evidence one ticket away rather than in the tree: MapEvent's arm copies
+		// slice HEADERS, and #2005 reads the mapped payload on a relay-leg goroutine,
+		// so a sort, an in-place dedupe or an append into a slice the event owns would
+		// be a data race across two goroutines rather than merely a wrong menu.
+		//
+		// TWO QUEUES, TWO ANSWERS, the arm above's unchanged. DOWNSTREAM at pushQueue
+		// this is not a droppable delta (the droppable set there is assistant_delta
+		// only, #610), same as every peer above. UPSTREAM at the fan-in it is:
+		// turnMarkFor answers turnMarkNone, so streamTurnSink's sinkFor classes the
+		// event droppable and can refuse it at droppableCap under load. DELIVERY ON
+		// THIS LANE IS BEST-EFFORT BY CONSTRUCTION and this arm does not pretend
+		// otherwise: beside that fan-in refusal, the bootstrap child's report is lost
+		// unconditionally — it reports before any conversation is routed, so the
+		// no-cursor drop above takes it — and a session rotation delivers no fresh
+		// inventory. All three are #2005's connect-time snapshot to repair. The one
+		// difference from the menu's own answer is that no retention sits above the
+		// send here yet (#2004), which changes WHO repairs the loss and not whether
+		// this arm should emit.
+		//
+		// Nothing bounds the rate on either side and that is deliberate: one
+		// initialize exchange per child is the cadence, claude's own rather than
+		// anything network-reachable; every CONTENT dimension is already bounded at
+		// construction by streamsup's caps, and the frame's BYTE cost by #2002's
+		// maxSlashCommandListBytes inside the mapper, which is the one place both wire
+		// consumers pass through. A second, differently-shaped filter here is the
+		// hazard the ThinkingProgress, RateLimited, ModelAnnounced and ModelList arms
+		// each name.
+		//
+		// No capability gate in the arm, for the arms above's reason.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	default:
 		e.logger.Debug("relay: interactive-turn drop; unknown event",
 			"event", "interactive_turn.unknown",
@@ -691,23 +749,19 @@ func eventKind(ev turnevent.Event) string {
 		//
 		// Like the two arms above, this variant is now claimed by a Handle case on
 		// this lane (#1638), so this file's `interactive_turn.unknown` Debug is no
-		// longer a live call site for it. That is a claim about ModelAnnounced ALONE
-		// and does not generalise to the production producer: since #1877
-		// internal/streamsup emits SlashCommandList, which no Handle case claims, so
-		// that Debug is a live call site for a variant the production producer emits
-		// — the arm below says what follows for its call sites. Handle now has an arm
-		// for 16 of turnevent.Event's 18 implementations, and the two without are
-		// PermissionRequest, which streamsup.Parser never produces (it is
-		// PTY/modalbridge-only, as TestTurnMarkFor_TotalOverEveryVariant states
-		// independently), and SlashCommandList, whose wire mapping has since landed
-		// (#2001) and whose Handle case is #2003's; #1719 is closed and was the
-		// decode. Landing the mapping did not shrink that count of two — a
-		// turnbridge.MapEvent arm is not a Handle case, and this file's Debug stays a
-		// live call site for the variant until #2003. The reachable eventKind
-		// call site left on this lane for THIS variant is the no-cursor drop, which
-		// returns before the type switch. Without the arm every eventKind site —
-		// here, acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go —
-		// would read kind=unknown for a variant the daemon does recognize.
+		// longer a live call site for it. Since #2003 that GENERALISES to the
+		// production producer rather than being a claim about ModelAnnounced alone:
+		// the last variant internal/streamsup emitted without a Handle case was
+		// SlashCommandList, and the arm below records the case that claims it, so
+		// that Debug is now a live call site for nothing the production producer
+		// emits. Handle has an arm for 17 of turnevent.Event's 18 implementations,
+		// and the one without is PermissionRequest, which streamsup.Parser never
+		// produces (it is PTY/modalbridge-only, as
+		// TestTurnMarkFor_TotalOverEveryVariant states independently). The reachable
+		// eventKind call site left on this lane for THIS variant is the no-cursor
+		// drop, which returns before the type switch. Without the arm every eventKind
+		// site — here, acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go
+		// — would read kind=unknown for a variant the daemon does recognize.
 		return "model_announced"
 	case turnevent.ModelList:
 		// The variant NAME only, for the arms above's reason — and here the
@@ -735,28 +789,32 @@ func eventKind(ev turnevent.Event) string {
 		// a fortiori. No entry's Name is returned, no entry's TruncatedFields, and
 		// neither is the entry count.
 		//
-		// Unlike the four arms above, NO Handle case claims this variant: #1854
-		// declares it, internal/streamsup's emitModelList produces it (#1877),
-		// turnbridge.MapEvent maps it (#2001), and the Handle case that would claim it
-		// is #2003's, still open — so the mapping exists with nothing on this lane
-		// routing to it, which is why the arm below is unchanged. So this file's
-		// `interactive_turn.unknown` Debug IS a live call site for it, alongside the
-		// no-cursor drop that returns before the type switch, and
-		// stream_turn_drain.go's sink-full droppable drop and not-active-session
-		// drop. Not reachable for this variant: observe's unbound-session drop and
-		// sinkFor's close drop, both gated on a non-turnMarkNone mark, and
-		// emitMapped's unmapped drop, which nothing routes it to.
+		// Like the four arms above, this variant is now claimed by a Handle case on
+		// this lane (#2003), so this file's `interactive_turn.unknown` Debug is no
+		// longer a live call site for it. The chain that got here: #1854 declared the
+		// variant, internal/streamsup's emitSlashCommandList produces it — reached
+		// from emitModelList's initialize handling (#1877) and from the commands-only
+		// rung #1891 added — turnbridge.MapEvent maps it (#2001), #2002 bounded the
+		// mapped frame to the v2 application-envelope cap, and Handle's case routes
+		// the event to that mapping. This was the last variant a production producer
+		// emitted without a case, which is what lets the ModelAnnounced arm above
+		// generalise its own claim.
 		//
-		// A PRODUCTION PRODUCER NOW EMITS THE VARIANT, so those four sites are
-		// reachable rather than merely live: any initialize reply carrying a
-		// NON-EMPTY commands array puts one of these on this lane, whether or not a
-		// models array rides with it (#1891 added the second producing rung; #1877
-		// was the first, and required both). Each is dropped and logged by kind. That
-		// widening strengthens what this arm already argued rather than qualifying
-		// it — strictly more inputs reach the same four drop sites. The arm landed
-		// with the declaration ahead of any producer, because the alternative was a
-		// window in which the daemon recognises the variant and every drop log calls
-		// it kind=unknown.
+		// STILL LIVE FOR THIS VARIANT, and reachable rather than merely live, because
+		// a production producer emits it: the no-cursor drop, which returns before
+		// the type switch and takes the bootstrap child's report unconditionally,
+		// and stream_turn_drain.go's sink-full droppable drop and not-active-session
+		// drop. Any initialize reply carrying a NON-EMPTY commands array puts one of
+		// these on this lane, whether or not a models array rides with it, and each
+		// of those three is dropped and logged by kind.
+		//
+		// Not reachable for this variant: observe's unbound-session drop and sinkFor's
+		// close drop, both gated on a non-turnMarkNone mark, and emitMapped's unmapped
+		// drop — WHICH STAYS UNREACHABLE FOR A NEW REASON. Something routes to it now,
+		// where before nothing did; what keeps it untaken is that MapEvent never
+		// refuses this variant, mapping even a zero-value SlashCommandList. That is
+		// strictly the stronger statement, so do not read the shortened enumeration
+		// above as a weakening.
 		return "slash_command_list"
 	default:
 		return "unknown"
