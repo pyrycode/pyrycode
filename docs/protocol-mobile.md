@@ -474,6 +474,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
 | **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. Nothing emits, accepts or enforces it yet. See [Attachments](#attachments). |
+| **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -1603,10 +1604,18 @@ shape but the **trust** — see **Trust and content hygiene** below.
 ahead of its implementation, the same declare-then-publish sequencing
 [`model_list`](#model_list) and [`slash_command_list`](#slash_command_list) used:
 reassembly and claim-checking are #1741, storage is #1743, the inbound dispatch
-is #1744, and retrieval is #1746. Two things this section deliberately does
+is #1897, and retrieval is #1746. One thing this section deliberately does
 **not** publish: the **retrieval request verb**, which #1746 declares (no such
-type exists in the daemon today), and the **upload success reply**, which is
-#1744's. No success frame is declared here, and a client must not invent one.
+type exists in the daemon today).
+
+**The upload success reply is now declared** — [`attachment_stored`](#attachment_stored)
+below (#1895), together with the [`attachment_id` shape](#the-attachment_id-shape)
+a client must obey. That closes the gap this section used to name: a client that
+uploaded was told what went wrong on every failure path and got silence on the one
+that worked. Nothing emits the frame yet; the dispatch that does is #1897, and
+#1898 observes it end to end. (#1744, which this section previously credited for
+both the dispatch and the reply, was split into those two and no longer exists as
+work — the repair [`model_list`](#model_list)'s changelog entry made for #1693.)
 
 #### `attachment_chunk`
 
@@ -1616,7 +1625,7 @@ both directions** — no field is ever elided, so a decoder may rely on all eigh
 
 | Field | Type | Meaning |
 |---|---|---|
-| `attachment_id` | string | The transfer this chunk belongs to, repeated identically on every chunk: the key a receiver accumulates under, and the identifier that later resolves to a file. At most 64 bytes. **Not a capability** — not secret, not unguessable, and never the only thing standing between a caller and a file. |
+| `attachment_id` | string | The transfer this chunk belongs to, repeated identically on every chunk: the key a receiver accumulates under, and the identifier that later resolves to a file. At most 64 bytes — but that is a **ceiling, not the shape**, and a client that picks any short string within it has its upload refused at the end. The rule is **[The `attachment_id` shape](#the-attachment_id-shape)** below; read it before minting one. **Not a capability** — not secret, not unguessable, and never the only thing standing between a caller and a file. |
 | `index` | integer | 0-based position of this chunk within the attachment, in `[0, total_chunks)`. It **decides where the bytes land**: a receiver addresses by it and never appends. |
 | `total_chunks` | integer | How many chunks the whole attachment splits into: ≥ 1, and identical on every chunk of one transfer. Because it rides every chunk, this stream needs **no completion frame**. |
 | `filename` | string | The client's own name for the file: a display string and a sanitiser input, **never a path**. At most 255 bytes (POSIX `NAME_MAX` — one path component). |
@@ -1741,6 +1750,93 @@ the channel, not just the daemon.
 exactly as [`request_debug_bundle`](#request_debug_bundle) records: an unpaired
 device is refused at the handshake (WS `4401`) and never reaches these paths.
 There is no per-verb authorization gate on either leg, and none is invented here.
+That holds for `attachment_stored` below unchanged — it grants nothing, so there
+is nothing extra to gate.
+
+#### `attachment_stored`
+
+Direction **binary → phone** (outbound v2 reply; not in `v1TypeSet` — an old phone
+never receives one, and `IsKnownAppType` rejects it, which is also the structural
+bar against a phone sending one and asserting that bytes it never uploaded are
+stored). Declared by **#1895**; **nothing emits it yet** — the inbound dispatch
+that does is #1897, and #1898 observes it end to end.
+
+The upload leg's **single positive terminal signal**: the transfer completed,
+every claim on it was checked, and the bytes are stored under the `attachment_id`
+the client chose. Before it, a client that uploaded was told what went wrong on
+each of the seven [`attachment.*`](#error-codes) failure paths and got **silence**
+on the path that worked. It is named as the positive of `attachment.storage_failed`
+so the family's terminal outcomes read as one set — but it is not narrow: it says
+the **whole transfer** succeeded, not merely that the storage step did.
+
+**Correlation rides `in_reply_to`, and it names the chunk *whose arrival completed
+the transfer*.** That is not necessarily the chunk with the highest `index`: this
+section publishes that chunks may arrive in **any order** and that the transfer is
+complete when every index in `[0, total_chunks)` has arrived exactly once, so the
+completing chunk is whichever one closed the set. **A client cannot predict which
+of its envelope ids that will be**, which is exactly why `attachment_id` also
+rides the payload. The two are not redundant: `in_reply_to` says *which frame this
+answers*, the payload says *which transfer this concludes*, and only the second is
+a value the client chose and can look up. Match on the payload id; treat
+`in_reply_to` as provenance rather than as your index key.
+
+**Every field is daemon-asserted**, which is the whole difference from the frame
+it answers. `attachment_chunk` rides both legs and nothing in it reports which
+direction a value came from, so its fields are claims inbound and laundered client
+input outbound. Here there is nothing to disambiguate — hence the provenance
+column.
+
+| Field | Type | Provenance | Meaning |
+|---|---|---|---|
+| `attachment_id` | string | daemon-asserted (the client's own id, echoed) | The attachment that was stored — the id repeated on every chunk of the upload, echoed back after the receiver validated its shape. **Not a capability**: not secret, not unguessable, and never the only thing between a caller and a file; it is echoed to exactly the authenticated session that uploaded the bytes, so this discloses nothing new. Conclude nothing on an id you do not recognise, and never present bytes you did not upload. |
+
+**And nothing else — every absence is a decision.**
+
+- **No host path, no directory component, no on-disk filename.** [§ Error codes](#error-codes) already forbids `attachment.storage_failed` from carrying the host path or the underlying filesystem error, either of which discloses the daemon's layout; a success frame leaking what the failure frame is guarded against would undo that mitigation from the other side.
+- **No stored filename in particular.** The daemon folds a client's `filename` into one path component, and the result is **neither unique nor an identifier** — distinct client names collide, and a case-insensitive host folds them further — so echoing it would hand a client something it cannot rely on. Retrieval addresses by `attachment_id`, and the client already knows the name it sent.
+- **No `conversation_id`**, for `attachment_chunk`'s reason: the upload landed in the conversation the authenticated session is already on, and a client holding the transfer already knows it.
+- **No `size`, `sha256` or `total_chunks`.** The client sent all three and they were checked against the assembled bytes before this frame can be emitted, so echoing them back confirms nothing a client could act on.
+
+The field is always present (no omitempty). This frame carries **no client-authored
+and no claude-authored byte**, so [§ Security model](#security-model)'s threat 1
+does not land on it, and — unlike `filename`, `sha256` and `data`, which this
+section forbids logging — **it is safe to log whole**.
+
+##### The `attachment_id` shape
+
+**A client mints the id, so the client has to get it right**, and the rule below
+binds every frame in this section — `attachment_chunk` on both legs and
+`attachment_stored`. The `attachment_id` field row's *"at most 64 bytes"* is a
+**ceiling for the envelope-size arithmetic, not the shape**, and reading it as
+permission to use any short string is the mistake this paragraph exists to
+prevent.
+
+The canonical form is a **lowercase UUIDv4 string**, exactly:
+
+- **36 bytes**, no more and no less;
+- `-` at offsets **8, 13, 18 and 23**;
+- `4` at offset **14**;
+- one of `8`, `9`, `a`, `b` at offset **19**;
+- **lowercase hex** (`0`–`9`, `a`–`f`) everywhere else.
+
+`3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67` is a conforming id.
+
+**Lowercase is load-bearing, not cosmetic.** The id becomes a **directory name** on
+the host, and the lowercase-only alphabet is what keeps the id-to-directory mapping
+**injective on a case-insensitive filesystem** — which APFS, the macOS default, is.
+A client that mints uppercase ids gets **two distinct attachments resolving to one
+directory** on a Mac, and their writes cross-contaminate with no symlink involved.
+The same alphabet is also why a conforming id contains no `/`, no `.`, no NUL and
+no `..`, so it cannot spell any path component other than itself — but note that
+**containment is a consequence of the shape, never of the length ceiling**: 64
+bytes accommodates `../../../../etc/passwd` several times over.
+
+**Nothing checks the shape at admission today**, and a client should know what that
+costs. A receiver keys an in-flight upload on the **raw string**, so a
+non-canonical id is accepted, every chunk is transmitted, and the transfer is
+refused only when the completing chunk reaches storage. Until an admission-time
+check exists, **a whole transfer is the price of learning this rule by being
+rejected** — which is why it is published here rather than left to be discovered.
 
 ### Session settings (v2)
 
@@ -2173,6 +2269,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-02`: **Published the attachment upload's success reply and the `attachment_id` shape** (#1895), closing a gap this file previously named as one: *"No success frame is declared here, and a client must not invent one."* A client that uploaded was told what went wrong on each of the seven `attachment.*` failure paths and got **silence** on the path that worked. [`attachment_stored`](#attachment_stored) is that path's single positive terminal — the transfer completed, every claim on it was checked, the bytes are stored — published in both places a frame is published, with the four-column **provenance** table [`question_dismissed`](#question_dismissed) uses rather than [`attachment_chunk`](#attachment_chunk)'s three-column one, because every field here is daemon-asserted and that is the whole difference from the frame it answers. **Correlation rides `in_reply_to`**, matching `session_settings_updated` and the reject half of this same leg (`attachment.stream_aborted` is an `error` correlated the same way) — but the id it names is the chunk **whose arrival completed the transfer**, not the last one sent, and since chunks may arrive in any order **a client cannot predict which of its envelope ids that will be**. That is why `attachment_id` also rides the payload, and the two are published as non-redundant: the envelope field says which frame this answers, the payload says which transfer it concludes, and only the second is a value the client chose and can look up. The payload carries **that one id and nothing else** — no host path, no directory component, no stored filename, no `conversation_id`, no echoed `size` / `sha256` / `total_chunks`. The filename's exclusion is argued rather than assumed: the daemon folds it into one path component whose result is **neither unique nor an identifier**, so echoing it would hand a client something it cannot rely on; and keeping it out is also what makes this the one frame in the section **safe to log whole**, since it carries none of the three fields the section forbids logging. Leaking a host path here would have undone `attachment.storage_failed`'s existing prohibition from the other side. **The [`attachment_id` shape](#the-attachment_id-shape) is published for the first time**, and it was already decided rather than open — the receiver validates it as a **lowercase UUIDv4**: 36 bytes, `-` at 8/13/18/23, `4` at 14, one of `89ab` at 19. The field table's *"at most 64 bytes"* was a **ceiling for the envelope arithmetic and never the shape**, and read as permission to use any short string it cost a whole transfer to correct: nothing checks the shape at **admission**, so a non-canonical id is accepted, every chunk is transmitted, and the upload is refused only when the completing chunk reaches storage. **Lowercase is load-bearing rather than cosmetic** — the id becomes a directory name, and the lowercase-only alphabet is what keeps the id-to-directory mapping **injective on a case-insensitive filesystem**, which APFS is by default, so uppercase ids give two attachments one directory on macOS and their writes cross-contaminate with no symlink involved. Containment follows from the shape and **never from the length ceiling**, which accommodates `../../../../etc/passwd` several times over. **Nothing emits the frame yet** (the inbound dispatch is #1897, the end-to-end observation #1898), the same declare-then-publish sequencing #1752 → #1751 used twice already in this family. The § Attachments scope fence is rewritten accordingly and its two **#1744** cites repaired — that ticket was split into #1895 and #1897 and no longer exists as work, the repair this file made for #1693. The retrieval request verb remains the one thing the section does not publish (#1746). Declaration only: no producer, no consumer, no validator, and **no admission-time check** — that is #1897's, which owns the reject path and the code to answer with.
 - `2026-09-02`: **`event_id` is now unique daemon-wide** (#2022), which changes the guarantee this file publishes and fixes a silent-mute defect the previous entry's own text had to work around. **What changed:** the daemon's event ring counted ids **per conversation**, each starting at 1, so the id spaces overlapped. A connection that reconnected advertising an **in-range** `last_event_id` for conversation A had its replay watermark clamped to A's newest id; when the daemon then rotated to conversation B — a `/clear`, or a switch — B's low ids fell at or below that watermark and **every one of them was dropped before reaching the wire**: no frame, no error, no `resync`, for the life of that connection. One ring-wide counter now assigns every id, so no future event in any conversation can carry an id at or below one already issued, and the drop guard is correct by construction rather than by a scope argument. **What a client must know:** `event_id` is still a `uint64`, still ≥ 1, and still strictly increasing within a conversation — but it no longer restarts at 1 per conversation, and within one conversation it is now **ascending rather than contiguous**, since other conversations take ids in between. A conversation's first id is normally far above 1. **A client keying a single scalar cursor on `event_id` — which is what § [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) tells clients to do — was carrying the same defect and is fixed by this with no client change**; a client keying its cursor per conversation was already correct and is unaffected. **No wire shape, field, type or frame changed**, and no client is required to do anything. Corrected here: the [`event_id`](#envelope) and `envelope-id` field-table rows, § [Interactive events](#interactive-events-v2-capability-gated)' *Replay cursor* paragraph, § [`hello`](#hello-v2-specific-note)'s `last_event_id` paragraph, § *Reconnect replay & resync*' *Beyond the id space* bullet, and § [`slash_command_list`](#slash_command_list)'s *What is not a loss point* paragraph — the last of which stated the per-conversation counting as a live caveat, which is how the defect was found. **Statements about the ring's retention are untouched and still true:** `MaxEventsPerConversation`, the per-conversation event ring and its per-conversation eviction policy all still hold — retention is per conversation, the id space is not. **Deliberately not done:** the replay drop guard was not made conversation-aware. Unique ids remove the failure, and a second mechanism for the same failure would need the conversation plumbed from the emitter through the push queue to the drop site. Earlier changelog entries are historical and were left untouched, including the previous entry's account of what it left standing.
 - `2026-09-02`: **Corrected § [`slash_command_list`](#slash_command_list)'s published claim that nothing emits the frame** (#2010) — #1860's correction for the sibling, one frame later, and for the reason that entry named when it deliberately left these statements standing: at that time the frame genuinely had no producer, and that reason expired with this family. **The frame is emitted**: #2001 added the mapping onto this wire shape, #2002 the frame-level byte bound inside it, #2003 the producer on the live interactive turn lane, and #2008 proves it reaches a connected client end to end — so the application-message-types row, § `slash_command_list`'s own paragraph and § [`question_shown`](#question_shown)'s precedent sentence now name those slices instead of **#1720**, a ticket that was split and no longer exists as work. **`dropped_commands` counts**, and this is the correction most likely to change what a client does, since the old text forbade the one arithmetic that now works: the decode's 128-entry cap (#1826) is the base, #2002's serialised-byte bound **adds its own drop on top rather than recomputing**, and both statements that denied it — the field-table row and the paragraph — are inverted, so `len(commands) + dropped_commands` now yields the menu's true size. **The sibling's shortcut is explicitly not transferred**: with two cutters a non-zero `dropped_commands` arrives beside *any* number of entries, so no "N of M" illustration is published and a short list is not evidence of a complete one. The **delivery window** is stated for the first time. What runs on a schedule is an **ask, not a delivery** — one `initialize` exchange per child spawn — and the live lane is **best-effort** at three loss points **re-derived from the code rather than copied**, because the three descriptions that existed disagreed: a report from any session that is not the active conversation's bound session is dropped, which loses the bootstrap child's inventory **unconditionally** and delivers no fresh inventory across a **rotation**; a busy session can refuse the frame at the fan-in; and no interactive connection may exist at that instant. The reconnect-replay dedup is **published as not a loss point** — it drops only what a connection already received in its replay, scoped to the conversation whose newest id its watermark was clamped from — which is a deliberate departure from `reconcileSlashCommandLists`' own doc block, whose enumeration counts it as one of three. This frame now has a **connect-time snapshot** (#2005 resolves, #2006 reconciles, #2007 enumerates, #2009 proves a late-connecting client receives it), so `slash_command_list` **joins § [Reconnect / Backfill semantics](#reconnect--backfill-semantics)' Mode B list** and the section gains the reconcile-on-connect note its Mode B neighbours carry, keyed on `conversation_id`; the four cases the snapshot does **not** cover are stated rather than left implied, and the live-lane frame's `event_id` is distinguished from the reconciled frame's deliberate absence of one. **Three things are deliberately left standing.** § `model_list`'s *"no connect-time snapshot today"* and its *"deliberately absent from the Mode B list"* are **both stale** — #1863 landed that reconcile and #1867 its enumeration, and neither ever reached this file — but they belong to the sibling family and are untouched here, which is why the Mode B list above names four frames while the daemon runs five, and why **no ordinal is published** for this frame. The Go comments carrying the same false claims are likewise untouched: the sibling paid for those separately (#1861/#1862), #2003 left this frame's standing on purpose, and no ticket owns them yet. And § [Attachments](#attachments)' sentence citing `model_list` and `slash_command_list` as declare-then-publish precedent is still true and was not swept. The changelog entries below are historical and were **left untouched** — #1860's own entry records which statements it left standing and why, and rewriting it would destroy that record. No behaviour, fixture or test changed.
 - `2026-09-02`: **An answered question batch now resolves to an allow carrying the operator's choices** (#1991), the third and last of the batch's terminal outcomes and the one that finishes the family's `outcome` vocabulary. Given a batch id and the client's entries, the daemon validates them against its own parked batch, consumes the registry one-shot, allows claude's blocked `AskUserQuestion` call with an updated input, and broadcasts one [`question_dismissed`](#question_dismissed) carrying the new **`outcome: answered` / `source: remote`** pair. **`answered` is a sentinel and carries no chosen label**, which is this frame's sharpest rule rather than a naming preference: `options` entries carry no id and claude selects by `label`, so the natural implementation reports that claude-authored string and moves a frame published as daemon-asserted into the batch's trust tier — a client wanting the label reads it from the batch it already holds. It shares `remote` with the refusal, so **`outcome` is what separates the two** and `source` alone must not be read as "answered". **The reply shape is claude's own contract** (<https://code.claude.com/docs/en/agent-sdk/user-input>): the updated input pairs the original `questions` array, required for tool processing, with an `answers` object keyed by each question's **text** whose value is the chosen label — an **array** for a `multi_select` question and a **bare string** otherwise, decided from the parked question rather than from how many values arrived. **Both halves come from copies the daemon holds**, never from anything the client echoed back, and the `questions` half is claude's own bytes spliced out of the parked tool input rather than a re-marshal of the wire-shaped batch: `protocol.Question` tags `multi_select` where claude's tool input uses `multiSelect`, so a re-marshal hands claude a key it does not read — **silently**, since the call is allowed either way — and the parse drops keys it does not model. **Free text is carried verbatim** and no value is ever compared against the offered labels, since the contract permits free text anywhere. **A malformed answer resolves nothing**: an index out of range, a repeated or a missing one, an entry count unequal to the batch's question count, no value for a question, or more than one for a single-select question all reject the whole answer — no verdict, no broadcast, and the batch left outstanding for a corrected answer or for the no-answer backstop. That discharges the three Contract-bounds rows § `question_answer` had been carrying as gaps, the sharpest being the range check whose absence **panics**; the entry-count comparison runs first, so an arbitrarily long array is O(1) to reject and per-frame work stays bounded by the batch's 1–4 questions. **Two questions with identical text collapse to one `answers` key and that is not a reject branch** — keying by text is claude's contract, so rejecting would strand the operator with a batch they can never answer, which is worse than the contract's own ambiguity, and nothing about it is client-controlled. **The one place the refusal's shape does not carry over** is that claude's parked input is read *before* the one-shot is consumed, and a miss ends the call having done nothing: a deny needs no input, but an allow does, and consuming without a verdict would silence the deferred retire closure that owes every client its `unanswered` while leaving claude denied by the timer with no client told why. Validation likewise reads through a **non-retiring** look-up, so a rejected answer leaves the batch answerable. **Nothing is reachable from the wire yet** — the resolver seam is still nil at every construction site, so § `question_answer`'s *"resolved by nothing yet"* stays true, and #1986 is what wires it behind the per-device gate; **this reply shape has never been confirmed against a live claude**, and that confirmation belongs to #1986, where the path runs end to end. **The path logs nothing at all**, so no question text and no answer value can reach a record. **Live-prose corrections in the same pass:** the three #1990 forward references in § `question_dismissed` (intro, `outcome` row, `remote` carry-over row) are discharged, the *"landed vocabulary is two pairs"* paragraph now publishes three, and the **eight remaining live `#1985` cites** are re-pointed — the `question_dismissed` and `question_answer` rows in § [Application message types](#application-message-types), § Question's intro, § `question_answer`'s intro, its three Contract-bounds rows and its SECURITY paragraph — plus that table's preamble, which read *"none are enforced anywhere"* and is now false for three of its four rows. The dated entries below are historical and stay untouched. **No live count moved**: no `#### ` heading was added or removed, so the three sentences reading **fifteen** stay checkable by counting `turn_state` through `model_announced`, and § `unrecognized_message`'s **five** is untouched.

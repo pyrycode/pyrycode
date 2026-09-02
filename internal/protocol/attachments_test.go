@@ -316,3 +316,116 @@ func TestAttachmentChunkPayload_FitV2EnvelopeCap(t *testing.T) {
 		t.Errorf("serialised envelope: got %d B, want < %d B", len(out), maxV2AppEnvelope)
 	}
 }
+
+// TestAttachmentStoredPayload_RoundTrip pins the upload leg's success reply
+// against the committed fixture: the envelope type, the correlation that rides
+// in_reply_to, the one payload key and its value.
+//
+// THE FIXTURE'S in_reply_to IS THE CONTRACT, not an arbitrary number. It points
+// at the envelope of the chunk WHOSE ARRIVAL COMPLETED THE TRANSFER, and the
+// value chosen here makes that checkable rather than merely stated: the transfer
+// is the two-chunk upload of attachment_chunk_upload.json, whose committed chunk
+// 0 rode envelope 812 — so this frame answers 814, the uncommitted chunk 1, and
+// NOT the 812 a reader would reach for. § Attachments publishes that chunks may
+// arrive in any order, so the completing chunk is whichever one closed the set
+// and a client cannot predict which of its envelope ids that will be. That is
+// exactly why attachment_id also rides the payload: in_reply_to says which frame
+// this answers, the payload says which transfer it concludes, and only the second
+// is something the client chose and can look up.
+//
+// InReplyTo is asserted NON-NIL, which is the structural half of the reply
+// classification cmd/pyry/relay_guard_test.go's excludedTypes records. Its
+// sibling TestAttachmentChunkPayload_Upload_RoundTrip asserts nil on the same
+// leg, so the pair says the chunk is not a reply and this frame is — a
+// difference in shape rather than in values.
+//
+// The attachment_id is the one attachment_chunk_upload.json carries, so the two
+// fixtures describe ONE transfer rather than two unrelated ones. It is also a
+// canonical id under the shape docs/protocol-mobile.md § Attachments now
+// publishes — 36 bytes, lowercase hex, dashes at 8/13/18/23, '4' at 14, 'a' at
+// 19 — so the published rule appears in committed bytes and not only in prose.
+func TestAttachmentStoredPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "attachment_stored.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeAttachmentStored {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeAttachmentStored)
+	}
+	if env.InReplyTo == nil {
+		t.Errorf("InReplyTo: got nil, want the completing chunk's envelope id — this frame is a reply")
+	} else if *env.InReplyTo != 814 {
+		t.Errorf("InReplyTo: got pointer to %d, want pointer to 814", *env.InReplyTo)
+	}
+
+	var payload AttachmentStoredPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if want := "3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67"; payload.AttachmentID != want {
+		t.Errorf("AttachmentID: got %q, want %q", payload.AttachmentID, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestAttachmentStoredPayload_WireKeys pins the payload's COMPLETE set of wire
+// keys, so a later field cannot be added without this failing. It is the
+// machine-checked form of the frame's central omission — no host path, no
+// directory component, no on-disk filename — rather than a property a reviewer
+// has to notice: any of those arriving as a field reddens here by construction.
+//
+// It is load-bearing beyond TestAttachmentStoredPayload_RoundTrip for a reason
+// that round trip cannot cover. An added field breaks the byte comparison there
+// too, but only until somebody regenerates the fixture; regenerate it under the
+// same mutant and the round trip goes green again while this stays red. That is
+// the argument TestAttachmentChunkPayload_Upload_RoundTrip records for its own
+// coverage not surviving regeneration, applied to the key set instead of to
+// omitempty.
+//
+// The assertion is two-sided on purpose — every expected key present AND no
+// unexpected key — because a one-sided containment check is what lets an added
+// field through, and that is the whole mutant class this test exists for.
+func TestAttachmentStoredPayload_WireKeys(t *testing.T) {
+	b, err := json.Marshal(AttachmentStoredPayload{AttachmentID: "3f2a1c40-9b7e-4d16-a5c3-0e8f1b2d4a67"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	want := map[string]bool{"attachment_id": true}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected wire key %q: the payload's key set is fixed at %v, and this frame must expose no host path, no directory component and no on-disk filename", k, want)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q, got: %s", k, b)
+		}
+	}
+}
+
+// TestAttachmentStoredPayload_ZeroValue_KeysPresent is the omitempty pin. It is a
+// marshalled zero value rather than a second fixture because this payload is
+// flat: one all-zero struct reaches every key, so the extra file a nested shape
+// would need buys nothing.
+//
+// It has to exist separately from both tests above. omitempty elides a key only
+// at its zero value, and both of those marshal a non-empty id, so an omitempty
+// added to the field leaves each of them entirely green — including the key-set
+// check, which would still see the key it expects.
+func TestAttachmentStoredPayload_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(AttachmentStoredPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	if want := `"attachment_id":""`; !bytes.Contains(b, []byte(want)) {
+		t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
+	}
+}

@@ -80,11 +80,13 @@ const (
 	MaxAttachmentChunkBytes = 45000
 
 	// MaxAttachmentIDBytes bounds AttachmentID. It is a CEILING FOR THE CAP
-	// ARITHMETIC, not a canonical shape: conversations.ValidID's 36-character
-	// UUIDv4 form is the precedent AttachmentChunkPayload's doc names, and 64
-	// sits comfortably above it and above a 64-hex token, so #1741 and #1743 can
-	// pick the shape without this constant constraining them. They may narrow
-	// below it; they must not exceed it.
+	// ARITHMETIC, not the canonical shape, and the shape is no longer open:
+	// attachments.EnsureDir picked conversations.ValidID's 36-character UUIDv4
+	// form — the precedent AttachmentChunkPayload's doc had named — and #1895
+	// publishes it in docs/protocol-mobile.md § Attachments as the rule a client
+	// must obey. 64 sits comfortably above it, so this constant never constrained
+	// the choice and does not describe it: a value passing this bound and failing
+	// that shape is refused at storage.
 	//
 	// A LENGTH CEILING IS NOT A SAFETY PROPERTY. 64 bytes accommodates
 	// "../../../../etc/passwd" several times over, so this constant does nothing
@@ -235,4 +237,87 @@ type AttachmentChunkPayload struct {
 	Size         int64  `json:"size"`          // declared byte length of the WHOLE file, not of this chunk
 	SHA256       string `json:"sha256"`        // lowercase hex sha256 of the WHOLE file; always 64 hex characters
 	Data         []byte `json:"data"`          // this chunk's raw bytes; base64 on the wire, content-bearing, never logged
+}
+
+// AttachmentStoredPayload is the body of an Envelope whose Type ==
+// TypeAttachmentStored (docs/protocol-mobile.md § Attachments, published by
+// #1895). The upload leg's success reply: the transfer completed, its claims were
+// checked, and the bytes are on the host addressable by this id. Wire vocabulary
+// only — nothing constructs, decodes or validates it here; #1897 emits it.
+//
+// ONE DIRECTION ONLY, binary → phone, which is the whole difference from the
+// frame it answers. AttachmentChunkPayload rides both legs and nothing in it
+// reports which direction a value came from, so its SECURITY block has to make a
+// consumer decide trust from where the frame arrived. Here there is nothing to
+// decide: every field is daemon-asserted, and § Attachments publishes a
+// provenance column saying so.
+//
+// ONE FIELD, and the id is the CLIENT'S OWN, echoed back. Nothing daemon-side
+// mints an attachment id — the client supplies it on every chunk,
+// attachments.EnsureDir validates its shape before it becomes a path component,
+// and storage keys by it. So "tie the reply to the upload" and "name the
+// attachment that was stored" are the same value, carried once. A second
+// daemon-side handle would be a new identifier with no minting site, no lifecycle
+// and no consumer. The daemon asserts nothing here it did not verify.
+//
+// Correlation to the request rides the envelope's InReplyTo, not a field, which
+// is why there is no request-id key: TypeAttachmentStored's block has that
+// decision, and the sibling shape is SessionSettingsUpdatedPayload, which
+// likewise carries only the id it confirms. That block also records WHICH chunk
+// InReplyTo names — the one whose arrival completed the transfer, not the highest
+// index — and therefore why this id is the match key a client can actually
+// predict.
+//
+// WHAT IS DELIBERATELY ABSENT, since every omission here is a decision:
+//
+//   - No host path, no directory component and no on-disk filename. EnsureDir
+//     returns a symlink-resolved absolute path and the natural implementation of
+//     "name the attachment that was stored" reaches for it; docs/protocol-mobile.md
+//     § Error codes already forbids attachment.storage_failed from carrying the
+//     host path or the underlying filesystem error, either of which discloses the
+//     daemon's layout, and a success frame leaking what the failure frame is
+//     guarded against would undo that mitigation from the other side.
+//     TestAttachmentStoredPayload_WireKeys pins the key set so this is checked
+//     rather than reviewed.
+//   - No stored filename in particular. attachments.SanitizeFilename's doc block
+//     records that its result is neither unique nor an identifier — distinct
+//     client names collide, and a case-insensitive host folds them further — so
+//     echoing it would hand a client something it cannot rely on. Retrieval
+//     (#1746) addresses by attachment id, and the client already knows the name it
+//     sent. Keeping it out also keeps this frame clear of the NEVER LOGGED rule
+//     AttachmentChunkPayload puts on Filename, SHA256 and Data: this payload
+//     carries none of the three and is safe to log whole.
+//   - No conversation_id, for AttachmentChunkPayload's reason: the upload landed
+//     in the conversation the authenticated v2 session is already on, and a client
+//     holding the transfer already knows it.
+//   - No size, sha256 or total_chunks. The client sent all three and they were
+//     checked against the assembled bytes before this frame can be emitted;
+//     echoing them back confirms nothing a client could act on.
+//
+// No omitempty and no MarshalJSON. The field is always present in the one
+// direction this frame travels, matching QuestionDismissedPayload; and there is
+// no slice field, so there is no nil→[] normalisation to perform and
+// QuestionShownPayload.MarshalJSON's backing-array data-race argument does not
+// transfer. Do not add one by analogy.
+//
+// SECURITY: receiving this frame IS NOT A CAPABILITY. The id is not secret, not
+// unguessable, and never the only thing standing between a caller and a file —
+// AttachmentChunkPayload's doc states that, and CodeAttachmentNotFound's
+// deliberate merge is what keeps retrieval from becoming a path-existence oracle.
+// It is echoed to exactly the authenticated session that uploaded the bytes, so
+// disclosure widens nothing. A decode of a truncated or hostile payload yields
+// the zero value rather than an error, because every key is optional to
+// encoding/json; the empty string is not a valid attachment id under any
+// published shape, so a consumer matching on it resolves nothing. A client
+// receiving an id it does not recognise ignores the frame — the reading
+// QuestionDismissedPayload publishes for an unrecognised batch — and never
+// presents bytes it did not upload.
+type AttachmentStoredPayload struct {
+	// AttachmentID is the attachment that was stored: the client's own id,
+	// repeated on every chunk of the upload and echoed back here. A client
+	// matches on it and concludes nothing when it does not recognise the value.
+	// Its canonical shape is conversations.ValidID's, published by #1895 —
+	// MaxAttachmentIDBytes is a ceiling for the cap arithmetic and not that
+	// shape.
+	AttachmentID string `json:"attachment_id"`
 }

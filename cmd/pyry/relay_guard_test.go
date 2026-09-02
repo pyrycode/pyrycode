@@ -113,6 +113,21 @@ var excludedTypes = map[string]string{
 	"TypeSessionSettingsUpdated": "reply",
 	"TypeSessionSettings":        "reply",
 
+	// outbound reply — the v2 attachment upload's success frame (#1895). Filed
+	// here rather than beside its own bidirectional sibling below, and the label
+	// is the same decision as the docs row and the payload's shape: correlation
+	// rides the envelope's in_reply_to, so "reply" is literally the definition
+	// this map gives above. TypeSessionSettingsUpdated is the shape copied — an
+	// outbound v2 confirmation of an inbound control frame carrying only the id
+	// it confirms — and the reject half of this same leg already correlates that
+	// way (attachment.stream_aborted is a TypeError via in_reply_to), so a
+	// success correlating differently would split one leg across two mechanisms.
+	// Mandatory from the moment the constant exists rather than from the moment
+	// something emits it (the producer is #1897): Assertion #3 reports an
+	// unclassified constant, not an unemitted one. Unlike the chunk below this
+	// frame has no inbound leg at all, so no entry ever moves to inboundTypes.
+	"TypeAttachmentStored": "reply",
+
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
 	"TypeTurnState":           "push",
