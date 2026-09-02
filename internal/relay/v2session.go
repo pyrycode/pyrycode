@@ -328,7 +328,10 @@ type V2Session struct {
 	// pre-open or non-open session leaves it nil. The plaintext slices are
 	// freshly allocated by noise.CipherState.Decrypt, so enqueuing them for
 	// later off-Run processing aliases nothing.
-	appFrames chan []byte
+	//
+	// The element carries the plaintext PLUS the routing decision dispatchAppFrame
+	// already made (#1897) — see appFrameJob. The worker never re-derives it.
+	appFrames chan appFrameJob
 
 	// bundleAssembling is the accept-side half of the per-conn debug-bundle
 	// in-flight gate (#1491), covering the window [request accepted →
@@ -842,18 +845,40 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeRequestSessionSettings:
 			m.handleRequestSessionSettings(ctx, s, probeEnv)
 			return
+		case protocol.TypeAttachmentChunk:
+			// The one control type whose handler does NOT run inline on Run
+			// (#1897). Every other arm above is fast; a completing chunk hashes
+			// and writes up to the per-upload byte bound, which is exactly the
+			// work #1491 had to move off Run for handleDebugBundleRequest. So
+			// this arm only tags the frame and falls through to the same
+			// non-blocking enqueue the v1 application path uses — the worker
+			// then routes it to handleAttachmentChunk instead of dispatch.Route.
+			// The case selector is what TestEveryInboundV2TypeHasHandler reads,
+			// and the guard reads selectors rather than bodies, so handing off
+			// satisfies it.
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, attachment: true})
+			return
 		}
 	}
 
-	// Application frame: hand off to this conn's worker (off-Run) via a
-	// non-blocking enqueue. Blocking here would re-couple Run to the
-	// handler's duration — the exact cross-conn head-of-line stall #965
-	// removes. s.appFrames is non-nil for any V2StateOpen session (created
-	// in handleNoiseInit's open tail alongside the worker), and Run reaching
-	// this line means the session is open (handleNoiseMsg's V2StateOpen
-	// case).
+	m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext})
+}
+
+// enqueueAppFrame hands one frame to this conn's worker (off-Run) via a
+// non-blocking enqueue. Blocking here would re-couple Run to the
+// handler's duration — the exact cross-conn head-of-line stall #965
+// removes. s.appFrames is non-nil for any V2StateOpen session (created
+// in handleNoiseInit's open tail alongside the worker), and Run reaching
+// this line means the session is open (handleNoiseMsg's V2StateOpen
+// case).
+//
+// Extracted from dispatchAppFrame's tail by #1897 so the attachment_chunk arm
+// and the v1 application fall-through share ONE enqueue, one overflow policy and
+// one close-at-4421 posture rather than growing a second copy that could drift.
+// MUST run on the Run goroutine, like the site it was extracted from.
+func (m *V2SessionManager) enqueueAppFrame(ctx context.Context, s *V2Session, job appFrameJob) {
 	select {
-	case s.appFrames <- plaintext:
+	case s.appFrames <- job:
 	default:
 		// Overflow: appFrameQueueDepth app frames already in flight for this
 		// one conn, far beyond request/response norms. Tear the conn down at
@@ -868,6 +893,27 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			"depth", appFrameQueueDepth)
 		m.closeWith(ctx, s, StatusProtocolMismatch, nil)
 	}
+}
+
+// appFrameJob is one plaintext queued for a conn's appFrameWorker, carrying the
+// routing decision dispatchAppFrame already made (#1897) rather than leaving the
+// worker to re-derive it.
+//
+// The tag exists so the decision lives in ONE place. Re-probing the envelope type
+// inside the worker would look equivalent and is not: it puts the same decision in
+// two places that can silently disagree, and TestEveryInboundV2TypeHasHandler
+// reads dispatchAppFrame's case selectors as THE registry of those decisions — so
+// a worker-side copy would let a future edit delete the case while the frame kept
+// routing, flipping the guard without changing behaviour.
+type appFrameJob struct {
+	// plaintext is the decrypted application frame, freshly allocated by
+	// noise.CipherState.Decrypt and therefore aliasing nothing.
+	plaintext []byte
+
+	// attachment reports that dispatchAppFrame recognised this frame as an
+	// attachment_chunk. False for every v1 application frame, which routes
+	// through dispatch.Route unchanged.
+	attachment bool
 }
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -891,7 +937,7 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 			return
 		case <-s.done:
 			return
-		case pt := <-s.appFrames:
+		case job := <-s.appFrames:
 			// closeWith may have closed s.done while this frame sat in the
 			// buffer (select picks randomly when both are ready). Re-check and
 			// abandon queued-but-unstarted frames for a torn-down conn rather
@@ -901,7 +947,18 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				return
 			default:
 			}
-			m.routeAppFrame(ctx, s, pt)
+			if job.attachment {
+				// The upload path (#1897). Runs here rather than in
+				// routeAppFrame because it neither builds an outbound channel
+				// nor calls dispatch.Route — it emits its own replies straight
+				// through forwardToRun. Being on this goroutine is what
+				// discharges attachments.Intake.Receive's single-feeder
+				// precondition: strictly FIFO, one frame fully handled before
+				// the next is dequeued, one worker per conn.
+				m.handleAttachmentChunk(ctx, s, job.plaintext)
+				continue
+			}
+			m.routeAppFrame(ctx, s, job.plaintext)
 		}
 	}
 }
@@ -1134,6 +1191,22 @@ func (m *V2SessionManager) closeWith(ctx context.Context, s *V2Session, code web
 	// race-free. nil for a session torn down before it ever reached open.
 	if s.done != nil {
 		close(s.done)
+	}
+	// Release this conn's in-flight uploads (#1897), in the same per-conn cleanup
+	// cluster as the worker stop above and the m.queues delete below. Without it a
+	// phone that drops mid-upload keeps holding daemon-wide upload capacity until
+	// uploadIdleTimeout expires, so a client that opens and drops conns can hold
+	// the whole budget. Called unconditionally for any conn (it is a no-op for one
+	// holding nothing), including a session torn down before it ever reached open.
+	//
+	// Safe HERE, on Run, while this conn's worker may still be inside Receive:
+	// ReleaseConn is the documented exception to that method's single-feeder
+	// precondition — remove-only, under the registry's own mutex, touching no
+	// accumulator. A teardown landing between Deliver and Store still files those
+	// bytes, which internal/attachments documents as accepted rather than
+	// mitigated.
+	if m.cfg.AttachmentIntake != nil {
+		m.cfg.AttachmentIntake.ReleaseConn(s.connID)
 	}
 	// Drop any in-flight reconnect-replay tail (#777). The session is deleted
 	// from m.sessions just below, so drainReplayOnce's scan can no longer find

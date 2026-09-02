@@ -434,3 +434,45 @@ Verification is touched-scope: `go test -race ./internal/relay/... ./cmd/pyry/..
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — implementation
+
+**No design departure.** The three Open Questions resolved as the plan predicted,
+so nothing above was rewritten:
+
+1. No nil-seam short-circuit in `routeAppFrame` — the guard stayed in
+   `handleAttachmentChunk`, so the case selector is unconditional.
+2. Five static message constants, one per code, named `msgAttachment*`.
+3. The accepted-but-incomplete path logs at Debug; only the terminal outcomes
+   (stored, refused) reach Info.
+
+One thing the plan under-specified and the code settled: the handler takes the
+**plaintext**, not `dispatchAppFrame`'s already-probed `Envelope`, and decodes it
+a second time. That keeps `appFrameJob` two fields wide, and the cost is the same
+two-decode total a v1 application frame already pays (the probe, then
+`dispatch.Route`'s).
+
+**Mutation testing — four mutants, all red on their predicted test**, run under
+`go test -overlay` so nothing was written to the worktree:
+
+| Mutant | Predicted red | Result |
+|---|---|---|
+| `if !stored` never taken (answer the incomplete chunk) | `..._AcceptedChunk_AnswersNothing` | red, plus two over-determined |
+| `ErrUnknownUpload` dropped from the `invalid_chunk` arm | `..._SentinelsMapToWireCodes` | sole red |
+| `"err", err` added to the refuse record | `..._CarriesNoBannedStrings` | sole red |
+| `ReleaseConn` call deleted from `closeWith` | `..._TeardownReleasesConn` | sole red |
+
+The first is over-determined because the accepted path's Debug record is the
+synchronisation knob two other tests wait on; its named test is still the one that
+fails on the assertion the mutant targets.
+
+**Measured size, against the `Estimate:` line's ~1150.** Total written work is
+**1206** lines of code and tests (244 inserted across the six modified files, 339
+in the new handler, 623 in its test), plus **436** lines of spec — **1642** all in.
+That is 1.4× the estimate and 2.0× the 800-line ceiling. The overage is in tests
+and doc comments rather than in logic: the handler's own executable body is about
+90 lines. Recorded here as the evidence the ticket's `needs-human:sizing` comment
+asked for — the run did **not** exhaust its budget, so by that comment's own
+standard this is not yet grounds for tightening the ceiling.

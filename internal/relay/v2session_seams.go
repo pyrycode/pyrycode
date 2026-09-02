@@ -12,9 +12,9 @@ import (
 
 // This file holds the V2SessionManager's dependency contracts and configuration,
 // carved out of v2session.go so they read in isolation from the manager core.
-// It collects the seven seam interfaces the manager depends on —
+// It collects the eight seam interfaces the manager depends on —
 // ScreenSnapshotter, Interrupter, SessionStarter, QueueRemover, SettingsUpdater,
-// ModalResolver, and QuestionResolver — declared consumer-side per CODING-STYLE
+// ModalResolver, QuestionResolver, and AttachmentIntake — declared consumer-side per CODING-STYLE
 // ("define interfaces where they are consumed"), plus the SettingsUpdate and RunConfig value types, the
 // ErrSessionUnknown sentinel, and the ~260-line V2SessionConfig struct. Pure
 // move: same package, no behaviour
@@ -223,6 +223,61 @@ type QuestionResolver interface {
 	// to choose, so the batch resolves with no selection. Same comma-ok-shaped
 	// report and same no-op posture as ResolveAnswer.
 	ResolveRefusal(p protocol.QuestionRefusedPayload, dev *devices.Device) bool
+}
+
+// AttachmentIntake drives one decoded attachment_chunk from admission to stored
+// bytes, and releases a departing conn's uploads (#1897). *attachments.Intake
+// satisfies it. Declared here, consumer-side, so the seam's own signatures name
+// only internal/protocol — but unlike its neighbours this seam does NOT keep
+// internal/relay free of the implementing package: handleAttachmentChunk imports
+// internal/attachments for the sentinels, which is the shape #1751's spec settled
+// (internal/* packages return Go sentinels; the dispatch site maps them to dotted
+// wire codes at the call site via errors.Is). The seams file itself gains no
+// import.
+//
+// Receive ANSWERS ONE OF THREE THINGS and the middle one is the trap. Restated
+// here because this is where an implementer and the handler meet it, and because
+// reading it the usual way is the single most likely way this path ships broken:
+//
+//   - ("", false, nil) — accepted, the transfer wants more. What MOST chunks of a
+//     healthy upload get, and NOT a refusal. attachments.ErrIncomplete never
+//     crosses this seam; Receive is the one place that interprets it.
+//   - (attachment_id, true, nil) — the completing chunk's verified bytes are
+//     stored.
+//   - ("", false, err) — refused, with some layer's own sentinel VERBATIM, so
+//     errors.Is reaches it unwrapped.
+//
+// So err != nil is the handler's whole refusal test and stored separates the
+// other two.
+//
+// SECURITY — the errors coming back are NOT loggable and NOT repliable. EnsureDir
+// wraps host paths and the daemon's own conversation id into its refusals, and
+// Store's rename leg wraps an *os.LinkError whose Error() prints the sanitised
+// filename. An implementation may add no annotation that would make that worse,
+// and the handler interpolates the error nowhere — every reply carries a static
+// per-code message and every log record carries the mapped code instead.
+//
+// RECEIVE CARRIES A SINGLE-FEEDER PRECONDITION: exactly one goroutine at a time
+// per conn id. The manager discharges it structurally — one appFrameWorker per
+// session, strictly FIFO — and it is why the upload runs on that worker rather
+// than inline on Run. ReleaseConn deliberately carries NO such precondition: it
+// is remove-only, so closeWith calls it on the Run goroutine while that conn's
+// worker may still be inside Receive.
+//
+// Optional: when nil the attachment_chunk case still INTERCEPTS and consumes the
+// frame — it no longer reaches dispatch.Route and so no longer draws its
+// unknown-type error reply — but nothing is decoded, nothing is uploaded and
+// nothing is replied.
+type AttachmentIntake interface {
+	// Receive routes one decoded chunk of one conn's upload. See the type doc
+	// for the three-way answer; connID is the registry key that keeps distinct
+	// conns' transfers separate.
+	Receive(connID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error)
+
+	// ReleaseConn drops every upload still in flight for one conn, returning the
+	// daemon-wide capacity they held without waiting for the idle window. A
+	// no-op for a conn holding nothing, so closeWith calls it unconditionally.
+	ReleaseConn(connID string)
 }
 
 // V2SessionConfig parameterises V2SessionManager. The handshake/transport
@@ -474,6 +529,27 @@ type V2SessionConfig struct {
 	// answer gate (#1986) exists, since the relay handler applies no authorization
 	// and the nil seam is what makes the interception fail-safe today.
 	QuestionResolver QuestionResolver
+
+	// AttachmentIntake receives inbound attachment_chunk frames and releases a
+	// departing conn's uploads (#1897). Optional: when nil the frame is STILL
+	// CONSUMED by the interception — it no longer reaches dispatch.Route and so no
+	// longer draws its unknown-type error reply — but nothing is decoded, nothing
+	// is stored and nothing is replied, and closeWith releases nothing. That is
+	// the whole of the nil behaviour, and it is what leaves every non-production
+	// construction site (unit tests, the fake-daemon e2e harness, foreground/v1)
+	// compiling and behaving unchanged.
+	//
+	// ONE PER DAEMON. attachments.Intake owns a registry whose in-flight ceiling
+	// is daemon-wide, so a second instance would be a second budget of the same
+	// size and the bound would stop meaning what it says. Production constructs
+	// exactly one, in cmd/pyry's startRelayV2.
+	//
+	// SECURITY: the seam's own doc block carries the obligations — the payload is
+	// remote-authored, the errors coming back wrap host paths and a sanitised
+	// filename and are therefore neither loggable nor repliable, and Receive's
+	// single-feeder precondition is discharged by the per-conn appFrameWorker
+	// rather than by any lock.
+	AttachmentIntake AttachmentIntake
 
 	// Interrupter routes an inbound interactive `interrupt` control frame to
 	// the supervised claude as one Esc (#707). Optional: nil ⇒ interrupt is

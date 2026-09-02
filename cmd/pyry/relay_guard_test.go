@@ -89,6 +89,13 @@ var inboundTypes = map[string]string{
 	"TypeRequestSessionSettings": "switch-intercepted",
 	"TypeQuestionAnswer":         "switch-intercepted",
 	"TypeQuestionRefused":        "switch-intercepted",
+	// The upload leg of the one BIDIRECTIONAL type here (#1897). It moved up from
+	// excludedTypes' "pending handler" when dispatchAppFrame gained its case, the
+	// move that entry named in advance. Filed on the same rule as its twelve
+	// neighbours — the guard reads case SELECTORS, not case bodies, so a case that
+	// tags the frame and hands it to the conn's appFrameWorker (where the upload's
+	// hashing and writing run, off Run) registers exactly as an inline one does.
+	"TypeAttachmentChunk": "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -199,20 +206,21 @@ var excludedTypes = map[string]string{
 	// together and this entry becomes "reply".
 	"TypeSlashCommandList": "push",
 
-	// pending handler — the v2 attachment chunk (#1752). Its own label rather
-	// than one of the eight pushes above, because the frame is BIDIRECTIONAL:
-	// upload rides it client→daemon and retrieval rides it daemon→client, so
-	// "push" and the reason its neighbours give for it ("this slice declares no
-	// inbound request verb") would both be false here. inboundTypes is wrong
-	// too — this slice ships no dispatch, so Assertion #1 would fail it by
-	// construction. Excluded under the reason that is actually true: the inbound
-	// leg has no handler YET. #1744 adds the dispatchAppFrame case, at which
-	// point this entry moves to inboundTypes as "switch-intercepted". TypeHello
-	// above is the precedent — a borderline phone→binary type deliberately not
-	// filed inbound, carrying its own label. Mandatory here from the moment the
-	// constant exists: Assertion #3 reports an unclassified constant, not an
-	// unemitted one.
-	"TypeAttachmentChunk": "pending handler (#1744)",
+	// TypeAttachmentChunk is NO LONGER HERE. It sat here as "pending handler"
+	// while #1752 had declared the constant and nothing dispatched it; #1897 added
+	// the dispatchAppFrame case, so it moved up to inboundTypes as
+	// "switch-intercepted", beside the question and modal arms. That move was
+	// mandatory rather than tidy-up — Assertion #2 fails a wired type still
+	// sitting in this map. Its old entry credited #1744, which was split into
+	// #1895/#1896/#1897 and no longer exists as work; the note below carries the
+	// same repair.
+	//
+	// The reason it was excluded rather than filed as a push is still worth
+	// keeping, because the frame is the map's only BIDIRECTIONAL one: upload
+	// rides it client→daemon and retrieval rides it daemon→client, so "push" and
+	// the reason its neighbours give for it ("this slice declares no inbound
+	// request verb") would both have been false. Its retrieval leg (#1746) adds
+	// no entry anywhere — an outbound use of an already-inbound type needs none.
 
 	// outbound push — the v2 clarifying-question batch (#1962). Outbound-only like
 	// the eight pushes above rather than bidirectional like the attachment chunk,
@@ -239,8 +247,8 @@ var excludedTypes = map[string]string{
 	// dispatched them; #1984 added the dispatchAppFrame cases, so both moved up to
 	// inboundTypes as "switch-intercepted", beside the analogous modal_answer /
 	// modal_cancel. That move was mandatory rather than tidy-up — Assertion #2
-	// fails a wired type still sitting in this map. TypeAttachmentChunk above is
-	// the same shape one step earlier: it stays excluded until #1744 dispatches it.
+	// fails a wired type still sitting in this map. TypeAttachmentChunk made the
+	// same move one step later, in #1897.
 }
 
 func TestEveryInboundV2TypeHasHandler(t *testing.T) {
