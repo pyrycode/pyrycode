@@ -56,7 +56,7 @@ type HelloServerPayload struct {
 // not null). The daemon intersecting this with its own supported set is
 // #608's job — this field is the advertisement only, no enforcement here.
 //
-// LastEventID is the durable per-conversation event id the phone last saw on
+// LastEventID is the durable, daemon-wide-unique event id the phone last saw on
 // the interactive structured stream (the event_id #649 stamps on Envelope).
 // A reconnecting phone advertises it so the daemon can replay the missed tail
 // from the in-memory event ring or signal a resync (#647). A pointer +

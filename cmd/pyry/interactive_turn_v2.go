@@ -120,7 +120,8 @@ type interactiveTurnEmitterV2 struct {
 	nextID uint64
 
 	// ring stores every fanned-out event under a durable, connection-independent
-	// per-conversation id for the #647 reconnect-replay path. It is owned here
+	// id that is unique daemon-wide (#2022) for the #647 reconnect-replay path,
+	// while retention stays per conversation. It is owned here
 	// (created in the constructor, daemon-resident since the emitter is built
 	// once in startInteractiveTurnStreamV2 — codebase/633.md), distinct from the
 	// per-conn envelope nextID above (NOT overloaded). The ring is self-
@@ -640,7 +641,7 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 		return
 	}
 
-	// Assign the durable per-conversation event id and record it for replay
+	// Assign the durable, daemon-wide-unique event id and record it for replay
 	// ONCE per logical event, before the per-conn fan-out — so the same event
 	// carries the same id regardless of conn count, and is retained even when no
 	// phone is interactive right now (the ring is the replay source for absent

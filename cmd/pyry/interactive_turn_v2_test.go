@@ -1262,7 +1262,7 @@ func TestInteractiveTurnEmitterV2_RingEmptyOnEmptyCursor(t *testing.T) {
 
 // --- #649 durable event id on the wire --------------------------------------
 
-// AC-1: every fanned-out envelope carries its durable per-conversation event id
+// AC-1: every fanned-out envelope carries its durable, daemon-wide-unique event id
 // on the wire (env.EventID), and that id equals the ring id recorded for the
 // same logical event, in the same order.
 func TestInteractiveTurnEmitterV2_WireCarriesDurableEventID(t *testing.T) {

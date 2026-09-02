@@ -1444,6 +1444,18 @@ func (m *V2SessionManager) forwardEnvelope(_ context.Context, connID string, env
 	// error, rekey, resync) are never structured events and are never dropped;
 	// conns that never advertised last_event_id keep replayThrough == 0 and
 	// live ids are always >= 1, so the guard is inert for them.
+	//
+	// replayThrough is a single per-conn scalar carrying no conversation tag,
+	// and this is deliberately NOT compensated for here. It is sound because
+	// eventring assigns ids from one ring-wide counter (#2022): every event
+	// appended after the watermark was taken carries a higher id, whatever
+	// conversation it belongs to, so the guard can only ever drop something this
+	// conn was actually given. Before that the id spaces overlapped, and a
+	// watermark clamped for the conversation a conn's replay came from muted
+	// every lower-id event of any conversation the daemon later rotated to.
+	// Making this comparison conversation-aware instead would mean plumbing the
+	// conversation from the emitter through Push to here, for a failure the id
+	// space already removes.
 	if env.EventID != nil && *env.EventID <= s.replayThrough {
 		return nil
 	}

@@ -27,7 +27,7 @@ type Envelope struct {
 	Payload   json.RawMessage `json:"payload"`
 	InReplyTo *uint64         `json:"in_reply_to,omitempty"`
 
-	// EventID is the durable, per-conversation event id (eventring) the
+	// EventID is the durable event id (eventring), unique daemon-wide, that the
 	// interactive structured stream stamps so a phone can advertise it as
 	// last_event_id on reconnect. Distinct from ID (the per-conn envelope
 	// counter that resets each reconnect). A pointer + omitempty so every
