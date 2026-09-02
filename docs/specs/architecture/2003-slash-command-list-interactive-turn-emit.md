@@ -96,3 +96,13 @@ All in `cmd/pyry/interactive_turn_v2_test.go`, driven by the existing `emitterSl
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — the entry-count needle does not go in the emit-path rig
+
+**What changed.** The Testing strategy above says `TestInteractiveTurnEmitterV2_NoAppOutputLogLeak`'s `leakable` slice gains `emitterSlashCommandListSentinels()...` **plus the entry count's decimal spelling**. Only the sentinels were added; the count needle was not.
+
+**What drove it.** Implementation, not a review finding. That rig keeps slog's own time attr, and every record it captures is a `push_err` carrying `env_id` — a small monotonic integer that runs 1..N across the event table. A whole-log `strings.Contains` for a one- or two-digit count is therefore TRUE against a *correct* implementation, which is the vacuous-needle failure with its polarity inverted: the assertion would be red for a reason that has nothing to do with a leak. The sibling's own discharge of this criterion (#1849) added sentinels only, for the same structural reason.
+
+**The new contract.** AC#3's entry-count half is asserted where the record is digit-free: `assertSlashCommandListKindLeaksNothing`, whose logger drops the time attr and whose drop records carry no `env_id`. It already carries `strconv.Itoa(len(emitterSlashCommandListFixture.Commands))` and needed no change. The emit-path rig carries a comment naming why the needle is absent, so a later reader does not "complete" the sweep and turn the test red. The security review's [Error messages, logs, telemetry] SHOULD FIX is discharged by the sentinel sweep on the emit path plus that count needle on the drop path — no log record on either path carries a workspace-authored string, and the count negative holds on the only path that can express it.
