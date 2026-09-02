@@ -389,3 +389,20 @@ one, so a mutant on either is caught broadly by construction; the design decisio
 each defends is still pinned by a named test.
 
 No design change: the implementation matches the plan as committed.
+
+### 2026-09-02 — the sizing estimate, re-measured against what landed
+
+Actual total written work: **1112 lines** — 271 production, 448 test, 393 spec —
+against the 815 estimated above. The two misses are worth carrying forward for
+anyone sizing a `security-sensitive` slice in this package:
+
+- **The mandated `## Security review` section is ~90 lines of spec on its own**
+  and the estimate did not budget for it. The label is applied by the refiner
+  before sizing, so it is knowable in advance.
+- **The test file came in at 448 against 350 estimated**, at this package's
+  comment density and with `assertNoBannedStrings` rolled into every refusal row.
+
+The ceiling call is unchanged and the reasons for it were structural rather than
+arithmetic: the split cap is spent at #1684 → #1744 → #1896, and the only seam
+available produces a one-consumer child the floor rule sends back. Recording the
+overage as measured rather than as estimated is the whole point of stating it.
