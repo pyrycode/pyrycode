@@ -352,6 +352,15 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassInBand(t *testing.T) {
 	if got := runner.revokeCount(); got != 1 {
 		t.Errorf("RevokeBypass called %d times, want exactly 1 (the live revocation)", got)
 	}
+	// ...and it reached the child through RevokeBypass, not through the
+	// mode-carrying sibling #2042 put on the seam beside it. The two emit the same
+	// line for mode "default", so revokeCount alone cannot tell "unchanged" from
+	// "quietly rerouted" — this pair is what makes #2042's no-change-on-the-wire
+	// claim an assertion. #2043 rewrites deliverSettingsInBand to send an
+	// operator-chosen mode; that is the ticket that flips this expectation.
+	if got := runner.permissionModes(); len(got) != 0 {
+		t.Errorf("SetPermissionMode called with %v, want no call: the revocation still routes through RevokeBypass", got)
+	}
 	if restarts := runner.restartArgs(); len(restarts) != 0 {
 		t.Errorf("a revoke respawned the child: Restart%v", restarts)
 	}

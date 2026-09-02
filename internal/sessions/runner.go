@@ -51,9 +51,7 @@ type Runner interface {
 	// writer; #1595 measured the drop live). Pool.UpdateSettings is its one
 	// caller, on the in-band branch, and it is the revoke direction ONLY: claude
 	// gates the escalation on the launch argv and refuses the request in words, so
-	// a YOLO enable keeps the restart. There is no mode parameter here or on
-	// (*streamsup.Runner).RevokeBypass — the enable direction does not exist on
-	// this surface.
+	// a YOLO enable keeps the restart. It takes no mode and can name none.
 	//
 	// It is ON this interface, unlike Interrupt / RestartFresh / BeginRotation,
 	// for the reason SetSpawnArgs is: its consumer is inside internal/sessions, so
@@ -66,7 +64,46 @@ type Runner interface {
 	// Returns the runner's retryable no-live-child error when nothing is bound;
 	// the caller logs and swallows it, because the argv install is the durable
 	// half. Safe from any goroutine.
+	//
+	// It sits beside SetPermissionMode TRANSITIONALLY. #2042 introduced the general
+	// form without touching this one, so the bytes Pool.deliverSettingsInBand
+	// delivers today are provably unchanged; #2043 rewrites that caller to send an
+	// operator-chosen mode, and this method loses its last caller there. The pair
+	// collapses in the slice that owns the consumer, not in the one that introduced
+	// the replacement.
 	RevokeBypass() error
+
+	// SetPermissionMode switches the LIVE child's permission posture without
+	// killing it, by writing one set_permission_mode control request carrying mode
+	// on the stream the daemon already holds open (#2042 widened #1603's writer;
+	// #1595 and #2041 measured the switch live). It is RevokeBypass generalised:
+	// the same line, the same no-respawn delivery, with the mode as a parameter.
+	//
+	// mode is refused unless it is in the runner's closed allow-list — today
+	// "default", "acceptEdits", "plan", "auto" and "dontAsk". The escalating mode is
+	// refused by NON-MEMBERSHIP rather than by a deny-list entry, so it names no
+	// literal and refuses every unanticipated spelling with it; re-granting bypass
+	// stays on the respawn path, where claude gates it on the launch argv.
+	//
+	// The refusal is a distinct, PERMANENT error, and a caller must not treat it as
+	// the retryable no-live-child error: the two are errors.Is-distinguishable and a
+	// refused mode can never succeed on retry. Neither error carries the rejected
+	// mode string, so a caller may log them verbatim — #833 keeps settings values
+	// out of the daemon log and a permission mode is a settings value.
+	//
+	// The allow-list is a VOCABULARY gate, not an authorisation one: it answers
+	// whether claude will parse the mode, never whether this caller may change this
+	// session's posture. Three of its members loosen a child launched in the
+	// daemon's default approval posture, and claude accepts them in-band. A caller
+	// taking a mode from a wire frame owns that decision itself.
+	//
+	// It is ON this interface for RevokeBypass's reason exactly — its consumers sit
+	// inside internal/sessions, where a structural assertion would fail open and
+	// leave a child in the wrong posture while the update reports success.
+	//
+	// Returns the runner's retryable no-live-child error when nothing is bound.
+	// Safe from any goroutine.
+	SetPermissionMode(mode string) error
 }
 
 // RunnerFactory constructs a Runner from a RunnerConfig. It is the injection seam

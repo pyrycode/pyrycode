@@ -67,6 +67,19 @@ func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
 // the one outcome a live revocation exists to prevent. Dispatched by #1604.
 func (a streamRunner) RevokeBypass() error { return a.r.RevokeBypass() }
 
+// SetPermissionMode forwards to (*streamsup.Runner).SetPermissionMode (#2042),
+// switching the live child's permission posture via a set_permission_mode control
+// request rather than a respawn. It is RevokeBypass generalised — the same line
+// with the mode as a parameter — and it is ON the sessions.Runner interface for
+// the same fail-open reason: its consumers sit inside internal/sessions, where an
+// assertion whose unmatched arm silently no-ops would leave a child in the wrong
+// posture while the update reports success.
+//
+// The concrete method refuses any mode outside its closed allow-list, so this
+// forward carries no validation of its own; adding one here would be a second
+// vocabulary to keep in step with the writer's.
+func (a streamRunner) SetPermissionMode(mode string) error { return a.r.SetPermissionMode(mode) }
+
 // Interrupt forwards to (*streamsup.Runner).Interrupt (#1120), ending the running
 // turn via a control_request line. It is OFF the sessions.Runner interface (which
 // stays un-widened, #1077) — a concrete method the #1121 interrupt dispatch

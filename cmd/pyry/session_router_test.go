@@ -25,6 +25,7 @@ func (stubRunner) Run(ctx context.Context) error        { <-ctx.Done(); return c
 func (stubRunner) Restart(args []string)                {}
 func (stubRunner) SetSpawnArgs(args []string)           {}
 func (stubRunner) RevokeBypass() error                  { return nil }
+func (stubRunner) SetPermissionMode(mode string) error  { return nil }
 
 // newRouterTestPool builds a real *sessions.Pool. sessions.New constructs the
 // bootstrap session entry without spawning claude, so Pool.Lookup works against

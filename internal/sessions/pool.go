@@ -892,8 +892,13 @@ func inBandDeliverable(update SettingsUpdate) bool {
 // NEVER logged, at any level: the model or effort value, the payload bytes, the
 // conversation id. #833 keeps settings values out of the daemon log and this path
 // gets no exemption just because the value now travels as command text. The
-// bypass record satisfies that rule structurally rather than by discipline —
-// RevokeBypass takes no mode, so there is no value it could leak.
+// bypass record satisfies that rule structurally rather than by discipline, and
+// since #2042 that rests on two clauses rather than one: the revoke shorthand this
+// site calls takes no mode, AND the seam's mode-carrying sibling
+// (Runner.SetPermissionMode) refuses an unsupported mode without echoing the
+// rejected string. The first clause expires when #2043 rewrites this site to send
+// an operator-chosen mode; the second is the one that still holds afterwards, and
+// it is why the error may be logged verbatim then too.
 func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUpdate) {
 	notDelivered := func(setting string, err error) {
 		p.log.Info("sessions: in-band settings command not delivered",
