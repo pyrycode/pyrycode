@@ -73,7 +73,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 |---|---|---|---|
 | `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678) | true |
-| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content)}` | true |
+| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, straight-through, no cap here — see below) | true |
 | `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |
@@ -272,6 +272,17 @@ the six-bytes-per-rune arithmetic) and states the same **display string, not a
 capability** hazard § `tool_use` states for `Input` — a tool result is raw
 command output or file contents, so a `'<'`-dense result is the ordinary case,
 not the contrived one.
+
+**The measured worst case moved with #2024's `ResultDetail` field** (see
+[protocol-package-interactive-event-payloads.md](protocol-package-interactive-event-payloads.md)):
+`TestToolResultPayload_FitV2EnvelopeCap` now carries it at its own 48-byte
+constructed worst case alongside the capped `ResultSummary`, measuring
+**61430 B, 93.8%** of the 65519-byte cap — up from 61363 B / 93.7%, exactly
+the field's 48 bytes plus 19 B of key and punctuation. `ResultDetail` needed
+no rune cap of its own (see the protocol doc) because it is formatted digits,
+not claude's text carried through — but it still eats headroom on this
+payload, now **~4.1 KB** rather than ~4.2 KB. The next field added here
+inherits the smaller number.
 
 ### Per-field input extraction (`inputFields` / `inputValue`, #1678)
 

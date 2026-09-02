@@ -143,6 +143,44 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// #2024. ResultDetail maps straight through, uncapped: its producer
+			// (streamsup's readLineCount) bounds it at construction, and it carries
+			// no claude-supplied byte for a cap here to defend against.
+			name: "ToolUpdate with a read's line count -> tool_result result_detail",
+			ev: turnevent.ToolUpdate{
+				ToolCallID:   "tool-6",
+				Status:       turnevent.ToolStatusCompleted,
+				Content:      turnevent.TextContent{Text: "file contents"},
+				ResultDetail: "110 of 1676 lines",
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-6",
+				IsError: false, ResultSummary: "file contents",
+				ResultDetail: "110 of 1676 lines",
+			},
+			wantOK: true,
+		},
+		{
+			// The common case by a wide margin: about 95% of calls are tools with
+			// no meaningful count, and an empty ResultDetail must survive the
+			// mapping as empty rather than acquiring a placeholder.
+			name: "ToolUpdate with no count -> tool_result result_detail empty",
+			ev: turnevent.ToolUpdate{
+				ToolCallID: "tool-7",
+				Status:     turnevent.ToolStatusCompleted,
+				Content:    turnevent.TextContent{Text: "ok"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-7",
+				IsError: false, ResultSummary: "ok",
+			},
+			wantOK: true,
+		},
+		{
 			name: "ToolUpdate failed -> over-cap error result truncated",
 			ev: turnevent.ToolUpdate{
 				ToolCallID: "tool-5",
@@ -2012,6 +2050,25 @@ func TestToolResultPayload_FitV2EnvelopeCap(t *testing.T) {
 		t.Fatalf("precondition: summary is %d runes, want %d (the cap plus one ellipsis)", n, maxResultSummaryRunes+1)
 	}
 
+	// ResultDetail at ITS producer's worst case (#2024), so the measurement
+	// covers the field rather than assuming it is small. streamsup's readLineCount
+	// composes from two non-negative int64s, so the longest string it can build is
+	// 19 digits + " of " + 19 digits + " lines" = 48 bytes; that number is
+	// maxResultDetailBytes over in streamsup, repeated here because it is
+	// unexported there — slashFillRow repeats the producer's caps for the same
+	// reason and names the same failure mode to watch for, a worst case that is no
+	// longer the producer's.
+	//
+	// Unlike ResultSummary above, this is NOT cut by anything in this package: the
+	// bound is over int64's RANGE rather than over claude's input length, which is
+	// what makes an absurd line count unable to grow the frame. The fill is digits
+	// and ASCII rather than '<' because that IS the producer's alphabet — it emits
+	// no byte encoding/json escapes, so 48 bytes here is 48 bytes on the wire.
+	detail := "9223372036854775806 of 9223372036854775807 lines"
+	if len(detail) != 48 {
+		t.Fatalf("precondition: detail fill is %d B, want the producer's 48-byte worst case", len(detail))
+	}
+
 	// IsError is explicitly false because that is the worst case: "false" costs
 	// one byte more on the wire than "true", and the field is never omitted.
 	body, err := json.Marshal(protocol.ToolResultPayload{
@@ -2020,6 +2077,7 @@ func TestToolResultPayload_FitV2EnvelopeCap(t *testing.T) {
 		ToolUseID:      fill(64),
 		IsError:        false,
 		ResultSummary:  summary,
+		ResultDetail:   detail,
 	})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)

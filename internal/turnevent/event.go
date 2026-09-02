@@ -59,10 +59,26 @@ type ToolStart struct {
 
 // ToolUpdate carries changed fields of an existing tool call. Content may be
 // nil for a status-only update.
+//
+// ResultDetail is a short, DAEMON-COMPOSED précis of the call's structured
+// outcome — "265 lines", "110 of 1676 lines" — derived from the tool_use_result
+// sidecar claude writes alongside each result (#2024). Empty means "no count",
+// which is the answer for about 95% of calls and for every shape the producer
+// does not recognise.
+//
+// Its provenance is the opposite of Content's and the distinction matters to
+// every consumer. Content carries claude's own bytes, so it needs a cap
+// downstream (turnbridge's maxResultSummaryRunes). ResultDetail contains NO
+// claude-supplied byte at all: streamsup's readLineCount formats two decoded
+// integers, so the alphabet is digits, spaces and ASCII letters and the length
+// is bounded by int64's range at construction. Treat it as display text — render
+// it, never parse it; the unit words live here precisely so a client need not
+// switch on a tool name to know what the number counts.
 type ToolUpdate struct {
-	ToolCallID string
-	Status     ToolStatus
-	Content    ToolContent
+	ToolCallID   string
+	Status       ToolStatus
+	Content      ToolContent
+	ResultDetail string
 }
 
 // TurnEnd marks the end of a claude turn, carrying the reason only.
