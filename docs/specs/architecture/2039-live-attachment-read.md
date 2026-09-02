@@ -346,3 +346,58 @@ and it still exits 0 through a shell wrapper.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — AC 3's mutation, and the one place the plan was wrong about it
+
+**What changed.** § Testing strategy prescribed `go test -overlay=<manifest>` as the
+way to run the mutant, following the ticket's own technical note. That does not work
+in this package, and the plan was wrong to carry it unexamined.
+
+**Why.** The overlay reaches the *test binary*. The daemon under test is a separate
+process, produced by `ensurePyryBuilt` shelling out to a plain `go build` with no
+overlay flag — so an overlaid run exercises an unmutated daemon and greens
+misleadingly, which is the failure mode this whole ticket exists to prevent one rung
+down. `ensurePyryBuilt` honours `PYRY_E2E_BIN`, so the mutation goes into the binary
+instead. Still no worktree write. Recorded in the test's header too, since that is
+where the next person to re-run the mutation will look.
+
+**The mutation.** A copy of `internal/relay/handlers/send_message.go` whose
+`composeAttachmentPrompt` returns `text` unconditionally — the empty-path list is
+already that function's identity case, so this is "composition disabled" exactly.
+Manifest, then binary, then run:
+
+```
+go build -overlay=<abs>/overlay.json -o <abs>/pyry-mutant ./cmd/pyry
+PYRY_E2E_BIN=<abs>/pyry-mutant go test -tags e2e_realclaude -count=1 -v \
+  -run '^TestInteractiveStreamAttachmentRead$' ./internal/e2e/realclaude/
+```
+
+`overlay.json` is `{"Replace": {"<abs>/internal/relay/handlers/send_message.go":
+"<abs>/send_message_mutant.go"}}`.
+
+**Measured red (AC 3).** `--- FAIL` in 6.81s, 1 `=== RUN` line, exit 1. Claude's
+reply is the diagnostic: *"I don't see a file path in your message. Could you please
+provide the path to the file you'd like me to read?"*, zero tools called. The upload
+chain ran green underneath — `attachment_stored` arrived and
+`requireStoredAttachment` passed — so the red is isolated to the composition and not
+to the transfer.
+
+**Measured green.** `--- PASS` in 8.97s, 1 `=== RUN` line, exit 0. Claude called
+exactly one tool, `Read`, and replied with the 24-character token and nothing else.
+
+### 2026-09-03 — Open questions resolved
+
+1. **Does a live claude open an absolute path outside its cwd?** Yes. The attachment
+   sits under the daemon's instance directory, not the workspace, and claude read it
+   without a modal and without objecting to its location. No workaround needed, and
+   the risk the ticket flagged did not materialise.
+2. **Does claude echo a 24-hex-char token byte-exact?** Yes — a 24-byte reply for a
+   25-byte file, no reformatting. The assertion therefore stays a strict
+   `strings.Contains`; the case-folding fallback § Open questions held in reserve was
+   not taken, and is not in the shipped code.
+3. **Is one cursor-stamp turn enough?** Yes. `attachment_stored` arrived and the
+   bytes landed on the host on the first attempt, under both the real and the mutant
+   build, so the follow-active cursor survives from the routed turn to the chunk with
+   no re-stamp.
