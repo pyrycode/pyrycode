@@ -211,6 +211,18 @@ re-tabled here.
   is the expected answer — confirm against the payload's `MarshalJSON` exemption
   before settling.
 
+## Revisions
+
+**2026-09-02 (Phase B)** — the sole Open Question resolved as predicted, so no
+design changed. `assertSlashCommandsCarry` compares both `Aliases` and
+`TruncatedFields` with `reflect.DeepEqual`: `protocol.SlashCommand.MarshalJSON`
+normalises `Aliases` but deliberately **exempts** `TruncatedFields`, so a nil
+there has to survive the whole path, and `slices.Equal(nil, []string{})` reports
+true — a length or `slices.Equal` comparison would carry the difference
+invisibly. Recorded because the reason is stronger than the plan stated: the
+exemption makes the choice mandatory for one of the two fields rather than
+merely expected for both.
+
 ## Security review
 
 **Verdict:** PASS
