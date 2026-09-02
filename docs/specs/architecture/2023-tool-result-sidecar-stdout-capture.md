@@ -495,3 +495,55 @@ reconstruct from the diff.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — the sidecar is on stdout under a different spelling
+
+**What changed:** `sidecapInspect` searches **two** spellings of the sidecar key,
+`toolUseResult` and `tool_use_result`, and records per line which one was seen
+(`tool_use_result_key`, `tool_use_result_spellings`) plus a record-level
+`sidecar_key_spelling_census`. The plan above specified a single key, `toolUseResult`,
+because that is the only spelling the 33 transcript sidecars use.
+
+**What drove it:** the first live run, against claude 2.1.239. It returned
+`outcome: sidecar-absent` — no line carried `toolUseResult` — and that answer was
+literally true and materially wrong. The retained lines' own `line_keys` carried
+`tool_use_result`, and its value was the transcript's file key set verbatim:
+`{"type":"text","file":{"filePath":…,"content":…,"numLines":…,"startLine":…,"totalLines":…}}`.
+**The sidecar is on stdout. Stdout spells it in snake_case.**
+
+**Why this was not left as a follow-up.** An `Open questions` entry above asks
+whether the sidecar arrives on stdout at all, and a committed artifact answering
+"absent" is exactly the input that would tell the downstream decoder ticket not to
+build a decoder. That is the *inverse* of the dead-code failure this ticket exists
+to prevent, and it would have been just as invisible: the artifact would have been
+internally consistent, the gate green, the budget spent. A one-spelling instrument
+is the defect, not the ticket's scope.
+
+**Result after the change**, same claude version, one live turn:
+
+| | |
+| --- | --- |
+| outcome | `sidecar-present` — 2 of 3 retained `user` lines |
+| spelling census | `{"tool_use_result": 2}` — **zero** camelCase |
+| observed key sets | `[file, type]` and `[interrupted, isImage, noOutputExpected, stderr, stdout]` |
+| block histogram | `{"0": 1, "1": 2}` — one `tool_result` block per sidecar-bearing line |
+
+So the two key sets the transcript's shape table predicts for a file read and a
+shell call **do** reproduce on stdout, byte-shape intact, under a snake_case key.
+Open question 1 is resolved present-with-a-caveat; open question 3 is resolved for
+this turn at one sidecar per block, on a stdout observation rather than on the
+transcript's 33-for-33.
+
+### 2026-09-02 — the writer declines to write on an instrument-broken run
+
+**What changed:** `sidecapWriteFixture` returns without writing when
+`stdout_lines_captured` is zero, logging the outcome instead. The plan's § Outcomes
+made `instrument-broken` fatal but did not say whether a fixture lands.
+
+**Why:** #1260 writes its record on every path because it writes to a temp artifact
+directory an operator inspects by hand. This writes into `testdata/`, which the run
+`git add`s, so a record with no captured lines would commit a worthless artifact
+under a filename claiming to be a capture of claude 2.1.239. The outcome still
+reaches the run log, which is where a broken instrument needs to be visible.

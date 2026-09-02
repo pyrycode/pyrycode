@@ -1,0 +1,187 @@
+{
+  "ticket": "2023",
+  "claude_version": "2.1.239 (Claude Code)",
+  "captured_at": "2026-09-02T14:07:54+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "This is the YOLO interactive shape. Production's stream path adds, via cmd/pyry's withApprovalArgs and internal/sessions.claudeSettingsArgs, a --permission-prompt-tool / --mcp-config pair on NON-yolo spawns plus a per-session --settings. This capture passes none of them: it uses --dangerously-skip-permissions, a real production shape (the YOLO session bit) and precisely the arm on which withApprovalArgs injects nothing. Whether the flag alters the user/tool_result line is UNMEASURED — do not read parity into it.",
+  "env_delta": [],
+  "workdir": "$WORKDIR",
+  "input_file": "$WORKDIR/sidecap-input.txt",
+  "input_file_content": "pyry #2023 probe input.\nThis file exists so one Read tool call has something to return.\nIts bytes are a declared constant in tool_result_sidecar_probe_test.go.\n",
+  "prompt": "Do exactly two things, in this order, and nothing else. First, use the Read tool exactly once on this file: $WORKDIR/sidecap-input.txt. Second, use the Bash tool exactly once to run this command verbatim: echo pyry-2023-shell-marker. Do not chain commands with \u0026\u0026 or ;, do not add any flags or redirections, do not read or list any other file, and do not comment on the results. run=$NONCE",
+  "outcome": "sidecar-present",
+  "outcome_detail": "2 of 3 retained user line(s) carry a top-level sidecar; spelling census map[tool_use_result:2]. NOTE the spelling: the transcript spells it \"toolUseResult\" and a decoder keyed on that name is dead code on stdout if the census below says \"tool_use_result\"",
+  "sidecar_observation_valid": true,
+  "terminated_on": "result",
+  "stdout_lines_captured": 34,
+  "user_lines_retained": 3,
+  "user_lines": [
+    {
+      "index": 12,
+      "line_keys": [
+        "message",
+        "parent_tool_use_id",
+        "session_id",
+        "timestamp",
+        "tool_use_result",
+        "type",
+        "uuid"
+      ],
+      "tool_use_result_present": true,
+      "tool_use_result_key": "tool_use_result",
+      "tool_use_result_spellings": [
+        "tool_use_result"
+      ],
+      "tool_use_result_is_object": true,
+      "tool_use_result_kind": "object",
+      "tool_use_result_keys": [
+        "file",
+        "type"
+      ],
+      "tool_result_block_count": 1,
+      "content_block_types": [
+        "tool_result"
+      ],
+      "payload_len_bytes": 881,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01QGE5CxkESTinJMgTZzMCdE\",\"type\":\"tool_result\",\"content\":\"1\\tpyry #2023 probe input.\\n2\\tThis file exists so one Read tool call has something to return.\\n3\\tIts bytes are a declared constant in tool_result_sidecar_probe_test.go.\\n4\\t\"}]},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"0802d929-8014-4f34-8c0c-9c4dd4425eff\",\"timestamp\":\"2026-09-02T11:07:58.537Z\",\"tool_use_result\":{\"type\":\"text\",\"file\":{\"filePath\":\"$WORKDIR/sidecap-input.txt\",\"content\":\"pyry #2023 probe input.\\nThis file exists so one Read tool call has something to return.\\nIts bytes are a declared constant in tool_result_sidecar_probe_test.go.\\n\",\"numLines\":4,\"startLine\":1,\"totalLines\":4}}}"
+    },
+    {
+      "index": 18,
+      "line_keys": [
+        "message",
+        "parent_tool_use_id",
+        "session_id",
+        "timestamp",
+        "tool_use_result",
+        "type",
+        "uuid"
+      ],
+      "tool_use_result_present": true,
+      "tool_use_result_key": "tool_use_result",
+      "tool_use_result_spellings": [
+        "tool_use_result"
+      ],
+      "tool_use_result_is_object": true,
+      "tool_use_result_kind": "object",
+      "tool_use_result_keys": [
+        "interrupted",
+        "isImage",
+        "noOutputExpected",
+        "stderr",
+        "stdout"
+      ],
+      "tool_result_block_count": 1,
+      "content_block_types": [
+        "tool_result"
+      ],
+      "payload_len_bytes": 465,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01Dnb1t3eG5ZLkyXpYDvD3fW\",\"type\":\"tool_result\",\"content\":\"pyry-2023-shell-marker\",\"is_error\":false}]},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"9a2ef321-a3df-4166-82a7-07c3aa9daabe\",\"timestamp\":\"2026-09-02T11:08:00.102Z\",\"tool_use_result\":{\"stdout\":\"pyry-2023-shell-marker\",\"stderr\":\"\",\"interrupted\":false,\"isImage\":false,\"noOutputExpected\":false}}"
+    },
+    {
+      "index": 24,
+      "line_keys": [
+        "isSynthetic",
+        "message",
+        "parent_tool_use_id",
+        "session_id",
+        "timestamp",
+        "type",
+        "uuid"
+      ],
+      "tool_use_result_present": false,
+      "tool_use_result_is_object": false,
+      "tool_use_result_kind": "absent",
+      "tool_result_block_count": 0,
+      "content_block_types": [
+        "text"
+      ],
+      "payload_len_bytes": 361,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"[Your previous response had no visible output. Please continue and produce a user-visible response.]\"}]},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"dde7fc58-12f1-422c-a7e9-23414d74fc1c\",\"timestamp\":\"2026-09-02T11:08:01.432Z\",\"isSynthetic\":true}"
+    }
+  ],
+  "sidecar_present_count": 2,
+  "sidecar_absent_count": 1,
+  "sidecar_key_spelling_census": {
+    "tool_use_result": 2
+  },
+  "observed_key_sets": [
+    {
+      "keys": [
+        "file",
+        "type"
+      ],
+      "count": 1
+    },
+    {
+      "keys": [
+        "interrupted",
+        "isImage",
+        "noOutputExpected",
+        "stderr",
+        "stdout"
+      ],
+      "count": 1
+    }
+  ],
+  "tool_result_block_count_histogram": {
+    "0": 1,
+    "1": 2
+  },
+  "content_block_type_census": {
+    "text": 1,
+    "tool_result": 2
+  },
+  "redaction": [
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 4
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 4
+    }
+  ],
+  "redaction_rationale": "The primary defence is by construction: the workdir is a fresh directory with NO git repo (no branch names), the prompt is rig-authored, the shell call is a fixed `echo` of a declared marker, and os.Environ() is never read into the record. Retention is keyed on type==\"user\", which is a NARROWING over #1260's capture: a system/init line — that file's largest operator-specific class, carrying the local MCP server names, tool list, slash-command names, skill names and subagent names — is never retained here at all. THE ONE WIDENING, STATED RATHER THAN INHERITED: unlike #1260's workdir this one is NOT empty. It holds exactly one file, because an AC needs a file read, and that file's entire content is a declared constant in tool_result_sidecar_probe_test.go (carried in this record as input_file_content, so a reader can check it rather than take this sentence on trust). Nothing operator-derived is introduced, but the by-construction argument is weaker by exactly that much. On top of that, dropcapRedactor substitutes a declared table of path/identifier classes into EVERY string entering the record, and dropcapScanner is a fail-closed deny-scan over the whole marshalled record plus every base64 payload's decoded bytes. DELIBERATELY KEPT, because removing them would defeat the ticket: top-level types and subtypes, claude's structural fields, tool names and tool-use ids, the sidecar's key sets and values, the rig-authored file content and echo marker, token counts and timestamps.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": false,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "limitations": "One turn, one spawn shape, one claude version, one model (haiku), and exactly two tool calls (one Read, one Bash). Cross-version, cross-model and cross-tool stability are UNMEASURED. A key set absent from observed_key_sets did not appear on THIS turn, which is not the same as claude never emitting it. In particular the transcript's 33 sidecars land in four key sets, and this turn can at most reach the two that a file read and a shell call produce.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}
