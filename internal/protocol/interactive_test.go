@@ -1793,8 +1793,11 @@ func TestSlashCommandListType_IsNotClaudesVocabulary(t *testing.T) {
 //     10-of-51 population a per-field bound cuts first. Populated on one row and
 //     null on the other four is model_list.json's own two-form pattern.
 //   - dropped_commands. 2, non-zero so this fixture pins the value rather than
-//     the zero encoding. Nothing counts it yet: #1719 owns making the decode
-//     record it, #1720 is where the field and a counter meet.
+//     the zero encoding. Something counts it since #1826 — streamsup's
+//     maxSlashCommandListEntries bounds the entry count and
+//     turnevent.SlashCommandList.DroppedCommands carries the cut — but nothing
+//     MAPS that onto this field, so the 2 here is still a fixture's number and
+//     not a producer's. #1720 is where the field and that counter meet.
 //
 // Row 1's description is asserted by measured property rather than as an exact
 // string — it is the only row too long for the table, and byte length, rune
@@ -1892,8 +1895,11 @@ func TestSlashCommandListPayload_RoundTrip(t *testing.T) {
 	})
 
 	// The count dimension, decided at the menu level and distinct from any row's
-	// text cut. Nothing counts it yet, so a client must not read
-	// len(commands) + dropped_commands as the menu's true size today.
+	// text cut. A producer counts it since #1826 (streamsup's
+	// maxSlashCommandListEntries), but nothing maps that count onto this payload and
+	// no frame of this type is produced at all, so a client still cannot read
+	// len(commands) + dropped_commands as the menu's true size off any live frame —
+	// #1720 is what makes that reading true.
 	if payload.DroppedCommands != 2 {
 		t.Errorf("DroppedCommands: got %d, want 2", payload.DroppedCommands)
 	}

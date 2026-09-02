@@ -1047,15 +1047,21 @@ type SlashCommand struct {
 // emitSlashCommandList applies the PER-FIELD CAPS, constructs the entries and EMITS
 // this list (#1877, in the tree — #1886 moved that construction out of emitModelList
 // into an emitter of its own, so more than one call site reaches it); the ENTRY-COUNT
-// BOUND, and the drop count that arrives
-// with it, is #1826's; and the PUBLISH — turnbridge.MapEvent's arm and cmd/pyry's
-// interactiveTurnEmitterV2.Handle case — is #1720's and is still open. #1719 is
-// CLOSED and was the decode, so it names no future producer.
+// BOUND, and the drop count that arrives with it, is #1826's and is IN THE TREE —
+// maxSlashCommandListEntries, cut in emitModelList above both rungs that read the
+// array, reported here as DroppedCommands; and the PUBLISH — turnbridge.MapEvent's
+// arm and cmd/pyry's interactiveTurnEmitterV2.Handle case — is #1720's and is still
+// open. #1719 is CLOSED and was the decode, so it names no future producer. ONE of
+// the four remains, and it is the only one that was ever a WIRE change.
 //
-// EVERY FIELD OF SlashCommand IS NOW BOUNDED and the one unbounded dimension left is
-// the ENTRY COUNT, which is #1826's: a per-field cap alone leaves this list's total
-// size a function of a number claude chooses, exactly as maxModelListEntries supplied
-// that missing factor for ModelList.
+// EVERY DIMENSION IS NOW BOUNDED and there is no unbounded one left to name. The
+// per-entry TEXT by streamsup's four field caps, reported per entry in
+// SlashCommand.TruncatedFields; the per-entry ALIAS count by
+// maxSlashCommandAliasCount, reported on the entry it happened to; and the ENTRY
+// count by maxSlashCommandListEntries, reported here as DroppedCommands — which is
+// the factor a per-field cap alone cannot supply, exactly as maxModelListEntries
+// supplied it for ModelList. What that does NOT give is a bound the WIRE can rely
+// on; DroppedCommands' own doc states the gap and names #1720 as its owner.
 //
 // IT IS PUBLISHED BY NO PATH TODAY. turnbridge.MapEvent has no arm for it, so its
 // default drops it, and cmd/pyry's interactiveTurnEmitterV2.Handle has no case,
@@ -1075,15 +1081,17 @@ type SlashCommand struct {
 // re-deriving it. That variation is why the list is per session and per working
 // directory, and why a client must not cache one across working directories.
 //
-// NO DroppedCommands FIELD, and the asymmetry with the wire type is deliberate.
-// protocol.SlashCommandListPayload declared its count ahead of any counter
-// because a WIRE with nowhere to put a drop discards it silently, and adding a
-// key later is a compatibility event. A daemon-internal struct is not a
-// compatibility surface: adding a field to it is a local change. So the count
-// arrives with the ENTRY-COUNT BOUND that produces it, which is how
-// ModelList.DroppedModels arrived with streamsup's maxModelListEntries and
-// BackgroundTaskRoster.DroppedTasks with maxTaskRosterEntries. A reader who knows
-// the wire type would otherwise read the absence as an oversight.
+// THE DroppedCommands FIELD ARRIVED WITH ITS BOUND (#1826), one slice after the
+// wire type declared its own, and the sequencing was the decision rather than an
+// accident of it. protocol.SlashCommandListPayload declared its count AHEAD of any
+// counter because a WIRE with nowhere to put a drop discards it silently, and
+// adding a key later is a compatibility event. A daemon-internal struct is not a
+// compatibility surface: adding a field to it is a local change, so this one waited
+// for the ENTRY-COUNT BOUND that produces it — which is how ModelList.DroppedModels
+// arrived with streamsup's maxModelListEntries and BackgroundTaskRoster.DroppedTasks
+// with maxTaskRosterEntries. The asymmetry a reader who knew the wire type would
+// once have read as an oversight is CLOSED, and what remains is the mapping between
+// the two fields, which is #1720's.
 //
 // claude's session_id is deliberately not a field, for BackgroundTaskStarted's
 // reason: claude's session identity is NOT the daemon's conversation identity,
@@ -1128,7 +1136,39 @@ type SlashCommandList struct {
 	// cannot tell that from "claude said nothing about commands" and will not
 	// assert it. That position still governs how a list that WAS emitted
 	// serialises, which is what #1720 reads it for.
+	//
+	// The entry COUNT is bounded too since #1826 (streamsup's
+	// maxSlashCommandListEntries), which is what a per-entry text cap alone cannot
+	// supply: the array's length is claude's — really the WORKSPACE's — to choose,
+	// so a per-field cap alone leaves the total a function of a number the daemon
+	// does not control. The list is truncated FROM THE TAIL when that cap fires,
+	// and the true size stays recoverable as len(Commands) + DroppedCommands.
 	Commands []SlashCommand
+	// DroppedCommands is how many entries the producer cut beyond its entry cap
+	// that this event does NOT carry; 0 when nothing was dropped. The list's true
+	// size is len(Commands) + DroppedCommands.
+	//
+	// The count dimension reports HERE rather than in a top-level TruncatedFields
+	// naming "commands", and that is why this variant has no top-level
+	// TruncatedFields at all — BackgroundTaskRoster.DroppedTasks' stated reason,
+	// unchanged: a name-only report loses how many were lost, and the count is the
+	// strictly more informative signal. Each dimension reports at the level where
+	// it happens — a text cut and an alias-list cut are both properties of ONE
+	// entry and ride that entry as SlashCommand.TruncatedFields.
+	//
+	// It is the only field on this variant that is DAEMON-derived rather than
+	// workspace-derived: an int computed from a slice length, carrying none of the
+	// workspace's bytes. That is what makes it the one field here a consumer may
+	// trust without the render boundary this type's SECURITY paragraph demands of
+	// every other one.
+	//
+	// WHAT IT DOES NOT BOUND is worth stating where a reader will look for it: the
+	// count cap makes the retained size a function of a daemon constant instead of
+	// a workspace's, but 128 entries at the 1280-byte per-entry term is 163,840
+	// bytes, well past the 65519-byte v2 application-envelope cap. No count cap can
+	// close that gap — maxSlashCommandListEntries carries the arithmetic — so a
+	// FRAME-level bound is #1720's to decide when this list first reaches a wire.
+	DroppedCommands int
 }
 
 // Stall is an internal-only onset marker: tui-driver raised a one-shot

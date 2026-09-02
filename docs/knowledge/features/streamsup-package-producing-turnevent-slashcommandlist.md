@@ -129,3 +129,51 @@ that exact row deleted and found three *other* test functions still caught it �
 hardcoded literal) was true and unaffected, but the "goes green" clause overstated the row's
 uniqueness. A claim about what a mutant would do is an empirical claim; write it after running the
 mutant, not instead of running it.
+
+**The entry count is bounded and the drop is counted — `maxSlashCommandListEntries` (128), #1826.**
+`maxTaskRosterEntries`' doctrine's third application after `maxModelListEntries` (#1812): tail
+truncation at construction, reported on `turnevent.SlashCommandList.DroppedCommands`, cut once in
+`emitModelList` above both rungs that read the array so `logControlResponse` can report it and neither
+rung needs its own cap. `commands` becomes the *emitted* count (mirroring `models`); `commands_dropped`
+is the record's seventh, daemon-computed attribute.
+
+*Lesson: a candidate set a sibling doc hands forward is a candidate set, not an answer — check it
+against current observations before taking it.* `maxSlashCommandDescription`'s fraction table offered
+6 or 8 entries, computed against the 1280-byte worst case. Both cut the committed capture's 51-entry
+menu by over 40 entries — a cap firing on claude's ordinary output, which this family's own
+`maxModelListEntries` doc rules out by name. Re-basing the fraction at the *retained* size (131.59
+B/entry, not the worst case) still wasn't enough: a second, larger observation (74 entries, a different
+claude version and working directory) already sits at 59% of the whole-line ceiling before any cap
+fires, so no count clearing it keeps the worst-case product under the v2 envelope. The derivation that
+resolves this has to say which constraint gives — here, the worst-case-product convention, kept instead
+being the rule that a cap must not fire on ordinary output — and name it as spent rather than silently
+picking whichever candidate is closest to hand. The next slice to read this constant's doc (#1720, the
+wire producer) is the reason the "does not buy" half matters as much as the number: 128 entries is
+headroom over both observations, but its worst case is still 2.5x the 65,519-byte application-envelope
+cap, and nothing about the count being bounded means a frame built from it fits.
+
+*Lesson: an inherited amplification claim needs recomputing per struct, not citing.* This family's
+per-entry caps cross-reference `maxTaskRosterEntries`' "linear and near 1" transient-amplification
+figure. `commandEntryLine`'s densest *legal* entry is `{},` — three bytes, because every key is
+optional — for a 72-byte decoded struct: ~24x, not near 1. The inherited citation would have understated
+a 4 MiB input line's transient allocation by two orders of magnitude (~100 MB, not ~4 MiB) at the exact
+struct this ticket was bounding. Worth checking before reusing any "amplification is near 1" claim
+against a struct whose fields are optional in a way the cited struct's aren't.
+
+*Lesson: a byte-accurate re-derivation of a doc-stated measurement can disagree with a naive one, and
+the disagreement is the tell for which is wrong.* Re-deriving `maxSlashCommandDescription`'s cited
+6,711-byte retained figure through Go's own `truncateField` reproduced it exactly; a first pass using
+`jq`'s `.[0:256]`, which slices by *codepoint*, returned 6,735 — 0.4% off, from cutting some multi-byte
+runes short of where a byte-accurate cut would. Separately, the protocol package's 14,277-byte figure
+for the same array turned out to be the *raw claude* bytes, not the capped daemon-side ones (11,403
+after truncation, with Go's HTML-escaping). Two measurements that look like they're of the same thing
+can be of different things; re-derive rather than transcribe, and check which side of a cap a cited
+figure was taken from.
+
+*Lesson: an equality against a fixture's own length is not a headroom proof.* `len(list.Commands) ==
+len(want)` on the committed 51-entry capture holds against a cap of 1 exactly as well as against 128 —
+it proves the cap didn't fire on *this* fixture, never that the cap has room above it. Proving headroom
+(AC 4 here) needs a guard that fails loudly should the fixture ever grow to meet the cap —
+`len(want) < cap`, asserted with `t.Fatalf` before the equality — so a future re-capture that
+approaches the cap reddens the guard and names itself as the cause, rather than reading as a producer
+regression.
