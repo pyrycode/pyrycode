@@ -78,6 +78,16 @@ Gate: `go test -race` on `internal/turnbridge`, `internal/streamsup`, `internal/
 1. **Does `internal/protocol/interactive.go` need editing?** AC 5 names exactly two doc blocks plus one sentence, none of them in `protocol`. But `SlashCommandListPayload`'s doc claims the arm carries the count "onto this field **verbatim**, never recomputed from len(Commands)", which AC 2 falsifies. Resolution: correct it. It is one sentence, and it is the fourth production file — measured, labelled `needs-human:sizing` and commented on the ticket, per the depth-capped path.
 2. **What reserve does the constant leave?** Fixed in Phase B from the cap test's measured output, not guessed here. Record the number in the constant's doc and in a `## Revisions` entry if it moves the constant.
 
+## Revisions
+
+**2026-09-02 — both Open questions resolved, and one test added that the plan did not foresee.**
+
+1. **`internal/protocol/interactive.go` is edited** (Open question 1, as planned). `SlashCommandListPayload`'s doc now says the arm takes the event's count as its *base* and adds its own frame cut, so the wire field is the sum of two cuts where the event-side field is the producer's alone. The same sweep found two further clauses in `turnevent.SlashCommandList`'s type doc that this commit falsifies and that AC 5 does not name — "with DroppedCommands carried" in the four-way attribution paragraph, and the "what that does NOT give is a bound the WIRE can rely on" sentence — both corrected in the same commit. No file count moved; both are in a file AC 5 already names.
+
+2. **`maxSlashCommandListBytes` is 64000, and the reserve is measured, not guessed** (Open question 2). `TestSlashCommandListPayload_FitV2EnvelopeCap` reports 8 worst-case entries kept, a 62,657-byte `commands` array, a 63,224-byte envelope at 96.5% of the cap, and a **567-byte** reserve outside `commands` against the 1,519 the constant leaves — roughly 2.7x. The constant's doc carries those numbers and says why a tighter margin than the sibling constants' is correct here: what they reserve against is an unbounded input field, where the only unbounded contributor left outside this measurement is `conversation_id`.
+
+3. **`TestMapEventSlashCommandListCutEndsTheWalk` was added, and the plan would have shipped without it.** The plan states the `break`-never-`continue` decision, and the over-budget test's fixture cannot detect it: every row there is the same worst-case size, so skipping a row and ending the walk produce identical output. Mutating the cut's `break` to `continue` over a `go test -overlay` left the whole package green. The new test decorrelates the fixture — ten worst-case rows followed by three tiny ones — so a skipping implementation admits a small row behind the cut and the prefix assertion names it. The prefix check deliberately runs before the count precondition, since a skipping implementation keeps *more* rows and a count guard placed first reports the failure as a stale fixture. The additive-drop assertion was mutation-checked the same way and already bound.
+
 ## Security review
 
 **Verdict:** PASS
