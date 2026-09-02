@@ -125,3 +125,32 @@ early. Any test in this family built the same way — assert a frame arrives,
 nothing more — should expect its red path to cost its whole budget, and
 should size that budget (and CI expectations around it) accordingly rather
 than against how fast the test runs when it passes.
+
+### `relay_v2_stream_slash_command_list_test.go` — `TestRelayV2_StreamSlashCommandListReachesConnectedPhone` (#2008)
+
+The direct twin of `relay_v2_stream_model_list_test.go` above, reusing its kill/respawn
+shape (`driveModelListRespawn`'s route, `modelListObservation`'s value-not-assertion
+collection shape) unchanged. Nothing about the route needed rederiving because
+`SlashCommandList` is gated independently of `ModelList` in `streamsup.Parser` —
+`emitSlashCommandList` suppresses a zero-length list on its own, unrelated to whether
+`models` was present on the same reply — so the two lanes are provably separate proofs,
+not one proof standing in for both. The open question this spec carried — whether the
+bootstrap child's own `initialize` reply puts a frame on the wire before the pre-kill
+turn stamps the active-conversation cursor — resolved as predicted: the RED run measured
+`pre-kill slash_command_list=0`, confirming `Handle`'s no-cursor return takes the
+bootstrap child's report unconditionally for this lane too, the same as it does for
+`model_list`.
+
+**A failure-message shape that's safe for one wire type isn't automatically safe for its
+sibling.** The model-list spec's assertion failures dump the whole decoded payload with
+`%+v` — harmless there, since a model list is claude-authored. A command's name,
+description, argument hint and aliases are WORKSPACE-authored — a lower-trust origin than
+claude's own strings (#833's posture), and the production path forwards them unsanitised
+by design, with the render boundary owing sanitisation left to the client. A `%+v` dump
+in this file's failure messages would be harmless against fakeclaude but would print an
+operator's real command strings if the same shape were copied into
+`internal/e2e/realclaude`. This spec asserts per field instead, comparing against the
+fake's own committed literals by name, and states why in the test's own header rather
+than leaving the next reader to infer it from the model-list sibling. #2009 and any
+later realclaude sibling proving this lane should copy this file's assertion shape, not
+the model-list file's.
