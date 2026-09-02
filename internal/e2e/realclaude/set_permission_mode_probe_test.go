@@ -591,6 +591,19 @@ type setModeFixtureRecord struct {
 	TurnBoundaries      []int             `json:"turn_boundaries"`
 	ProbeOutcomes       []probeOutcome    `json:"probe_outcomes"`
 
+	// Model is the value that reached `--model`. It is written on every arm,
+	// #1595's four included: the model was a package constant when this record
+	// was designed, and a capture that does not name it cannot be read against a
+	// later one taken on a different model.
+	Model string `json:"model"`
+
+	// ModeSwitchAuto is #2041's observation of what the live model list published
+	// for Model, and is nil on every arm that did not ask. Its inner fields carry
+	// no omitempty on purpose — supports_auto_mode is exactly the field whose
+	// false claude spells by ABSENCE, so a capture that omitted it would
+	// reproduce the trap the measurement exists to avoid.
+	ModeSwitchAuto *modeSwitchAutoObservation `json:"mode_switch_auto,omitempty"`
+
 	StdinWriteErrors       []string `json:"stdin_write_errors"`
 	StderrCapture          string   `json:"stderr_capture"`
 	ExitCode               int      `json:"exit_code"`
@@ -618,13 +631,21 @@ func setModeFixturePath(t *testing.T, versionToken, arm string) string {
 
 // writeSetModeFixture writes rec through a temp file and a rename, so an
 // interrupted run cannot leave a half-written fixture behind for a later commit.
-func writeSetModeFixture(t *testing.T, rec *setModeFixtureRecord) string {
+//
+// fixturePath mints the destination. It is a PARAMETER rather than a second
+// writer function beside this one, and that is a security property rather than a
+// style choice: this name is on eleven finOfflineExecBans lists as the identifier
+// that fences an offline file off from the committed testdata/, and a sibling
+// writeXFixture would be a second route to packageDir that every one of those
+// entries silently fails to cover.
+func writeSetModeFixture(t *testing.T, rec *setModeFixtureRecord,
+	fixturePath func(t *testing.T, versionToken, arm string) string) string {
 	t.Helper()
 	dir := filepath.Join(packageDir(t), "testdata")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("#1595: mkdir testdata: %v", err)
 	}
-	path := setModeFixturePath(t, rec.ClaudeVersion, rec.Arm)
+	path := fixturePath(t, rec.ClaudeVersion, rec.Arm)
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		t.Fatalf("#1595: marshal fixture for arm %q: %v", rec.Arm, err)
@@ -650,15 +671,54 @@ func writeSetModeFixture(t *testing.T, rec *setModeFixtureRecord) string {
 // turn that never closed, a control_response that never came, one that came with
 // subtype "error", a mismatched request_id, an absent init line, a stdin write
 // error, a non-zero exit, a tripped deadline, a scanner error.
-func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm, versionRaw, versionToken string) *setModeFixtureRecord {
+// setModeChildConfig carries what a CALLER varies across measurements while the
+// drive sequence stays fixed. #1595's four arms all take the same one, built from
+// this file's constants; #2041's five take one per arm, because its whole subject
+// is a per-arm model.
+//
+// It exists because runSetModeChild hardcoded four things a second measurement
+// must vary — the model, the two prompts, the turn bound, and the fixture family
+// its writer mints into — and copying the driver to change them would have
+// duplicated the recorder, the reader goroutine and the wait discipline along
+// with them.
+type setModeChildConfig struct {
+	// model reaches `--model` verbatim. A caller deriving it from anything a
+	// subprocess said must shape-check it first: a value beginning with `-`
+	// parses as a FLAG, not as this flag's value. See modeSwitchModelValueOK.
+	model string
+
+	// promptOne and promptTwo are the two probe turns. They must differ from each
+	// other, so turn 2 is a fresh request rather than one claude can answer with
+	// "I already did that".
+	promptOne string
+	promptTwo string
+
+	maxTurns string
+
+	// fixturePath mints the arm's destination, and is what keeps two measurements
+	// in separate committed families.
+	fixturePath func(t *testing.T, versionToken, arm string) string
+
+	// autoMode is recorded verbatim into the arm's fixture and read by nothing
+	// here. nil on a measurement that asked claude nothing about its model list.
+	autoMode *modeSwitchAutoObservation
+}
+
+func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
+	versionRaw, versionToken string, cfg setModeChildConfig) *setModeFixtureRecord {
 	t.Helper()
+
+	if cfg.model == "" {
+		t.Fatalf("#1595[%s]: no model configured; the child would launch on claude's default "+
+			"and the record would name a model the run never chose", arm.name)
+	}
 
 	argv := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--verbose",
-		"--model", setModeModel,
-		"--max-turns", setModeMaxTurns,
+		"--model", cfg.model,
+		"--max-turns", cfg.maxTurns,
 	}
 	if arm.launchYOLO {
 		argv = append(argv, "--dangerously-skip-permissions")
@@ -712,11 +772,11 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm, ve
 		}
 	}
 
-	turnOne, err := setModeTurnLine(setModePromptOne)
+	turnOne, err := setModeTurnLine(cfg.promptOne)
 	if err != nil {
 		t.Fatalf("#1595[%s]: %v", arm.name, err)
 	}
-	turnTwo, err := setModeTurnLine(setModePromptTwo)
+	turnTwo, err := setModeTurnLine(cfg.promptTwo)
 	if err != nil {
 		t.Fatalf("#1595[%s]: %v", arm.name, err)
 	}
@@ -774,6 +834,16 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm, ve
 			arm.name, truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
 	}
 
+	// A cap is not a redaction. An auth failure is exactly the condition that
+	// makes claude print a long message to stderr, stderrFixtureCap bounds how
+	// much of it lands in the file, and 8 KiB of a credential-bearing message
+	// still commits the credential to a public repo. This guard fatals BEFORE any
+	// bytes are written and is inert when neither variable is set, so it cannot
+	// misfire on a machine with no token. initialize_control_probe_test.go added
+	// it for its own family after this file shipped; #2041's captures are the
+	// second family here to carry claude stderr and the call covers both.
+	initControlScrubbed(t, stderrBuf.String())
+
 	boundaries := rec.snapshotBoundaries()
 	responses := rec.snapshotControlResponses()
 	exitCode := -1
@@ -792,7 +862,9 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm, ve
 		Arm:            arm.name,
 		LaunchYOLOFlag: arm.launchYOLO,
 		Argv:           append([]string{claudeBin}, argv...),
-		Prompts:        []string{setModePromptOne, setModePromptTwo},
+		Prompts:        []string{cfg.promptOne, cfg.promptTwo},
+		Model:          cfg.model,
+		ModeSwitchAuto: cfg.autoMode,
 
 		RequestedMode:                   arm.targetMode,
 		ControlRequestID:                requestID,
@@ -815,9 +887,9 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm, ve
 		ScannerError:           scannerErr,
 	}
 
-	path := writeSetModeFixture(t, record)
-	t.Logf("#1595[%s]: %d line(s), init modes %v, %d control_response(s), exit=%d, deadline_tripped=%v, %s",
-		arm.name, len(lines), record.InitPermissionModes, len(responses), exitCode,
+	path := writeSetModeFixture(t, record, cfg.fixturePath)
+	t.Logf("#1595[%s]: model %q, %d line(s), init modes %v, %d control_response(s), exit=%d, deadline_tripped=%v, %s",
+		arm.name, cfg.model, len(lines), record.InitPermissionModes, len(responses), exitCode,
 		record.ContextDeadlineTripped, duration.Round(time.Millisecond))
 	for i, resp := range responses {
 		t.Logf("#1595[%s]: control_response[%d]: %s", arm.name, i, resp)
@@ -882,10 +954,21 @@ func TestRealClaude_SetPermissionMode_InBandProbe(t *testing.T) {
 
 	// Sequential, no t.Parallel: at most one child and one reader goroutine exist
 	// at a time, and the four arms share one pinned $HOME.
+	// One config for all four arms: this measurement's arms differ only in the
+	// launch flag and the requested mode, and the model is genuinely the same for
+	// each. #2041 is the measurement that needs one per arm.
+	cfg := setModeChildConfig{
+		model:       setModeModel,
+		promptOne:   setModePromptOne,
+		promptTwo:   setModePromptTwo,
+		maxTurns:    setModeMaxTurns,
+		fixturePath: setModeFixturePath,
+	}
+
 	records := make(map[string]*setModeFixtureRecord, len(setModeArms))
 	for _, arm := range setModeArms {
 		t.Run(arm.name, func(t *testing.T) {
-			records[arm.name] = runSetModeChild(t, claudeBin, workdir, arm, versionRaw, versionToken)
+			records[arm.name] = runSetModeChild(t, claudeBin, workdir, arm, versionRaw, versionToken, cfg)
 		})
 	}
 
@@ -964,6 +1047,28 @@ func TestRealClaude_SetPermissionMode_InBandProbe(t *testing.T) {
 	}
 }
 
+// setModeAdversarialVersionTokens is what `claude --version` might plausibly emit,
+// plus the shapes that could smuggle a name into another glob or out of testdata/.
+// versionSlug leaves `.` and `-` intact, so `..` survives slugging — which is why
+// the containment assertions these feed are not redundant with the glob ones.
+//
+// It is a package-level var rather than a literal inside the test below because
+// #2041's namer must clear the same three families over the SAME tokens, and a
+// second copied literal is a list that drifts. A file adding a token here widens
+// both checks at once; that is the point. Read-only — never append to it from a
+// test, since several t.Parallel tests range it.
+var setModeAdversarialVersionTokens = []string{
+	"2.1.220",
+	"2.1.220 (Claude Code)",
+	"2_1_220",
+	"2.1.220-beta.1",
+	"permission_protocol",
+	"..",
+	"../..",
+	"",
+	strings.Repeat("9", 64),
+}
+
 // TestRealClaude_SetPermissionMode_FixtureNamesAvoidRegressionGlobs asserts that
 // every filename setModeFixturePath mints, for every arm and for adversarial
 // version tokens, is matched by NEITHER fixtureGlob NOR dropcapFixtureGlob — and
@@ -978,21 +1083,7 @@ func TestRealClaude_SetPermissionMode_InBandProbe(t *testing.T) {
 //
 // No subprocess and no credentials — it passes on a machine with no claude at all.
 func TestRealClaude_SetPermissionMode_FixtureNamesAvoidRegressionGlobs(t *testing.T) {
-	// Adversarial tokens: what `claude --version` might plausibly emit, plus the
-	// shapes that could smuggle a name into another glob or out of testdata/.
-	// versionSlug leaves `.` and `-` intact, so `..` survives slugging — which is
-	// why the containment assertion below is not redundant with the glob ones.
-	tokens := []string{
-		"2.1.220",
-		"2.1.220 (Claude Code)",
-		"2_1_220",
-		"2.1.220-beta.1",
-		"permission_protocol",
-		"..",
-		"../..",
-		"",
-		strings.Repeat("9", 64),
-	}
+	tokens := setModeAdversarialVersionTokens
 	globs := []string{fixtureGlob, dropcapFixtureGlob}
 	wantDir := filepath.Join(packageDir(t), "testdata")
 

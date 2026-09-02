@@ -387,3 +387,38 @@ The offline names test is `t.Parallel` and touches nothing shared.
 **Date:** 2026-09-02
 </content>
 </invoke>
+
+## Revisions
+
+### 2026-09-02 — the arm token needed sanitising, and the namer grew a helper
+
+**What changed:** `modeSwitchFixtureName` now passes the arm through
+`modeSwitchNameToken` before joining it into the filename. The plan specified sanitising for
+the version token only (via `versionSlug`), and treated the arm token as safe because the arm
+names are compile-time constants.
+
+**What drove it:** the hostile arm literals the security review's file-operations finding
+added to the names test — `a/b`, `/abs`, `../..` — went red on first run. A namer asked for
+`a/b` minted a path resolving to `testdata/permission_mode_switch_v…_a/b.json`, outside the
+one directory the writer creates. The security review predicted the exposure in prose ("the
+arm token is *not* slugged, which is the untested half") and then the plan left the namer
+unchanged; the test is what turned the prediction into a red.
+
+**The new contract:** `modeSwitchNameToken` maps every byte outside `[A-Za-z0-9_-]` to `_` and
+caps at 32, preserving case. It is deliberately not `versionSlug`, which lowercases and would
+mint `…_acceptedits.json`, costing the reader the token that says which mode a capture is
+about. Sanitising rather than rejecting: containment becomes a property of the name, so no
+caller has to validate first.
+
+### 2026-09-02 — the auto-capable preference list carried a stale value
+
+**What changed:** `modeSwitchAutoCapablePreference` names `claude-fable-5-1[1m]` where the
+plan and the ticket both say `claude-fable-5[1m]`.
+
+**What drove it:** the live 2.1.239 model list published `claude-fable-5-1[1m]`, while the
+committed `initialize_control_v2.1.239.json` records `claude-fable-5[1m]`. Same binary
+version, drifted value. Nothing depended on it — `sonnet` was selected — and the entry is an
+ordering hint whose fallback takes the first qualifying row in arrival order, so a name that
+no longer exists costs nothing. It is corrected and recorded because it is the concrete
+evidence for the design's central choice: select the model out of the run's own list, never
+out of a table. `modeSwitchModelValueOK`'s table now pins both spellings.
