@@ -40,6 +40,7 @@ type ToolResultPayload struct {
     ToolUseID      string `json:"tool_use_id"` // matches the tool_use this completes
     IsError        bool   `json:"is_error"`
     ResultSummary  string `json:"result_summary"` // human-readable précis, not raw output
+    ResultDetail   string `json:"result_detail"` // daemon-composed display text, e.g. a read's line count (#2024)
 }
 
 type TurnEndPayload struct {
@@ -138,6 +139,15 @@ type CompactingPayload struct {
   presence is also what makes `ToolUsePayload` non-comparable with `==`; every
   existing comparison already goes through `reflect.DeepEqual` or byte
   equality.
+- **`ToolResultPayload.ResultDetail` (#2024) needs no rune cap of its own, unlike its sibling
+  `ResultSummary`.** The producer (`internal/streamsup`'s `readLineCount`) formats only two
+  bounded `int64`s plus fixed ASCII literals — never claude's text carried through — so its
+  alphabet is `[0-9]`, space, and letters: no JSON escape, no multibyte rune, nothing for a
+  cap to defend against. `resultSummary`'s cap exists because that field *is* claude's text,
+  verbatim, with no bound of its own; a claude-derived field needs the same treatment only
+  when the daemon is forwarding claude's bytes rather than formatting its own. The field is
+  named generically rather than after the read shape because #2025 adds four more sidecar
+  shapes onto the same field, none of them minting a new wire type.
 - **`TestToolUsePayload_FitV2EnvelopeCap` (#1678) is a second instance of the
   measured-envelope pattern the background-task section below established:**
   fills every value with `'<'`, plus the two upstream-unbounded identity

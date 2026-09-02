@@ -117,7 +117,7 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `TextChunk` | `MessageID, Text string` | incremental assistant text, grouped by message |
 | `ThoughtChunk` | `MessageID, Text string` | streaming reasoning ("thinking") text |
 | `ToolStart` | `ToolCallID, Title string`, `Kind ToolKind`, `RawInput json.RawMessage`, `Locations []Location` | a new tool invocation |
-| `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent` | changed fields of an existing tool call; `Content` may be `nil` (status-only update) |
+| `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent`, `ResultDetail string` | changed fields of an existing tool call; `Content` may be `nil` (status-only update). `ResultDetail` (#2024) is daemon-composed display text derived from claude's stdout sidecar (e.g. a read's line count) — named generically because #2025 fills it from four more sidecar shapes, none minting a new event field |
 | `TurnEnd` | `Reason TurnEndReason` | end of a claude turn; carries the reason only |
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
 | `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |

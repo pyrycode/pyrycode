@@ -107,3 +107,21 @@ location, and #1839 (below) put the consumer inside this same file rather than i
 `internal/sessions` — so the rule still argues against an interface method, now for the ordinary
 reason (in-package caller, no cross-package dispatch to satisfy) rather than for having no caller
 at all. This slice writes the line and stops; nothing reads the ack.
+
+**Tool-result sidecar decode — fail-closed is a confinement control, not just AC hygiene (#2024).**
+`consumeLine`'s `user` arm hands `emitUser` the raw line bytes (the `emitRateLimit(line)` shape), which
+decodes the line's `tool_use_result` sidecar a second time into `json.RawMessage`-typed fields, the
+`systemTaskUpdatedLine.Patch` precedent. The read shape (`file.numLines`/`file.totalLines`) is the only
+one this slice recognises; every other shape — absent, non-object, one-key, non-integer counts — sends no
+count. That default earns more than "no second unrecognized outcome": `emitUnrecognized` puts the
+offending line's bytes on the wire (truncated to `maxUnrecognizedRaw`) for the phone to render, and a read
+sidecar's undeclared `file.content` is **the entire contents of the file claude read**. Routing an
+unrecognised sidecar through that path would exfiltrate the leading bytes of any file claude reads to the
+relay — so no sidecar path may ever emit `Unrecognized`, structurally, not just by test coverage. The
+second control is what `toolResultSidecar`/`sidecarFile` leave out: `file.content` and `file.filePath` are
+never declared on the decode target, a stronger guarantee than a confinement test sweep — a field that
+doesn't exist on the struct can't leak regardless of what future code does with the decoded value.
+Confirmed non-vacuous by mutation: forcing the envelope key from `tool_use_result` back to the
+transcript's `toolUseResult` — precisely the dead-code decoder [#2023's stdout capture](e2e-realclaude-tool-result-sidecar-probe-test-go.md)
+exists to have prevented — turns 6 subtests red under `go test -overlay`, so the fixtures pin the observed
+spelling rather than merely agreeing with it.
