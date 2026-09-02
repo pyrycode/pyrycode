@@ -604,6 +604,45 @@ const (
 	sourceQuestionRemote   = "remote"
 )
 
+// outcomeQuestionAnswered completes the family's outcome vocabulary (#1991),
+// the third and last sentinel beside unanswered and refused. It shares
+// sourceQuestionRemote with the refusal: both are a batch the operator resolved
+// from a client, which is exactly what § question_dismissed's `remote`
+// carry-over row publishes.
+//
+// It is a SENTINEL and not the chosen option, which is this frame's sharpest
+// rule rather than a naming preference. QuestionOption carries no id and
+// claude's answer protocol selects by LABEL, so the natural implementation of an
+// answered dismissal reports that claude-authored string here — moving a frame
+// whose published provenance reads daemon-asserted into the batch's trust tier,
+// where a client would render it as trusted chrome. A client that wants the
+// chosen label reads it from the batch it already holds.
+const outcomeQuestionAnswered = "answered"
+
+// answerVerdictInput is the updated tool input an answered batch hands back to
+// claude: its own questions array, passed through, plus the operator's answers.
+// The two keys are claude's whole contract for the reply
+// (https://code.claude.com/docs/en/agent-sdk/user-input) — the questions array
+// is required for tool processing, and answers is keyed by each question's TEXT
+// with the chosen option's label as its value.
+//
+// Questions is a json.RawMessage BECAUSE THE PASSTHROUGH MUST BE CLAUDE'S OWN
+// BYTES, spliced out of the parked tool input rather than re-marshalled from the
+// daemon's wire-shaped batch. The two routes are indistinguishable to a shape
+// check and differ by one key spelling: protocol.Question tags MultiSelect as
+// multi_select where claude's tool input uses multiSelect, so a re-marshal hands
+// claude a key it does not read — silently, since the call is allowed either
+// way. questionbridge.Parse also drops keys it does not model, which would cut a
+// field a later claude release adds.
+//
+// Answers values are `any` rather than []string because the shape is per
+// question: a bare string for a single-select question, an array for a
+// multiSelect one, matching claude's own examples for each kind.
+type answerVerdictInput struct {
+	Questions json.RawMessage `json:"questions"`
+	Answers   map[string]any  `json:"answers"`
+}
+
 // reasonQuestionRefused is the deny message a refused batch returns to claude. A
 // compile-time constant — never host-derived, never client-supplied — exactly
 // like reasonRemoteDeny and permbridge's own reasonTimeout, so nothing an
@@ -699,6 +738,199 @@ func (b *streamApprovalBridge) RefuseQuestion(batchID string) (consumed bool) {
 	}, "stream_question.refused_push_err")
 
 	return true
+}
+
+// AnswerQuestion resolves the outstanding batch named by batchID as the
+// operator's answer: claude's parked AskUserQuestion call is allowed, carrying an
+// updated input that pairs claude's own questions array with what they chose, and
+// every interactive client is told the panel is dead. It reports whether it
+// consumed the batch — a diagnostic for the caller's log record, never a
+// broadcast trigger (relay.QuestionResolver's doc block).
+//
+// It is AnswerQuestion and not ResolveAnswer because that name is already taken
+// on this struct by the modal path, exactly as RefuseQuestion had to sidestep
+// ResolveCancel. It takes the batch id and the entries rather than the whole
+// protocol.QuestionAnswerPayload so it never holds an answer_token it has no
+// business reading — questionbridge.Parse taking the pair rather than the
+// permbridge.Request is the same argument. That token is idempotency and not
+// authorization; the real dedup is the one-shot consume below.
+//
+// IT APPLIES NO AUTHORIZATION AND IS NOT SELF-GUARDING. Possession of the batch
+// id is treated as sufficient here, which is safe only because the per-device
+// answer gate (#1986) sits above it and because nothing reaches this path from
+// the wire until that gate exists — relay.QuestionResolver is unimplemented and
+// V2SessionConfig.QuestionResolver is nil at every construction site. A wiring
+// site that calls this without gating first lets any paired device answer.
+//
+// RefuseQuestion is the template, and its ordering argument carries over intact —
+// read the correlation without deleting it, consume the one-shot before handing
+// claude the verdict — with ONE step it does not have:
+//
+//   - THE PARKED INPUT IS READ BEFORE THE CONSUME, AND ITS MISS IS A REAL
+//     BRANCH. permbridge.Lookup missing means permbridge already resolved this
+//     approval on its own timer, so there are no input bytes to pass through.
+//     This returns having done NOTHING, because the control server's deferred
+//     retireQuestion is about to run and owes every client its `unanswered`
+//     dismissal: consuming first and dismissing without a verdict would silence
+//     that backstop and leave claude denied by the timer with no client told
+//     why. A Deny needs no input, which is why the refusal resolves
+//     unconditionally and this cannot.
+//   - THE VALIDATION READS THROUGH questionbridge.Lookup, NOT Resolve. A
+//     rejected answer must leave the batch answerable for a corrected one
+//     (answerVerdict states every rule), so the one-shot is consumed only once
+//     the verdict is known good. Validating against Resolve would burn the batch
+//     on a malformed frame.
+//
+// The check-then-act between that Lookup and the Resolve is deliberately not
+// atomic and is safe in both directions: the one-shot is the single arbiter, so
+// a concurrent retireQuestion or RefuseQuestion either wins it (this call
+// returns false having resolved nothing) or loses it (it broadcasts nothing).
+// Validating against a batch a concurrent caller then consumes costs only wasted
+// work. The exploitable ordering is the reverse one, consume-then-validate.
+//
+// THE DISMISSAL FANS OUT ON ITS OWN GOROUTINE, RefuseQuestion's one deliberate
+// deviation from retireQuestion, for its reason verbatim: broadcast calls
+// bcast.ActiveConns, which funnels a request onto the relay manager's Run select,
+// so a caller already on Run blocks there until the daemon ctx is cancelled. This
+// primitive's caller is #1986's QuestionResolver implementation, which relay
+// documents as running on Run and which cannot hand the work off itself — it owes
+// its own caller this bool synchronously. Everything before the fan-out therefore
+// stays synchronous: the validation, the consume, claude's verdict and the return
+// value are all settled before this returns. That goroutine ends when the fan-out
+// finishes, or at the latest when the daemon ctx is cancelled (ActiveConns returns
+// nil on a done ctx and broadcast's Push loop returns early on teardown); at most
+// one exists per consumed answer, and an answer requires a batch parked on a
+// human, so a client cannot drive the count.
+//
+// SECURITY: the answers are remote-authored, and they reach claude's context —
+// which grants nothing new, since a paired client can already put arbitrary text
+// into the conversation with send_message, so an answer sits at exactly that
+// trust tier (protocol.QuestionAnswerEntry's doc block). What must not happen is
+// the other direction, and it is structural here: the path emits NO log record of
+// its own, so there is no field for question text, an answer value or any other
+// byte of the batch to leak into. The relay handler already logs the outcome with
+// the batch id and the answer token, the two fields internal/protocol marks safe,
+// so a record here would duplicate it while its only new material is exactly what
+// may never be logged.
+func (b *streamApprovalBridge) AnswerQuestion(batchID string, answers []protocol.QuestionAnswerEntry) (consumed bool) {
+	b.mu.Lock()
+	toolUseID, ok := b.byQuestion[batchID]
+	b.mu.Unlock()
+	if !ok {
+		return false
+	}
+
+	// Before the consume: no input bytes means no verdict, and the backstop
+	// still owes this batch its dismissal.
+	req, ok := b.perm.Lookup(toolUseID)
+	if !ok {
+		return false
+	}
+	batch, ok := b.questions.Lookup(batchID)
+	if !ok {
+		return false
+	}
+	updated, ok := answerVerdict(req.Input, batch.Questions, answers)
+	if !ok {
+		return false
+	}
+
+	if _, ok := b.questions.Resolve(batchID); !ok {
+		return false // the backstop, a refusal, or an earlier answer already consumed it
+	}
+
+	// A Resolve miss here means permbridge resolved this approval between the
+	// Lookup above and now — the batch is consumed either way, and the client
+	// must still learn the panel is dead, so the dismissal below is
+	// unconditional.
+	b.perm.Resolve(toolUseID, permbridge.Allow(updated))
+
+	go b.broadcast(protocol.TypeQuestionDismissed, protocol.QuestionDismissedPayload{
+		QuestionBatchID: batchID,
+		Outcome:         outcomeQuestionAnswered,
+		Source:          sourceQuestionRemote,
+	}, "stream_question.answered_push_err")
+
+	return true
+}
+
+// answerVerdict validates a client's entries against the parked batch and, if
+// they hold, assembles the updated tool input an allow carries back. It reports
+// false for every rejection, and a rejection is TOTAL: nothing is assembled,
+// which is what lets the caller consume the one-shot only on success.
+//
+// BOTH HALVES OF THE RESULT COME FROM COPIES THE DAEMON HOLDS, never from
+// anything the client echoed back. input is claude's own parked bytes, whose
+// questions VALUE is spliced through untouched (answerVerdictInput says why a
+// re-marshal is wrong); questions is the parked batch, which supplies the text
+// keying each answer. The two agree because Surface reaches surfaceQuestion only
+// through a questionbridge.Parse that already succeeded on these exact bytes, and
+// Parse rejects rather than truncates. That is also why the extraction below
+// cannot fail — it is folded into the reject path rather than ignored, so the
+// structurally unreachable case still cannot reach claude with a missing key.
+//
+// The rules, each of which rejects the whole answer:
+//
+//   - Entry count must equal the parked question count. It is checked FIRST, so
+//     an arbitrarily long payload — protocol enforces no bound on the inbound
+//     array — is O(1) to reject and per-frame work stays bounded by the batch's
+//     1-4 questions. With the counts equal, "every index in range and none
+//     repeated" gives exactly-once coverage by pigeonhole, which is the whole
+//     purpose of seen.
+//   - Every index must fall inside the batch. protocol carries QuestionIndex and
+//     never range-checks it, so the check has to happen before the subscript;
+//     skipping it is a panic rather than a wrong answer.
+//   - A question with no values selects nothing, and more than one value for a
+//     single-select question states two positions.
+//
+// NO VALUE IS COMPARED AGAINST THE OFFERED LABELS, deliberately: claude's
+// contract permits free text anywhere and requires no value to be one of the
+// labels, so a validator rejecting an unlisted value would reject a legal answer.
+// Whether a value is emitted bare or as an array is decided from the parked
+// question's MultiSelect and never from how many values arrived, so the shape
+// matches claude's own examples per question kind.
+//
+// TWO QUESTIONS IN ONE BATCH CAN CARRY IDENTICAL TEXT, AND THAT COLLAPSES TO ONE
+// answers KEY. There is deliberately no reject branch for it: keying by text is
+// claude's own contract, so the daemon cannot do better than the shape allows,
+// and rejecting would strand the operator with a batch they can never answer —
+// strictly worse than the contract's own ambiguity. Nothing about it is
+// client-controlled.
+func answerVerdict(input json.RawMessage, questions []protocol.Question, answers []protocol.QuestionAnswerEntry) (json.RawMessage, bool) {
+	if len(answers) != len(questions) {
+		return nil, false
+	}
+	var parked struct {
+		Questions json.RawMessage `json:"questions"`
+	}
+	if err := json.Unmarshal(input, &parked); err != nil || len(parked.Questions) == 0 {
+		return nil, false
+	}
+
+	seen := make([]bool, len(questions))
+	chosen := make(map[string]any, len(questions))
+	for _, a := range answers {
+		if a.QuestionIndex < 0 || a.QuestionIndex >= len(questions) || seen[a.QuestionIndex] {
+			return nil, false
+		}
+		seen[a.QuestionIndex] = true
+
+		q := questions[a.QuestionIndex]
+		if len(a.Values) == 0 || (!q.MultiSelect && len(a.Values) > 1) {
+			return nil, false
+		}
+		if q.MultiSelect {
+			chosen[q.Text] = a.Values
+		} else {
+			chosen[q.Text] = a.Values[0]
+		}
+	}
+
+	out, err := json.Marshal(answerVerdictInput{Questions: parked.Questions, Answers: chosen})
+	if err != nil {
+		return nil, false
+	}
+	return out, true
 }
 
 // Surface raises a permbridge-parked approval to interactive clients as the same

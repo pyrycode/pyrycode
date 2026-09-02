@@ -1681,3 +1681,406 @@ func TestStreamApproval_NoQuestionBodyLeakOnRefusal(t *testing.T) {
 		}
 	}
 }
+
+// The two question texts questionInput parks, in claude's own array order. The
+// first question is multiSelect and carries three options; the second is
+// single-select and carries two — the pair both emitted answer shapes need.
+const (
+	multiQuestionText  = "how should it write?"
+	singleQuestionText = "which branch should it target?"
+)
+
+// goodAnswers covers the parked batch exactly once: several values for the
+// multiSelect question, one for the single-select one.
+func goodAnswers() []protocol.QuestionAnswerEntry {
+	return []protocol.QuestionAnswerEntry{
+		{QuestionIndex: 0, Values: []string{"rewrite", "second"}},
+		{QuestionIndex: 1, Values: []string{"main"}},
+	}
+}
+
+// surfacedQuestion parks an AskUserQuestion call, surfaces it, and returns the
+// minted batch id with the fixture isolated — the four lines every test below
+// opens with.
+func surfacedQuestion(t *testing.T, f questionFixture, text string) (permbridge.Request, *permbridge.Pending, string) {
+	t.Helper()
+	req, pending := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, text, "Write strategy", "rewrite", "replace the file wholesale"))
+	f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.isolate()
+	return req, pending, batchID
+}
+
+// updatedInput decodes an allow verdict's updated tool input into its two
+// halves, asserting it carries EXACTLY the two keys claude's contract names —
+// the passthrough questions array and the answers object — and nothing else.
+func updatedInput(t *testing.T, v permbridge.Verdict) (json.RawMessage, map[string]any) {
+	t.Helper()
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(v.UpdatedInput, &keys); err != nil {
+		t.Fatalf("decode updated input: %v", err)
+	}
+	if len(keys) != 2 || keys["questions"] == nil || keys["answers"] == nil {
+		names := make([]string, 0, len(keys))
+		for k := range keys {
+			names = append(names, k)
+		}
+		t.Fatalf("updated input keys = %v, want exactly questions + answers", names)
+	}
+	var answers map[string]any
+	if err := json.Unmarshal(keys["answers"], &answers); err != nil {
+		t.Fatalf("decode answers: %v", err)
+	}
+	return keys["questions"], answers
+}
+
+// AC-1: an answer to an outstanding batch resolves claude's parked call as an
+// ALLOW whose updated input maps each question's text to its value — a bare
+// string for the single-select question and an ARRAY for the multiSelect one,
+// which is decided from the parked multi_select rather than from how many values
+// arrived. The multiSelect question here receives two values and the
+// single-select one receives client free text matching no offered label, so an
+// implementation keying the shape off arrival count, or one validating values
+// against the batch's labels, fails.
+func TestStreamApprovalBridge_AnswerQuestion_AllowsWithAssembledInput(t *testing.T) {
+	t.Parallel()
+
+	const freeText = "a branch nobody offered"
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	_, pending, batchID := surfacedQuestion(t, f, multiQuestionText)
+
+	if !f.bridge.AnswerQuestion(batchID, []protocol.QuestionAnswerEntry{
+		{QuestionIndex: 0, Values: []string{"rewrite", "second"}},
+		{QuestionIndex: 1, Values: []string{freeText}},
+	}) {
+		t.Fatal("AnswerQuestion = false for an outstanding batch")
+	}
+
+	v := pending.Await()
+	if v.Behavior != permbridge.BehaviorAllow {
+		t.Fatalf("verdict behavior = %q, want allow", v.Behavior)
+	}
+	_, answers := updatedInput(t, v)
+
+	if got, ok := answers[multiQuestionText].([]any); !ok || len(got) != 2 || got[0] != "rewrite" || got[1] != "second" {
+		t.Errorf("answers[multiSelect] = %#v, want the ordered array [rewrite second]", answers[multiQuestionText])
+	}
+	if got, ok := answers[singleQuestionText].(string); !ok || got != freeText {
+		t.Errorf("answers[single-select] = %#v, want the bare free-text string %q", answers[singleQuestionText], freeText)
+	}
+	if len(answers) != 2 {
+		t.Errorf("answers has %d keys, want one per parked question", len(answers))
+	}
+
+	waitPush(t, f.pushed)
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeQuestionDismissed {
+		t.Fatalf("pushes = %v, want exactly one question_dismissed", got)
+	}
+	if _, ok := f.qreg.Lookup(batchID); ok {
+		t.Error("batch still outstanding; the answer must consume the one-shot")
+	}
+	if n := questionLen(f.bridge); n != 1 {
+		t.Errorf("byQuestion len = %d, want 1; retireQuestion stays the sole correlation deleter", n)
+	}
+}
+
+// AC-2: the questions array claude gets back is claude's OWN bytes, spliced out
+// of the parked tool input, not a re-marshal of the daemon's wire-shaped batch.
+// The two routes are indistinguishable to a shape assertion and differ by one
+// key spelling: protocol.Question tags MultiSelect as multi_select where claude's
+// tool input uses multiSelect, so a re-marshal hands claude a key it does not
+// read — silently, since the call is allowed either way. Both spellings are
+// asserted, and the value is compared byte-for-byte against the parked input's.
+func TestStreamApprovalBridge_AnswerQuestion_PassesClaudesOwnQuestionBytes(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	req, pending, batchID := surfacedQuestion(t, f, multiQuestionText)
+
+	if !f.bridge.AnswerQuestion(batchID, goodAnswers()) {
+		t.Fatal("AnswerQuestion = false for an outstanding batch")
+	}
+	questions, _ := updatedInput(t, pending.Await())
+
+	var parked struct {
+		Questions json.RawMessage `json:"questions"`
+	}
+	if err := json.Unmarshal(req.Input, &parked); err != nil {
+		t.Fatalf("decode the parked tool input: %v", err)
+	}
+	var want, got bytes.Buffer
+	if err := json.Compact(&want, parked.Questions); err != nil {
+		t.Fatalf("compact the parked questions: %v", err)
+	}
+	if err := json.Compact(&got, questions); err != nil {
+		t.Fatalf("compact the passed-through questions: %v", err)
+	}
+	if got.String() != want.String() {
+		t.Errorf("questions passthrough =\n%s\nwant claude's own bytes:\n%s", got.String(), want.String())
+	}
+	if !strings.Contains(got.String(), `"multiSelect"`) {
+		t.Error(`the passthrough lost claude's "multiSelect" key`)
+	}
+	if strings.Contains(got.String(), `"multi_select"`) {
+		t.Error(`the passthrough carries the wire key "multi_select"; it re-marshalled the parked batch instead of splicing claude's bytes`)
+	}
+}
+
+// AC-3: an answer that does not name every parked question exactly once, or
+// whose values are unusable, resolves NOTHING — no verdict reaches claude,
+// nothing is broadcast, and the batch stays outstanding for a corrected answer or
+// for the no-answer backstop. Each row asserts all three, so a partial or
+// last-write-wins resolution fails whichever half it got wrong.
+//
+// No row rejects on a value the batch does not offer: claude's contract permits
+// free text anywhere, which the allow test above pins from the other side.
+func TestStreamApprovalBridge_AnswerQuestion_RejectPaths(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		answers []protocol.QuestionAnswerEntry
+	}{
+		{"index over-large", []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{"rewrite"}}, {QuestionIndex: 2, Values: []string{"main"}}}},
+		{"index negative", []protocol.QuestionAnswerEntry{{QuestionIndex: -1, Values: []string{"rewrite"}}, {QuestionIndex: 1, Values: []string{"main"}}}},
+		{"index repeated", []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{"rewrite"}}, {QuestionIndex: 0, Values: []string{"second"}}}},
+		{"question missing", []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{"rewrite"}}}},
+		{"no entries at all", nil},
+		{"more entries than questions", []protocol.QuestionAnswerEntry{
+			{QuestionIndex: 0, Values: []string{"rewrite"}},
+			{QuestionIndex: 1, Values: []string{"main"}},
+			{QuestionIndex: 1, Values: []string{"next"}},
+		}},
+		{"no value for a question", []protocol.QuestionAnswerEntry{{QuestionIndex: 0, Values: []string{"rewrite"}}, {QuestionIndex: 1, Values: nil}}},
+		{"two values for a single-select question", []protocol.QuestionAnswerEntry{
+			{QuestionIndex: 0, Values: []string{"rewrite"}},
+			{QuestionIndex: 1, Values: []string{"main", "next"}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newQuestionFixture(t, testConvID, discardLogger())
+			_, _, batchID := surfacedQuestion(t, f, multiQuestionText)
+
+			if f.bridge.AnswerQuestion(batchID, tt.answers) {
+				t.Error("AnswerQuestion = true; the answer does not name every parked question exactly once")
+			}
+			if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+				t.Errorf("pushes = %v, want none", got)
+			}
+			if _, ok := f.perm.Lookup("tu-q1"); !ok {
+				t.Error("the parked approval was resolved by a rejected answer")
+			}
+			if _, ok := f.qreg.Lookup(batchID); !ok {
+				t.Error("the batch was consumed by a rejected answer; it must stay outstanding for a corrected one")
+			}
+		})
+	}
+}
+
+// AC-3's sharpest row, and the reason the parked-input read comes BEFORE the
+// consume: permbridge resolved this approval on its own timer, so there are no
+// input bytes to pass through. The answer must do nothing at all — consuming and
+// dismissing without a verdict would silence the deferred retireQuestion, which
+// owes every client its `unanswered` dismissal, and leave claude denied by the
+// timer with no client told why.
+func TestStreamApprovalBridge_AnswerQuestion_ParkedInputGone(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	_, _, batchID := surfacedQuestion(t, f, multiQuestionText)
+	f.perm.Resolve("tu-q1", permbridge.Deny("the approval window elapsed"))
+
+	if f.bridge.AnswerQuestion(batchID, goodAnswers()) {
+		t.Error("AnswerQuestion = true; claude's parked input was no longer retrievable")
+	}
+	if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+		t.Errorf("pushes = %v, want none", got)
+	}
+	if _, ok := f.qreg.Lookup(batchID); !ok {
+		t.Fatal("the batch was consumed with no verdict; the no-answer backstop can no longer dismiss it")
+	}
+
+	// The backstop still owes its dismissal, and can still pay it.
+	f.bridge.retireQuestion(batchID)
+	if got := pushTypes(f.bcast.pushes); len(got) != 1 || got[0] != protocol.TypeQuestionDismissed {
+		t.Fatalf("pushes after the backstop ran = %v, want its one question_dismissed", got)
+	}
+	if d := lastQuestionDismissed(t, f.bcast.pushes); d.Outcome != outcomeQuestionUnanswered {
+		t.Errorf("backstop outcome = %q, want %q", d.Outcome, outcomeQuestionUnanswered)
+	}
+}
+
+// AC-4: the three verdicts share one arbiter — the registry's one-shot — so a
+// batch resolved by any of them is inert to the other two, in both directions.
+// This holds structurally rather than by agreement between the call sites, which
+// is why every pairing is asserted rather than a representative one.
+func TestStreamApprovalBridge_AnswerQuestion_SingleArbiter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// first consumes the batch; second must then find nothing.
+		first  func(f questionFixture, retire func(), batchID string)
+		second func(f questionFixture, retire func(), batchID string) bool
+		// pushes the first verdict is expected to emit before the second runs.
+		firstPushes int
+	}{
+		{
+			name:        "answer then retire",
+			first:       func(f questionFixture, _ func(), id string) { f.bridge.AnswerQuestion(id, goodAnswers()) },
+			second:      func(_ questionFixture, retire func(), _ string) bool { retire(); return false },
+			firstPushes: 1,
+		},
+		{
+			name:        "answer then refuse",
+			first:       func(f questionFixture, _ func(), id string) { f.bridge.AnswerQuestion(id, goodAnswers()) },
+			second:      func(f questionFixture, _ func(), id string) bool { return f.bridge.RefuseQuestion(id) },
+			firstPushes: 1,
+		},
+		{
+			name:        "retire then answer",
+			first:       func(_ questionFixture, retire func(), _ string) { retire() },
+			second:      func(f questionFixture, _ func(), id string) bool { return f.bridge.AnswerQuestion(id, goodAnswers()) },
+			firstPushes: 1,
+		},
+		{
+			name:        "refuse then answer",
+			first:       func(f questionFixture, _ func(), id string) { f.bridge.RefuseQuestion(id) },
+			second:      func(f questionFixture, _ func(), id string) bool { return f.bridge.AnswerQuestion(id, goodAnswers()) },
+			firstPushes: 1,
+		},
+		{
+			name:        "answer twice",
+			first:       func(f questionFixture, _ func(), id string) { f.bridge.AnswerQuestion(id, goodAnswers()) },
+			second:      func(f questionFixture, _ func(), id string) bool { return f.bridge.AnswerQuestion(id, goodAnswers()) },
+			firstPushes: 1,
+		},
+		{
+			name:  "unknown batch id",
+			first: func(questionFixture, func(), string) {},
+			second: func(f questionFixture, _ func(), _ string) bool {
+				return f.bridge.AnswerQuestion("never-surfaced", goodAnswers())
+			},
+			firstPushes: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newQuestionFixture(t, testConvID, discardLogger())
+			req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+				questionInput(t, multiQuestionText, "Write strategy", "rewrite", "replace the file wholesale"))
+			retire := f.bridge.Surface(req)
+			batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+			f.isolate()
+
+			tt.first(f, retire, batchID)
+			for range tt.firstPushes {
+				waitPush(t, f.pushed)
+			}
+			f.isolate()
+
+			if tt.second(f, retire, batchID) {
+				t.Error("the second verdict consumed a batch the first one had already resolved")
+			}
+			if got := pushTypes(f.bcast.pushes); len(got) != 0 {
+				t.Errorf("pushes = %v after the second verdict, want none (single arbiter)", got)
+			}
+		})
+	}
+}
+
+// AC-4: the dismissal an answer emits carries source `remote` and an outcome
+// sentinel distinct from BOTH the refusal's and the no-answer one, and carries no
+// claude-authored string. The last clause is the trust-tier rule from
+// § question_dismissed rather than a style preference: options carry no id and
+// claude selects by LABEL, so the natural implementation reports the chosen
+// label here and moves a daemon-asserted frame into the batch's trust tier. Every
+// offered label is asserted absent from both fields.
+func TestStreamApprovalBridge_AnswerQuestion_DismissalCarriesNoClaudeString(t *testing.T) {
+	t.Parallel()
+
+	f := newQuestionFixture(t, testConvID, discardLogger())
+	_, _, batchID := surfacedQuestion(t, f, multiQuestionText)
+
+	if !f.bridge.AnswerQuestion(batchID, goodAnswers()) {
+		t.Fatal("AnswerQuestion = false for an outstanding batch")
+	}
+	waitPush(t, f.pushed)
+
+	d := lastQuestionDismissed(t, f.bcast.pushes)
+	if d.QuestionBatchID != batchID {
+		t.Errorf("question_batch_id = %q, want the batch frame's %q", d.QuestionBatchID, batchID)
+	}
+	if d.Source != sourceQuestionRemote {
+		t.Errorf("source = %q, want %q", d.Source, sourceQuestionRemote)
+	}
+	if d.Outcome != outcomeQuestionAnswered {
+		t.Errorf("outcome = %q, want %q", d.Outcome, outcomeQuestionAnswered)
+	}
+	if outcomeQuestionAnswered == outcomeQuestionUnanswered || outcomeQuestionAnswered == outcomeQuestionRefused {
+		t.Error("the answered outcome must be distinct from both the no-answer and the refusal sentinels")
+	}
+	for _, label := range []string{"rewrite", "second", "third", "main", "next"} {
+		if d.Outcome == label || d.Source == label {
+			t.Errorf("dismissal carries the claude-authored option label %q; both fields are daemon-defined sentinels", label)
+		}
+	}
+}
+
+// AC-5: no byte of the batch and no byte of the client's answer reaches a log
+// field on this path. The buffer is asserted EMPTY rather than merely
+// sentinel-free — the answer emits no record of its own, so any diagnostic later
+// added anywhere on this path reddens whether or not it happens to carry a
+// secret. FOUR claude-authored sentinels, one per string the input carries, plus
+// a client-authored one: an input-wide sentinel would pass while a field echoed
+// only the header, only a label, or only the answer.
+//
+// Pushes are NOT forced to fail here, unlike the permission leak probe.
+// broadcast's push-error arm is shared, content-free and already probed by the
+// no-answer test; running it would put its Debug line in the buffer and cost
+// this test its empty-buffer assertion, which is the stronger claim. It would
+// also race the buffer — that line is written by the detached fan-out AFTER the
+// Push that waitPush observes, so no happens-before edge covers it.
+func TestStreamApproval_NoQuestionBodyLeakOnAnswer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		secretText   = "SECRET-QUESTION-TEXT-5555"
+		secretHeader = "SECRET-HEADER-6666"
+		secretLabel  = "SECRET-LABEL-7777"
+		secretDesc   = "SECRET-DESCRIPTION-8888"
+		secretAnswer = "SECRET-ANSWER-VALUE-9999"
+	)
+
+	logger, logBuf := auditLogger()
+	f := newQuestionFixture(t, testConvID, logger)
+	req, _ := parkApproval(t, f.perm, "tu-q1", questionbridge.ToolName,
+		questionInput(t, secretText, secretHeader, secretLabel, secretDesc))
+	f.bridge.Surface(req)
+	batchID := lastQuestionShown(t, f.bcast.pushes).QuestionBatchID
+	f.isolate()
+
+	if !f.bridge.AnswerQuestion(batchID, []protocol.QuestionAnswerEntry{
+		{QuestionIndex: 0, Values: []string{secretAnswer}},
+		{QuestionIndex: 1, Values: []string{secretAnswer}},
+	}) {
+		t.Fatal("AnswerQuestion = false for an outstanding batch")
+	}
+	waitPush(t, f.pushed)
+
+	if s := logBuf.String(); s != "" {
+		t.Errorf("the answer logged %q; this path emits no record of its own", s)
+	}
+	d := lastQuestionDismissed(t, f.bcast.pushes)
+	for _, secret := range []string{secretText, secretHeader, secretLabel, secretDesc, secretAnswer} {
+		if strings.Contains(d.Outcome, secret) || strings.Contains(d.Source, secret) {
+			t.Errorf("question_dismissed carries %q; both fields are daemon-asserted sentinels", secret)
+		}
+	}
+}

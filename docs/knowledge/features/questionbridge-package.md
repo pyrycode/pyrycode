@@ -187,13 +187,16 @@ pass because there's nothing to alias.
   [question-batch payload](protocol-package-question-batch-payload.md)).
   #1983 declared the inbound vocabulary (`question_answer` / `question_refused`,
   vocabulary only); #1984 (landed) wires the [inbound interception](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md)
-  through a nil-able `QuestionResolver` seam. #1985 split into #1990 (landed) —
-  the refusal path, `streamApprovalBridge.RefuseQuestion` — and #1991, the
-  still-open answer path; each must be the sole dismissal broadcaster for the
-  batch it consumes (#1973's retire backstop only fires when its own
-  `Resolve` call misses, which it does once either resolution path wins the
-  one-shot first). Neither is wired to `relay.QuestionResolver` yet — that is
-  #1986's per-device-gated seam. #1979 (landed) is the relay half of the
+  through a nil-able `QuestionResolver` seam. #1985 split into #1990 — the
+  refusal path, `streamApprovalBridge.RefuseQuestion` — and #1991 — the
+  answer path, `streamApprovalBridge.AnswerQuestion` (both landed); each is
+  the sole dismissal broadcaster for the batch it consumes (#1973's retire
+  backstop only fires when its own `Resolve` call misses, which it does once
+  either resolution path wins the one-shot first). See [the question-arm
+  section](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#the-question-arm-1973--a-second-discriminant-ahead-of-the-permission-path)
+  for both primitives' ordering and the answer path's assembly/testing traps.
+  Neither is wired to `relay.QuestionResolver` yet — that is #1986's
+  per-device-gated seam. #1979 (landed) is the relay half of the
   connect-time reconcile (`Snapshot`, mints/retires nothing) — see
   [the reconcile doc](v2-session-manager-state-machine-connect-time-question-reconcile-outstanding.md).
   #1980 wires `Snapshot` itself into the seam and is the client contract.

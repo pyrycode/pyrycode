@@ -210,7 +210,7 @@ are deliberately undistinguished — falls through to the unchanged permission
 path, the fail-closed degrade for a batch nobody can render. `retireQuestion`
 mirrors `retire`: unconditional correlation delete, then the registry's
 one-shot `Resolve` decides whether this closure or a resolution path (#1990's
-refusal, #1991's still-open answer) broadcasts the dismissal.
+refusal, #1991's answer) broadcasts the dismissal.
 
 **#1990 added the first deliberate resolution, `streamApprovalBridge.RefuseQuestion`,
 beside this backstop.** It reads `byQuestion` before consuming the one-shot
@@ -228,6 +228,43 @@ so it cannot itself hop off `Run` before calling this method, and
 directly. See [questionbridge-package.md](questionbridge-package.md) for the
 registry and [`specs/architecture/1990-question-refusal.md`](../../specs/architecture/1990-question-refusal.md)
 for the full ordering argument.
+
+**#1991 added the second resolution, `streamApprovalBridge.AnswerQuestion`,
+and it needs one more read than the refusal because an allow needs input
+where a deny needs none.** Before consuming the questionbridge one-shot it
+takes `permbridge.Registry.Lookup(toolUseID)` — comma-ok — to fetch claude's
+own parked `Request.Input`; a miss means permbridge already resolved the
+approval on its own timer, so `AnswerQuestion` returns having done nothing,
+the same inert-on-miss shape `RefuseQuestion` uses for the one-shot itself,
+just one step earlier. `RefuseQuestion`'s unconditional resolve is the one
+place its shape does not carry over: a `Deny` needs no input, an `Allow`
+does.
+
+**Splicing claude's own bytes and re-marshalling the daemon's parked batch
+are not interchangeable copies of the same information.** `AnswerQuestion`
+builds claude's updated tool input by extracting the `questions` value out
+of `permbridge.Request.Input` as a `json.RawMessage`, never by re-marshalling
+`protocol.Question` — because `protocol.Question` tags the multi-select flag
+`multi_select` where claude's own tool input spells it `multiSelect`, and
+claude accepts the call either way, silently, whichever key is present. A
+test that decodes the updated input and checks its shape passes on both
+routes; only a byte comparison against the parked `Request.Input`, plus a
+grep for the surviving key spelling, catches the wrong one. Generalizes past
+this ticket: a "pass X through verbatim" claim about a value that also has a
+same-shaped sibling type needs that byte-level pin, not a decode-and-check
+test.
+
+**Testing the detached dismissal goroutine's push-failure arm and asserting
+the log buffer stays empty are mutually exclusive, not merely awkward
+together.** The error line `broadcast` writes on a failed `Push` is written
+by the detached goroutine *after* the `Push` a test's wait signal observes,
+so nothing establishes a happens-before edge between the two — forcing the
+failure both fails `-race` and leaves the buffer non-empty, so an
+empty-buffer claim can only be tested with that arm left unforced. #1990's
+refusal probe already made this choice; #1991's answer probe kept the same
+split rather than trying to cover both in one test. Whatever #1986 adds on
+top of this detached-broadcast pattern should keep the push-failure coverage
+and the log-emptiness claim as two separate tests.
 
 **`byQuestion` is a second map, not a second key space inside `byModal`, and
 that is load-bearing, not a style choice.** `ResolveStream` treats *any*
