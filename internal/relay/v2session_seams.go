@@ -650,4 +650,79 @@ type V2SessionConfig struct {
 	// existing-test posture. #1980 wires the daemon-side producer to
 	// questionbridge.Registry.Snapshot.
 	OutstandingQuestions func() []protocol.QuestionShownPayload
+
+	// RetainedSlashCommandLists enumerates the daemon's currently-retained
+	// slash-command lists as marshal-ready slash_command_list payloads (one per
+	// session holding a list, each already stamped with its own conversation_id)
+	// for connect-time reconcile (#2006) — the fifth Mode B instance after
+	// OutstandingModals, OutstandingQueues, RetainedModelLists and
+	// OutstandingQuestions. Called on the Run goroutine from handleNoiseInit's
+	// interactive-open tail; the returned payloads are unicast to the just-opened
+	// conn only. slash_command_list is snapshot-shaped full state — it is decoded
+	// from one initialize reply, it is session configuration rather than a turn
+	// event, and receiving one neither opens nor closes a turn — so the re-send is
+	// idempotent by construction: re-connecting re-sends the same snapshot. A pure
+	// read: it mints nothing, retires nothing, and changes no daemon state.
+	//
+	// The reconcile exists because the live turn lane is the only path carrying this
+	// frame today and three independent loss points sit in front of it: the
+	// emitter's empty-conversation early return, unconditional for the bootstrap
+	// child because the conversation cursor is only ever set by a successful route
+	// while the initialize ask fires at child spawn; the droppable classification
+	// under droppableCap; and forwardEnvelope's last_event_id dedup, a reconnect
+	// mechanism with no fresh-connect backfill. A client attaching later has no path
+	// to the list at all, so its command menu stays empty until a turn that may
+	// never come.
+	//
+	// A closure returning []protocol.SlashCommandListPayload, not a *sessions.Pool
+	// or a turnevent value: internal/relay imports neither internal/sessions nor
+	// internal/turnevent (sessions appears only transitively via internal/control,
+	// so a go list -deps reading looks like a contradiction and is not one), and
+	// protocol is already imported, so the payload crosses the boundary with no new
+	// import and no cycle (matching the four seams above — define the dependency
+	// where it is consumed).
+	//
+	// Enumerate-all, not conversation-keyed. A V2Session carries no conversation id
+	// — it holds connID, state, resp, send, recv, device, interactive and peerStatic
+	// — so there is nothing to key on at connect time; each payload self-identifies
+	// by its own conversation_id. RetainedModelLists and OutstandingQuestions state
+	// the same reasoning. cmd/pyry's resolveBoundSlashCommandList (#2005) is the
+	// conversation-keyed variant and is deliberately the WRONG shape here; bridging
+	// the two is #2007's job.
+	//
+	// Order is not part of the contract, and a caller MUST correlate a list by its
+	// conversation_id rather than by its position in the returned slice — the
+	// envelope id this path stamps is fixed and non-load-bearing for the same
+	// reason.
+	//
+	// BOUNDED TIME, like every seam the manager calls on its Run goroutine: an
+	// implementation that blocks stalls Run and with it every conn the manager
+	// services. ModalResolver's doc block states the same obligation and this one is
+	// not hypothetical — the #2007 producer walks a conversation registry under that
+	// registry's mutex, which is exactly the shape that can block.
+	//
+	// SECURITY: this seam accepts ALREADY-BOUNDED payloads only. The reconcile path
+	// applies no bound of its own — not on how many payloads are returned, not on
+	// any entry's text — because the bound is decided upstream at construction
+	// (SlashCommandListPayload.DroppedCommands on the aggregate,
+	// SlashCommand.TruncatedFields per entry, over a producer cut measured against
+	// marshalled bytes so the envelope stays under the v2 application-envelope cap).
+	// A second cap here would be a second place the limit is decided and the two
+	// could disagree silently, so the obligation stays the producer's. Note that
+	// those per-payload bounds do NOT bound how many payloads can be returned at
+	// once; on this path pushQueue's byte ceiling is the backstop, and a cardinality
+	// cap, if one is ever wanted, belongs to the producer and not to either half of
+	// this reconcile. The four strings a row carries — Name, ArgumentHint,
+	// Description and each entry of Aliases — are WORKSPACE-authored, untrusted text
+	// that crossed the subprocess trust boundary (SlashCommand's own doc, which
+	// grades that origin below claude-authored), and they are NEVER logged on the
+	// reconcile path. They are also forwarded UNSANITISED — no control-character or
+	// terminal-escape stripping happens here, and Description is measured to carry
+	// newlines — which is SlashCommand's own documented decision and not an
+	// omission: the render boundary owing the sanitisation is the client's.
+	//
+	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#2006 / foreground /
+	// existing-test posture, the nil-resolver posture the other optional control
+	// seams share. #2007 wires the daemon-side producer.
+	RetainedSlashCommandLists func() []protocol.SlashCommandListPayload
 }

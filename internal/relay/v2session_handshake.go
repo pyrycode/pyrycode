@@ -377,6 +377,19 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// prompt first, the same reason the queue reconcile is already second.
 	m.reconcileModelLists(ctx, s)
 
+	// Connect-time slash-command-list reconcile (#2006): send the retained
+	// slash_command_list for each session holding one to this conn — the fifth Mode B
+	// instance alongside the four reconciles above — so a client attaching later gets
+	// a correct command menu without waiting for a turn that may never come. The live
+	// turn lane never reaches such a client, for the three loss points
+	// reconcileSlashCommandLists names. No-op for a non-interactive conn or an unwired
+	// seam. Correctness does not depend on the position: the five carry distinct
+	// payload types, none reads another's effect, and none of the five frames is
+	// droppable (pushQueue.enqueue marks only TypeAssistantDelta so). This tail is
+	// ordered by time-sensitivity — permission prompt first — and a command menu is the
+	// least time-sensitive of the five, so it goes last.
+	m.reconcileSlashCommandLists(ctx, s)
+
 	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
 	// off, replay the conversation's missed tail (or emit a resync marker) on
 	// this conn before Run returns to its select to service the live stream

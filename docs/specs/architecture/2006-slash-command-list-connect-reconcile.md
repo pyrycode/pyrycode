@@ -293,6 +293,34 @@ Scenarios:
    stays ~40 lines. Any departure from what this section describes is recorded under
    `## Revisions`.
 
+## Revisions
+
+**2026-09-02 — Phase B.** No design change; the three Open Questions resolved as written and
+both SHOULD FIX items from § Security review landed.
+
+1. **Seam name** — shipped as `RetainedSlashCommandLists`, as planned.
+2. **File name** — shipped as `internal/relay/v2session_slashreconcile.go`, as planned.
+3. **AC5 teardown test** — resolved as expected: a hand-built `V2Session` plus an
+   already-cancelled context is enough, and the test performs no handshake. It still calls
+   `startManager`, which is the package's only manager constructor helper, so the Run
+   goroutine exists but stays idle; nothing is shared with it, since the reconcile reads only
+   `connID` / `interactive` off the local session value and `Push` resolves `connID` under
+   `pushMu`.
+   - **The assertion is confirmed sole-red by mutation.** Replacing the branch's `return` with
+     `continue` under a `go test -overlay` mutant yields 3 `push_err` records for 3 payloads
+     against the expected 1, so the test genuinely distinguishes "stops the batch" from
+     "skips one and continues" rather than merely observing that nothing was sent.
+4. **SHOULD FIX [Concurrency]** — the bounded-time obligation is stated in
+   `RetainedSlashCommandLists`' doc block, naming #2007's registry-mutex walk as the concrete
+   shape that can block.
+5. **SHOULD FIX [Errors/logs]** — the test file's header records that both error branches are
+   unreachable by fixture, so the content-free-logging test proves the *success* path logs
+   nothing and the two error branches' guarantee rests on code reading.
+
+Unrelated pre-existing finding, deliberately not fixed (§ Scope Discipline):
+`internal/relay/v2session_queuereconcile_test.go` is `gofmt`-dirty on `origin/main` and is
+outside this ticket's diff.
+
 ## Security review
 
 **Verdict:** PASS
