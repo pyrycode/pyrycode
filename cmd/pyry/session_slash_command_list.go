@@ -152,3 +152,120 @@ func resolveBoundSlashCommandList(convReg *conversations.Registry, pool *session
 	// SECURITY paragraph keeps off that path. No fixture reaches them, deliberately.
 	return out, true
 }
+
+// retainedSlashCommandLists adapts the conversation-keyed resolver above to the
+// relay's connect-time reconcile seam (#2007 fills #2006's
+// V2SessionConfig.RetainedSlashCommandLists, which shipped wired to nothing): one
+// marshal-ready protocol.SlashCommandListPayload per conversation whose bound
+// session currently holds an inventory. The shape is outstandingQueues' —
+// dependencies in, a closure out, one payload per contributing entity, a pure read
+// — and it is retainedModelLists' TWIN, so read that function alongside this one.
+//
+// This slice builds NO ENVELOPE. reconcileSlashCommandLists already owns the type
+// stamp, the shared batch timestamp, the nil EventID and the Push; this half ends
+// at the payload slice. The sentence above resolveBoundSlashCommandList's MapEvent
+// assertion that credits #2007 with naming the type predates #2006 and is stale.
+//
+// The ENUMERATION is forced rather than chosen: a relay V2Session carries no
+// conversation id, so there is nothing to key the resolver on at connect time and
+// the only way to fill a conversation-scoped seam is to walk the registry. The seam
+// says so from its own side, and names the conversation-keyed resolver as the
+// obvious wrong shape to reach for here.
+//
+// The comma-ok is the ONLY filter. This function reads no field of Conversation but
+// ID, and inspects no payload it is about to append. Every refusal rule stays inside
+// resolveBoundSlashCommandList, where #2005 put them; a second spelling here would
+// be a second place the rule is decided. In particular there is deliberately NO
+// len(Commands) > 0 check — but the reason is the TWIN'S CONCLUSION REACHED BY A
+// DIFFERENT ROUTE, and copying retainedModelLists' sentence would state something
+// false. That one leans on turnevent.ModelList.Models being documented "never
+// empty"; turnevent.SlashCommandList.Commands carries no such type-level guarantee.
+// The guarantee is the PRODUCER's — streamsup's emitSlashCommandList returns early
+// on a zero-length entry list (#1877), so nothing empty ever reaches the retention —
+// which is the wording resolveBoundSlashCommandList itself inherited. No arm of it
+// answers true with an empty Commands, so such a check would be a strictly weaker
+// restatement no test could redden.
+//
+// The DOUBLE LOOKUP is deliberate, and it is a SECURITY CONTROL rather than
+// redundancy. Registry.List already hands back each Conversation, CurrentSessionID
+// included, and this loop throws that away so the resolver can Get the row again.
+// Reading CurrentSessionID off the listed row and calling Pool.Lookup directly would
+// fork the empty-CurrentSessionID guard, which is the #678 isolation enforcement
+// point: Pool.Lookup("") returns the BOOTSTRAP session with a nil error, so a fork
+// that drifted would hand an unbound conversation the shared bootstrap child's
+// command menu stamped with its own conversation id — a cross-conversation
+// disclosure, and the exact failure the isolation test pins. The bootstrap session
+// contributes nothing for the same reason it needs no special case: it has no
+// conversation record, so it never appears in List at all, and the payload is
+// conversation-scoped with no id to stamp for it.
+//
+// The cost of that choice is O(rows²) comparisons: Registry.Get is a linear scan, so
+// N rows cost N scans, plus one deep copy per contributing session's inventory. This
+// runs once per interactive handshake and never per turn, so at the tens to hundreds
+// of rows this daemon carries it is microseconds on the relay manager's Run
+// goroutine. It is stated because the registry only GROWS — auto-archive sets a flag
+// rather than deleting, and archived rows are deliberately enumerated below — so
+// whoever hits it can see the cost. The fix, if one is ever needed, is an id-keyed
+// index inside internal/conversations, NOT reading the binding off the listed row.
+//
+// Enumerate-all, unfiltered, so ARCHIVED conversations CONTRIBUTE. List with no
+// filter returns them, and Registry.SetArchived writes exactly one field without
+// unbinding CurrentSessionID, so an archived conversation whose bound session still
+// holds an inventory produces a payload. That is intended: the reconcile asserts
+// current control truth and the client decides what to show. Neither adding nor
+// omitting a conversations.ListFilter here is a free edit.
+//
+// Order is List's (registry insertion order) and is NOT a contract.
+// reconcileSlashCommandLists sends one envelope per payload under a single fixed,
+// non-load-bearing envelope id, and the seam's own doc block binds callers to
+// correlate by conversation_id — so callers and tests index by ConversationID, never
+// by position.
+//
+// SECURITY: a pure read — it mints nothing, retires nothing and mutates no daemon
+// state, including nothing it read: each resolver call takes its own deep copy out
+// of the hold, so two conversations bound to the SAME session get payloads with
+// independent backing arrays and no caller can write through a producer's slice. It
+// takes NO logger and MUST NOT grow one, resolveBoundSlashCommandList's #833 rule
+// inherited with the threat one step sharper: the only thing a "why did this row not
+// contribute" line could carry is a conversation id or the command strings, and
+// those are the WORKSPACE's rather than claude's, so whoever wrote a repository
+// controls them. Every id it hands the resolver came out of this daemon's own
+// registry and is server-minted (handlers.CreateConversation builds each row's ID
+// from conversations.NewID), so the resolver's untrusted-id arm is unreachable from
+// this entry point and needs no second guard here. This path applies no bound of its
+// own: the payloads arrive already bounded at construction (DroppedCommands on the
+// aggregate, TruncatedFields per entry, over a producer cut measured against
+// marshalled bytes), and the count is deliberately uncapped — the shape
+// outstandingQueues and retainedModelLists already ship, with pushQueue's byte
+// ceiling as the relay-side backstop. A cap here would be a second place the limit is
+// decided. Not closed here, and named because turning this path on is what gives it
+// effect: a paired interactive conn is unicast EVERY retained list, including
+// conversations bound to other workspaces. Per-device confinement belongs to the
+// Mode B umbrella (#829) rather than to one of its five instances.
+//
+// Concurrency: synchronous on the caller's goroutine; nothing is spawned, so there is
+// nothing to leak or join. The seam requires BOUNDED TIME because this closure runs
+// on the manager's Run goroutine, and it holds: the per-row Get runs OUTSIDE List's
+// lock scope because the loop iterates the copy List returns, and Registry.Save takes
+// its snapshot under the registry mutex and releases it BEFORE any disk write, so no
+// Get here can ever queue behind an fsync. Do not restructure through Registry.Update
+// or any registry-held callback, which would both add a registry→pool lock edge the
+// daemon does not have today and deadlock against Update's own no-re-entry rule. The
+// List → Get window is the benign TOCTOU the resolver documents: a row created,
+// deleted, rebound or rotated inside it either resolves to the inventory of the
+// session bound a moment ago or refuses, and both are correct. No re-read, no retry,
+// no re-list.
+func retainedSlashCommandLists(convReg *conversations.Registry, pool *sessions.Pool) func() []protocol.SlashCommandListPayload {
+	return func() []protocol.SlashCommandListPayload {
+		convs := convReg.List()
+		out := make([]protocol.SlashCommandListPayload, 0, len(convs))
+		for _, c := range convs {
+			payload, ok := resolveBoundSlashCommandList(convReg, pool, string(c.ID))
+			if !ok {
+				continue
+			}
+			out = append(out, payload)
+		}
+		return out
+	}
+}

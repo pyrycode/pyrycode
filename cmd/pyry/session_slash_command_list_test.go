@@ -434,3 +434,307 @@ func TestResolveBoundSlashCommandList_LogsNothing(t *testing.T) {
 		t.Errorf("the caller's untrusted conversation id leaked into a log record:\n%s", logs)
 	}
 }
+
+// indexSlashCommandsByConversation keys an enumeration's result on
+// ConversationID, which is how every assertion below reads it:
+// retainedSlashCommandLists returns List's order (registry insertion order) and
+// that is deliberately NOT a contract — the seam's own doc block binds callers to
+// correlate by conversation id, and reconcileSlashCommandLists stamps one fixed,
+// non-load-bearing envelope id across the batch. It also fails a duplicated id,
+// which is the shape a loop that appended the same row twice would take.
+//
+// It is indexByConversation's shape reproduced rather than shared, this family's
+// convention for keeping each twin's rig byte-stable.
+func indexSlashCommandsByConversation(t *testing.T, got []protocol.SlashCommandListPayload) map[string]protocol.SlashCommandListPayload {
+	t.Helper()
+	byID := make(map[string]protocol.SlashCommandListPayload, len(got))
+	for _, p := range got {
+		if _, dup := byID[p.ConversationID]; dup {
+			t.Fatalf("conversation %q contributed twice: %+v", p.ConversationID, got)
+		}
+		byID[p.ConversationID] = p
+	}
+	return byID
+}
+
+// #2007 AC 1: one conversation bound to a session holding a retained inventory
+// yields exactly one payload, carrying that session's commands in claude's order
+// under that conversation's id.
+//
+// The bootstrap session is armed and bound, so a mutant that returned the zero
+// payload or an empty slice is red on the count as well as on the contents.
+// DroppedCommands is asserted against a literal rather than the fixture's field,
+// so a count recomputed from len(Commands) reddens — shipping 0 would tell a
+// client that a capped menu is the whole menu.
+func TestRetainedSlashCommandLists_EnumeratesTheBoundSessionsInventory(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newSlashCommandListTestPool(t)
+	held := sentinelSlashCommandList("ENUM")
+	plan.arm(pool.BootstrapID(), held)
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-enum",
+		CurrentSessionID: string(pool.BootstrapID()),
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	got := retainedSlashCommandLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedSlashCommandLists returned %d payloads, want exactly 1: %+v", len(got), got)
+	}
+	if got[0].ConversationID != "conv-enum" {
+		t.Errorf("ConversationID = %q, want %q", got[0].ConversationID, "conv-enum")
+	}
+	if got[0].DroppedCommands != 4 {
+		t.Errorf("DroppedCommands = %d, want 4 (carried from the retained list, never recomputed)", got[0].DroppedCommands)
+	}
+	assertSlashCommandsCarry(t, got[0], held)
+}
+
+// #2007 AC 4: each refusal contributes no payload and raises no error, and does so
+// WITHOUT aborting the enumeration or contaminating a sibling's payload. The
+// resolver's comma-ok is the only filter, so every one of these skips is decided
+// inside resolveBoundSlashCommandList and nowhere here.
+//
+// All four rows live in ONE registry on purpose — that is the whole point of the
+// test. A refusal that aborted the enumeration, appended a zero payload, or
+// carried the previous row's commands forward is red here and invisible in four
+// single-row registries. The three refusing rows are the three arms reachable from
+// this entry point; the resolver's unknown-conversation arm is unreachable because
+// every id came out of List.
+//
+// The contributing row is created LAST, after all three refusals, and that order is
+// load-bearing: List returns registry insertion order, so a mutant that broke out
+// of the loop on the first refusal instead of continuing would still return the
+// survivor — and go green — if the survivor came first. Behind three refusals it
+// returns nothing.
+func TestRetainedSlashCommandLists_SkipsEachRefusalAndKeepsGoing(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newSlashCommandListTestPool(t)
+	held := sentinelSlashCommandList("SURVIVOR")
+	plan.arm(pool.BootstrapID(), held)
+
+	// A second pool session whose runner implements SlashCommandList but has
+	// nothing armed: the "reported nothing" refusal, one step deeper than the two
+	// below. Bound to its own row so the refusal is reached through the registry.
+	ctx := runPoolReady(t, pool)
+	silent, err := pool.Create(ctx, "session-silent")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-silent", CurrentSessionID: string(silent), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-live", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+
+	got := retainedSlashCommandLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedSlashCommandLists returned %d payloads, want exactly 1 (only conv-live contributes): %+v", len(got), got)
+	}
+	if got[0].ConversationID != "conv-live" {
+		t.Fatalf("the surviving payload names %q, want %q", got[0].ConversationID, "conv-live")
+	}
+	assertSlashCommandsCarry(t, got[0], held)
+	// An empty menu is never presented as a real one: no payload may carry zero
+	// commands, whichever row produced it. This is the assertion a `len(Commands)
+	// > 0` filter here would make vacuous — the guarantee belongs to the producer
+	// (streamsup's emitSlashCommandList suppresses the empty list, #1877) and is
+	// spelled once, in the resolver's bool.
+	for _, p := range got {
+		if len(p.Commands) == 0 {
+			t.Errorf("payload for %q carries an empty inventory; a refusal must contribute nothing at all", p.ConversationID)
+		}
+	}
+}
+
+// #2007 AC 4, the nothing-to-send half: an empty registry and a registry whose
+// every row refuses both enumerate to no payloads and no panic. Split from the test
+// above because that one always has a survivor, so it cannot distinguish "skipped
+// the refusals" from "returned the survivor and stopped".
+func TestRetainedSlashCommandLists_NothingToSend(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newSlashCommandListTestPool(t)
+	// Armed but never bound: a mutant that enumerated the POOL instead of the
+	// registry would contribute here, and an unarmed bootstrap would hide that.
+	plan.arm(pool.BootstrapID(), sentinelSlashCommandList("UNREACHABLE"))
+
+	now := time.Now().UTC()
+	allRefuse := &conversations.Registry{}
+	allRefuse.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	allRefuse.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+
+	tests := []struct {
+		name string
+		reg  *conversations.Registry
+	}{
+		{"empty registry", &conversations.Registry{}},
+		{"every row refuses", allRefuse},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := retainedSlashCommandLists(tc.reg, pool)(); len(got) != 0 {
+				t.Fatalf("retainedSlashCommandLists returned %d payloads, want none: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+// #2007 AC 3: the enumeration is unfiltered, so an ARCHIVED conversation whose
+// bound session still holds an inventory DOES contribute. Registry.SetArchived
+// writes exactly one field and never unbinds CurrentSessionID, and the reconcile
+// asserts current control truth — the client decides what to show.
+//
+// This is the sole red for a mutant that narrows the call to
+// List(ListFilter{IsArchived: &f}), which is otherwise invisible: every other test
+// here builds unarchived rows.
+func TestRetainedSlashCommandLists_ArchivedConversationsContribute(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newSlashCommandListTestPool(t)
+	held := sentinelSlashCommandList("ARCHIVED")
+	plan.arm(pool.BootstrapID(), held)
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-archived",
+		CurrentSessionID: string(pool.BootstrapID()),
+		IsArchived:       true,
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	got := retainedSlashCommandLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedSlashCommandLists returned %d payloads, want 1 — archiving does not unbind the session: %+v", len(got), got)
+	}
+	if got[0].ConversationID != "conv-archived" {
+		t.Errorf("ConversationID = %q, want %q", got[0].ConversationID, "conv-archived")
+	}
+	assertSlashCommandsCarry(t, got[0], held)
+}
+
+// #2007 AC 2: two conversations bound to two DIFFERENT pool sessions each carry
+// their own session's inventory across ONE enumeration. This is the pin a shared
+// buffer, an off-by-one, or a loop-variable capture cannot pass, and it is the sole
+// red for the #678 fork the double lookup exists to prevent — reading
+// CurrentSessionID off the listed row and calling Pool.Lookup directly hands an
+// unbound row the bootstrap child's menu stamped with its own conversation id.
+// TestResolveBoundSlashCommandList_IsolatesConversations makes the same point one
+// call at a time; only the enumerator can cross two rows within a single result
+// slice, and a single-conversation fixture cannot redden any of it.
+//
+// The two sessions also pin that two payloads never share a backing array: each
+// resolver call takes its own deep copy out of the hold, so a mutant that hoisted
+// one copy out of the loop would cross the two inventories here.
+//
+// Not parallel: t.Setenv confines anything the pool's create path resolves out of
+// HOME, and t.Setenv forbids t.Parallel.
+func TestRetainedSlashCommandLists_DoesNotCrossConversations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	pool, plan := newSlashCommandListTestPool(t)
+	// Pool.Create schedules the new session on the run group, so the pool has to be
+	// running or supervise returns ErrPoolNotRunning.
+	ctx := runPoolReady(t, pool)
+	sessA := pool.BootstrapID()
+	sessB, err := pool.Create(ctx, "session-b")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	listA, listB := sentinelSlashCommandList("ALPHAENUM"), sentinelSlashCommandList("BETAENUM")
+	plan.arm(sessA, listA)
+	plan.arm(sessB, listB)
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-a", CurrentSessionID: string(sessA), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-b", CurrentSessionID: string(sessB), LastUsedAt: now})
+
+	got := retainedSlashCommandLists(reg, pool)()
+	if len(got) != 2 {
+		t.Fatalf("retainedSlashCommandLists returned %d payloads, want 2: %+v", len(got), got)
+	}
+	byID := indexSlashCommandsByConversation(t, got)
+	gotA, ok := byID["conv-a"]
+	if !ok {
+		t.Fatalf("conv-a contributed no payload: %+v", got)
+	}
+	gotB, ok := byID["conv-b"]
+	if !ok {
+		t.Fatalf("conv-b contributed no payload: %+v", got)
+	}
+	assertSlashCommandsCarry(t, gotA, listA)
+	assertSlashCommandsCarry(t, gotB, listB)
+	// Stated separately for the same reason the resolver's twin states it: the
+	// failure this test exists to catch is A being handed B's menu stamped with A's
+	// own id, and a reader should not have to compare two sentinel tags to see it.
+	if gotA.Commands[0].Name == gotB.Commands[0].Name {
+		t.Fatalf("both conversations enumerated the same inventory: %q", gotA.Commands[0].Name)
+	}
+}
+
+// #2007 AC 5: no command name, argument hint, description or alias reaches a log
+// record on this path at any level, and neither does a conversation id.
+//
+// What this pins, honestly: retainedSlashCommandLists takes no *slog.Logger, so the
+// structural half of AC 5 is enforced by the signature and by review. What this
+// catches is the one real regression shape — someone reaching for the package-level
+// slog.Info / slog.Default() to explain why a row did not contribute. The registry
+// deliberately holds BOTH a contributing row and refusing ones, because that "why
+// did this row skip" line is exactly where such a call would be added. The strings
+// are workspace-authored — whoever wrote a repository controls them — which is a
+// lower-trust origin than the model-list twin's claude-authored values.
+//
+// It must NOT call t.Parallel: slog.SetDefault is process-global. The pool is built
+// BEFORE the default is swapped, so sessions.New captures the old default and the
+// pool's own diagnostics cannot land in this buffer.
+func TestRetainedSlashCommandLists_LogsNothing(t *testing.T) {
+	pool, plan := newSlashCommandListTestPool(t)
+	held := sentinelSlashCommandList("ENUMLOGNEG")
+	plan.arm(pool.BootstrapID(), held)
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-logneg", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-ZZUNTRUSTEDENUMZZ", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-gone", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	got := retainedSlashCommandLists(reg, pool)()
+	if len(got) != 1 {
+		t.Fatalf("retainedSlashCommandLists returned %d payloads, want 1; the log negative needs the happy path", len(got))
+	}
+
+	logs := buf.String()
+	if logs != "" {
+		t.Fatalf("retainedSlashCommandLists wrote %d bytes of log; it must write none:\n%s", len(logs), logs)
+	}
+	// Belt-and-braces on the values themselves, so a future handler swap that made
+	// the emptiness check weaker still names what leaked. The v != "" guard is not
+	// decorative: strings.Contains(logs, "") is true unconditionally, so an empty
+	// field would make this loop assert nothing.
+	for _, c := range got[0].Commands {
+		for _, v := range append([]string{c.Name, c.ArgumentHint, c.Description}, c.Aliases...) {
+			if v != "" && strings.Contains(logs, v) {
+				t.Errorf("a slash-command value leaked into a log record: %q", v)
+			}
+		}
+	}
+	// The refusing rows' ids are the other half: a "why did this row not
+	// contribute" line would carry one.
+	if strings.Contains(logs, "ZZUNTRUSTEDENUMZZ") {
+		t.Errorf("a skipped conversation's id leaked into a log record:\n%s", logs)
+	}
+}
