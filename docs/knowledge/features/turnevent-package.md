@@ -131,10 +131,13 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
   or empty `commands` array emits nothing (the decode collapses all three onto
   one nil slice, so the producer can't make the positive statement an empty
   emit would be making; see [streamsup-package.md](streamsup-package.md)).
-  `turnbridge.MapEvent`'s `default` drops the variant and
-  `interactiveTurnEmitterV2.Handle` has no case for it — both now genuinely
-  reached rather than merely armless, since a production path emits the
-  variant. The entry count is bounded and its drop counted since #1826
+  `interactiveTurnEmitterV2.Handle` has no case for it, so the value never
+  reaches `MapEvent` at all — genuinely reached-but-dropped rather than merely
+  armless, since a production path emits the variant. `turnbridge.MapEvent`
+  itself stopped being armless in #2001, which gave it an explicit
+  `SlashCommandList` arm (see [turnbridge-package.md](turnbridge-package.md));
+  that arm is unreached in production until `Handle` gains its case, #2003's.
+  The entry count is bounded and its drop counted since #1826
   (`maxSlashCommandListEntries`, truncation from the tail, reported on
   `DroppedCommands`) — one ticket after the first emit, exactly the gap
   `ModelList`'s own count bound (`maxModelListEntries`) took after its first

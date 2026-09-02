@@ -6,9 +6,9 @@ capture) at construction and the entries emit as one `turnevent.SlashCommandList
 `ModelList`; absent, null or empty emits nothing. No entry-count cap and no `DroppedCommands` —
 that's #1826's, one array over the #1811→#1812 precedent — so `logControlResponse` gains no seventh
 attribute: with no count cap the decoded count the sixth attribute already reports still equals the
-emitted count. Producing is not publishing: `turnbridge.MapEvent` gains no arm and
-`interactiveTurnEmitterV2.Handle` gains no case, so the value is logged by kind and dropped — that's
-still #1720's.
+emitted count. Producing is not publishing: at the time, `turnbridge.MapEvent` had no arm and
+`interactiveTurnEmitterV2.Handle` had no case, so the value was logged by kind and dropped.
+`MapEvent` gained its arm in #2001 (still an unreached one — see below); `Handle`'s case is #2003's.
 
 **The construction moved into its own emitter (#1886).** The cap, the `turnevent.SlashCommand`
 construction and the single emit no longer sit inline at `emitModelList`'s tail — they're
