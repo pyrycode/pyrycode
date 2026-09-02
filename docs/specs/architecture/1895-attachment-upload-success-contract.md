@@ -423,3 +423,44 @@ Verification is `go test -race ./internal/protocol/... ./cmd/pyry/...`,
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — mutant results corrected the Testing strategy's prediction
+
+The plan listed *"changing the constant's value (RoundTrip, plus the three
+`compat_test.go` registries)"* among the mutants. Run rather than predicted, that
+is **wrong about the registries**: mutating `TypeAttachmentStored`'s value to
+`"attachment_saved"` reddens `TestAttachmentStoredPayload_RoundTrip` **only**.
+
+The reason is worth recording, because it changes what those registries are
+evidence of. All three key on the **constant symbol**, not on its wire string, so
+a value change moves through `TestIsKnownAppType`, `v2OnlyTypes` and the partition
+`all` slice consistently and none of them notices. They pin the constant's
+**membership** — v2-only, never in `v1TypeSet`, rejected by `IsKnownAppType` — and
+the **committed fixture is the only thing that pins the wire value**. A ticket
+that added the registry entries and skipped the fixture would ship a type whose
+string nothing checks.
+
+The other three mutants behaved as the plan predicted, confirmed by overlay run:
+
+| Mutant | Red | Green |
+|---|---|---|
+| Second field on the payload | `WireKeys`, `RoundTrip` | `ZeroValue` |
+| `omitempty` on the sole field | `ZeroValue` | `WireKeys`, `RoundTrip` |
+| Entry dropped from `excludedTypes` | relay guard Assertion #3 | everything in `internal/protocol` |
+
+The added-field row also confirms `WireKeys` is load-bearing beyond `RoundTrip`
+rather than merely redundant with it: `WireKeys` never reads the fixture, so
+regenerating the fixture under that mutant restores `RoundTrip` to green and
+leaves `WireKeys` red.
+
+### 2026-09-02 — the `attachment_id` shape got its own heading
+
+The plan placed the shape as prose inside the `attachment_stored` subsection. It
+shipped as a `##### The `attachment_id` shape` heading nested in that subsection
+instead. Two links need to resolve to it — the `attachment_chunk` field row's
+pointer and the scope fence's — and an anchor needs a heading. Nesting keeps it
+inside the subsection AC #3 names while the text states that the rule binds every
+frame in the section, not only the frame it sits under. `##### `resync`` is the
+existing precedent for the heading level.

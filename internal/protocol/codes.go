@@ -922,6 +922,67 @@ const (
 	TypeAttachmentChunk = "attachment_chunk" // phone ↔ binary, one chunk of an attachment's bytes (both directions)
 )
 
+// Mobile Protocol v2 attachment upload success reply (#1895, split from #1744;
+// docs/protocol-mobile.md § Attachments publishes it). The one POSITIVE terminal
+// signal the upload leg had: the transfer completed, its claims were checked, and
+// the bytes are on the host addressable by the id the client chose. Its payload
+// is AttachmentStoredPayload (attachments.go). Before this constant a client that
+// uploaded was told what went wrong on every failure path and got silence on the
+// one that worked, and that section said so — "No success frame is declared here,
+// and a client must not invent one."
+//
+// THE NAME is the positive of CodeAttachmentStorageFailed, so the family's
+// terminal outcomes read as one set rather than a positive invented in a
+// different idiom from its negatives. It is not read as narrow: six other
+// attachment.* codes also terminate an upload, and this is the single positive
+// terminal for the WHOLE transfer, not a report that only the storage step
+// succeeded. "attachment_uploaded" was rejected because the wire type names what
+// the frame IS to a client — TypeQuestionShown's block records that rule — and
+// what this frame is, is the daemon's assertion, not the client's action.
+// "attachment_ack" was rejected outright: TypeAck already exists and AckPayload
+// is a struct{}, so the name would promise the existing empty frame while
+// carrying a payload. That emptiness is also why the generic ack cannot serve
+// here — it can name no attachment.
+//
+// IT IS A REPLY, correlated via the envelope's InReplyTo, and that is ONE
+// decision expressed in three places that must agree: this block, the
+// docs/protocol-mobile.md § Application message types row, and
+// cmd/pyry/relay_guard_test.go's excludedTypes entry, which defines "reply" as
+// exactly this. TypeSessionSettingsUpdated is the nearest analogue on both counts
+// — an outbound v2 confirmation of an inbound control frame, filed "reply",
+// published as correlated by in_reply_to, and carrying only the id it confirms
+// because the client already knows what it sent. The reject half of this same leg
+// already went that way: CodeAttachmentStreamAborted is a TypeError correlated
+// via in_reply_to, and a success correlating differently from the failure it is
+// the alternative to would split one leg across two mechanisms.
+//
+// WHAT InReplyTo POINTS AT is the envelope of the chunk WHOSE ARRIVAL COMPLETED
+// THE TRANSFER — not the one with the highest Index. Chunks may arrive in any
+// order and the transfer is complete when every index in [0, TotalChunks) has
+// arrived exactly once, so the completing chunk is whichever one closed the set,
+// and a client cannot predict which of its envelope ids that will be. That is why
+// the payload ALSO carries the attachment id: the envelope field says which frame
+// this answers, the payload says which transfer it concludes, and only the second
+// is a value the client chose and can look up. The two are not redundant.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an old
+// (v1) phone never receives this frame, and IsKnownAppType rejecting it is the
+// structural bar against a v1 client sending one into dispatch.Route. Filing it
+// in inboundTypes is impossible anyway — Assertion #1 requires an inbound type to
+// be wired into cmd/pyry/relay.go's Handlers map or internal/relay/v2session.go's
+// dispatchAppFrame, and this slice ships no dispatch. Two drift detectors classify
+// it, both mandatory from the moment the constant exists rather than from the
+// moment something emits it: the partition in internal/protocol/compat_test.go
+// (this lives in v2OnlyTypes), and excludedTypes as a reply.
+//
+// The declaring ticket (#1895) is wire vocabulary and publication only — no
+// producer, no consumer, no validator. #1897 dispatches the inbound leg and emits
+// this frame, and #1898 observes it end to end. Same declare-then-emit sequencing
+// as #1752→#1753 and #1616→#1638.
+const (
+	TypeAttachmentStored = "attachment_stored" // binary → phone, the upload leg's success reply, correlated via in_reply_to
+)
+
 // Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The
 // questions claude asks mid-turn when it needs the operator to choose between
 // approaches, carried to a client as one frame per batch. The call rides the same
