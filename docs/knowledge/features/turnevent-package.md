@@ -120,8 +120,8 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
 | `Unrecognized` | `Site UnrecognizedSite`, `Kind string`, `Raw string`, `Truncated bool` | **internal-only** diagnostic, and the one variant that is not a claude sub-state: the stream parser met output it has no mapping for. `Site` is a closed enum (`line_type` / `assistant_block` / `user_block` / `undecodable`); `Kind` is the offending type, empty for `undecodable`; `Raw` is the offending JSON already truncated by the producer, a `string` and not `json.RawMessage` because a truncated blob is no longer valid JSON |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
-| `SlashCommandList` (#1854, produced #1877) | `Commands []SlashCommand` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877; not yet published — see below |
-| `SlashCommand` (#1854, element type — not an `Event`, no marker) | `Name, TruncatedFields []string` | one inventory entry, mirroring `protocol.SlashCommand`'s field order |
+| `SlashCommandList` (#1854, produced #1877) | `Commands []SlashCommand`, `DroppedCommands int` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877, entry-count bounded and its drop counted since #1826; not yet published — see below |
+| `SlashCommand` (#1854, element type — not an `Event`, no marker) | `Name, ArgumentHint, Description string`, `Aliases, TruncatedFields []string` | one inventory entry, mirroring `protocol.SlashCommand`'s field order |
 
 - **`SlashCommandList` / `SlashCommand` (#1854) were declared ahead of their
   producer; #1877 shipped the producer, and nothing publishes them yet.**
@@ -134,23 +134,27 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
   `turnbridge.MapEvent`'s `default` drops the variant and
   `interactiveTurnEmitterV2.Handle` has no case for it — both now genuinely
   reached rather than merely armless, since a production path emits the
-  variant. No entry-count cap and no `DroppedCommands` yet; that bound is
-  #1826's, exactly as `ModelList`'s own count bound (`maxModelListEntries`)
-  arrived one ticket after its first emit (#1811 → #1812). `turnMarkFor`
-  answers it correctly by construction (`turnMarkNone`, same as `ModelList`):
-  the inventory is reported once per `initialize` exchange, which opens and
-  closes no turn and is not even per-turn.
-- **`SlashCommand`'s two fields are the first and the last of
-  `protocol.SlashCommand`'s five**, in that type's own declaration order —
-  `ArgumentHint`, `Description` and `Aliases` arrive with their own slices,
-  following `ModelOption`'s one-field-at-a-time growth across #1819/#1827/#1828.
-  Fixing the order before the second field exists is the point: each later field
-  lands in its mirrored position instead of being appended.
-- **No `DroppedCommands` field, deliberately**, unlike the wire type's
-  `SlashCommandListPayload`. A daemon-internal struct isn't a compatibility
-  surface, so the count arrives later with the entry-count bound that produces
-  it — the same order `ModelList.DroppedModels` arrived in with
-  `maxModelListEntries`.
+  variant. The entry count is bounded and its drop counted since #1826
+  (`maxSlashCommandListEntries`, truncation from the tail, reported on
+  `DroppedCommands`) — one ticket after the first emit, exactly the gap
+  `ModelList`'s own count bound (`maxModelListEntries`) took after its first
+  emit (#1811 → #1812). `turnMarkFor` answers it correctly by construction
+  (`turnMarkNone`, same as `ModelList`): the inventory is reported once per
+  `initialize` exchange, which opens and closes no turn and is not even
+  per-turn.
+- **`SlashCommand` now carries all five of `protocol.SlashCommand`'s fields**,
+  in that type's own declaration order — `ArgumentHint` (#1957), `Description`
+  (#1904) and `Aliases` (#1825) arrived one at a time after `Name`, following
+  `ModelOption`'s one-field-at-a-time growth across #1819/#1827/#1828. Fixing
+  the order before the second field existed is what let each later field land
+  in its mirrored position instead of being appended.
+- **`DroppedCommands` arrived with its entry-count bound (#1826), one ticket
+  after the wire type declared its own** — the same order `ModelList.DroppedModels`
+  arrived in with `maxModelListEntries`. A daemon-internal struct isn't a
+  compatibility surface, so this field could wait for the bound that produces
+  it rather than being declared ahead of it the way the wire type was; see
+  [Producing `turnevent.SlashCommandList`](streamsup-package-producing-turnevent-slashcommandlist.md)
+  for the derivation.
 - **SECURITY: every string on these two types is workspace-authored** — a
   command defined in a repository was written by whoever wrote that repository,
   a *lower*-trust origin than claude's own strings, which strengthens rather than
