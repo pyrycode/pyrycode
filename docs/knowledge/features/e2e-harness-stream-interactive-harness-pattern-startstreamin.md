@@ -154,3 +154,31 @@ fake's own committed literals by name, and states why in the test's own header r
 than leaving the next reader to infer it from the model-list sibling. #2009 and any
 later realclaude sibling proving this lane should copy this file's assertion shape, not
 the model-list file's.
+
+### `relay_v2_stream_slash_command_list_reconcile_test.go` — `TestRelayV2_StreamSlashCommandListReachesLateConnectingPhone` (#2009)
+
+The inverse of the sibling directly above, built on `relay_v2_stream_model_list_reconcile_test.go`'s
+two-conn sequencing (#1868) but needing a **third** conn — not a stylistic choice, but forced by
+`fakephone.Client.ReceiveBytes`'s documented close-on-timeout semantics (see
+[fakephone-harness.md § Library trade-off](fakephone-harness.md)): proving an absence means running
+a window to its deadline, and the conn that does that is dead afterward, so it cannot also be the
+conn that mints the conversation the way the model-list twin's phone A does double duty. Phone-empty
+handshakes while the registry is still empty and is asserted to receive nothing (and to complete its
+handshake normally regardless); phone-a mints and drives a turn; phone-b connects only afterward and
+is the sole conn read for the frame.
+
+**`listsOnMinter` converged on 1 here, not the 0 the model-list twin's original prediction stated —
+and that divergence is itself informative rather than a discrepancy to chase.** The mechanism is the
+same unordered race #1868 found (see
+[v2-session-manager.md's slash-command-list reconcile section](v2-session-manager.md)): whether the
+live lane also delivers to the minting conn depends on ack-parse-vs-cursor-stamp ordering, which this
+variant's own mutation run resolved as 0-or-1 rather than always-0. The value is logged, never
+asserted, for the same reason as its twin — but the AC-4 mutant run is what made the divergence
+visible: the mutant read `minter=1, observer=0`, which is the two producers of this frame told apart
+by data rather than assumed apart by code reading.
+
+**A dead conn's discarded closure is a compile-time guard, not a comment.** Phone-empty's
+seal-and-send closure is thrown away after its window closes, the same as phone-b's is in the
+model-list twin — so a later edit that tries to reuse either conn fails to build instead of failing
+as a decrypt error that reads like a daemon bug. Worth copying into any future third-conn design in
+this family: discard the closure, don't just note in prose that the conn shouldn't be reused.
