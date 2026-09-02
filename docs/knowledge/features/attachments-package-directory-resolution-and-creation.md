@@ -4,8 +4,11 @@
 attachment of one conversation is filed under —
 `conversations/<conversation-id>/attachments/<attachment-id>` beneath the
 daemon instance directory, every level `0o700` — and returns its
-`EvalSymlinks`-resolved path. Writing bytes into it is #1782's; dispatching to
-it and mapping refusals to wire codes is #1744's. It carries two sentinels of
+`EvalSymlinks`-resolved path. Writing bytes into it is #1782's. `Intake`
+(#1896, see § "Chunk intake driver" below) is now its caller, on the
+completing chunk only, feeding the returned directory straight to `Store`;
+mapping refusals to wire codes is #1897's, at the dispatch site outside this
+package. It carries two sentinels of
 its own, `ErrInvalidID` and `ErrNotContained`, structurally unlike the seven
 below: `EnsureDir` has no accumulator state to latch or discard, so the
 discard-semantics table doesn't apply to it.

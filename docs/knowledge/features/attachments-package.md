@@ -1,6 +1,6 @@
 # `internal/attachments` — inbound attachment-chunk accumulation
 
-Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782, #1795, #1796, #1784, #1880, #1817), fourteen slices of the family split from #1741/#1766:
+Package (#1769, #1770, #1772, #1776, #1777, #1787, #1781, #1788, #1782, #1795, #1796, #1784, #1880, #1817, #1896), fifteen slices of the family split from #1741/#1766:
 holds one inbound
 attachment upload's chunks in memory, addressed by index, refuses a stream
 whose framing contradicts what the transfer declared at admission (#1769),
@@ -24,6 +24,15 @@ the on-host directory one attachment is filed under, and `Store` (#1782, see
 § "Writing attachment bytes" below) writes the verified bytes into it — the
 package's only two functions that touch a filesystem. `Accumulator` itself
 still carries no lock; synchronisation lives in `Registry` alone.
+
+`Intake` (#1896, `intake.go`, see § "Chunk intake driver" below) is the
+package's composite entry point: it sequences `Admit`, `Deliver`, `EnsureDir`
+and `Store` into the one call the wire layer needs, and is the first
+production caller any primitive in this package has had. It maps nothing to
+the wire and has no caller of its own yet — #1897 is both: it declares the
+seam interface `Intake.Receive`/`Intake.ReleaseConn` satisfy, builds the
+production conversation resolver, and wires `appFrameWorker` as this
+package's first caller from *outside* it.
 
 `SanitizeFilename` (#1772, `filename.go`) is unrelated in shape but shares the
 package: a pure, stateless function turning a client-supplied
@@ -129,4 +138,5 @@ search can reach it.
 - [Writing attachment bytes (#1782)](attachments-package-writing-attachment-bytes.md) — `Store` (`storage.go`) takes the directory `EnsureDir` returned, a client-supplied filename, and already-verified bytes, and writes them…
 - [Sentinels and discard semantics](attachments-package-sentinels-and-discard-semantics.md) — Eight exported sentinels, `errors.New("attachments: …")` house style, in three families plus two non-discarding outliers. 
 - [Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, and #1796)](attachments-package-mutation-testing-lessons-measured-across.md) — This package's sole-redness claims are measured with `go test -overlay` (mutants applied via an absolute-path JSON manifest, no worktree…
+- [Chunk intake driver (#1896)](attachments-package-intake-driver.md) — `Intake` (`intake.go`) sequences `Admit`, `Deliver`, `EnsureDir` and `Store` into one call: the fork between a first-to-arrive…
 - [Blocked family (not landed)](attachments-package-blocked-family-not-landed.md) — `total_chunks`/`size` cross-check landed as `CheckDeclaration` (#1776, see § "Admission layer" above), the per-upload byte bound landed as…

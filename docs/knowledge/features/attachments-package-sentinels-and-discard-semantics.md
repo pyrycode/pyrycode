@@ -1,7 +1,7 @@
 # Sentinels and discard semantics
 
-Eight exported sentinels, `errors.New("attachments: …")` house style, in
-three families plus two non-discarding outliers. Six discard the transfer
+Nine exported sentinels, `errors.New("attachments: …")` house style, in
+three families plus three non-discarding outliers. Six discard the transfer
 (latched on first refusal — every later `Add` and `Assemble` returns the
 identical wrapped error, and the held chunk bytes are dropped at the moment
 of refusal so a poisoned accumulator holds no memory past that point).
@@ -19,6 +19,7 @@ resumable answer a later chunk can turn into bytes.
 | `ErrTooManyUploads` (#1796) | resource | n/a — refused before any `Accumulator` exists, by `Registry`'s admission gate rather than `Add`/`Assemble` |
 | `ErrIncomplete` | — | no |
 | `ErrUnknownUpload` (#1784) | — | n/a — no `Accumulator` is looked up for the pair; refused by `Registry.Deliver` itself before either `Add` or `Assemble` runs |
+| `ErrNoConversation` (#1896) | — | n/a — raised by `Intake.Receive` after `Deliver` has already released the entry and assembled the bytes; there is no accumulator state left to latch or drop |
 
 `ErrUploadTooLarge` is the one sentinel not scoped to `accumulator.go`'s var
 block, whose opening sentence reads "Sentinel errors returned by `Add` and
@@ -26,22 +27,28 @@ block, whose opening sentence reads "Sentinel errors returned by `Add` and
 an `Accumulator` exists, so it lives in `admission.go` beside
 `ErrInvalidDeclaration` instead.
 
-Mapping these to the wire is #1744's job at the dispatch site — this package
-emits no wire codes and does not import `codes.go`. The mapping is
-deliberately many-to-one within the framing and integrity families: all
-three framing sentinels answer `CodeAttachmentInvalidChunk`, both integrity
-sentinels answer `CodeAttachmentIntegrityFailed`. `ErrUploadTooLarge` is
-one-to-one — `CodeAttachmentTooLarge` — and permanent for that file, in
-contrast to `ErrTooManyUploads`'s `CodeAttachmentTooManyUploads` (#1796),
-which is marked transient because it clears once other uploads finish; the
-mapping itself is still #1744's to make. Distinguishing
+Mapping these to the wire is #1897's job at the dispatch site — this package
+emits no wire codes and does not import `codes.go`, and #1896's `Intake`
+(the package's first composite caller, see § "Chunk intake driver") hands
+every sentinel here back verbatim rather than mapping any of them. The
+mapping is deliberately many-to-one within the framing and integrity
+families: all three framing sentinels answer `CodeAttachmentInvalidChunk`,
+both integrity sentinels answer `CodeAttachmentIntegrityFailed`.
+`ErrUploadTooLarge` is one-to-one — `CodeAttachmentTooLarge` — and permanent
+for that file, in contrast to `ErrTooManyUploads`'s
+`CodeAttachmentTooManyUploads` (#1796), which is marked transient because it
+clears once other uploads finish. `ErrNoConversation` (#1896) is unmapped as
+of this writing — no candidate wire code is named for it yet, and clearing
+it is the same shape as `ErrTooManyUploads`: routing to a conversation is
+exactly the thing that makes it clear. The mapping itself is still #1897's
+to make. Distinguishing
 sentinel from sentinel is wanted in-process, for this package's own tests and
 for the daemon's logs, not on the wire — a single corrupt transfer must still
 resolve to exactly one wire code, which is why `reject` (the shared latch
 primitive every discarding family calls) has to run for a resource refusal
 too: without the latch, a chunk sent after an `ErrUploadTooLarge` reject on
 an already-refused transfer would fall through to a framing check, and one
-transfer would emit two different wire codes at #1744.
+transfer would emit two different wire codes at #1897's dispatch site.
 
 `Assemble`'s two integrity comparisons (#1770) both read the assembled `out`
 slice itself — never a proxy computed from the chunk map or the per-chunk
@@ -64,7 +71,7 @@ and the claimed digest are attacker-supplied, so timing leaks nothing the
 attacker doesn't already hold.
 
 Neither integrity error string carries the declared `sha256` itself — it's an
-attacker-chosen, JSON-decoded string headed for #1744's line-oriented log, the
+attacker-chosen, JSON-decoded string headed for #1897's line-oriented log, the
 same hazard `AttachmentChunkPayload`'s `Data` and `Filename` are already
 banned from error strings for. `ErrDigestMismatch`'s message instead carries
 the **computed** digest (daemon-authored, fixed shape, one-way) and
