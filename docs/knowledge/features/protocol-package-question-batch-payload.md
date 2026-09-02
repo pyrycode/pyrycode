@@ -139,8 +139,8 @@ application dispatch. **#1984 added the interception**: both cases now sit in
 `dispatchAppFrame`'s switch, decode into these types and hand off to a
 nil-able `QuestionResolver` seam — see [Inbound question control](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md).
 It resolves nothing on its own (the seam is nil at every construction site);
-\#1990 (landed) adds the daemon-side refusal primitive and #1991 the answer
-one, and #1986 implements the seam itself, gated per device, against the
+\#1990 and #1991 (both landed) add the daemon-side refusal and answer
+primitives; #1986 implements the seam itself, gated per device, against the
 daemon's parked batch.
 
 ```go
@@ -172,11 +172,17 @@ type QuestionRefusedPayload struct {
 - **The index is carried, never range-checked in this package** — the same
   "`internal/protocol` enforces no bounds" rule `questionbridge.Parse` (not
   this package) applies to the outbound batch. The obligation this hands to
-  #1991's answer resolution is concrete and stated in the Go doc rather than left implicit: a
-  negative or over-large `question_index` used to subscript the parked batch
-  panics. Plain `int`, not `uint` — an unsigned type would reject `-1` at
-  decode while still accepting `1<<62`, trading a range problem for a
+  the answer resolution is concrete and stated in the Go doc rather than left
+  implicit: a negative or over-large `question_index` used to subscript the
+  parked batch panics. Plain `int`, not `uint` — an unsigned type would reject
+  `-1` at decode while still accepting `1<<62`, trading a range problem for a
   decode-error surprise and smuggling a bounds decision into this package.
+  `streamApprovalBridge.AnswerQuestion` (#1991, landed) discharges the
+  obligation: range is checked before every subscript, entry count against
+  the batch size is checked first (bounding the walk by the parked batch's
+  1-4 questions rather than by the array's own length), and no value is ever
+  compared against the offered labels, since claude's contract permits free
+  text anywhere.
 - **`Values` are opaque and never checked against the batch's offered
   labels.** claude's contract permits free text anywhere and requires no
   value to match a label, so a validator rejecting an unlisted value would
@@ -337,4 +343,4 @@ nesting depth, not from the sibling with the closest type count.
 - [Model-list payload](protocol-package-model-list-payload.md) — the two-normalisers-with-different-reasons counter-example this payload's shared-reason case contrasts with
 - [questionbridge-package.md](questionbridge-package.md) — the fail-closed bounded parse (#1965), landed with no consumer
 - [Inbound question control](v2-session-manager-state-machine-inbound-question-control-questionresolver-seam.md) — #1984's `dispatchAppFrame` interception and `QuestionResolver` seam, landed with nothing wired behind it
-- Open, deliberately out of scope so far: the per-device answer gate (#702) extension to a question answer, and resolution against the daemon's parked batch — #1990 (landed) is the refusal primitive, #1991 the answer one, and #1986 must gate the `QuestionResolver` seam that calls them before anything is wired
+- Open, deliberately out of scope so far: the per-device answer gate (#702) extension to a question answer, and resolution against the daemon's parked batch — #1990 and #1991 (both landed) are the refusal and answer primitives, and #1986 must gate the `QuestionResolver` seam that calls them before anything is wired
