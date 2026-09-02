@@ -422,3 +422,63 @@ ordering hint whose fallback takes the first qualifying row in arrival order, so
 no longer exists costs nothing. It is corrected and recorded because it is the concrete
 evidence for the design's central choice: select the model out of the run's own list, never
 out of a table. `modeSwitchModelValueOK`'s table now pins both spellings.
+
+### 2026-09-02 — the deterministic tests ship under a different name than this plan published
+
+**What changed:** the Testing strategy section above names
+`TestRealClaude_InBandModeSwitch_FixtureNamesAvoidRegressionGlobs` and publishes a
+verification command filtering on `-run TestRealClaude_InBandModeSwitch_FixtureNames`. The
+shipped name is `TestModeSwitch_FixtureNamesAvoidRegressionGlobs`, and the working command
+is:
+
+```
+go test -tags e2e_realclaude -race -count=1 -run 'TestModeSwitch' ./internal/e2e/realclaude/
+```
+
+**What drove it:** the plan's stated reason for a distinct prefix was to keep these tests out
+of the sweep #1595's finding doc publishes (`-run TestRealClaude_SetPermissionMode`). The
+shipped name serves that reason better than the planned one did — `TestModeSwitch_` is
+outside the `TestRealClaude_` family altogether, so no live-suite filter picks up a
+deterministic test and no reader mistakes one for a test that spends tokens. The rename was
+right and went unrecorded, which is the actual defect: the plan kept publishing a command
+that matches **zero** tests and exits 0 while doing so — the "green that proves nothing"
+shape CLAUDE.md § Testing warns about, sitting in the document a later reader copies from.
+
+**The contract:** the deterministic tests in this family are named `TestModeSwitch*` and the
+live probe is `TestRealClaude_InBandModeSwitch_Probe`. The prefix is what separates a test
+that needs credentials from one that does not; keep them apart when adding to either.
+
+### 2026-09-02 — the Files read entry overstated what was verified about `finOfflineExecBans`
+
+**What changed:** nothing in the code. The Files read entry for `offline_exec_ban_test.go`
+claims this ticket adds "no new `packageDir` wrapper an existing entry would have to learn."
+It adds one: `modeSwitchFixturePath` calls `packageDir` directly, the same shape as the
+already-banned `setModeFixturePath`.
+
+**What drove it:** the claim was reasoning, not a measurement, and it was wrong. Recording it
+rather than quietly deleting it, because the premise should not be read as verified by a
+later ticket that inherits this file.
+
+**Why no code change:** no offline-pure file calls `modeSwitchFixturePath`, so no ban list is
+currently wrong. `finOfflineExecBans`' own header already concedes the residual — the check
+is per-file syntax rather than a call graph, and "a fourth helper added later inherits no
+such check." Editing eleven ban lists across files this ticket has no business in would trade
+a documentation error for a much larger diff in unrelated files. The design point the plan
+was actually protecting did hold: no new *writer* symbol was added, because the path minter
+is a parameter of the existing `writeSetModeFixture` rather than a sibling of it.
+
+### 2026-09-02 — the scrub guard sat below a fatal that printed what it scrubs
+
+**What changed:** `runSetModeChild` now calls `initControlScrubbed` **before** the no-stdout
+`t.Fatalf`, not after it. `runModeSwitchDiscovery` already had this ordering.
+
+**What drove it:** the guard refuses to record a credential or to print an excerpt of one,
+and the fatal above it printed stderr through `truncateString` — a cap, not a redaction, which
+is the argument the guard's own comment makes. The trigger is the condition that comment
+names: credentials present, an auth failure, a child that dies producing no stdout, landing
+the token in a run log the dispatcher salvages. The committed-artifact path this ticket newly
+creates was guarded correctly; this was the inherited log path, improved but not closed.
+
+**The contract:** in this package, scrub immediately after the reader goroutine is joined and
+before any branch that can read `stderrBuf` — ordering is the entire guard, so a later caller
+that adds a failure path above the scrub silently removes it.

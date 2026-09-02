@@ -828,12 +828,6 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 	<-readerDone
 	duration := time.Since(start)
 
-	lines := rec.snapshotLines()
-	if len(lines) == 0 {
-		t.Fatalf("#1595[%s]: claude produced no stdout; there is nothing to capture\nstderr:\n%s\nwaitErr: %v",
-			arm.name, truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
-	}
-
 	// A cap is not a redaction. An auth failure is exactly the condition that
 	// makes claude print a long message to stderr, stderrFixtureCap bounds how
 	// much of it lands in the file, and 8 KiB of a credential-bearing message
@@ -842,7 +836,22 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 	// misfire on a machine with no token. initialize_control_probe_test.go added
 	// it for its own family after this file shipped; #2041's captures are the
 	// second family here to carry claude stderr and the call covers both.
+	//
+	// Scrub before the raw stderr can reach a failure message below. The guard
+	// refuses to record a credential OR to print an excerpt of one, and the
+	// no-stdout fatal underneath prints stderr through truncateString — a cap,
+	// by the same argument this comment already makes. The trigger is the exact
+	// condition named above: credentials present, an auth failure, a child that
+	// dies producing no stdout, landing the token in a run log. Ordering is the
+	// whole guard; runModeSwitchDiscovery scrubs before its own fatal for this
+	// reason.
 	initControlScrubbed(t, stderrBuf.String())
+
+	lines := rec.snapshotLines()
+	if len(lines) == 0 {
+		t.Fatalf("#1595[%s]: claude produced no stdout; there is nothing to capture\nstderr:\n%s\nwaitErr: %v",
+			arm.name, truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
+	}
 
 	boundaries := rec.snapshotBoundaries()
 	responses := rec.snapshotControlResponses()

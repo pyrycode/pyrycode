@@ -251,11 +251,16 @@ type modeSwitchAutoObservation struct {
 // initControlSummarize carries the measurement and the reason; a reader that
 // stops at either of the first two reports a false absence.
 //
-// The `found` return is decided on the RAW BYTES, so `"models":[]` and an absent
-// key stay distinguishable: unmarshalling straight into a slice collapses both to
-// nil, and "claude reported an empty list" is a different finding from "claude
-// reported no list".
-func modeSwitchAutoRows(responses []json.RawMessage) (rows []modeSwitchAutoRow, found bool) {
+// The second return is the RAW BYTES of the array that was read, nil when no
+// placement carried one. Returning the bytes rather than a bool keeps three
+// outcomes apart that a bool collapses to two: an absent key (nil), an empty
+// list (`[]`), and a list whose shape does not decode (anything else, with no
+// rows). Unmarshalling straight into a slice would collapse all three to nil,
+// and "claude reported an empty list" is a different finding from "claude
+// reported no list" — which is in turn different from "claude reported
+// something this reader cannot parse", a distinction the caller can only draw
+// if it can quote what arrived.
+func modeSwitchAutoRows(responses []json.RawMessage) (rows []modeSwitchAutoRow, models json.RawMessage) {
 	for _, raw := range responses {
 		var env struct {
 			Models   json.RawMessage `json:"models"`
@@ -279,11 +284,12 @@ func modeSwitchAutoRows(responses []json.RawMessage) (rows []modeSwitchAutoRow, 
 		if len(models) == 0 {
 			continue
 		}
-		found = true
 
 		var entries []map[string]json.RawMessage
 		if err := json.Unmarshal(models, &entries); err != nil {
-			return nil, true
+			// The bytes go back so the caller reports what arrived rather than
+			// calling a malformed list an empty one.
+			return nil, models
 		}
 		for _, entry := range entries {
 			var row modeSwitchAutoRow
@@ -298,9 +304,9 @@ func modeSwitchAutoRows(responses []json.RawMessage) (rows []modeSwitchAutoRow, 
 			}
 			rows = append(rows, row)
 		}
-		return rows, true
+		return rows, models
 	}
-	return nil, false
+	return nil, nil
 }
 
 // modeSwitchModelValueOK reports whether value may reach `--model`.
@@ -470,14 +476,19 @@ func runModeSwitchDiscovery(t *testing.T, claudeBin, workdir string) []modeSwitc
 			"selects every arm's model, so there is nothing to measure\nstderr:\n%s\nwaitErr: %v",
 			truncateString(stderrBuf.String(), stderrFixtureCap), waitErr)
 	}
-	rows, found := modeSwitchAutoRows(responses)
-	if !found {
+	rows, models := modeSwitchAutoRows(responses)
+	if len(models) == 0 {
 		t.Fatalf("#2041[discovery]: %d control_response(s) carried no models array at any of the "+
 			"three placements; refusing to select a model the run never observed", len(responses))
 	}
 	if len(rows) == 0 {
-		t.Fatalf("#2041[discovery]: claude published an EMPTY models array; there is no model to " +
-			"run an arm on")
+		// The bytes are quoted because an empty list and a list this reader
+		// cannot decode both land here and want different responses from an
+		// operator: the first is claude publishing nothing, the second is this
+		// probe's own reader falling behind claude's shape.
+		t.Fatalf("#2041[discovery]: claude's models array yielded no rows; there is no model to "+
+			"run an arm on. Verbatim, this is either an empty list or a shape this reader cannot "+
+			"decode: %s", truncateString(string(models), stderrFixtureCap))
 	}
 
 	for _, r := range rows {
@@ -876,6 +887,154 @@ func TestModeSwitchModelValueOK_RejectsAFlagShapedModelValue(t *testing.T) {
 			t.Parallel()
 			if got := modeSwitchModelValueOK(tc.value); got != tc.want {
 				t.Errorf("modeSwitchModelValueOK(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestModeSwitchAutoRows_KeepsAbsentEmptyAndMalformedApart pins the reader whose
+// answer decides whether the live probe runs at all, and in particular the three
+// outcomes a bool return collapses to two.
+//
+// The distinction is not cosmetic. Every one of these fails the run before an arm
+// spends a token, so the message is the ONLY thing an operator gets. "claude
+// published an empty list" sends them to claude; "this reader cannot decode what
+// claude published" sends them to this file. Reporting the second as the first
+// costs a debugging cycle at the moment the probe is least able to explain
+// itself.
+//
+// KeyPresent is the other half: supportsAutoMode false is spelled by ABSENCE in
+// claude's own 2.1.239 list, so a reader that cannot tell an omitted key from a
+// published false reproduces the exact trap this ticket exists to make visible.
+func TestModeSwitchAutoRows_KeepsAbsentEmptyAndMalformedApart(t *testing.T) {
+	t.Parallel()
+
+	// The array sits under response.response — the placement a real reply uses.
+	nest := func(models string) []json.RawMessage {
+		return []json.RawMessage{json.RawMessage(
+			`{"response":{"response":{"models":` + models + `}}}`)}
+	}
+
+	tests := []struct {
+		name      string
+		responses []json.RawMessage
+		wantRows  []modeSwitchAutoRow
+		wantBytes string // "" means nil: no array found at any placement
+	}{
+		{
+			name:      "no models key anywhere is an absence, not an empty list",
+			responses: []json.RawMessage{json.RawMessage(`{"response":{"response":{}}}`)},
+			wantBytes: "",
+		},
+		{
+			name:      "no control_response at all",
+			responses: nil,
+			wantBytes: "",
+		},
+		{
+			name:      "an explicit null is an absence too",
+			responses: nest(`null`),
+			wantBytes: "",
+		},
+		{
+			// Distinguishing this row from the next is the whole point: both
+			// yield zero rows, and only the bytes say which happened.
+			name:      "an empty list yields no rows and reports its own bytes",
+			responses: nest(`[]`),
+			wantBytes: `[]`,
+		},
+		{
+			name:      "a list this reader cannot decode is NOT reported as empty",
+			responses: nest(`{"oops":"an object where an array belongs"}`),
+			wantBytes: `{"oops":"an object where an array belongs"}`,
+		},
+		{
+			name:      "absence of supportsAutoMode is not a published false",
+			responses: nest(`[{"value":"claude-haiku-4-5"}]`),
+			wantRows: []modeSwitchAutoRow{
+				{Value: "claude-haiku-4-5", SupportsAutoMode: false, KeyPresent: false},
+			},
+			wantBytes: `[{"value":"claude-haiku-4-5"}]`,
+		},
+		{
+			name:      "a published false is distinguishable from an absent key",
+			responses: nest(`[{"value":"x","supportsAutoMode":false}]`),
+			wantRows: []modeSwitchAutoRow{
+				{Value: "x", SupportsAutoMode: false, KeyPresent: true},
+			},
+			wantBytes: `[{"value":"x","supportsAutoMode":false}]`,
+		},
+		{
+			name:      "a null supportsAutoMode counts as absent",
+			responses: nest(`[{"value":"x","supportsAutoMode":null}]`),
+			wantRows: []modeSwitchAutoRow{
+				{Value: "x", SupportsAutoMode: false, KeyPresent: false},
+			},
+			wantBytes: `[{"value":"x","supportsAutoMode":null}]`,
+		},
+		{
+			name:      "the 2.1.239 shape: true rows and absent-key rows together",
+			responses: nest(`[{"value":"sonnet","supportsAutoMode":true},{"value":"haiku"}]`),
+			wantRows: []modeSwitchAutoRow{
+				{Value: "sonnet", SupportsAutoMode: true, KeyPresent: true},
+				{Value: "haiku", SupportsAutoMode: false, KeyPresent: false},
+			},
+			wantBytes: `[{"value":"sonnet","supportsAutoMode":true},{"value":"haiku"}]`,
+		},
+		{
+			// The selector rejects an empty Value like any other unusable shape;
+			// the reader's job is to report the row, not to drop it.
+			name:      "a non-string value leaves Value empty rather than failing the read",
+			responses: nest(`[{"value":42,"supportsAutoMode":true}]`),
+			wantRows: []modeSwitchAutoRow{
+				{Value: "", SupportsAutoMode: true, KeyPresent: true},
+			},
+			wantBytes: `[{"value":42,"supportsAutoMode":true}]`,
+		},
+		{
+			name: "the top-level placement is read too",
+			responses: []json.RawMessage{
+				json.RawMessage(`{"models":[{"value":"opus","supportsAutoMode":true}]}`),
+			},
+			wantRows: []modeSwitchAutoRow{
+				{Value: "opus", SupportsAutoMode: true, KeyPresent: true},
+			},
+			wantBytes: `[{"value":"opus","supportsAutoMode":true}]`,
+		},
+		{
+			name: "a response carrying no models is skipped for one that does",
+			responses: []json.RawMessage{
+				json.RawMessage(`{"subtype":"success"}`),
+				json.RawMessage(`{"response":{"response":{"models":[{"value":"sonnet","supportsAutoMode":true}]}}}`),
+			},
+			wantRows: []modeSwitchAutoRow{
+				{Value: "sonnet", SupportsAutoMode: true, KeyPresent: true},
+			},
+			wantBytes: `[{"value":"sonnet","supportsAutoMode":true}]`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rows, models := modeSwitchAutoRows(tc.responses)
+
+			if string(models) != tc.wantBytes {
+				t.Errorf("models bytes = %q, want %q", string(models), tc.wantBytes)
+			}
+			// An absence must be a nil slice, not an empty one: the caller
+			// branches on len(models) == 0 to decide "claude reported no list".
+			if tc.wantBytes == "" && models != nil {
+				t.Errorf("models = %q, want nil for an absence", string(models))
+			}
+			if len(rows) != len(tc.wantRows) {
+				t.Fatalf("got %d rows, want %d: %+v", len(rows), len(tc.wantRows), rows)
+			}
+			for i, want := range tc.wantRows {
+				if rows[i] != want {
+					t.Errorf("row %d = %+v, want %+v", i, rows[i], want)
+				}
 			}
 		})
 	}
