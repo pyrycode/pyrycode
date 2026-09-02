@@ -399,3 +399,54 @@ design has four.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — implementation
+
+**The design shipped as planned.** No arm changed shape between the plan and the code, and
+all four Open questions resolved as written: the shell arm keys on `stdout` **and**
+`interrupted`; the write arm never decodes hunks; `searchDetail` sends one number; and a
+present-but-invalid `numLines` rejects rather than falling back to `numFiles`.
+
+**The ticket's one anticipated finding, confirmed.** `readLineCount` was a single-shape
+composer, not a dispatch. It is now `toolResultDetail` over `readDetail` / `shellDetail` /
+`editDetail` / `writeDetail` / `searchDetail`, with `countLines` shared by the two arms that
+count rather than being told. Four call sites moved, as counted.
+
+**Two small departures from the plan's wording, neither a design change.** The stage-2
+targets shipped as named types (`sidecarStdout`, `sidecarPatch`, `sidecarContent`) rather
+than as the anonymous structs the plan sketched, so each can carry the doc that states why
+it is separate. And the bound test was renamed *and* given a sibling —
+`TestToolResultDetail_BoundedByConstruction` keeps the read's 48-byte measurement, while the
+new `TestToolResultDetail_OtherFormsAreShorter` measures the other four and pins the
+alphabet — rather than being extended in place, because the two assert different things.
+
+**The security review's [Threat model] finding landed.** The fifth stale claim is corrected:
+`TestToolResultPayload_FitV2EnvelopeCap` no longer justifies its all-ASCII 48-byte fill with
+"that IS the producer's alphabet", which stopped being true here, but with the reason that
+survives — the read form is the longest **of five** and happens to be the all-ASCII one. The
+new `TestToolResultDetail_OtherFormsAreShorter` is what keeps that half honest. Reported as
+a comment on the ticket. `maxResultDetailBytes` is unchanged at **48**: re-derived across all
+five forms it beats edit's 43, write's 36 and shell/search's 25, so the envelope measurement
+does not move and `TestToolResultPayload_FitV2EnvelopeCap` needed no re-measurement.
+
+**Non-vacuity, established by mutation rather than by argument.** Three mutants under
+`go test -overlay` (no worktree writes), each caught by precisely the case its acceptance
+criterion names:
+
+- `editDetail` differencing the hunks' `oldLines`/`newLines` instead of counting `+`/`-`
+  prefixes: the context-heavy hunk and the multi-hunk case both red. This is the mutant that
+  matters most — the wrong implementation is *plausible*, and a fixture whose context lines
+  did not outnumber its changed ones would have agreed with it.
+- `writeDetail` requiring a non-empty `structuredPatch`: the `structuredPatch: []` create
+  went red, so the arm is proven against the form 240 of 240 observed creates carry.
+- `shellDetail` counting `stderr` instead of `stdout`: the longer-stderr case went red,
+  so "stderr is not counted into it" is measured rather than asserted.
+
+**Size, measured.** 907 insertions across six files plus a 401-line spec — ~1300 written
+lines against the ~990 the plan projected and the 800-line boundary. The overage the plan
+stated up front is therefore larger than stated, and the reason is the one the plan named
+and accepted: the boundary does not resolve to a split here. Recorded so the calibration is
+against a real number, not the estimate — and so a future ticket in this file sizes against
+1300 rather than against 750.

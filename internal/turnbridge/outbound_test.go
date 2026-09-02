@@ -2051,19 +2051,26 @@ func TestToolResultPayload_FitV2EnvelopeCap(t *testing.T) {
 	}
 
 	// ResultDetail at ITS producer's worst case (#2024), so the measurement
-	// covers the field rather than assuming it is small. streamsup's readLineCount
-	// composes from two non-negative int64s, so the longest string it can build is
-	// 19 digits + " of " + 19 digits + " lines" = 48 bytes; that number is
-	// maxResultDetailBytes over in streamsup, repeated here because it is
-	// unexported there — slashFillRow repeats the producer's caps for the same
-	// reason and names the same failure mode to watch for, a worst case that is no
-	// longer the producer's.
+	// covers the field rather than assuming it is small. streamsup's
+	// toolResultDetail composes five forms; the longest is still the READ's, two
+	// non-negative int64s as 19 digits + " of " + 19 digits + " lines" = 48 bytes.
+	// That number is maxResultDetailBytes over in streamsup, repeated here because
+	// it is unexported there — slashFillRow repeats the producer's caps for the
+	// same reason and names the same failure mode to watch for, a worst case that
+	// is no longer the producer's.
 	//
 	// Unlike ResultSummary above, this is NOT cut by anything in this package: the
 	// bound is over int64's RANGE rather than over claude's input length, which is
-	// what makes an absurd line count unable to grow the frame. The fill is digits
-	// and ASCII rather than '<' because that IS the producer's alphabet — it emits
-	// no byte encoding/json escapes, so 48 bytes here is 48 bytes on the wire.
+	// what makes an absurd line count unable to grow the frame.
+	//
+	// THE FILL IS ALL-ASCII BECAUSE THE LONGEST FORM IS, NOT BECAUSE THE PRODUCER
+	// IS. Before #2025 those were the same statement; that ticket's edit and write
+	// forms emit U+2212 and U+00B7, so the alphabet is now ASCII plus those two.
+	// The read form remains the longest of the five and happens to be the
+	// all-ASCII one, and encoding/json escapes no byte of any form, so 48 bytes
+	// here is still 48 bytes on the wire. streamsup's
+	// TestToolResultDetail_OtherFormsAreShorter is what keeps the "longest of
+	// five" half true.
 	detail := "9223372036854775806 of 9223372036854775807 lines"
 	if len(detail) != 48 {
 		t.Fatalf("precondition: detail fill is %d B, want the producer's 48-byte worst case", len(detail))
