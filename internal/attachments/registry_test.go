@@ -68,6 +68,7 @@ var packageSentinels = []error{
 	ErrInvalidID,
 	ErrNotContained,
 	ErrWriteFailed,
+	ErrNoConversation,
 }
 
 // The concurrency tests below coordinate with channels rather than sync

@@ -245,11 +245,12 @@ A canonical `aid1` is required wherever a test reaches storage, since
   so no row can go vacuous. The success answer needs no such test: it is a
   `string` and a `bool`, and the id is the one value that is allowed.
 
-Mutants worth naming, each expected to be a sole red: gating admission on
+Mutants worth naming, each expected to redden: gating admission on
 `chunk.Index == 0`; feeding `Admit`'s returned accumulator; returning
 `Deliver`'s `ErrIncomplete` as a refusal; passing `""` to `EnsureDir` instead of
 refusing; returning `Store`'s path as the answer; wrapping any pass-through in a
-`fmt.Errorf` that interpolates the filename or the digest.
+`fmt.Errorf` that interpolates the filename or the digest. See § Revisions for
+what they measured.
 
 ## Open questions
 
@@ -357,3 +358,34 @@ checked alone. The overage is stated rather than engineered around.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — the six mutants, measured
+
+All six ran under `go test -overlay` (absolute-path manifest, no worktree
+writes — this package's established technique) against the landed suite. All six
+are red; three are sole reds and three are over-determined, which corrects the
+Testing-strategy paragraph's claim that each would be a sole red:
+
+| Mutant | Verdict | Killed by |
+|---|---|---|
+| fork gated on `chunk.Index == 0` | RED, sole | `TestIntake_FirstChunkOfAnyIndex_GoesThroughAdmission` |
+| `Deliver`'s `ErrIncomplete` handed back as a refusal | RED, 5 tests | every test that feeds a non-completing chunk |
+| `""` passed to `EnsureDir` instead of refusing | RED, sole | `TestIntake_NoConversation_RefusesTheCompletingChunk`, all three rows |
+| the stored path answered as the attachment | RED, 2 tests | the two storing tests |
+| `Admit`'s returned accumulator fed directly | RED, 4 tests | both storing tests and the no-conversation rows |
+| a `fmt.Errorf` wrap interpolating filename + declared digest | RED, sole | `TestIntake_Refusals_ComeBackAsTheirOwnSentinel`, 2 rows |
+
+The last one is the point of AC 5, and it is the gap the package overview parked
+on `Deliver`: the identical wrap is **green** across that method's suite, because
+sentinel-identity assertions survive a wrap. Rolling `assertNoBannedStrings` into
+every refusal row rather than testing it once is what turns the structural
+never-log claim into a covered one at this seam.
+
+Over-determination is not a defect in the three that have it. An incomplete chunk
+is fed by almost every fixture here, and storage is reached by every completing
+one, so a mutant on either is caught broadly by construction; the design decision
+each defends is still pinned by a named test.
+
+No design change: the implementation matches the plan as committed.
