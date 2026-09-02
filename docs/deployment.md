@@ -115,6 +115,8 @@ brew upgrade pyrycode/tap/pyry
 go install github.com/pyrycode/pyrycode/cmd/pyry@latest
 ```
 
+If you build from source instead, write straight to the installed path — `go build -o ~/.local/bin/pyry ./cmd/pyry` — or remove the old file before copying the new one in. Do **not** `cp` over the file the daemon is currently running from: on macOS the kernel then refuses to execute the result (`last exit reason = OS_REASON_CODESIGNING` in `launchctl print`, signal 9 on every exec) even though `codesign` still calls it valid, and the service stays down until the file is replaced properly. The three paths above are all safe; each replaces the file instead of overwriting it in place.
+
 Then restart so systemd picks up the new binary:
 
 ```bash
