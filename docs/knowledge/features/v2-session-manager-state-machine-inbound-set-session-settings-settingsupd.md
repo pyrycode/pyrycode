@@ -4,11 +4,12 @@
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
 `dispatch.Route` — same boundary as `interrupt` / `request_snapshot` /
 `request_debug_bundle`, no `dispatch.Route` handler. It consumes [#844's wire
-vocabulary](protocol-package.md#session-settings-payloads-844)
+vocabulary](protocol-package.md#session-settings-payloads-844-permission-mode-1687)
 (`SetSessionSettingsPayload` / `SessionSettingsUpdatedPayload` /
 `CodeSessionNotFound`) and is the **daemon-side write path** for a paired
-client's per-session `model` / `effort` / `yolo` — the untrusted-value
-validation #833 explicitly deferred to this wire-owning ticket.
+client's per-session `model` / `effort` / `yolo` / `permission_mode` (#1687)
+— the untrusted-value validation #833 explicitly deferred to this
+wire-owning ticket.
 **`security-sensitive`**: the first inbound control verb that both persists a
 mutation from untrusted input AND owes the caller a reply. A *running* session
 picks the change up **immediately**: `Pool.UpdateSettings` partitions on which
@@ -33,11 +34,19 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
    decode failure yields a `protocol.malformed` reply, not a silent drop.
    Never echoes the decode error or any payload byte —
    `encoding/json` quotes attacker bytes into its error string.
-3. **Validate `model`/`effort` before any persistence** — an invalid value
-   yields a malformed reply, never a persisted bad setting (the
-   argv-injection defense, below). `yolo` needs no value check: a malformed
-   `yolo` already failed step 2's type-decode, so bypass can never be
-   inferred from a bad value.
+3. **Validate `model`/`effort`/`permission_mode` before any persistence** —
+   an invalid value yields a malformed reply, never a persisted bad setting
+   (the argv-injection defense, below). `yolo` needs no value check: a
+   malformed `yolo` already failed step 2's type-decode, so bypass can never
+   be inferred from a bad value. `permission_mode` (#1687) adds two reject
+   branches here, both replying with the same `msgSettingsMalformed`
+   constant used everywhere else in this step, order chosen for the
+   property below rather than for behaviour (the reply is identical either
+   way):
+   - **Conflict**: `PermissionMode != nil && YOLO != nil` — unconditional on
+     the mode's value, so "neither field can win over the other" holds even
+     for an unrecognised mode.
+   - **Vocabulary**: `PermissionMode != nil && !validPermissionMode(*PermissionMode)`.
 4. **Nil-seam guard.** `m.cfg.SettingsUpdater == nil` → deterministic
    `server.binary_offline` "unavailable" reply (foreground / unwired), never
    a silent drop.
@@ -51,7 +60,8 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
 
 - **`SettingsUpdater` / `SettingsUpdate` / `ErrSessionUnknown` consumer seam**
   (beside `Interrupter` / `SessionStarter` / `QueueRemover`). `SettingsUpdate{
-  Model, Effort *string; YOLO *bool}` mirrors `sessions.SettingsUpdate` 1:1 so
+  Model, Effort *string; YOLO *bool; PermissionMode *string}` (#1687) mirrors
+  `sessions.SettingsUpdate` 1:1 so
   `internal/relay` imports neither `internal/sessions` nor `cmd/pyry`; the
   optional `V2SessionConfig.SettingsUpdater` field is nil-safe (nil ⇒
   "unavailable" reply, never drop). `cmd/pyry`'s `settingsUpdaterAdapter{p
@@ -96,6 +106,17 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   medium, high, xhigh, max}`, matching `cmd/pyry/agent_run.go`'s
   `validEfforts` but defined relay-local since `internal/relay` cannot import
   `cmd/pyry`.
+- **`validPermissionMode(mode string) bool`** (#1687) — a closed enum like
+  `validEffort`, not `validModel`'s byte-class grammar: a permission mode is
+  a fixed vocabulary (claude's five in-band modes, measured live by #2041),
+  where a model identifier is not. `{default, acceptEdits, plan, auto,
+  dontAsk}`; `""` and `bypassPermissions` are both deliberately excluded —
+  `""` because an explicit empty string names no posture (see the payload
+  doc), `bypassPermissions` because that posture must keep exactly one
+  spelling on the wire (`yolo: true`), which is the ticket's whole
+  privilege-escalation bound. Carries the same direction hazard `validEffort`
+  already flags: a closed enum refuses inbound anything claude adds later,
+  so widening it needs a fresh live measurement, not a hunch.
 - **`settingsReplyError(ctx, s, inReplyTo, code, message, retryable)`** — a
   third near-identical copy of the `snapshotReplyError` /
   `debugBundleReplyError` shape (marshal `protocol.ErrorPayload` →
@@ -114,3 +135,26 @@ apply is one atomic `saveLocked` (#840) — no partial-parse path can reach
 `YOLO=*true`. Belt-and-suspenders is different fabric here: the safe default
 is pointer-nil semantics (code) and the corruption guard is `json.Unmarshal`
 strictness (code), not a second stochastic check.
+
+**The relay's mode+yolo conflict rule is deliberately stricter than the
+primitive it feeds, and proving that needs the pair the primitive would
+accept (#1687).** `sessions.validatePermissionUpdate` refuses only a
+*contradicting* mode+yolo pair; this handler's conflict check refuses **any**
+frame carrying both, agreeing or not. The two test rows that pin this as the
+relay's *own* rule, not an inherited one, are `mode + yolo:false` and
+`mode + yolo:true` — the second is the pair the inner layer would have
+accepted, so only it proves the relay is stricter rather than redundant.
+Without that row every reject here could be (mis)read as the pool's check
+surfacing one layer out.
+
+**A hand-maintained 1:1 seam mirror (`SettingsUpdate` → `settingsUpdaterAdapter`
+→ `sessions.SettingsUpdate`) fails silently on a dropped field, and the
+happy path won't reliably catch it.** A copy that forgets `PermissionMode`
+turns the update into a no-op the pool accepts with a `nil` error — nothing
+observably wrong unless the test asserts the *stored* value. The assertion
+that kills that mutant unconditionally is on a **rejected** mode: the pool
+validates a posture only when the update actually names one, so a non-nil
+`ErrUnsupportedPermissionMode` from a request the handler already validated
+is unforgeable evidence the pointer crossed every hop. Prefer a rejection-path
+assertion over a stored-value one when pinning that a mirrored field survived
+an adapter — it doesn't depend on persistence succeeding to be meaningful.

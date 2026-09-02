@@ -468,7 +468,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`debug_bundle_chunk`** | binary → phone | no | **New in v2.** Outbound — one ordered, cap-respecting slice of a streamed debug bundle (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`debug_bundle_done`** | binary → phone | no | **New in v2.** Outbound — completion marker after the last `debug_bundle_chunk`, carrying the exact chunk count (#812). See [Debug bundle](#debug-bundle-v2). |
 | **`request_debug_bundle`** | phone → binary | no | **New in v2.** Inbound control (bare, no payload) — a paired client requests the current session's debug bundle; the daemon streams it back as `debug_bundle_chunk*` + `debug_bundle_done` (#813). See [Debug bundle](#debug-bundle-v2). |
-| **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
+| **`set_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client changes one session's per-session model / effort / permission mode / YOLO. Interactive-capability-gated (enforced by the handler #845). See [Session settings](#session-settings-v2). |
 | **`session_settings_updated`** | binary → phone | no | **New in v2.** Outbound reply confirming a `set_session_settings`, correlated by `in_reply_to` (#845). See [Session settings](#session-settings-v2). |
 | **`request_session_settings`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for the run configuration of the conversation it names in `conversation_id`. A request that names no conversation names no session, and is answered with the all-zero reply. Interactive-capability-gated. See [Session settings](#session-settings-v2). |
 | **`session_settings`** | binary → phone | no | **New in v2.** Outbound reply carrying the current run configuration, correlated by `in_reply_to` (#491). See [Session settings](#session-settings-v2). |
@@ -1929,7 +1929,7 @@ yet own.
 
 ### Session settings (v2)
 
-A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
+A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, permission mode, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844, permission mode #1687). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
 
 #### `set_session_settings`
 
@@ -1939,7 +1939,9 @@ Direction **phone → binary** (inbound v2 control). Intercepted by the v2 sessi
 
 A client learns it from [`session_settings`](#session_settings) below, the request/response route it can drive at any time, or observes a change to it on the [`session_transition`](#interactive-events-v2-capability-gated) marker. **The marker alone is not a sufficient source**, and this document used to say it was. The daemon fires `session_transition` only on a clear or an idle eviction, never on session creation, so a client that had done neither never learned an id and could not write at all. That was the whole of `pyrycode-desktop#491`: the run-configuration UI rendered and stayed permanently inert. Drive `request_session_settings` when you need the current value; treat the marker as an update to it.
 
-The three settings fields are **optional** and encode a *presence contract*: a field that is **absent** from the payload means "leave that setting unchanged", while a field that is **present** — including at its zero value (`""` for `model`/`effort`, `false` for `yolo`) — means "set it to this value". An **absent** `yolo` can therefore never be read as a sent `false`, and an absent `model` can never be read as an instruction to clear the stored value. (On the wire this is `omitempty` over pointer fields: an absent key, not a literal `null`.)
+The four settings fields are **optional** and encode a *presence contract*: a field that is **absent** from the payload means "leave that setting unchanged", while a field that is **present** — including at its zero value (`""` for `model`/`effort`, `false` for `yolo`) — means "set it to this value". An **absent** `yolo` can therefore never be read as a sent `false`, and an absent `model` can never be read as an instruction to clear the stored value. (On the wire this is `omitempty` over pointer fields: an absent key, not a literal `null`.)
+
+`permission_mode` is the one field for which **present-at-`""` is not a settable value**. `model` and `effort` accept `""` as "run at claude's own default" — a real value. The default *posture* is a nameable mode (`"default"`), so an explicit `""` names nothing and is rejected.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1947,6 +1949,37 @@ The three settings fields are **optional** and encode a *presence contract*: a f
 | `model` | string (optional) | New model; absent = leave unchanged. This writes the per-session **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
 | `effort` | string (optional) | New reasoning effort; absent = leave unchanged. |
 | `yolo` | boolean (optional) | New bypass-permissions (YOLO) state; absent = leave unchanged. An absent `yolo` never enables bypass. |
+| `permission_mode` | string (optional) | New permission mode; absent = leave unchanged. One of `default`, `acceptEdits`, `plan`, `auto`, `dontAsk`. Anything else — including `""` and `bypassPermissions` — is rejected. **Must not be sent together with `yolo`.** |
+
+##### `permission_mode` (#1687)
+
+Claude has six permission modes, and `yolo` can spell only two of them. This field carries the other four, so a client can offer what claude actually supports instead of an on-or-off switch.
+
+| Mode | What it does |
+|---|---|
+| `default` | Prompts before anything dangerous. |
+| `acceptEdits` | Accepts file edits without asking. |
+| `auto` | A model classifier approves or denies each prompt. Only some models support it — read `supports_auto_mode` on the model list and grey the option out rather than asking. |
+| `plan` | Analysis only, runs no tools. |
+| `dontAsk` | Never prompts; denies anything not already approved. |
+
+Two rules a client must build against, both enforced at the wire boundary:
+
+- **The field joins `yolo`, it does not replace it.** `yolo` keeps its meaning and is not going away in this version; a client that only ever sends `yolo` keeps working unchanged.
+- **A frame carrying both `permission_mode` and `yolo` is rejected as malformed**, whatever the two say. They are two spellings of one posture — `yolo: true` is `bypassPermissions`, `yolo: false` is `default` — so a frame carrying both is redundant or contradictory. The daemon refuses rather than picking a winner, so there is no precedence rule to get wrong: letting the mode win would silently downgrade an escalation, and letting `yolo` win would grant one from a frame that said `false`. **Send one or the other, never both.**
+
+**`bypassPermissions` is rejected on this field.** The bypass posture stays reachable only through `yolo: true`, so it keeps exactly one spelling on the wire. Note the asymmetry with the read half below, which *does* report `bypassPermissions` when the session is in it — a client labels its menu from the reported value and sends `yolo` to change that particular posture.
+
+A rejected value produces the same `protocol.malformed` reply as any other malformed request, echoing no part of what was sent, and **nothing is persisted** — the check runs before the daemon touches its session registry.
+
+Example (a client switching a session into plan mode):
+
+```json
+{
+  "id": 813, "type": "set_session_settings", "ts": "...",
+  "payload": { "session_id": "sess-a", "permission_mode": "plan" }
+}
+```
 
 Example (a client changing only the reasoning effort — `model` and `yolo` omitted):
 
@@ -2011,8 +2044,11 @@ This is the **read half** the settings cluster shipped without. Before it, a cli
 | `model` | string | Model override in force; **empty string = inherited daemon default** (no override). This is the **override**, not what claude announced for the turn — see [`model_announced`](#model_announced). |
 | `effort` | string | Reasoning-effort override in force; **empty string = inherited daemon default** (no override). |
 | `yolo` | bool | Bypass-permissions (`--dangerously-skip-permissions`) on/off; **`false` = permissions enforced** (the fail-safe default). |
+| `permission_mode` | string | The posture in force (#1687) — one of the five write-half modes, or `bypassPermissions`. **`""` means no session resolved**, not an unnamed mode: it occurs only in the all-zero reply, alongside `session_id: ""`. This is the value a client labels its permission menu from, rather than the request it last sent. |
 | `used_tokens` | int | Context-window tokens consumed by the latest turn. `0` against a non-zero `window_tokens` is a genuine fresh session. |
 | `window_tokens` | int | Context-window size. **`0` = the usage reader is unwired**, not an empty window — do not render a percentage from it. |
+
+`permission_mode` and `yolo` always agree, because the daemon stores them so they cannot disagree: a session in bypass reports `permission_mode: "bypassPermissions"` **and** `yolo: true`. So this reply can name a posture the write half refuses to accept on its own `permission_mode` field — that is deliberate, and it is why the read half exists: the menu's label comes from the daemon's state, not from what the client last sent.
 
 Scope: the values describe the session bound to the **conversation the request named**, and `session_id` names that same session, so a client reads and writes the same place. The whole set is keyed by conversation and moves as one — the daemon resolves the id and reads that session's settings under a single acquisition, so no field can describe a session another field does not, even against a concurrent idle eviction. A request that resolves to no session gets every field at its zero value; it is never answered with some other session's.
 
@@ -2023,7 +2059,7 @@ Example:
   "id": 45, "type": "session_settings", "ts": "...", "in_reply_to": 812,
   "payload": {
     "session_id": "sess-a", "model": "opus", "effort": "high", "yolo": false,
-    "used_tokens": 12480, "window_tokens": 200000
+    "permission_mode": "default", "used_tokens": 12480, "window_tokens": 200000
   }
 }
 ```

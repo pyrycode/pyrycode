@@ -1,15 +1,16 @@
-# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610) — the read half of the #844 cluster
+# Inbound `request_session_settings` (#491/#1214, extended #1586, conversation-keyed #1610, permission mode #1687) — the read half of the #844 cluster
 
 `request_session_settings` is a v2 **control** envelope (phone → binary),
 intercepted in `dispatchAppFrame`'s discriminator switch **before**
 `dispatch.Route` — same boundary as `set_session_settings` / `request_snapshot`
 / `request_debug_bundle`, no `dispatch.Route` handler. It consumes
-[the read-side wire vocabulary](protocol-package.md#session-settings-read-payloads-4911214-conversationid-field-1586-conversation-keyed-reply-1610)
+[the read-side wire vocabulary](protocol-package.md#session-settings-read-payloads-4911214-conversationid-field-1586-conversation-keyed-reply-1610-permission-mode-1687)
 (`RequestSessionSettingsPayload` / `SessionSettingsPayload`) and answers with
 the current run configuration: the session id a client must address a
-`set_session_settings` to, the model / effort / YOLO in force, and the
-context-window occupancy — **all six fields describing the one session bound
-to the conversation the client named** (#1610). Before #1610 the reported id
+`set_session_settings` to, the model / effort / YOLO / permission mode
+(#1687) in force, and the context-window occupancy — **all seven fields
+describing the one session bound to the conversation the client named**
+(#1610). Before #1610 the reported id
 and the reported values could describe different sessions: the id followed
 whichever conversation the request named, but the values were always the
 shared **bootstrap** session's, so a client changing model/effort/YOLO for
@@ -75,7 +76,9 @@ outright; every branch produces the same reply shape:
      Honouring it makes the relay fail closed on its own contract rather than
      on the producer's good behaviour — pinned by a **poisoned** refusal
      double in the unit tests (§ Test design).
-4. **Marshal + reply.** Unchanged shape, sourcing all six fields from `cfg`.
+4. **Marshal + reply.** Unchanged shape, sourcing all seven fields from `cfg`
+   (`PermissionMode` added by #1687, riding the same struct so it inherits
+   the single-acquisition guarantee below without a new read).
    No new log call on any reject branch — this verb fires on every sheet
    open, so a per-reject line would log more than the write path, and the
    only thing it could add is the caller's untrusted conversation id.
@@ -83,7 +86,7 @@ outright; every branch produces the same reply shape:
 - **`RunConfigFor func(conversationID string) (RunConfig, bool)` — the sole
   seam this handler consults (#1609 built it, #1610 wires it in).** One call
   resolves a *named* conversation to its own bound session id, model / effort
-  / YOLO and context-window figures together, with a comma-ok for "not
+  / YOLO / permission mode (#1687) and context-window figures together, with a comma-ok for "not
   addressable". `cmd/pyry` composes it (`runConfigFor`, layering
   `resolveBoundRunSettings` over the conversations registry and
   `Pool.SettingsFor` with the by-id `snapshotUsageFor` context-window reader)

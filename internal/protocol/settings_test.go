@@ -69,12 +69,67 @@ func TestSetSessionSettingsPayload_RoundTrip(t *testing.T) {
 				}
 			}
 
+			// Both fixtures omit permission_mode (#1687), so both pin the ABSENT
+			// half of its presence contract — including the present-at-zero row,
+			// which proves the new field does not have to ride along with the
+			// three that were on the wire before it. There is no
+			// "present at zero" row for it: unlike model/effort/yolo, an explicit
+			// "" names no posture and is refused at the wire boundary, so the
+			// PRESENT half is pinned by set_session_settings_mode.json below.
+			if payload.PermissionMode != nil {
+				t.Errorf("PermissionMode: got %q, want nil (omitted)", *payload.PermissionMode)
+			}
+
 			// Byte-equal round-trip is the regression guard for the omitempty
 			// decision: drop omitempty and the omitted fixture grows null keys;
 			// swap the pointers for values and a sent zero can't survive.
 			roundTripEnvelope(t, env, payload, raw)
 		})
 	}
+}
+
+// TestSetSessionSettingsPayload_PermissionModeRoundTrip pins the PRESENT half of
+// the permission mode's presence contract (#1687), the half the two fixtures
+// above cannot carry. A frame naming only a mode decodes to a non-nil pointer
+// with the three older fields still nil, and re-marshals byte-for-byte — so a
+// client changing only the posture sends exactly one settings key, and the mode
+// key is emitted only when it was sent.
+//
+// The fixture names "plan" rather than "default" deliberately: "default" is also
+// what canonicalisation lands on downstream, so a bug that dropped the value
+// while keeping the pointer could still read as correct against it.
+//
+// It does NOT pin that yolo is absent as a validity rule — that a frame carrying
+// both is refused is a WIRE-BOUNDARY decision, tested where the boundary lives
+// (internal/relay's set_session_settings handler). This package defines shape.
+func TestSetSessionSettingsPayload_PermissionModeRoundTrip(t *testing.T) {
+	t.Parallel()
+	raw := readFixture(t, "set_session_settings_mode.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeSetSessionSettings {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeSetSessionSettings)
+	}
+
+	var payload SetSessionSettingsPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.SessionID != "sess-a" {
+		t.Errorf("SessionID: got %q, want %q", payload.SessionID, "sess-a")
+	}
+	if payload.PermissionMode == nil || *payload.PermissionMode != "plan" {
+		t.Fatalf("PermissionMode: got %v, want non-nil pointer to %q", payload.PermissionMode, "plan")
+	}
+	if payload.Model != nil || payload.Effort != nil || payload.YOLO != nil {
+		t.Errorf("Model/Effort/YOLO: got %v/%v/%v, want all nil (a mode-only frame changes nothing else)",
+			payload.Model, payload.Effort, payload.YOLO)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
 }
 
 // TestSessionSettingsUpdatedPayload_RoundTrip pins the reply's shape: it
@@ -192,6 +247,9 @@ func TestSessionSettingsPayload_RoundTrip(t *testing.T) {
 	if payload.YOLO {
 		t.Error("YOLO: got true, want false")
 	}
+	if payload.PermissionMode != "default" {
+		t.Errorf("PermissionMode: got %q, want %q", payload.PermissionMode, "default")
+	}
 	if payload.UsedTokens != 12480 {
 		t.Errorf("UsedTokens: got %d, want %d", payload.UsedTokens, 12480)
 	}
@@ -222,6 +280,13 @@ func TestSessionSettingsPayload_ZeroFieldsPresent(t *testing.T) {
 		`"model":""`,
 		`"effort":""`,
 		`"yolo":false`,
+		// permission_mode "" is the one zero here that does NOT name a posture
+		// (#1687): a resolved session always reports one of claude's six modes,
+		// because the pool normalises the stored value at construction. So ""
+		// occurs only in this all-zero reply, alongside session_id "" — it means
+		// "nothing resolved", not "running in some unnamed mode". Keeping it on
+		// the wire is what lets a client read that pair as one answer.
+		`"permission_mode":""`,
 		`"used_tokens":0`,
 		`"window_tokens":0`,
 	} {

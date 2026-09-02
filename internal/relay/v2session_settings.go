@@ -54,10 +54,16 @@ const (
 //  2. Decode: this verb owes a reply, so a decode failure yields a malformed reply
 //     and persists nothing (AC #4). NEVER echo the decode error or any payload
 //     byte — encoding/json quotes attacker bytes into its error string.
-//  3. Validate model/effort BEFORE any persistence (AC #5): an invalid value
-//     yields a malformed reply, not a persisted bad setting. YOLO needs no value
-//     check — a malformed yolo already failed step 2's type-decode, so bypass can
-//     never be inferred from a bad value (AC #4).
+//  3. Validate model/effort/permission mode BEFORE any persistence (AC #5): an
+//     invalid value yields a malformed reply, not a persisted bad setting. YOLO
+//     needs no value check — a malformed yolo already failed step 2's type-decode,
+//     so bypass can never be inferred from a bad value (AC #4). The permission
+//     mode (#1687) adds two rejects here, both replying with the same fixed
+//     constant so no reject is distinguishable by its reply: a frame carrying BOTH
+//     a mode and a YOLO, and a mode outside validPermissionMode's closed five.
+//     Neither reject is logged — a permission mode is a settings value and #833
+//     keeps those out of the daemon log at every level, so "rejected mode X" must
+//     not be added for debuggability.
 //  4. Nil-seam guard: a nil SettingsUpdater replies "unavailable" deterministically
 //     (foreground / unwired), never a silent drop.
 //  5. Persist + reply: UpdateSettings merges all present fields under one atomic
@@ -88,6 +94,25 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsMalformed, false)
 		return
 	}
+	// A permission mode and a YOLO bit are two spellings of ONE posture, so a
+	// frame carrying both is refused (#1687) — checked BEFORE the mode's value so
+	// the refusal holds even for a mode this daemon does not recognise, and so
+	// "neither field can win over the other" is unconditional. Refusal rather than
+	// precedence, for the reason sessions.ErrPermissionModeConflict records one
+	// layer in: letting the mode win downgrades an escalation silently, letting
+	// YOLO win GRANTS one from a frame that said false, so neither is fail-safe in
+	// both directions. This is deliberately STRICTER than the pool's own rule,
+	// which refuses only a CONTRADICTING pair: at the wire there is no precedence
+	// question for a client author or a reviewer to answer, and no client sends
+	// both.
+	if p.PermissionMode != nil && p.YOLO != nil {
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsMalformed, false)
+		return
+	}
+	if p.PermissionMode != nil && !validPermissionMode(*p.PermissionMode) {
+		m.settingsReplyError(ctx, s, env.ID, protocol.CodeProtocolMalformed, msgSettingsMalformed, false)
+		return
+	}
 
 	if m.cfg.SettingsUpdater == nil {
 		// Unwired seam (foreground / pre-wire): report unavailable, never drop.
@@ -99,9 +124,10 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 	// contract. UpdateSettings applies all present fields atomically (one
 	// saveLocked, rollback on failure), so any combination applies or nothing does.
 	err := m.cfg.SettingsUpdater.UpdateSettings(p.SessionID, SettingsUpdate{
-		Model:  p.Model,
-		Effort: p.Effort,
-		YOLO:   p.YOLO,
+		Model:          p.Model,
+		Effort:         p.Effort,
+		YOLO:           p.YOLO,
+		PermissionMode: p.PermissionMode,
 	})
 	if errors.Is(err, ErrSessionUnknown) {
 		m.settingsReplyError(ctx, s, env.ID, protocol.CodeSessionNotFound, msgSettingsNotFound, false)
@@ -149,7 +175,8 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 		InReplyTo: &inReplyTo,
 	}
 	// One content-free info log: conn_id + session_id only. The model / effort /
-	// YOLO values are NEVER logged at any level (#833 keeps them out of logs).
+	// YOLO / permission mode values are NEVER logged at any level (#833 keeps them
+	// out of logs).
 	m.cfg.Logger.Info("relay: v2 session settings updated",
 		"event", "v2.settings.updated",
 		"conn_id", s.connID,
@@ -167,8 +194,17 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 // handleRequestSessionSettings answers an inbound request_session_settings
 // control frame with the run configuration of the conversation the client named
 // (#491, #1214, #1610): that conversation's bound session id to address changes
-// to, the model / effort / YOLO in force on it, and its context-window
-// occupancy. It is the READ half of the #844 cluster, which shipped write-only.
+// to, the model / effort / YOLO / permission mode in force on it, and its
+// context-window occupancy. It is the READ half of the #844 cluster, which
+// shipped write-only.
+//
+// The reported permission mode (#1687) is what lets a client label its menu from
+// the daemon's state rather than from the request it last sent. It can name a
+// posture the WRITE half refuses to accept — a bypass session reports
+// "bypassPermissions" here while only the YOLO bit can set it — because the
+// daemon stores mode and YOLO so they cannot disagree, and reporting the posture
+// the session is actually in is the point of a read half.
+//
 // Intercepted in dispatchAppFrame before dispatch.Route, like
 // handleSetSessionSettings above, and runs on the manager's single Run dispatch
 // goroutine.
@@ -215,7 +251,7 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 // reaching.
 //
 // The reply NEVER carries a screen byte, a transcript byte, or a file path —
-// only the id, two short enum-ish strings, a bool and two aggregate integers.
+// only the id, three short enum-ish strings, a bool and two aggregate integers.
 // The requested conversation_id reaches neither the reply, a log line, nor an
 // error string; it is a lookup key and nothing else.
 func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *V2Session, env protocol.Envelope) {
@@ -256,16 +292,20 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 		}
 	}
 
-	// All six fields come from the one RunConfig, so the reported id and the
+	// All seven fields come from the one RunConfig, so the reported id and the
 	// reported values always describe the same session — including in the zero
-	// case, which the wire contract already defines as a real answer.
+	// case, which the wire contract already defines as a real answer. That extends
+	// to the permission mode and the YOLO bit, which the daemon stores so they can
+	// never disagree (#1687), so no client can read a posture assembled from two
+	// different sessions.
 	payload, err := json.Marshal(protocol.SessionSettingsPayload{
-		SessionID:    cfg.SessionID,
-		Model:        cfg.Model,
-		Effort:       cfg.Effort,
-		YOLO:         cfg.YOLO,
-		UsedTokens:   cfg.UsedTokens,
-		WindowTokens: cfg.WindowTokens,
+		SessionID:      cfg.SessionID,
+		Model:          cfg.Model,
+		Effort:         cfg.Effort,
+		YOLO:           cfg.YOLO,
+		PermissionMode: cfg.PermissionMode,
+		UsedTokens:     cfg.UsedTokens,
+		WindowTokens:   cfg.WindowTokens,
 	})
 	if err != nil {
 		// A closed struct of two strings, a bool and two ints; marshal cannot fail
@@ -287,8 +327,9 @@ func (m *V2SessionManager) handleRequestSessionSettings(ctx context.Context, s *
 		Payload:   payload,
 		InReplyTo: &inReplyTo,
 	}
-	// Content-free debug log: conn_id only. The model / effort / YOLO values are
-	// NEVER logged at any level (#833 keeps them out of logs), and neither are the
+	// Content-free debug log: conn_id only. The model / effort / YOLO / permission
+	// mode values are NEVER logged at any level (#833 keeps them out of logs), and
+	// neither are the
 	// usage integers or the session id — this is a routine read that can fire on
 	// every sheet open, so it logs less than the write path, not more.
 	m.cfg.Logger.Debug("relay: v2 session settings reported",
@@ -461,6 +502,55 @@ func modelWordByte(c byte) bool {
 func validEffort(e string) bool {
 	switch e {
 	case "", "low", "medium", "high", "xhigh", "max":
+		return true
+	default:
+		return false
+	}
+}
+
+// validPermissionMode reports whether mode is an acceptable permission posture
+// from an untrusted set_session_settings frame (#1687). Like validEffort it is a
+// CLOSED ENUM and not validModel's byte-class grammar, because a posture is a
+// fixed vocabulary while a model identifier is not: claude's modes are named in
+// its own source, a client picks from a menu of them, and a grammar would admit
+// values nobody enumerated. It carries validEffort's direction hazard too — a
+// closed enum refuses inbound anything claude adds later, and widening it is a
+// code edit here plus one in internal/sessions.
+//
+// A switch and not a package-level slice or map, matching the same decision
+// internal/sessions records for its own copy: a mutable package-level collection
+// holding a security vocabulary is something any code in this package, a test
+// included, could append the escalation onto. Control flow cannot be appended to.
+//
+// The set is claude's five IN-BAND modes, measured live at 2.1.239 by #2041 and
+// mirrored from internal/sessions' permissionModeInBand — defined relay-local
+// because internal/relay cannot import internal/sessions, the same reason
+// validEffort duplicates cmd/pyry's --effort enum. Two omissions are the ticket's
+// decisions rather than oversights:
+//
+//   - "" is REFUSED, and this is where the three validators in this file
+//     deliberately disagree. validModel and validEffort accept "" as "emit no
+//     flag, run at claude's own default" — a real value. The default posture is a
+//     NAMEABLE mode, so an explicit "" names nothing and has no reading;
+//     sessions.Pool.UpdateSettings rejects it for the same reason. Do NOT "fix"
+//     this by copying the siblings' first case.
+//   - bypassPermissions is REFUSED, so this ticket adds no path to a privilege
+//     escalation that did not exist before it. The bypass posture stays reachable
+//     only through the YOLO bit, which keeps exactly one spelling for it on the
+//     wire. Nothing downstream can derive it from a mode either: the stored
+//     posture escalates on the YOLO bit alone, and claudeSettingsArgs composes
+//     --dangerously-skip-permissions from that bit and never from the mode.
+//
+// The accepted value reaches ONE sink, and it is not the one validModel worries
+// about: a posture is delivered to the live child as a set_permission_mode
+// control request carrying a JSON string field, never interpolated into turn text
+// the way "/model "+value is. So the whitespace-and-line-terminator reasoning
+// validModel needs does not apply here — but the five literals contain no byte
+// that would matter to it anyway, and no byte that could pose as a claude flag on
+// a spawn argv.
+func validPermissionMode(mode string) bool {
+	switch mode {
+	case "default", "acceptEdits", "plan", "auto", "dontAsk":
 		return true
 	default:
 		return false

@@ -38,11 +38,35 @@ package protocol
 // only on a clear or an idle eviction, never on session creation, so a client
 // that had done neither never learned an id and could not write. A plain string,
 // always required, no omitempty.
+// PermissionMode names one of claude's permission modes (#1687), and it JOINS
+// YOLO rather than superseding it — the mobile client speaks yolo and the wire
+// types are not drifted without a matching change on every client. Removing yolo
+// is a later ticket, filed when every client has moved.
+//
+// Two rules make this field unlike its three siblings, and both are enforced at
+// the wire boundary (internal/relay's set_session_settings handler), not here —
+// this package defines shape:
+//
+//   - Present-at-"" is NOT a settable value. For Model and Effort "" means "run
+//     at claude's own default", a real value the presence contract can carry. The
+//     default posture is a NAMEABLE mode ("default"), so an explicit "" names
+//     nothing and is refused. The pointer's job here is purely absent-vs-present.
+//   - A frame carrying BOTH this field and YOLO is refused as malformed. They are
+//     two spellings of one posture — yolo:true is bypassPermissions, yolo:false is
+//     default — so a frame carrying both is redundant or contradictory. Refusal
+//     rather than precedence means there is no rule for a client author or a
+//     reviewer to get wrong, and no client sends both.
+//
+// The accepted vocabulary is claude's five in-band modes (default, acceptEdits,
+// plan, auto, dontAsk), measured live by #2041. bypassPermissions is refused on
+// this field: the escalation stays reachable only through YOLO, so it keeps
+// exactly one spelling on the wire.
 type SetSessionSettingsPayload struct {
-	SessionID string  `json:"session_id"`
-	Model     *string `json:"model,omitempty"`
-	Effort    *string `json:"effort,omitempty"`
-	YOLO      *bool   `json:"yolo,omitempty"`
+	SessionID      string  `json:"session_id"`
+	Model          *string `json:"model,omitempty"`
+	Effort         *string `json:"effort,omitempty"`
+	YOLO           *bool   `json:"yolo,omitempty"`
+	PermissionMode *string `json:"permission_mode,omitempty"`
 }
 
 // SessionSettingsUpdatedPayload is the body of an Envelope whose Type ==
@@ -116,8 +140,20 @@ type RequestSessionSettingsPayload struct {
 //   - Model / Effort "" mean "inherited default, no per-session override" —
 //     the same meaning they carry on screen_snapshot.
 //   - YOLO false means permissions are enforced.
+//   - PermissionMode "" means NO SESSION RESOLVED, and it is the one zero here
+//     that does not name a real posture (#1687). A resolved session always reports
+//     one of claude's six modes, because the daemon normalises the stored value at
+//     every construction site — so "" occurs only in the all-zero reply, beside
+//     SessionID "". Read the pair together.
 //   - WindowTokens 0 means the usage seam was not wired; UsedTokens 0 against a
 //     non-zero WindowTokens is a genuine fresh session.
+//
+// PermissionMode and YOLO always agree, because the daemon stores them so they
+// cannot disagree: a session in bypass reports "bypassPermissions" AND yolo true.
+// So this half can report a posture the WRITE half refuses to accept on its
+// permission_mode field — deliberate, and the whole point of the read half
+// existing. A client labels its menu from this value and keeps sending yolo to
+// change the bypass posture.
 //
 // Scope: the values are those of the session bound to the conversation the
 // request named (RequestSessionSettingsPayload above, #1586/#1610), and SessionID
@@ -127,10 +163,11 @@ type RequestSessionSettingsPayload struct {
 // session's values and write its change to another. A request that resolves to no
 // session gets every field at its zero value, never some other session's.
 type SessionSettingsPayload struct {
-	SessionID    string `json:"session_id"`
-	Model        string `json:"model"`
-	Effort       string `json:"effort"`
-	YOLO         bool   `json:"yolo"`
-	UsedTokens   int    `json:"used_tokens"`
-	WindowTokens int    `json:"window_tokens"`
+	SessionID      string `json:"session_id"`
+	Model          string `json:"model"`
+	Effort         string `json:"effort"`
+	YOLO           bool   `json:"yolo"`
+	PermissionMode string `json:"permission_mode"`
+	UsedTokens     int    `json:"used_tokens"`
+	WindowTokens   int    `json:"window_tokens"`
 }

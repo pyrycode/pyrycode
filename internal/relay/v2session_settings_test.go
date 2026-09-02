@@ -136,6 +136,23 @@ func TestV2Session_SetSessionSettings_AppliesByCapability(t *testing.T) {
 			wantUpdate: SettingsUpdate{Model: strPtr(""), Effort: strPtr("")},
 		},
 		{
+			name:       "interactive only permission mode",
+			caps:       []string{protocol.CapabilityInteractive},
+			payload:    protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("plan")},
+			wantCalled: true,
+			wantUpdate: SettingsUpdate{PermissionMode: strPtr("plan")},
+		},
+		{
+			// A mode alongside model/effort is fine — those are orthogonal
+			// settings. Only a mode alongside YOLO is refused, and that row lives
+			// in the malformed table below (#1687).
+			name:       "interactive permission mode with model and effort",
+			caps:       []string{protocol.CapabilityInteractive},
+			payload:    protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr("sonnet"), Effort: strPtr("low"), PermissionMode: strPtr("acceptEdits")},
+			wantCalled: true,
+			wantUpdate: SettingsUpdate{Model: strPtr("sonnet"), Effort: strPtr("low"), PermissionMode: strPtr("acceptEdits")},
+		},
+		{
 			name:       "non-interactive is inert",
 			caps:       nil,
 			payload:    protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr("sonnet")},
@@ -315,6 +332,25 @@ func TestV2Session_SetSessionSettings_MalformedRejected(t *testing.T) {
 		{"invalid model control byte", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr("claude\x00opus")})},
 		{"invalid model over length", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Model: strPtr(longModel)})},
 		{"invalid effort ultra", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, Effort: strPtr("ultra")})},
+
+		// Permission mode (#1687). Every row here must leave the seam untouched:
+		// a refused posture is one that never reached the registry, and so never
+		// reached a spawn argv either.
+		{"permission mode empty string", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("")})},
+		{"permission mode unknown value", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("yolo")})},
+		{"permission mode wrong case", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("Plan")})},
+		// The escalation is refused on the mode field so bypass keeps exactly one
+		// spelling (the yolo bit). This row is AC #4 in one line.
+		{"permission mode bypassPermissions", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("bypassPermissions")})},
+		// Both spellings of the posture in one frame: refused whichever way they
+		// point, so neither can win over the other. The yolo:false row is the one
+		// that proves this is the RELAY's rule and not an inherited one — the pool
+		// validator downstream accepts that exact pair as consistent.
+		{"permission mode with yolo true", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("plan"), YOLO: boolPtr(true)})},
+		{"permission mode with yolo false", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("plan"), YOLO: boolPtr(false)})},
+		// A garbage mode paired with a yolo is still refused: the conflict rule
+		// does not depend on the mode being one this daemon recognises.
+		{"unknown permission mode with yolo", mustSettingsPayload(t, protocol.SetSessionSettingsPayload{SessionID: settingsSessionID, PermissionMode: strPtr("nonsense"), YOLO: boolPtr(true)})},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -605,6 +641,50 @@ func TestValidEffort(t *testing.T) {
 	for _, tc := range cases {
 		if got := validEffort(tc.in); got != tc.want {
 			t.Errorf("validEffort(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestValidPermissionMode unit-tests the relay-local posture enum (#1687). It
+// enumerates the whole accepted set, so a member silently lost in a refactor
+// fails here rather than only as a client's option vanishing.
+//
+// The two named refusals carry the ticket's decisions and are the rows to keep:
+//
+//   - "" is refused, and this is the one place the three settings validators in
+//     this file DISAGREE on purpose. validModel and validEffort accept "" as
+//     "emit no flag, run at claude's own default" — a real value. The default
+//     posture is a NAMEABLE mode, so an explicit "" here names nothing;
+//     sessions.Pool.UpdateSettings refuses it too, and refusing at the wire keeps
+//     the two layers agreeing rather than leaning on the inner one. Do not "fix"
+//     this by copying the siblings' first case.
+//   - bypassPermissions is refused, so the escalation is unreachable through this
+//     field and keeps exactly one spelling on the wire (the yolo bit). A mode
+//     string cannot grant bypass at any layer below either: the stored posture
+//     escalates on the yolo bit alone, and claudeSettingsArgs derives
+//     --dangerously-skip-permissions from that bit and never from the mode.
+func TestValidPermissionMode(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"default", true},
+		{"acceptEdits", true},
+		{"plan", true},
+		{"auto", true},
+		{"dontAsk", true},
+		{"", false},
+		{"bypassPermissions", false},
+		{"Plan", false},
+		{"plan ", false},
+		{"acceptedits", false},
+		{"yolo", false},
+	}
+	for _, tc := range cases {
+		if got := validPermissionMode(tc.in); got != tc.want {
+			t.Errorf("validPermissionMode(%q) = %v, want %v", tc.in, got, tc.want)
 		}
 	}
 }

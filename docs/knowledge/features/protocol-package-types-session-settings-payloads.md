@@ -1,7 +1,7 @@
-# Session settings payloads (#844)
+# Session settings payloads (#844, permission mode #1687)
 
 The wire vocabulary for changing a session's per-session model / reasoning
-effort / YOLO (`docs/protocol-mobile.md` § Session settings; split from #841). **Wire vocabulary only** — the handler that intercepts
+effort / permission mode / YOLO (`docs/protocol-mobile.md` § Session settings; split from #841). **Wire vocabulary only** — the handler that intercepts
 `set_session_settings` at `v2session.go`'s `dispatchAppFrame` **before**
 `dispatch.Route` (the `TypeModalAnswer` / `TypeNewSession` precedent — **no
 `dispatch.Route` handler**), gates on the `interactive` capability, validates,
@@ -11,10 +11,11 @@ See [codebase/844.md](../codebase/844.md).
 
 ```go
 type SetSessionSettingsPayload struct {
-    SessionID string  `json:"session_id"`
-    Model     *string `json:"model,omitempty"`
-    Effort    *string `json:"effort,omitempty"`
-    YOLO      *bool   `json:"yolo,omitempty"`
+    SessionID      string  `json:"session_id"`
+    Model          *string `json:"model,omitempty"`
+    Effort         *string `json:"effort,omitempty"`
+    YOLO           *bool   `json:"yolo,omitempty"`
+    PermissionMode *string `json:"permission_mode,omitempty"`
 }
 
 type SessionSettingsUpdatedPayload struct {
@@ -22,7 +23,7 @@ type SessionSettingsUpdatedPayload struct {
 }
 ```
 
-- **The three settings fields are pointers with `omitempty` — the presence
+- **The four settings fields are pointers with `omitempty` — the presence
   contract.** `nil` means "leave unchanged"; a non-nil pointer means "set to
   this value", including a non-nil `*""` (`Model`/`Effort`) or `*false`
   (`YOLO`), which are thereby distinguishable from omitted. This is the
@@ -33,9 +34,18 @@ type SessionSettingsUpdatedPayload struct {
   can never masquerade as an instruction to clear a stored value. The struct
   doc comment flags the divergence explicitly so a future contributor
   doesn't "fix" it by copying the sibling style.
-- **Mirrors `sessions.SettingsUpdate{Model, Effort *string; YOLO *bool}`
-  (#840) field-for-field** — the #845 handler decodes this payload straight
-  into that seam.
+- **`PermissionMode` breaks the pattern its three siblings set: present-at-`""`
+  is not a settable value.** For `Model`/`Effort`, `*""` means "run at
+  claude's own default" — a real value the presence contract distinguishes
+  from omitted. The default *posture* is itself a nameable mode (`"default"`),
+  so an explicit `""` names nothing; `validPermissionMode` in
+  `internal/relay` refuses it before persistence, same reply as any other
+  out-of-vocabulary value. A field family sharing one presence-contract
+  paragraph can still diverge on what "present at zero" means per field —
+  don't assume a sibling's reading carries over.
+- **Mirrors `sessions.SettingsUpdate{Model, Effort *string; YOLO *bool;
+  PermissionMode *string}` (#840, #1687) field-for-field** — the #845
+  handler decodes this payload straight into that seam.
 - **`SessionID` is the addressing key** — matches
   `sessions.Pool.UpdateSettings(id sessions.SessionID, …)` and is already
   carried to clients in the `session_transition` marker's `new_session_id`
@@ -52,8 +62,16 @@ type SessionSettingsUpdatedPayload struct {
   which carries the label.
 
 Golden round-trips in `settings_test.go`: a table-driven test over
-`set_session_settings_full.json` (all three fields present at zero value)
-vs `set_session_settings_omitted.json` (only `session_id`), asserting pointer
-nil-ness then a byte-equal re-marshal — the regression guard for the
+`set_session_settings_full.json` (all three original fields present at zero
+value) vs `set_session_settings_omitted.json` (only `session_id`), asserting
+pointer nil-ness then a byte-equal re-marshal — the regression guard for the
 `omitempty` decision — plus a `session_settings_updated.json` round-trip for
-the reply.
+the reply. `PermissionMode` could not extend `set_session_settings_full.json`:
+that fixture also carries `yolo`, which the relay's conflict check rejects,
+and its "present at zero" reading (`""`) is a refusal rather than a value for
+this field alone. It got its own fixture, `set_session_settings_mode.json`
+(`{"session_id":"sess-a","permission_mode":"plan"}`), while the two existing
+fixtures — unchanged — now also pin `PermissionMode == nil` on the absent
+half. When a new field's presence-contract reading diverges from its
+siblings', reach for a fixture of its own rather than extending the "all
+fields present" one.

@@ -1165,17 +1165,24 @@ func (m sessionMinter) Create(ctx context.Context, label, spawnDir string) (stri
 // so internal/relay imports neither internal/sessions nor cmd/pyry) and owns the
 // single sessions.ErrSessionNotFound → relay.ErrSessionUnknown mapping — the
 // project convention that sentinel-to-wire mapping lives at the consumer call
-// site, not in the primitive. The three presence pointers pass straight through:
+// site, not in the primitive. The four presence pointers pass straight through:
 // relay.SettingsUpdate mirrors sessions.SettingsUpdate 1:1, so a nil field still
 // means "leave unchanged" and a nil YOLO can never enable bypass. The precedent
 // for this type-narrowing seam is sessionMinter / poolResolver above.
+//
+// The mirror is maintained BY HAND, so a field added on one side and forgotten
+// here compiles and ships as a silent no-op. That is what
+// TestSettingsUpdaterAdapter_CarriesPermissionMode exists to catch, and why it
+// asserts on a REJECTED mode: the pool validates a posture only when the update
+// names one, so a dropped field returns nil rather than an error.
 type settingsUpdaterAdapter struct{ p *sessions.Pool }
 
 func (a settingsUpdaterAdapter) UpdateSettings(id string, u relay.SettingsUpdate) error {
 	err := a.p.UpdateSettings(sessions.SessionID(id), sessions.SettingsUpdate{
-		Model:  u.Model,
-		Effort: u.Effort,
-		YOLO:   u.YOLO,
+		Model:          u.Model,
+		Effort:         u.Effort,
+		YOLO:           u.YOLO,
+		PermissionMode: u.PermissionMode,
 	})
 	if errors.Is(err, sessions.ErrSessionNotFound) {
 		return relay.ErrSessionUnknown
@@ -1484,6 +1491,11 @@ type boundRunSettings struct {
 	model     string
 	effort    string
 	yolo      bool
+	// permissionMode is the posture the session runs under (#1687). It is read
+	// from the same SessionSettings value as the three above, so it can never
+	// describe a different session, and the pool normalises it at construction —
+	// a resolved session always names one of claude's six modes, never "".
+	permissionMode string
 }
 
 // sessionSettingsReader is the single pool method resolveBoundRunSettings needs,
@@ -1548,10 +1560,11 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 		return boundRunSettings{}, false
 	}
 	return boundRunSettings{
-		sessionID: conv.CurrentSessionID,
-		model:     s.Model,
-		effort:    s.Effort,
-		yolo:      s.YOLO,
+		sessionID:      conv.CurrentSessionID,
+		model:          s.Model,
+		effort:         s.Effort,
+		yolo:           s.YOLO,
+		permissionMode: s.PermissionMode,
 	}, true
 }
 
