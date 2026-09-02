@@ -475,3 +475,33 @@ The whole-module race suite is the verifier's gate, not this run's.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — the Sizing section under-measured this plan's own length
+
+**What changed:** nothing in the design. The Sizing table above predicts ~800-boundary-safe
+"~700 lines (this plan ~290, production ~150, tests ~250)". The measured actual is **982**: 477
+lines of plan plus 505 insertions of code and tests. Every other boundary held as written — 5
+production files, 0 new exported types, 7 consumer call sites, 5 acceptance criteria, 4 reject
+branches — and the run finished well inside its budget, which is what the line ceiling exists to
+protect.
+
+**What drove it:** the estimate for the plan itself was wrong by 190 lines, not the estimate for
+the code (which came in at 505 against a predicted 400). Two components were under-counted, and
+both are structural rather than accidental: the `## Security review` section this ticket's label
+mandates runs ~90 lines on its own, and the Design section grew by three findings that section
+produced — the `switch`-not-a-slice argument, the vocabulary-vs-authorisation contract, and the
+`PIPE_BUF` length bound. #2041's plan recorded the same shape from the same cause: on a
+`security-sensitive` ticket the review accounts for about a third of the overage.
+
+**Why it is recorded rather than acted on:** the work was complete, verified and committed before
+the miss was measured, and the ceiling protects a budget that was never at risk. Splitting
+finished green work would trade nothing for nothing. The durable cost of leaving it unrecorded is
+different and real: #2043, #1687 and #1686 all size against this slice as their nearest analogue,
+and an estimate is what they would have copied. **The number to size against is 982 across 5
+production files, not 670.**
+
+**For the next `security-sensitive` plan:** budget ~100 lines for the review section before
+counting anything else, and expect the findings it produces to land back in Design rather than
+staying inside the review.
