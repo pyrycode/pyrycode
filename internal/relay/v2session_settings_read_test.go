@@ -38,24 +38,32 @@ const (
 // fixtureRunConfig is what RunConfigFor reports for readKnownConvID: the id and
 // the five values describing ONE session, which is the whole point of the type
 // (#1609).
+// The reported posture is bypassPermissions BECAUSE YOLO is true, and the pair
+// is deliberate rather than incidental (#1687): the daemon stores the two so they
+// can never disagree, so this fixture is the read half reporting a posture the
+// write half refuses to accept on its mode field. That asymmetry is the design —
+// a client labels its menu "bypass" from the daemon's state while yolo stays the
+// only spelling that can grant it.
 var fixtureRunConfig = RunConfig{
-	SessionID:    readSessionID,
-	Model:        readModel,
-	Effort:       readEffort,
-	YOLO:         true,
-	UsedTokens:   readUsedTokens,
-	WindowTokens: readWindowTokens,
+	SessionID:      readSessionID,
+	Model:          readModel,
+	Effort:         readEffort,
+	YOLO:           true,
+	PermissionMode: "bypassPermissions",
+	UsedTokens:     readUsedTokens,
+	WindowTokens:   readWindowTokens,
 }
 
 // fixtureReport is fixtureRunConfig as the reply a resolvable request must come
 // back with — the six fields cross the handler unchanged.
 var fixtureReport = protocol.SessionSettingsPayload{
-	SessionID:    fixtureRunConfig.SessionID,
-	Model:        fixtureRunConfig.Model,
-	Effort:       fixtureRunConfig.Effort,
-	YOLO:         fixtureRunConfig.YOLO,
-	UsedTokens:   fixtureRunConfig.UsedTokens,
-	WindowTokens: fixtureRunConfig.WindowTokens,
+	SessionID:      fixtureRunConfig.SessionID,
+	Model:          fixtureRunConfig.Model,
+	Effort:         fixtureRunConfig.Effort,
+	YOLO:           fixtureRunConfig.YOLO,
+	PermissionMode: fixtureRunConfig.PermissionMode,
+	UsedTokens:     fixtureRunConfig.UsedTokens,
+	WindowTokens:   fixtureRunConfig.WindowTokens,
 }
 
 // poisonedRunConfig is the fixture's REFUSAL return: a non-zero RunConfig handed
@@ -67,12 +75,13 @@ var fixtureReport = protocol.SessionSettingsPayload{
 // borrowed from cmd/pyry. Ordinary strings: this is a fixture, not a second path
 // probe.
 var poisonedRunConfig = RunConfig{
-	SessionID:    "sess-refused-999",
-	Model:        "claude-refused-1-0",
-	Effort:       "max",
-	YOLO:         true,
-	UsedTokens:   4242,
-	WindowTokens: 424242,
+	SessionID:      "sess-refused-999",
+	Model:          "claude-refused-1-0",
+	Effort:         "max",
+	YOLO:           true,
+	PermissionMode: "dontAsk",
+	UsedTokens:     4242,
+	WindowTokens:   424242,
 }
 
 // resolveFixtureConv is the RunConfigFor double every fixture below shares: it

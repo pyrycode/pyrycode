@@ -503,10 +503,11 @@ func runConfigFor(
 			return relay.RunConfig{}, false
 		}
 		cfg := relay.RunConfig{
-			SessionID: b.sessionID,
-			Model:     b.model,
-			Effort:    b.effort,
-			YOLO:      b.yolo,
+			SessionID:      b.sessionID,
+			Model:          b.model,
+			Effort:         b.effort,
+			YOLO:           b.yolo,
+			PermissionMode: b.permissionMode,
 		}
 		if usage != nil {
 			cfg.UsedTokens, cfg.WindowTokens = usage(b.sessionID)

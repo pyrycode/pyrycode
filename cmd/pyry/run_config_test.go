@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"slices"
 	"sync"
 	"testing"
@@ -73,8 +74,8 @@ func TestResolveBoundRunSettings(t *testing.T) {
 	// conversation is still bound to.
 	newReader := func() *settingsReaderDouble {
 		return &settingsReaderDouble{settings: map[sessions.SessionID]sessions.SessionSettings{
-			"sess-a":        {Model: "claude-opus-4-8", Effort: "high", YOLO: true},
-			"sess-b":        {Model: "", Effort: "low"},
+			"sess-a":        {Model: "claude-opus-4-8", Effort: "high", YOLO: true, PermissionMode: "bypassPermissions"},
+			"sess-b":        {Model: "", Effort: "low", PermissionMode: "plan"},
 			"sess-defaults": {},
 		}}
 	}
@@ -108,14 +109,14 @@ func TestResolveBoundRunSettings(t *testing.T) {
 		{
 			name:      "conversation A reports its own session and settings",
 			convID:    "conv-a",
-			want:      boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true},
+			want:      boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions"},
 			wantOK:    true,
 			wantAsked: []sessions.SessionID{"sess-a"},
 		},
 		{
 			name:      "conversation B reports its own session and settings",
 			convID:    "conv-b",
-			want:      boundRunSettings{sessionID: "sess-b", model: "", effort: "low", yolo: false},
+			want:      boundRunSettings{sessionID: "sess-b", model: "", effort: "low", yolo: false, permissionMode: "plan"},
 			wantOK:    true,
 			wantAsked: []sessions.SessionID{"sess-b"},
 		},
@@ -242,7 +243,7 @@ func TestRunConfigFor_NoSessionsDirectoryStillResolves(t *testing.T) {
 	t.Parallel()
 
 	resolve := func(convID string) (boundRunSettings, bool) {
-		return boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true}, true
+		return boundRunSettings{sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions"}, true
 	}
 
 	seam := runConfigFor(resolve, nil)
@@ -253,7 +254,7 @@ func TestRunConfigFor_NoSessionsDirectoryStillResolves(t *testing.T) {
 	if !ok {
 		t.Fatalf("seam(conv-a) ok = false, want true — an unwired usage half does not make a resolved conversation unresolvable")
 	}
-	want := relay.RunConfig{SessionID: "sess-a", Model: "claude-opus-4-8", Effort: "high", YOLO: true}
+	want := relay.RunConfig{SessionID: "sess-a", Model: "claude-opus-4-8", Effort: "high", YOLO: true, PermissionMode: "bypassPermissions"}
 	if got != want {
 		t.Errorf("seam(conv-a) = %+v, want %+v", got, want)
 	}
@@ -270,8 +271,8 @@ func TestRunConfigFor_ReadsUsageForTheResolvedSession(t *testing.T) {
 	t.Parallel()
 
 	bound := map[string]boundRunSettings{
-		"conv-a": {sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true},
-		"conv-b": {sessionID: "sess-b", effort: "low"},
+		"conv-a": {sessionID: "sess-a", model: "claude-opus-4-8", effort: "high", yolo: true, permissionMode: "bypassPermissions"},
+		"conv-b": {sessionID: "sess-b", effort: "low", permissionMode: "acceptEdits"},
 	}
 	resolve := func(convID string) (boundRunSettings, bool) {
 		b, ok := bound[convID]
@@ -293,8 +294,8 @@ func TestRunConfigFor_ReadsUsageForTheResolvedSession(t *testing.T) {
 		t.Fatalf("seam ok = (%v, %v) for (conv-a, conv-b), want (true, true)", okA, okB)
 	}
 
-	wantA := relay.RunConfig{SessionID: "sess-a", Model: "claude-opus-4-8", Effort: "high", YOLO: true, UsedTokens: 1000, WindowTokens: 200_000}
-	wantB := relay.RunConfig{SessionID: "sess-b", Effort: "low", UsedTokens: 150_000, WindowTokens: 1_000_000}
+	wantA := relay.RunConfig{SessionID: "sess-a", Model: "claude-opus-4-8", Effort: "high", YOLO: true, PermissionMode: "bypassPermissions", UsedTokens: 1000, WindowTokens: 200_000}
+	wantB := relay.RunConfig{SessionID: "sess-b", Effort: "low", PermissionMode: "acceptEdits", UsedTokens: 150_000, WindowTokens: 1_000_000}
 	if gotA != wantA {
 		t.Errorf("seam(conv-a) = %+v, want %+v — no field may describe another conversation's session", gotA, wantA)
 	}
@@ -331,5 +332,52 @@ func TestRunConfigFor_UnresolvableReachesNoUsageRead(t *testing.T) {
 	}
 	if asked := usage.calls(); len(asked) != 0 {
 		t.Errorf("usage reader was asked for %q, want no calls — an unresolvable conversation must reach no transcript path", asked)
+	}
+}
+
+// TestSettingsUpdaterAdapter_CarriesPermissionMode pins the WRITE half of the
+// same chain against a real *sessions.Pool (#1687). The adapter mirrors
+// relay.SettingsUpdate into sessions.SettingsUpdate field by field, by hand, so a
+// field added to one side and forgotten on the other compiles and ships silently
+// — the relay-side table proves only that the pointer reaches the seam, not that
+// the seam's implementation forwards it.
+//
+// The rejected-mode case is the precise mutant-killer, and it is why this test
+// does not just assert the happy path. Pool.UpdateSettings validates the mode
+// only when the update NAMES one, so an adapter that dropped the field would make
+// this frame an empty no-op and return nil. A non-nil error is therefore
+// unforgeable evidence that the value crossed. It must also not be mapped to
+// relay.ErrSessionUnknown, which is reserved for an id the daemon does not host.
+func TestSettingsUpdaterAdapter_CarriesPermissionMode(t *testing.T) {
+	t.Parallel()
+
+	pool := newRouterTestPool(t)
+	id := string(pool.Default().ID())
+	adapter := settingsUpdaterAdapter{pool}
+
+	mode := "plan"
+	if err := adapter.UpdateSettings(id, relay.SettingsUpdate{PermissionMode: &mode}); err != nil {
+		t.Fatalf("UpdateSettings(%q): unexpected err %v", mode, err)
+	}
+	got, err := pool.SettingsFor(sessions.SessionID(id))
+	if err != nil {
+		t.Fatalf("SettingsFor: %v", err)
+	}
+	if got.PermissionMode != mode {
+		t.Errorf("stored PermissionMode = %q, want %q — the pointer did not cross the adapter", got.PermissionMode, mode)
+	}
+
+	// A mode the pool refuses: the error must surface as itself, not as nil (the
+	// dropped-field signature) and not as the unknown-session sentinel.
+	bogus := "not-a-mode"
+	err = adapter.UpdateSettings(id, relay.SettingsUpdate{PermissionMode: &bogus})
+	if err == nil {
+		t.Fatal("UpdateSettings(bogus mode) = nil, want a rejection — a nil here means the field never reached the pool")
+	}
+	if errors.Is(err, relay.ErrSessionUnknown) {
+		t.Errorf("UpdateSettings(bogus mode) = %v, want a validation error, not the unknown-session sentinel", err)
+	}
+	if after, ferr := pool.SettingsFor(sessions.SessionID(id)); ferr != nil || after.PermissionMode != mode {
+		t.Errorf("stored PermissionMode = %q (err %v), want %q unchanged — a refused mode must persist nothing", after.PermissionMode, ferr, mode)
 	}
 }

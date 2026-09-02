@@ -77,6 +77,16 @@ type SettingsUpdate struct {
 	Model  *string
 	Effort *string
 	YOLO   *bool
+
+	// PermissionMode names the posture to switch to (#1687), mirroring
+	// sessions.SettingsUpdate's field of the same name. It reaches this struct
+	// only after handleSetSessionSettings has checked it against
+	// validPermissionMode, so a non-nil value here is always one of claude's five
+	// in-band modes — never "", never bypassPermissions, never an unrecognised
+	// string. The escalation therefore has no expression on this field at all: it
+	// travels as YOLO and nothing else, which is what keeps the bypass fail-safe
+	// to a single bit.
+	PermissionMode *string
 }
 
 // SettingsUpdater persists a per-session settings change named by an inbound
@@ -113,13 +123,23 @@ type SettingsUpdater interface {
 // indistinguishable from a genuine all-defaults session, which is exactly why
 // "this conversation is not addressable" is RunConfigFor's comma-ok and never a
 // field of this struct.
+//
+// PermissionMode is the posture in force (#1687), and unlike Model and Effort its
+// empty string is NOT a real reported value: the producer reads it from a
+// pool-held session, whose stored mode is normalised at construction, so a
+// resolved RunConfig always names one of claude's six modes. "" occurs only in
+// the zero RunConfig a refusal returns. It always agrees with YOLO — the daemon
+// stores the two so they cannot disagree — so a bypass session reports
+// "bypassPermissions" here AND YOLO true, a posture the write path deliberately
+// refuses to accept on its own mode field.
 type RunConfig struct {
-	SessionID    string
-	Model        string
-	Effort       string
-	YOLO         bool
-	UsedTokens   int
-	WindowTokens int
+	SessionID      string
+	Model          string
+	Effort         string
+	YOLO           bool
+	PermissionMode string
+	UsedTokens     int
+	WindowTokens   int
 }
 
 // ErrSessionUnknown is the relay-local sentinel the SettingsUpdater adapter
