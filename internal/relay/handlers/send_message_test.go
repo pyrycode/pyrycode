@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -79,10 +80,13 @@ func routeTo(w TurnWriter) SessionRouter {
 	return &stubSessionRouter{tw: w}
 }
 
-// enqueueCall records one (conversationID, text) pair the handler appended.
+// enqueueCall records one (conversationID, text, delivery) triple the handler
+// appended. delivery is what reaches claude; text is what a client reads back,
+// and the two differ only for a message naming attachments (#2038).
 type enqueueCall struct {
-	convID string
-	text   string
+	convID   string
+	text     string
+	delivery string
 }
 
 // fakeEnqueuer is the test double for Enqueuer. It records every (convID, text)
@@ -97,8 +101,8 @@ type fakeEnqueuer struct {
 	reject bool
 }
 
-func (f *fakeEnqueuer) Enqueue(convID, text string) uint64 {
-	f.calls = append(f.calls, enqueueCall{convID: convID, text: text})
+func (f *fakeEnqueuer) EnqueueDelivery(convID, text, delivery string) uint64 {
+	f.calls = append(f.calls, enqueueCall{convID: convID, text: text, delivery: delivery})
 	if f.reject {
 		return 0
 	}
@@ -198,7 +202,7 @@ func TestSendMessage_AckOnEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -213,6 +217,11 @@ func TestSendMessage_AckOnEnqueue(t *testing.T) {
 	}
 	if q.calls[0].convID != sendMsgConvID || q.calls[0].text != sendMsgText {
 		t.Errorf("Enqueue(%q, %q), want (%q, %q)", q.calls[0].convID, q.calls[0].text, sendMsgConvID, sendMsgText)
+	}
+	// A message naming no attachments is delivered byte-for-byte as it is queued
+	// (#2038 AC 2) — the composition seam is inert when there is nothing to name.
+	if q.calls[0].delivery != sendMsgText {
+		t.Errorf("delivery = %q, want the queued text %q verbatim", q.calls[0].delivery, sendMsgText)
 	}
 	if bound.activateCalls != 0 || bound.calls != 0 {
 		t.Errorf("write surface reached on enqueue path: activate=%d write=%d, want 0/0 (writer is discarded)", bound.activateCalls, bound.calls)
@@ -248,7 +257,7 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 			MessageID:      sendMsgMessageID,
 			Text:           text,
 		})
-		h := SendMessage(router, q, sendMsgLogger(t))
+		h := SendMessage(router, q, nil, sendMsgLogger(t))
 		if err := h(context.Background(), c, req); err != nil {
 			t.Fatalf("handler(%s): %v", convID, err)
 		}
@@ -258,7 +267,10 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 	send(t, convA, textA)
 	send(t, convB, textB)
 
-	want := []enqueueCall{{convID: convA, text: textA}, {convID: convB, text: textB}}
+	want := []enqueueCall{
+		{convID: convA, text: textA, delivery: textA},
+		{convID: convB, text: textB, delivery: textB},
+	}
 	if len(q.calls) != len(want) {
 		t.Fatalf("Enqueue calls = %d, want %d", len(q.calls), len(want))
 	}
@@ -286,7 +298,7 @@ func TestSendMessage_UnknownConversation_RejectedBeforeEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -328,7 +340,7 @@ func TestSendMessage_NoBoundSession_RejectedBeforeEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -371,7 +383,7 @@ func TestSendMessage_BacklogFull_RetryableReject(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, logger)
+	h := SendMessage(router, q, nil, logger)
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -425,7 +437,7 @@ func TestSendMessage_MalformedPayload_RejectedBeforeEnqueue(t *testing.T) {
 		Payload: []byte("not-json"),
 	}
 
-	h := SendMessage(router, q, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -443,5 +455,475 @@ func TestSendMessage_MalformedPayload_RejectedBeforeEnqueue(t *testing.T) {
 	}
 	if len(q.calls) != 0 {
 		t.Errorf("Enqueue calls = %d, want 0 (malformed payload must not reach the backlog)", len(q.calls))
+	}
+}
+
+// --- #2038: naming a message's stored attachments ---------------------------
+
+const (
+	attachPath1 = "/home/u/.pyry/inst/conversations/c/attachments/a1/report.pdf"
+	attachPath2 = "/home/u/.pyry/inst/conversations/c/attachments/a2/_.._.._etc_passwd"
+)
+
+// attachID builds a canonical-shaped attachment id. The handler never validates
+// the shape (attachments.ResolvePath owns that check), but using the real shape
+// keeps a fixture from reading as permission to send any short string.
+func attachID(n int) string {
+	return fmt.Sprintf("aaaaaaaa-aaaa-4aaa-8aaa-%012d", n)
+}
+
+// repeatID builds a list naming one id n times — the shape that makes the bound's
+// count-elements-not-distinct-ids rule observable.
+func repeatID(id string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = id
+	}
+	return out
+}
+
+// resolveCall records one (conversationID, attachmentID) pair the handler asked
+// the resolver about. The conversation half is the one that matters: it must be
+// the id Route already validated, never anything else, or ResolvePath's
+// confinement precondition is not discharged.
+type resolveCall struct {
+	convID string
+	id     string
+}
+
+// fakeAttachmentResolver is the test double for AttachmentResolver. An id absent
+// from paths does not resolve — the single comma-ok refusal ResolvePath answers
+// for an unknown id, a non-canonical id and a foreign-conversation id alike.
+type fakeAttachmentResolver struct {
+	paths map[string]string
+	calls []resolveCall
+}
+
+func (f *fakeAttachmentResolver) resolve(convID, id string) (string, bool) {
+	f.calls = append(f.calls, resolveCall{convID: convID, id: id})
+	p, ok := f.paths[id]
+	return p, ok
+}
+
+// sendMsgRawRequest builds a send_message envelope from RAW payload JSON. It
+// exists for the three empty wire forms: SendMessagePayload's omitempty elides a
+// nil and an empty slice identically, so a marshalled struct cannot express
+// "attachment_ids": null or "attachment_ids": [] at all.
+func sendMsgRawRequest(t *testing.T, payloadJSON string) protocol.Envelope {
+	t.Helper()
+	if !json.Valid([]byte(payloadJSON)) {
+		t.Fatalf("fixture payload is not valid JSON: %s", payloadJSON)
+	}
+	return protocol.Envelope{
+		ID:      sendMsgRequestID,
+		Type:    protocol.TypeSendMessage,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(payloadJSON),
+	}
+}
+
+// wantPrompt builds the delivery payload the handler is expected to compose, so
+// every assertion below is an EXACT string compare rather than a substring probe
+// that would tolerate a stray path or a mangled separator.
+func wantPrompt(text string, paths ...string) string {
+	block := attachmentPromptHeader + "\n" + strings.Join(paths, "\n")
+	if text == "" {
+		return block
+	}
+	return text + "\n\n" + block
+}
+
+func sendMsgErrorPayload(t *testing.T, env protocol.Envelope) protocol.ErrorPayload {
+	t.Helper()
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	return payload
+}
+
+// TestSendMessage_NoAttachments_DeliveredVerbatim covers AC 2 across ALL THREE
+// empty wire forms. SendMessagePayload.UnmarshalJSON collapses them to one
+// value, so a build that branched on which arrived would have to do it against a
+// distinction the decoder already erased — these rows are what prove it did.
+func TestSendMessage_NoAttachments_DeliveredVerbatim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{"key absent", `{"conversation_id":"C1","message_id":"M1","text":"hi there"}`},
+		{"null", `{"conversation_id":"C1","message_id":"M1","text":"hi there","attachment_ids":null}`},
+		{"empty array", `{"conversation_id":"C1","message_id":"M1","text":"hi there","attachment_ids":[]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			res := &fakeAttachmentResolver{}
+			c, recv, _ := newSendMsgConn(t)
+
+			h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+			if err := h(context.Background(), c, sendMsgRawRequest(t, tt.payload)); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1", len(q.calls))
+			}
+			if q.calls[0].text != sendMsgText || q.calls[0].delivery != sendMsgText {
+				t.Errorf("queued (text, delivery) = (%q, %q), want both %q byte-for-byte",
+					q.calls[0].text, q.calls[0].delivery, sendMsgText)
+			}
+			if len(res.calls) != 0 {
+				t.Errorf("resolver called %d times for a message naming nothing, want 0", len(res.calls))
+			}
+		})
+	}
+}
+
+// TestSendMessage_ComposesPromptFromAttachments covers AC 1 and the dedup half of
+// AC 6: each named attachment's on-host path reaches claude in the order the
+// client listed it, the queued text stays the user's own words, and a repeated id
+// is resolved once and named once at its FIRST-occurrence position.
+func TestSendMessage_ComposesPromptFromAttachments(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		text        string
+		ids         []string
+		wantPaths   []string
+		wantResolve []string // the ids the resolver should have been asked about, in order
+	}{
+		{
+			name:        "one attachment",
+			text:        sendMsgText,
+			ids:         []string{attachID(1)},
+			wantPaths:   []string{attachPath1},
+			wantResolve: []string{attachID(1)},
+		},
+		{
+			name:        "two attachments keep the client's order",
+			text:        sendMsgText,
+			ids:         []string{attachID(2), attachID(1)},
+			wantPaths:   []string{attachPath2, attachPath1},
+			wantResolve: []string{attachID(2), attachID(1)},
+		},
+		{
+			// The dedup row. A build that named every occurrence answers the path
+			// twice; one that deduped on LAST occurrence answers them reversed.
+			name:        "a repeated id is resolved once and named once, in first-occurrence order",
+			text:        sendMsgText,
+			ids:         []string{attachID(1), attachID(2), attachID(1)},
+			wantPaths:   []string{attachPath1, attachPath2},
+			wantResolve: []string{attachID(1), attachID(2)},
+		},
+		{
+			// Empty text is a real message — a person attaching a file and saying
+			// nothing. The block stands alone, with no leading blank line.
+			name:        "empty text carries the block alone",
+			text:        "",
+			ids:         []string{attachID(1)},
+			wantPaths:   []string{attachPath1},
+			wantResolve: []string{attachID(1)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			res := &fakeAttachmentResolver{paths: map[string]string{
+				attachID(1): attachPath1,
+				attachID(2): attachPath2,
+			}}
+			c, recv, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           tt.text,
+				AttachmentIDs:  tt.ids,
+			})
+
+			h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1", len(q.calls))
+			}
+			if q.calls[0].text != tt.text {
+				t.Errorf("queued text = %q, want the user's own words %q", q.calls[0].text, tt.text)
+			}
+			if want := wantPrompt(tt.text, tt.wantPaths...); q.calls[0].delivery != want {
+				t.Errorf("delivery =\n%q\nwant\n%q", q.calls[0].delivery, want)
+			}
+
+			if len(res.calls) != len(tt.wantResolve) {
+				t.Fatalf("resolver asked %d times (%+v), want %d", len(res.calls), res.calls, len(tt.wantResolve))
+			}
+			for i, wantID := range tt.wantResolve {
+				if res.calls[i].id != wantID {
+					t.Errorf("resolve[%d] id = %q, want %q", i, res.calls[i].id, wantID)
+				}
+				// Confinement: every resolve is asked against the conversation Route
+				// already validated, never a second id from anywhere else.
+				if res.calls[i].convID != sendMsgConvID {
+					t.Errorf("resolve[%d] conversation = %q, want the routed %q", i, res.calls[i].convID, sendMsgConvID)
+				}
+			}
+		})
+	}
+}
+
+// TestSendMessage_UnresolvedAttachment_RejectedBeforeEnqueue covers AC 3: a named
+// id that does not resolve under this conversation puts NO path in a prompt and
+// nothing in the backlog, and the client is told attachment.not_found with a
+// static message that does not say which id failed.
+func TestSendMessage_UnresolvedAttachment_RejectedBeforeEnqueue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		resolver AttachmentResolver
+		res      *fakeAttachmentResolver
+	}{
+		{
+			name: "one of two ids does not resolve",
+			res:  &fakeAttachmentResolver{paths: map[string]string{attachID(1): attachPath1}},
+		},
+		{
+			// Fail-closed: with no resolver wired, a message naming attachments is
+			// refused rather than silently delivered without them.
+			name: "nil resolver refuses every id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			var resolve AttachmentResolver
+			if tt.res != nil {
+				resolve = tt.res.resolve
+			}
+			c, recv, _ := newSendMsgConn(t)
+			ids := []string{attachID(1), attachID(9)}
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           sendMsgText,
+				AttachmentIDs:  ids,
+			})
+
+			h := SendMessage(router, q, resolve, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+
+			env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+			payload := sendMsgErrorPayload(t, env)
+			if payload.Code != protocol.CodeAttachmentNotFound {
+				t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeAttachmentNotFound)
+			}
+			if payload.Retryable {
+				t.Errorf("Retryable = true, want false (re-listing the conversation is the repair)")
+			}
+			// The oracle guard: naming WHICH of the ids failed would turn one
+			// send_message into a batch existence probe for up to 32 ids.
+			for _, id := range ids {
+				if strings.Contains(payload.Message, id) {
+					t.Errorf("reply message %q names attachment id %q; it must be static", payload.Message, id)
+				}
+			}
+			if strings.Contains(payload.Message, attachPath1) {
+				t.Errorf("reply message %q discloses a host path", payload.Message)
+			}
+			if len(q.calls) != 0 {
+				t.Errorf("Enqueue calls = %d, want 0 (a partially-attached turn must never reach claude)", len(q.calls))
+			}
+		})
+	}
+}
+
+// TestSendMessage_AttachmentIDBound covers the enforcement half of AC 6. The
+// bound is protocol.MaxAttachmentIDsPerMessage, published as UNCHECKED with
+// enforcement named as this ticket's, and it counts ELEMENTS rather than distinct
+// ids — the repeated-id row is what makes that ordering non-vacuous, since a
+// build that deduped before counting accepts it.
+func TestSendMessage_AttachmentIDBound(t *testing.T) {
+	t.Parallel()
+	atBound := make([]string, protocol.MaxAttachmentIDsPerMessage)
+	overBound := make([]string, protocol.MaxAttachmentIDsPerMessage+1)
+	for i := range overBound {
+		overBound[i] = attachID(i)
+		if i < len(atBound) {
+			atBound[i] = attachID(i)
+		}
+	}
+	repeated := repeatID(attachID(0), protocol.MaxAttachmentIDsPerMessage+1)
+
+	tests := []struct {
+		name        string
+		ids         []string
+		wantType    string
+		wantCode    string
+		wantEnqueue int
+	}{
+		{"exactly at the bound is accepted", atBound, protocol.TypeAck, "", 1},
+		{"one past the bound is refused", overBound, protocol.TypeError, protocol.CodeProtocolMalformed, 0},
+		{"one past the bound as repeats of ONE id is still refused", repeated, protocol.TypeError, protocol.CodeProtocolMalformed, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			paths := map[string]string{}
+			for i := range overBound {
+				paths[attachID(i)] = fmt.Sprintf("/home/u/.pyry/inst/conversations/c/attachments/a%d/f.txt", i)
+			}
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			res := &fakeAttachmentResolver{paths: paths}
+			c, recv, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           sendMsgText,
+				AttachmentIDs:  tt.ids,
+			})
+
+			h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+
+			env := assertSendMsgEnvelopeShape(t, recv(), tt.wantType)
+			if tt.wantCode != "" {
+				payload := sendMsgErrorPayload(t, env)
+				if payload.Code != tt.wantCode {
+					t.Errorf("Code = %q, want %q", payload.Code, tt.wantCode)
+				}
+				if payload.Retryable {
+					t.Errorf("Retryable = true, want false (resending the same frame reproduces it)")
+				}
+				// The bound is a pure frame-shape rule, so it is answered before
+				// Route stamps the active-conversation cursor and before a single
+				// directory is read. Both counters at 0 is that ordering.
+				if len(router.gotIDs) != 0 {
+					t.Errorf("router routed %v on an over-bound frame, want none (the cursor must not be stamped)", router.gotIDs)
+				}
+				if len(res.calls) != 0 {
+					t.Errorf("resolver asked %d times on an over-bound frame, want 0", len(res.calls))
+				}
+			}
+			if len(q.calls) != tt.wantEnqueue {
+				t.Errorf("Enqueue calls = %d, want %d", len(q.calls), tt.wantEnqueue)
+			}
+		})
+	}
+}
+
+// TestSendMessage_RouteBeforeResolve pins the other half of the ordering, and it
+// is the security-load-bearing half: attachments.ResolvePath's precondition is
+// that its conversationID is one the authenticated session is already on, and
+// Route validating the client-asserted id against the registry binding is what
+// discharges it. A build that resolved first would resolve against an id nothing
+// had checked.
+func TestSendMessage_RouteBeforeResolve(t *testing.T) {
+	t.Parallel()
+	router := &stubSessionRouter{err: errors.New("conversation has no bound session")}
+	q := &fakeEnqueuer{}
+	res := &fakeAttachmentResolver{paths: map[string]string{attachID(1): attachPath1}}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+		AttachmentIDs:  []string{attachID(1)},
+	})
+
+	h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+	if payload := sendMsgErrorPayload(t, env); payload.Code != protocol.CodeServerBinaryOffline {
+		t.Errorf("Code = %q, want %q (the routing reject wins over a resolvable attachment)", payload.Code, protocol.CodeServerBinaryOffline)
+	}
+	if len(res.calls) != 0 {
+		t.Errorf("resolver asked %d times against an unvalidated conversation, want 0", len(res.calls))
+	}
+	if len(q.calls) != 0 {
+		t.Errorf("Enqueue calls = %d, want 0", len(q.calls))
+	}
+}
+
+// TestSendMessage_AttachmentPathsNeverLogged covers AC 5 on all three new
+// branches. The non-vacuity guard is the positive half: on the success path the
+// test asserts the handler DID hold the path (it composed it into the delivery)
+// and still did not log it, so the assertion cannot pass by the handler simply
+// never having the value.
+func TestSendMessage_AttachmentPathsNeverLogged(t *testing.T) {
+	t.Parallel()
+	const filename = "quarterly_earnings_draft.pdf"
+	path := "/home/u/.pyry/inst/conversations/c/attachments/" + attachID(1) + "/" + filename
+
+	tests := []struct {
+		name string
+		ids  []string
+		// wantComposed marks the one branch that reaches the composer, where the
+		// test can prove the handler HELD the path before asserting it stayed
+		// unlogged.
+		wantComposed bool
+	}{
+		{"success path composes and stays silent", []string{attachID(1)}, true},
+		{"not-found path", []string{attachID(1), attachID(9)}, false},
+		{"over-bound path", repeatID(attachID(1), protocol.MaxAttachmentIDsPerMessage+1), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ids := tt.ids
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			res := &fakeAttachmentResolver{paths: map[string]string{attachID(1): path}}
+			logger, logs := sendMsgCapturingLogger(t)
+			c, recv, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      sendMsgMessageID,
+				Text:           sendMsgText,
+				AttachmentIDs:  ids,
+			})
+
+			h := SendMessage(router, q, res.resolve, logger)
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			recv()
+
+			// Non-vacuity: prove the handler actually held the path on the one
+			// branch where it should have, so the absence below is a real silence.
+			if tt.wantComposed {
+				if len(q.calls) != 1 || !strings.Contains(q.calls[0].delivery, path) {
+					t.Fatalf("delivery = %+v, want it to carry %q — the log assertion is vacuous otherwise", q.calls, path)
+				}
+			}
+
+			got := logs.String()
+			for _, banned := range []string{path, filename, attachID(1)} {
+				if strings.Contains(got, banned) {
+					t.Errorf("log carries %q, which AC 5 forbids at any level:\n%s", banned, got)
+				}
+			}
+		})
 	}
 }

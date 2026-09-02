@@ -211,3 +211,13 @@ Any of these reopening during Phase B is recorded as a `## Revisions` entry in t
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — implementation
+
+Two departures from the plan as committed. Neither changes a design decision; both are recorded because the plan states the thing they depart from explicitly.
+
+- **The log-discipline test's non-vacuity guard is different, and stronger.** The plan (and the security review's SHOULD FIX) asked for a fixture filename differing from its own sanitised form. That guard is the right one for `ResolvePath`'s round trip and the wrong one here: the handler test uses a *fake* resolver, so no sanitiser runs and the filename's form proves nothing. What actually makes "the log does not carry the path" vacuous is the handler never having held the path. `TestSendMessage_AttachmentPathsNeverLogged` therefore asserts the positive first on the success branch — the composed delivery *does* carry the path — and only then asserts the log's silence. A build that dropped the path entirely fails the first assertion instead of passing the second.
+
+- **`internal/protocol/messaging.go` is edited, making four production files rather than the three the plan counted.** Doc comments only; no behaviour, no wire change. `MaxAttachmentIDsPerMessage` and `SendMessagePayload` both said enforcement and consumption were this ticket's still-future work, which stops being true the moment this lands, and a declaration that points at a ticket already closed is the stale-citation shape the whole family works to avoid. The blocks now name the enforcing symbol (`SendMessage` in `internal/relay/handlers`), and the "unchecked" claim is narrowed to what stays true — that *this package* still counts nothing. Four files remains inside the five-file ceiling.

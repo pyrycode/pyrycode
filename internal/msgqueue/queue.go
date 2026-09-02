@@ -40,7 +40,11 @@
 // SECURITY: the queued text is untrusted, phone-originated content bound for
 // claude's stdin verbatim. It is treated as opaque transit bytes — stored,
 // never inspected or used in a control decision, and converted to []byte only at
-// the DeliverFunc call. It is NEVER logged at any level (mirrors
+// the DeliverFunc call. Since #2038 a message may carry a separate DELIVERY
+// payload alongside it (EnqueueDelivery), composed by the send_message handler
+// and possibly naming an on-host path; it gets the same treatment and is the one
+// value that must never reach a client, which QueuedMessage's shape enforces
+// rather than a rule. NEITHER IS EVER LOGGED at any level (mirrors
 // internal/relay/handlers/send_message.go's discipline); the drain's
 // warn-on-error logs only conversation_id, the queued message id, and the
 // enqueue timestamp. convID is used solely as a map key; validating/resolving it
@@ -176,12 +180,25 @@ type QueuedMessage struct {
 }
 
 // queued is one buffered inbound message: the stable per-conversation id, the
-// untrusted text bound for claude's stdin, and the enqueue timestamp (ADR 025's
-// {queued_msg_id, text, ts}). text is opaque transit and is never logged.
+// untrusted text a client reads back, the payload actually delivered to claude,
+// and the enqueue timestamp (ADR 025's {queued_msg_id, text, ts}). Both strings
+// are opaque transit and neither is ever logged.
+//
+// text and delivery differ only for a message whose client named stored
+// attachments (#2038): the send_message handler composes a prompt naming each
+// attachment's ON-HOST PATH and passes it as delivery, while text stays the
+// user's own words. Nothing here reads either string — the split exists so the
+// composed prompt reaches claude WITHOUT reaching the wire, and QueuedMessage
+// carrying only text is what makes that structural rather than a rule.
+//
+// delivery is a plain value, NOT an "empty means fall back to text" sentinel:
+// Enqueue passes text explicitly, so no branch anywhere distinguishes the two
+// fields' provenance and drain stays one unconditional expression.
 type queued struct {
-	id   uint64
-	text string
-	ts   time.Time
+	id       uint64
+	text     string
+	delivery string
+	ts       time.Time
 }
 
 // convQueue is one conversation's FIFO plus its id counter and the drain-state
@@ -276,7 +293,35 @@ func New(cfg Config) (*Queue, error) {
 // — untouched (reject, never drop). The one caller (the send_message handler)
 // maps a 0 return to a retryable "backlog full" reply so the phone re-issues
 // later.
+//
+// It is EnqueueDelivery with the two halves equal: what a client reads back is
+// byte-for-byte what claude receives. Every caller but the attachment-composing
+// one wants that, which is why this signature is the one that did not change.
 func (q *Queue) Enqueue(convID, text string) uint64 {
+	return q.EnqueueDelivery(convID, text, text)
+}
+
+// EnqueueDelivery appends a message whose queued TEXT and delivered PAYLOAD
+// differ, and is Enqueue in every other respect — same id contract, same
+// non-blocking append, same per-conversation cap and same 0-on-reject sentinel.
+//
+// text is what a client reads back through Snapshot/SnapshotAll (and so through
+// queue_state, on both the enqueue push and the connect-time reconcile);
+// delivery is what the drain hands to DeliverFunc, and therefore what reaches
+// claude's stdin. The one caller passing two different strings is the
+// send_message handler composing a prompt that names an attachment's on-host
+// path (#2038).
+//
+// SECURITY, and it is the reason this method exists rather than a wider Enqueue.
+// The delivery payload may carry a HOST PATH, which docs/protocol-mobile.md
+// § Error codes forbids putting on the wire from the other side (neither
+// attachment.storage_failed nor attachment.not_found may disclose the daemon's
+// layout). QueuedMessage carries no delivery field, so Snapshot and SnapshotAll
+// are structurally incapable of projecting one and no consumer can leak it by
+// omission — a future consumer that wants the path on the wire has to widen the
+// exported type to get it. Both strings stay opaque transit and neither is ever
+// logged, delivery least of all.
+func (q *Queue) EnqueueDelivery(convID, text, delivery string) uint64 {
 	q.mu.Lock()
 	c := q.convs[convID]
 	if c == nil {
@@ -297,7 +342,7 @@ func (q *Queue) Enqueue(convID, text string) uint64 {
 	}
 	id := c.nextID
 	c.nextID++
-	c.items = append(c.items, queued{id: id, text: text, ts: time.Now()})
+	c.items = append(c.items, queued{id: id, text: text, delivery: delivery, ts: time.Now()})
 
 	q.maybeSpawnDrainLocked(convID, c)
 	q.mu.Unlock()
@@ -539,7 +584,9 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 		q.mu.Unlock()
 
 		gate := q.commitGate(convID, head.id)
-		err := q.deliver(turncommit.With(deliverCtx, gate), convID, []byte(head.text))
+		// head.delivery, never head.text: the delivered payload is the composed one
+		// where the two differ (#2038), and equals text for every other message.
+		err := q.deliver(turncommit.With(deliverCtx, gate), convID, []byte(head.delivery))
 		cancelDeliver()
 
 		q.mu.Lock()
