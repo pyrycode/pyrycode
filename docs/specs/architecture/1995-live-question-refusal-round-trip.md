@@ -336,3 +336,48 @@ The deliverable *is* a test, so the strategy is how its own non-vacuity is prove
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — implementation
+
+**No design departure.** Every interface above landed as specified. Both SHOULD FIX
+findings that constrain code landed: claude-authored bytes reach a message only
+through `%q` and `truncateString` (the allowed modal's `Title`, the accumulated
+continuation), and the trigger carries the bare base name `pyrycode-<nonce>.txt` with
+no directory and no absolute path. The third — logging each allowed modal's title so
+an unexpected allow is legible — landed in the allow arm's `t.Logf`.
+
+One constant was dropped as redundant rather than declared: the plan implied a pair of
+transcribed vocabulary constants, but `wantQuestionSource` (`"remote"`) already exists
+in this package from the answer gate and spells the same `sourceQuestionRemote` value,
+so only `wantRefusedOutcome` is new.
+
+**All three open questions resolved by the observed run** (2026-09-02, first run of the
+gate, `--- PASS` in 6.51s with exactly one `=== RUN` line):
+
+1. **What claude does with `reasonQuestionRefused`: it stops.** It called
+   `AskUserQuestion` with one question, four options, `multiSelect` false; the refusal
+   produced `question_dismissed{refused, remote}`; it then raised no further permission
+   modal, did not re-ask, wrote nothing, and replied with one sentence inviting the
+   discussion the wording asked for before reaching terminal idle. The wording achieves
+   what #1990 wrote it for.
+2. **`perTurnReplyBudget` is ample.** The whole post-refusal settle took well under a
+   second of the 120s budget; the turn end to end was 6.5s. No constant widened.
+3. **`maxExtraRefusals` did not fire, nor did `maxAllowedModals`.** Both branches were
+   untaken, as anticipated. They stay, for the reason the plan gave: a re-asked batch
+   left outstanding parks the turn for ten minutes and yields a wall-clock diagnostic
+   that names nothing.
+
+**The limit this run does not clear, stated rather than smoothed over.** Because claude
+stopped cleanly, the allow arm never fired, so the absence check's non-vacuity is
+structural — had claude pressed on, its `Write` would have raised a modal this loop
+would have allowed — rather than demonstrated by this run. There is no way to arrange a
+run where the arm fires without breaking the behaviour under test. The file header
+carries the same caveat where a reader of the test will meet it.
+
+**Measured size.** The test file is 415 lines; with this spec the slice wrote ~770,
+above the size-S 400-line boundary. That was found and recorded before the plan was
+committed — the ticket carries `needs-human:sizing` and a comment with the measurement,
+the split that was considered, and why it does not stand. The split-depth gate bars a
+proposal (`parent 1987 grandparent 1907`), so the ticket was built as it stands.

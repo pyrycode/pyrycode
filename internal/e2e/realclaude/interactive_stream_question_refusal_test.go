@@ -20,7 +20,33 @@ package realclaude
 //
 // # MEASURED: what claude actually did
 //
-// [FILLED IN FROM THE OBSERVED RUN]
+// Observed 2026-09-02, the first run of this gate, under askQuestionCaptureModel.
+// Claude called AskUserQuestion with one question offering four options and
+// multiSelect false; the refusal produced question_dismissed{refused, remote} for that
+// batch; and then CLAUDE STOPPED. It raised no further permission modal, did not
+// re-ask, wrote nothing, and replied with a single sentence inviting the discussion
+// the wording asked for — "I'll hold off — what would you like to discuss about the
+// eviction policy choice?" — before the turn reached terminal idle. Whole turn: 6.5s.
+// So reasonQuestionRefused achieves what #1990 wrote it for: claude neither answered
+// its own question nor continued into the work it was blocking.
+//
+// TWO HONEST LIMITS ON THAT OBSERVATION, worth more to a later reader than the result:
+//
+//   - Because claude stopped cleanly, the allow arm below NEVER FIRED — zero modals
+//     were raised after the refusal. The absence check's non-vacuity is therefore
+//     structural rather than demonstrated by this run: had claude pressed on, its
+//     Write would have raised a permission modal (writeFileTrigger's whole premise on
+//     the stream path) and this loop would have allowed it. A run in which the arm
+//     fires and the file still does not appear would be strictly stronger evidence,
+//     and there is no way to arrange one without breaking the behaviour under test.
+//   - maxAllowedModals and maxExtraRefusals were both untaken for the same reason.
+//     They stay: without the re-ask arm a re-asked batch parks the turn until the
+//     daemon's ten-minute approval window elapses, and the resulting wall-clock
+//     diagnostic would name nothing.
+//
+// This is a standing real-claude gate in preship, not a deterministic RED/GREEN
+// oracle. A future model that reasons differently about the deny is the thing it
+// exists to catch, and the sentence above is the baseline it would be caught against.
 //
 // # Why the absence check ALLOWS the modals it meets
 //
