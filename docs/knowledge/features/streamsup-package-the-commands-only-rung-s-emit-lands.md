@@ -198,6 +198,44 @@ table at once — nearly every row is silently an empty-hint row already. A `why
 a mutant's redness belongs to one row needs checking against how many other rows share the
 same silent default, not just the row's own stated input.
 
+**`Aliases` completes the per-entry shape — decode, cap, carry (#1825).** `commandEntryLine` gains the
+fourth and last key, `Aliases []string`, decoded verbatim and in claude's own order through a new
+`boundAliases` closure — `emitModelList`'s `boundEach` shape, not the scalar `bound`'s: zero-length
+returns `nil` before anything else, the count cut runs from the tail before the per-element allocation,
+every surviving element goes through `truncateField`, and the report is appended at most once. Two
+constants of its own, `maxSlashCommandAlias` (64 bytes/alias) and `maxSlashCommandAliasCount` (8
+aliases/entry) — the count cap deliberately thicker than the family's ~1.6x cardinality convention,
+because this list is workspace-authored and unbounded by anything claude ships (unlike a published
+model or effort menu), and because a cut alias costs a working command greyed out in a consumer's menu,
+not a truncated row. Absent, JSON `null`, and a published `[]` all collapse to `nil` on
+`turnevent.SlashCommand.Aliases`, decided on the type with the capture's 0-of-51-empty measurement
+recorded there; `protocol.SlashCommand.MarshalJSON`'s own nil→`[]` wire normalisation is what makes the
+collapse cheap rather than lossy. The per-entry term is now a sum plus a product:
+`256+256+256 + 64×8 = 1280` bytes, moving the entry-count fractions #1826 reads from 10/13 to 6/8.
+`commandEntryLine` now declares its complete four-key vocabulary; see
+[the per-entry byte budget's third dimension](streamsup-package-the-per-entry-byte-budget-s-third-dimension.md)
+for the absent/empty collapse this slice weighed against.
+
+*Lesson: the vacuity trap this doc flagged forward (`argumentHint`'s section, above) did bite, and the
+fix is the runner, not the fixture.* `slices.Equal(nil, []string{})` reports `true`, so every one of the
+42 capture entries that omit `aliases` compares equal against a producer that kept the absent/empty
+distinction — the collapse would have been provably untested by the idiom the other three scalar fields'
+matrices use. The fix: at least one omitter is asserted with an explicit `got.Aliases != nil`, and the
+boundary matrix's runner switched to `reflect.DeepEqual`, which does separate `nil` from `[]string{}`.
+
+*Lesson: an empty-valued sentinel disarms a log-leak sweep for a list field the same way it does for a
+string field, but the fix is per-fixture-entry, not per-fixture.* An entry whose alias list is empty
+contributes no needle to `emitterSlashCommandListSentinels` at all, so it would have been silently
+exempt from the no-leak sweep rather than failing it. Every `cmd/pyry` fixture entry now carries at
+least one non-empty alias — a filter that skipped only the ordinarily-empty entries would have re-opened
+the same gap for the next list-valued field to land.
+
+*Lesson: a boundary row's "sole red" claim can be backwards, and only measurement catches it.* The
+exactly-at-the-byte-cap row looked like the row that would catch a bound call reading the wrong constant
+(`maxSlashCommandName` in place of `maxSlashCommandAlias`, say). Measured via `go test -overlay`, it
+stays green — a 64-byte input is untouched under a 256-byte cap, which is exactly what the row expects —
+and the over-cap and mid-rune rows catch the swap instead.
+
 **Fresh-restart under a new id (#1124).** `RestartFresh(newID string)` rotates the runner into a fresh
 session: the *next* spawn uses `--session-id <newID>` (a new transcript, no fork) instead of `--resume`,
 and a later crash-respawn then `--resume`s `newID` — never the pre-rotation id. It reuses the live-restart

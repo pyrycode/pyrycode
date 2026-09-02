@@ -2857,15 +2857,27 @@ func TestInteractiveTurnEmitterV2_ModelListNotSynthesizedWithoutAnEvent(t *testi
 var emitterSlashCommandListFixture = turnevent.SlashCommandList{
 	Commands: []turnevent.SlashCommand{
 		{
-			Name:            "qq-name-alpha-sentinel",
-			ArgumentHint:    "qq-hint-alpha-sentinel",
-			Description:     "qq-description-alpha-sentinel",
+			Name:         "qq-name-alpha-sentinel",
+			ArgumentHint: "qq-hint-alpha-sentinel",
+			Description:  "qq-description-alpha-sentinel",
+			// TWO aliases where the other entry has one, so this field is
+			// distinguishable in cardinality as well as in bytes — and both are
+			// NON-EMPTY, which the sentinel derivation's own doc requires of every
+			// needle it feeds to strings.Contains.
+			Aliases:         []string{"qq-alias-alpha-sentinel", "qq-alias-alpha-second-sentinel"},
 			TruncatedFields: []string{"qq-truncated-alpha-sentinel"},
 		},
 		{
-			Name:            "zz-name-beta-sentinel",
-			ArgumentHint:    "zz-hint-beta-sentinel",
-			Description:     "zz-description-beta-sentinel",
+			Name:         "zz-name-beta-sentinel",
+			ArgumentHint: "zz-hint-beta-sentinel",
+			Description:  "zz-description-beta-sentinel",
+			// Non-empty here too, and deliberately NOT nil even though nil is this
+			// field's own load-bearing absence: an entry with no aliases contributes
+			// no needle at all, so the field's leak would go unswept on this entry
+			// while every assertion stayed green. TruncatedFields carries the nil
+			// case for this fixture and is the right field for it, being the one the
+			// family's absence convention is about.
+			Aliases:         []string{"zz-alias-beta-sentinel"},
 			TruncatedFields: nil,
 		},
 	},
@@ -2882,8 +2894,18 @@ var emitterSlashCommandListFixture = turnevent.SlashCommandList{
 // gets no log-leak assertion at all — and this lane is where "no log line carries
 // decoded content" is a deterministic test rather than an advisory sentence. Each
 // field-adding slice therefore owes a sentinel on every entry and a line here;
-// Description is the first one to pay it, ArgumentHint (#1957) the second, and the
-// first of them is the proof the claim needed correcting.
+// Description is the first one to pay it, ArgumentHint (#1957) the second, Aliases
+// (#1825) the third and last, and the first of them is the proof the claim needed
+// correcting.
+//
+// THE THIRD ONE IS A LIST AND PAYS THE SAME DEBT ELEMENT BY ELEMENT, appended with
+// `...` exactly as TruncatedFields is. What it adds is a second way to under-sweep
+// that no scalar field has an analogue for: an entry whose alias list is EMPTY
+// contributes NO needle rather than an empty one, so it would be silently exempt
+// from the sweep instead of failing it. That is why every entry of the fixture
+// carries at least one alias — the same requirement as the non-empty paragraph
+// below, for a different underlying reason: there the danger is a vacuously-true
+// needle, here an absent one.
 //
 // EVERY ENTRY'S HINT IS NON-EMPTY, and that is a REQUIREMENT of these assertions
 // rather than a stylistic choice, because the needles are fed to strings.Contains
@@ -2900,6 +2922,7 @@ func emitterSlashCommandListSentinels() []string {
 		out = append(out, c.Name)
 		out = append(out, c.ArgumentHint)
 		out = append(out, c.Description)
+		out = append(out, c.Aliases...)
 		out = append(out, c.TruncatedFields...)
 	}
 	return out

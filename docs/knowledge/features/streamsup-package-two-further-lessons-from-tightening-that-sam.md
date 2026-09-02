@@ -96,8 +96,10 @@ block turns a boundary that used to prove nothing into one that does.
 **Declaring `commands` alongside `models` (#1853).** `controlResponseLine`'s decode target grew a
 second array, `commandEntryLine{ Name string }`, for claude's slash-command inventory — one field,
 same reasoning as `modelOptionLine` and `systemInitLine`: absence from the decode target is a
-stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stay undeclared
-(as of #1853 — `description` joined in #1904, below; `argumentHint`/`aliases` remain undeclared, #1830 and #1825).
+stronger guarantee than a test sweep, so `argumentHint`/`description`/`aliases` stayed undeclared
+at the time. All three later joined — `description` in #1904, `argumentHint` in #1957, `aliases` in
+\#1825 — and `commandEntryLine` now declares its complete four-key vocabulary; no field remains
+undeclared by omission.
 Declaring the array turns a `commands` that arrives as a number, a string or an object from
 *silently ignored* into a whole-line decode failure on the undecodable rung — the same shape
 guarantee `models` already had, extended to a second field. `logControlResponse` grew a sixth
@@ -126,6 +128,8 @@ flagged this as a SHOULD FIX (the comment borrowed `systemInitLine`'s register �
 *never* hold — for three keys the wire type was already committed to carrying) and it was left
 unfixed at the time, deliberately non-blocking. #1904 declared the first of those three
 (`description`) and rewrote the paragraph to name which omissions survive rather than forbid
-completion outright: `argumentHint` is #1830's, `aliases` is #1825's. Whoever picks up the remaining
-two now reads an explicit assignment instead of an absolute ban; #1720 still owns *publishing* the
-shape once all four are decoded.
+completion outright. `argumentHint` followed in #1957, and `aliases` — the last of the four — in
+\#1825, which re-walked the SECURITY sink enumeration for its own value rather than inheriting
+`argumentHint`'s answer (per value, not per field, is the convention this package settled on).
+`commandEntryLine` now declares its full vocabulary; #1720 still owns *publishing* the shape now
+that all four are decoded.

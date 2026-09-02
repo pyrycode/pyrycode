@@ -853,12 +853,12 @@ type ModelList struct {
 // an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
 // for their reason.
 //
-// Its four fields are FOUR of protocol.SlashCommand's five (#1727), in that
+// Its five fields are ALL FIVE of protocol.SlashCommand's (#1727), in that
 // type's own declaration order: the command's name, its argument hint, its
-// description, and the report naming which of this entry's fields the producer
-// cut. The one still missing — Aliases, between the last two — is deliberately
-// absent and arrives with its own slice, exactly as ModelOption grew a field at
-// a time across #1819 / #1827 / #1828.
+// description, its aliases, and the report naming which of this entry's fields
+// the producer cut. The set is COMPLETE as of #1825 — the vocabulary grew a
+// field at a time across #1877 / #1904 / #1957 / #1825, exactly as ModelOption
+// grew across #1819 / #1827 / #1828, and there is no further field promised.
 //
 // FIXING THE ORDER BEFORE THE SECOND FIELD EXISTS is the whole point of choosing
 // it now, and Description (#1904) is the first evidence that the promise was
@@ -868,9 +868,14 @@ type ModelList struct {
 // (#1957) is the second, and it is the case the promise was actually WRITTEN
 // for: Description had one declared field to land after, so no reordering could
 // have got it wrong, where this field had to be INSERTED BETWEEN two that
-// already existed and appending it would have compiled just as well. Each later
-// field lands the same way, so the eventual mapping onto the wire type stays a
-// field-for-field copy rather than a reordering a reader has to check.
+// already existed and appending it would have compiled just as well. Aliases
+// (#1825) is the third and last, and it pays the promise off at the END of the
+// order rather than by insertion: it is the only one of the three whose
+// mirrored slot sits after every field declared before it, so appending it was
+// CORRECT here where appending ArgumentHint would have been wrong — the rule
+// earns its keep by making that a checked fact rather than a coincidence.
+// The mapping onto the wire type is now a field-for-field copy across the whole
+// struct rather than a reordering a reader has to check.
 type SlashCommand struct {
 	// Name is claude's command name, VERBATIM, per ModelAnnounced.Model's rule:
 	// no lowercasing, no canonicalisation, no prefix stripping, and no leading
@@ -930,6 +935,56 @@ type SlashCommand struct {
 	// see SlashCommandList's SECURITY paragraph, which owns that statement for
 	// every string on this type.
 	Description string
+	// Aliases are claude's alternative names for the command, VERBATIM and in
+	// claude's own order, per ModelAnnounced.Model's rule: no lowercasing, no
+	// trimming, no charset filtering, no leading "/" added or removed, no
+	// deduplication and no sorting.
+	//
+	// AN ALIAS IS NOT AN ENTRY. #1600's verbatim rule forbids expanding one into a
+	// synthetic command of its own: the committed capture's `clear` carries `reset`
+	// and `new`, and a producer that turned those into two more rows would be
+	// inventing commands claude never published. They belong to the entry that
+	// declares them and are matched against it.
+	//
+	// THEY ARE WHAT MAKES A CONSUMER'S MATCH CORRECT, which is the whole reason the
+	// field exists rather than a nicety: the desktop Actions menu's own reset entry
+	// is an alias of clear and not a command name, so a consumer matching its menu
+	// against Name alone finds nothing for it and greys out a command that works.
+	//
+	// AN ABSENT KEY, A JSON null AND A PUBLISHED EMPTY ARRAY ARE ONE READING, spelled
+	// nil, and the collapse is deliberate rather than an artefact of how Go decodes.
+	// It is DECIDED HERE because protocol.SlashCommand.MarshalJSON asks this type to
+	// decide it (#1825). The measurement behind it is that the distinction has never
+	// been observed: ZERO of the committed capture's 51 entries carry an empty array,
+	// 42 omit the key and 9 carry a non-empty one, so what a kept distinction would
+	// separate is one observed shape from one claude has never sent. It also could
+	// not survive the trip — protocol.SlashCommand.MarshalJSON publishes [] for both,
+	// deliberately, so a client never has to branch on absent-versus-empty to match
+	// an alias — and a daemon-internal difference erased one hop downstream is a
+	// difference no consumer can act on.
+	//
+	// It is ModelOption.EffortLevels' collapse WEIGHED rather than inherited, with
+	// the frequencies INVERTED: absence is the single exception there and the
+	// majority here. What the frequency changes is how often the collapse fires, not
+	// what either shape MEANS — an entry with no aliases and an entry with the key
+	// absent issue a consumer the identical instruction, that there is no alternative
+	// spelling to match against, and no behaviour branches on which claude meant.
+	//
+	// nil rather than []string{} for TruncatedFields' reason: nil is this struct's
+	// own spelling for an empty list, and two list fields disagreeing on how to spell
+	// empty is worse than picking a direction once. The trap that makes the choice
+	// worth stating: slices.Equal(nil, []string{}) reports TRUE, so a design keeping
+	// the distinction would carry a difference invisible to the comparison idiom
+	// every assertion on such a field uses.
+	//
+	// Bounded by the producer AT CONSTRUCTION in TWO dimensions under TWO caps of
+	// their own — streamsup's maxSlashCommandAlias on each string and
+	// maxSlashCommandAliasCount on how many this slice retains — and never sanitized:
+	// see SlashCommandList's SECURITY paragraph, which owns that statement for every
+	// string on this type. It is the only field here a cut can SHORTEN THE LIST of
+	// rather than only shorten a value of, and a cut on either dimension reports
+	// once under "aliases".
+	Aliases []string
 	// TruncatedFields names THIS entry's fields the producer cut to fit their
 	// caps, in declaration order, using the DAEMON's snake_case names. They agree
 	// with protocol.SlashCommand.TruncatedFields' wire names, so a later mapping
@@ -937,23 +992,35 @@ type SlashCommand struct {
 	// empty non-nil slice; BackgroundTask.TruncatedFields is the convention's
 	// single source.
 	//
-	// TODAY IT CAN CARRY "name", "argument_hint" AND "description", IN THAT
-	// ORDER, AND THE ENUMERATION GROWS WITH THE FIELD SET. #1904 was the first
-	// slice to extend it and #1957 the second, exactly as
-	// ModelOption.TruncatedFields grew to include "effort_levels" in #1827 — and
-	// it is what turned the declaration ORDER above into a claim a test can see,
-	// an enumeration of one having nothing to order.
+	// IT CAN CARRY "name", "argument_hint", "description" AND "aliases", IN THAT
+	// ORDER, AND THE ENUMERATION GREW WITH THE FIELD SET UNTIL IT WAS COMPLETE.
+	// #1904 was the first slice to extend it, #1957 the second and #1825 the last,
+	// exactly as ModelOption.TruncatedFields grew to include "effort_levels" in
+	// #1827 — and it is what turned the declaration ORDER above into a claim a test
+	// can see, an enumeration of one having nothing to order.
 	//
-	// "argument_hint" is the first name here that is NOT byte-identical to
-	// claude's own key for the field, which is argumentHint. These are the
-	// daemon's names, as the paragraph above says, and until this field landed
-	// that was a distinction with no difference to see.
+	// "argument_hint" is the only name here that is NOT byte-identical to claude's
+	// own key for the field, which is argumentHint. These are the daemon's names, as
+	// the paragraph above says; the other three coincide with claude's key and with
+	// protocol.SlashCommand's wire name, and until that field landed the distinction
+	// had no difference to see.
+	//
+	// "aliases" IS THE ONE NAME HERE THAT CAN MEAN TWO DIFFERENT CUTS — a string in
+	// the list shortened, or the list itself shortened — and it says the same thing
+	// either way and at most once per entry. A consumer reading it learns that the
+	// alias set it holds is incomplete, which is the actionable fact for both; WHICH
+	// dimension fired is not recoverable from this slice, exactly as
+	// ModelOption.TruncatedFields' "effort_levels" does not distinguish its own two.
 	//
 	// A NAME FOR A FIELD THIS TYPE DOES NOT DECLARE MUST NEVER APPEAR. A producer
-	// that cut a value this type does not carry has nothing to report here,
-	// because the value is not on the type. That is the one way this partial field
-	// set could produce a lie: a report telling a consumer that text it holds is
-	// incomplete, when the type never held that text at all.
+	// that cut a value this type does not carry has nothing to report here, because
+	// the value is not on the type. That is the one way a partial field set could
+	// produce a lie: a report telling a consumer that text it holds is incomplete,
+	// when the type never held that text at all. The rule stands with an EMPTY
+	// EXTENSION since #1825 — the type now declares every per-entry key claude sends,
+	// so there is no field left for a producer to report and not carry — and it is
+	// kept rather than retired because what it forbids is a producer inventing a
+	// name, which no field count makes impossible.
 	TruncatedFields []string
 }
 
@@ -975,14 +1042,20 @@ type SlashCommand struct {
 //
 // THE PRODUCER HAS SINCE ARRIVED, and the work is split four ways — worth naming
 // because the attributions are the easy thing to get wrong here.
-// internal/streamsup's commandEntryLine holds the DECODE (#1853, in the tree); its
-// emitSlashCommandList applies the BYTE CAP, constructs the entries and EMITS this
-// list (#1877, in the tree — #1886 moved that construction out of emitModelList into
-// an emitter of its own, so more than one call site reaches it); the ENTRY-COUNT
+// internal/streamsup's commandEntryLine holds the DECODE (#1853, in the tree, and
+// COMPLETE since #1825 declared the fourth and last per-entry key); its
+// emitSlashCommandList applies the PER-FIELD CAPS, constructs the entries and EMITS
+// this list (#1877, in the tree — #1886 moved that construction out of emitModelList
+// into an emitter of its own, so more than one call site reaches it); the ENTRY-COUNT
 // BOUND, and the drop count that arrives
 // with it, is #1826's; and the PUBLISH — turnbridge.MapEvent's arm and cmd/pyry's
 // interactiveTurnEmitterV2.Handle case — is #1720's and is still open. #1719 is
 // CLOSED and was the decode, so it names no future producer.
+//
+// EVERY FIELD OF SlashCommand IS NOW BOUNDED and the one unbounded dimension left is
+// the ENTRY COUNT, which is #1826's: a per-field cap alone leaves this list's total
+// size a function of a number claude chooses, exactly as maxModelListEntries supplied
+// that missing factor for ModelList.
 //
 // IT IS PUBLISHED BY NO PATH TODAY. turnbridge.MapEvent has no arm for it, so its
 // default drops it, and cmd/pyry's interactiveTurnEmitterV2.Handle has no case,
