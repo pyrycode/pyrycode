@@ -89,6 +89,19 @@ Nothing runs in production. Every failure path is a `t.Fatalf` or `t.Errorf`. Th
 1. **Do the mutant measurements support the pair's sole-red claim?** Resolved in Phase B by running them; the `why` blocks are written from the results, and a `## Revisions` entry records any claim the measurement contradicted.
 2. **Does the captured pin have a sole red of its own, or only redundant coverage?** The candidate is a non-ASCII mangling of a value that fits, which no cap-table row can see because every hint row's surviving output is ASCII. Measured, not assumed.
 
+## Revisions
+
+**2026-09-02 — the four mutants were run; both open questions resolved, no design change.** Each was applied to `parser.go` through `go test -count=1 -overlay=<abs-path json> ./internal/streamsup/`, so nothing was written into the worktree. Results, which are what the `why` blocks now say:
+
+| Mutant | Reddened | Verdict |
+|---|---|---|
+| the hint's `bound` call inlined with a **replacing** scrub | the two new rows and **nothing else in the package** | the pair's sole-red claim holds, scoped to the pair |
+| `truncateField`'s scrub made a replacement | all six slash-command mid-rune rows **plus four other tests'** (`ModelList`, `ModelAnnounced`, `TaskStarted`, `TaskUpdated`, `BackgroundTaskRoster`) | the pair is *a* red there and never the only one, as written |
+| a hint that fits stripped of non-ASCII | **only** the captured pin, on all three arms | **Open question 2: yes.** The pin has a sole red of its own — no cap-table row carries a wide rune through *uncut*, the mid-rune rows' rune being the one the cut deletes |
+| an absent hint defaulted to a placeholder | the captured pin **and most of the cap table**, `commandEntryFixture` omitting the key on every entry that does not ask for one | the pin claims defaulting as coverage, never as its own; recorded in its doc |
+
+Open question 1 is resolved by the first two rows of that table: the claim as drafted survived its mutant unchanged, so nothing was rewritten.
+
 ## Security review
 
 **Verdict:** PASS

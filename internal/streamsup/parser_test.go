@@ -4579,6 +4579,211 @@ func TestParser_InitializeControlResponseCutsTheCapturedDescriptions(t *testing.
 	}
 }
 
+// TestParser_InitializeControlResponseCarriesTheCapturedArgumentHints is #1958's
+// committed-capture pin for the ARGUMENT HINT cap, and it is the INVERSE of its sibling
+// one field over: TestParser_InitializeControlResponseCutsTheCapturedDescriptions grades
+// a cut that fires on ten of the fifty-one entries, and this one grades a cap that fires
+// on NONE. What it asserts is therefore SURVIVAL — claude's whole captured array
+// crossing whole — rather than a cut landing in the right place.
+//
+// It runs inside `make check` for #1810's reason: the e2e_realclaude build tag governs
+// that package's Go FILES, not its testdata. No live claude and no credentials are
+// involved on any path here.
+//
+// A test of its own rather than more assertions inside
+// TestParser_InitializeControlResponseCountsTheCapturedCommands, and the precedent
+// points that way twice over. That test's subject is the fifty-one-entry INVENTORY, name
+// for name; #1904 NARROWED its TruncatedFields assertion to the one name precisely
+// because a whole-slice cap claim did not belong in it, and a second cap outcome
+// asserted there would come back in through the door that narrowing closed. It would
+// also have to be a per-entry Contains sweep to fit that loop, where what this pin needs
+// is EXACT SET EQUALITY — the cut pin's idiom and not the inventory's.
+//
+// The capture's own shape is guarded FIRST, naming the arm, before it is used as an
+// expectation, and each guard is a proof a re-capture could silently take away:
+//
+//   - fifty-one entries, every one carrying a STRING argumentHint. capturedCommandString
+//     supplies the second half by failing when the key is absent or not a string, so
+//     "present on all fifty-one and absent from none" needs no guard beside it;
+//   - exactly thirty-three of them EMPTY, which keeps "an empty hint is the ORDINARY
+//     case for this field" the capture's own fact rather than a transcription;
+//   - NONE over the cap. This is what makes the empty expected report set below a
+//     measurement of "nothing was cut" instead of a coincidence, and it is where a
+//     changed CAPTURE is separated from a broken CUT: a re-capture that lengthened a
+//     hint past the cap fails HERE saying exactly that, rather than reddening the
+//     comparison below as though the emitter had regressed;
+//   - auto-mode-setup pinned BY NAME, nameOutsideSlug's idiom: the capture's longest
+//     hint at 121 bytes and the only one carrying a rune wider than one byte.
+//
+// THE EMPTY EXPECTED SET IS THIS PIN'S ONE VACUITY RISK, named here rather than left for
+// a reader to find: slices.Equal against a nil slice also passes against a producer that
+// reports nothing at all, for any field. What makes it a measurement is
+// TestParser_SlashCommandFieldsAreCapped's hint LIVENESS row, which proves the report
+// CAN fire under "argument_hint"; without that row standing beside it this assertion
+// would be a tautology dressed as a pin.
+//
+// What the verbatim comparisons prove is deliberately NARROW, the sibling's newline
+// discipline applied to a field whose values are not cut at all: across all fifty-one
+// hints the capture carries NO byte below 0x20 and exactly one non-ASCII codepoint,
+// U+2026, three times and all inside auto-mode-setup. So what these assertions show is
+// that THOSE bytes cross untouched at claude's own offsets — never that "any byte
+// survives", a breadth these values do not exhibit. Nothing here says a consumer may
+// skip escaping: sanitization is the render boundary's, exactly as maxSlashCommandName's
+// doc divides it.
+//
+// WHAT THIS PIN IS THE SOLE RED FOR, measured rather than reasoned: a producer that
+// MANGLES a multi-byte rune in a hint that FITS — non-ASCII stripped, re-encoded or
+// normalised below the cap. No row of TestParser_SlashCommandFieldsAreCapped can see
+// that, because every hint row's surviving output is ASCII: the mid-rune rows'
+// multi-byte rune is the one the cut DELETES, so no constructed row carries a wide rune
+// through UNCUT and only claude's own auto-mode-setup does. What this pin is NOT alone
+// for is a producer DEFAULTING an empty hint — that mutant reddens the matrix's
+// empty/null/omitted row and most of the table with it, commandEntryFixture omitting the
+// key on every entry that does not ask for one — so the equality below claims the
+// defaulting case as coverage and never as its own.
+func TestParser_InitializeControlResponseCarriesTheCapturedArgumentHints(t *testing.T) {
+	t.Parallel()
+
+	// The capture's counts as LITERALS, for nameOutsideSlug's reason: derived on both
+	// sides, every guard below would follow a re-capture anywhere and assert nothing,
+	// which is the whole failure these guards exist to make loud.
+	const (
+		wantEntries   = 51
+		wantEmpty     = 33
+		nonASCIIName  = "auto-mode-setup"
+		nonASCIIBytes = 121
+	)
+
+	for _, arm := range initCaptureArms {
+		if arm == initCaptureArmNoRequest {
+			continue
+		}
+		t.Run(initCaptureArmLabel(arm), func(t *testing.T) {
+			t.Parallel()
+
+			entries := capturedCommandEntries(t, arm)
+			if len(entries) != wantEntries {
+				t.Fatalf("arm %q carries %d command entries, want %d; a re-capture changed claude's "+
+					"reply and every count below was proven against the fifty-one-entry shape",
+					arm, len(entries), wantEntries)
+			}
+			var (
+				empty       int
+				nonASCII    string
+				sawNonASCII bool
+			)
+			for _, entry := range entries {
+				name := capturedCommandString(t, entry, "name")
+				hint := capturedCommandString(t, entry, "argumentHint")
+				if hint == "" {
+					empty++
+				}
+				// The whole premise of this pin, asserted per entry rather than over a maximum, so
+				// the failure names the entry that moved. A hint over the cap would be CUT, and
+				// the empty expected report set below is exactly the claim that none is.
+				if len(hint) > slashCommandArgumentHintCapFixture {
+					t.Fatalf("arm %q: captured %q carries a %d-byte hint %s, over the %d-byte cap — a "+
+						"re-capture lengthened claude's own output past this cap, so what changed is "+
+						"the CAPTURE and not the cut, and the empty expected report set below was "+
+						"proven against a capture nothing was cut in",
+						arm, name, len(hint), slashCommandNamePreview(hint), slashCommandArgumentHintCapFixture)
+				}
+				if name == nonASCIIName {
+					nonASCII, sawNonASCII = hint, true
+				}
+			}
+			if empty != wantEmpty {
+				t.Fatalf("arm %q: %d of the captured hints are empty, want exactly %d — the majority-empty "+
+					"shape is what the per-entry comparisons below are a proof ABOUT, an empty "+
+					"expectation being the one that a defaulting producer fails", arm, empty, wantEmpty)
+			}
+			// The non-ASCII proof is a property of ONE captured value, so it is guarded by name:
+			// a re-capture that shortened auto-mode-setup or swapped its ellipses for "..." would
+			// otherwise leave the fifty-one comparisons below passing with nothing multi-byte in
+			// them, and no message would say what was lost.
+			if !sawNonASCII {
+				t.Fatalf("arm %q carries no entry named %q; it is this pin's only source of a hint with a "+
+					"rune wider than one byte", arm, nonASCIIName)
+			}
+			if len(nonASCII) != nonASCIIBytes || utf8.RuneCountInString(nonASCII) == len(nonASCII) {
+				t.Fatalf("arm %q: captured %q hint is %d bytes over %d runes %s, want %d bytes over fewer "+
+					"runes — a re-capture took away the one multi-byte value this pin rests on",
+					arm, nonASCIIName, len(nonASCII), utf8.RuneCountInString(nonASCII),
+					slashCommandNamePreview(nonASCII), nonASCIIBytes)
+			}
+
+			events := collectEvents(capturedInitializeLine(t, arm))
+			// TWO events: every responding arm carries a models array beside its commands one,
+			// so the ModelList — the rung's own discriminant — goes first and the inventory
+			// behind it.
+			if len(events) != 2 {
+				t.Fatalf("event count: got %d, want 2 (turnevent.ModelList then turnevent.SlashCommandList) — %#v",
+					len(events), events)
+			}
+			list, ok := events[1].(turnevent.SlashCommandList)
+			if !ok {
+				t.Fatalf("event[1] = %T, want turnevent.SlashCommandList", events[1])
+			}
+			// FATAL, the sibling's reason: the cap cuts a HINT and never an ENTRY, so a producer
+			// that dropped one must fail here rather than let the index below run off the end.
+			// It is also where a producer ELIDING the thirty-three empty-hint entries lands.
+			if len(list.Commands) != len(entries) {
+				t.Fatalf("SlashCommandList carries %d entries, want %d — one per array element, in "+
+					"claude's own order", len(list.Commands), len(entries))
+			}
+			var (
+				gotCut      []string
+				nonASCIIGot turnevent.SlashCommand
+			)
+			for i, got := range list.Commands {
+				// The capture's own bytes on the right-hand side and index i on BOTH, which is
+				// what pins claude's ORDER alongside the values. EXACT equality, so this one
+				// comparison carries all three of "all fifty-one arrive verbatim", "the empty ones
+				// arrive as entries carrying an EMPTY hint" and "auto-mode-setup's 121 bytes
+				// arrive whole": a defaulted, substituted, re-encoded or trimmed value differs
+				// from claude's, and an empty expectation is the one a default cannot satisfy.
+				// The RE-ENCODING half of that list is this test's alone; the rest it shares with
+				// the matrix, as this test's doc records.
+				if wantHint := capturedCommandString(t, entries[i], "argumentHint"); got.ArgumentHint != wantHint {
+					t.Errorf("arm %q entry %d (%q) argument hint: got %s, want %s verbatim — no defaulting "+
+						"of the empty ones, no substitution, no re-encoding of a multi-byte rune",
+						arm, i, got.Name, slashCommandNamePreview(got.ArgumentHint),
+						slashCommandNamePreview(wantHint))
+				}
+				if slices.Contains(got.TruncatedFields, "argument_hint") {
+					gotCut = append(gotCut, got.Name)
+				}
+				if got.Name == nonASCIIName {
+					nonASCIIGot = got
+				}
+			}
+			// EXACT equality against a NIL set, never a per-entry Contains sweep, for the
+			// sibling's reason: equality is what makes "and NO OTHERS" structural — a cut that
+			// fired on any entry reddens here without anything having to enumerate the fifty that
+			// must not report. See this test's doc for why an empty expectation is a measurement
+			// here and not a tautology.
+			var wantCut []string
+			if !slices.Equal(gotCut, wantCut) {
+				t.Errorf("arm %q: the emitted entries reporting \"argument_hint\" are %q, want NONE — no "+
+					"captured hint reaches the %d-byte cap (the guard above holds that), so a report "+
+					"here is the cap firing on a value that fits",
+					arm, gotCut, slashCommandArgumentHintCapFixture)
+			}
+			// auto-mode-setup asserted again BY NAME. The equality above already covers this
+			// entry, so what this adds is a failure MESSAGE that names it — nameOutsideSlug's
+			// argument exactly: the one captured value carrying multi-byte runes should not fail
+			// anonymously as "entry 7" in a message saying nothing about encodings.
+			if nonASCIIGot.ArgumentHint != nonASCII {
+				t.Errorf("arm %q: emitted %q argument hint: got %s, want the capture's own %d bytes %s — "+
+					"the only captured hint with runes wider than one byte, carried WHOLE because "+
+					"nothing cuts it at this cap",
+					arm, nonASCIIName, slashCommandNamePreview(nonASCIIGot.ArgumentHint),
+					len(nonASCII), slashCommandNamePreview(nonASCII))
+			}
+		})
+	}
+}
+
 // TestParser_InitializeControlResponseAbsentPayloadEmitsNothing is AC 3's absent
 // case, and its fixture is COMMITTED rather than synthetic: initCaptureArmNoRequest
 // is the arm of #1763's measurement that sent no initialize request, so its record
@@ -5437,19 +5642,24 @@ func slashCommandNamePreview(s string) string {
 // grades the JSON tag and the report name in one row, and getting either wrong is
 // otherwise silent.
 //
-// The description's committed-capture pin is NOT here and is not missing either — it
-// is TestParser_InitializeControlResponseCutsTheCapturedDescriptions, which grades the
-// same cut against claude's own bytes rather than against constructed fixtures.
+// The committed-capture pins are NOT here and are not missing either — they are
+// TestParser_InitializeControlResponseCutsTheCapturedDescriptions and, since #1958,
+// TestParser_InitializeControlResponseCarriesTheCapturedArgumentHints, which grade the
+// same two caps against claude's own bytes rather than against constructed fixtures.
+// The second of them is this matrix's own creditor: its empty expected report set is a
+// measurement only because the hint LIVENESS row below proves the report can fire
+// under "argument_hint" at all.
 //
 // #1877 shipped the first two rows as the bound's liveness proof, so it was never
 // unproven for a merge window; #1878 turned them into a table and added the rest.
 // #1904 repeated that sequencing one field over — liveness rows first — and #1905
 // added the description's boundary rows to match the name's. What each row is FOR is
-// in its own `why`, and the two exactly-at-the-cap rows carry the tickets' reason for
+// in its own `why`, and the three exactly-at-the-cap rows carry the tickets' reason for
 // existing: they are the only rows that redden on truncateField's <= becoming <.
 //
-// TWO such rows rather than one, and neither is the sole red for that operator:
-// truncateField is SHARED by both fields, so a flip reddens both at-cap rows together.
+// THREE such rows rather than one, and none is the sole red for that operator:
+// truncateField is SHARED by all three fields, so a flip reddens the three at-cap rows
+// together.
 // What each of them IS the sole red for is an INLINED per-field cut — the emitter
 // replacing that one field's bound call with its own length test — and each row's
 // `why` states its own.
@@ -5740,6 +5950,44 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 				"under it (untouched under either)",
 		},
 		{
+			name: "an argument hint cut landing mid-rune deletes the partial rune (two-byte)",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint",
+					strings.Repeat("h", slashCommandArgumentHintCapFixture-1)+twoByteRune+"z"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", ArgumentHint: strings.Repeat("h", slashCommandArgumentHintCapFixture-1),
+					TruncatedFields: []string{"argument_hint"}},
+			},
+			why: "one byte UNDER the cap: truncateField's scrub is a DELETION, not a replacement — and " +
+				"the report still names the field, because the bool says only whether the cap cut. Sole " +
+				"red WITH the row below and never alone, which is why the claim is scoped to the PAIR: " +
+				"the emitter INLINING the hint's cut with a REPLACEMENT scrub reddens both of them and " +
+				"— MEASURED, not reasoned — nothing else in this package. The shared-truncateField " +
+				"version of that same mutant reddens the name's and the description's mid-rune rows " +
+				"and four other tests' besides, so THERE this pair is A red and never the only one. " +
+				"CONSTRUCTED rather than drawn from the capture " +
+				"because at this cap no captured hint is cut at all — see maxSlashCommandArgumentHint's " +
+				"doc, which owns that measurement and is not restated here",
+		},
+		{
+			name: "an argument hint cut landing mid-rune deletes the partial rune (four-byte)",
+			entries: []any{
+				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint",
+					strings.Repeat("h", slashCommandArgumentHintCapFixture-3)+fourByteRune+"z"),
+			},
+			want: []turnevent.SlashCommand{
+				{Name: "deep-research", ArgumentHint: strings.Repeat("h", slashCommandArgumentHintCapFixture-3),
+					TruncatedFields: []string{"argument_hint"}},
+			},
+			why: "THREE bytes under, which is what makes \"1-3 bytes under the cap\" a range rather than " +
+				"a one-byte anecdote for this field as well. What it adds over the row above is the " +
+				"RANGE and nothing else — the two redden together under every scrub mutant, which is " +
+				"why the pair's sole-redness is claimed there once instead of split across both. Its " +
+				"CONSTRUCTED input has the row above's reason, and maxSlashCommandArgumentHint's doc " +
+				"has the measurement",
+		},
+		{
 			name: "an absent argument hint is still an entry, spelled \"\", null or omitted",
 			entries: []any{
 				commandEntryWithFixture(commandEntryFixture("deep-research"), "argumentHint", ""),
@@ -5863,10 +6111,7 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 				// field holds on the type so a reader checks one order rather than two. An EMPTY
 				// expectation is live here rather than vacuous — it is the majority captured
 				// shape — so a producer defaulting an absent hint to anything at all fails the
-				// equality. No UTF-8 check beside them: this field has no mid-rune row for one
-				// to grade, no captured hint being cut at its cap at all (see
-				// maxSlashCommandArgumentHint), and a check green on every row is a check that
-				// says nothing.
+				// equality.
 				if len(got.ArgumentHint) != len(want.ArgumentHint) {
 					t.Errorf("entry %d argument hint: got %d bytes, want %d (%s)",
 						i, len(got.ArgumentHint), len(want.ArgumentHint), tt.why)
@@ -5874,6 +6119,16 @@ func TestParser_SlashCommandFieldsAreCapped(t *testing.T) {
 					t.Errorf("entry %d argument hint: got %s, want %s — same length, different bytes; "+
 						"claude's hint is carried VERBATIM and the cut is a BYTE cut and nothing else",
 						i, slashCommandNamePreview(got.ArgumentHint), slashCommandNamePreview(want.ArgumentHint))
+				}
+				// The name's UTF-8 check in its place beside them since #1958, when this field
+				// got mid-rune rows for it to grade: live on those two rows and a no-op on the
+				// rest. It is NOT what CARRIES them — the byte length above is, a scrub that
+				// REPLACED the partial rune keeping this check green while the length moves — so
+				// what it adds beside them is the narrower claim that no cut of this field leaves
+				// an invalid encoding behind.
+				if !utf8.ValidString(got.ArgumentHint) {
+					t.Errorf("entry %d argument hint is not valid UTF-8: %s",
+						i, slashCommandNamePreview(got.ArgumentHint))
 				}
 				// The name's assertions again for the second capped field, and for their reason:
 				// the length is what identifies a cut landing at the wrong byte and the equality
