@@ -13,8 +13,31 @@ not unique. `ErrWriteFailed` is a third top-level sentinel in `storage.go`,
 beside `ErrInvalidID`/`ErrNotContained` — not folded into `accumulator.go`'s
 grouped block, whose opening sentence scopes it to `Add`/`Assemble`. `Store`
 is idempotent (`Rename`, not `O_EXCL`), which is what lets a phone's
-reconnect-and-resend overwrite with the same bytes instead of failing. No
-production caller yet; #1744 wires the dispatch site.
+reconnect-and-resend overwrite with the same bytes instead of failing.
+`Intake` (#1896, see § "Chunk intake driver" above) is now its caller, and
+deliberately discards the returned path rather than answering it to the wire
+layer — it embeds the sanitised filename, and `AttachmentStoredPayload`'s
+doc block names reaching for it as the natural wrong move; #1897 is what
+wires the caller from outside this package.
+
+- **The doc's own "only way the dispatch site can reach it" assumption is
+  false, by design, once a real caller exists.** This file's doc comment
+  argues idempotent overwrite is safe because two attachments can't collide
+  on one directory-plus-name pair "which is the only way the dispatch site
+  can reach it" — implicitly assuming a caller always holds distinct
+  directories. `Intake.Receive` falsifies that: two conns uploading under
+  the same client-chosen `attachment_id` into the same conversation resolve
+  to the identical directory and stored name, and `Store`'s atomicity makes
+  that collision last-writer-wins rather than corrupted, not conflict-free.
+  It is accepted rather than fixed — both conns are already-paired devices
+  of one account, `attachment_id` is published as not-a-capability, and
+  separating them would need a per-conn path component that retrieval
+  (#1746) does not address by. The lesson generalises: a doc comment's
+  safety argument that leans on "the only way a caller can reach this" is a
+  claim about every caller that will ever exist, not just the one in mind
+  when it was written — worth re-checking against the actual call site the
+  moment one lands, not trusting as still true because the code didn't
+  change.
 
 - **A privacy rule stated as one property across several failure branches
   needs checking branch by branch, not as a whole.** The spec banned a

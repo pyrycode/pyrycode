@@ -9,9 +9,12 @@ comma-ok `Lookup`, an unexported stamping `lookupAndStamp`, `Release`, its
 conn-keyed sibling `ReleaseConn` (#1817, removes every upload one conn holds
 in a single pass, for a teardown path that has the conn but never the list of
 attachment_ids it was admitted under), and two unexported test-only readers,
-`count` and `lastChunkAt` (#1880). Still unreachable from production — nothing
-calls it until #1744 wires the dispatch site, and #1744 lands last in the
-family.
+`count` and `lastChunkAt` (#1880). `Intake` (#1896, see § "Chunk intake
+driver" below) is now the registry's caller — `#1744`, the ticket this doc
+used to cite, split into #1896 (this driver) and #1897 (the dispatch site).
+The registry itself is still unreachable from outside `internal/attachments`:
+`Intake` has no caller of its own yet, and #1897 is what wires
+`appFrameWorker` to it.
 
 **Each entry carries `lastChunkAt`, the clock's reading at admission and at
 the last delivered chunk (#1880).** The clock is a nil-tolerant seam —
@@ -144,10 +147,12 @@ transfer, not what "per delivered chunk" means for a method that never calls
 posture `Admit` already hands its
 accumulator back under, safe for the same reason: the conn is in the key and
 `appFrameWorker` serialises one conn's frames, so exactly one goroutine can
-ever reach one accumulator. `Deliver` still has no production caller; #1744 is expected to call it with the same chunk it just fed to `Admit`,
-looking the pair back up rather than feeding `Admit`'s returned accumulator
-directly — the latter would bypass every release this ticket added and
-re-open the lockout for single-chunk transfers.
+ever reach one accumulator. **#1896 landed `Deliver`'s first caller:**
+`Intake.Receive` calls it with the same chunk it just fed to `Admit`, looking
+the pair back up rather than feeding `Admit`'s returned accumulator directly
+— the latter would bypass every release this ticket added and re-open the
+lockout for single-chunk transfers. That caller is still internal to this
+package; #1897 wires the first caller from outside it.
 
 **A structural no-format-string claim still needs a test that puts a format
 string back.** Code review's one SHOULD FIX on #1784 (not blocking): `Deliver`
@@ -160,9 +165,19 @@ interpolates the client's `attachment_id` (and, on the `Add` leg, the declared
 digest) is **green across all 147 tests**, because the AC 5 fixture asserts
 sentinel identity via `errors.Is`, which a wrap still satisfies. Same shape as
 the gate-ordering gap just above: a property guaranteed by the current code is
-not covered until a fixture tries to violate it. Parked for whichever of #1744
-or the documentation phase next touches `Deliver` — the fix is three lines,
-asserting `err.Error()` carries neither the id nor the digest, the idiom
+not covered until a fixture tries to violate it.
+
+**Still open in `Deliver`'s own suite.** #1896 pinned the equivalent property
+one layer up — `Intake`'s own tests (`intake_test.go`) roll a
+banned-string assertion into every refusal row reachable from `Receive`,
+`Deliver`'s included, so the property is now covered wherever `Receive` is
+the entry point. That is not the same fix as the one parked here: nobody
+added the three lines to `registry_test.go` itself, so the same wrap on
+`Deliver` measured directly (bypassing `Intake`) is still unmeasured. A
+future change to `Deliver` reached through some caller other than `Intake`
+would not be caught by #1896's fixture. Parked for whichever of #1897 or the
+documentation phase next touches `Deliver` directly — the fix is still the
+three lines described above, the idiom
 `TestRegistry_AdmitAtTheBound_RefusesANewPair` already uses for the capacity
 refusal.
 
@@ -198,14 +213,15 @@ that.
   depends on only holds if the exported path is tested too, not inherited
   from coverage one layer down.
 - **Sequencing constraint discharged: #1796 landed the entry-count cap ahead
-  of #1744.** #1787/#1788's security review required #1744 (the dispatch
-  site, and this package's first production caller) not land ahead of the
-  in-flight entry-count cap — wiring the dispatch site first would have gone
-  live with `Admit` bounding one upload's bytes but placing no bound on how
-  many uploads may exist, so N distinct `attachment_id` values on one conn
-  would yield N entries. That gap is closed: `maxInFlightUploads` (#1796) is
-  the entry-count bound, and #1744 remains the package's first production
-  caller once it lands.
+  of the driver that composes `Admit`.** #1787/#1788's security review
+  required #1744 — since split into #1896 (this driver) and #1897 (the
+  dispatch site) — not land ahead of the in-flight entry-count cap: wiring a
+  caller first would have gone live with `Admit` bounding one upload's bytes
+  but placing no bound on how many uploads may exist, so N distinct
+  `attachment_id` values on one conn would yield N entries. That gap is
+  closed: `maxInFlightUploads` (#1796) landed first, `Intake` (#1896) is now
+  the package's first production caller, and #1897 remains the package's
+  first caller from outside it.
 
 - **Keyed by conn-and-attachment_id, not the bare id this doc used to sketch.**
   `docs/protocol-mobile.md` § Attachments documents `attachment_id` as "not a
