@@ -1878,12 +1878,20 @@ func writeInterruptAck(w io.Writer, requestID string) error {
 //
 // The envelope and the entries are transcribed from the committed capture
 // (internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json, claude 2.1.239).
-// What is NOT transcribed is everything else the real answer carries: the inner
-// payload also holds commands (51 in the capture), agents, output_style, account, pid
-// and session_state, and the outer object holds pending_permission_requests and
-// pending_user_dialog_requests. All of it is OMITTED rather than invented — this is a
-// fake, not a mirror, and models alone is what the consumers riding this need. #1683
-// extends the same answer with commands when it lands.
+// TWO arrays now, models and commands, and they are SIBLINGS inside the inner payload
+// rather than one nested in the other. The daemon's classification reads them under two
+// INDEPENDENT gates — internal/streamsup's emitModelList emits a ModelList for a
+// non-empty models array and then calls emitSlashCommandList unconditionally, which
+// suppresses itself on a zero-length list — so answering with both produces one of each
+// event, ModelList first, and answering with either alone still produces just that one.
+//
+// What is STILL not transcribed is the rest of what the real answer carries: the inner
+// payload also holds agents, output_style, account, pid and session_state, and the outer
+// object holds pending_permission_requests and pending_user_dialog_requests. All of it
+// is OMITTED rather than invented — this is a fake, not a mirror, and these two arrays
+// are what the consumers riding this need. The commands arm landed with #2008, which
+// inherited it from #1683 after that ticket closed NOT_PLANNED; a reader arriving from
+// the old pointer should look there.
 //
 // Going through writeJSONLine is load-bearing for the echo rather than a style
 // preference. requestID is inbound bytes — whatever the daemon wrote to this child's
@@ -1905,7 +1913,8 @@ func writeInitializeAck(w io.Writer, requestID string) error {
 			"subtype":    "success",
 			"request_id": requestID,
 			"response": map[string]any{
-				"models": initializeModels,
+				"models":   initializeModels,
+				"commands": initializeCommands,
 			},
 		},
 	})
@@ -1971,6 +1980,77 @@ var initializeModels = []map[string]any{
 		"resolvedModel": "claude-haiku-4-5-20251001",
 		"displayName":   "Haiku",
 		"description":   "Haiku 4.5 · Fastest for quick answers",
+	},
+}
+
+// initializeCommands is the canned slash-command inventory writeInitializeAck answers
+// with beside initializeModels — the workspace's invocable commands, four entries
+// transcribed VERBATIM from the same committed capture
+// (internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json) and kept in that
+// capture's own relative order, since nothing downstream sorts them.
+//
+// FOUR ENTRIES, NOT THE CAPTURE'S WHOLE ARRAY, on initializeModels' terms: a fake
+// transcribes the key sets a consumer branches on rather than mirroring a real reply.
+// The capture has exactly two key sets and no third — most entries carry name,
+// description and argumentHint, and a minority carry a fourth aliases key — so four
+// rows cover the vocabulary with two of each.
+//
+// AN ENTRY WITHOUT ALIASES OMITS THE KEY, and this is the load-bearing property of the
+// fixture rather than a transcription shortcut. A fake emitting "aliases":[] where
+// claude omits the key hands the decode an already-collapsed input, so the absent-key
+// arm is never traversed — the same failure initializeModels' minimal entry exists to
+// avoid, and absent is the only shape on record: no entry in the capture publishes an
+// empty aliases array. A map per entry, not a struct with omitempty, is what makes the
+// absence literal: the key is simply not there.
+//
+// THE INTERLEAVING IS DELIBERATE and it is what an attribution assertion rests on. Two
+// alias-bearing entries with DIFFERENT values and DIFFERENT counts — clear's two,
+// non-alphabetical so their order is observable, and config's one — separated by
+// entries that omit the key. With a single alias-bearing entry a client-side assertion
+// cannot separate "aliases attached to the entry that owns them" from "aliases present
+// somewhere in the payload", because a key-blind flat reading passes both; with these
+// four, that reading reddens on compact and model, and a wrong-owner reading reddens on
+// clear and config in both value and count.
+//
+// WHY ALIASES ARE WORTH CANNING AT ALL: clear publishes reset and new, and the desktop
+// Actions menu's own reset entry is that ALIAS rather than a command name, so a path
+// carrying names only greys out a command that works. The cheaper source cannot
+// substitute — the same capture's system/init line carries a names-only twin under
+// slash_commands with the identical names in the identical order and not one alias.
+//
+// These strings are WORKSPACE-authored in production, a lower-trust origin than claude's
+// own: a command defined in a repository was written by whoever wrote that repository.
+// They are never logged (#833). Here they are this file's literals, so the posture costs
+// the fake nothing — but a consumer copying these rows into an assertion inherits the
+// obligation.
+//
+// READ-ONLY: never appended to, never reassigned, for initializeModels' reason
+// restated because it applies independently. It is marshalled from runStreamJSON's
+// single goroutine in production and from t.Parallel() subtests in the package unit
+// test; a mutation would race in a way -race catches only when the runs happen to
+// overlap, so this has to be a stated rule rather than an observed green.
+var initializeCommands = []map[string]any{
+	{
+		"name":         "clear",
+		"description":  "Start a new session with empty context; previous session stays on disk (resumable with /resume)",
+		"argumentHint": "[name]",
+		"aliases":      []string{"reset", "new"},
+	},
+	{
+		"name":         "compact",
+		"description":  "Free up context by summarizing the conversation so far",
+		"argumentHint": "<optional custom summarization instructions>",
+	},
+	{
+		"name":         "config",
+		"description":  "Set a setting by key",
+		"argumentHint": "key=value",
+		"aliases":      []string{"settings"},
+	},
+	{
+		"name":         "model",
+		"description":  "Set the AI model for Claude Code",
+		"argumentHint": "<model>",
 	},
 }
 

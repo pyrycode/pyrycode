@@ -178,9 +178,36 @@ existing behaviour, and every existing interrupt-mode test, are unchanged by con
 
 `writeInitializeAck` answers with the same inverted envelope `writeInterruptAck`
 established (`subtype`/`request_id` nested *under* `response`), one level deeper still:
-the initialize payload sits at `response.response`, carrying `models` only —
-`writeInitializeAck`/`initializeModels` — never `commands`, `agents`, `account`, or the
-rest of the real payload (#1683 is what extends this same answer with `commands`).
+the initialize payload sits at `response.response`, carrying `models` and — since #2008 —
+`commands` beside it. (#1683, the ticket this doc used to point to for that arm, closed
+`NOT_PLANNED` and split into the #1720 family #2008 is a grandchild of; the dead pointer
+is why a "extends this same answer" cross-reference should never survive a ticket's own
+closure without a follow-up check.) Still absent: `agents`, `output_style`, `account`,
+`pid`, `session_state`, and the outer object's two pending-request arrays.
+
+**`initializeCommands` reuses `initializeModels`'s map-per-entry pattern for the same
+absence-must-be-literal reason, plus a property the model list didn't need: attribution.**
+Four entries, transcribed verbatim from the same capture and kept in the capture's own
+order — `clear` (aliases `["reset", "new"]`), `compact` (no `aliases` key), `config`
+(aliases `["settings"]`), `model` (no `aliases` key) — deliberately interleaved rather
+than grouped. One alias-bearing entry can't separate "aliases attached to the entry that
+owns them" from "aliases present somewhere in the payload"; two, with different values
+and different counts, separated by a no-alias entry, force a decoder that flattens or
+mis-attributes to redden at a specific index instead of passing by coincidence. Neither
+alias-bearing entry ever cans `"aliases": []` — `SlashCommand.MarshalJSON`
+(`internal/protocol`) already normalises the omitted-key case to `[]` on the wire, see
+[protocol-package-slash-command-list-payload.md](protocol-package-slash-command-list-payload.md)
+— so the fake's job, like `initializeModels`'s, is only to keep feeding that decode the
+shape claude actually sends. `initializeCommands` carries the identical READ-ONLY
+discipline `initializeModels` does — marshalled from `runStreamJSON`'s single goroutine in
+production and from `t.Parallel()` subtests in the package unit test — stated as a rule in
+the var's doc block rather than left to an observed `-race` green, since a future append or
+reassignment would race only on the runs where the two happen to overlap.
+
+`internal/e2e/relay_v2_stream_slash_command_list_test.go` (#2008) is the round-trip proof
+reading these four rows back through a real daemon to a connected phone — see
+[e2e-harness-stream-interactive-harness-pattern-startstreamin.md](e2e-harness-stream-interactive-harness-pattern-startstreamin.md)
+for the kill/respawn shape it reuses and the assertion-message lesson it adds on top.
 
 **Absent is not present-and-empty, and a map is what makes that literal.** The canned
 list carries two entries transcribed verbatim from
