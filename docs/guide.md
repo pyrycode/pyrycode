@@ -65,6 +65,15 @@ cp pyry ~/.local/bin/
 # Make sure ~/.local/bin is on $PATH.
 ```
 
+**Re-installing over a running daemon (macOS):** do not `cp` a new build over `~/.local/bin/pyry` while the launchd daemon is running from it. The copy succeeds, but the kernel then refuses to execute the file — `launchctl print gui/$(id -u)/dev.pyrycode.pyry` shows `last exit reason = OS_REASON_CODESIGNING`, and even `pyry --version` dies with signal 9 — although `codesign -vv` still reports it valid. The daemon stays down until the file is replaced properly. Write straight to the path instead, which lands on a fresh file:
+
+```bash
+go build -o ~/.local/bin/pyry ./cmd/pyry
+launchctl kickstart -k gui/$(id -u)/dev.pyrycode.pyry
+```
+
+or remove the old file before copying (`rm ~/.local/bin/pyry && cp pyry ~/.local/bin/`). `install.sh`, `pyry update`, `go install` and Homebrew are all unaffected: each replaces the file rather than overwriting it in place.
+
 For a remote target, cross-compile:
 
 ```bash
