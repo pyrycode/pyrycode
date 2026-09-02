@@ -108,6 +108,8 @@ never opens the file at all. Exploiting the window needs write access inside
 the daemon's own `0o700` state directory, which already permits rewriting
 `devices.json` — strictly worse than redirecting one attachment read.
 
+**#2038's security review found the window is *wider* than that framing implies, not narrower.** For the retrieval leg the path is opened immediately; for prompt composition the path sits in `msgqueue`'s backlog and may wait a whole claude turn before claude's `Read` tool opens it. The attacker capability required is unchanged (the same `0o700`-directory write access above), so the accepted bound still covers it — but a future caller reasoning from "the window is short" rather than "the window needs privileged write access regardless of length" would be reasoning from the wrong invariant.
+
 See [Mutation-testing lessons](attachments-package-mutation-testing-lessons-measured-across.md)
 for two more traps this ticket's suite found: a validate-then-look-up table
 built entirely from fixtures that are also absent, and a "stable across

@@ -106,6 +106,7 @@ type Config struct {
 
 func New(cfg Config) (*Queue, error)                       // errors if cfg.Deliver == nil
 func (q *Queue) Enqueue(convID, text string) uint64        // non-blocking; returns the stable per-conv id (>= 1), or 0 if the backlog is at cap (#869: reject, never drop)
+func (q *Queue) EnqueueDelivery(convID, text, delivery string) uint64 // #2038: Enqueue in every respect except delivery — text is what Snapshot/SnapshotAll (and so queue_state) reads back, delivery is the []byte the drain hands DeliverFunc. Enqueue is EnqueueDelivery(convID, text, text); it must NOT take q.mu before delegating (q.mu is not re-entrant — doing so hangs all ~108 existing Enqueue call sites, not just the new one)
 func (q *Queue) Run(ctx context.Context) error             // lifecycle; blocks until ctx done, then joins all drains
 func (q *Queue) Snapshot(convID string) []QueuedMessage    // #719: ordered copy of the backlog; unknown conv ⇒ nil
 func (q *Queue) SnapshotAll() map[string][]QueuedMessage    // #878: every conv's backlog keyed by convID, omitting empty ones
@@ -119,7 +120,10 @@ panic). `RetryInterval`, `OnChange`, and `Logger` fall back to their defaults; a
 nil `OnChange` is the supported "notification disabled" default (no validation,
 unlike the required `Deliver`).
 
-Internal shapes mirror ADR 025's record: `queued{id, text, ts}`, and a
+Internal shapes mirror ADR 025's record: `queued{id, text, delivery, ts}` (`delivery`
+added #2038 — a plain value, not an "empty means fall back to text" sentinel, so
+`drain` stays a single unconditional `[]byte(head.delivery)` with no branch on
+which field a caller meant), and a
 per-conversation `convQueue{items []queued, nextID uint64, draining bool}` held in
 a `map[string]*convQueue` under a single `sync.Mutex`.
 
@@ -445,6 +449,19 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
 - **`text` is opaque transit.** Stored, never inspected, parsed, or used in a
   control decision; converted to `[]byte` only at the `deliver` call; **never
   logged** (above).
+- **`delivery` (#2038) carries the same opaque-transit, never-logged discipline
+  as `text`, and is structurally incapable of reaching a client.**
+  `EnqueueDelivery` lets a caller enqueue a payload distinct from what a client
+  reads back — `internal/relay/handlers.SendMessage` uses it to hand claude a
+  composed prompt naming a stored attachment's on-host path while `text` stays
+  the user's own words, which `docs/protocol-mobile.md` § Error codes forbids
+  putting on the wire. `QueuedMessage` gains no `delivery` field, so
+  `Snapshot`/`SnapshotAll` — and so `queue_state`, on both the enqueue push and
+  the connect-time reconcile — are structurally incapable of projecting one; a
+  future consumer that wants the path on the wire has to widen the exported
+  type to get it, rather than merely forgetting a filter. `Enqueue` is
+  `EnqueueDelivery(convID, text, text)`, so none of its ~108 existing call
+  sites needed touching.
 - **`convID` is a map key only.** Validating/resolving it to a real session is the
   **caller's** job, upstream of `Enqueue` (the `SessionRouter` / `ValidateConversation`
   in `send_message.go`). A hostile `convID` can at worst create an isolated FIFO that

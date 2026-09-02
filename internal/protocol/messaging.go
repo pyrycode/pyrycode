@@ -17,16 +17,20 @@ import (
 // receiver-configured and unpublished, learned by being rejected. A client
 // composing a message needs this one BEFORE it sends, not after.
 //
-// UNCHECKED, like every bound this package declares. internal/protocol is a
+// UNCHECKED HERE, like every bound this package declares. internal/protocol is a
 // stdlib-only leaf data package with no producer, no consumer and no validator;
-// nothing here counts the list, and a reader must not mistake a declared bound
-// for an enforced one. Enforcement is #2038's, and no wire code is named here
-// for an over-bound list — ErrUnknownUpload's doc block is the precedent for
-// declining to publish a mapping this package does not own.
+// nothing in this package counts the list, and a reader must not mistake a
+// declared bound for one this type enforces. It IS enforced, since #2038, by
+// SendMessage in internal/relay/handlers — the frame's first counter — which
+// refuses an over-bound list with CodeProtocolMalformed rather than truncating
+// it. No wire code is named HERE for that refusal even so; ErrUnknownUpload's
+// doc block is the precedent for declining to publish a mapping this package
+// does not own.
 //
 // The bound counts ELEMENTS, NOT DISTINCT IDS. A list may repeat one id 32
-// times; whether a receiver dedups or refuses is #2038's call, and publishing
-// the counting rule is what makes that a decision rather than an omission.
+// times, and that counting rule is load-bearing rather than incidental: #2038
+// DEDUPLICATES a repeat on first occurrence, and it counts this bound against
+// the raw elements BEFORE doing so, so 33 copies of one id is over bound.
 //
 // Why 32, as arithmetic rather than taste. Each canonical id is exactly 36 bytes
 // and costs 39 inside a JSON array (two quotes and one separator), so 32 ids are
@@ -54,9 +58,11 @@ const MaxAttachmentIDsPerMessage = 32
 // AttachmentIDs names the uploaded attachments this message carries (#2036), so
 // the daemon can name them instead of inferring the set from upload order or
 // arrival timing. Wire vocabulary only: nothing produces, consumes or validates
-// it here, and composing the prompt from it is #2038. Element order is the
-// client's own presentation order and is NOT a correlation key — ids identify
-// attachments, positions identify nothing, QuestionAnswerEntry's rule.
+// it here. Element order is the client's own presentation order and is NOT a
+// correlation key — ids identify attachments, positions identify nothing,
+// QuestionAnswerEntry's rule. #2038 is the consumer, and it composes the prompt
+// naming each attachment's on-host path in this order, deduplicated on first
+// occurrence.
 //
 // EVERY ELEMENT IS AN UNVERIFIED CLAIM, and it BECOMES A DIRECTORY COMPONENT
 // beneath the resolved conversation directory. Its canonical shape — the
@@ -122,7 +128,7 @@ type SendMessagePayload struct {
 // trap: encoding/json decodes [] to an empty NON-NIL slice while an absent key
 // and null both leave nil. len(x) == 0 agrees across all three, but x == nil
 // does not — so a consumer can tell [] from the other two, and #2038 is the
-// consumer about to read this field.
+// consumer that reads this field.
 //
 // This is NORMALISATION AT THE DECODE BOUNDARY, not validation: nothing is
 // checked and nothing is rejected on content, so the package overview's "pure

@@ -633,6 +633,38 @@ func startRelayV2(
 		},
 	)
 
+	// Attachment resolver seam for send_message (#2038): the READ half of the
+	// upload leg above, over the same instance directory the intake writes into.
+	//
+	// It adapts attachments.ResolvePath to handlers.AttachmentResolver's comma-ok
+	// shape, and THIS IS THE ONLY SCOPE THAT EVER HOLDS THE RESOLVER'S ERROR. The
+	// adaptation is a discard rather than a loss: ResolvePath answers exactly one
+	// sentinel for an unknown id, a non-canonical id and an id stored under
+	// another conversation alike, so nothing downstream could branch on it — while
+	// its shape-invalid refusal formats the RAW client-supplied attachment id into
+	// its message, which docs/protocol-mobile.md § Attachments forbids logging
+	// (raw, an element is an arbitrary client string in a line-oriented log). The
+	// error dies here, unlogged, so the handler cannot disclose what it never
+	// receives. Nothing is logged on the success path either: the resolved path's
+	// leaf is a client filename, which the same section bans logging for a privacy
+	// reason sanitising does not lift.
+	//
+	// conversationID arrives from the handler, which has already validated it
+	// against the registry binding via SessionRouter.Route — ResolvePath's stated
+	// precondition, and the confinement property that keeps a documented
+	// non-capability from becoming one.
+	attachmentResolve := func(conversationID, attachmentID string) (string, bool) {
+		path, err := attachments.ResolvePath(
+			resolveInstanceDirPath(w.instanceName),
+			conversations.ConversationID(conversationID),
+			attachmentID,
+		)
+		if err != nil {
+			return "", false
+		}
+		return path, true
+	}
+
 	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply. session_settings read it too between #491 and #1610,
@@ -672,7 +704,7 @@ func startRelayV2(
 			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
 			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(w.convReg),
 			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),
-			protocol.TypeSendMessage:           handlers.SendMessage(w.router, w.queue, logger),
+			protocol.TypeSendMessage:           handlers.SendMessage(w.router, w.queue, attachmentResolve, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot

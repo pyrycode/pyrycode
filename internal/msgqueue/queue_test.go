@@ -1065,3 +1065,135 @@ func TestQueue_RemoveHeadWaitingForIdle_Droppable(t *testing.T) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
 }
+
+// deliveryText and deliveryPayload are the two halves of the #2038 seam, kept
+// DELIBERATELY DIFFERENT so every assertion below is non-vacuous: a build that
+// delivered the queued text, or snapshotted the delivered payload, answers the
+// other string and fails. The payload is shaped like the composed prompt the
+// send_message handler builds — a host path is exactly what must not reach a
+// snapshot.
+const (
+	deliveryText    = "look at this"
+	deliveryPayload = "look at this\n\nAttached files: /home/u/.pyry/x/conversations/c/attachments/a/report.pdf"
+)
+
+// TestQueue_EnqueueDelivery_DeliversPayloadAndSnapshotsText is the #2038 seam's
+// core pin: what reaches DeliverFunc is the delivery payload, while what Snapshot
+// and SnapshotAll report is the queued text. Both reads happen while the delivery
+// is GATED — an item leaves the backlog on a confirmed commit, so the snapshot
+// window only exists mid-flight.
+func TestQueue_EnqueueDelivery_DeliversPayloadAndSnapshotsText(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.gates["c"] = make(chan struct{}) // hold the delivery so the backlog stays readable
+
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	if id := q.EnqueueDelivery("c", deliveryText, deliveryPayload); id != 1 {
+		t.Fatalf("EnqueueDelivery id = %d, want 1", id)
+	}
+	if got := recvWithin(t, f.entered, "deliver"); got != deliveryPayload {
+		t.Fatalf("DeliverFunc payload = %q, want the delivery payload %q", got, deliveryPayload)
+	}
+
+	snap := q.Snapshot("c")
+	if len(snap) != 1 {
+		t.Fatalf("Snapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].Text != deliveryText {
+		t.Errorf("Snapshot Text = %q, want the queued text %q", snap[0].Text, deliveryText)
+	}
+	all := q.SnapshotAll()
+	if len(all["c"]) != 1 || all["c"][0].Text != deliveryText {
+		t.Errorf("SnapshotAll()[\"c\"] = %+v, want one entry carrying %q", all["c"], deliveryText)
+	}
+
+	f.gates["c"] <- struct{}{}
+	recvWithin(t, f.completed, "completion")
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// TestQueue_Enqueue_DeliversTheSnapshotText pins the compatibility half: Enqueue
+// is EnqueueDelivery with the two halves equal, so what claude receives is
+// byte-for-byte what a client reads back. This is #2038 AC 2 at the engine — the
+// 108 existing Enqueue call sites depend on it and none of them says so.
+func TestQueue_Enqueue_DeliversTheSnapshotText(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.gates["c"] = make(chan struct{})
+
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	q.Enqueue("c", deliveryText)
+	if got := recvWithin(t, f.entered, "deliver"); got != deliveryText {
+		t.Fatalf("DeliverFunc payload = %q, want %q", got, deliveryText)
+	}
+	if snap := q.Snapshot("c"); len(snap) != 1 || snap[0].Text != deliveryText {
+		t.Fatalf("Snapshot = %+v, want one entry carrying %q", snap, deliveryText)
+	}
+
+	f.gates["c"] <- struct{}{}
+	recvWithin(t, f.completed, "completion")
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// TestQueue_EnqueueDelivery_RejectedAtCap pins that the #869 per-conversation
+// bound is enforced identically on the new entry point — it is the SAME single
+// insertion point, so a build that let the new method skip the cap would reopen
+// the in-memory DoS surface for every message naming an attachment.
+func TestQueue_EnqueueDelivery_RejectedAtCap(t *testing.T) {
+	t.Parallel()
+	f := newFakeDeliver()
+	f.gates["c"] = make(chan struct{})
+
+	q, err := New(Config{Deliver: f.deliver, RetryInterval: time.Millisecond, MaxQueuedPerConversation: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- q.Run(ctx) }()
+
+	if id := q.EnqueueDelivery("c", deliveryText, deliveryPayload); id != 1 {
+		t.Fatalf("first EnqueueDelivery id = %d, want 1", id)
+	}
+	recvWithin(t, f.entered, "deliver")
+
+	if id := q.EnqueueDelivery("c", "second", "second payload"); id != 0 {
+		t.Errorf("EnqueueDelivery at cap = %d, want 0 (reject, never drop)", id)
+	}
+	if snap := q.Snapshot("c"); len(snap) != 1 || snap[0].Text != deliveryText {
+		t.Errorf("Snapshot = %+v, want the first message untouched", snap)
+	}
+
+	f.gates["c"] <- struct{}{}
+	recvWithin(t, f.completed, "completion")
+
+	cancel()
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}

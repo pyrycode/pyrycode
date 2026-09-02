@@ -524,3 +524,66 @@ func TestQueueStateEmitterV2_Run_ConcurrentOnChange(t *testing.T) {
 	cancel()
 	cleanup()
 }
+
+// TestQueueState_ComposedDeliveryNeverReachesTheWire covers #2038 AC 4 on BOTH
+// read-back paths a client has: the per-change queue_state push (Snapshot →
+// toQueueStatePayload) and the connect-time reconcile (outstandingQueues). A
+// message naming attachments is delivered to claude as a composed prompt naming
+// their on-host paths, and neither path may carry one — docs/protocol-mobile.md
+// § Error codes forbids disclosing the daemon's layout from the other side, and a
+// success path leaking what the failure path is guarded against would undo that
+// mitigation.
+//
+// The queue is deliberately never Run, so nothing drains and the backlog stays
+// readable. The delivery payload differs from the text, or a build that projected
+// the wrong field would pass.
+func TestQueueState_ComposedDeliveryNeverReachesTheWire(t *testing.T) {
+	t.Parallel()
+	const (
+		convID   = "conv-attach"
+		userText = "what does this say?"
+		hostPath = "/home/u/.pyry/inst/conversations/conv-attach/attachments/aaaaaaaa-aaaa-4aaa-8aaa-000000000001/report.pdf"
+	)
+	composed := userText + "\n\nAttached files (use the Read tool to view each):\n" + hostPath
+
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if id := q.EnqueueDelivery(convID, userText, composed); id != 1 {
+		t.Fatalf("EnqueueDelivery id = %d, want 1", id)
+	}
+
+	// Both arms read the same msgqueue snapshot through the same mapping, so both
+	// are asserted here rather than trusting one to stand for the other.
+	arms := map[string]protocol.QueueStatePayload{
+		"queue_state push":       toQueueStatePayload(convID, q.Snapshot(convID)),
+		"connect-time reconcile": {},
+	}
+	reconciled := outstandingQueues(q)()
+	if len(reconciled) != 1 {
+		t.Fatalf("outstandingQueues returned %d payloads, want 1", len(reconciled))
+	}
+	arms["connect-time reconcile"] = reconciled[0]
+
+	for name, payload := range arms {
+		if payload.ConversationID != convID {
+			t.Errorf("%s: ConversationID = %q, want %q", name, payload.ConversationID, convID)
+		}
+		if len(payload.Queued) != 1 {
+			t.Fatalf("%s: Queued len = %d, want 1", name, len(payload.Queued))
+		}
+		if payload.Queued[0].Text != userText {
+			t.Errorf("%s: Text = %q, want the user's own words %q", name, payload.Queued[0].Text, userText)
+		}
+		// Marshalled, because the wire is what AC 4 is about — a leak through any
+		// field of the payload, not just Text, has to fail this.
+		wire, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("%s: marshal payload: %v", name, err)
+		}
+		if strings.Contains(string(wire), hostPath) {
+			t.Errorf("%s: wire payload discloses the host path:\n%s", name, wire)
+		}
+	}
+}
