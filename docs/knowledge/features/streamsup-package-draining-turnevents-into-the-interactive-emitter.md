@@ -54,6 +54,8 @@ not inside the sink, so the drop decision stays consistent with the cursor `Hand
 flushes the prior conversation's buffered delta and re-mints a fresh turn for the new one — the drain
 supplies session-level gating, the emitter's existing follow-active logic does the rest.
 
+**The same gate also drops one turn's worth of delivery across every session rotation (#2010, from the `slash_command_list`/`model_list` docs re-derivation) — a stale tag, not a race.** `sinkFor`'s session tag is captured once, at runner construction, by `newStreamRunnerFactory` (see [streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)); `Pool.rekeyLocked` (`RotateForNewSession`) re-keys the pool entry and rebinds the conversation **in place**, while the surviving runner's already-bound sink keeps its construction-time tag. So immediately after a rotation, the reporting child's tag and the conversation's active binding are simply different ids, and this gate drops the report — even though the rotation did spawn a genuine new child, and therefore a new ask. Nothing about interleaving order can close this; it is a mapping that goes stale at rekey, not a narrow race window.
+
 **Single-writer invariant.** Only the drain goroutine ever calls `emitter.Handle`/`flushDelta` — same
 single-Run-goroutine assumption the PTY producer relies on, `-race`-tested by feeding two sessions'
 Parsers concurrently. The drain also selects `emitter.flushC()` (the emitter arms its own coalescing
