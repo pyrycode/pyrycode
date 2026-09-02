@@ -366,7 +366,7 @@ type Runner struct {
 	restartCh chan struct{}
 
 	// controlSeq mints locally-unique correlation ids for every control line the
-	// runner writes — Interrupt and RevokeBypass alike. ONE sequence, not one per
+	// runner writes — Interrupt and SetPermissionMode alike. ONE sequence, not one per
 	// subtype: request_id must be unique across all in-flight control requests on
 	// the stream, so two counters would both mint "1" and a future ack-correlator
 	// could not tell an interrupt ack from a revocation ack. atomic.Uint64 because
@@ -577,7 +577,8 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 //
 // Interrupt is a concrete method on *Runner, deliberately NOT on sessions.Runner
 // (#1077's placement rule: its dispatch lives in cmd/pyry, which can assert —
-// unlike SetSpawnArgs (#1580) and RevokeBypass (#1604), whose consumer is inside
+// unlike SetSpawnArgs (#1580), RevokeBypass (#1604) and SetPermissionMode (#2042),
+// whose consumer is inside
 // internal/sessions and which are ON the interface for exactly that reason):
 // #1121's interrupt routing reaches it via its own narrow interface or a type
 // assertion. It mirrors how
@@ -587,26 +588,51 @@ func (r *Runner) Interrupt() error {
 	return WriteInterrupt(r.Stdin(), r.nextControlID())
 }
 
-// RevokeBypass writes a single set_permission_mode control_request line to the
-// live child's stdin, dropping its bypass posture WITHOUT killing it (#1595
-// measured the drop live: success ack, next init reporting permissionMode
-// default, and matching behaviour on the following turn, no respawn). The
-// request_id is locally minted, and the mode is fixed in the writer — there is no
-// enable direction on this surface, deliberately (see WriteBypassRevocation).
-// When no child is live Stdin() is nil, so RevokeBypass returns the retryable
-// ErrNoLiveChild without writing and without panicking.
+// SetPermissionMode writes a single set_permission_mode control_request line to
+// the live child's stdin, switching its permission posture WITHOUT killing it.
+// #1595 measured the default switch live against claude 2.1.220 and #2041
+// measured acceptEdits, dontAsk, plan and auto against 2.1.239 — each acked
+// success with the next turn's init.permissionMode echoing the new mode, no
+// respawn. The request_id is locally minted from the counter Interrupt and
+// RequestInitialize share.
 //
-// Unlike Interrupt it IS on sessions.Runner (#1604 widened the interface), and
-// the contrast is the rule rather than an exception: Interrupt's dispatch lives in
-// cmd/pyry, which can type-assert, whereas this method's consumer is
-// Pool.UpdateSettings inside internal/sessions, with no such dispatch site. A
-// structural assertion there would fail OPEN — its unmatched arm is a silent
-// no-op, leaving the posture un-revoked while the update reports success — so the
-// interface method makes a runner that cannot revoke a build failure instead.
+// mode is refused unless it is in WritePermissionMode's closed allow-list, which
+// is how the enable direction stays off this surface: bypassPermissions is refused
+// by NON-MEMBERSHIP, so the literal never appears in production source and every
+// unanticipated spelling is refused with it. Re-granting bypass stays on the
+// respawn path. The refusal (ErrUnsupportedPermissionMode) is permanent and stays
+// errors.Is-distinguishable from the retryable ErrNoLiveChild, which is what a
+// caller gets when no child is live — Stdin() is nil then, so nothing is written
+// and nothing panics.
+//
+// Like RevokeBypass and unlike Interrupt it IS on sessions.Runner, and the
+// contrast is the rule rather than an exception: Interrupt's dispatch lives in
+// cmd/pyry, which can type-assert, whereas this method's consumers sit inside
+// internal/sessions, with no such dispatch site. A structural assertion there
+// would fail OPEN — its unmatched arm is a silent no-op, leaving the child in the
+// wrong posture while the update reports success — so the interface method makes a
+// runner that cannot switch a build failure instead.
+//
 // Stdin() releases r.mu before returning, so the potentially-blocking write never
 // holds it. Safe from any goroutine.
+func (r *Runner) SetPermissionMode(mode string) error {
+	return WritePermissionMode(r.Stdin(), r.nextControlID(), mode)
+}
+
+// RevokeBypass drops the live child's bypass posture by asking for the default
+// mode. It is SetPermissionMode's named revoke shorthand, kept because it has a
+// production caller — Pool.deliverSettingsInBand — whose delivered bytes must not
+// change while the mode-carrying method is introduced beside it. #2043 rewrites
+// that caller to send an operator-chosen mode, which is the slice where this
+// method loses its last caller and can go: a method is deleted alongside the
+// consumer that held it, not in the slice whose contract is that the consumer is
+// untouched.
+//
+// It cannot name anything but permissionModeDefault, so the revocation line is
+// byte-identical to the one #1595 measured and #1604 has been sending since. Its
+// no-live-child contract is SetPermissionMode's, unchanged.
 func (r *Runner) RevokeBypass() error {
-	return WriteBypassRevocation(r.Stdin(), r.nextControlID())
+	return r.SetPermissionMode(permissionModeDefault)
 }
 
 // RequestInitialize writes a single initialize control_request line to the live
@@ -641,7 +667,8 @@ func (r *Runner) RequestInitialize() error {
 }
 
 // nextControlID mints the next locally-unique control-request correlation id,
-// shared by Interrupt, RevokeBypass and RequestInitialize. The atomic counter is
+// shared by Interrupt, SetPermissionMode and RequestInitialize (RevokeBypass draws
+// on it through SetPermissionMode, minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream
 // rather than merely within one subtype. That is all a future ack-correlator

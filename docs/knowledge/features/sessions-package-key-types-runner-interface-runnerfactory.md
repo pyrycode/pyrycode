@@ -1,4 +1,4 @@
-# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout)
+# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042)
 
 `Session.sup` is typed `Runner` (`internal/sessions/runner.go`):
 
@@ -11,6 +11,7 @@ type Runner interface {
     Restart(args []string)
     SetSpawnArgs(args []string) // #1580 — installs the NEXT spawn's argv, no kill
     RevokeBypass() error        // #1604 — drops bypass on the LIVE child, no kill
+    SetPermissionMode(mode string) error // #2042 — switches the LIVE child to a caller-named mode, no kill
 }
 
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)
@@ -57,14 +58,25 @@ would be `ok == false` always and fall through silently to an inert default — 
 5's #1580 review round caught in this file's own first-draft correction. `Interrupt`/`RestartFresh`/
 `BeginRotation`/`ModelList` stay off `sessions.Runner` deliberately (adding any would be speculative
 surface, or in `ModelList`'s case would drag every test double in both packages into the diff for no
-compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs` and
-`RevokeBypass` are on it instead, because — per their own docs — widening is compile-checked across the
-whole one-production/five-double set, whereas a type assertion at a future call site would fail silently
-(open, for `RevokeBypass`) at runtime and either fall back to `Restart` or leave a posture un-revoked while
-the caller reports success — the exact outcomes these two swap/revoke-only methods exist to avoid. Both
-share the same placement rule: their consumer, `Pool.UpdateSettings`, is inside `internal/sessions`, so
-there is no `cmd/pyry` dispatch site to type-assert at. See [codebase/1580.md](../codebase/1580.md) for the
-swap-only installer and [codebase/1604.md](../codebase/1604.md) for the in-band revocation.
+compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs`,
+`RevokeBypass` and `SetPermissionMode` are on it instead, because — per their own docs — widening is
+compile-checked across the whole one-production/five-double set, whereas a type assertion at a future
+call site would fail silently (open, for the latter two) at runtime and either fall back to `Restart` or
+leave a posture stuck while the caller reports success — the exact outcomes these swap/posture-changing
+methods exist to avoid. All three share the same placement rule: their consumers are inside
+`internal/sessions`, so there is no `cmd/pyry` dispatch site to type-assert at.
+
+`RevokeBypass` and `SetPermissionMode` sit on the interface **transitionally, side by side**: #2042
+generalised the fixed-`"default"` revoke into a mode-carrying method without touching `RevokeBypass`
+itself (now re-expressed as `SetPermissionMode(permissionModeDefault)`), specifically so
+`Pool.UpdateSettings`'s delivered bytes stayed provably unchanged. The pair collapses in #2043, the
+slice that migrates `Pool.UpdateSettings` to send an operator-chosen mode and removes `RevokeBypass`
+there — a method is retired alongside the consumer that held it, not in the slice that introduces its
+replacement. See [codebase/1580.md](../codebase/1580.md) for the swap-only installer,
+[codebase/1604.md](../codebase/1604.md) for the in-band revocation, and
+[streamsup-package-content-blocks-are-held-as-json-rawmessage.md § Permission-mode send
+primitive](streamsup-package-content-blocks-are-held-as-json-rawmessage.md) for the writer and its
+closed allow-list.
 
 A runner double armed for a **bootstrap-session** capability test cannot be armed at construction time:
 `sessions.New` invokes `RunnerFactory` while building the bootstrap entry, so the test does not know the

@@ -93,6 +93,7 @@ func (baseRunner) Run(ctx context.Context) error        { return nil }
 func (baseRunner) Restart(args []string)                {}
 func (baseRunner) SetSpawnArgs(args []string)           {}
 func (baseRunner) RevokeBypass() error                  { return nil }
+func (baseRunner) SetPermissionMode(mode string) error  { return nil }
 
 func (c childSnapshot) String() string {
 	return fmt.Sprintf("{session=%s dead=%t stdin=%q}", c.sessionID, c.dead, c.stdin)

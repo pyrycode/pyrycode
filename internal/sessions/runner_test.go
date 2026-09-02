@@ -36,6 +36,8 @@ func (fakeRunner) SetSpawnArgs(args []string) {}
 
 func (fakeRunner) RevokeBypass() error { return nil }
 
+func (fakeRunner) SetPermissionMode(mode string) error { return nil }
+
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
 // Config.RunnerFactory is invoked in place of the default runner at BOTH construction
 // sites — the bootstrap (Pool.New) and the per-session create (Pool.buildSession,
@@ -158,6 +160,14 @@ type lifecycleRunner struct {
 	// is: the production runner, not the pool, is what refuses when no child is
 	// bound, and the pool's contract is to attempt the revocation unconditionally.
 	revokes int
+	// modes records the mode of every SetPermissionMode call, in order — the
+	// mode-carrying sibling #2042 put on the seam beside RevokeBypass. It is
+	// recorded so a test can assert the pool did NOT start routing through it: the
+	// two methods emit the same line when the mode is "default", so a count on
+	// revokes alone cannot tell "the revocation still goes through RevokeBypass"
+	// from "it quietly moved". #2043 is when a delivery through this method becomes
+	// the expected state.
+	modes []string
 }
 
 func (r *lifecycleRunner) State() State {
@@ -250,6 +260,13 @@ func (r *lifecycleRunner) RevokeBypass() error {
 	return nil
 }
 
+func (r *lifecycleRunner) SetPermissionMode(mode string) error {
+	r.mu.Lock()
+	r.modes = append(r.modes, mode)
+	r.mu.Unlock()
+	return nil
+}
+
 // restartArgs, spawnArgSets, userTurns and revokeCount are the read side of the
 // four records above. Each takes r.mu and deep-copies, because the lifecycle
 // goroutine writes while the test goroutine reads and every assertion must stay
@@ -281,6 +298,14 @@ func (r *lifecycleRunner) revokeCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.revokes
+}
+
+// permissionModes is the read side of modes, deep-copying under r.mu like its
+// four siblings above.
+func (r *lifecycleRunner) permissionModes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.modes...)
 }
 
 func cloneArgvRecords(recs [][]string) [][]string {

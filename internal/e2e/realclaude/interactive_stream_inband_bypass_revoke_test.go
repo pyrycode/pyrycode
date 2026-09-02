@@ -295,9 +295,12 @@ func (r *revokeTap) droppedCount() int {
 //
 // Dropping every other record is also what keeps the runner's lifecycle lines out
 // of the test output — a nil streamsup.Config.Logger would fall back to
-// slog.Default(). Nothing it retains is a secret: RevokeBypass takes no mode, so
-// there is no settings value the bypass record could carry, which is the
-// structural guarantee deliverSettingsInBand's doc already makes.
+// slog.Default(). Nothing it retains is a secret, and since #2042 that rests on
+// two clauses rather than one: RevokeBypass — the method this path still calls —
+// takes no mode, AND the seam's mode-carrying sibling refuses an unsupported mode
+// without echoing the rejected string. Either way there is no settings value the
+// bypass record could carry, which is the structural guarantee
+// deliverSettingsInBand's doc already makes.
 type revokeLogHandler struct {
 	mu           *sync.Mutex
 	spawns       *int

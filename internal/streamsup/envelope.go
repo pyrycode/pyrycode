@@ -17,6 +17,21 @@ import (
 // it to a retryable "no live child" outcome.
 var ErrNoLiveChild = errors.New("streamsup: no live child")
 
+// ErrUnsupportedPermissionMode is returned by WritePermissionMode when the caller
+// names a mode outside permissionModeAllowed's closed set. It is a permanent
+// refusal, unlike the retryable ErrNoLiveChild, and the two must stay
+// errors.Is-distinguishable: a caller that mistook this for "no live child" would
+// retry a request that can never succeed.
+//
+// It is returned BARE, never wrapped with the rejected value. Its text is a
+// constant precisely so it cannot echo the mode: Pool.deliverSettingsInBand logs
+// this error verbatim, and #833 keeps settings values out of the daemon log. A
+// mode is a settings value, so the obvious fmt.Errorf("… %q", mode) would leak an
+// operator's value into the log through the error return. The refusal tells an
+// operator THAT a mode was refused; which one is recoverable from the request they
+// sent, not from pyry's log.
+var ErrUnsupportedPermissionMode = errors.New("streamsup: unsupported permission mode")
+
 // userTurn is the stream-json envelope written to claude's stdin. The shape
 // mirrors streamrunner's verbatim (the 2026-05-14 probe):
 //
@@ -136,30 +151,82 @@ func WriteInterrupt(w io.Writer, requestID string) error {
 	return nil
 }
 
-// marshalBypassRevocationEnvelope returns the single newline-terminated
-// set_permission_mode control line that drops a running child's bypass posture.
-// #1595 measured this line live against claude 2.1.220: the child acked it with a
-// success control_response, its next init line reported permissionMode default,
-// and its behaviour on the following turn matched a default-launched control
-// child exactly — all without a respawn.
+// permissionModeDefault is the posture a bypass revocation asks for, and the mode
+// (*Runner).RevokeBypass names. It is the one member of the allow-list below with
+// a production caller.
+const permissionModeDefault = "default"
+
+// permissionModeAllowed reports whether mode is one claude's set_permission_mode
+// accepts. It is a CLOSED allow-list and membership is the whole gate.
 //
-// Like marshalInterruptEnvelope, every field but the locally-minted request_id is
-// a fixed literal, so it has no injection surface of its own; the appended '\n' is
-// the sole raw newline, making the envelope one physical line by construction.
+// The escalating mode is refused by NON-MEMBERSHIP rather than by a deny-list
+// entry. #1603 kept the enable direction structurally absent rather than merely
+// undocumented, and a deny-list would break that twice over: it would have to name
+// the literal in production source, and it would fail open on every spelling it
+// failed to anticipate. Refusing by non-membership also refuses the near misses —
+// a wrong case, a trailing space — for free.
 //
-// The emitted mode is fixed at default and is deliberately NOT a parameter. The
-// opposite direction is a privilege escalation reachable over the daemon's own
-// stdin, so it is absent from this surface rather than one argument away — and
-// claude refuses it anyway: #1595 drove a request for the bypassPermissions mode
-// on a child launched without --dangerously-skip-permissions and got back a
-// refusal naming that missing flag. Re-granting bypass stays on the respawn path.
-func marshalBypassRevocationEnvelope(requestID string) ([]byte, error) {
+// The set is a switch rather than a package-level slice or map on purpose. A
+// `var permissionModes = []string{…}` reads more like a list, but it is mutable
+// package state holding a security allow-list: anything in this package, a test
+// included, could append the escalation onto it and dissolve the carve-out
+// globally. Control flow cannot be appended to.
+//
+// THIS IS A VOCABULARY CHECK, NOT AN AUTHORISATION CHECK. It answers "is this a
+// permission mode claude will parse?" and nothing else. It does not answer "may
+// this caller change this session's posture?" — that decision belongs to whoever
+// accepts the mode from a wire frame. Three of the five members (acceptEdits, auto,
+// dontAsk) genuinely LOOSEN a child launched in default behind the daemon's
+// approval flags (cmd/pyry's withApprovalArgs), and #2041 measured claude
+// accepting each of them in-band on exactly such a child at 2.1.239: they arrive
+// because this daemon asked, not because claude vetted them. bypassPermissions is
+// the one mode claude refuses for itself, on a child launched without
+// --dangerously-skip-permissions (#1595, recorded there as a claude-version fact
+// rather than a guarantee — which is why it is the backstop here and this
+// allow-list is the defence).
+//
+// Membership also bounds the emitted line's LENGTH, which is load-bearing and easy
+// to lose in a refactor. The longest member is acceptEdits, so the envelope stays
+// near 110 bytes — far under PIPE_BUF — which is what keeps one write(2) atomic so
+// a control line cannot interleave with a concurrent WriteTurn on the same fd. An
+// unbounded caller-supplied mode could push the line past PIPE_BUF and tear it
+// against a turn. A future widening of the vocabulary inherits that constraint.
+func permissionModeAllowed(mode string) bool {
+	switch mode {
+	case permissionModeDefault, "acceptEdits", "plan", "auto", "dontAsk":
+		return true
+	}
+	return false
+}
+
+// marshalPermissionModeEnvelope returns the single newline-terminated
+// set_permission_mode control line asking a running child to switch to mode.
+// #1595 measured the default line live against claude 2.1.220 (success ack, next
+// init reporting permissionMode default, matching behaviour on the following turn,
+// no respawn) and #2041 measured acceptEdits, dontAsk, plan and auto the same way
+// against 2.1.239.
+//
+// Like its three siblings in this file it is a PURE ENCODER with no gate of its
+// own: the policy lives in the Write* half, where the nil-writer refusal already
+// lives. That placement is deliberate and it is this writer's one residual — the
+// encoder will mint a line for any mode string it is handed, escalation included.
+// It has exactly ONE caller, WritePermissionMode, which holds the allow-list gate;
+// a SECOND caller is the moment that gate has to move down into this function.
+// Duplicating the check in both halves today would be two copies of one defence
+// rather than a second one.
+//
+// mode and the locally-minted request_id are the only caller-influenced fields and
+// both are marshalled as JSON string values, so json.Marshal escapes every
+// metacharacter: neither can open a second physical line or rewrite the other's
+// field. The appended '\n' is the sole raw newline, making the envelope one
+// physical line by construction (structured encoding, never concatenation).
+func marshalPermissionModeEnvelope(requestID, mode string) ([]byte, error) {
 	env := controlRequest{
 		Type:      "control_request",
 		RequestID: requestID,
 		Request: controlRequestInner{
 			Subtype: "set_permission_mode",
-			Mode:    "default",
+			Mode:    mode,
 		},
 	}
 	b, err := json.Marshal(env)
@@ -169,37 +236,59 @@ func marshalBypassRevocationEnvelope(requestID string) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
-// WriteBypassRevocation writes one set_permission_mode control_request line onto
-// w, the child's held-open stdin (from Runner.Stdin), dropping the live child's
-// bypass posture without killing it. It mirrors WriteInterrupt exactly: nil-check
-// first, marshal, one Write, never close w.
+// WritePermissionMode writes one set_permission_mode control_request line onto w,
+// the child's held-open stdin (from Runner.Stdin), switching the live child's
+// permission posture without killing it. It mirrors WriteInterrupt: refuse,
+// marshal, one Write, never close w — the io.Writer type structurally forbids a
+// half-close/EOF forgery.
+//
+// It replaced #1603's WriteBypassRevocation, which took no mode and emitted
+// "default" alone. The safety property that writer held was never "one literal"
+// but "no escalation reachable from this surface", and the allow-list keeps it:
+// see permissionModeAllowed, including why the gate here is a VOCABULARY check and
+// not an authorisation one.
+//
+// The two refusals, in the order they are checked:
+//
+//   - mode outside permissionModeAllowed → ErrUnsupportedPermissionMode, bare.
+//   - w == nil (no live child) → ErrNoLiveChild.
+//
+// The allow-list check comes FIRST, and the order is a contract rather than an
+// accident. Both orderings write zero bytes, so this is not about the wire; it is
+// about what the caller is told. Reversed, a caller naming an escalation while no
+// child was bound would get back the RETRYABLE ErrNoLiveChild and could reasonably
+// retry forever against a request that can never succeed. A vocabulary refusal is
+// permanent and must read as permanent whatever the child is doing.
 //
 // requestID must be a LOCALLY-MINTED id — Runner.nextControlID is the only source
-// that satisfies this, and (*Runner).RevokeBypass is the only in-repo caller. The
-// structured encoding makes a hostile id non-catastrophic rather than merely
-// unlikely (json.Marshal escapes every metacharacter, so no id can open a second
-// physical line or rewrite the fixed mode), but the contract is the primary
-// defence and the escaping the backstop.
+// that satisfies this, and (*Runner).SetPermissionMode is the only in-repo caller.
+// The structured encoding makes a hostile id non-catastrophic rather than merely
+// unlikely, but the contract is the primary defence and the escaping the backstop.
 //
-// A nil w means no live child: WriteBypassRevocation returns ErrNoLiveChild and
-// writes nothing (checked first, so no panic and no partial write). A marshal
-// failure (not reachable with fixed literals, defensive) and a write failure (e.g.
-// EPIPE when the pipe closed mid-teardown) are returned wrapped.
+// A marshal failure (not reachable for two strings, defensive) and a write failure
+// (e.g. EPIPE when the pipe closed mid-teardown) are returned wrapped, never
+// mis-reported as either refusal. No wrap carries the mode: an operator's value
+// must not reach the daemon log through an error return (see
+// ErrUnsupportedPermissionMode).
 //
 // The control_response ack is not read here — nothing correlates the request_id,
 // and reading it would need a stdout tap this slice has no consumer for. The
 // parser already consumes the ack content-free (#1500), so the reply is handled
-// without being interpreted.
-func WriteBypassRevocation(w io.Writer, requestID string) error {
+// without being interpreted. That is also where claude's own per-model refusal of
+// auto lands (#2041), unread for now.
+func WritePermissionMode(w io.Writer, requestID, mode string) error {
+	if !permissionModeAllowed(mode) {
+		return ErrUnsupportedPermissionMode
+	}
 	if w == nil {
 		return ErrNoLiveChild
 	}
-	env, err := marshalBypassRevocationEnvelope(requestID)
+	env, err := marshalPermissionModeEnvelope(requestID, mode)
 	if err != nil {
-		return fmt.Errorf("streamsup: marshal bypass revocation: %w", err)
+		return fmt.Errorf("streamsup: marshal permission mode: %w", err)
 	}
 	if _, err := w.Write(env); err != nil {
-		return fmt.Errorf("streamsup: write bypass revocation: %w", err)
+		return fmt.Errorf("streamsup: write permission mode: %w", err)
 	}
 	return nil
 }
@@ -233,8 +322,9 @@ func marshalInitializeEnvelope(requestID string) ([]byte, error) {
 
 // WriteInitialize writes one initialize control_request line onto w, the child's
 // held-open stdin (from Runner.Stdin), asking the live child to report what it
-// knows about itself without a respawn. It mirrors WriteBypassRevocation exactly:
-// nil-check first, marshal, one Write, never close w — the io.Writer type
+// knows about itself without a respawn. It mirrors WritePermissionMode minus the
+// allow-list gate (this subtype has no caller-supplied field to gate): nil-check
+// first, marshal, one Write, never close w — the io.Writer type
 // structurally forbids a half-close/EOF forgery, which on a stream-json child
 // would mean "no more input" and take the live session down without killing it.
 //
@@ -252,7 +342,7 @@ func marshalInitializeEnvelope(requestID string) ([]byte, error) {
 // the retryable ErrNoLiveChild.
 //
 // The control_response ack is not read here: this slice writes the line and stops,
-// exactly as WriteBypassRevocation writes without reading its ack. Nothing
+// exactly as WritePermissionMode writes without reading its ack. Nothing
 // correlates the request_id yet, and the parser already consumes control responses
 // content-free (#1500), so the reply is handled without being interpreted.
 func WriteInitialize(w io.Writer, requestID string) error {

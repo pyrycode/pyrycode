@@ -264,6 +264,45 @@ func TestRunner_RevokeBypass_NoLiveChild(t *testing.T) {
 	}
 }
 
+// TestRunner_SetPermissionMode_NoLiveChild: with no child spawned, Stdin() is nil
+// and SetPermissionMode returns ErrNoLiveChild without writing and without
+// panicking — the mode-carrying method inherits the same safe no-op refusal its
+// three control-request siblings give (#2042 AC4).
+func TestRunner_SetPermissionMode_NoLiveChild(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := r.SetPermissionMode("acceptEdits"); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("SetPermissionMode with no live child = %v, want ErrNoLiveChild", err)
+	}
+}
+
+// TestRunner_SetPermissionMode_RefusesUnknownMode: the allow-list refusal reaches
+// the caller THROUGH the runner, not merely through the free function, and stays
+// distinguishable from the retryable no-live-child error even on a runner that has
+// no live child — the state in which every caller of this method first meets it.
+//
+// This is the method a wire-driven caller will reach (#1687, #1686), so the
+// refusal has to survive the one hop between WritePermissionMode and the seam.
+func TestRunner_SetPermissionMode_RefusesUnknownMode(t *testing.T) {
+	t.Parallel()
+	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	err = r.SetPermissionMode("bypassPermissions")
+	if !errors.Is(err, ErrUnsupportedPermissionMode) {
+		t.Fatalf("SetPermissionMode(escalation) = %v, want ErrUnsupportedPermissionMode", err)
+	}
+	if errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("SetPermissionMode(escalation) reported the retryable ErrNoLiveChild: %v", err)
+	}
+}
+
 // TestRunner_RevokeBypass_LiveChildDelivers: on a live child RevokeBypass writes a
 // single set_permission_mode control_request line onto the held-open stdin; the
 // echo_lines fake child echoes it back as ECHO:<line>, proving the exact envelope

@@ -170,15 +170,22 @@ func TestWriteInterrupt_WriteError(t *testing.T) {
 // probe's id substituted: it dropped a running child's bypass posture with no
 // respawn. A fixed request_id keeps the assertion deterministic (the live-minted
 // id is exercised by the runner tests).
+//
+// #2042 widened the marshaller to take the mode; this test keeps its name and its
+// want literal unchanged, because what it pins is the REVOCATION line rather than
+// the marshaller — the one line a live claude has been sent since #1604, and the
+// one Pool.deliverSettingsInBand still emits. TestMarshalPermissionModeEnvelope_AllowedModes
+// covers the other four modes and repeats this row from its own table, so the two
+// agree by construction rather than by a shared constant.
 func TestMarshalBypassRevocationEnvelope(t *testing.T) {
 	t.Parallel()
-	out, err := marshalBypassRevocationEnvelope("fixed-id")
+	out, err := marshalPermissionModeEnvelope("fixed-id", "default")
 	if err != nil {
-		t.Fatalf("marshalBypassRevocationEnvelope: %v", err)
+		t.Fatalf("marshalPermissionModeEnvelope: %v", err)
 	}
 	const want = `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"default"}}` + "\n"
 	if string(out) != want {
-		t.Fatalf("marshalBypassRevocationEnvelope =\n %q\nwant\n %q", out, want)
+		t.Fatalf("marshalPermissionModeEnvelope(…, \"default\") =\n %q\nwant\n %q", out, want)
 	}
 	// Exactly one raw newline, and it is the trailing terminator.
 	if got := bytes.Count(out, []byte{'\n'}); got != 1 {
@@ -197,18 +204,153 @@ func TestMarshalBypassRevocationEnvelope(t *testing.T) {
 	}
 }
 
+// TestMarshalPermissionModeEnvelope_AllowedModes asserts every allow-listed mode
+// marshals to a byte-exact single-line control_request with the wire order the
+// measurements pin: subtype BEFORE mode. #1595 measured the default row live
+// against claude 2.1.220 and #2041 measured the other four in-band against
+// 2.1.239, each acked success with the next turn's init.permissionMode echoing
+// the new mode.
+//
+// The table carries its own literals rather than reading permissionModeAllowed.
+// A test that enumerated the production allow-list would pass identically against
+// a corrupted one — it would assert "whatever the writer accepts, it encodes",
+// which is not a contract. This asserts the five modes by name.
+func TestMarshalPermissionModeEnvelope_AllowedModes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		mode string
+		want string
+	}{
+		{"default", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"default"}}` + "\n"},
+		{"acceptEdits", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"acceptEdits"}}` + "\n"},
+		{"plan", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"plan"}}` + "\n"},
+		{"auto", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"auto"}}` + "\n"},
+		{"dontAsk", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"dontAsk"}}` + "\n"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.mode, func(t *testing.T) {
+			t.Parallel()
+			out, err := marshalPermissionModeEnvelope("fixed-id", tt.mode)
+			if err != nil {
+				t.Fatalf("marshalPermissionModeEnvelope(…, %q): %v", tt.mode, err)
+			}
+			if string(out) != tt.want {
+				t.Fatalf("marshalPermissionModeEnvelope(…, %q) =\n %q\nwant\n %q", tt.mode, out, tt.want)
+			}
+			// Exactly one raw newline, and it is the terminator: the mode
+			// introduced no second physical line.
+			if got := bytes.Count(out, []byte{'\n'}); got != 1 {
+				t.Fatalf("mode %q line has %d raw newlines, want exactly 1 (the terminator)", tt.mode, got)
+			}
+			if out[len(out)-1] != '\n' {
+				t.Fatalf("mode %q line not newline-terminated: %q", tt.mode, out)
+			}
+			var cr decodedControlRequest
+			if err := json.Unmarshal(out[:len(out)-1], &cr); err != nil {
+				t.Fatalf("mode %q line did not decode as a single JSON object: %v (%q)", tt.mode, err, out)
+			}
+			if cr.Type != "control_request" || cr.Request.Subtype != "set_permission_mode" || cr.Request.Mode != tt.mode {
+				t.Fatalf("mode %q line shape = %+v, want control_request/set_permission_mode/%s", tt.mode, cr, tt.mode)
+			}
+		})
+	}
+}
+
+// TestWritePermissionMode_RefusesUnknownMode: a mode outside the closed allow-list
+// is refused with ZERO bytes reaching the writer, and the refusal is
+// distinguishable from the retryable no-live-child error (AC2, AC3).
+//
+// bypassPermissions is named directly, and this is the only place under
+// internal/streamsup it appears. #1603 kept the enable direction structurally
+// absent rather than merely undocumented, and #2042 keeps that property by
+// refusing it through NON-MEMBERSHIP in permissionModeAllowed rather than through a
+// deny-list entry — a deny-list would have to name the literal in production
+// source and would still fail open on any spelling it failed to anticipate. Naming
+// it HERE is what stops the carve-out from dissolving silently: a later slice that
+// edits the allow-list leaves this row red if it lets the escalation through.
+//
+// The near-miss rows (wrong case, trailing space, lowercased) are the spellings a
+// deny-list would have missed and a closed allow-list refuses for free.
+//
+// Each row also asserts the error text does not echo the rejected mode.
+// Pool.deliverSettingsInBand logs this error verbatim and #833 keeps settings
+// values out of the daemon log, so a helpful fmt.Errorf("… %q", mode) here would
+// leak an operator's value into the log through the error return.
+func TestWritePermissionMode_RefusesUnknownMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{"the escalation", "bypassPermissions"},
+		{"empty", ""},
+		{"wrong case", "Default"},
+		{"trailing space", "default "},
+		{"lowercased member", "acceptedits"},
+		{"json shaped", `default"}},{"type":"control_request`},
+		{"unknown word", "yolo"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var buf bytes.Buffer
+			err := WritePermissionMode(&buf, "id", tt.mode)
+			if !errors.Is(err, ErrUnsupportedPermissionMode) {
+				t.Fatalf("WritePermissionMode(…, %q) = %v, want ErrUnsupportedPermissionMode", tt.mode, err)
+			}
+			if errors.Is(err, ErrNoLiveChild) {
+				t.Fatalf("WritePermissionMode(…, %q) refusal reads as ErrNoLiveChild, which the caller may retry forever: %v", tt.mode, err)
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("WritePermissionMode(…, %q) wrote %d bytes (%q), want zero reaching the child", tt.mode, buf.Len(), buf.Bytes())
+			}
+			if tt.mode != "" && strings.Contains(err.Error(), tt.mode) {
+				t.Fatalf("WritePermissionMode(…, %q) error echoes the rejected mode: %v", tt.mode, err)
+			}
+		})
+	}
+}
+
+// TestWritePermissionMode_RefusalOutranksNilWriter pins the ordering inside
+// WritePermissionMode: the allow-list check runs BEFORE the nil-writer check.
+//
+// Both orderings write zero bytes, so this is not about the wire. It is about what
+// the caller is told: reversed, a caller naming an escalation while no child is
+// bound would get back the RETRYABLE ErrNoLiveChild and could reasonably retry
+// forever against a request that can never succeed. A vocabulary refusal is
+// permanent and has to read as permanent whatever the child is doing. This test is
+// what goes red if a later edit tidies the nil check back to the top.
+func TestWritePermissionMode_RefusalOutranksNilWriter(t *testing.T) {
+	t.Parallel()
+	err := WritePermissionMode(nil, "id", "bypassPermissions")
+	if !errors.Is(err, ErrUnsupportedPermissionMode) {
+		t.Fatalf("WritePermissionMode(nil, …, unsupported) = %v, want ErrUnsupportedPermissionMode", err)
+	}
+	if errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WritePermissionMode(nil, …, unsupported) reported the retryable ErrNoLiveChild: %v", err)
+	}
+}
+
 // TestMarshalBypassRevocationEnvelope_RequestIDInjectionResistance mirrors
 // TestMarshalTurnEnvelope_InjectionResistance for the revocation's one variable
 // field. request_id is locally minted today (digits only), so this is a contract
 // pin rather than a live threat: even a hostile id cannot introduce a second
 // physical line, and — the property that matters here — it cannot rewrite the
-// fixed mode, because the mode is a literal in the marshalled struct rather than
-// text spliced into a string. The escalating mode bypassPermissions is
-// deliberately absent from the rows: naming it in a Go string literal anywhere
-// under internal/streamsup would trip the ticket's grep, and claude refuses that
-// direction anyway on a child launched without --dangerously-skip-permissions
-// (#1595). acceptEdits stands in as the attacker's substitute mode; what is
-// asserted is that no id-supplied mode survives at all.
+// mode, because the mode is a marshalled struct field rather than text spliced
+// into a string. #2042 made the mode a parameter and the property is unchanged:
+// what a caller names is bounded by permissionModeAllowed, and what an id names is
+// bounded by json.Marshal's escaping. Neither reaches the other's field.
+//
+// The escalating mode bypassPermissions is absent from THESE rows because the
+// attacker modelled here supplies a request_id, not a mode; the mode surface is
+// where it belongs, and TestWritePermissionMode_RefusesUnknownMode names it
+// directly. (The rule this comment used to state — that naming it in any Go string
+// literal under internal/streamsup would trip the ticket's grep — is narrower than
+// it read: #2042's grep excludes _test.go files, so the literal is banned from
+// production source only.) acceptEdits stands in as the attacker's substitute
+// mode; what is asserted is that no id-supplied mode survives at all.
 func TestMarshalBypassRevocationEnvelope_RequestIDInjectionResistance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -228,9 +370,9 @@ func TestMarshalBypassRevocationEnvelope_RequestIDInjectionResistance(t *testing
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			out, err := marshalBypassRevocationEnvelope(tt.requestID)
+			out, err := marshalPermissionModeEnvelope(tt.requestID, "default")
 			if err != nil {
-				t.Fatalf("marshalBypassRevocationEnvelope: %v", err)
+				t.Fatalf("marshalPermissionModeEnvelope: %v", err)
 			}
 			// Exactly one raw newline, and it is the terminator: the id
 			// introduced no second physical line.
@@ -257,46 +399,60 @@ func TestMarshalBypassRevocationEnvelope_RequestIDInjectionResistance(t *testing
 	}
 }
 
-// TestWriteBypassRevocation_NilRefusal: a nil writer (no live child) yields
-// ErrNoLiveChild and writes nothing — never a panic, never a partial write.
-func TestWriteBypassRevocation_NilRefusal(t *testing.T) {
+// TestWritePermissionMode_NilRefusal: a nil writer (no live child) yields
+// ErrNoLiveChild and writes nothing — never a panic, never a partial write. The
+// mode is an allow-listed one, so the refusal under test is the nil writer's and
+// not the allow-list's (TestWritePermissionMode_RefusalOutranksNilWriter covers
+// the case where both apply).
+func TestWritePermissionMode_NilRefusal(t *testing.T) {
 	t.Parallel()
-	if err := WriteBypassRevocation(nil, "id"); !errors.Is(err, ErrNoLiveChild) {
-		t.Fatalf("WriteBypassRevocation(nil, …) = %v, want ErrNoLiveChild", err)
+	if err := WritePermissionMode(nil, "id", "default"); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WritePermissionMode(nil, …, \"default\") = %v, want ErrNoLiveChild", err)
 	}
 }
 
-// TestWriteBypassRevocation_WritesEnvelope: WriteBypassRevocation emits exactly
-// the marshalled revocation line onto the writer and never closes it.
-func TestWriteBypassRevocation_WritesEnvelope(t *testing.T) {
+// TestWritePermissionMode_WritesEnvelope: WritePermissionMode emits exactly the
+// marshalled line onto the writer and never closes it.
+func TestWritePermissionMode_WritesEnvelope(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := WriteBypassRevocation(&buf, "id"); err != nil {
-		t.Fatalf("WriteBypassRevocation: %v", err)
+	if err := WritePermissionMode(&buf, "id", "acceptEdits"); err != nil {
+		t.Fatalf("WritePermissionMode: %v", err)
 	}
-	want, err := marshalBypassRevocationEnvelope("id")
+	want, err := marshalPermissionModeEnvelope("id", "acceptEdits")
 	if err != nil {
-		t.Fatalf("marshalBypassRevocationEnvelope: %v", err)
+		t.Fatalf("marshalPermissionModeEnvelope: %v", err)
 	}
 	if !bytes.Equal(buf.Bytes(), want) {
-		t.Fatalf("WriteBypassRevocation wrote %q, want %q", buf.Bytes(), want)
+		t.Fatalf("WritePermissionMode wrote %q, want %q", buf.Bytes(), want)
 	}
 }
 
-// TestWriteBypassRevocation_WriteError: a stdin write failure (e.g. EPIPE on a
+// TestWritePermissionMode_WriteError: a stdin write failure (e.g. EPIPE on a
 // pipe closed mid-teardown) is returned wrapped and never mis-reported as the
 // no-live-child refusal, which the caller may retry.
-func TestWriteBypassRevocation_WriteError(t *testing.T) {
+//
+// It drives acceptEdits rather than default so the no-echo assertion means
+// something: the refusal path is not the only route an operator's value could
+// take into Pool.deliverSettingsInBand's log record, and "default" is too common a
+// word for its absence to be evidence.
+func TestWritePermissionMode_WriteError(t *testing.T) {
 	t.Parallel()
-	err := WriteBypassRevocation(errWriter{}, "id")
+	err := WritePermissionMode(errWriter{}, "id", "acceptEdits")
 	if err == nil {
-		t.Fatal("WriteBypassRevocation on a failing writer: got nil error, want non-nil")
+		t.Fatal("WritePermissionMode on a failing writer: got nil error, want non-nil")
 	}
 	if errors.Is(err, ErrNoLiveChild) {
-		t.Fatalf("WriteBypassRevocation write error mis-reported as ErrNoLiveChild: %v", err)
+		t.Fatalf("WritePermissionMode write error mis-reported as ErrNoLiveChild: %v", err)
 	}
-	if !strings.Contains(err.Error(), "write bypass revocation") {
-		t.Fatalf("WriteBypassRevocation error = %v, want it to mention %q", err, "write bypass revocation")
+	if errors.Is(err, ErrUnsupportedPermissionMode) {
+		t.Fatalf("WritePermissionMode write error mis-reported as the vocabulary refusal: %v", err)
+	}
+	if !strings.Contains(err.Error(), "write permission mode") {
+		t.Fatalf("WritePermissionMode error = %v, want it to mention %q", err, "write permission mode")
+	}
+	if strings.Contains(err.Error(), "acceptEdits") {
+		t.Fatalf("WritePermissionMode write error echoes the mode: %v", err)
 	}
 }
 
