@@ -84,14 +84,21 @@ func TestAttachmentChunkPayload_Upload_RoundTrip(t *testing.T) {
 
 // TestAttachmentChunkPayload_Retrieval_RoundTrip pins the DAEMON → CLIENT leg:
 // the second chunk of a two-chunk retrieval, on an envelope carrying
-// in_reply_to. Retrieval answers #1746's request verb, so it takes the response
-// shape every other daemon → client frame in this testdata takes
-// (conversations.json carries in_reply_to; send_message.json does not).
+// in_reply_to. Retrieval answers the request verb #2052 declares
+// (TypeRequestAttachment), so it takes the response shape every other daemon →
+// client frame in this testdata takes (conversations.json carries in_reply_to;
+// send_message.json does not).
 //
 // The in_reply_to assertion is the only thing distinguishing this test from its
 // upload sibling. Without it "both directions" would be two value sets over one
-// shape. What is pinned here is the ENVELOPE a daemon → client chunk rides;
-// #1746 still owns whether and how the retrieval verb correlates.
+// shape. What is pinned here is the ENVELOPE a daemon → client chunk rides, and
+// the question this comment used to leave open — whether and how the retrieval
+// verb correlates — is settled: correlation rides in_reply_to and the request
+// payload carries no request-id key (#2052). The 91 below is not an arbitrary
+// number any more either. It is the envelope id of the committed
+// request_attachment.json, so the two fixtures describe one retrieval, and
+// TestRequestAttachmentPayload_RoundTrip asserts the same value from the other
+// end.
 func TestAttachmentChunkPayload_Retrieval_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "attachment_chunk_retrieval.json")
 
@@ -261,7 +268,7 @@ const attachmentSHA256HexLen = 64
 //
 // The three metadata bounds this fills to are DECLARED HERE AND ENFORCED
 // NOWHERE, so this is a proof about frames that respect them: #1741 makes them
-// true inbound, #1744 and #1746 outbound. Until then a frame violating them
+// true inbound, #1897 and #2053 outbound. Until then a frame violating them
 // exceeds the cap and the transport drops it.
 //
 // Neither the Logf nor the failure message prints the marshalled bytes — lengths
@@ -407,6 +414,130 @@ func TestAttachmentStoredPayload_WireKeys(t *testing.T) {
 	for k := range want {
 		if _, ok := got[k]; !ok {
 			t.Errorf("missing wire key %q, got: %s", k, b)
+		}
+	}
+}
+
+// TestRequestAttachmentPayload_RoundTrip pins the retrieval REQUEST against its
+// committed fixture: the envelope type, the absent in_reply_to, and both ids.
+//
+// It is also the only test in this package that pins the wire STRING
+// "request_attachment". None of the three registries in compat_test.go can — all
+// three key on the Go symbol, so renaming the constant's value moves through them
+// consistently and reddens none, measured by mutant on #1895's sibling.
+//
+// THE ENVELOPE ID IS THE CONTRACT, not an arbitrary number. It is 91, which is
+// exactly the in_reply_to the committed attachment_chunk_retrieval.json carries,
+// and the attachment_id is that fixture's. So the two files describe ONE
+// retrieval — request, then the chunk answering it — and the correlation decision
+// this frame records in prose (it rides the envelope, so the payload carries no
+// request-id key) appears in committed bytes. That is the tie
+// attachment_stored.json made for the upload leg, run the other way.
+//
+// InReplyTo is asserted NIL, which is the structural half of the classification
+// cmd/pyry/relay_guard_test.go's excludedTypes records: this frame is a request,
+// not a reply, and the correlation runs from it rather than to it. Its sibling
+// TestAttachmentStoredPayload_RoundTrip asserts non-nil on the same tie, so the
+// pair is a difference in shape rather than in values.
+func TestRequestAttachmentPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "request_attachment.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRequestAttachment {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRequestAttachment)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got pointer to %d, want nil — this frame is a request, not a reply", *env.InReplyTo)
+	}
+	// The value the retrieval chunk answers. Asserted here so the pair cannot
+	// drift into two unrelated fixtures.
+	if env.ID != 91 {
+		t.Errorf("ID: got %d, want 91 (the in_reply_to attachment_chunk_retrieval.json carries)", env.ID)
+	}
+
+	var payload RequestAttachmentPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if want := "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4"; payload.ConversationID != want {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, want)
+	}
+	if want := "7c1d5e92-4a30-4b8f-9e21-6d4c3b0a8f55"; payload.AttachmentID != want {
+		t.Errorf("AttachmentID: got %q, want %q", payload.AttachmentID, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestRequestAttachmentPayload_WireKeys pins the payload's COMPLETE set of wire
+// keys, so a later field cannot be added without this failing. It is the
+// machine-checked form of the frame's central omission — NO REQUEST-ID KEY,
+// because correlation rides the envelope's in_reply_to for the reasons
+// AttachmentStoredPayload records — rather than a property a reviewer has to
+// notice: a request_id, a nonce or a token arriving as a field reddens here by
+// construction, and the retrieval fixture that already landed would then be
+// describing a different scheme.
+//
+// It is load-bearing beyond the round trip above for the reason that round trip
+// cannot cover. An added field breaks the byte comparison there too, but only
+// until somebody regenerates the fixture; regenerate it under the same mutant and
+// the round trip goes green again while this stays red.
+//
+// The assertion is two-sided on purpose — every expected key present AND no
+// unexpected key — because a one-sided containment check is what lets an added
+// field through, and that is the whole mutant class this test exists for.
+func TestRequestAttachmentPayload_WireKeys(t *testing.T) {
+	b, err := json.Marshal(RequestAttachmentPayload{
+		ConversationID: "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
+		AttachmentID:   "7c1d5e92-4a30-4b8f-9e21-6d4c3b0a8f55",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	want := map[string]bool{"conversation_id": true, "attachment_id": true}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected wire key %q: the payload's key set is fixed at %v, and this frame must carry no request-id key — correlation rides the envelope's in_reply_to", k, want)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q, got: %s", k, b)
+		}
+	}
+}
+
+// TestRequestAttachmentPayload_ZeroValue_KeysPresent is the omitempty pin, and
+// the reason it exists separately from both tests above is that omitempty elides
+// a key only at its zero value: both of those marshal non-empty ids, so an
+// omitempty added to either field leaves them entirely green — including the
+// key-set check, which would still see the keys it expects.
+//
+// A marshalled zero value rather than a second fixture, for
+// AttachmentStoredPayload's reason: the payload is flat, so one all-zero struct
+// reaches every key and the extra file a nested shape would need buys nothing.
+//
+// The zero value is also the frame RequestAttachmentPayload's doc block warns
+// about. Every key is optional to encoding/json, so a truncated or hostile
+// payload decodes to exactly this — two empty strings, no error — which is why
+// the block requires a consumer to resolve nothing from them rather than joining
+// them into a path.
+func TestRequestAttachmentPayload_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(RequestAttachmentPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	for _, want := range []string{`"conversation_id":""`, `"attachment_id":""`} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
 		}
 	}
 }

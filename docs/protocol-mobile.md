@@ -475,6 +475,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`session_error`** | binary → phone | no | **New in v2.** Unsolicited, conversation-scoped terminal session-error frame — the daemon gave up delivering a conversation's queued backlog (`session.blocked`; #1007). Carries `conversation_id`, `code`, `message`; NOT `in_reply_to`-correlated. See [Error codes](#error-codes). |
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. Nothing emits, accepts or enforces it yet. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
+| **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -1604,9 +1605,14 @@ shape but the **trust** — see **Trust and content hygiene** below.
 ahead of its implementation, the same declare-then-publish sequencing
 [`model_list`](#model_list) and [`slash_command_list`](#slash_command_list) used:
 reassembly and claim-checking are #1741, storage is #1743, the inbound dispatch
-is #1897, and retrieval is #1746. One thing this section deliberately does
-**not** publish: the **retrieval request verb**, which #1746 declares (no such
-type exists in the daemon today).
+is #1897, and retrieval is three slices — the request verb #2052, the outbound
+stream #2053, and the handler that joins them #2054.
+
+**The section now publishes every frame in the transfer.** The one thing it used
+to hold back — the **retrieval request verb** — is
+[`request_attachment`](#request_attachment) below (#2052), so a client no longer
+has to guess at a verb no document named. **Nothing answers it yet**: #2054 is
+the handler, and #2053 the stream it replies with.
 
 **The upload success reply is now declared** — [`attachment_stored`](#attachment_stored)
 below (#1895), together with the [`attachment_id` shape](#the-attachment_id-shape)
@@ -1644,8 +1650,10 @@ There is **no `conversation_id`**, and the omission is a security property rathe
 than an oversight. An upload lands in the conversation the authenticated session
 is already on, decided daemon-side from session context, so a client cannot steer
 bytes into another conversation's directory by naming one. Retrieval's request
-verb does name a conversation, but that is a different frame and #1746's to
-declare.
+verb does name a conversation, but that is a different frame —
+[`request_attachment`](#request_attachment) (#2052) — and what makes *it* safe is
+that the id is a lookup key validated against the daemon's registry, never a
+value trusted as sent.
 
 **Chunking (the sender's obligation).** The per-chunk bound is **45000 raw bytes
 of `data` before base64** — not base64 characters, not payload bytes, not
@@ -1704,8 +1712,9 @@ thing to copy and it is the wrong one here.
   document.
 
 **Retrieval, and its two terminal signals.** Retrieval is the same frame,
-daemon-authored, flowing binary → phone in reply to the request verb #1746
-declares.
+daemon-authored, flowing binary → phone in reply to
+[`request_attachment`](#request_attachment) (#2052), correlated to it by
+`in_reply_to`.
 
 - **Completion** is `total_chunks` distinct indices received. There is **no
   completion frame**, and none is coming:
@@ -1946,6 +1955,98 @@ elements, so 33 copies of one id is over bound and is refused. A client still
 must not *rely* on deduplication — the receiver's answer to a repeat is defined
 here, but sending each id once remains the conforming shape.
 
+#### `request_attachment`
+
+Direction **phone → binary** (inbound v2 control; not in `v1TypeSet` — an old
+phone never sends one, and `IsKnownAppType` rejects it, which is the structural
+bar against a v1 client pushing one into the application dispatch chain).
+Declared by **#2052**.
+
+**Nothing answers it yet.** The handler that resolves the request and replies is
+**#2054**, and the outbound stream it replies with is **#2053**. Sent today the
+frame reaches no dispatch surface at all. This is the section's last unpublished
+frame — it was named as a gap here (*"no such type exists in the daemon today"*)
+so a client author would not invent a verb, and it is published ahead of its
+handler for the same reason `attachment_chunk` (#1752) and `attachment_stored`
+(#1895) were: the wire string is the contract, and a name chosen twice is a name
+chosen wrong once.
+
+**It names a conversation and an attachment, and nothing else.** **Every field is
+client-asserted** — this frame travels in one direction only, so unlike
+[`attachment_chunk`](#attachment_chunk) there is no leg on which its fields are
+daemon-authored and no provenance to disambiguate.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation whose attachment is wanted. A **lookup key validated against the daemon's own registry before it resolves anything**, never a value trusted as sent — and **naming a conversation here is not authorization**. This is the only place in this section where a client names a scope, which is why the rule is stated rather than assumed: it is exactly the property [Naming a message's attachments](#naming-a-messages-attachments) publishes for `attachment_ids`, where **confinement**, not the id's shape or randomness, is what does the work. Obeys **[The `attachment_id` shape](#the-attachment_id-shape)** — the same lowercase-UUIDv4 rule, which is also what the daemon enforces for conversation ids. |
+| `attachment_id` | string | The attachment wanted **within that conversation**: the client's own id, the one it repeated on every chunk of the upload. Obeys **[The `attachment_id` shape](#the-attachment_id-shape)**. **Not a capability** — knowing an id is not permission to fetch it, and the id is neither secret nor unguessable. |
+
+**Both fields are always present** (no `omitempty`), so a decoder may rely on
+both.
+
+**Correlation rides `in_reply_to`, so there is no request-id key** — the decision
+[`attachment_stored`](#attachment_stored) already took, and both terminals of
+this leg follow it: the answering `attachment_chunk` frames and an
+`attachment.stream_aborted` `error` alike name this request's envelope id. A
+client matches the answer to the ask through the envelope, not through a payload
+field.
+
+**An absent or empty id resolves nothing.** Every key is optional to a JSON
+decoder, so a truncated or hostile payload decodes to two empty strings rather
+than to an error; the empty string is not a valid id under any shape this section
+publishes, so it names no conversation and no attachment. A receiver must not
+join it into a path — an empty component resolves to the **conversation directory
+root**, not to an error — and must reject the frame rather than treat it as a
+request for nothing.
+
+**No bound is published here**, deliberately. This shape carries no count and no
+length field, so there is nothing to allocate from, and the encrypted-frame cap
+is the only byte limit that applies. Any limit the receiver puts on **concurrent
+retrievals** is receiver-configured and unpublished, learned by being rejected —
+the same posture `attachment.too_large` and `attachment.too_many_uploads` take on
+the upload leg, and the #1752 rule against publishing a figure ahead of the code
+that enforces it.
+
+**Three answers**, and the reject vocabulary is the existing one rather than
+anything minted here:
+
+- **The file**, as a stream of [`attachment_chunk`](#attachment_chunk) frames
+  correlated by `in_reply_to`, complete when `total_chunks` distinct indices have
+  arrived. There is **no completion frame** — see **Retrieval, and its two
+  terminal signals** above.
+- **[`attachment.not_found`](#error-codes)**, for every request that yields no
+  bytes: an unknown id, an id whose canonical shape is invalid, and an id
+  resolving outside the named conversation's directory are **deliberately
+  indistinguishable**, and the message is static and never echoes the requested id
+  or the resolved path. Two distinguishable answers would make this verb a
+  path-existence oracle for a traversal probe — which is the whole reason that
+  code is merged.
+- **[`attachment.stream_aborted`](#error-codes)**, if the daemon abandons a
+  retrieval mid-stream. The client MUST discard everything accumulated.
+
+**Sending this frame is not a capability, and neither is receiving an answer.**
+Authorization is **pairing**, enforced structurally at the Noise IK handshake
+exactly as for both existing legs; there is no per-verb gate on this one and none
+is invented here. What bounds a paired but hostile client is confinement to the
+conversation it named *and* the daemon's validation of that name — not the
+secrecy of an id. Both fields are client-supplied strings and are **loggable only
+after their shape is validated**, the rule this section already applies to
+`filename`; the payload carries no content-bearing bytes, so once validated it is
+safe to log whole. Nothing in it is claude-authored and nothing in it becomes
+prompt content, so [§ Security model](#security-model)'s threat 1 does not land
+here — the opposite of `send_message`'s `attachment_ids`, which does reach
+`claude`.
+
+```json
+{
+  "id": 91, "type": "request_attachment", "ts": "...",
+  "payload": {
+    "conversation_id": "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
+    "attachment_id": "7c1d5e92-4a30-4b8f-9e21-6d4c3b0a8f55"
+  }
+}
+```
+
 ### Session settings (v2)
 
 A paired client sends `set_session_settings` to change one session's **per-session settings** — its model, reasoning effort, permission mode, and YOLO (bypass-permissions) — and the daemon confirms with `session_settings_updated` (#597 Phase 3, #844, permission mode #1687). This section defines only the wire vocabulary; the handler that intercepts the request — gating on the negotiated `interactive` capability, validating, and persisting the change via `sessions.Pool.UpdateSettings` (#840) — is sibling #845.
@@ -2117,8 +2218,8 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | `attachment.too_many_uploads` | yes, after a backoff | The receiver's bound on **concurrent in-flight uploads** is hit (#1741). The one bound in this family that clears on its own — it clears when *other* uploads finish, so a client MUST back off rather than resend immediately: an immediate retry both fails and consumes the capacity it is waiting for. Contrast the permanent `attachment.too_large`. |
 | `attachment.too_large` | no | **One upload** exceeds the receiver's per-upload byte bound, detected either from the declared `size` on the first chunk or from accumulated bytes later (#1741). Permanent for that file — the same bytes fail the same way every time, so a client shrinks the file rather than retrying. Not `message.too_long`, which says one **envelope** was oversized. |
 | `attachment.storage_failed` | yes, after a backoff | A verified attachment could not be written to the host (#1743, surfaced by #1744). Carries a **static** message — never the host path and never the underlying filesystem error, either of which discloses the daemon's layout. The host condition may not clear at all, so a client MUST back off and MUST NOT hot-loop the re-upload. |
-| `attachment.not_found` | no | An attachment id did not resolve to a file inside the named conversation's directory. **Both verbs, as of #2036**: a retrieval request (#1746), and a [`send_message`](#naming-a-messages-attachments) whose `attachment_ids` names an id that does not resolve under the message's own conversation. One code rather than a second minted for the message path, because the predicate, the retryability, the static message and the client's repair are identical, and the merge argument below applies with *more* force to `send_message` — the cheaper probe of the two. **Deliberately indistinguishable** across an unknown id, an id whose canonical shape is invalid, and an id resolving outside that directory — a disclosure decision, not an imprecision: two codes would make the asking verb a path-existence oracle for a traversal probe. Nothing is lost by the merge, because all of those outcomes mean the same thing to a client — re-list the conversation's attachments — so there are no sub-cases to branch on. The message is static and never echoes the requested id or the resolved path; where a request names **several** ids it also **never says which one failed**, since a per-id answer would rebuild the oracle as a batch probe. |
-| `attachment.stream_aborted` | yes, after a backoff | The daemon abandoned a retrieval **mid-stream** (#1746). An `error` envelope correlated via `in_reply_to`, never a second attachment frame. The client **MUST discard everything accumulated for that transfer** and MUST NOT present the partial bytes as the file — with no completion frame this is the only negative signal the stream has. A re-request re-runs the same resolution work, so retry after a backoff, never immediately. |
+| `attachment.not_found` | no | An attachment id did not resolve to a file inside the named conversation's directory. **Both verbs, as of #2036**: a [`request_attachment`](#request_attachment) (declared by #2052, answered by #2054), and a [`send_message`](#naming-a-messages-attachments) whose `attachment_ids` names an id that does not resolve under the message's own conversation. One code rather than a second minted for the message path, because the predicate, the retryability, the static message and the client's repair are identical, and the merge argument below applies with *more* force to `send_message` — the cheaper probe of the two. **Deliberately indistinguishable** across an unknown id, an id whose canonical shape is invalid, and an id resolving outside that directory — a disclosure decision, not an imprecision: two codes would make the asking verb a path-existence oracle for a traversal probe. Nothing is lost by the merge, because all of those outcomes mean the same thing to a client — re-list the conversation's attachments — so there are no sub-cases to branch on. The message is static and never echoes the requested id or the resolved path; where a request names **several** ids it also **never says which one failed**, since a per-id answer would rebuild the oracle as a batch probe. |
+| `attachment.stream_aborted` | yes, after a backoff | The daemon abandoned a retrieval **mid-stream** — the stream is #2053's and the `error` frame reporting it is #2054's to emit. An `error` envelope correlated via `in_reply_to` (naming the [`request_attachment`](#request_attachment) that asked), never a second attachment frame. The client **MUST discard everything accumulated for that transfer** and MUST NOT present the partial bytes as the file — with no completion frame this is the only negative signal the stream has. A re-request re-runs the same resolution work, so retry after a backoff, never immediately. |
 
 WS close codes used at the transport layer:
 
@@ -2413,6 +2514,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-03`: **Published the retrieval request verb** (#2052), closing the one hole this section named out loud — *"the retrieval request verb ... (no such type exists in the daemon today)"* — and with it the last unpublished frame of the attachment transfer. A client that wanted a file back had nothing to send, and [pyrycode-desktop#687](https://github.com/pyrycode/pyrycode-desktop/issues/687) was parked on exactly that question. [`request_attachment`](#request_attachment) is that frame, published in both places a frame is published, with a **three-column** field table rather than [`attachment_stored`](#attachment_stored)'s four: this one travels in **one direction only**, so every field is client-asserted and a provenance column would repeat a single value where [`question_answer`](#question_answer)'s varies. **The name was fixed here rather than left to the handler**, because a wire type string *is* the contract — the client writes its sender against the published name, and a name chosen twice is a name chosen wrong once. It follows the three inbound *ask the daemon for X* verbs already on this wire (`request_snapshot`, `request_debug_bundle`, `request_session_settings`) instead of inventing a fourth idiom. **It names a conversation and an attachment and nothing else**, which this section had already committed to: [`attachment_chunk`](#attachment_chunk) carries no `conversation_id` because an upload lands in the conversation the authenticated session is already on, so naming one there would only let a client steer bytes elsewhere — while a retrieval must be able to say which conversation's file it wants. That makes this **the only frame in the section where a client names a scope**, so the safety is published with the field rather than left to its first implementer: the `conversation_id` is a **lookup key validated against the daemon's registry before it reaches a path join**, never a value trusted as sent, and **naming a conversation is not authorization** — the [`attachment_ids`](#naming-a-messages-attachments) rule that **confinement**, not an id's shape or randomness, does this work. Both ids obey the existing [`attachment_id` shape](#the-attachment_id-shape) rather than a new rule. **Correlation rides `in_reply_to`, so the payload carries no request-id key** — `attachment_stored`'s decision, and the one the code already owed an answer for: the committed retrieval chunk fixture rides `in_reply_to` while its test recorded the question as open, so inventing a request-id key here would have left a landed fixture describing a different scheme. That fixture's `91` is now the envelope id of a committed `request_attachment` fixture, so the pair describes **one retrieval** and the decision appears in bytes rather than only in prose. **An absent or empty id resolves nothing**, stated because the failure is silent and specific: every key is optional to a JSON decoder, so a hostile payload decodes to two empty strings, and joining an empty component addresses the **conversation directory root** rather than erroring. **No bound is published** and none is minted — the shape carries no count or length field, so there is nothing to allocate from, and any concurrency limit stays receiver-configured and learned by being rejected (#1752's rule). The reject vocabulary is the **existing** one, pointed at rather than restated, so `attachment.not_found`'s deliberate merge cannot be diluted by a second telling. **Nothing emits, accepts or dispatches the frame yet**: it is filed in the relay guard under a **pending-handler** label rather than as an inbound type (which the guard would fail with no handler) or as a push (which would be false for an inbound frame), the same filing `question_answer` / `question_refused` and `attachment_chunk` each carried before their own handlers landed. Declaration only — **no admission-time check**, which with the registry validation belongs to #2054, the handler; #2053 is the stream it answers with. The scope fence, the no-`conversation_id` argument, the retrieval paragraph and the two `attachment.*` error rows are repaired accordingly, their **#1746** cites split across #2052 / #2053 / #2054 — that ticket no longer exists as work, the repair this file made for #1744 and #1693.
 - `2026-09-03`: **A message's stored attachments now reach `claude`** (#2038), the slice that delivers the user story the whole [Attachments](#attachments) family exists for. `attachment_ids` had been declared (#2036) and the id → path resolver built (#2037), with nothing joining them: a client could upload a file, name it on a message, and `claude` never heard about it. The daemon now resolves each named id **against the message's own conversation** and delivers a prompt carrying the user's text followed by the attachments' on-host paths and a direction to read them. The **path form, not an inlined content block**, is the decision on record since 2026-05-16 — once persistence puts the bytes on disk, inlining duplicates them into the transcript, and the accepted cost is one extra turn per attachment. Three things this section had deliberately left open are now **decided and published rather than merely implemented**: the **32-id bound is enforced** for the first time (it counts raw **elements**, before any deduplication, exactly as published); an **over-bound list is refused with `protocol.malformed`, not retryable** — refused rather than truncated, because truncation drops a person's files while the message ships looking complete, and reusing the malformed code rather than minting one because 32 is a contract a client knows *before* it sends; and a **repeated id is deduplicated on first occurrence** and the message accepted, since refusing punishes a client for something harmless and naming a path twice tells `claude` to read one file twice. The security posture is inherited rather than re-derived: every id goes through `attachments.ResolvePath`, so the **canonical-shape check happens before any path join**, and **confinement** — not the id's shape or randomness — is what keeps a documented non-capability from becoming one, discharged by validating the client-asserted `conversation_id` against the registry binding **before** any resolve. A named id that does not resolve refuses the **whole** message with `attachment.not_found`, whose static message still **never says which of the ids failed**. **No host path reaches the wire**: what a client reads back through [`queue_state`](#queue-v2) — on the enqueue push and on connect-time reconcile alike — carries the user's own text, enforced by the daemon's queue carrying the composed prompt as a separate delivery payload its snapshot type cannot project, rather than by a rule a consumer has to remember. And **no log line carries a filename, a path, or a shape-unvalidated id** at any level; the resolver's error, which formats a raw client-supplied id into its message, is discarded at the one adapter that ever holds it. That `claude`, handed a path, actually opens the file is a claim about a live model and is #2039's.
 - `2026-09-02`: **Published which attachments a message carries** (#2036). The upload leg was complete — bytes reassembled, verified, filed and answered with [`attachment_stored`](#attachment_stored) — and **nothing on the wire said which message an uploaded attachment belonged to**, so a daemon would have had to infer the set from upload order or arrival timing. [`send_message`](#application-message-types) now carries an optional `attachment_ids`, published in both places this document publishes a field: the § Application message types row, whose Notes cell was empty, and § Attachments → [Naming a message's attachments](#naming-a-messages-attachments). Elements obey the existing [`attachment_id` shape](#the-attachment_id-shape) rather than a new rule, and the **bound is 32 ids per message, counting elements rather than distinct ids** — a published, **unchecked** number in the `MaxAttachmentChunkBytes` idiom (a client needs it *before* it sends), deliberately not the receiver-configured-and-unpublished idiom `attachment.too_large` uses. The bound is stated as contract clarity and bounded work, **not** as a DoS mitigation: the envelope cap already limits an unbounded list to ~1680 elements and a paired device may already spawn `claude` turns. **The empty case is the key omitted entirely** — what shipping v1-compatible clients already send — with `null` and `[]` also accepted and all three made **indistinguishable to any consumer**; the always-present-never-null encoding the four outbound slice-valued payloads carry is a shape precedent and not a placement one, and applying it here would have published "always present" for a key half the wire's population never sends. Security posture is published with the field rather than left to the consumer: every element is a **claim** that becomes both a **directory component** and **prompt content**, so § Security model's threat 1 lands on it and **one canonical-shape check answers both hazards**; elements are loggable only after validation; and **confinement to the message's own conversation** — not the id's shape or its randomness — is what keeps a documented non-capability from becoming one. `attachment.not_found` is **widened to span both verbs** rather than a code minted for this path, since the predicate, retryability, static message and repair are identical — and its static message now also never says *which* of several named ids failed, which would rebuild the path-existence oracle as a batch probe. Nothing produces, consumes or validates the field yet; #2038 does, and no code is published for an over-bound list because whatever first counts one owns that decision.
 - `2026-09-02`: **Published the attachment upload's success reply and the `attachment_id` shape** (#1895), closing a gap this file previously named as one: *"No success frame is declared here, and a client must not invent one."* A client that uploaded was told what went wrong on each of the seven `attachment.*` failure paths and got **silence** on the path that worked. [`attachment_stored`](#attachment_stored) is that path's single positive terminal — the transfer completed, every claim on it was checked, the bytes are stored — published in both places a frame is published, with the four-column **provenance** table [`question_dismissed`](#question_dismissed) uses rather than [`attachment_chunk`](#attachment_chunk)'s three-column one, because every field here is daemon-asserted and that is the whole difference from the frame it answers. **Correlation rides `in_reply_to`**, matching `session_settings_updated` and the reject half of this same leg (`attachment.stream_aborted` is an `error` correlated the same way) — but the id it names is the chunk **whose arrival completed the transfer**, not the last one sent, and since chunks may arrive in any order **a client cannot predict which of its envelope ids that will be**. That is why `attachment_id` also rides the payload, and the two are published as non-redundant: the envelope field says which frame this answers, the payload says which transfer it concludes, and only the second is a value the client chose and can look up. The payload carries **that one id and nothing else** — no host path, no directory component, no stored filename, no `conversation_id`, no echoed `size` / `sha256` / `total_chunks`. The filename's exclusion is argued rather than assumed: the daemon folds it into one path component whose result is **neither unique nor an identifier**, so echoing it would hand a client something it cannot rely on; and keeping it out is also what makes this the one frame in the section **safe to log whole**, since it carries none of the three fields the section forbids logging. Leaking a host path here would have undone `attachment.storage_failed`'s existing prohibition from the other side. **The [`attachment_id` shape](#the-attachment_id-shape) is published for the first time**, and it was already decided rather than open — the receiver validates it as a **lowercase UUIDv4**: 36 bytes, `-` at 8/13/18/23, `4` at 14, one of `89ab` at 19. The field table's *"at most 64 bytes"* was a **ceiling for the envelope arithmetic and never the shape**, and read as permission to use any short string it cost a whole transfer to correct: nothing checks the shape at **admission**, so a non-canonical id is accepted, every chunk is transmitted, and the upload is refused only when the completing chunk reaches storage. **Lowercase is load-bearing rather than cosmetic** — the id becomes a directory name, and the lowercase-only alphabet is what keeps the id-to-directory mapping **injective on a case-insensitive filesystem**, which APFS is by default, so uppercase ids give two attachments one directory on macOS and their writes cross-contaminate with no symlink involved. Containment follows from the shape and **never from the length ceiling**, which accommodates `../../../../etc/passwd` several times over. **Nothing emits the frame yet** (the inbound dispatch is #1897, the end-to-end observation #1898), the same declare-then-publish sequencing #1752 → #1751 used twice already in this family. The § Attachments scope fence is rewritten accordingly and its two **#1744** cites repaired — that ticket was split into #1895 and #1897 and no longer exists as work, the repair this file made for #1693. The retrieval request verb remains the one thing the section does not publish (#1746). Declaration only: no producer, no consumer, no validator, and **no admission-time check** — that is #1897's, which owns the reject path and the code to answer with.
