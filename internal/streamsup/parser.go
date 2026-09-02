@@ -751,10 +751,11 @@ const maxSlashCommandName = 256
 // outcome for the COUNT. The descriptions alone total 10,580 bytes — already past
 // 10240 and past 8192 before a single name is counted — and one of them is 1145 bytes
 // by itself. It is stated against the FRACTION and not against the whole 16 KiB
-// deliberately: uncut name+hint+description is 11,604, over both established fractions
-// but UNDER 16384, so "past the whole ceiling uncut" would be false and would rest this
-// argument on a premise a reader can knock down. The third field moved that figure and
-// the premise was re-checked rather than assumed, this sentence being built to be
+// deliberately: uncut name+hint+description+aliases is 11,668, over both established
+// fractions but UNDER 16384, so "past the whole ceiling uncut" would be false and would
+// rest this argument on a premise a reader can knock down. The third field moved that
+// figure and the fourth moved it again by its whole 64-byte footprint; the premise is
+// re-checked at each field rather than assumed, this sentence being built to be
 // knock-down-able and a stale number being exactly the knock-down. TruncatedFields is what makes the cut
 // honest rather than silent.
 //
@@ -873,25 +874,29 @@ const maxSlashCommandArgumentHint = 256
 // which is maxSlashCommandArgumentHint's name-the-base obligation inherited with the
 // problem different rather than worse. Both bases are stated so a reader re-deriving
 // one does not reach a different number and think this doc wrong: 64 is 2.67x the
-// longest captured NAME (24, __remote-workflow) and 7.1x the longest captured ALIAS
-// (9), also 11x the alias mean and 12.8x the alias median.
+// longest captured NAME (24, fewer-permission-prompts) and 7.1x the longest captured
+// ALIAS (9), also 11x the alias mean and 12.8x the alias median. The name witness is
+// named because this doc INVITES re-derivation: __remote-workflow, which carries the
+// charset fact everywhere else in this file, is only 17 bytes and would put a
+// re-deriving reader at 3.76x.
 //
 // WHY THE NAME POPULATION IS THE RIGHT BASE, and it is MEASURED rather than assumed
 // because the obvious intuition is false. "An alias is a short form of the name" would
-// make this field's own longest the base — but FIVE of the eleven captured aliases are
-// LONGER than the name they alias (reset for clear, checkup for doctor, proactive for
-// loop, settings for config, and routines ties schedule). An alias is simply another
-// name for the command, written by the same workspace author in the same file, and one
-// captured alias (name, for rename) is a token that could equally have been a command's
-// own name. So the population an alias is drawn from is the NAME population, whose
-// longest member the capture puts at 24 bytes, and a cap that admits any name-shaped
-// alias is what this field needs.
+// make this field's own longest the base — but THREE of the eleven captured aliases are
+// strictly LONGER than the name they alias (checkup for doctor, proactive for loop,
+// settings for config) and THREE more TIE it (routines for schedule, reset for clear,
+// stats for usage), so six of the eleven are at least as long as the name they stand
+// in for. An alias is simply another name for the command, written by the same
+// workspace author in the same file, and one captured alias (name, for rename) is a
+// token that could equally have been a command's own name. So the population an alias
+// is drawn from is the NAME population, whose longest member the capture puts at 24
+// bytes, and a cap that admits any name-shaped alias is what this field needs.
 //
 // WHY NOT 32: it is 3.6x this field's own longest but only 1.33x the longest captured
 // name, so the cap would sit inside the noise of the population aliases come from —
-// maxSlashCommandArgumentHint's WHY NOT 128 argument, with __remote-workflow's 24 bytes
-// as the committed evidence that this vocabulary reaches into that range. 16 cuts a
-// name-shaped alias outright.
+// maxSlashCommandArgumentHint's WHY NOT 128 argument, with fewer-permission-prompts'
+// 24 bytes as the committed evidence that this vocabulary reaches into that range. 16
+// cuts a name-shaped alias outright.
 //
 // WHY NOT 256, maxSlashCommandName's own number: that cap's 10.7x is paid ONCE per
 // entry, and this one is paid up to maxSlashCommandAliasCount times, so copying it

@@ -83,10 +83,12 @@ Against the other three fields: names 494 bytes, hints 530, descriptions 10,580.
 field by an order of magnitude.
 
 **Measured counter-claim, because the obvious intuition is false.** An alias is not systematically shorter
-than the name it aliases: 5 of the 11 are LONGER (`reset` for `clear`, `checkup` for `doctor`, `proactive`
-for `loop`, `settings` for `config`, and `routines` ties `schedule`). So "aliases are short by nature" is
-not available as an argument, and the population an alias is drawn from is the NAME population — which the
-capture measures at a 24-byte longest (`__remote-workflow`). One captured alias (`name`, for `rename`) is
+than the name it aliases: 3 of the 11 are strictly LONGER (`checkup` for `doctor`, `proactive` for `loop`,
+`settings` for `config`) and 3 more TIE (`routines`/`schedule`, `reset`/`clear`, `stats`/`usage`), so 6 of
+the 11 are at least as long as the name they stand in for. So "aliases are short by nature" is not
+available as an argument, and the population an alias is drawn from is the NAME population — which the
+capture measures at a 24-byte longest (`fewer-permission-prompts`; `__remote-workflow`, the charset
+witness this file uses elsewhere, is only 17). One captured alias (`name`, for `rename`) is
 a token that could equally have been a command's own name. That measurement drives the byte cap below.
 
 ## Design
@@ -127,15 +129,16 @@ normalise rather than two to reconcile.
 - **Base named, per `maxSlashCommandArgumentHint`'s standing obligation, and here there are two.** Over
   the 11 observed aliases: 64 is 7.1x the longest (9), 11x the mean, 12.8x the median. Over the population
   an alias is DRAWN from — command names, per the counter-claim above — it is 2.67x the longest captured
-  name (24). The second base is the one the derivation rests on; the first is stated so a reader
-  re-deriving does not reach 7.1x and think this doc wrong.
+  name (24, `fewer-permission-prompts`). The second base is the one the derivation rests on; the first is
+  stated so a reader re-deriving does not reach 7.1x and think this doc wrong, and the name witness is
+  named for the same reason.
 - **Why not 256 (the name's own cap):** that cap's 10.7x is paid ONCE per entry. This one is paid up to
   `maxSlashCommandAliasCount` times, so copying it applies a singly-multiplied budget to a
   doubly-multiplied field. `maxSlashCommandDescription`'s multiplication argument, one dimension further
   down, and `maxModelEffortLevel`'s position in its own family.
 - **Why not 32:** 32 is 3.6x the longest observed alias but only 1.33x the longest captured NAME, so the
   cap would sit inside the noise of the population aliases come from — `maxSlashCommandArgumentHint`'s
-  WHY NOT 128 argument, with `__remote-workflow`'s 24 bytes as the committed evidence.
+  WHY NOT 128 argument, with `fewer-permission-prompts`' 24 bytes as the committed evidence.
 - **Why not 16:** it cuts a name-shaped alias outright.
 - **Mid-rune is unreachable on the live path:** no captured alias carries non-ASCII and the longest is 9
   bytes, so a cut cannot occur at all, let alone inside a rune. Mid-rune is a constructed-fixture question
@@ -255,6 +258,11 @@ sentence, not by grepping the new symbol's name — the emitter's own recorded l
   false. Redrawn, as that paragraph itself instructs: all four keys are declared, so all four are
   UNWRITTEN — kept out by what this function chooses to log rather than by what the decode target can hold
   — and there is no key left in the "unreachable by omission" category at all.
+- `turnevent.SlashCommand` (the TYPE doc, above the struct) — "Its four fields are FOUR of
+  `protocol.SlashCommand`'s five" becomes all five, and "The one still missing — Aliases, between the last
+  two — is deliberately absent" resolves. The `FIXING THE ORDER BEFORE THE SECOND FIELD EXISTS` paragraph
+  gains its third and last piece of evidence, which is the one that pays the promise off at the END of the
+  order rather than by insertion.
 - `turnevent.SlashCommand.TruncatedFields` — "TODAY IT CAN CARRY name, argument_hint AND description"
   becomes four, and "A NAME FOR A FIELD THIS TYPE DOES NOT DECLARE MUST NEVER APPEAR" now has an empty
   extension, which is worth saying.
@@ -462,9 +470,10 @@ Each is resolved in Phase B and recorded under `## Revisions` if it changed the 
 
 **Open question 1 (is 64 right for the byte cap?)** — resolved as 64, design unchanged. The
 name-population argument survived re-reading and was strengthened by a measurement made during
-implementation: five of the eleven captured aliases are LONGER than the name they alias, so "an alias is
-a short form of the name" is false and the alias population cannot be its own base. Both bases are stated
-on `maxSlashCommandAlias`.
+implementation: six of the eleven captured aliases are at least as long as the name they alias — three
+strictly longer and three tying — so "an alias is a short form of the name" is false and the alias
+population cannot be its own base. Both bases are stated on `maxSlashCommandAlias`. (The count in this
+paragraph read "five … LONGER" until the 2026-09-02 correction below.)
 
 **Open question 2 (the `Count` suffix)** — kept, on `maxModelEffortLevelCount`'s naming argument
 verbatim. The one-character difference between the two constants is real and a swap at the call site
@@ -496,3 +505,53 @@ Two claims were **confirmed** rather than corrected: the count-cap boundary row 
 count bound's `>` becoming `>=`, and the four-name declaration-order row is the sole red for the alias
 bound call moved before the description's. The count-liveness row picked up a measured claim it had not
 been credited with: it is the sole red for both mutants that make a count cut SILENT.
+
+### 2026-09-02 (rework 1) — four derivation-comment claims corrected against the capture
+
+Verifier FAIL on PR #1999: correct code, complete coverage, no runtime finding, four false or unswept
+factual claims in the derivation comments. All four are comment-only; no constant moves, no test changes,
+no design decision reopened. Every number below was re-derived from
+`internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json` in this session before editing.
+
+1. **The byte cap's name witness was wrong.** `maxSlashCommandAlias`'s doc attributed the 24-byte longest
+   captured NAME to `__remote-workflow`, which is **17** bytes; the longest is
+   **`fewer-permission-prompts`, at 24** (then `artifact-capabilities` 21, `workflow-launch-exec` and
+   `artifact-diagramming` 20, `run-skill-generator` 19, `__remote-workflow` 17 in sixth). The base and
+   therefore the constant are unchanged — 2.67x and 1.33x both still hold — but the doc explicitly invites
+   re-derivation from the named witness, and a reader doing that reached 3.76x and would have reopened the
+   WHY NOT 32 rejection. `__remote-workflow` remains the right witness for the CHARSET fact it carries
+   elsewhere in the file, and is untouched there; it was the wrong witness for LENGTH. Corrected in the
+   constant's doc, in this plan's Design § 2 and in the measured counter-claim above it.
+2. **The alias-versus-name comparison miscounted.** "FIVE of the eleven captured aliases are LONGER than
+   the name they alias" was wrong and self-contradictory — it counted `routines` as longer while its own
+   parenthetical called it a tie, listed `reset` as longer when `reset` and `clear` are both 5 bytes, and
+   omitted the `stats`/`usage` tie entirely. Measured: **three strictly longer** (`checkup`/`doctor`,
+   `proactive`/`loop`, `settings`/`config`) and **three ties** (`routines`/`schedule`, `reset`/`clear`,
+   `stats`/`usage`), so **six of eleven are at least as long**. The conclusion is unaffected — "an alias is
+   a short form of the name" is still false and the name population is still the right base — but the
+   paragraph advertises itself as MEASURED and is the load-bearing argument for 64.
+3. **`maxSlashCommandDescription`'s uncut-total was stale.** The A CAP FIRING ON CLAUDE'S ORDINARY OUTPUT
+   paragraph still read `11,604` (three fields) where the fourth field moves it to **11,668**. Every other
+   figure in that doc was updated by the implementation commit — retained 6,647→6,711, the fraction table
+   10/13→6/8, the term 768→1280, the 512 candidate 8,763→8,827 — and this one was missed, on the one
+   sentence built to be knock-down-able by exactly a stale number. The conclusion is unaffected (11,668 is
+   still over both fractions and still under 16384); the field list in the sentence grew to four alongside.
+4. **The `turnevent.SlashCommand` TYPE doc was not swept.** It still read "Its four fields are FOUR of
+   `protocol.SlashCommand`'s five … The one still missing — Aliases, between the last two — is
+   deliberately absent," about thirty lines above the declaration this slice added. Now all five, with the
+   set stated as COMPLETE and no further field promised. The `FIXING THE ORDER BEFORE THE SECOND FIELD
+   EXISTS` paragraph stopped at Description and ArgumentHint; Aliases is the third and last, and it is the
+   one that pays the promise off at the END of the order rather than by insertion — appending it was
+   CORRECT here where appending ArgumentHint would have been wrong, which is what makes the rule a checked
+   fact rather than a coincidence. This is also a **plan-layer** miss: § 6's falsified-claims list named
+   `SlashCommand.TruncatedFields` and `SlashCommandList` but not the type doc that encloses them, so the
+   sweep missed it twice. § 6 now names it.
+
+**The sweep lesson, which is what generalises.** Findings 1–3 are all the same shape: a number or a
+witness correct when written and stale or mis-transcribed once, inside a paragraph whose own text says a
+reader will re-derive it. Grepping the new symbol's name finds none of them — they live in a SIBLING
+constant's doc (3), in a witness token shared with an unrelated fact (1), and in a parenthetical that
+contradicts its own head clause (2). Finding 4 is the enclosing-doc miss: sweeping a type's FIELD docs
+does not sweep the TYPE doc above them, and the falsified-claims list inherited that blind spot from the
+plan. A derivation comment is swept by re-deriving every number it states, not by reading it for
+plausibility.

@@ -853,12 +853,12 @@ type ModelList struct {
 // an Event, so it carries no marker — BackgroundTask's and ModelOption's shape,
 // for their reason.
 //
-// Its four fields are FOUR of protocol.SlashCommand's five (#1727), in that
+// Its five fields are ALL FIVE of protocol.SlashCommand's (#1727), in that
 // type's own declaration order: the command's name, its argument hint, its
-// description, and the report naming which of this entry's fields the producer
-// cut. The one still missing — Aliases, between the last two — is deliberately
-// absent and arrives with its own slice, exactly as ModelOption grew a field at
-// a time across #1819 / #1827 / #1828.
+// description, its aliases, and the report naming which of this entry's fields
+// the producer cut. The set is COMPLETE as of #1825 — the vocabulary grew a
+// field at a time across #1877 / #1904 / #1957 / #1825, exactly as ModelOption
+// grew across #1819 / #1827 / #1828, and there is no further field promised.
 //
 // FIXING THE ORDER BEFORE THE SECOND FIELD EXISTS is the whole point of choosing
 // it now, and Description (#1904) is the first evidence that the promise was
@@ -868,9 +868,14 @@ type ModelList struct {
 // (#1957) is the second, and it is the case the promise was actually WRITTEN
 // for: Description had one declared field to land after, so no reordering could
 // have got it wrong, where this field had to be INSERTED BETWEEN two that
-// already existed and appending it would have compiled just as well. Each later
-// field lands the same way, so the eventual mapping onto the wire type stays a
-// field-for-field copy rather than a reordering a reader has to check.
+// already existed and appending it would have compiled just as well. Aliases
+// (#1825) is the third and last, and it pays the promise off at the END of the
+// order rather than by insertion: it is the only one of the three whose
+// mirrored slot sits after every field declared before it, so appending it was
+// CORRECT here where appending ArgumentHint would have been wrong — the rule
+// earns its keep by making that a checked fact rather than a coincidence.
+// The mapping onto the wire type is now a field-for-field copy across the whole
+// struct rather than a reordering a reader has to check.
 type SlashCommand struct {
 	// Name is claude's command name, VERBATIM, per ModelAnnounced.Model's rule:
 	// no lowercasing, no canonicalisation, no prefix stripping, and no leading
