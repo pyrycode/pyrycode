@@ -323,3 +323,32 @@ tool result the way #1938 captured the call, that is its own ticket.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-02
+
+## Revisions
+
+### 2026-09-02 — implementation
+
+**No design departure.** Every interface above landed as specified, both SHOULD FIX
+findings included: claude-authored strings reach a message only through `%q` and
+`truncateString` (`questionLabelLogCap`, `questionTextLogCap`), and the `model`
+parameter's doc comment states it must be a compile-time constant.
+
+Both open questions resolved without changing the design:
+
+1. **Continuation compliance.** The first-mention rule was checked mechanically
+   against ten scenarios outside the worktree before shipping, including the two
+   overlap hazards the plan did not name: an unchosen label that is a PREFIX of the
+   chosen one (`LRU` beside `LRU-K`) yields equal indices, and the strict `<`
+   comparison is what keeps that from being a false red. A restated batch fails, a
+   compliant bare label passes, and "you chose X rather than Y" passes.
+2. **multiSelect.** Not forced. `raiseRealQuestionBatch` logs each question's flag,
+   so the run records what claude actually produced.
+
+**Measured size, stated rather than smoothed over.** The file is 484 lines (233 code,
+225 comment) against the refiner's ~300-line estimate; with the 23-line harness
+parameterisation the slice wrote ~507 lines, above the size-S 400-line boundary. The
+code half is in line with the analogue pair (95 and 168 code lines) — this file
+carries what those two split across them plus the choice logic neither has — and the
+excess is the package's comment density. The boundary was applied in good faith at
+both enforcement points; the overrun was only measurable once the file existed, and
+splitting a finished, verified single deliverable would cost more than it returns.

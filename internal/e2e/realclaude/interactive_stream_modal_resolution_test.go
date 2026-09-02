@@ -83,7 +83,7 @@ const (
 // raise a real permission modal, answer allow_once, and prove the turn resumes
 // to completion. Answer-only — the cancel phase (#1030 Phase B) is out of scope.
 func TestInteractiveStreamModalResolution(t *testing.T) {
-	h, convID := startStreamModalResolutionHarness(t)
+	h, convID := startStreamModalResolutionHarness(t, permissionDaemonModel)
 	// A per-run nonce keeps the trigger command distinct (defeats accidental
 	// caching) without asserting on its echo.
 	nonce := time.Now().UnixNano()
@@ -132,7 +132,12 @@ func TestInteractiveStreamModalResolution(t *testing.T) {
 // fan to every interactive conn regardless of conversation), so the interactive
 // capability alone receives them. Returns the harness and the seeded bound
 // conversation id. Skips cleanly when claude / creds are absent.
-func startStreamModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
+// model is passed through to spawnPermissionDaemon's --model and MUST be a
+// compile-time constant, for that helper's reason. It became a parameter in
+// #1987, whose question gate needs the one model under which a live
+// AskUserQuestion call has actually been measured; the two modal gates pass
+// permissionDaemonModel and are unchanged by it.
+func startStreamModalResolutionHarness(t *testing.T, model string) (*perConvHarness, string) {
 	t.Helper()
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
@@ -181,7 +186,7 @@ func startStreamModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	d := spawnPermissionDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server")
+	d := spawnPermissionDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server", model)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)

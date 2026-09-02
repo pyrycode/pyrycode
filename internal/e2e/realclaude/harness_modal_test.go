@@ -150,7 +150,7 @@ func startModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
 
-	d := spawnPermissionDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server")
+	d := spawnPermissionDaemon(t, home, workdir, claudeBin, fr.URL()+"/v2/server", permissionDaemonModel)
 	t.Cleanup(func() { d.stop(t) })
 
 	serverID := readPersistedServerID(t, home)
@@ -168,13 +168,24 @@ func startModalResolutionHarness(t *testing.T) (*perConvHarness, string) {
 	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir}, liveModalConvID
 }
 
+// permissionDaemonModel is the model every permission-modal gate in this package
+// has always run under, hoisted out of spawnPermissionDaemon's argv when #1987
+// made the model a parameter. Passing it preserves those gates byte for byte.
+const permissionDaemonModel = "haiku"
+
 // spawnPermissionDaemon forks real pyry exactly like spawnBootstrapDaemon EXCEPT
 // it drops the trailing --dangerously-skip-permissions flag, so real claude runs
 // in default permission mode and the first gated Bash call raises a real
 // permission modal. It reuses bootstrapDaemon / waitForReady / stop /
 // shortSocketPath / ensurePyryBuilt / lockedBuffer unchanged. Blocks until the
 // control socket is dialable.
-func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL string) *bootstrapDaemon {
+//
+// model is the value handed to claude's --model. IT MUST BE A COMPILE-TIME
+// CONSTANT at every call site: it lands directly in the child's argv, so a
+// runtime-derived string would put arbitrary text there. Today's callers pass
+// permissionDaemonModel or askQuestionCaptureModel, and which gate runs under
+// which is argued at the caller, not here.
+func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL, model string) *bootstrapDaemon {
 	t.Helper()
 	bin := ensurePyryBuilt(t) // builds with real HOME (warm cache); runs with isolated HOME
 	socket := shortSocketPath(t)
@@ -188,7 +199,7 @@ func spawnPermissionDaemon(t *testing.T, home, workdir, claudeBin, relayURL stri
 		"-pyry-workdir=" + workdir,
 		"-pyry-relay=" + relayURL,
 		"--",
-		"--model", "haiku",
+		"--model", model,
 		// NOTE: NO --dangerously-skip-permissions — that flag suppresses the
 		// permission modals this gate exists to exercise. This is the single line
 		// that differs from spawnBootstrapDaemon.
