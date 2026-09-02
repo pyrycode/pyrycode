@@ -55,6 +55,20 @@ carrying the **echoed** prompt (the non-vacuity guard — proves the full
 round-trip, not just "some text"), then a terminal `turn_state{idle}`. Details
 and the full wire diagram: [codebase/1141.md](../codebase/1141.md).
 
+### Cursor-stamping only needs the ack, not the drain (#1898)
+
+The test above drains all the way to `turn_state{idle}` because proving
+delivery of the turn is its whole subject. A sibling whose precondition is
+narrower — only that `sessionRouter.Route`'s success path has stamped
+`activeConversation` — doesn't need that drain: `handlers.SendMessage` calls
+`Route` and only *then* enqueues and acks, so an observed ack is already
+proof the cursor is non-empty. #1898's attachment-upload e2e (which needs a
+routed conversation before it can upload, not a completed turn) stops at the
+ack for exactly this reason, saving the drain's ~20s of deadline for an
+assertion that ticket never makes. Any e2e that needs the cursor stamped as
+a *precondition* — rather than as the thing under test — should copy this
+shorter stop, not the full drain.
+
 ### `relay_v2_stream_model_list_test.go` — `TestRelayV2_StreamModelListReachesConnectedPhone` (#1845)
 
 A spawn-time frame (here, `model_list`) can't be observed by simply

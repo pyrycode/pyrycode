@@ -109,6 +109,13 @@ no validator, by design.
   magnitude. The per-upload byte bound is a separate concern (#1777); adding
   an absolute size cap here would be scope creep this ticket deliberately
   declined.
+- **A fixture sized at exactly `MaxAttachmentChunkBytes` is single-chunk, not
+  multi-chunk.** `total_chunks == max(1, ceil(size / bound))` is compared by
+  equality, and at `size == bound` that's `max(1, ceil(1)) == 1` — the exact
+  boundary a test author reaches for first when picking "one chunk's worth."
+  #1898's e2e upload proof derives `total_chunks` from the constant with an
+  explicit `< 2` guard rather than hardcoding a fixture size, so a future move
+  of the constant reddens loudly instead of silently degrading to one chunk.
 
 ## What a successful `Assemble` does not mean
 
