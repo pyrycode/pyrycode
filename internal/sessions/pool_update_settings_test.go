@@ -39,6 +39,12 @@ func helperPoolWithSettings(t *testing.T, regPath string, settings SessionSettin
 			Model:        settings.Model,
 			Effort:       settings.Effort,
 			YOLO:         settings.YOLO,
+			// Through permissionModeForDisk, so the pre-written entry has the
+			// on-disk shape saveLocked would have produced for these settings —
+			// notably no permission_mode key for the default posture or the
+			// escalation. A test that wants the pre-#2043 shape passes a mode-free
+			// literal and gets exactly that.
+			PermissionMode: permissionModeForDisk(settings),
 		}},
 	}); err != nil {
 		t.Fatalf("pre-write registry: %v", err)

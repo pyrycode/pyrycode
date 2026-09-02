@@ -387,8 +387,11 @@ func New(cfg Config) (*Pool, error) {
 		lastActiveAt = entry.LastActiveAt
 		// Honour persisted spawn settings across a daemon restart. Unlike
 		// lifecycle_state (per-process, ignored below), these are the
-		// operator's spawn intent and must survive restart.
-		settings = SessionSettings{Model: entry.Model, Effort: entry.Effort, YOLO: entry.YOLO}
+		// operator's spawn intent and must survive restart. settingsFromEntry
+		// owns the posture's default-tolerant read, so an entry written before
+		// #2043 — no permission_mode key at all — materialises as the mode its
+		// yolo already implies.
+		settings = settingsFromEntry(*entry)
 		// Bootstrap-only: ignore persisted lifecycle_state. The bootstrap
 		// is the per-process auto-spawn entry; daemon-mode startup
 		// contract is "claude is available". Idle eviction within a
@@ -409,6 +412,12 @@ func New(cfg Config) (*Pool, error) {
 		now := time.Now().UTC()
 		createdAt, lastActiveAt = now, now
 	}
+
+	// Cold start's zero value carries no posture; normalise it here so the
+	// bootstrap Session holds the default mode spelled out, exactly as the
+	// warm-start branch above does (settingsFromEntry normalises too, so this is
+	// idempotent on that path).
+	settings = canonicalSettings(settings)
 
 	// Embedded hosts (pyry acp, #761) suppress the eager bootstrap claude so a
 	// per-caller Pool.Create is the only interactive claude. Overrides whatever
@@ -696,29 +705,49 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // stable. On a saveLocked failure the in-memory settings are rolled back so
 // memory stays consistent with disk.
 //
+// The permission posture is stored as TWO fields that can never disagree (#2043).
+// validatePermissionUpdate rejects an unrecognised mode
+// (ErrUnsupportedPermissionMode) and a mode contradicting a YOLO in the same frame
+// (ErrPermissionModeConflict) before anything is mutated; what survives derives
+// both fields together:
+//
+//	update carries                          stored mode        stored YOLO
+//	yolo:true                               bypassPermissions  true
+//	yolo:false, stored mode is bypass       default            false
+//	yolo:false, stored mode is anything else unchanged         false
+//	mode bypassPermissions                  bypassPermissions  true
+//	any other known mode                    that mode          false
+//
+// Row three is the one to read twice: a yolo:false must not drag an operator out
+// of plan and into default as a side effect of naming a field it was not asked
+// about.
+//
 // After a successful persist of a real change the change is also LIVE-APPLIED to
 // the session's supervisor, by one of two mechanisms picked on what the update
-// carried — which fields, and for YOLO its value too (inBandDeliverable):
+// carried — which fields, and for the posture its value too (inBandDeliverable):
 //
 //   - A change claude accepts on the stream the daemon already holds open is
-//     delivered IN-BAND (#1581, #1604): the /model and /effort commands as
-//     ordinary user turns, and a bypass REVOCATION as a set_permission_mode
-//     control request, so the child is neither terminated nor respawned and its
-//     transcript survives. That branch still installs the recomposed argv, via
-//     SetSpawnArgs — Restart's swap half — because skipping the install would let
-//     the operator's change silently revert on the next crash-respawn or evict →
-//     Activate. Delivery is fire-and-forget; see deliverSettingsInBand.
+//     delivered IN-BAND (#1581, #1604, #2043): the /model and /effort commands as
+//     ordinary user turns, and any of the five in-band postures as a
+//     set_permission_mode control request, so the child is neither terminated nor
+//     respawned and its transcript survives. That branch still installs the
+//     recomposed argv, via SetSpawnArgs — Restart's swap half — because skipping
+//     the install would let the operator's change silently revert on the next
+//     crash-respawn or evict → Activate. Fire-and-forget; see
+//     deliverSettingsInBand.
 //   - Every other change keeps the live restart (#842): the argv is recomposed
 //     from the persisted settings and, if a child is running, that child is
-//     killed so the supervisor relaunches it — resuming the conversation — with
-//     the new model / effort / YOLO. This is the path a bypass ENABLE takes, and
-//     the path a model or effort cleared back to claude's own default takes.
+//     killed so the supervisor relaunches it — resuming the conversation — under
+//     the new settings. This is the path a bypass ENABLE takes, whether it is
+//     spelled as yolo:true or as the bypassPermissions mode, and the path a model
+//     or effort cleared back to claude's own default takes.
 //
-// The bypass split is on DIRECTION, not presence, and it is measured rather than
-// assumed (#1595): claude accepts a revocation on a held-open stream but refuses
-// an escalation in words, gating it on the launch argv. So a revoke applies to the
-// running child with no respawn, and an enable can only be granted by relaunching
-// under the recomposed argv.
+// The bypass split is on the POSTURE ASKED FOR, not on presence, and it is
+// measured rather than assumed (#1595, #2041): claude accepts each of the other
+// five modes on a held-open stream but refuses the escalation in words, gating it
+// on the launch argv. So a switch among the five applies to the running child with
+// no respawn, and bypass can only be granted by relaunching under the recomposed
+// argv.
 //
 // For an evicted session neither mechanism finds a child; the argv install alone
 // applies on the next Activate, and the caller still sees success. Both branches
@@ -737,6 +766,10 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 		p.mu.Unlock()
 		return ErrSessionNotFound
 	}
+	if err := validatePermissionUpdate(update); err != nil {
+		p.mu.Unlock()
+		return err
+	}
 	merged := sess.settings
 	if update.Model != nil {
 		merged.Model = *update.Model
@@ -744,8 +777,21 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	if update.Effort != nil {
 		merged.Effort = *update.Effort
 	}
-	if update.YOLO != nil {
+	// The posture's two fields move together, and the mode arm subsumes the YOLO
+	// arm: validatePermissionUpdate has already refused a frame carrying both
+	// with values that disagree, so when both are present they derive the same
+	// pair and running the mode arm alone is not a precedence rule.
+	switch {
+	case update.PermissionMode != nil:
+		merged.PermissionMode = *update.PermissionMode
+		merged.YOLO = merged.PermissionMode == permissionModeBypass
+	case update.YOLO != nil:
 		merged.YOLO = *update.YOLO
+		// canonicalPermissionMode is what makes a revoke land in default while
+		// leaving a non-bypass mode alone: a yolo:false must not drag an
+		// operator out of plan as a side effect of naming a field it was not
+		// asked about.
+		merged.PermissionMode = canonicalPermissionMode(merged.PermissionMode, merged.YOLO)
 	}
 	if merged == sess.settings {
 		p.mu.Unlock()
@@ -771,7 +817,7 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// the next spawn still carries the change.
 	if inBandDeliverable(update) {
 		sup.SetSpawnArgs(newArgs)
-		p.deliverSettingsInBand(id, sup, update)
+		p.deliverSettingsInBand(id, sup, update, merged)
 		return nil
 	}
 	// This is a LIVE PRODUCTION CALLER of Restart, and #1604 did not remove it.
@@ -787,25 +833,61 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	return nil
 }
 
+// validatePermissionUpdate refuses the two posture updates that have no correct
+// reading, BEFORE Pool.UpdateSettings mutates anything, so a rejected frame
+// leaves the stored settings, the registry file and the running child
+// byte-identical to their prior state:
+//
+//   - a mode outside permissionModeKnown, including the empty string — unlike
+//     Model and Effort, where "" means "omit the flag, run at claude's own
+//     default", the default posture is a NAMEABLE mode, so an explicit "" has no
+//     reading. Refusing here is what keeps an unrecognised value out of the
+//     registry, and therefore out of every argv composed from it later and away
+//     from the child.
+//   - a mode and a YOLO bit that contradict each other. Neither precedence is
+//     fail-safe in both directions, so neither is chosen; see
+//     ErrPermissionModeConflict.
+//
+// Neither error carries the rejected value (#833). Total over any
+// SettingsUpdate: an update naming no mode is trivially valid, so the caller can
+// invoke it unconditionally.
+func validatePermissionUpdate(update SettingsUpdate) error {
+	if update.PermissionMode == nil {
+		return nil
+	}
+	mode := *update.PermissionMode
+	if !permissionModeKnown(mode) {
+		return ErrUnsupportedPermissionMode
+	}
+	if update.YOLO != nil && (mode == permissionModeBypass) != *update.YOLO {
+		return ErrPermissionModeConflict
+	}
+	return nil
+}
+
 // inBandDeliverable reports whether update's PRESENT fields are all changes
 // claude accepts on a stream it is already reading — a non-empty Model or Effort
-// as a /model or /effort command (#1581), and a bypass REVOCATION as a
-// set_permission_mode control request (#1604) — and so the changes
+// as a /model or /effort command (#1581), and any of the five in-band postures as
+// a set_permission_mode control request (#1604, #2043) — and so the changes
 // Pool.UpdateSettings can live-apply without tearing the child down.
 //
 // The rule keys on what the wire carried, never on merged-vs-previous per field:
-// SetSessionSettingsPayload's three fields are omitempty pointers documented as a
+// SetSessionSettingsPayload's fields are omitempty pointers documented as a
 // presence contract, so a client changing only the model sends only the model.
-// A present YOLO is now read for its VALUE as well as its presence, which is
-// still a property of the frame and NOT a diff against stored state — do not
-// quietly convert this predicate into a per-field differ. Three consequences are
-// deliberate rather than incidental:
+// A present YOLO or PermissionMode is read for its VALUE as well as its presence,
+// which is still a property of the frame and NOT a diff against stored state — do
+// not quietly convert this predicate into a per-field differ. What #2043 adds is
+// that one posture is expressed by TWO fields, so an update naming either is an
+// update to the posture; the routing still reads the frame, and it is
+// deliverSettingsInBand that resolves which posture RESULTS. Three consequences
+// are deliberate rather than incidental:
 //
-//   - The split is on the DIRECTION of a bypass change, not its presence (#1595
-//     measured both directions live). A revoke goes in-band; an ENABLE takes the
-//     restart, because claude gates the escalation on the launch argv and refuses
-//     the control request in words, so only a respawn under the recomposed argv
-//     can grant it.
+//   - The split is on the POSTURE ASKED FOR, not on the presence of a posture
+//     field (#1595 and #2041 measured both directions live). The five in-band
+//     modes and a yolo:false go in-band; an ESCALATION takes the restart, whether
+//     spelled as yolo:true or as the bypassPermissions mode, because claude gates
+//     it on the launch argv and refuses the control request in words, so only a
+//     respawn under the recomposed argv can grant it.
 //   - A revoke goes in-band INCLUDING when it equals the stored value, which
 //     sends a revocation to a child that was never in bypass. Harmless and
 //     deliberately not fixed: the delivery is fire-and-forget, the installed argv
@@ -827,7 +909,16 @@ func inBandDeliverable(update SettingsUpdate) bool {
 	if update.YOLO != nil && *update.YOLO {
 		return false
 	}
-	if update.Model == nil && update.Effort == nil && update.YOLO == nil {
+	// Refused by NON-MEMBERSHIP, so the escalation is not named here and every
+	// unanticipated spelling is refused with it — the shape #2042's writer-side
+	// allow-list uses for the same reason. An unrecognised mode never reaches
+	// this predicate in production (validatePermissionUpdate rejects the frame
+	// outright), so this arm is the escalation's route to the restart, plus
+	// defence.
+	if update.PermissionMode != nil && !permissionModeInBand(*update.PermissionMode) {
+		return false
+	}
+	if update.Model == nil && update.Effort == nil && update.YOLO == nil && update.PermissionMode == nil {
 		return false
 	}
 	if update.Model != nil && *update.Model == "" {
@@ -841,26 +932,48 @@ func inBandDeliverable(update SettingsUpdate) bool {
 
 // deliverSettingsInBand writes the settings changes implied by update onto id's
 // live child stdin as the non-restarting live-apply (#1581): the /model and
-// /effort commands as ordinary user turns, and a bypass REVOCATION as a
-// set_permission_mode control request via RevokeBypass (#1604). Caller must have
-// released p.mu and must have installed the recomposed argv already, so a failed
-// delivery still reaches the next spawn.
+// /effort commands as ordinary user turns, and the resulting permission POSTURE
+// as a set_permission_mode control request via SetPermissionMode (#1604 built the
+// revoke-only form; #2043 generalised it). Caller must have released p.mu and must
+// have installed the recomposed argv already, so a failed delivery still reaches
+// the next spawn. merged is the posture that update RESULTS in, computed under
+// p.mu by the caller, so this site reads no pool state.
 //
 // One send per PRESENT field, not per changed field: a frame carrying an
 // unchanged model alongside a new effort re-sends the model, which claude answers
 // and discards. That costs one round trip in a case no frame has been observed to
 // produce, and per-field diffing is the refinement the presence contract rules
 // out. The commands are SEPARATE turns — a two-command message is unmeasured —
-// and model → effort → bypass is fixed for the same reason claudeSettingsArgs
+// and model → effort → posture is fixed for the same reason claudeSettingsArgs
 // fixes that order: determinism buys testability at no cost.
 //
-// The bypass clause fires on a revoke and ONLY a revoke. The !*update.YOLO half
-// of its guard is unreachable under today's inBandDeliverable, which rejects an
-// enable outright; it is kept as the enable-direction fail-safe so this site is
-// independently correct rather than dependent on a caller-side invariant — the
-// same argument inBandDeliverable's own doc makes for its redundant
+// The posture clause is EXACTLY ONE send for an update naming either posture
+// field, and that arithmetic is the point (#2043's AC3). The posture is expressed
+// by two fields, so a mode and a YOLO in one frame are one change, not two; the
+// pre-#2043 shape — a mode clause beside the old !*update.YOLO → RevokeBypass()
+// clause — would emit TWO identical control requests for one revocation, because
+// the derivation makes a yolo:false update also carry a non-bypass mode. Dropping
+// that clause without this replacement would emit ZERO and quietly end the
+// revocation this path performs. The wire bytes of a revocation are unchanged by
+// the collapse — RevokeBypass was SetPermissionMode("default") — so what changed
+// is which method emits them, and that RevokeBypass is off the Runner seam.
+//
+// The value delivered is the posture that RESULTS, not the field the frame
+// named: a yolo:false against a stored plan re-sends plan, which the child is
+// already in. That is the same redundancy this path already tolerates for an
+// unchanged model re-sent alongside a new effort, and it is reachable only when
+// some other field changed too — an update that changes nothing returns as a
+// no-op in UpdateSettings before the live-apply.
+//
+// The bypass guard is unreachable under today's inBandDeliverable, which rejects
+// an escalation outright; it is kept as the enable-direction fail-safe so this
+// site is independently correct rather than dependent on a caller-side invariant —
+// the same argument inBandDeliverable's own doc makes for its redundant
 // nothing-present clause. TestPool_DeliverSettingsInBand_EnableWritesNothing
-// asserts it directly rather than leaving it untested defence.
+// asserts it directly rather than leaving it untested defence. It is the second of
+// three independent stops for the escalation, after the routing predicate and
+// before the writer's own allow-list, which refuses it by non-membership in
+// another package.
 //
 // Two ordering facts a reader will otherwise get wrong:
 //
@@ -889,17 +1002,16 @@ func inBandDeliverable(update SettingsUpdate) bool {
 // relay.SettingsUpdater seam signature for no observable gain. conversationID is
 // "" — accepted for Runner conformance and unused by the stream runner.
 //
-// NEVER logged, at any level: the model or effort value, the payload bytes, the
-// conversation id. #833 keeps settings values out of the daemon log and this path
-// gets no exemption just because the value now travels as command text. The
-// bypass record satisfies that rule structurally rather than by discipline, and
-// since #2042 that rests on two clauses rather than one: the revoke shorthand this
-// site calls takes no mode, AND the seam's mode-carrying sibling
-// (Runner.SetPermissionMode) refuses an unsupported mode without echoing the
-// rejected string. The first clause expires when #2043 rewrites this site to send
-// an operator-chosen mode; the second is the one that still holds afterwards, and
-// it is why the error may be logged verbatim then too.
-func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUpdate) {
+// NEVER logged, at any level: the model, effort or permission-mode value, the
+// payload bytes, the conversation id. #833 keeps settings values out of the daemon
+// log and this path gets no exemption just because the value now travels as
+// command text. The posture record satisfies that rule structurally rather than by
+// discipline: "permission_mode" is the constant field NAME, and the seam's error
+// carries no mode either — Runner.SetPermissionMode refuses an unsupported mode
+// with a bare sentinel that does not echo the rejected string, which is why the
+// error may be logged verbatim. That second clause is the one that survived #2043
+// taking the no-mode revoke shorthand off the seam.
+func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUpdate, merged SessionSettings) {
 	notDelivered := func(setting string, err error) {
 		p.log.Info("sessions: in-band settings command not delivered",
 			"session", id, "setting", setting, "err", err)
@@ -915,10 +1027,14 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 	if update.Effort != nil {
 		send("effort", "/effort "+*update.Effort)
 	}
-	if update.YOLO != nil && !*update.YOLO {
-		if err := sup.RevokeBypass(); err != nil {
-			notDelivered("bypass", err)
-		}
+	if update.PermissionMode == nil && update.YOLO == nil {
+		return
+	}
+	if merged.PermissionMode == permissionModeBypass {
+		return
+	}
+	if err := sup.SetPermissionMode(merged.PermissionMode); err != nil {
+		notDelivered("permission_mode", err)
 	}
 }
 
@@ -1569,6 +1685,13 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 // phone-granted bypass cannot survive a daemon restart (#1487).
 func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings SessionSettings) (*Session, error) {
 	tpl := p.sessionTpl
+	// Normalise the posture before it reaches either the argv or the stored
+	// value, so a minted session (mintSettings' two-field literal) and a revived
+	// one (the zero value) both hold the default mode spelled out rather than an
+	// empty string. It is a normalisation, not a gate: neither caller takes a
+	// mode from operator input — Pool.UpdateSettings is where an unrecognised
+	// mode is rejected.
+	settings = canonicalSettings(settings)
 	// The per-session --settings file pre-approves the project's MCP servers so
 	// claude's startup enablement modal never wedges the readiness check (#943).
 	// It joins spawnBase (below) rather than claudeSettingsArgs so it survives
@@ -1762,6 +1885,10 @@ func (p *Pool) saveLocked() error {
 			Model:  s.settings.Model,
 			Effort: s.settings.Effort,
 			YOLO:   s.settings.YOLO,
+			// permissionModeForDisk drops the default posture and the
+			// escalation, so the omitempty shape above stays byte-stable for a
+			// default session and the escalation keeps one on-disk spelling.
+			PermissionMode: permissionModeForDisk(s.settings),
 		}
 		// omitempty on the JSON tag keeps the stable on-disk shape for
 		// the dominant active case — important for the existing

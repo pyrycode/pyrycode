@@ -34,8 +34,6 @@ func (fakeRunner) Restart(args []string) {}
 
 func (fakeRunner) SetSpawnArgs(args []string) {}
 
-func (fakeRunner) RevokeBypass() error { return nil }
-
 func (fakeRunner) SetPermissionMode(mode string) error { return nil }
 
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
@@ -153,20 +151,16 @@ type lifecycleRunner struct {
 	// the production runner, not the pool, that refuses a write when no child is
 	// bound, and the pool's contract is to attempt the write unconditionally.
 	writes [][]byte
-	// revokes counts every RevokeBypass call — the in-band bypass revocation
-	// #1604 routes through the same branch. A COUNT, not a bool: an assertion has
-	// to be able to tell "exactly one" from "two" and catch a double-send.
-	// Recorded on EVERY call including no-live-child, for the same reason writes
-	// is: the production runner, not the pool, is what refuses when no child is
-	// bound, and the pool's contract is to attempt the revocation unconditionally.
-	revokes int
-	// modes records the mode of every SetPermissionMode call, in order — the
-	// mode-carrying sibling #2042 put on the seam beside RevokeBypass. It is
-	// recorded so a test can assert the pool did NOT start routing through it: the
-	// two methods emit the same line when the mode is "default", so a count on
-	// revokes alone cannot tell "the revocation still goes through RevokeBypass"
-	// from "it quietly moved". #2043 is when a delivery through this method becomes
-	// the expected state.
+	// modes records the mode of every SetPermissionMode call, in order — the whole
+	// in-band posture channel since #2043 collapsed #1604's revoke-only
+	// RevokeBypass into it. A recorded SEQUENCE, not a count, for the reason the
+	// count it replaced was not a bool: an assertion has to tell "exactly one send"
+	// from "two" (the old revoke clause left standing beside the mode clause) and
+	// from "none" (that clause dropped with no replacement), and it has to read
+	// WHICH posture was sent. Recorded on EVERY call including no-live-child, for
+	// the same reason writes is: the production runner, not the pool, is what
+	// refuses when no child is bound, and the pool's contract is to attempt the
+	// send unconditionally.
 	modes []string
 }
 
@@ -253,13 +247,6 @@ func (r *lifecycleRunner) SetSpawnArgs(args []string) {
 	r.mu.Unlock()
 }
 
-func (r *lifecycleRunner) RevokeBypass() error {
-	r.mu.Lock()
-	r.revokes++
-	r.mu.Unlock()
-	return nil
-}
-
 func (r *lifecycleRunner) SetPermissionMode(mode string) error {
 	r.mu.Lock()
 	r.modes = append(r.modes, mode)
@@ -267,8 +254,8 @@ func (r *lifecycleRunner) SetPermissionMode(mode string) error {
 	return nil
 }
 
-// restartArgs, spawnArgSets, userTurns and revokeCount are the read side of the
-// four records above. Each takes r.mu and deep-copies, because the lifecycle
+// restartArgs, spawnArgSets, userTurns and permissionModes are the read side of
+// the four records above. Each takes r.mu and deep-copies, because the lifecycle
 // goroutine writes while the test goroutine reads and every assertion must stay
 // -race clean. userTurns converts to string on read so a delivery assertion reads
 // as the command text it is.
@@ -294,14 +281,8 @@ func (r *lifecycleRunner) userTurns() []string {
 	return out
 }
 
-func (r *lifecycleRunner) revokeCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.revokes
-}
-
 // permissionModes is the read side of modes, deep-copying under r.mu like its
-// four siblings above.
+// three siblings above.
 func (r *lifecycleRunner) permissionModes() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()

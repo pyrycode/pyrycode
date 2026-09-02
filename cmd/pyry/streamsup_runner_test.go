@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -356,6 +357,66 @@ func TestWithApprovalArgs(t *testing.T) {
 			if slices.Contains(got, f) {
 				t.Errorf("yolo args %q must not carry approval flag %q", got, f)
 			}
+		}
+	})
+
+	countMode := func(args []string) int {
+		n := 0
+		for _, a := range args {
+			if a == "--permission-mode" || strings.HasPrefix(a, "--permission-mode=") {
+				n++
+			}
+		}
+		return n
+	}
+
+	// #2043: a session storing a permission mode composes --permission-mode <mode>
+	// through sessions.claudeSettingsArgs, and this function runs at runner
+	// CONSTRUCTION on top of that — the path a daemon restart takes to rebuild a
+	// session out of the registry. Injecting the set unmodified would spawn it as
+	// "--permission-mode plan … --permission-mode default", and the last flag wins.
+	t.Run("a spawn already naming a mode gets exactly one", func(t *testing.T) {
+		t.Parallel()
+		for _, in := range [][]string{
+			{"--model", "haiku", "--permission-mode", "plan", "--settings", "p"},
+			{"--permission-mode=plan", "--settings", "p"},
+		} {
+			got := withApprovalArgs(in, path)
+
+			if n := countMode(got); n != 1 {
+				t.Errorf("withApprovalArgs(%q) produced %d --permission-mode flags, want exactly 1: %q", in, n, got)
+			}
+			// The operator's own mode is the one that survives; the injected
+			// default is what drops.
+			if slices.Contains(got, "default") {
+				t.Errorf("withApprovalArgs(%q) kept the injected default mode: %q", in, got)
+			}
+			// It drops ONLY that pair. Returning args unchanged instead would
+			// spawn a mode-carrying session with no permission-prompt tool and no
+			// mcp-config — the daemon's approval gate absent, reachable from a
+			// stored setting. This is the assertion that forbids that shortcut.
+			for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+				if !slices.Contains(got, f) {
+					t.Errorf("withApprovalArgs(%q) = %q dropped the approval flag %q", in, got, f)
+				}
+			}
+			if !slices.Contains(got, path) {
+				t.Errorf("withApprovalArgs(%q) = %q dropped the mcp-config path", in, got)
+			}
+			if countSkip(got) != 0 {
+				t.Errorf("withApprovalArgs(%q) = %q invented a bypass flag", in, got)
+			}
+		}
+	})
+
+	// A yolo spawn is still returned untouched even when it names a mode: the
+	// mode-aware branch must not reorder the two arms, because a bypass child has
+	// no approval gate to inject in the first place.
+	t.Run("yolo beats a named mode and still injects nothing", func(t *testing.T) {
+		t.Parallel()
+		in := []string{"--permission-mode", "plan", "--dangerously-skip-permissions"}
+		if got := withApprovalArgs(in, path); !slices.Equal(got, in) {
+			t.Errorf("withApprovalArgs yolo+mode = %q, want unchanged %q", got, in)
 		}
 	})
 

@@ -36,6 +36,48 @@ type registryEntry struct {
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`
 	YOLO   bool   `json:"yolo,omitempty"`
+
+	// PermissionMode is the session's stored posture (#2043), written by
+	// permissionModeForDisk and read by settingsFromEntry. Only the four
+	// non-default in-band modes are ever written: the default posture and the
+	// escalation both write nothing, the first to keep the default session's
+	// on-disk shape byte-stable and the second because the yolo key above is the
+	// escalation's one on-disk spelling. So the disk cannot hold a mode that
+	// contradicts yolo. A missing key is the pre-#2043 shape and decodes to the
+	// posture yolo already implies.
+	PermissionMode string `json:"permission_mode,omitempty"`
+}
+
+// permissionModeForDisk returns the permission_mode value s serialises to. The
+// mode itself for the four non-default in-band modes; "" for the default posture,
+// for the escalation (carried by the yolo key), and for anything else — so the
+// on-disk vocabulary is closed by the same predicate settingsFromEntry reads it
+// back through, rather than by trusting the in-memory canonical form to be intact.
+func permissionModeForDisk(s SessionSettings) string {
+	if s.YOLO || s.PermissionMode == permissionModeDefault || !permissionModeInBand(s.PermissionMode) {
+		return ""
+	}
+	return s.PermissionMode
+}
+
+// settingsFromEntry maps a decoded registry entry to the SessionSettings a warm
+// start materialises, normalising the posture through canonicalPermissionMode.
+//
+// Default-TOLERANT at the read rather than defaulted at the write site: an
+// operator's existing registry predates permission_mode entirely, and such an
+// entry yields the posture its yolo already implies — bypass for yolo:true,
+// default otherwise. A garbage value, or a bypassPermissions written by hand
+// beside yolo:false, degrades to default: the tolerance can only ever move AWAY
+// from the escalation, and yolo stays the authoritative half. It is a function
+// rather than a literal inside Pool.New so the tolerance is testable without
+// building a pool.
+func settingsFromEntry(e registryEntry) SessionSettings {
+	return SessionSettings{
+		Model:          e.Model,
+		Effort:         e.Effort,
+		YOLO:           e.YOLO,
+		PermissionMode: canonicalPermissionMode(e.PermissionMode, e.YOLO),
+	}
 }
 
 // loadRegistry reads sessions.json from path. Returns (nil, nil) when the file

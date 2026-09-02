@@ -58,22 +58,17 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // avoid. Dispatched from the in-band branch of Pool.UpdateSettings since #1581.
 func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
 
-// RevokeBypass forwards to (*streamsup.Runner).RevokeBypass (#1603), dropping the
-// live child's bypass posture via a set_permission_mode control request rather
-// than a respawn. Like SetSpawnArgs it is ON the sessions.Runner interface, for
-// exactly the fail-open reason stated above: its consumer is Pool.UpdateSettings
-// inside internal/sessions, and an assertion there whose unmatched arm silently
-// no-ops would leave the posture un-revoked while the update reports success —
-// the one outcome a live revocation exists to prevent. Dispatched by #1604.
-func (a streamRunner) RevokeBypass() error { return a.r.RevokeBypass() }
-
 // SetPermissionMode forwards to (*streamsup.Runner).SetPermissionMode (#2042),
 // switching the live child's permission posture via a set_permission_mode control
-// request rather than a respawn. It is RevokeBypass generalised — the same line
-// with the mode as a parameter — and it is ON the sessions.Runner interface for
-// the same fail-open reason: its consumers sit inside internal/sessions, where an
-// assertion whose unmatched arm silently no-ops would leave a child in the wrong
-// posture while the update reports success.
+// request rather than a respawn. It is ON the sessions.Runner interface for the
+// fail-open reason stated above: its consumer is Pool.deliverSettingsInBand inside
+// internal/sessions, and an assertion there whose unmatched arm silently no-ops
+// would leave a child in the wrong posture while the update reports success.
+//
+// It is the whole posture seam since #2043: the revoke-only RevokeBypass forward
+// that used to sit here went with the interface method when Pool.UpdateSettings
+// started sending an operator-chosen mode. (*streamsup.Runner).RevokeBypass still
+// exists with its own coverage; this adapter no longer reaches it.
 //
 // The concrete method refuses any mode outside its closed allow-list, so this
 // forward carries no validation of its own; adding one here would be a second
@@ -243,13 +238,65 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 //     --permission-mode default set that routes every non-allowlisted tool use
 //     through the daemon approval registry.
 //
+// Since #2043 the spawn's own args can already name a permission mode: a session
+// storing one composes --permission-mode <mode> through
+// sessions.claudeSettingsArgs, and this function runs at runner CONSTRUCTION on
+// top of that — the path a daemon restart takes to rebuild a session out of the
+// registry. Injecting the set unmodified would spawn it as
+// "--permission-mode plan … --permission-mode default", so the injected set drops
+// its own mode pair in that case.
+//
+// It drops ONLY that pair. Returning args unchanged instead — the shape the yolo
+// arm above uses — would spawn every mode-carrying session with no
+// permission-prompt tool and no mcp-config, i.e. with the daemon's approval gate
+// entirely absent, reachable from a stored setting. The yolo arm is safe only
+// because a bypass child has no approval gate to lose; a mode-carrying child does.
+//
 // The append runs on a clone so the caller's args (scfg.Args, freshly owned by
 // mapStreamsupConfig) is never aliased or mutated.
 func withApprovalArgs(args []string, mcpApprovePath string) []string {
 	if slices.Contains(args, "--dangerously-skip-permissions") {
 		return args
 	}
-	return append(slices.Clone(args), permissionArgs(false, mcpApprovePath)...)
+	extra := permissionArgs(false, mcpApprovePath)
+	if namesPermissionMode(args) {
+		extra = dropPermissionMode(extra)
+	}
+	return append(slices.Clone(args), extra...)
+}
+
+// namesPermissionMode reports whether args already carry a --permission-mode
+// flag, in either the two-token or the joined form. Both are checked for
+// stripSessionIDFlags' reason: the composed argv only ever uses the two-token
+// form, but the operator's bootstrap pass-through claude args reach this function
+// too and can spell a flag either way.
+func namesPermissionMode(args []string) bool {
+	for _, a := range args {
+		if a == "--permission-mode" || strings.HasPrefix(a, "--permission-mode=") {
+			return true
+		}
+	}
+	return false
+}
+
+// dropPermissionMode returns args without its --permission-mode flag and value.
+// It scans rather than slicing a known offset, so permissionArgs' ordering is not
+// load-bearing here — a reordering there stays a cosmetic change instead of
+// silently dropping the wrong flag. Never mutates args.
+func dropPermissionMode(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--permission-mode" {
+			i++ // skip its value; a dangling flag just drops the lone token
+			continue
+		}
+		if strings.HasPrefix(a, "--permission-mode=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // mapStreamsupConfig maps a supervisor.Config to the streamsup.Config that

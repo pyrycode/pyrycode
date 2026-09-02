@@ -11,6 +11,7 @@ On-disk persistence for `internal/sessions.Pool`. The registry stores per-pyry-n
 - **Phase 1.1a-A2 (#73):** `Pool.Create` writes new non-bootstrap entries via `saveLocked` with `bootstrap=false`. See [sessions-package.md § Pool.Create](sessions-package.md).
 - **Phase 1.1c-A (#62):** `Pool.Rename(id, newLabel)` mutates the `label` field via `saveLocked`. Empty `newLabel` clears the on-disk value to `""`; non-empty values persist verbatim. See [sessions-package.md § Pool.Rename](sessions-package.md).
 - **Phase 1.1+:** `Pool.Remove` plugs into the same `saveLocked` seam.
+- **#833, extended #2043:** `model`/`effort`/`yolo` land on the entry (#833); `permission_mode` joins them (#2043) as the fourth spawn-setting field, closed to the four non-default in-band modes on write.
 
 ## Path
 
@@ -47,6 +48,8 @@ Lives as a sibling to the per-name socket `~/.pyry/<name>.sock`. Resolution is i
 | `last_active_at` | RFC3339Nano | Equal to `created_at` in 1.2a. Bumped on `RotateID` (1.2b-A) and on every lifecycle state transition (1.2c-A). |
 | `bootstrap` | bool | Marks the entry resolved by `Pool.Lookup("")`. Omitted on disk when false (`omitempty`). |
 | `lifecycle_state` | string | `"active"` or `"evicted"` (1.2c-A). Omitted on disk when `"active"` (`omitempty`) — preserves the dominant-case byte-stability. Missing field on read defaults to `"active"`. |
+| `model` / `effort` / `yolo` | string / string / bool | Per-session spawn settings (#833). All `omitempty`; `yolo` is the escalation's one on-disk spelling. See [`SessionSettings` + `claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md). |
+| `permission_mode` | string | The stored posture (#2043). `permissionModeForDisk` writes only the four non-default in-band modes (`acceptEdits`, `plan`, `auto`, `dontAsk`) — the default posture and the escalation both write nothing, so a default session's on-disk shape stays byte-stable and the disk can never hold a mode that contradicts `yolo`. `settingsFromEntry` reads it back through `canonicalPermissionMode(permission_mode, yolo)`, gated by the *same* predicate as the write, so the on-disk vocabulary is closed independently of the in-memory value being intact. A missing key — every entry written before #2043 — decodes to `""`, which canonicalises to the posture `yolo` already implies (`bypassPermissions` if `true`, `default` otherwise): default-tolerant at the read, not defaulted at the write, because an operator's existing registry predates the key. A garbage on-disk value degrades to `default` the same way — the tolerance can only ever move *away* from the escalation, following `parseLifecycleState`'s precedent for an unrecognised on-disk enum. |
 
 **Forward compatibility:** unknown top-level and per-session fields are tolerated on read (default `encoding/json` decoder; `DisallowUnknownFields` is *not* set). New fields land additively in later phases without breaking old pyry binaries.
 

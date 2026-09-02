@@ -45,39 +45,17 @@ type Runner interface {
 	// notably that the argv is installed verbatim, with validation staying upstream
 	// in Session.spawnArgs.
 	SetSpawnArgs(args []string)
-	// RevokeBypass drops the LIVE child's bypass-permissions posture without
-	// killing it, by writing one set_permission_mode control request carrying
-	// mode "default" on the stream the daemon already holds open (#1603 built the
-	// writer; #1595 measured the drop live). Pool.UpdateSettings is its one
-	// caller, on the in-band branch, and it is the revoke direction ONLY: claude
-	// gates the escalation on the launch argv and refuses the request in words, so
-	// a YOLO enable keeps the restart. It takes no mode and can name none.
-	//
-	// It is ON this interface, unlike Interrupt / RestartFresh / BeginRotation,
-	// for the reason SetSpawnArgs is: its consumer is inside internal/sessions, so
-	// there is no cmd/pyry dispatch site to type-assert at. A structural assertion
-	// here would fail OPEN — its unmatched arm is a silent no-op, leaving the
-	// posture un-revoked while UpdateSettings reports success — which is the exact
-	// regression the in-band revocation exists to prevent. The interface method
-	// makes a runner that cannot revoke a build failure instead.
-	//
-	// Returns the runner's retryable no-live-child error when nothing is bound;
-	// the caller logs and swallows it, because the argv install is the durable
-	// half. Safe from any goroutine.
-	//
-	// It sits beside SetPermissionMode TRANSITIONALLY. #2042 introduced the general
-	// form without touching this one, so the bytes Pool.deliverSettingsInBand
-	// delivers today are provably unchanged; #2043 rewrites that caller to send an
-	// operator-chosen mode, and this method loses its last caller there. The pair
-	// collapses in the slice that owns the consumer, not in the one that introduced
-	// the replacement.
-	RevokeBypass() error
-
 	// SetPermissionMode switches the LIVE child's permission posture without
 	// killing it, by writing one set_permission_mode control request carrying mode
 	// on the stream the daemon already holds open (#2042 widened #1603's writer;
-	// #1595 and #2041 measured the switch live). It is RevokeBypass generalised:
-	// the same line, the same no-respawn delivery, with the mode as a parameter.
+	// #1595 and #2041 measured the switch live). It is the generalisation of
+	// #1604's revoke-only RevokeBypass, which this interface carried until #2043
+	// rewrote Pool.deliverSettingsInBand to send an operator-chosen mode: the same
+	// line, the same no-respawn delivery, with the mode as a parameter. Leaving
+	// both on the seam would have let one revocation emit two identical control
+	// requests, since the posture derivation makes a yolo:false update carry a
+	// non-bypass mode of its own. (*streamsup.Runner) keeps its own RevokeBypass
+	// and its package-level coverage; nothing outside that package calls it.
 	//
 	// mode is refused unless it is in the runner's closed allow-list — today
 	// "default", "acceptEdits", "plan", "auto" and "dontAsk". The escalating mode is
@@ -97,9 +75,12 @@ type Runner interface {
 	// daemon's default approval posture, and claude accepts them in-band. A caller
 	// taking a mode from a wire frame owns that decision itself.
 	//
-	// It is ON this interface for RevokeBypass's reason exactly — its consumers sit
-	// inside internal/sessions, where a structural assertion would fail open and
-	// leave a child in the wrong posture while the update reports success.
+	// It is ON this interface for SetSpawnArgs' reason exactly — its consumer sits
+	// inside internal/sessions, where a structural assertion would fail open: an
+	// unmatched arm is a silent no-op, leaving the child in the wrong posture
+	// while UpdateSettings reports success, which is the exact regression the
+	// in-band delivery exists to prevent. The interface method makes a runner that
+	// cannot switch posture a build failure instead.
 	//
 	// Returns the runner's retryable no-live-child error when nothing is bound.
 	// Safe from any goroutine.

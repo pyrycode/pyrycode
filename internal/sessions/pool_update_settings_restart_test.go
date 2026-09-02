@@ -44,6 +44,11 @@ func helperRestartPool(t *testing.T, regPath, tplWorkDir string, settings Sessio
 			Model:        settings.Model,
 			Effort:       settings.Effort,
 			YOLO:         settings.YOLO,
+			// Through permissionModeForDisk, so the pre-written entry has the shape
+			// saveLocked would have produced: a mode-free literal writes no
+			// permission_mode key and therefore reproduces the pre-#2043 on-disk
+			// shape exactly.
+			PermissionMode: permissionModeForDisk(settings),
 		}},
 	}); err != nil {
 		t.Fatalf("pre-write registry: %v", err)
@@ -138,8 +143,9 @@ func mintEvicted(t *testing.T, pool *Pool, spawnDir string, settings SessionSett
 // this already flips IS the enable direction: claude gates the escalation on the
 // launch argv and refuses the control request (#1595), so only the respawn under
 // the recomposed argv can grant it. The restart-argv read below is one half of
-// that pin; revokeCount() == 0 is the other — no production path writes an ENABLE
-// over the control channel, under any update.
+// that pin; an empty permissionModes() is the other — no production path writes an
+// ENABLE over the control channel, under any update, in either of the two
+// spellings #2043 gave it.
 func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -173,8 +179,8 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 		t.Errorf("restart argv = %v, want %v", got, want)
 	}
 	// #1604: the enable direction never travels over the control channel.
-	if got := runner.revokeCount(); got != 0 {
-		t.Errorf("a YOLO enable wrote %d permission-mode change(s) in-band, want 0", got)
+	if got := runner.permissionModes(); len(got) != 0 {
+		t.Errorf("a YOLO enable wrote %v in-band, want no posture send at all", got)
 	}
 	// AC #3: the same call persisted the change.
 	if disk := diskSettings(t, regPath); disk != (SessionSettings{Model: "opus", Effort: "high", YOLO: true}) {
@@ -347,19 +353,19 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassInBand(t *testing.T) {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
-	// The live half: exactly one revocation reached the running child. Exactly
-	// one, not at least one — a double-send would be a bug worth failing on.
-	if got := runner.revokeCount(); got != 1 {
-		t.Errorf("RevokeBypass called %d times, want exactly 1 (the live revocation)", got)
-	}
-	// ...and it reached the child through RevokeBypass, not through the
-	// mode-carrying sibling #2042 put on the seam beside it. The two emit the same
-	// line for mode "default", so revokeCount alone cannot tell "unchanged" from
-	// "quietly rerouted" — this pair is what makes #2042's no-change-on-the-wire
-	// claim an assertion. #2043 rewrites deliverSettingsInBand to send an
-	// operator-chosen mode; that is the ticket that flips this expectation.
-	if got := runner.permissionModes(); len(got) != 0 {
-		t.Errorf("SetPermissionMode called with %v, want no call: the revocation still routes through RevokeBypass", got)
+	// The live half, and AC #3's arithmetic: EXACTLY ONE posture send reached the
+	// running child, carrying the mode the revocation derives. Two would be the
+	// old revoke clause left standing beside the new mode clause — both fire on
+	// this update — and zero would be that clause dropped with nothing put in its
+	// place. Neither mutant survives this assertion.
+	//
+	// The send goes through the seam's mode-carrying method: #2042 introduced it
+	// beside RevokeBypass so the delivered bytes stayed provably unchanged, and
+	// #2043 collapsed the pair here, taking RevokeBypass off the Runner seam. The
+	// wire bytes are still the ones #1595 measured — RevokeBypass was
+	// SetPermissionMode("default") — so what changed is which method emits them.
+	if got, want := runner.permissionModes(), []string{"default"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("in-band posture sends = %v, want exactly %v", got, want)
 	}
 	if restarts := runner.restartArgs(); len(restarts) != 0 {
 		t.Errorf("a revoke respawned the child: Restart%v", restarts)
@@ -400,9 +406,11 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassInBand(t *testing.T) {
 //
 // #1604 must NOT drag this back to a respawn assertion: the model-only path it
 // covers is exactly the one #1581 moved off the restart, and the argv it reads is
-// the next-spawn install. The one thing #1604 adds is revokeCount() == 0 — an
-// omitted YOLO writes no permission-mode change at all, which is the direct red
-// for a delivery guard relaxed to send unconditionally.
+// the next-spawn install. The one thing #1604 adds is an empty permissionModes() —
+// an update naming NEITHER posture field writes no posture change at all, which is
+// the direct red for a delivery guard relaxed to send unconditionally. That guard
+// is what keeps #2043's "one posture send per posture-carrying update" from
+// becoming "one per update".
 func TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -422,8 +430,8 @@ func TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand(t *testing.T) {
 	if restarts := runner.restartArgs(); len(restarts) != 0 {
 		t.Errorf("model-only update respawned the child: Restart%v", restarts)
 	}
-	if got := runner.revokeCount(); got != 0 {
-		t.Errorf("an omitted YOLO wrote %d permission-mode change(s) in-band, want 0", got)
+	if got := runner.permissionModes(); len(got) != 0 {
+		t.Errorf("an update naming no posture field wrote %v in-band, want none", got)
 	}
 	if got, want := runner.userTurns(), []string{"/model opus"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("delivered turns = %q, want %q", got, want)

@@ -69,6 +69,23 @@ func TestInBandDeliverable(t *testing.T) {
 		{"yolo revoke with cleared model", SettingsUpdate{Model: ptr(""), YOLO: ptr(false)}, false},
 		{"yolo enable only", SettingsUpdate{YOLO: ptr(true)}, false},
 		{"nothing present", SettingsUpdate{}, false},
+		// #2043's posture rows. Each of the five modes claude accepts on a
+		// held-open stream goes in-band; the escalation and every unanticipated
+		// spelling are refused by NON-MEMBERSHIP in the same clause, which is why
+		// the garbage rows read false without the predicate naming any of them.
+		{"mode default", SettingsUpdate{PermissionMode: ptr(permissionModeDefault)}, true},
+		{"mode acceptEdits", SettingsUpdate{PermissionMode: ptr("acceptEdits")}, true},
+		{"mode plan", SettingsUpdate{PermissionMode: ptr("plan")}, true},
+		{"mode auto", SettingsUpdate{PermissionMode: ptr("auto")}, true},
+		{"mode dontAsk", SettingsUpdate{PermissionMode: ptr("dontAsk")}, true},
+		{"mode with model and effort", SettingsUpdate{Model: ptr("opus"), Effort: ptr("high"), PermissionMode: ptr("plan")}, true},
+		{"escalation as a mode", SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}, false},
+		{"escalation as a mode beside a model", SettingsUpdate{Model: ptr("opus"), PermissionMode: ptr(permissionModeBypass)}, false},
+		{"unknown mode", SettingsUpdate{PermissionMode: ptr("Plan")}, false},
+		{"empty mode", SettingsUpdate{PermissionMode: ptr("")}, false},
+		// The empty-value reject still wins over a posture change, and loses
+		// nothing: the respawn recomposes argv from the merged settings.
+		{"mode with cleared model", SettingsUpdate{Model: ptr(""), PermissionMode: ptr("plan")}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,34 +98,50 @@ func TestInBandDeliverable(t *testing.T) {
 }
 
 // TestPool_DeliverSettingsInBand_EnableWritesNothing (#1604, AC #3's second
-// half): deliverSettingsInBand refuses to write a permission-mode change for a
-// YOLO *enable*, and refuses it AT THE DELIVERY SITE rather than relying on
+// half): deliverSettingsInBand refuses to write a permission-mode change for an
+// escalation, and refuses it AT THE DELIVERY SITE rather than relying on
 // inBandDeliverable having rejected the frame first.
 //
 // It calls the unexported delivery directly with a shape the predicate never lets
 // through, which is the only way to reach the enable-direction fail-safe — and so
-// the only red available for a mutant that drops the `!*update.YOLO` conjunct.
-// That guard is what makes the delivery independently correct instead of dependent
-// on a caller-side invariant; without this test it would be untested defence.
+// the only red available for a mutant that drops the bypass guard. That guard is
+// what makes the delivery independently correct instead of dependent on a
+// caller-side invariant; without this test it would be untested defence. Both
+// spellings of the escalation are passed, since #2043 gave it a second one: the
+// merged posture is what the guard reads, so a mode-spelled enable must be
+// refused by the same branch as a YOLO-spelled one.
 //
 // No runPoolInBackground: the delivery reads only p.log and the runner it is
 // handed, so a live child would add nothing to observe.
 func TestPool_DeliverSettingsInBand_EnableWritesNothing(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
-	regPath := filepath.Join(dir, "sessions.json")
-
-	pool := helperRestartPool(t, regPath, t.TempDir(), SessionSettings{})
-	id := pool.Default().ID()
-	runner := runnerDouble(t, pool, id)
-
-	pool.deliverSettingsInBand(id, runner, SettingsUpdate{YOLO: ptr(true)})
-
-	if got := runner.revokeCount(); got != 0 {
-		t.Errorf("a YOLO enable wrote %d permission-mode change(s) in-band, want 0", got)
+	cases := []struct {
+		name   string
+		update SettingsUpdate
+	}{
+		{"yolo-spelled enable", SettingsUpdate{YOLO: ptr(true)}},
+		{"mode-spelled enable", SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}},
 	}
-	if got := runner.userTurns(); len(got) != 0 {
-		t.Errorf("a YOLO-only update invented a command: %q", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			regPath := filepath.Join(dir, "sessions.json")
+
+			pool := helperRestartPool(t, regPath, t.TempDir(), SessionSettings{})
+			id := pool.Default().ID()
+			runner := runnerDouble(t, pool, id)
+
+			merged := SessionSettings{YOLO: true, PermissionMode: permissionModeBypass}
+			pool.deliverSettingsInBand(id, runner, tc.update, merged)
+
+			if got := runner.permissionModes(); len(got) != 0 {
+				t.Errorf("an escalation wrote %v in-band, want no posture send at all", got)
+			}
+			if got := runner.userTurns(); len(got) != 0 {
+				t.Errorf("a posture-only update invented a command: %q", got)
+			}
+		})
 	}
 }
 

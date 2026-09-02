@@ -484,3 +484,145 @@ func TestSave_StableOrdering(t *testing.T) {
 		t.Fatalf("re-decode: %v", err)
 	}
 }
+
+// TestSettingsFromEntry (#2043, AC #2's read half) pins the registry's
+// default-TOLERANT posture read. The rows that matter are the ones with no
+// permission_mode key at all — every registry written before #2043 — and the ones
+// whose key cannot be trusted.
+//
+// Every tolerant arm lands on the default posture, so the tolerance can only ever
+// move AWAY from the escalation: yolo stays the authoritative half, and a
+// bypassPermissions hand-written beside yolo:false does not grant one.
+func TestSettingsFromEntry(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		entry registryEntry
+		want  SessionSettings
+	}{
+		{
+			name:  "pre-2043 entry, no key, no yolo",
+			entry: registryEntry{Model: "sonnet", Effort: "low"},
+			want:  SessionSettings{Model: "sonnet", Effort: "low", PermissionMode: permissionModeDefault},
+		},
+		{
+			name:  "pre-2043 entry with yolo yields the escalation",
+			entry: registryEntry{YOLO: true},
+			want:  SessionSettings{YOLO: true, PermissionMode: permissionModeBypass},
+		},
+		{
+			name:  "a stored in-band mode round-trips",
+			entry: registryEntry{PermissionMode: "plan"},
+			want:  SessionSettings{PermissionMode: "plan"},
+		},
+		{
+			name:  "an unrecognised value degrades to default",
+			entry: registryEntry{PermissionMode: "hand-edited-nonsense"},
+			want:  SessionSettings{PermissionMode: permissionModeDefault},
+		},
+		{
+			name:  "a hand-written escalation without yolo does not grant one",
+			entry: registryEntry{PermissionMode: permissionModeBypass},
+			want:  SessionSettings{PermissionMode: permissionModeDefault},
+		},
+		{
+			name:  "yolo wins over a contradicting stored mode",
+			entry: registryEntry{YOLO: true, PermissionMode: "plan"},
+			want:  SessionSettings{YOLO: true, PermissionMode: permissionModeBypass},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := settingsFromEntry(tc.entry)
+			if got != tc.want {
+				t.Errorf("settingsFromEntry(%+v) = %+v, want %+v", tc.entry, got, tc.want)
+			}
+			if got.YOLO != (got.PermissionMode == permissionModeBypass) {
+				t.Errorf("settingsFromEntry produced a posture that disagrees with itself: %+v", got)
+			}
+		})
+	}
+}
+
+// TestPermissionModeForDisk (#2043, AC #2's write half): only the four
+// non-default in-band modes are ever serialised. The default posture writes
+// nothing so the omitempty on-disk shape stays byte-stable for a default session,
+// and the escalation writes nothing because the yolo key is its one on-disk
+// spelling — which is what makes it impossible for the file to hold a mode that
+// contradicts yolo.
+func TestPermissionModeForDisk(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   SessionSettings
+		want string
+	}{
+		{"zero value", SessionSettings{}, ""},
+		{"default posture", SessionSettings{PermissionMode: permissionModeDefault}, ""},
+		{"in-band mode", SessionSettings{PermissionMode: "acceptEdits"}, "acceptEdits"},
+		{"escalation", SessionSettings{YOLO: true, PermissionMode: permissionModeBypass}, ""},
+		{"escalation spelled by yolo alone", SessionSettings{YOLO: true}, ""},
+		{"a mode beside yolo is still not written", SessionSettings{YOLO: true, PermissionMode: "plan"}, ""},
+		{"an unrecognised in-memory value", SessionSettings{PermissionMode: "nonsense"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := permissionModeForDisk(tc.in); got != tc.want {
+				t.Errorf("permissionModeForDisk(%+v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRegistry_PermissionModeOnDiskShape (#2043, AC #2): the key survives a real
+// save → load → derive round-trip, and a default session's file does not carry it
+// at all — the byte-stable shape the omitempty tags exist for.
+func TestRegistry_PermissionModeOnDiskShape(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	when := fixedTime(t)
+
+	save := func(t *testing.T, name string, s SessionSettings) (string, string) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := saveRegistryLocked(path, &registryFile{
+			Version: 1,
+			Sessions: []registryEntry{{
+				ID:             SessionID("550e8400-e29b-41d4-a716-446655440000"),
+				CreatedAt:      when,
+				LastActiveAt:   when,
+				Bootstrap:      true,
+				YOLO:           s.YOLO,
+				PermissionMode: permissionModeForDisk(s),
+			}},
+		}); err != nil {
+			t.Fatalf("save: %v", err)
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		return path, string(raw)
+	}
+
+	path, raw := save(t, "plan.json", SessionSettings{PermissionMode: "plan"})
+	if !strings.Contains(raw, `"permission_mode": "plan"`) {
+		t.Errorf("a stored mode is missing from the file: %s", raw)
+	}
+	reg, err := loadRegistry(path)
+	if err != nil {
+		t.Fatalf("loadRegistry: %v", err)
+	}
+	if got := settingsFromEntry(*pickBootstrap(reg)); got.PermissionMode != "plan" {
+		t.Errorf("round-tripped posture = %+v, want plan", got)
+	}
+
+	for _, s := range []SessionSettings{{}, {PermissionMode: permissionModeDefault}, {YOLO: true, PermissionMode: permissionModeBypass}} {
+		_, raw := save(t, "shape.json", s)
+		if strings.Contains(raw, "permission_mode") {
+			t.Errorf("settings %+v wrote a permission_mode key, want the pre-2043 shape: %s", s, raw)
+		}
+	}
+}

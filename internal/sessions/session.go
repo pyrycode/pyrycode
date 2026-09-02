@@ -56,18 +56,139 @@ func closedChan() chan struct{} {
 	return ch
 }
 
-// SessionSettings is the per-session model / reasoning-effort / bypass-permissions
-// triple persisted in the registry (#833) and applied to the claude spawn argv.
+// SessionSettings is the per-session model / reasoning-effort / permission-posture
+// set persisted in the registry (#833, #2043) and applied to the claude spawn argv.
 // The zero value inherits the daemon template for Model/Effort and enforces
-// permissions (YOLO off) — the fail-safe default.
+// permissions (YOLO off, mode default) — the fail-safe default.
 //
 // Set initially in Pool.New (bootstrap) or Pool.buildSession (minted) and
 // mutated post-construction by Pool.UpdateSettings (#840) under Pool.mu (write);
 // read under Pool.mu — the same discipline Pool.Rename uses for label.
+//
+// PermissionMode and YOLO express ONE posture through two fields, and a Pool-held
+// Session always satisfies YOLO == (PermissionMode == permissionModeBypass):
+// every writer either rejects (Pool.UpdateSettings, on an unknown mode or a
+// contradictory pair) or normalises (both construction sites and the registry
+// read, via canonicalPermissionMode). YOLO stays the authoritative half for the
+// escalation — claudeSettingsArgs derives the bypass flag from it and never from
+// the mode string — so the fail-safe is enforced in exactly one place even if a
+// hand-built Session literal in a test breaks the invariant.
+//
+// yolo is not redundant and is not being phased out here: the mobile client
+// speaks it, and #1687 settles what the two mean together on the wire.
 type SessionSettings struct {
 	Model  string
 	Effort string
 	YOLO   bool
+
+	// PermissionMode is the posture claude runs the session under: one of the
+	// five modes it accepts on a held-open stream (permissionModeInBand) or
+	// permissionModeBypass, which only a relaunch can grant (#1595). Empty is
+	// the zero value's "never chosen", read as the default posture and
+	// normalised to permissionModeDefault at every construction site.
+	PermissionMode string
+}
+
+// permissionModeDefault is claude's own default posture and the mode a bypass
+// revocation lands in. It is a NAMEABLE mode, unlike an empty Model or Effort,
+// which is why claudeSettingsArgs still emits no flag for it: naming it would
+// change the argv every default session composes today.
+//
+// permissionModeBypass is the escalation. It is stored and it reaches the spawn
+// argv ONLY as --dangerously-skip-permissions (claudeSettingsArgs), never as a
+// --permission-mode value, so the YOLO fail-safe keeps exactly one spelling.
+const (
+	permissionModeDefault = "default"
+	permissionModeBypass  = "bypassPermissions"
+)
+
+// ErrUnsupportedPermissionMode is returned by Pool.UpdateSettings when the update
+// names a permission mode this daemon does not recognise. Nothing is persisted and
+// no live child is touched, so an unrecognised value can never reach a spawn argv
+// or the child.
+//
+// Bare: it does NOT echo the rejected mode. A caller may therefore log it
+// verbatim — #833 keeps settings values out of the daemon log and a permission
+// mode is a settings value. It is the in-package twin of the seam's own
+// streamsup.ErrUnsupportedPermissionMode, which this package must not import
+// (that would invert the Runner seam).
+var ErrUnsupportedPermissionMode = errors.New("sessions: unsupported permission mode")
+
+// ErrPermissionModeConflict is returned by Pool.UpdateSettings when one frame
+// carries a permission mode and a YOLO bit that contradict each other — a
+// bypassPermissions mode with yolo:false, or any other mode with yolo:true.
+// Nothing is persisted.
+//
+// Rejection rather than a precedence rule, because neither precedence is
+// fail-safe in both directions: letting the mode win downgrades an escalation
+// silently, letting YOLO win GRANTS one from a frame that said false. A
+// contradictory update has no correct reading. Bare, for
+// ErrUnsupportedPermissionMode's reason.
+var ErrPermissionModeConflict = errors.New("sessions: permission mode contradicts yolo")
+
+// permissionModeInBand reports whether mode is one claude accepts on a stream it
+// is already reading — #2041 measured all five live at 2.1.239, extending #1595's
+// default — and so one Pool.UpdateSettings can deliver without tearing the child
+// down. It mirrors internal/streamsup's writer-side allow-list, which this package
+// may not import; a mode outside it is refused by the writer anyway, so the two
+// lists disagreeing costs a swallowed Info record, never a wrong posture.
+//
+// A switch, deliberately, and NOT a package-level slice or map: the latter is
+// mutable package state holding a security vocabulary, which anything in this
+// package — a test included — could append the escalation onto. Control flow
+// cannot be appended to. Same argument the writer's own allow-list records.
+//
+// THIS IS A VOCABULARY CHECK, NOT AN AUTHORISATION CHECK. It answers "will claude
+// parse this mode?" and nothing else. Three of its members (acceptEdits, auto,
+// dontAsk) genuinely LOOSEN a child launched behind the daemon's approval flags
+// (cmd/pyry's withApprovalArgs), and dontAsk means the permission-prompt tool
+// never fires at all. Who may ask for that is #1687's decision; this slice's only
+// caller is in-package.
+func permissionModeInBand(mode string) bool {
+	switch mode {
+	case permissionModeDefault, "acceptEdits", "plan", "auto", "dontAsk":
+		return true
+	}
+	return false
+}
+
+// permissionModeKnown reports whether mode is one this daemon can STORE: the
+// in-band five plus the escalation, which is stored and delivered by relaunching
+// rather than in-band. It is the gate Pool.UpdateSettings applies to operator
+// input, and it is what keeps an unrecognised value out of the registry — and
+// therefore out of every argv composed from it later.
+func permissionModeKnown(mode string) bool {
+	return mode == permissionModeBypass || permissionModeInBand(mode)
+}
+
+// canonicalPermissionMode returns the posture the (mode, yolo) pair actually
+// describes, establishing SessionSettings' invariant. Total, and it never
+// escalates: an unrecognised or empty mode, and a bypassPermissions mode paired
+// with yolo:false, all land on the default posture.
+//
+// It NORMALISES TRUSTED INPUT and is not a validation path — its callers are the
+// two construction sites and the registry read, never operator input, which
+// Pool.UpdateSettings rejects loudly instead. The tolerant arm follows
+// parseLifecycleState's precedent in this file: an unrecognised value on disk
+// degrades to the conservative default rather than bricking a daemon over a
+// hand-edit that has a safe reading.
+func canonicalPermissionMode(mode string, yolo bool) string {
+	if yolo {
+		return permissionModeBypass
+	}
+	if permissionModeInBand(mode) {
+		return mode
+	}
+	return permissionModeDefault
+}
+
+// canonicalSettings returns s with its permission posture normalised. Applied at
+// both construction sites so a Pool-held Session never carries the empty mode,
+// and so Pool.mintSettings' and Pool.Revive's zero values become the default
+// posture rather than an unspelled one.
+func canonicalSettings(s SessionSettings) SessionSettings {
+	s.PermissionMode = canonicalPermissionMode(s.PermissionMode, s.YOLO)
+	return s
 }
 
 // SettingsUpdate is a partial change to a session's SessionSettings. A nil
@@ -83,15 +204,37 @@ type SettingsUpdate struct {
 	Model  *string
 	Effort *string
 	YOLO   *bool
+
+	// PermissionMode names the posture to switch to (#2043). Unlike Model and
+	// Effort, "" is NOT a meaningful value here — the default posture is a
+	// nameable mode, so an explicit empty string has no reading and is rejected
+	// with ErrUnsupportedPermissionMode like any other unrecognised value.
+	//
+	// It and YOLO express one posture, so an update naming EITHER is an update
+	// to the posture; naming both with values that contradict each other is
+	// ErrPermissionModeConflict. See Pool.UpdateSettings for the derivation.
+	PermissionMode *string
 }
 
 // claudeSettingsArgs returns the extra claude flags implied by s, in a
-// deterministic order (model, effort, bypass) for testability. Empty Model or
-// Effort emits no flag (inherit the template). YOLO==true appends
-// --dangerously-skip-permissions; YOLO==false appends nothing — the absence of
-// the flag is what enforces permissions. The function never emits a
-// permission-disabling flag, so a zero value yields nil and callers append
-// nothing (byte-identical argv).
+// deterministic order (model, effort, posture) for testability. Empty Model or
+// Effort emits no flag (inherit the template).
+//
+// The posture slot is mutually exclusive and emits at most one flag:
+//
+//   - YOLO==true appends --dangerously-skip-permissions and NOTHING else. The
+//     escalation keeps exactly one spelling, never --permission-mode
+//     bypassPermissions, so the fail-safe is enforced in one place. The flag is
+//     derived from the YOLO bit alone and never from PermissionMode, so no mode
+//     string can compose a bypass child.
+//   - a non-default in-band mode appends --permission-mode <mode> (#2043).
+//   - permissionModeDefault, and the zero value's "", append nothing. default IS
+//     claude's own default, so omitting the flag is the equivalent of an empty
+//     Model — and it is what keeps every argv this function composes today
+//     byte-identical.
+//
+// YOLO==false alone still appends nothing, so the function can never emit a
+// permission-disabling flag and a zero value yields nil.
 func claudeSettingsArgs(s SessionSettings) []string {
 	var args []string
 	if s.Model != "" {
@@ -100,8 +243,11 @@ func claudeSettingsArgs(s SessionSettings) []string {
 	if s.Effort != "" {
 		args = append(args, "--effort", s.Effort)
 	}
-	if s.YOLO {
+	switch {
+	case s.YOLO:
 		args = append(args, "--dangerously-skip-permissions")
+	case s.PermissionMode != permissionModeDefault && permissionModeInBand(s.PermissionMode):
+		args = append(args, "--permission-mode", s.PermissionMode)
 	}
 	return args
 }
