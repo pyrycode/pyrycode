@@ -56,7 +56,12 @@ at every call site since it lands in claude's argv.
   guessing and has no wrong case.
 
 See `docs/specs/architecture/1987-live-question-answer-round-trip.md` for the
-full design and security review. The refusal arm (a device paired without
-`--allow-remote-permissions` must not resolve a batch) is out of scope here —
-it stays with `questionResolverV2.admit`'s hermetic tests and is driven live
-in #1995, which rides this file's trigger and drain scaffold.
+full design and security review. The user-refusal arm — refusing an
+already-surfaced batch through `question_refused` — rides this file's trigger
+and drain scaffold and is driven live in
+[interactive_stream_question_refusal_test.go](e2e-realclaude-interactive-stream-question-refusal-test-go.md)
+(#1995). The per-device denial arm (a device paired *without*
+`--allow-remote-permissions` must not resolve a batch) is out of scope for
+both files: it stays with `questionResolverV2.admit`'s hermetic tests alone,
+since both harnesses pair *with* the flag so the round trip is observable at
+all.
