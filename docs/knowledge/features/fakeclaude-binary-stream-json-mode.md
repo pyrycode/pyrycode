@@ -13,7 +13,8 @@ When `PYRY_FAKE_CLAUDE_STREAM_JSON` is set, `main()`'s **very first** statement 
 
 ```go
 if os.Getenv(envStreamJSON) != "" {
-    runStreamJSON(os.Stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
+    runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
+        os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "")
     return
 }
 ```
@@ -76,12 +77,12 @@ TurnEndReasonEndTurn}` — see [streamsup-package.md § Turn I/O](streamsup-pack
   `atomic.Bool` signals are reached. Stream-json travels over a **pipe**, not a PTY,
   so canonical line discipline / CR mapping don't apply — `enterRawMode()` is never
   called in this mode.
-- **Default mode still ignores every non-`"user"` line, with one exception.** An
-  `initialize` `control_request` gets a canned answer regardless of mode or rider (#1692,
-  see § Initialize control request answer below); every other `control_request` —
-  including `interrupt` in default mode — is still dropped unlooked-at. new_session /
-  queue / modal remain out of scope for the fake. Interrupt is handled by the
-  `honorInterrupt` rider, below (#1136).
+- **Default mode still ignores every non-`"user"` line, with two exceptions.** An
+  `initialize` `control_request` (#1692) and a `set_permission_mode` `control_request`
+  (#2067, see the two sections below) each get a canned answer regardless of mode or
+  rider; every other `control_request` — including `interrupt` in default mode — is
+  still dropped unlooked-at. new_session / queue / modal remain out of scope for the
+  fake. Interrupt is handled by the `honorInterrupt` rider, below (#1136).
 - **No new glyph, no allowlist change.** Stream mode emits pure JSON — no TUI
   substrate glyphs — so `cmd/substrate-guard`'s allowlist for this file is
   unaffected.
@@ -256,6 +257,90 @@ a live developer recording (`argv` carries a home path, the inner payload carrie
 `account` object) — the test's failure messages print key **names** only, never a
 decoded entry or file dump, to avoid republishing that into CI output on a red run.
 
+### Set-permission-mode control request answer (#2067)
+
+The daemon is gaining a spawn-time posture gate (#2064): write the session's stored
+permission mode onto every spawned child's stdin as a `set_permission_mode`
+`control_request`, then refuse every user turn until claude acks it. Answered on the
+same terms as `initialize` above — **unconditional**, in an `else if` arm beside it in
+`runStreamJSON`'s dispatch, not gated by any rider — for the same reason: once #2064
+starts sending the line, every session in the fake-daemon suite arms the gate (an e2e
+session's stored posture canonicalises to `default`), so a fake that never answered
+would refuse every turn forever. Nothing sends the request yet, so this ticket changes
+no existing suite's bytes.
+
+The ack envelope is transcribed from claude's own committed answer
+(`internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.239_reescalate.json`, one
+of eleven `set_permission_mode` acks across ten committed captures): `subtype` and
+`request_id` nested under `response` (the inverse of the request side, same shape
+`writeInterruptAck`/`writeInitializeAck` use), wrapping `{"mode": <echo>}` one level
+deeper still at `response.response`. `set_permission_mode_control_test.go` cross-checks
+the fake's own key sets against a re-walk of the captures (8+ matched acks, 2+ distinct
+correlated modes as non-vacuity floors) rather than trusting the shape by inspection.
+
+**Both echoed values — `request_id` and `mode` — are verbatim and unvalidated.** A
+request naming a mode outside claude's vocabulary, or carrying no `mode` key at all, is
+answered with whatever it carried: absent decodes to `""` and is echoed as
+`"mode":""`, present-and-empty rather than corrected or refused. This is deliberately
+**not** checked against `streamsup.permissionModeAllowed`: that allow-list is the
+daemon's own *outbound* defence against minting an escalating line, and a fake that
+re-applied it *inbound* could no longer reproduce what the daemon actually sends —
+`bypass_reescalation_v2.1.239_reescalate.json` is real claude answering a
+`bypassPermissions` request, a mode the list does not admit, with a plain success. An
+inbound filter would make that transcript unreproducible, which is precisely what
+\#2064's ack correlation has to observe.
+
+**A second field off an already-parameterised decode is where a duplicate decode gets
+written — push the guard down instead.** `controlRequestID(line, subtype)` already
+existed as the one place the `type`/`subtype` check happens (generalised from
+`interruptControlRequest` by #1692, itself following `argvSessionID` → `argvIDFlag`'s
+extract-the-shared-half-into-a-parameter move, #1631). This arm needed a *second* field
+(`mode`, a sibling of `subtype` under `request`, not top-level beside `request_id`) —
+not obtainable by widening `controlRequestID`'s return without breaking its other two
+callers. The guard moved one level down instead: `decodeControlRequest(line, subtype)
+(inControlRequest, bool)` is now the sole decode and the sole type/subtype check;
+`controlRequestID` became a thin wrapper reading `.RequestID` off it, signature and all
+three existing callers unchanged; `setPermissionModeRequest(line) (requestID, mode
+string, ok bool)` is the new per-subtype wrapper reading both fields. Writing a second
+`json.Unmarshal` in a standalone function would have been exactly the drift
+`controlRequestID`'s doc already warns against.
+
+**The withheld-mode-ack rider (`PYRY_FAKE_CLAUDE_STREAM_WITHHOLD_MODE_ACK`,
+`withholdModeAck`, default-off)** lets a caller drive a child that never confirms its
+posture — the shape #2064's turn-gate e2e needs. It is the only rider on this file that
+*suppresses* a line rather than adding one, and the only one riding an answer that is
+otherwise unconditional, which is why the check sits **inside** the dispatch arm rather
+than on its condition: the request must still be *read and consumed by this arm*, only
+the ack withheld. Gating the arm's condition instead would let the line fall through to
+whatever arm follows it — inert today, since nothing does, but a latent bug the moment
+one is added, and no test today could tell the two apart (both compile, both pass,
+because nothing follows the arm that would match the line). Unset ⟹ off ⟹ the ack is
+emitted.
+
+**A rider that suppresses a line needs a follow-on turn in its test to mean anything.**
+A bare byte-count assertion (`on` produces zero `control_response` lines) passes just
+as well for a rider implemented by `return`-ing out of the read loop entirely — the
+child is dead, and a dead child also emits no ack. The test that actually kills that
+mutant feeds the `set_permission_mode` request **followed by a user turn** and asserts
+the turn's reply still lands while the ack does not; that is also the literal property
+the consumer needs (a child that is alive but unconfirmed), so the stronger test and
+the correct spec turned out to be the same test.
+
+**Known gap, deliberately unfixed here: the approve rider's read loop
+(`runStreamJSONApprove`, § Approve rider below) answers neither `set_permission_mode`
+nor `initialize`.** It is a separate, wholly duplicated read loop from `runStreamJSON`
+(see § Approve rider), so this arm's dispatch never reaches it. Harmless while nothing
+sends the request — but `internal/e2e/relay_v2_stream_modal_test.go` spawns its child
+with the approve rider on, so the moment #2064's spawn-time gate arms, that child will
+never ack its posture and every turn in that suite will be refused, the exact failure
+this ticket exists to prevent, one path over. Flagged for #2064 to close, not fixed
+here — out of this ticket's ACs.
+
+Not gaining a NAK arm: `streamsup.parser.go` records that a `set_permission_mode` NAK
+exists on the wire (an `error` string, no inner response), but no AC here asks for one,
+\#2064 needs an *ack* to correlate, and a NAK would need its own rider to be reachable
+at all. Left for whichever of #2064/#2065 first needs to drive a refusal.
+
 ### Stream-path stdin tee (`PYRY_FAKE_CLAUDE_STDIN_LOG`, #1137, per-child since #1331)
 
 `PYRY_FAKE_CLAUDE_STDIN_LOG` already existed for the PTY path (`startStdinReader`,
@@ -413,7 +498,11 @@ runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
 `runStreamJSONApprove` duplicates `runStreamJSON`'s ~15-line read loop rather than
 widening its signature — same discipline as the stdin tee and startup hold: the
 tested seam (`runStreamJSON`) stays byte-identical for the send/interrupt/queue
-siblings.
+siblings. **That duplication is also why this rider answers neither `initialize`
+(#1692) nor `set_permission_mode` (#2067)** — both live only in `runStreamJSON`'s
+dispatch. Harmless today; once #2064's spawn-time posture gate arms, a child spawned
+with this rider on (`relay_v2_stream_modal_test.go` does) will never ack its posture
+and every turn in that suite will be refused. Flagged for #2064, not yet fixed.
 
 **Socket-in-a-file.** The daemon's control socket is a random per-spawn path
 (`shortSocketPath`), unknown before spawn and not derivable from the child's env or

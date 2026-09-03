@@ -368,6 +368,7 @@ const (
 	envStreamApprove      = "PYRY_FAKE_CLAUDE_STREAM_APPROVE"
 	envStreamBogus        = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
 	envStreamRateLimit    = "PYRY_FAKE_CLAUDE_STREAM_RATE_LIMIT"
+	envStreamWithholdMode = "PYRY_FAKE_CLAUDE_STREAM_WITHHOLD_MODE_ACK"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
@@ -673,8 +674,15 @@ func main() {
 		// rate_limit_info.status, which is the gate's sole discriminator, so the
 		// benign case and its arrival control differ in exactly that one string and
 		// are provably on the same path. Empty ⟹ off ⟹ byte-identical.
+		//
+		// Withheld-mode-ack rider (envStreamWithholdMode, default-off): read the
+		// set_permission_mode control_request as usual but emit no ack, so a caller
+		// can drive a child that never confirms its posture (#2067). Unlike every
+		// rider above this one SUPPRESSES an answer rather than adding a line, which
+		// is why it is a rider at all: the answer itself is unconditional, on the
+		// `initialize` arm's terms. Unset ⟹ off ⟹ the ack is emitted.
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
-			os.Getenv(envStreamRateLimit))
+			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "")
 		return
 	}
 
@@ -1465,17 +1473,25 @@ type inUserTurn struct {
 }
 
 // inControlRequest is the minimal decode of one inbound control_request line — only
-// the fields the interrupt mode reads (the top-level type and request subtype, plus
-// the correlation id the ack echoes since #1500). It mirrors streamsup.controlRequest
-// (envelope.go), which is unexported there.
+// the fields the fake reads (the top-level type and request subtype, the correlation
+// id the ack echoes since #1500, and the requested mode since #2067). It mirrors
+// streamsup.controlRequest (envelope.go), which is unexported there.
 //
-// RequestID is TOP-LEVEL here, matching marshalInterruptEnvelope's request side. The
-// response side inverts that — see writeInterruptAck.
+// The two inbound values sit at DIFFERENT levels, and both are the wire's, not a
+// convenience. RequestID is TOP-LEVEL, matching marshalInterruptEnvelope's request
+// side; the response side inverts that — see writeInterruptAck. Mode is a SIBLING of
+// Subtype inside Request, matching marshalPermissionModeEnvelope, not a second
+// top-level field beside RequestID.
+//
+// Mode is empty for every subtype that does not carry one, which is every subtype but
+// set_permission_mode. That is a decoded absence, not a sentinel: the fake echoes it
+// as it found it rather than substituting a default — see writeSetPermissionModeAck.
 type inControlRequest struct {
 	Type      string `json:"type"`
 	RequestID string `json:"request_id"`
 	Request   struct {
 		Subtype string `json:"subtype"`
+		Mode    string `json:"mode"`
 	} `json:"request"`
 }
 
@@ -1580,17 +1596,34 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // control_request.
 //
 // An `initialize` control_request (#1689) is answered in BOTH modes and under no
-// rider — see writeInitializeAck. It is the one control line the fake handles
-// unconditionally, because once the daemon starts sending it every fake-daemon run
-// sees it regardless of rider; nothing sends it today, so no existing suite's bytes
-// change. Every other control_request keeps its behaviour exactly.
+// rider — see writeInitializeAck. A `set_permission_mode` one (#2067) is answered on
+// the same terms — see writeSetPermissionModeAck. They are the control lines the fake
+// handles unconditionally, because once the daemon starts sending them every
+// fake-daemon run sees them regardless of rider; nothing sends either today, so no
+// existing suite's bytes change. Every other control_request keeps its behaviour
+// exactly.
 //
 // rateLimitStatus selects the rate-limit rider (#1411, default-off): non-empty
 // prepends one top-level rate_limit_event line carrying that string as its
 // rate_limit_info.status, ahead of the normal reply. Empty means off — which is why
 // the parser's third rung (an absent or empty rate_limit_info) is deliberately not
 // reachable through this seam and stays parser-tier.
-func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string) {
+//
+// withholdModeAck selects the withheld-mode-ack rider (#2067, default-off): the
+// set_permission_mode request is still READ and still consumed by its own arm, but no
+// ack is written, so a caller can drive a child that never confirms its posture. It is
+// the only rider here that suppresses a line rather than adding one, and the only one
+// riding an answer that is otherwise unconditional — which is why the check sits
+// INSIDE that arm rather than on its condition: gating the condition would let the
+// line fall through to whatever arm follows, inert today and a latent bug the moment
+// one is added. False ⟹ off ⟹ the ack is emitted.
+//
+// The riders are parameters in the order they landed, and withholdModeAck is appended
+// rather than grouped with the leading bools deliberately: the resulting string, bool
+// tail makes a mis-slotted call-site edit a compile error, which a third adjacent bool
+// would not.
+func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string,
+	withholdModeAck bool) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1642,6 +1675,25 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				if werr := writeInitializeAck(w, reqID); werr != nil {
 					return
 				}
+			} else if reqID, mode, ok := setPermissionModeRequest(b); ok {
+				// The daemon told this child which permission posture to adopt (#2067) —
+				// the request it will, from #2064 on, write at spawn time and hold every
+				// user turn behind. Answered UNCONDITIONALLY and beside the honorInterrupt
+				// arm, for the reason the initialize arm above records: once the daemon
+				// starts sending the line every fake-daemon run sees it regardless of
+				// rider. Nothing sends it today, so no existing suite's bytes change.
+				//
+				// The rider is checked HERE, inside the arm, rather than on its condition.
+				// Withholding means the request is still read and still consumed by this
+				// arm and merely goes unanswered — which is the child #2064 needs, one
+				// that never confirms its posture but is otherwise alive. Gating the
+				// condition instead would let the line fall through to whatever arm
+				// follows: inert today, a latent bug the moment one is added.
+				if !withholdModeAck {
+					if werr := writeSetPermissionModeAck(w, reqID, mode); werr != nil {
+						return
+					}
+				}
 			} else if honorInterrupt {
 				if reqID, ok := interruptControlRequest(b); ok {
 					// The daemon routed a phone interrupt to this child as a control_request:
@@ -1688,29 +1740,44 @@ func userTurnText(line []byte) (string, bool) {
 }
 
 // The control_request subtypes fakeclaude answers, named so the dispatch in
-// runStreamJSON reads by name rather than by bare literal. Both are the daemon's
+// runStreamJSON reads by name rather than by bare literal. All three are the daemon's
 // strings: interrupt is streamsup.marshalInterruptEnvelope's (#1136/#1500), initialize
-// is the request the daemon sends to collect the session's model list (#1689).
+// is the request the daemon sends to collect the session's model list (#1689), and
+// set_permission_mode is marshalPermissionModeEnvelope's (#2067).
 const (
-	subtypeInterrupt  = "interrupt"
-	subtypeInitialize = "initialize"
+	subtypeInterrupt         = "interrupt"
+	subtypeInitialize        = "initialize"
+	subtypeSetPermissionMode = "set_permission_mode"
 )
 
-// controlRequestID reports whether line is a control_request carrying subtype,
-// returning its correlation id for an ack to echo. It mirrors userTurnText's decode
-// discipline: a minimal struct, and a line that fails to decode or carries another
-// type or subtype returns ("", false) — the caller ignores it, preserving the
-// parser's per-line resilience.
+// decodeControlRequest reports whether line is a control_request carrying subtype,
+// returning the decoded envelope for a per-subtype wrapper to read its fields off. It
+// mirrors userTurnText's decode discipline: a minimal struct, and a line that fails to
+// decode or carries another type or subtype returns (zero, false) — the caller ignores
+// it, preserving the parser's per-line resilience.
 //
 // ONE decode parameterised by subtype rather than a twin per subtype, mirroring the
 // argvSessionID → argvIDFlag extraction #1631 made in this file: a duplicated decode
-// is what drifts when the request envelope moves.
-func controlRequestID(line []byte, subtype string) (string, bool) {
+// is what drifts when the request envelope moves. #2067 needed a SECOND field off the
+// same line and pushed the guard down here rather than writing that twin — so the
+// wrappers below select fields and the type/subtype check exists exactly once.
+func decodeControlRequest(line []byte, subtype string) (inControlRequest, bool) {
 	var in inControlRequest
 	if err := json.Unmarshal(line, &in); err != nil {
-		return "", false
+		return inControlRequest{}, false
 	}
 	if in.Type != "control_request" || in.Request.Subtype != subtype {
+		return inControlRequest{}, false
+	}
+	return in, true
+}
+
+// controlRequestID reports whether line is a control_request carrying subtype,
+// returning its correlation id for an ack to echo — the field-selecting wrapper for
+// every subtype whose answer echoes the id alone.
+func controlRequestID(line []byte, subtype string) (string, bool) {
+	in, ok := decodeControlRequest(line, subtype)
+	if !ok {
 		return "", false
 	}
 	return in.RequestID, true
@@ -1723,6 +1790,23 @@ func controlRequestID(line []byte, subtype string) (string, bool) {
 // correlation id for the ack to echo (#1500).
 func interruptControlRequest(line []byte) (string, bool) {
 	return controlRequestID(line, subtypeInterrupt)
+}
+
+// setPermissionModeRequest reports whether line is the set_permission_mode
+// control_request the daemon writes to the child's stdin
+// (streamsup.marshalPermissionModeEnvelope:
+// {"type":"control_request","request_id":…,"request":{"subtype":"set_permission_mode",
+// "mode":…}}), returning the two values its ack echoes (#2067).
+//
+// The only wrapper that reads a second field, which is why decodeControlRequest exists
+// underneath it. Neither value is inspected: an unknown mode, or a request carrying no
+// mode at all, comes back as it was found — see writeSetPermissionModeAck.
+func setPermissionModeRequest(line []byte) (requestID, mode string, ok bool) {
+	in, ok := decodeControlRequest(line, subtypeSetPermissionMode)
+	if !ok {
+		return "", "", false
+	}
+	return in.RequestID, in.Request.Mode, true
 }
 
 // writeStreamResponse writes fakeclaude's canned reply to one user turn: one
@@ -1915,6 +1999,56 @@ func writeInitializeAck(w io.Writer, requestID string) error {
 			"response": map[string]any{
 				"models":   initializeModels,
 				"commands": initializeCommands,
+			},
+		},
+	})
+}
+
+// writeSetPermissionModeAck writes the control_response real claude answers a
+// `set_permission_mode` control_request with (#2067): the ack envelope
+// writeInterruptAck documents — `subtype` and `request_id` nested UNDER `response`,
+// the inverse of the request side — wrapping the requested mode one level deeper
+// still, at `response.response.mode`.
+//
+// The envelope is transcribed from the committed captures, of which there are ten
+// carrying eleven of these acks; the nearest is
+// internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.239_reescalate.json
+// (claude 2.1.239). Their shape is uniform: {response, type} at the top,
+// {subtype, request_id, response} inside, and `mode` ALONE in the payload. Nothing
+// else is invented — set_permission_mode_control_test.go cross-checks all three key
+// sets against the captures, so an added key would red.
+//
+// BOTH echoed values are verbatim and unvalidated. writeInitializeAck argues the
+// marshalling property for the id and it carries over unchanged: these are inbound
+// bytes — whatever the daemon wrote to this child's stdin — reflected straight back
+// onto stdout, which the daemon's stream parser reads as line-delimited JSON.
+// json.Marshal escapes them, so a value carrying a newline and a forged envelope lands
+// as one escaped string inside one physical line; built with fmt.Sprintf instead,
+// either value would split the output and fabricate an extra stream line the parser
+// consumes as a real event. The mode is the newer of the two and the one that had no
+// proof, so its injection row is the one the test leads with.
+//
+// The mode is NOT checked against streamsup's permissionModeAllowed, and that is
+// deliberate rather than an omission. That allow-list is the daemon's own OUTBOUND
+// defence against minting an escalating line; a fake that re-applied it inbound could
+// no longer reproduce what the daemon actually sent, which is precisely what #2064's
+// ack correlation has to observe. The captures settle it: the reescalate one above
+// holds claude answering a `bypassPermissions` request — a mode that list does not
+// admit — with a plain success. A request naming no mode is likewise answered with the
+// key present and empty, not corrected to a default and not refused. The fake echoes,
+// it does not police.
+//
+// A map[string]any like writeInterruptAck and writeInitializeAck: keys marshal sorted,
+// so the line is deterministic without declaring a struct for a shape nothing else
+// reads. Returns the first marshal/write error.
+func writeSetPermissionModeAck(w io.Writer, requestID, mode string) error {
+	return writeJSONLine(w, map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "success",
+			"request_id": requestID,
+			"response": map[string]any{
+				"mode": mode,
 			},
 		},
 	})
