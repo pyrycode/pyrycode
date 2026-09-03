@@ -614,3 +614,115 @@ against the pre-fix shape by `go test -overlay` (`armed on "1" (the predecessor 
 
 § Design's "its gate is never armed" is superseded by the code comment at the arm site:
 every spawn publishes its own gate state, and only the id it publishes is conditional.
+
+### 2026-09-03 — rework, verifier MUST FIX: a NAK wedged the session permanently
+
+**The defect.** § Error handling's row 5 recorded only the local behaviour — *"Ack
+subtype is not `success` → no release"* — and never asked what happens to the session
+NEXT. A live child that answers the spawn-time write with a non-success subtype left
+the gate closed with **no opener left**: `arm` had exactly one production call site
+(`spawnAndWait`) and `release` exactly one (`noteControlAck`), so a spawn was the only
+opener, and the child is healthy, so nothing triggers one. § Design's *"a child that
+exits before acking … needs no teardown hook"* argument covers only a child that
+**dies**; a NAK is a child that answers.
+
+The operator's documented remedy provably did not recover it. `inBandDeliverable` is
+true for every `permissionModeInBand` mode, so a corrective mode change takes
+`Pool.UpdateSettings`' in-band branch, never restarts, and reaches `SetPermissionMode`
+— which minted a **fresh** id that nothing armed. Claude acked that id, `release`
+compared it against the still-armed spawn id, they did not match, and the gate stayed
+closed. Only an escalation to `bypassPermissions` reached `Restart`, so the sole
+in-product recovery was to grant bypass and then downgrade again. Meanwhile every turn
+refused under the **retryable** classification, so msgqueue burned its full give-up
+window against a state that could never change, and the only evidence was one repeated
+Info record naming neither the cause nor the mode.
+
+A NAK is documented claude behaviour rather than a hypothetical.
+`turnevent.ModelOption.SupportsAutoMode` records that claude refuses `auto` **per
+model**, `validatePermissionUpdate` accepts `auto` for any session on any model, and
+mode and model are independent settings, so nothing re-checks the pairing when either
+one changes.
+
+**The policy, settled here.** Fail-closed stays. Releasing on a NAK would be actively
+wrong under #2065, where the child launches in bypass and a NAK'd downgrade must not
+admit turns. What was missing is a *terminating* path — the daemon held a definitive
+answer and discarded it. Two changes, and neither loosens the gate:
+
+1. **The NAK is recorded rather than dropped.** `PostureGate` gains one bool beside the
+   id, set by `refuse(id)` when a non-success ack carries the id the gate is armed
+   against. `arm`, `release` and `retarget` all clear it, so the verdict never outlives
+   the request it answers. Unlike `release`, `refuse` **needs** the `armedID != ""`
+   guard that `release`'s doc argues against having: an open gate's id is `""`, so a NAK
+   carrying no `request_id` would otherwise mark an OPEN gate refused. The flag changes
+   no decision — the gate was already closed — it changes what the operator is told.
+   `WriteUserTurn` writes a distinct record at **Warn** naming the cause instead of
+   repeating "not yet confirmed by claude" at Info forever.
+2. **`SetPermissionMode` re-targets a CLOSED gate onto its own id**, after a successful
+   write, so the documented remedy works: change the mode, the in-band write gets
+   confirmed, the gate opens. An **OPEN** gate is never closed by it, and that half is
+   as load-bearing as the first — this ticket gates *spawns*, and closing the gate on an
+   in-band change would drop the `/model` and `/effort` sends `deliverSettingsInBand`
+   issues immediately afterwards through `WriteUserTurn`. A write that fails, or a mode
+   the allow-list refuses, does not re-target either: the pending spawn id stays armed
+   so its own ack can still open the gate.
+
+**The classification is unchanged, deliberately.** Turns still refuse with the retryable
+`ErrNoLiveChild`. With (2) the state is operator-recoverable without a daemon restart,
+which is exactly what retryable means, and a fourth error out of `WriteUserTurn` would
+break the contract check that stream `WriteUserTurn` returns only `ErrNoLiveChild`,
+`turncommit.ErrDropped` or nil (`TestRelayV2_StreamNewSessionRotatesAndRestartsFresh`).
+The refusal of an in-band `/model` send while the gate is closed is not new and is not
+made worse: the rotation gate already refuses those sends in its own window. What this
+fix removes is the PERMANENCE, not the refusal.
+
+**§ Error handling, amended.** Row 5 gains its terminating half, and one row is added —
+8 of 10:
+
+| # | Branch | Outcome |
+|---|---|---|
+| 5 | Ack subtype is not `success`, carrying the ARMED id | no release; the gate is marked refused and every turn refused from then on is recorded at Warn naming the cause. Recovered by an in-band posture change (which re-targets it) or by the next spawn |
+| 8 | `SetPermissionMode`'s write fails, or its mode is refused by the allow-list | no re-target — the pending spawn id stays armed, so its own ack can still open the gate |
+
+**§ Security review, amended for the NAK path** (it did not consider it):
+
+- The **trust-boundary** finding is unchanged in kind and narrower in fact. The child's
+  stdout can open the gate on a success and can now also MARK it refused — but `refuse`
+  is strictly less permissive than doing nothing: it cannot open a gate, and the
+  `armedID != ""` guard makes "cannot close an open one" structural rather than
+  argued. A hostile child gains no capability it did not already have by staying
+  silent.
+- The **logging** obligation is preserved rather than relaxed. `noteControlAck` still
+  logs NOTHING on any path, including the decode error. The new Warn is written at the
+  turn site from gate state alone and carries the session id and no other field — not
+  the mode, not the request id, not the subtype text, not the payload. The single bit
+  that crosses from the child's answer into the log is the record's existence, and that
+  bit is already observable as "this session's turns are being refused".
+- **Availability, not privilege**, in both directions. (2) can only open a gate that a
+  spawn armed, and only on the ack for a write the daemon itself just made off its own
+  counter; it adds no authorisation decision and touches neither the allow-list nor
+  `validatePermissionUpdate`.
+
+**Testing.** Neither suite could reach a NAK-then-turn sequence — the fake acks
+unconditionally and the live rig drives `default` only — so the coverage sits at the
+level the state machine lives on, in `internal/streamsup`, where the whole path
+(parser → gate → runner) is real and deterministic:
+`TestPostureGate_NakIsRecordedAndRetargetRecovers` walks every new transition including
+the two guards; `TestParser_NoteControlAck_NakMarksTheArmedRequestRefused` proves
+`consumeLine`'s arm reaches `refuse` and that a sibling's NAK does not;
+`TestRunner_NakThenInBandModeChange_RecoversTheSession` drives the operator sequence end
+to end against the fake child — spawn, NAK, turn refused with zero bytes and the Warn
+record, `SetPermissionMode`, ack, turn flows;
+`TestRunner_SetPermissionMode_LeavesAnOpenGateOpen` is the `/model`-drop guard; and
+`TestRunner_SetPermissionMode_FailedWriteDoesNotRetarget` pins row 8. An e2e was
+considered and rejected: the recovery path is entirely inside `internal/streamsup` with
+no cross-package seam, so a second withheld-ack-style rider on the fake would prove
+nothing the runner-level test does not.
+
+**Doc comments retired in the same push** (verifier SHOULD FIX). `nextControlID` still
+claimed *"this slice does not read the control_response ack, so the id is write-only
+here"*, `WritePermissionMode` and `WriteInitialize` still claimed *"nothing correlates
+the request_id"*, `Config.SpawnPermissionMode` still claimed a bypass spawn's *"gate is
+never armed"* (superseded by the previous entry's hoist), `WriteUserTurn` enumerated two
+refusal causes where there are now three, and fakeclaude's `runStreamJSONApprove` header
+still claimed non-user lines are *"ignored … exactly like runStreamJSON"* with the
+correction stranded forty lines down inside the arm that falsified it.
