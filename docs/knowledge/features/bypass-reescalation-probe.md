@@ -120,6 +120,10 @@ go test -tags e2e_realclaude -race -count=1 -run TestBypassReescalation ./intern
 
 ## Related
 
+- [`bypass-approval-argv-probe.md`](bypass-approval-argv-probe.md) — #2061, which builds on this
+  ticket's mechanism finding to measure the same escalation on the argv production actually
+  spawns (the four approval flags alongside bypass): the approval bridge comes back after the
+  in-band downgrade, and no race window was observed in three consecutive spawns.
 - [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md) — #1595, whose
   `enable` negative and index-symmetry rule this measurement re-measures and extends.
 - [`permission-mode-switch-inband-probe.md`](permission-mode-switch-inband-probe.md) — #2041,
