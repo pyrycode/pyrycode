@@ -86,10 +86,14 @@ package realclaude
 // arm's post-change read is its turn 2, so its control must also be a turn 2, or
 // the verdict folds in a turn-index confound.
 //
-// #2041 and #2060 ride this same driver with their own arms. #2060 widened it with
-// an optional third turn and a second control request between turns 2 and 3, both
-// INERT here: setModeChildConfig.promptThree is empty on this measurement, so these
-// four arms still drive exactly the two turns described above.
+// #2041, #2060 and #2061 ride this same driver with their own arms, and every
+// widening they brought is INERT here. #2060 added an optional third turn and a
+// second control request between turns 2 and 3; setModeChildConfig.promptThree is
+// empty on this measurement, so these four arms still drive exactly the two turns
+// described above. #2061 added per-arm extra launch flags, a first control request
+// movable ahead of turn 1, a stage-mark hook and an approval observation; all four
+// are zero-valued here, so this measurement's argv, ordering and record are
+// byte-for-byte what its committed 2.1.220 captures already record.
 //
 // # Why the echoed response is not the verdict
 //
@@ -211,6 +215,42 @@ type setModeArm struct {
 	// It is inert unless setModeChildConfig.promptThree is set: a second request is
 	// only meaningful when a turn follows it to read the result off.
 	secondTargetMode string
+
+	// extraLaunchArgs are appended to the argv AFTER the launchYOLO branch below.
+	// Nil on every arm before #2061, which is what keeps every committed capture's
+	// argv byte-identical to what it already records.
+	//
+	// It exists because runSetModeChild builds its argv inline and branches only on
+	// launchYOLO, so the ONLY two argvs reachable through this rig were the bare one
+	// and the bare one plus --dangerously-skip-permissions. #2061's whole subject is
+	// a third: the bypass flag beside production's four approval flags, which
+	// permissionArgs composes and withApprovalArgs injects per spawn, and which no
+	// capture in this package covers because withApprovalArgs returns early on
+	// --dangerously-skip-permissions and so production never emits both.
+	//
+	// A []string rather than a typed flag set: this rig has no business knowing what
+	// a permission flag is, and a caller measuring some other argv gets the axis for
+	// free. Nothing here validates the contents — the caller owns them, and every
+	// element on every arm today is a package constant or a path the caller minted.
+	extraLaunchArgs []string
+
+	// requestBeforeFirstTurn moves the FIRST control request ahead of turn 1,
+	// instead of between turns 1 and 2. False on every arm before #2061.
+	//
+	// #2060 moved the SECOND request's position; this moves the first's, and the two
+	// are independent knobs because the sequence they describe is. #2061 needs it to
+	// ask whether anything can execute between launch and a downgrade landing —
+	// #1686's design writes the downgrade immediately at spawn, and every request
+	// this rig could write was positioned after a turn, so the window it opens was
+	// unreachable through the driver.
+	//
+	// The send-and-WAIT is unchanged when it moves: the ack is awaited on
+	// setModeControlBudget before turn 1 is written. That is deliberate, and is the
+	// case most favourable to a design that wants the downgrade to have landed — an
+	// ungated turn after an awaited ack is a real race window rather than an
+	// artefact of not waiting, and an ack that never drew before turn 1 says the
+	// request cannot be written that early at all.
+	requestBeforeFirstTurn bool
 }
 
 var setModeArms = []setModeArm{
@@ -644,6 +684,13 @@ type setModeFixtureRecord struct {
 	// reproduce the trap the measurement exists to avoid.
 	ModeSwitchAuto *modeSwitchAutoObservation `json:"mode_switch_auto,omitempty"`
 
+	// Approval is #2061's record of what reached its stub approval socket, sliced
+	// by the drive sequence's stages, and is nil on every arm that ran with no such
+	// socket. Its inner fields carry no omitempty for ModeSwitchAuto's reason: a
+	// ZERO approval count is the finding on the arm whose bridge never came back,
+	// and an omitempty int would spell that finding by ABSENCE.
+	Approval *bypassArgvApproval `json:"approval,omitempty"`
+
 	StdinWriteErrors       []string `json:"stdin_write_errors"`
 	StderrCapture          string   `json:"stderr_capture"`
 	ExitCode               int      `json:"exit_code"`
@@ -753,7 +800,73 @@ type setModeChildConfig struct {
 	// autoMode is recorded verbatim into the arm's fixture and read by nothing
 	// here. nil on a measurement that asked claude nothing about its model list.
 	autoMode *modeSwitchAutoObservation
+
+	// mark is called once after each COMPLETED step of the drive sequence, with one
+	// of the setModeStage* constants. nil on every caller before #2061 and
+	// nil-checked at every site, so it costs an existing measurement nothing.
+	//
+	// It exists so a caller can attribute an event this rig knows nothing about to
+	// the turn that produced it. #2061 watches a stub approval socket claude reaches
+	// over a SEPARATE channel — nothing on it passes through this file — and its
+	// verdict is not "how many approvals in total" but "was the bridge consulted on
+	// the post-downgrade turn". A total cannot answer that; a snapshot at each stage
+	// boundary can, because the driver is strictly serialised and waits for each
+	// turn's result line before writing the next.
+	//
+	// Marks fire from the TEST goroutine only, so an observer needs no lock against
+	// this file — though #2061's does need one against its own accept loop.
+	//
+	// controlResponses is this rig's OWN running count at that moment, handed over
+	// rather than left to be re-derived. An observer cannot recover it from the
+	// record: the record is written once at the end, and "was the request acked
+	// BEFORE turn 1" is a question about a moment, not about a total. Reading the
+	// stdout order instead would rest on whether claude emits its system/init line
+	// at spawn or per turn, which is exactly the kind of assumption a measurement
+	// ticket must not build a verdict on.
+	mark func(stage string, controlResponses int)
+
+	// approval, when non-nil, is called ONCE just before the record is built, and
+	// its result stored verbatim on the record. nil on every caller before #2061.
+	//
+	// A closure rather than a value like autoMode, and the difference is when the
+	// observation completes: autoMode is known before the child starts, while an
+	// observation OF the child is only complete after it has exited. Calling it here
+	// rather than filling the field after runSetModeChild returns keeps
+	// writeSetModeFixture the single writer — a caller that filled the field
+	// afterwards would have to write the fixture a second time.
+	approval func() *bypassArgvApproval
+
+	// redactRunLocal, when non-nil, is applied to every RECORDED argv token and to
+	// the stderr capture. It never touches what is EXECUTED. nil before #2061.
+	//
+	// #2061 hands claude two run-local temp paths on the argv — an mcp-config and a
+	// Unix socket — and both would otherwise be committed. /var/folders/ and
+	// /private/var/folders/ are two of dropcapFixedNeedles' five fixed deny classes,
+	// so committing one cuts against this package's own grain; and a fresh random
+	// path per run makes the captures undiffable, in a measurement whose whole
+	// subject is the argv. It is a redaction of RUN-LOCAL NOISE, not of a
+	// credential: initControlScrubbed below is the credential guard and runs first,
+	// unconditionally, whether or not this is set.
+	redactRunLocal func(string) string
 }
+
+// The stages setModeChildConfig.mark names, in drive order. Each fires AFTER that
+// step completed — after the turn's result line was awaited, or after the control
+// request's response was.
+//
+// setModeStagePreTurnControl and setModeStageControlOne are two different points
+// and not one renamed: an arm setting requestBeforeFirstTurn marks the former and
+// never the latter, so an observer can tell a downgrade written before turn 1 from
+// one written after it without being told which arm it is watching.
+const (
+	setModeStageStart          = "start"            // child spawned, nothing written yet
+	setModeStagePreTurnControl = "pre_turn_control" // the before-turn-1 request settled
+	setModeStageTurnOne        = "turn_1"
+	setModeStageControlOne     = "control_1"
+	setModeStageTurnTwo        = "turn_2"
+	setModeStageControlTwo     = "control_2"
+	setModeStageTurnThree      = "turn_3"
+)
 
 func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 	versionRaw, versionToken string, cfg setModeChildConfig) *setModeFixtureRecord {
@@ -774,6 +887,9 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 	if arm.launchYOLO {
 		argv = append(argv, "--dangerously-skip-permissions")
 	}
+	// Last, so the bypass flag keeps the position every committed capture records
+	// and a diff against one of those shows the extras as a pure suffix.
+	argv = append(argv, arm.extraLaunchArgs...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), setModeChildBudget)
 	defer cancel()
@@ -832,17 +948,24 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		t.Fatalf("#1595[%s]: %v", arm.name, err)
 	}
 
-	writeLine("turn 1", turnOne)
-	if !setModeWaitFor(rec.resultCount, 1, setModeTurnBudget) {
-		t.Logf("#1595[%s]: turn 1 produced no result line within %s (recorded, continuing)",
-			arm.name, setModeTurnBudget)
+	mark := func(stage string) {
+		if cfg.mark != nil {
+			cfg.mark(stage, rec.controlResponseCount())
+		}
 	}
+	mark(setModeStageStart)
 
 	var (
 		controlSent json.RawMessage
 		requestID   string
 	)
-	if arm.targetMode != "" {
+	// Lifted into a closure so arm.requestBeforeFirstTurn can call it from either
+	// of two positions with an identical body, budget and correlation recording.
+	// Copying it to a second site is how the two positions would silently drift.
+	sendFirstRequest := func() {
+		if arm.targetMode == "" {
+			return
+		}
 		// A correlation token, not a security token — the same reason
 		// (*Runner).Interrupt mints its id from a monotonic counter. A fixed
 		// per-arm id keeps the fixture diffable.
@@ -860,6 +983,26 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		}
 	}
 
+	// #2061's ordering knob. The stage mark fires even on an arm that sends nothing
+	// here, so an observer's window boundaries exist on every arm and a control's
+	// "zero approvals before turn 1" is a read rather than a missing stage.
+	if arm.requestBeforeFirstTurn {
+		sendFirstRequest()
+	}
+	mark(setModeStagePreTurnControl)
+
+	writeLine("turn 1", turnOne)
+	if !setModeWaitFor(rec.resultCount, 1, setModeTurnBudget) {
+		t.Logf("#1595[%s]: turn 1 produced no result line within %s (recorded, continuing)",
+			arm.name, setModeTurnBudget)
+	}
+	mark(setModeStageTurnOne)
+
+	if !arm.requestBeforeFirstTurn {
+		sendFirstRequest()
+	}
+	mark(setModeStageControlOne)
+
 	// Turn 2 is driven unconditionally, on the control arms too. It is what makes
 	// recording an absent init line legitimate under AC 2: the init line is
 	// emitted per turn rather than at spawn, so "no init after the control
@@ -871,6 +1014,7 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		t.Logf("#1595[%s]: turn 2 produced no result line within %s (recorded, continuing)",
 			arm.name, setModeTurnBudget)
 	}
+	mark(setModeStageTurnTwo)
 
 	// The optional second control request and third turn, #2060's addition. Both are
 	// inert on a caller leaving promptThree empty, which is every caller before it.
@@ -906,6 +1050,7 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 				ControlRequestSent: sent,
 			}
 		}
+		mark(setModeStageControlTwo)
 
 		turnThree, err := setModeTurnLine(cfg.promptThree)
 		if err != nil {
@@ -917,6 +1062,7 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 			t.Logf("#1595[%s]: turn 3 produced no result line within %s (recorded, continuing)",
 				arm.name, setModeTurnBudget)
 		}
+		mark(setModeStageTurnThree)
 	}
 
 	if err := stdinPipe.Close(); err != nil {
@@ -970,16 +1116,34 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		prompts = append(prompts, cfg.promptThree)
 	}
 
+	// Applied to what is RECORDED, never to what was executed — the child above ran
+	// on the real argv and its real stderr already went through initControlScrubbed.
+	recordedArgv := append([]string{claudeBin}, argv...)
+	recordedStderr := stderrBuf.String()
+	if cfg.redactRunLocal != nil {
+		redacted := make([]string, 0, len(recordedArgv))
+		for _, tok := range recordedArgv {
+			redacted = append(redacted, cfg.redactRunLocal(tok))
+		}
+		recordedArgv = redacted
+		recordedStderr = cfg.redactRunLocal(recordedStderr)
+	}
+	var approval *bypassArgvApproval
+	if cfg.approval != nil {
+		approval = cfg.approval()
+	}
+
 	record := &setModeFixtureRecord{
 		ClaudeVersionRaw: versionRaw,
 		ClaudeVersion:    versionToken,
 
 		Arm:            arm.name,
 		LaunchYOLOFlag: arm.launchYOLO,
-		Argv:           append([]string{claudeBin}, argv...),
+		Argv:           recordedArgv,
 		Prompts:        prompts,
 		Model:          cfg.model,
 		ModeSwitchAuto: cfg.autoMode,
+		Approval:       approval,
 
 		RequestedMode:                   arm.targetMode,
 		ControlRequestID:                requestID,
@@ -995,7 +1159,7 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		ProbeOutcomes:       setModeTurnWindows(lines, boundaries),
 
 		StdinWriteErrors:       writeErrs,
-		StderrCapture:          truncateString(stderrBuf.String(), stderrFixtureCap),
+		StderrCapture:          truncateString(recordedStderr, stderrFixtureCap),
 		ExitCode:               exitCode,
 		WaitError:              waitErrStr,
 		ContextDeadlineTripped: errors.Is(ctx.Err(), context.DeadlineExceeded),

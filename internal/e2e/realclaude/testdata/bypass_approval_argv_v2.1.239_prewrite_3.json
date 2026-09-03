@@ -1,0 +1,1472 @@
+{
+  "claude_version_raw": "2.1.239 (Claude Code)",
+  "claude_version": "2.1.239",
+  "arm": "prewrite_3",
+  "launch_yolo_flag": true,
+  "argv": [
+    "/Users/juhanailmoniemi/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-haiku-4-5",
+    "--max-turns",
+    "8",
+    "--dangerously-skip-permissions",
+    "--permission-prompt-tool",
+    "mcp__pyry_approve__approve",
+    "--mcp-config",
+    "\u003cmcp-config: run-local temp path redacted\u003e",
+    "--strict-mcp-config",
+    "--permission-mode",
+    "default"
+  ],
+  "prompts": [
+    "Use the Bash tool to run `ls -la /` and report the first line of output.",
+    "Use the Bash tool to run `ls -la /tmp` and report the first line of output."
+  ],
+  "requested_mode": "default",
+  "control_request_id": "set-permission-mode-prewrite_3",
+  "control_request_sent": {
+    "type": "control_request",
+    "request_id": "set-permission-mode-prewrite_3",
+    "request": {
+      "subtype": "set_permission_mode",
+      "mode": "default"
+    }
+  },
+  "control_responses": [
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "set-permission-mode-prewrite_3",
+        "response": {
+          "mode": "default"
+        }
+      }
+    }
+  ],
+  "control_response_request_id_matched": true,
+  "init_permission_modes": [
+    "default",
+    "default"
+  ],
+  "stdout_events": [
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "set-permission-mode-prewrite_3",
+        "response": {
+          "mode": "default"
+        }
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": null,
+      "permissionMode": "default",
+      "uuid": "5ac6dd42-d2c5-422e-93c2-bebc33202dd6",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/bypass-approval-argv-work",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "tools": [
+        "Task",
+        "Artifact",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "74320dc4-a4a1-422a-b3eb-8b325d664c9e",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassApprovalArgv-Probe349640107-001-bypass-approval-argv-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/11158.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "rate_limit_event",
+      "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1788411000,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false
+      },
+      "uuid": "0e7b7399-936c-4c82-b4e2-02ea2bdfdd61",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "uuid": "2a387666-b5c6-47a5-bdbe-dd91eb24e24b",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 32,
+      "estimated_tokens_delta": 31,
+      "uuid": "1b618805-2371-475d-a6e1-9c9bafd8865b",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 50,
+      "estimated_tokens_delta": 18,
+      "uuid": "d8705c03-32c2-4525-8c11-5ee5a8a995b4",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 120,
+      "estimated_tokens_delta": 70,
+      "uuid": "29b8af8f-01f3-4004-8d4b-aa420d5495b6",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFwB1tCUX8qfrGu6cE",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run a bash command `ls -la /` and report the first line of output. This is a straightforward request to execute a command and show the results.\n\nLet me run this command.",
+            "signature": "EtgDCrIBCBEYAipAvVlJVIaNs7FMeQ035voqZkAtuy8Mrp1wWLTNazsBf/K3k1jj2A16591DPHSFRfAgAhnkiEW9e4GxDO9QEG6RvjIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGvzePUBrABAhIMs+VeONWIc165hIbdGgxE8miDJuMG9lMRWYsiMIZA/B0Y9YlMMWkYQp+wu01ghlb+ZfFS0eK0rCNikslhdW1UqL7MFw5UBYuE3lfyyyrSAd2VNnvIsO7IPly5zs1KvSuIK4V/Ws2DXwduFwBDCVmW596W78oRe3ie7wSnEc3WpyULo5GjX3U1T4EBdJDtnmCQatixpKLtcTE6KUufTUFYsKUr3GGauUkC0Xd/AAil7zRpUKTmzYJEwj8hQWmurNs9Ux9B++oy6TqvP6kOY4MMxT4KGbgpBsbzg+Blghs8M8f8QVhrOtMEC13cjuS2210EjH5P79lIAj8jdy4DzWSTAz8qPzne8Q92zzWm/6AIoE9Gjz7omBKcBTU0ucqwy7ZbURgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 8041,
+          "cache_read_input_tokens": 27799,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 8041
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "7f3fd24a-5e7d-47c2-86d5-e4fbe2a806c6",
+      "timestamp": "2026-09-03T03:17:03.542Z",
+      "request_id": "req_011CefnFvNtqFKSM7WHfyrrN"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFwB1tCUX8qfrGu6cE",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01KoB87eMHNanxgkzov5U6Ze",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /",
+              "description": "List files in root directory with details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 8041,
+          "cache_read_input_tokens": 27799,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 8041
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "63099258-fcc4-4620-996d-8e221aad1aec",
+      "timestamp": "2026-09-03T03:17:03.720Z",
+      "request_id": "req_011CefnFvNtqFKSM7WHfyrrN"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "#2061 probe: every gated call is denied",
+            "is_error": true,
+            "tool_use_id": "toolu_01KoB87eMHNanxgkzov5U6Ze"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "4adc8afa-bd5d-4163-918a-14386c6b8d71",
+      "timestamp": "2026-09-03T03:17:03.752Z",
+      "tool_use_result": "Error: #2061 probe: every gated call is denied",
+      "tool_result_meta": [
+        {
+          "id": "toolu_01KoB87eMHNanxgkzov5U6Ze",
+          "non_execution_kind": "permission-rule"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 2,
+      "estimated_tokens_delta": 2,
+      "uuid": "4338e41e-067e-4be7-b580-25dd84890d00",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 28,
+      "estimated_tokens_delta": 26,
+      "uuid": "1ecdd1ff-8050-4aa1-b7c4-cbbbea56bbe1",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 60,
+      "estimated_tokens_delta": 32,
+      "uuid": "cbcc0e4c-3514-4ab3-a1e9-32e9bf7d382a",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 80,
+      "estimated_tokens_delta": 20,
+      "uuid": "2d4e7185-0def-4d65-a239-4efbd556446b",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 149,
+      "estimated_tokens_delta": 69,
+      "uuid": "6b045784-d842-427f-9b8e-ea9bcec4a41e",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnG6d3AsGS3mGSEv9fs",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The bash command was denied. This appears to be part of a test probe (based on the error message \"#2061 probe: every gated call is denied\"). The user's permission mode is blocking this bash call.\n\nI should explain to the user that the bash command was denied by their permission settings and cannot be executed.",
+            "signature": "Es0ECrIBCBEYAipAbnpIfVb4+BVXi4MolaAC1RXCmlsQzIyFIOoXcR++oGhs92X+lQMccuNK964p8SnXt3+hEBicChdAgNWLw1ddhTIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGxzePUBrABAhIMpyKuuRIjG+zJCqaEGgynvH5+9/xViD1A7DUiMPbmZ9EvRIpwKOr+uJSizkOLpUS8sTynXaTCvMoH8nKbnuvOS3zT3UewQK9vNS21tCrHAjNsvAJZuQyqruR8jcUleVjeDipnvQI9EUbdnRTBo6nDQbIhvK/RLhsJZ1VY0OeTnPtzpn8Cqp1vxjAS1nPubTI/zjhFtM8Z/jqiAWCCq9VPdExZ/fB0yMgLHhyLexjMd/c408gfszQWhKDYrmy8K0FQOsDe9/kIQaForwgwd2eU8FEme4ZTYH7KRfHI1+nF8945fbTAmE0TCH6rDrpTRoPuw5SaJSCssySjWwETzwPNnfscUf6yzu7UmEKMLF3KCZ69Ps5mrB/fRQCpygYQfxKrpcn3obbuhG0wA3KqdV797Mxnu0u5r/x3M9qP3RcHpEnUzAnpDVnUkA7LhYzOtqbV0sz/STVGyWqNV6T2wGNrAPwl/BQKgl0J13/tGy/uTPj46jfB0uMdxAFF3teiJCdj/95iC0k5fzDyj5q/96gWacZo8Rt4chgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 200,
+          "cache_read_input_tokens": 35840,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 200
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "6952bb0f-15cd-48d3-83f2-e9d6668b3b13",
+      "timestamp": "2026-09-03T03:17:05.575Z",
+      "request_id": "req_011CefnG5YZ2jiqZkXM1b9hP"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnG6d3AsGS3mGSEv9fs",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The bash command was denied by your permission settings. The system is blocking gated calls in this session. This means I cannot execute the `ls -la /` command without your explicit permission, which you can grant through the permission prompt if one appears, or by adjusting your Claude Code permission settings."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 200,
+          "cache_read_input_tokens": 35840,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 200
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "c9ed19b2-c33b-426a-abaa-745a13e0ab23",
+      "timestamp": "2026-09-03T03:17:06.226Z",
+      "request_id": "req_011CefnG5YZ2jiqZkXM1b9hP"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 5492,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "total_cost_usd": 0.0251919,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 8241,
+        "cache_read_input_tokens": 63639,
+        "output_tokens": 271,
+        "output_tokens_details": {
+          "thinking_tokens": 123
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 8241,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 139,
+            "cache_read_input_tokens": 35840,
+            "cache_creation_input_tokens": 200,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 200
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 12,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000973,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 18,
+          "outputTokens": 271,
+          "cacheReadInputTokens": 63639,
+          "cacheCreationInputTokens": 8241,
+          "webSearchRequests": 0,
+          "costUSD": 0.024218899999999998,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_01KoB87eMHNanxgkzov5U6Ze",
+          "tool_input": {
+            "command": "ls -la /",
+            "description": "List files in root directory with details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The bash command was denied by your permission settings. The system is blocking gated calls in this session. This means I cannot execute the `ls -la /` command without your explicit permission, which you can grant through the permission prompt if one appears, or by adjusting your Claude Code permission settings.",
+      "ttft_ms": 2060,
+      "ttft_stream_ms": 1022,
+      "time_to_request_ms": 96,
+      "type": "result",
+      "duration_ms": 4772,
+      "uuid": "358c2266-2029-4d22-b409-315b09f4d367"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/bypass-approval-argv-work",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "tools": [
+        "Task",
+        "Artifact",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "83088cbd-bf42-410b-b713-d0164b1095a9",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassApprovalArgv-Probe349640107-001-bypass-approval-argv-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/11158.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 3,
+      "estimated_tokens_delta": 3,
+      "uuid": "5e834270-4841-4421-a9cb-c74e19230ef2",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 8,
+      "estimated_tokens_delta": 5,
+      "uuid": "a47ba002-ee88-4d9f-bb69-711814ae030f",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 9,
+      "estimated_tokens_delta": 1,
+      "uuid": "55c14c48-e26d-4296-a4d3-7e211d5c39e1",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 11,
+      "estimated_tokens_delta": 2,
+      "uuid": "dc20afcd-f594-45cf-b2c5-5dac1b5ee5af",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 15,
+      "estimated_tokens_delta": 4,
+      "uuid": "7f9e518e-e987-422e-bf9a-55cedbf8ba30",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 20,
+      "estimated_tokens_delta": 5,
+      "uuid": "803dc946-db4a-423a-8f2f-b87d0750b7a9",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 24,
+      "estimated_tokens_delta": 4,
+      "uuid": "ad3bb6ad-6b7e-438d-bb7a-d402e51179c3",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 26,
+      "estimated_tokens_delta": 2,
+      "uuid": "71800f78-a5a0-4eec-a52b-a66a8bd30e07",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 28,
+      "estimated_tokens_delta": 2,
+      "uuid": "1001b349-9daa-49e9-be57-7dab549f4ccf",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 32,
+      "estimated_tokens_delta": 4,
+      "uuid": "476d2b0f-dc17-4abc-a08b-c3ae971ad304",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 34,
+      "estimated_tokens_delta": 2,
+      "uuid": "5d20704e-b27b-43d3-9054-27edd0892ae6",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 36,
+      "estimated_tokens_delta": 2,
+      "uuid": "05f34371-3ecf-4359-bf51-4a57a6e95302",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 41,
+      "estimated_tokens_delta": 5,
+      "uuid": "4b837d7f-4234-4e0c-89cd-6d271533d837",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 43,
+      "estimated_tokens_delta": 2,
+      "uuid": "bd989fb9-31cc-4abc-bef3-422ccf7ba9d7",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 48,
+      "estimated_tokens_delta": 5,
+      "uuid": "04b93fdd-0026-48de-b117-1d337cf25b99",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 49,
+      "estimated_tokens_delta": 1,
+      "uuid": "c3ba39cf-e7b0-45d0-acf1-19b3ec4781d1",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 51,
+      "estimated_tokens_delta": 2,
+      "uuid": "8bb25693-4ab4-4f54-9aea-519629281c6f",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 53,
+      "estimated_tokens_delta": 2,
+      "uuid": "02e1bb64-c8db-42ad-bea2-788d5b665e88",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 54,
+      "estimated_tokens_delta": 1,
+      "uuid": "9e770da9-b532-4c28-a4b7-28fe8daf054a",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 59,
+      "estimated_tokens_delta": 5,
+      "uuid": "ef980d46-b690-4d96-addc-635f36bf7690",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 63,
+      "estimated_tokens_delta": 4,
+      "uuid": "9c9eb1f0-df41-47a8-bde7-933fc02b6dc0",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 67,
+      "estimated_tokens_delta": 4,
+      "uuid": "a018c7ee-5ad0-4c4c-a480-1ec778189621",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 69,
+      "estimated_tokens_delta": 2,
+      "uuid": "becacd48-c47e-4849-9b0b-0eefb120cc10",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 71,
+      "estimated_tokens_delta": 2,
+      "uuid": "b38e4166-47e8-4a14-8cfc-7f4b3a78dc79",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 75,
+      "estimated_tokens_delta": 4,
+      "uuid": "9c211c68-0691-4bc7-b387-f8cb6ba2906d",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 78,
+      "estimated_tokens_delta": 3,
+      "uuid": "1a5428a5-c7f5-4b67-82a1-ebee0057f0a5",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 79,
+      "estimated_tokens_delta": 1,
+      "uuid": "0191775b-3234-4c9f-a92a-80dc2cab534f",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 81,
+      "estimated_tokens_delta": 2,
+      "uuid": "d4a8b1ba-369c-43fb-bf27-8e5c0e2cf01b",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 84,
+      "estimated_tokens_delta": 3,
+      "uuid": "0941310c-0303-4409-983f-b8f93d96c47a",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 89,
+      "estimated_tokens_delta": 5,
+      "uuid": "55b0d703-c23b-45b3-9219-7fe796d82d74",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 90,
+      "estimated_tokens_delta": 1,
+      "uuid": "0efaeb1b-44ac-4bd9-89fc-44bd5226a3a5",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 149,
+      "estimated_tokens_delta": 59,
+      "uuid": "4f3f4677-bc51-436c-bcc3-001cdcf6eec5",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnGHMx5EPL1dBBmP7fP",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run `ls -la /tmp` and report the first line of output. This is another bash command request. Given that the previous bash call was denied, this one will likely be denied too based on the system-reminder that said \"every gated call is denied\". Let me try it anyway to see what happens.",
+            "signature": "EssECrIBCBEYAipAZVpWnRKxdG8y081jPOzIJBMTTTYv0OrUghxo7iSUSm2eMyncZJ2gdic8DtiCXvns7mukubUQzww5a+Mv/tkH5jIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAG0zePUBrABAhIMCZOtCvqj0xlfersEGgyUUVvPNEGbkHoFScAiMDK1Mjl2ZmMqrC6wugic/qMaRSHJ2L8D2vd2T2FfpP2unoFaOc9qg2dhbGjfGj66+irFAn9jIkqXnE/oDpKPJ6b5fPnY+i5SiOZ2HD3s/NzpmWOepRwHGHKCVFiEHbW4Wx2COC1rvHlPm6PXK4QMOdSixQ4rp0IdRYuycWuS8z6tPx2U0TPQq5TJMprJ/nG3fHoIZyWaQeBYq5QvCUx9krsVXjQAdEkEg/E1iamgxMFOSHj2EzqT/9FaPrMuDWKxJIQtYf3vEakRgAq9D/pkjqoS2QJWIL2PoSzd9aiJsxH9lhh+P46I7QFA0VmWT2S8ZxSrqF5fC+kCrpE909n3VuuEHHy6A/Qh9zm1KFi31C3JTCF5y2nNUcET/2xyyklfLi6ECgi13Axc0BlW2tZ8TLRWuEFclcJ8wgJHmd8sAWLUoNd3+kkWlWDHy4IXHirS5nugA2Amor5PAubcJHH1nxxw285HocN3lT07Cdz3ip69JzP9ck13zfcYAQ=="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 198,
+          "cache_read_input_tokens": 36040,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 198
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "1ebea857-06ed-4d1a-b3b5-2934f21055b4",
+      "timestamp": "2026-09-03T03:17:08.152Z",
+      "request_id": "req_011CefnGGoDuhZkMaQikye3o"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnGHMx5EPL1dBBmP7fP",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_016Za9W1hbkXjt2nqCL1mRc4",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /tmp",
+              "description": "List files in /tmp directory with details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 198,
+          "cache_read_input_tokens": 36040,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 198
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "c25cadca-d94b-41a1-88cb-7cc7f490437f",
+      "timestamp": "2026-09-03T03:17:08.552Z",
+      "request_id": "req_011CefnGGoDuhZkMaQikye3o"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "#2061 probe: every gated call is denied",
+            "is_error": true,
+            "tool_use_id": "toolu_016Za9W1hbkXjt2nqCL1mRc4"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "e6828945-70ef-458e-b4ff-3fd7e23d6678",
+      "timestamp": "2026-09-03T03:17:08.563Z",
+      "tool_use_result": "Error: #2061 probe: every gated call is denied",
+      "tool_result_meta": [
+        {
+          "id": "toolu_016Za9W1hbkXjt2nqCL1mRc4",
+          "non_execution_kind": "permission-rule"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "uuid": "83ee0fbd-b9b3-481d-9bdc-3b2e56545058",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 4,
+      "estimated_tokens_delta": 3,
+      "uuid": "0e4d5522-9d5e-498e-b330-3c5acea0e72e",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 6,
+      "estimated_tokens_delta": 2,
+      "uuid": "e6648ab0-d32d-4d42-b866-8159c254b36e",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 8,
+      "estimated_tokens_delta": 2,
+      "uuid": "1b458fc3-94fc-406d-8495-c1374ce5169e",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 10,
+      "estimated_tokens_delta": 2,
+      "uuid": "4fdece55-7ace-43ba-885b-7c8013329999",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 13,
+      "estimated_tokens_delta": 3,
+      "uuid": "4aac8688-0c99-44ba-b1da-f51b18362673",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 49,
+      "estimated_tokens_delta": 36,
+      "uuid": "c5c1a175-939f-4ba0-b4c0-a6985c060cdc",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 82,
+      "estimated_tokens_delta": 33,
+      "uuid": "dbdda2f5-e0b6-4b32-93ea-3c3a541d2390",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 150,
+      "estimated_tokens_delta": 68,
+      "uuid": "ab976771-e077-435c-b5b3-995ae110be2f",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnGSvRkXXhQ2rmibBXb",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "As expected, this bash call was also denied. The system reminder was accurate - every gated call is being denied in this session. This appears to be a test probe to verify that the system correctly denies gated calls according to the permission settings.\n\nI should inform the user that this call was also denied.",
+            "signature": "Es4ECrIBCBEYAipAUirFdqgAz7mQSnANYq4nQPdYxn+iq+6NmDCthkQ4vqejJZ813yarbtwCSITug017rcAZI+oe+9wrwNY9u5BiSjIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAG2zePUBrABAhIMv9ammJDWmjL3Jo1KGgwtbJmUop1TkMnYJJsiMKGVvJVDM4RiBOsED3qzHPYb1QoF43B6nRDDMRSfI/pogG3JvE0hFHS5MQ0cEEfeOCrIAt6ckJDMYdphJDUg8r2zUGETzfloBu3RHBBfpSe+IyaSbOZ5dvzjDUM6PO7yHf607plBhAe/6PSOzRy0zCBG+HxGwxK1IwAUOAdj3ngdtX0WMq8AI2u84hRxoIEm1QWyM0h7wasVZwB6CDi41UJ8xrfaqTyIdtmL9xcBibCvNLv+4lHqPS10RPhsNP6rrnEexJMGdaPrUIuPTRS0H+JmrzlA7MCyX+TYIE8nnyZPThufLjLGfnOXuAfJaXo+gpH422+LXeK8iC6I2llOexsI6SD4SfhNHIYU55v63siy6Jx+IHwr05Nh4A2F6yGgHonRQmPQDBdu7D3WpjWxqVtUg5KigvPHKnV+816aRMQqmNFgfKvVXkAWwY9RmTWMvBJ02cFq1vrUUKk+PzAUp+7dIje4VHvbyFih1QVXUoy+UB8JL1/m6Em5fh0YAQ=="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 227,
+          "cache_read_input_tokens": 36238,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 227
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "15fd74a4-e672-4b8e-b1ec-5ff2487622c5",
+      "timestamp": "2026-09-03T03:17:10.593Z",
+      "request_id": "req_011CefnGSAHPqLjRvsgL8H2X"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnGSvRkXXhQ2rmibBXb",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "This bash command was also denied by your permission settings. The system is blocking all gated calls in this session, so I cannot execute bash commands without appropriate permissions being granted."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 227,
+          "cache_read_input_tokens": 36238,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 227
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "uuid": "3b4e4091-8791-4dc8-b7ef-8e89f9ef32ca",
+      "timestamp": "2026-09-03T03:17:10.606Z",
+      "request_id": "req_011CefnGSAHPqLjRvsgL8H2X"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 9785,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "55572399-bc6d-43df-8d95-8e31de58cc3d",
+      "total_cost_usd": 0.0346327,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 425,
+        "cache_read_input_tokens": 72278,
+        "output_tokens": 269,
+        "output_tokens_details": {
+          "thinking_tokens": 145
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 425,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 110,
+            "cache_read_input_tokens": 36238,
+            "cache_creation_input_tokens": 227,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 227
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 12,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000973,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 36,
+          "outputTokens": 540,
+          "cacheReadInputTokens": 135917,
+          "cacheCreationInputTokens": 8666,
+          "webSearchRequests": 0,
+          "costUSD": 0.0336597,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_016Za9W1hbkXjt2nqCL1mRc4",
+          "tool_input": {
+            "command": "ls -la /tmp",
+            "description": "List files in /tmp directory with details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "This bash command was also denied by your permission settings. The system is blocking all gated calls in this session, so I cannot execute bash commands without appropriate permissions being granted.",
+      "ttft_ms": 1797,
+      "ttft_stream_ms": 833,
+      "time_to_request_ms": 21,
+      "type": "result",
+      "duration_ms": 4320,
+      "uuid": "3606dcc7-da0e-426d-a50b-7d0809add8bb"
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    18,
+    66
+  ],
+  "probe_outcomes": [
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    }
+  ],
+  "model": "claude-haiku-4-5",
+  "approval": {
+    "requests": [
+      {
+        "seq": 1,
+        "tool_name": "Bash"
+      },
+      {
+        "seq": 2,
+        "tool_name": "Bash"
+      }
+    ],
+    "requests_seen": 2,
+    "requests_dropped": 0,
+    "decode_errors": 0,
+    "non_approve_requests": 0,
+    "stages": [
+      {
+        "stage": "start",
+        "approvals": 0,
+        "control_responses": 0
+      },
+      {
+        "stage": "pre_turn_control",
+        "approvals": 0,
+        "control_responses": 1
+      },
+      {
+        "stage": "turn_1",
+        "approvals": 1,
+        "control_responses": 1
+      },
+      {
+        "stage": "control_1",
+        "approvals": 1,
+        "control_responses": 1
+      },
+      {
+        "stage": "turn_2",
+        "approvals": 2,
+        "control_responses": 1
+      }
+    ]
+  },
+  "stdin_write_errors": null,
+  "stderr_capture": "",
+  "exit_code": 0,
+  "wait_error": "",
+  "context_deadline_tripped": false,
+  "duration_ms": 10262,
+  "scanner_error": ""
+}

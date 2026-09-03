@@ -1,0 +1,1232 @@
+{
+  "claude_version_raw": "2.1.239 (Claude Code)",
+  "claude_version": "2.1.239",
+  "arm": "prewrite_2",
+  "launch_yolo_flag": true,
+  "argv": [
+    "/Users/juhanailmoniemi/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-haiku-4-5",
+    "--max-turns",
+    "8",
+    "--dangerously-skip-permissions",
+    "--permission-prompt-tool",
+    "mcp__pyry_approve__approve",
+    "--mcp-config",
+    "\u003cmcp-config: run-local temp path redacted\u003e",
+    "--strict-mcp-config",
+    "--permission-mode",
+    "default"
+  ],
+  "prompts": [
+    "Use the Bash tool to run `ls -la /` and report the first line of output.",
+    "Use the Bash tool to run `ls -la /tmp` and report the first line of output."
+  ],
+  "requested_mode": "default",
+  "control_request_id": "set-permission-mode-prewrite_2",
+  "control_request_sent": {
+    "type": "control_request",
+    "request_id": "set-permission-mode-prewrite_2",
+    "request": {
+      "subtype": "set_permission_mode",
+      "mode": "default"
+    }
+  },
+  "control_responses": [
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "set-permission-mode-prewrite_2",
+        "response": {
+          "mode": "default"
+        }
+      }
+    }
+  ],
+  "control_response_request_id_matched": true,
+  "init_permission_modes": [
+    "default",
+    "default"
+  ],
+  "stdout_events": [
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "set-permission-mode-prewrite_2",
+        "response": {
+          "mode": "default"
+        }
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": null,
+      "permissionMode": "default",
+      "uuid": "7153b5c6-1d1e-4870-803d-863f705fe3b7",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/bypass-approval-argv-work",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "tools": [
+        "Task",
+        "Artifact",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "68c578ae-e50b-4b3d-b583-b7e050252ee6",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassApprovalArgv-Probe349640107-001-bypass-approval-argv-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/10897.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "rate_limit_event",
+      "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1788411000,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false
+      },
+      "uuid": "6cc924c5-b83a-4377-9733-367a328c48a5",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 3,
+      "estimated_tokens_delta": 3,
+      "uuid": "e5561f36-1dab-4a30-a71a-d89a1b54d57a",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 8,
+      "estimated_tokens_delta": 5,
+      "uuid": "5dbd96e3-893c-449e-9738-1438f494e9d2",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 44,
+      "estimated_tokens_delta": 36,
+      "uuid": "2544de2f-52f1-4830-b0a9-ab21d3a0f8aa",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 66,
+      "estimated_tokens_delta": 22,
+      "uuid": "68bcccf0-882b-4df5-8584-e817f1505337",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 135,
+      "estimated_tokens_delta": 69,
+      "uuid": "eedd87fd-320d-467c-b96e-4f67b2c3a433",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFCR22AnPs7Hf9uo5v",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run a Bash command `ls -la /` and report the first line of output. This is a straightforward task that doesn't require any special permissions - it's just listing the root directory.\n\nLet me execute this command using the Bash tool.",
+            "signature": "EpcECrIBCBEYAipAQZapNsC2N4kvtvJTL6GW8voEF/scTU8H1LvnfTUgfNJFeFZKyxe7PNqvu4YsT6rzEfnl6bD8he2M60BHvVNN1TIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGlzePUBrABAhIMvZ9S40zTh39umII0GgwELD3fkn7rGD2qMqciMJj3WbBqyLxFCBON9gyrj0+1VZwaZV+I7c0jK7kKxaFGTc2o4XJz6ZCAwD3SC2tR7SqRAtOcbEHqFEPZzsPmCYpAuEVCrHSCBgEJ372Au1xt1Pti60TyBPTC5enXJGtBt2qP/eoA52DTGqvq+/YnOjAFVq6cEdydPrlqHRig1mJP+jnSsZuijqgE4qvWFOYurqEmOK47hnmsegb6ZWzmVsf+Lbefz04VBTRE2O2QbzBB5KqHaCqoHTxIV9KsgxYSnKWhBxLdmNnSHitGIOj7dLcJgFk/fl8luKmenjbPXJztdoryOyt+vEOxLN39AE8t71eibNdWItkTHeUuqB4VLQ93eWGZPDhIm8TrMRu+mcN/J4st5KfhCbkjNZFqAqCFXXuh/unZEsdq0Sqos8qC5Cnr2XfbmP8EKbxNm+7yB6wFLdqEBxgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 8043,
+          "cache_read_input_tokens": 27799,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 8043
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "e5a1a3eb-c27d-4452-bfac-a3a62cab9f53",
+      "timestamp": "2026-09-03T03:16:53.667Z",
+      "request_id": "req_011CefnFBgcZ5pio5Vwd3fgs"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFCR22AnPs7Hf9uo5v",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_012P7aNHDzcResCd69o2Litb",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /",
+              "description": "List root directory with details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 8043,
+          "cache_read_input_tokens": 27799,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 8043
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "c2c26bc0-4efb-4b68-a622-90980c879bd7",
+      "timestamp": "2026-09-03T03:16:53.818Z",
+      "request_id": "req_011CefnFBgcZ5pio5Vwd3fgs"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "#2061 probe: every gated call is denied",
+            "is_error": true,
+            "tool_use_id": "toolu_012P7aNHDzcResCd69o2Litb"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "500de353-2135-4789-9c91-77960925c3ba",
+      "timestamp": "2026-09-03T03:16:53.846Z",
+      "tool_use_result": "Error: #2061 probe: every gated call is denied",
+      "tool_result_meta": [
+        {
+          "id": "toolu_012P7aNHDzcResCd69o2Litb",
+          "non_execution_kind": "permission-rule"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "uuid": "f916cc3c-4e74-4bbb-ba38-41b32d1bd90f",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 4,
+      "uuid": "01f55043-25c8-4cf2-9162-28bf2c13002f",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 6,
+      "estimated_tokens_delta": 1,
+      "uuid": "824da6a5-7586-45a3-a009-ee4de5c70fc6",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 8,
+      "estimated_tokens_delta": 2,
+      "uuid": "9f3f9e94-acbb-4c48-ae29-99cfda44642b",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 32,
+      "estimated_tokens_delta": 24,
+      "uuid": "3868c809-bcfa-4f74-83cb-faf89e759a78",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 61,
+      "estimated_tokens_delta": 29,
+      "uuid": "3839a039-2800-44fb-86d9-4d663211ef14",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 131,
+      "estimated_tokens_delta": 70,
+      "uuid": "03500912-7828-40a4-ba35-b3fd9a3275cf",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFMzjB4UPviX3hBNcy",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The Bash tool call was denied. This appears to be a \"gated call\" that requires user approval. The system is set up to prompt the user for permission when certain tools are used. I should inform the user that the command requires approval.",
+            "signature": "EoQECrIBCBEYAipAV7cmAygq9/woPKy84Yn9DinXYfiOu1SPeqXhrbZBZAvgq18xYjHA/AB5VCysZwtTuC07LSzFEuw0anKSCXcTAjIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGnzePUBrABAhIMuzMSY/HhhTviYsuyGgy8JSW8udRAyugi9e8iMDHHFw/jGsHmFRAWYSCoMlG+eg57dR/lsyDA8UeAbL+vdQ6UtD4UU2SuvDy3R+rmVSr+AbguacAXNZV0vpO+zQrJUPNEp5InOH5uawgEesAqFfLHIXyD3Bcs37XfGlOpeBzyVUOaN7CQUKO/Ibg6e6KR+PkrxG7k7th3ynb38ZL6DUFVC1HkASR2fouIWmZYxeSwg+YNEXK4pbs4Uq4C7/YoA8yCDhVVK4VZLvdqnvoTTa7UQxXSKM0oX5t4NQhuKuqIJR6McnkYj7yW2jZt6cEfjl5Eb5yLqY9FWqrzi3qSYWm7UjMsAzdeIItrLw5jxFm+8vbikBiUwHu4Avaa3iqVw/b7ijDnJMLMlPG6ThS71smvmjnA+lmkwmqcyZea8odfm8jV8o++vE7NmwGCm34WGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 211,
+          "cache_read_input_tokens": 35842,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 211
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "b222eb93-f2f4-4a57-9ef7-9a76a384a6a5",
+      "timestamp": "2026-09-03T03:16:55.899Z",
+      "request_id": "req_011CefnFMD6j2dJ2G3kXosDx"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFMzjB4UPviX3hBNcy",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Bash command requires approval. Your permission settings are set to gate this call. You'll need to approve running `ls -la /` in order for me to execute it and show you the output."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 211,
+          "cache_read_input_tokens": 35842,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 211
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "7ac843c6-86bb-4a7b-a522-be6f43c9df14",
+      "timestamp": "2026-09-03T03:16:56.154Z",
+      "request_id": "req_011CefnFMD6j2dJ2G3kXosDx"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 5415,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "total_cost_usd": 0.0251031,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 8254,
+        "cache_read_input_tokens": 63641,
+        "output_tokens": 247,
+        "output_tokens_details": {
+          "thinking_tokens": 120
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 8254,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 104,
+            "cache_read_input_tokens": 35842,
+            "cache_creation_input_tokens": 211,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 211
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 13,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000978,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 18,
+          "outputTokens": 247,
+          "cacheReadInputTokens": 63641,
+          "cacheCreationInputTokens": 8254,
+          "webSearchRequests": 0,
+          "costUSD": 0.0241251,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_012P7aNHDzcResCd69o2Litb",
+          "tool_input": {
+            "command": "ls -la /",
+            "description": "List root directory with details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The Bash command requires approval. Your permission settings are set to gate this call. You'll need to approve running `ls -la /` in order for me to execute it and show you the output.",
+      "ttft_ms": 2236,
+      "ttft_stream_ms": 1161,
+      "time_to_request_ms": 187,
+      "type": "result",
+      "duration_ms": 4751,
+      "uuid": "f98c857c-774f-4359-b684-c39034bcbfbc"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/bypass-approval-argv-work",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "tools": [
+        "Task",
+        "Artifact",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "8e865b92-30d0-4e5a-9a43-39082242dfc0",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassApprovalArgv-Probe349640107-001-bypass-approval-argv-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/10897.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 5,
+      "uuid": "1179b56c-af72-4c0d-a78f-a240292ec7b7",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 45,
+      "estimated_tokens_delta": 40,
+      "uuid": "3fb81ddf-c9c1-488e-bcc6-c953473ca6a8",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 52,
+      "estimated_tokens_delta": 7,
+      "uuid": "28ccb750-9f0c-49d3-905d-a3ce9767df0f",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 122,
+      "estimated_tokens_delta": 70,
+      "uuid": "d2215586-afa5-4334-8d18-ab00fefe981c",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFY4iPJZkS1jSVbzTA",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run a Bash command `ls -la /tmp` and report the first line of output. This is similar to the previous request but with a different directory. Let me try to execute this command.",
+            "signature": "EuADCrIBCBEYAipAR0q9n49IJG45BYDRwdqt98YmYExEsr0GTSZtGEU24MXO4Htskzc+rnM6z7+QiqeZwT19hUE76vIMhlXoZ7KU7DIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGpzePUBrABAhIMbo3c9ACWkVz8nc7lGgwtr77+EyRaMgGUoT0iMAaqGHU3nWGx1An82Gmp58atUl0ruNrDxcRufNeV222xtyzrwtbD+UT0rUulo2RUWiraAUamI/LRQ7rWdrrn6kaIO0vj9uM6MHbLZgzOuW7OqecO+NNuzIyuAjd7+WY1cjNBNfk/5XZzG6ESEzF4eJfsx0Nv3HsILh2EUfUF/f0Xm+IzUvwdt0mnQXdK0qtBkT91/xBOys8lS99AIRR+m6tAH0jby38UtpQSX7TLWdHjadezJAaLy7Fe0dsLyY4N2moytJYJIWo4wCrG+pwdo4+MtCOtKmHTtKQOPihx9+5mrlyu6XglWYopse5EwPUi76Jvv46wFR+svKl1ZmiUZS0jXg5DuxZkHe8AbCcIGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 163,
+          "cache_read_input_tokens": 36053,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 163
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "b71f3764-ae5c-4276-a0c7-9d03e7c68a67",
+      "timestamp": "2026-09-03T03:16:57.889Z",
+      "request_id": "req_011CefnFXJZz4iknDbFgGpZ4"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFY4iPJZkS1jSVbzTA",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01FGsx72aVcGFdXhqhCBfPBi",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /tmp",
+              "description": "List /tmp directory with details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 163,
+          "cache_read_input_tokens": 36053,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 163
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "1a9879be-81b7-4802-ba01-a38537f7da50",
+      "timestamp": "2026-09-03T03:16:58.202Z",
+      "request_id": "req_011CefnFXJZz4iknDbFgGpZ4"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "#2061 probe: every gated call is denied",
+            "is_error": true,
+            "tool_use_id": "toolu_01FGsx72aVcGFdXhqhCBfPBi"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "b70ac73e-4652-4cd0-991a-bb686bf9f2b4",
+      "timestamp": "2026-09-03T03:16:58.215Z",
+      "tool_use_result": "Error: #2061 probe: every gated call is denied",
+      "tool_result_meta": [
+        {
+          "id": "toolu_01FGsx72aVcGFdXhqhCBfPBi",
+          "non_execution_kind": "permission-rule"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 2,
+      "estimated_tokens_delta": 2,
+      "uuid": "83065b59-9a19-46c3-9738-d6b6a00448fa",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 39,
+      "estimated_tokens_delta": 37,
+      "uuid": "8f1e1fce-c6ca-475b-afaf-9528cfbfbfd3",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 62,
+      "estimated_tokens_delta": 23,
+      "uuid": "d2cc7de4-df4a-491c-bd40-4ce770f2a55d",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 131,
+      "estimated_tokens_delta": 69,
+      "uuid": "0b2eb780-98d3-4d40-b171-4cb69da1f3c3",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFgkquDM7P7TtE4n6a",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "Again, the Bash command was denied with the same \"every gated call is denied\" error. This appears to be a permission setting where the user's settings have all Bash calls gated and requiring approval. I should communicate this to the user.",
+            "signature": "EoUECrIBCBEYAipAkAggCZLDNlfphbK4/0tJpuRQcE2hGVsxVtnTNbo7QkV9WNQuEyvaR/KWRIjgafrrf+F4inHd68xxafRobrp6ZDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGrzePUBrABAhIMrbIrBq4SvcG7OkIMGgwe11Si1Cn8wNvECAUiMCCZebFHop0OVmOmGx6NiB0E+ncBok0QVGLiCvVywpQdqCr+sY6eUGWkBxLMdLOTlyr/AVDGbCkpSivLSwUBMcsZb8OlkFcPBe9uzg7GiE+cyW4yRils7Gug1/Z1A0/6cKRTlmGnMEAjmIIPXXY0cgi9IjOMbG6hm5Ixqjt+0yuard+DMHi5Mr1j+PYNiH1+9J7EE7skO0IcirQT9z6CkCst5/GlwGLbLiTQIYiUaP30ta274mduunxofvL9nOuCJUarDTxoe4dg19/DQLFUo2ma/1/RgrFW4svjm45gwlI5KCZTijEP0sgQpRHb5did7YOyrK+7UfsU5M/kz7jktqB5nI/e3oVgy3qhyEHQ/2TYbu/y+7K/Wtyac5gABU/9hiDEqXZYH1FaM5rViPgfkON4ChgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 201,
+          "cache_read_input_tokens": 36216,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 201
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "365795e2-8cfb-427d-abe2-c3f2b1836a69",
+      "timestamp": "2026-09-03T03:16:59.952Z",
+      "request_id": "req_011CefnFfxUQjxP3Vt3Zx8hG"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnFgkquDM7P7TtE4n6a",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "This command also requires approval. Your permission settings are configured to gate Bash tool calls, so I need your approval to run `ls -la /tmp`. Once you approve, I'll be able to execute it and show you the first line of output."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 201,
+          "cache_read_input_tokens": 36216,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 201
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "uuid": "09eb87e8-c147-4ffa-9def-97bd1e9a19ff",
+      "timestamp": "2026-09-03T03:17:00.358Z",
+      "request_id": "req_011CefnFfxUQjxP3Vt3Zx8hG"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 9559,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "48bbec36-c1e6-4a52-810b-c1dfb81295e4",
+      "total_cost_usd": 0.034316,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 364,
+        "cache_read_input_tokens": 72269,
+        "output_tokens": 248,
+        "output_tokens_details": {
+          "thinking_tokens": 109
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 364,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 115,
+            "cache_read_input_tokens": 36216,
+            "cache_creation_input_tokens": 201,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 201
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 13,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000978,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 36,
+          "outputTokens": 495,
+          "cacheReadInputTokens": 135910,
+          "cacheCreationInputTokens": 8618,
+          "webSearchRequests": 0,
+          "costUSD": 0.033338,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_01FGsx72aVcGFdXhqhCBfPBi",
+          "tool_input": {
+            "command": "ls -la /tmp",
+            "description": "List /tmp directory with details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "This command also requires approval. Your permission settings are configured to gate Bash tool calls, so I need your approval to run `ls -la /tmp`. Once you approve, I'll be able to execute it and show you the first line of output.",
+      "ttft_ms": 1681,
+      "ttft_stream_ms": 1022,
+      "time_to_request_ms": 15,
+      "type": "result",
+      "duration_ms": 4170,
+      "uuid": "c6abe377-2f2a-4929-a9de-2c6c58f0f3c6"
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    21,
+    36
+  ],
+  "probe_outcomes": [
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    }
+  ],
+  "model": "claude-haiku-4-5",
+  "approval": {
+    "requests": [
+      {
+        "seq": 1,
+        "tool_name": "Bash"
+      },
+      {
+        "seq": 2,
+        "tool_name": "Bash"
+      }
+    ],
+    "requests_seen": 2,
+    "requests_dropped": 0,
+    "decode_errors": 0,
+    "non_approve_requests": 0,
+    "stages": [
+      {
+        "stage": "start",
+        "approvals": 0,
+        "control_responses": 0
+      },
+      {
+        "stage": "pre_turn_control",
+        "approvals": 0,
+        "control_responses": 1
+      },
+      {
+        "stage": "turn_1",
+        "approvals": 1,
+        "control_responses": 1
+      },
+      {
+        "stage": "control_1",
+        "approvals": 1,
+        "control_responses": 1
+      },
+      {
+        "stage": "turn_2",
+        "approvals": 2,
+        "control_responses": 1
+      }
+    ]
+  },
+  "stdin_write_errors": null,
+  "stderr_capture": "",
+  "exit_code": 0,
+  "wait_error": "",
+  "context_deadline_tripped": false,
+  "duration_ms": 10049,
+  "scanner_error": ""
+}
