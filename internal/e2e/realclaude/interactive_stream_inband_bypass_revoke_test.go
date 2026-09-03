@@ -141,6 +141,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -151,6 +152,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/sessions"
 	"github.com/pyrycode/pyrycode/internal/streamsup"
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 const (
@@ -649,4 +651,208 @@ func firstOrEmpty(s []string) string {
 		return ""
 	}
 	return s[0]
+}
+
+// --- #2064: the spawn-time posture gate, on the daemon's own spawn path --------
+
+// TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows is #2064 AC 5. It
+// drives one live claude session whose STORED posture is the default one — the
+// posture that arms the gate, unlike the bypass session the test above measures — and
+// proves the gate OPENS: the daemon writes its stored posture to the child it just
+// spawned, claude acks the daemon's OWN minted request_id, and a user turn completes.
+//
+// # Why a completed turn is the assertion
+//
+// With the gate armed, WriteUserTurn refuses with the retryable no-live-child error
+// until the ack for THAT child's minted id lands. So a turn that completes is a
+// released gate — there is no other way for those bytes to reach claude. That makes
+// A2 below the strongest single assertion available here, and it is why this test does
+// not reach for a private counter or a hand-built control line: it measures the
+// production path end to end or it measures nothing.
+//
+// # Why it extends this rig rather than authoring a second one
+//
+// Everything it needs already exists here. seedBypassRegistry takes a `yolo bool`, so
+// the one posture that arms the gate needs no new seeder — just `false`. revokeTap
+// records the control_responses verbatim, newRevokeLogRecorder counts spawns, and
+// inbandSendTurn drives a turn against a result-count oracle. The ONE thing the rig
+// lacks is a release side: this file's factory installs the tap in Config.Stdout, and
+// the tap is not a parser, so nothing would ever open the gate. A real
+// streamsup.Parser is therefore teed in beside the tap and its own gate handed to the
+// runner — which is exactly the production wiring newStreamRunnerFactory installs,
+// where the parser mints the gate and the runner arms it.
+//
+// # What this does NOT claim
+//
+// That claude ENFORCES the acked posture. An echoed mode is the child's report of its
+// own posture, the same scope boundary this file's header draws for the revocation it
+// measures. What is proven is that the round trip closed on the daemon's own id.
+//
+// # Which assertion carries which proof
+//
+//   - A1 is the correlation: a control_response arrived at all. Without it A2 could
+//     in principle pass on a tree where the gate was never armed.
+//   - A2 is the gate opening, and it is the sole red for a broken correlation — a
+//     mismatched id, a subtype check that never passes, a parser and runner holding
+//     different gates. Under any of those inbandSendTurn dies waiting for a result
+//     that the refused turn can never produce.
+//   - A3 is the second confirmation #1595 and #2041 both read: the next turn's
+//     init.permissionMode echo. Logged and asserted as `default`, the stored posture.
+//   - A4 pins that this happened on ONE child, so no respawn is doing the work.
+//
+// # Measured 2026-09-03, claude on the operator's Max plan — EXECUTED, not skipped
+//
+// One `=== RUN` line, `--- PASS`, 3.72 s, one turn's tokens spent:
+//
+//	control_responses 1, init permissionModes ["default"], spawns 1,
+//	pid 9000 -> 9000, results 1, dropped partials 0, non-JSON lines 0,
+//	not-delivered records 0
+//	control_response verbatim:
+//	  {"type":"control_response","response":{"subtype":"success",
+//	   "request_id":"1","response":{"mode":"default"}}}
+//
+// Two things in that ack are worth reading rather than skimming. `request_id` is "1",
+// the daemon's OWN minted id off nextControlID, so the correlation closed on a value
+// this process chose — the thing the sibling test above records as impossible to
+// assert before this ticket existed. And `response.mode` is `default`, the stored
+// posture, which is the ack agreeing with A3's init echo from a second direction.
+// The id is logged as an OBSERVATION and deliberately not asserted: pinning a private
+// counter's start value would make an implementation detail a test contract, exactly
+// as that sibling's header argues.
+//
+// Read the count of `=== RUN` lines to know this executed; the exit code cannot tell a
+// skipped run from a passing one — with no credentials every test here skips and the
+// suite still exits 0.
+func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing.T) {
+	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
+	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+
+	workdir := filepath.Join(home, revokeWorkdirName+"-2064")
+	if err := os.MkdirAll(workdir, 0o700); err != nil {
+		t.Fatalf("#2064: create workdir: %v", err)
+	}
+
+	// yolo:false — the DEFAULT posture, which is what arms the gate. The sibling
+	// test's yolo:true seeds bypassPermissions, which the runner's allow-list refuses
+	// by non-membership, so that session is sent nothing and never gated at all.
+	registryPath := filepath.Join(t.TempDir(), "sessions.json")
+	seededID := seedBypassRegistry(t, registryPath, false)
+
+	rec := newRevokeTap()
+	logHandler, spawns, notDelivered := newRevokeLogRecorder()
+
+	var tap inbandRunner
+	factory := func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+		// The parser is the gate's minter, exactly as in production. It is teed in
+		// beside the tap rather than replacing it: the tap is what makes the ack and
+		// the init modes readable, and the parser is what RELEASES the gate. Its sink
+		// is a no-op — this test reads claude's raw lines through the tap, not events.
+		parser := streamsup.NewParser(func(turnevent.Event) {}, cfg.Logger)
+		r, err := streamsup.New(streamsup.Config{
+			ClaudeBin: cfg.ClaudeBin,
+			WorkDir:   cfg.WorkDir,
+			SessionID: cfg.SessionID,
+			Args:      cfg.ClaudeArgs,
+			Stdout:    io.MultiWriter(rec, parser),
+			Logger:    cfg.Logger,
+			// Read off the RunnerConfig rather than hard-coded, so the pool's own
+			// plumbing of the stored posture is part of what this run measures.
+			SpawnPermissionMode: cfg.PermissionMode,
+			PostureGate:         parser.PostureGate(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("#2064: stream runner: %w", err)
+		}
+		tap = inbandRunner{Runner: r}
+		return tap, nil
+	}
+
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap: sessions.SessionConfig{
+			ClaudeBin:  claudeBin,
+			WorkDir:    workdir,
+			ClaudeArgs: revokeBaseArgs,
+		},
+		RegistryPath:  registryPath,
+		RunnerFactory: factory,
+		Logger:        slog.New(logHandler),
+	})
+	if err != nil {
+		t.Fatalf("#2064: sessions.New: %v", err)
+	}
+
+	sup := pool.Default().Runner()
+	if sup != sessions.Runner(tap) {
+		t.Fatalf("#2064: pool.Default().Runner() is not the runner the test captured (%T vs %T)", sup, tap)
+	}
+
+	// Instrument check — the deterministic half, BEFORE any child is spawned, so a
+	// seed that did not reach the pool costs zero tokens. A bypass posture here would
+	// mean the runner writes nothing and the gate is never armed, leaving every
+	// assertion below passing against a session this ticket does not gate.
+	settings, ok := pool.DefaultSettings()
+	if !ok || settings.YOLO || settings.PermissionMode != "default" {
+		t.Fatalf("#2064: pool.DefaultSettings() = %+v (ok=%v), want the default posture: the "+
+			"registry seeded at %s with bootstrap id %s did not reach the pool, so the gate "+
+			"would never be armed and this run would measure nothing",
+			settings, ok, registryPath, seededID)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_ = tap.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(inbandRunExitWait):
+			t.Errorf("#2064: streamsup.Run did not return within %s of cancel", inbandRunExitWait)
+		}
+	})
+
+	if !inbandWaitForChild(tap) {
+		t.Fatalf("#2064: no live child within %s: claude never spawned", inbandSpawnWait)
+	}
+	pidBefore := tap.State().ChildPID
+
+	// A2's driver. On a tree whose correlation is broken this call is where the run
+	// dies: the gate never opens, every WriteUserTurn refuses, and no result arrives.
+	inbandSendTurn(t, sup, rec, revokePromptOne)
+
+	responses := rec.snapshotControlResponses()
+	modes := rec.snapshotInitModes()
+	pidAfter := tap.State().ChildPID
+	spawnCount := spawns()
+	t.Logf("#2064: control_responses %d, init permissionModes %q, spawns %d, pid %d -> %d, "+
+		"results %d, dropped partials %d, non-JSON lines %d, not-delivered records %d",
+		len(responses), modes, spawnCount, pidBefore, pidAfter,
+		rec.resultCount(), rec.droppedCount(), rec.nonJSONCount(), len(notDelivered()))
+	for i, resp := range responses {
+		t.Logf("#2064: control_response[%d] verbatim: %s", i, resp)
+	}
+
+	if len(responses) == 0 {
+		t.Errorf("A1: claude answered no control_request at all, so nothing shows the "+
+			"spawn-time set_permission_mode write reached the child (pid %d)", pidBefore)
+	}
+	// A2 is carried by inbandSendTurn above: it fatals when no result arrives, and
+	// with the gate armed a completed turn IS the released gate. Restated here rather
+	// than left implicit, because a reader looking for "the gate opened" would
+	// otherwise find no assertion naming it.
+	if rec.resultCount() == 0 {
+		t.Errorf("A2: no result line for the turn, so the posture gate never opened and " +
+			"claude never saw it")
+	}
+	if len(modes) == 0 || modes[len(modes)-1] != "default" {
+		t.Errorf("A3: the child reported init.permissionMode %q (all %q), want %q — the "+
+			"second confirmation that the acked posture is the stored one",
+			firstOrEmpty(modes), modes, "default")
+	}
+	if spawnCount != 1 {
+		t.Errorf("A4: %d spawns over the whole run, want exactly 1; the gate must open on "+
+			"the child that was spawned, not on a replacement", spawnCount)
+	}
 }
