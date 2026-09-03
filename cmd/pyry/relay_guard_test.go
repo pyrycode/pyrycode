@@ -96,6 +96,15 @@ var inboundTypes = map[string]string{
 	// tags the frame and hands it to the conn's appFrameWorker (where the upload's
 	// hashing and writing run, off Run) registers exactly as an inline one does.
 	"TypeAttachmentChunk": "switch-intercepted",
+	// The retrieval request verb (#2054), moved up from excludedTypes' "pending
+	// handler (#2052)" when dispatchAppFrame gained its case — the move that entry
+	// named in advance, and mandatory rather than tidy-up: Assertion #2 fails a
+	// wired type left sitting in that map. Same filing as the chunk above and for
+	// the same reason: its case tags the frame and hands it to the conn's
+	// appFrameWorker, where the file read and the chunking run off Run, and the
+	// guard reads case SELECTORS rather than case bodies. Unlike that one it is
+	// inbound and nothing else — the chunk type also rides the outbound leg.
+	"TypeRequestAttachment": "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -242,20 +251,19 @@ var excludedTypes = map[string]string{
 	// unemitted one.
 	"TypeQuestionDismissed": "push",
 
-	// pending handler — the v2 attachment RETRIEVAL REQUEST verb (#2052). Filed
-	// under its own true label rather than borrowed from a neighbour, following
-	// TypeQuestionAnswer / TypeQuestionRefused (which sat here as "pending handler
-	// (#1984)") and TypeAttachmentChunk before them. Both alternatives are wrong in
-	// a checkable way: inboundTypes fails Assertion #1, which requires an inbound
-	// type to be wired into the Handlers map or dispatchAppFrame, and this slice
-	// ships no dispatch; "push" is false for a frame that is exclusively inbound,
-	// so filing it there to dodge Assertion #1 would be a lie to the guard.
-	// Mandatory from the moment the constant exists rather than from the moment
-	// something dispatches it — Assertion #3 reports an unclassified constant, not
-	// an unhandled one. #2054 adds the dispatchAppFrame case, at which point
-	// Assertion #2 FORCES this entry up to inboundTypes as "switch-intercepted";
-	// a wired type left in this map fails.
-	"TypeRequestAttachment": "pending handler (#2054)",
+	// TypeRequestAttachment is NO LONGER HERE. It sat here as "pending handler
+	// (#2054)" while #2052 had declared the constant and nothing dispatched it;
+	// #2054 added the dispatchAppFrame case, so it moved up to inboundTypes as
+	// "switch-intercepted", beside the attachment chunk whose upload leg made the
+	// same move in #1897. That move was mandatory rather than tidy-up — Assertion
+	// #2 fails a wired type still sitting in this map, exactly as the old entry
+	// said it would.
+	//
+	// The reason it was excluded rather than filed as a push is still worth
+	// keeping: "push" is false for a frame that is exclusively inbound, and filing
+	// it that way to dodge Assertion #1 — which requires an inbound type to be
+	// wired into the Handlers map or dispatchAppFrame — would have been a lie to
+	// the guard rather than a classification.
 
 	// The v2 question answer and refusal are NOT here. They were, as "pending
 	// handler (#1984)" while #1983 had declared the constants and nothing
