@@ -326,15 +326,17 @@ the turn's reply still lands while the ack does not; that is also the literal pr
 the consumer needs (a child that is alive but unconfirmed), so the stronger test and
 the correct spec turned out to be the same test.
 
-**Known gap, deliberately unfixed here: the approve rider's read loop
-(`runStreamJSONApprove`, § Approve rider below) answers neither `set_permission_mode`
-nor `initialize`.** It is a separate, wholly duplicated read loop from `runStreamJSON`
-(see § Approve rider), so this arm's dispatch never reaches it. Harmless while nothing
-sends the request — but `internal/e2e/relay_v2_stream_modal_test.go` spawns its child
-with the approve rider on, so the moment #2064's spawn-time gate arms, that child will
-never ack its posture and every turn in that suite will be refused, the exact failure
-this ticket exists to prevent, one path over. Flagged for #2064 to close, not fixed
-here — out of this ticket's ACs.
+**CLOSED by #2064: the approve rider's read loop (`runStreamJSONApprove`, § Approve
+rider below) now answers `set_permission_mode`, not `initialize`.** It was, and
+remains, a separate, wholly duplicated read loop from `runStreamJSON` (see § Approve
+rider) — the gap this entry used to flag was exactly the predicted failure:
+`internal/e2e/relay_v2_stream_modal_test.go` spawns its child with the approve rider
+on, and the moment #2064's spawn-time gate went live, that child could never ack its
+posture and the modal round-trip failed on its deadline reporting no modal — a
+failure that reads as approval-wiring breakage and is not one (measured: 9.3s on
+`origin/main`, 81s failing without the arm, 9.5s passing with it). `initialize` is
+deliberately still unanswered there — nothing gates a turn on that ack, so answering
+it would be untested surface added on symmetry alone.
 
 Not gaining a NAK arm: `streamsup.parser.go` records that a `set_permission_mode` NAK
 exists on the wire (an `error` string, no inner response), but no AC here asks for one,
@@ -498,11 +500,18 @@ runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "")
 `runStreamJSONApprove` duplicates `runStreamJSON`'s ~15-line read loop rather than
 widening its signature — same discipline as the stdin tee and startup hold: the
 tested seam (`runStreamJSON`) stays byte-identical for the send/interrupt/queue
-siblings. **That duplication is also why this rider answers neither `initialize`
-(#1692) nor `set_permission_mode` (#2067)** — both live only in `runStreamJSON`'s
-dispatch. Harmless today; once #2064's spawn-time posture gate arms, a child spawned
-with this rider on (`relay_v2_stream_modal_test.go` does) will never ack its posture
-and every turn in that suite will be refused. Flagged for #2064, not yet fixed.
+siblings. **That duplication is why this rider answered neither `initialize`
+(#1692) nor `set_permission_mode` (#2067) for a while** — both live only in
+`runStreamJSON`'s dispatch, and this loop's own doc comment claimed non-user lines
+are ignored "exactly like runStreamJSON," which stopped being true at #1692 and more
+so at #2067 without this loop noticing. #2064 made the gap fatal rather than latent
+(a child spawned with this rider on never acked its posture once the spawn-time gate
+started requiring one) and added the `set_permission_mode` arm here; `initialize`
+stays unanswered on purpose — nothing gates a turn on that ack. **General lesson: a
+doc comment asserting two code paths behave "exactly like" each other rots the
+moment either path is taught something new** — the fix has to grep for every
+duplicated read loop a new dispatch arm needs, not just the one path the ticket
+names. See [streamsup-package-posture-gate-spawn-permission-mode-ack.md](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
 
 **Socket-in-a-file.** The daemon's control socket is a random per-spawn path
 (`shortSocketPath`), unknown before spawn and not derivable from the child's env or

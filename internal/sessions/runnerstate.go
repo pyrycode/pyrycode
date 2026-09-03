@@ -66,6 +66,22 @@ type RunnerConfig struct {
 	// ClaudeArgs is the extra argv passed through to claude.
 	ClaudeArgs []string
 
+	// PermissionMode is the session's stored permission posture, written to every
+	// spawned child in-band and confirmed before any user turn reaches it (#2064).
+	// Both construction sites set it from settings.PermissionMode below a
+	// canonicalSettings call, so it is always a real mode and never the empty one.
+	//
+	// It is the CONSTRUCTION-TIME value only, and it goes stale: Pool.UpdateSettings
+	// rebuilds no runner, so a posture changed after startup reaches the runner
+	// through Runner.SetSpawnPermissionMode instead. This field seeds; that method
+	// updates.
+	//
+	// bypassPermissions travels here like any other mode. The stream runner refuses to
+	// write it — the escalation is not in its allow-list — so a bypass session is sent
+	// nothing and its turns are never gated, and re-granting bypass stays on the
+	// respawn path.
+	PermissionMode string
+
 	// Logger is used for the runner's diagnostics. Optional; nil falls back to
 	// the package default.
 	Logger *slog.Logger

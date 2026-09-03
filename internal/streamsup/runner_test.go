@@ -934,7 +934,7 @@ func TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript(t *testing.T) {
 		sessionID: testSessionID,
 	}
 
-	_, cancel, args, forceFirst, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, args, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 
 	if forceFirst {
@@ -1265,7 +1265,7 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 
 	r.RestartFresh("")
 
-	_, cancel, args, forceFirst, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, args, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if forceFirst {
 		t.Errorf("beginSpawn forceFirst = true after RestartFresh(%q), want false (no-op held)", "")

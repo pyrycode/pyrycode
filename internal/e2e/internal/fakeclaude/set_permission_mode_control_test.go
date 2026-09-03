@@ -510,3 +510,66 @@ func TestSetPermissionModeAck_MatchesCommittedCaptures(t *testing.T) {
 		t.Logf("emitted ack shape %s attested by %s", signature, provenance)
 	}
 }
+
+// TestRunStreamJSONApprove_AnswersSetPermissionMode (#2064) is the regression test for
+// the arm #2067 landed on one read loop and not the other.
+//
+// runStreamJSONApprove is a SEPARATE ~15-line loop, duplicated from runStreamJSON
+// rather than sharing its dispatch, and its doc said non-user lines are ignored
+// "exactly like runStreamJSON" — which stopped being true when that loop learned to
+// answer. Nothing caught the divergence because nothing sent the request yet.
+//
+// #2064 turned it fatal: the daemon writes this request at every spawn and refuses
+// every user turn until the child acks it, so an approve-rider child that drops the
+// line refuses its turn forever. Measured 2026-09-03 against a tree carrying #2064's
+// gate and this arm reverted: TestRelayV2_StreamModalPermissionRoundTrip failed in
+// 81 s on its deadline reporting no modal — a failure that reads as an approval-wiring
+// fault and is not one. With the arm it passes in 9.5 s, the same as before #2064.
+//
+// The turn row is the non-vacuity gate: it proves this loop still does its own job, so
+// a green here cannot come from a loop that answers control requests and has stopped
+// gating calls.
+func TestRunStreamJSONApprove_AnswersSetPermissionMode(t *testing.T) {
+	t.Parallel()
+
+	const reqID = "2064-approve-arm"
+	var buf bytes.Buffer
+	// socketFile "" makes dialApproval fail fast, so the turn row below needs no
+	// daemon — this test is about the read loop's dispatch, not the approval verdict.
+	runStreamJSONApprove(strings.NewReader(
+		setPermissionModeRequestLine(reqID, "plan")+"\n"+
+			userTurnLine("gate this")+"\n"), &buf, "")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	var ack setPermissionModeAck
+	found := false
+	sawToolUse := false
+	for _, line := range lines {
+		var probe setPermissionModeAck
+		if err := json.Unmarshal([]byte(line), &probe); err != nil {
+			continue
+		}
+		switch {
+		case probe.Type == "control_response" && probe.Response.RequestID == reqID:
+			ack, found = probe, true
+		case probe.Type == "assistant":
+			sawToolUse = true
+		}
+	}
+
+	if !found {
+		t.Fatalf("the approve rider dropped the set_permission_mode request, so a child under "+
+			"it can never confirm its posture and every user turn is refused forever:\n%s",
+			strings.Join(lines, "\n"))
+	}
+	if ack.Response.Subtype != "success" {
+		t.Errorf("ack subtype = %q, want %q", ack.Response.Subtype, "success")
+	}
+	if mode, present := ackMode(t, ack); !present || mode != "plan" {
+		t.Errorf("echoed mode = %q (present=%v), want %q", mode, present, "plan")
+	}
+	if !sawToolUse {
+		t.Error("no assistant line for the user turn: the new arm must not swallow the turn " +
+			"this rider exists to gate")
+	}
+}

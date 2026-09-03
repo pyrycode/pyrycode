@@ -45,6 +45,36 @@ type Runner interface {
 	// notably that the argv is installed verbatim, with validation staying upstream
 	// in Session.spawnArgs.
 	SetSpawnArgs(args []string)
+	// SetSpawnPermissionMode installs the posture the runner's NEXT and every later
+	// spawn asserts to its child in-band, without touching the running one (#2064).
+	// It is SetSpawnArgs' posture twin and stands in the same relation to
+	// SetPermissionMode below that SetSpawnArgs stands in to Restart: one changes
+	// what runs next, the other changes what is running now.
+	//
+	// Pool.UpdateSettings is its one caller, and it calls it on the line ABOVE its
+	// branch split — the single point both branches pass through — because neither
+	// branch rebuilds the runner. Without it a runner keeps asserting the posture it
+	// was CONSTRUCTED with, so a crash-respawn after an operator's change would
+	// re-assert the startup posture and can LOOSEN one that was since tightened.
+	//
+	// The two shapes that look sufficient and are not: piggybacking the install on
+	// SetPermissionMode misses an escalation to bypass, which is not
+	// in-band-deliverable and never reaches that method; deriving the posture from
+	// the installed argv is exact today and dies with #2065, which takes the mode out
+	// of the launch argv entirely.
+	//
+	// mode is installed VERBATIM AND UNVALIDATED — bypassPermissions included, the
+	// empty string included. This is not an operator-input path: callers pass an
+	// already-canonical stored posture, and the vocabulary gate that matters runs at
+	// the SPAWN, where a mode outside the runner's allow-list means nothing is written
+	// and nothing is gated. It returns nothing and cannot fail; it is non-blocking and
+	// takes no lock the sessions layer holds.
+	//
+	// It is ON this interface for SetPermissionMode's reason exactly, and the stakes
+	// are higher here: its consumer sits inside internal/sessions, where a structural
+	// assertion fails OPEN, and failing open means a respawned child silently
+	// asserting a posture the operator has already changed.
+	SetSpawnPermissionMode(mode string)
 	// SetPermissionMode switches the LIVE child's permission posture without
 	// killing it, by writing one set_permission_mode control request carrying mode
 	// on the stream the daemon already holds open (#2042 widened #1603's writer;

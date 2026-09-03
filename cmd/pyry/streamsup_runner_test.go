@@ -631,3 +631,56 @@ func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 		t.Errorf("runner = %v, want nil (no silent PTY fallback)", runner)
 	}
 }
+
+// TestMapStreamsupConfig_CarriesPermissionMode (#2064): the stored posture crosses
+// the mapper as a plain value, and its runtime partner does NOT — the same dividing
+// line ClaudeSessionsDir and Stdout already sit on either side of.
+//
+// bypassPermissions is carried rather than filtered here, and that is deliberate: the
+// mapper normalises nothing, and the refusal that matters is the runner's closed
+// allow-list at the spawn. Filtering here would be a second vocabulary to keep in step
+// with that one.
+func TestMapStreamsupConfig_CarriesPermissionMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"default", "plan", "bypassPermissions", ""} {
+		got := mapStreamsupConfig(sessions.RunnerConfig{
+			ClaudeBin:      "/opt/claude",
+			WorkDir:        "/work",
+			SessionID:      "sess-uuid",
+			PermissionMode: mode,
+		})
+		if got.SpawnPermissionMode != mode {
+			t.Errorf("SpawnPermissionMode = %q, want %q", got.SpawnPermissionMode, mode)
+		}
+		if got.PostureGate != nil {
+			t.Errorf("PostureGate = %v, want nil — it is a runtime object installed in newStreamRunnerFactory, not the pure mapper", got.PostureGate)
+		}
+	}
+}
+
+// TestSessionParser_MintsOneStablePostureGate (#2064) pins the parser half of the
+// binding the whole correlation rests on: the gate the runner ARMS must be the very
+// object the parser RELEASES, so PostureGate() has to mint one gate and keep handing
+// back that same object. Asserting non-nil would pass against a fresh gate per call,
+// under which every turn would be refused forever — so the assertion is identity.
+//
+// It is named for what it pins rather than for the factory, deliberately. The obvious
+// name would say newStreamRunnerFactory, but streamsup.Config is not observable from
+// the runner the factory returns, so the far half of the binding cannot be asserted
+// from this package at all; the comment in the body names what carries it instead.
+func TestSessionParser_MintsOneStablePostureGate(t *testing.T) {
+	t.Parallel()
+	parser, _, _ := newSessionParser(func(turnevent.Event) {}, nil)
+	gate := parser.PostureGate()
+	if gate == nil {
+		t.Fatal("newSessionParser's parser minted no posture gate")
+	}
+	if second := parser.PostureGate(); second != gate {
+		t.Error("PostureGate() returned a different object on the second call; the runner and the parser would hold different gates")
+	}
+	// The gate's own transitions are unexported and belong to internal/streamsup's
+	// tests. What this package owns is the BINDING, and its end-to-end proof is the
+	// fake-daemon suite: every stream session there now arms this gate, so a factory
+	// that handed the runner a gate the parser does not release would refuse every
+	// turn in every one of those tests rather than showing up as one missed assertion.
+}

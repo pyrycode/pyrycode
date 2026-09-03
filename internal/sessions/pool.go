@@ -475,8 +475,12 @@ func New(cfg Config) (*Pool, error) {
 		// dropped on the floor by the stream factory, so removing them changes no
 		// behaviour — it stops advertising behaviour nothing implements. See
 		// RunnerConfig's doc for the two that represent real gaps.
-		SessionID:      string(bootstrapID),
-		ClaudeArgs:     bootstrapArgs,
+		SessionID:  string(bootstrapID),
+		ClaudeArgs: bootstrapArgs,
+		// The stored posture the stream runner asserts to every child it spawns
+		// (#2064). settings is canonicalSettings'd above, so this is a real mode and
+		// never the empty one, whichever of the warm/cold-start branches ran.
+		PermissionMode: settings.PermissionMode,
 		Logger:         cfg.Logger,
 		BackoffInitial: cfg.Bootstrap.BackoffInitial,
 		BackoffMax:     cfg.Bootstrap.BackoffMax,
@@ -815,6 +819,21 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 	// Both branches install newArgs; only one kills. Swap BEFORE the write: the
 	// install is the durable half and is non-blocking, so if the delivery fails
 	// the next spawn still carries the change.
+	//
+	// The posture install (#2064) sits ABOVE the split because it is the one thing
+	// BOTH branches need and only one of them would otherwise get. The runner asserts
+	// its stored posture to every child it spawns, and neither branch rebuilds the
+	// runner — so a construction-time value goes stale here, and a later
+	// crash-respawn would re-assert the posture the session had at daemon start. The
+	// escalation branch below is the half that makes the placement necessary rather
+	// than tidy: it never calls SetPermissionMode, so an install folded into
+	// deliverSettingsInBand would miss exactly the transition that most needs it.
+	//
+	// Unconditional rather than gated on update.PermissionMode/YOLO being present:
+	// merged.PermissionMode is the session's stored posture whatever this update
+	// named, so re-installing it is idempotent and a future branch cannot forget it.
+	// It is non-blocking and takes no Pool lock, so it is safe here, past the unlock.
+	sup.SetSpawnPermissionMode(merged.PermissionMode)
 	if inBandDeliverable(update) {
 		sup.SetSpawnArgs(newArgs)
 		p.deliverSettingsInBand(id, sup, update, merged)
@@ -1730,8 +1749,11 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		// #1108 seam: the same id already baked into ClaudeArgs as
 		// "--session-id <id>" is also exposed here so the stream RunnerFactory
 		// (#1109) can read it at construction.
-		SessionID:      string(id),
-		ClaudeArgs:     args,
+		SessionID:  string(id),
+		ClaudeArgs: args,
+		// Same seed as Pool.New's, and canonicalSettings runs above this site too
+		// (#2064).
+		PermissionMode: settings.PermissionMode,
 		Logger:         p.log,
 		BackoffInitial: tpl.BackoffInitial,
 		BackoffMax:     tpl.BackoffMax,

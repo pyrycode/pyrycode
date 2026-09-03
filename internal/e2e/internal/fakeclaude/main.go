@@ -2290,9 +2290,17 @@ const (
 // until the daemon answers), then writes one assistant echo carrying the verdict
 // needle + one result{success} line. runStreamJSON stays byte-identical (the
 // send / interrupt / queue siblings depend on it), so the ~15-line read loop is
-// duplicated rather than widening its signature — the cheaper trade. Non-user lines
-// are ignored, and the loop returns on EOF or the first write error, exactly like
-// runStreamJSON.
+// duplicated rather than widening its signature — the cheaper trade. The loop returns
+// on EOF or the first write error, exactly like runStreamJSON.
+//
+// NON-USER LINES ARE NOT ALL IGNORED, and this header said they were until #2064. The
+// duplication above is of the LOOP, not of the DISPATCH, so every control arm
+// runStreamJSON grew — initialize at #1692, set_permission_mode at #2067 — landed on
+// one side only and had to be mirrored here by hand. This rider answers
+// set_permission_mode (see the arm below for why that one and not initialize); anything
+// else non-user is ignored. A future arm added to runStreamJSON has to be considered
+// here too, and the cost of missing one is not a skipped assertion: it is a sibling
+// test dying on its deadline with a symptom that points somewhere else entirely.
 //
 // The block goes BEFORE the dial (#1918), which is the position real claude's gate
 // has: the deny-default boundary lives between the tool_use emission and its
@@ -2326,6 +2334,26 @@ func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 				}
 				verdict := dialApproval(socketFile, toolUseID)
 				if werr := writeVerdictResponse(w, msgID, verdict); werr != nil {
+					return
+				}
+			} else if reqID, mode, ok := setPermissionModeRequest([]byte(line)); ok {
+				// The arm the header's "non-user lines are not all ignored" paragraph is
+				// about. runStreamJSON learned to ANSWER initialize at #1692 and
+				// set_permission_mode at #2067; because the duplication was of the loop
+				// rather than of the dispatch, both arms landed on one side only and this
+				// rider's child stayed unable to confirm its posture.
+				//
+				// #2064 is what made that fatal rather than latent: the daemon now writes
+				// this request at every spawn and refuses every user turn until the child
+				// acks it, so a rider that drops the line refuses the modal test's turn
+				// forever and it dies on its deadline having shown no modal — a failure
+				// that reads as an approval-wiring fault and is not one.
+				//
+				// ONLY this subtype is mirrored, not initialize as well. Nothing gates a
+				// turn on the initialize ack, so an unanswered one costs this rider a
+				// model list it never reads; answering it here would be untested surface
+				// added on symmetry alone.
+				if werr := writeSetPermissionModeAck(w, reqID, mode); werr != nil {
 					return
 				}
 			}

@@ -3578,14 +3578,17 @@ type logRecorder struct {
 // values are rendered with slog.Value.String() so the content check does not
 // depend on the value's dynamic type.
 type capturedRecord struct {
-	msg   string
+	msg string
+	// level is read by #2064's turn-refusal assertions, where Info and Warn carry
+	// different operator instructions for two states that refuse identically.
+	level slog.Level
 	attrs map[string]string
 }
 
 func (h *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *logRecorder) Handle(_ context.Context, rec slog.Record) error {
-	c := capturedRecord{msg: rec.Message, attrs: make(map[string]string)}
+	c := capturedRecord{msg: rec.Message, level: rec.Level, attrs: make(map[string]string)}
 	rec.Attrs(func(a slog.Attr) bool {
 		c.attrs[a.Key] = a.Value.String()
 		return true

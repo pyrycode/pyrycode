@@ -1,4 +1,4 @@
-# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043)
+# `Runner` interface + `RunnerFactory` (#1077, corrected #1580 for #1348 fallout, widened #2042, `RevokeBypass` retired #2043, widened again #2064)
 
 `Session.sup` is typed `Runner` (`internal/sessions/runner.go`):
 
@@ -11,6 +11,7 @@ type Runner interface {
     Restart(args []string)
     SetSpawnArgs(args []string) // #1580 — installs the NEXT spawn's argv, no kill
     SetPermissionMode(mode string) error // #2042 — switches the LIVE child to a caller-named mode, no kill
+    SetSpawnPermissionMode(mode string) // #2064 — installs the NEXT spawn's posture write, no kill, no live effect
 }
 
 type RunnerFactory func(cfg RunnerConfig) (Runner, error)
@@ -57,13 +58,17 @@ would be `ok == false` always and fall through silently to an inert default — 
 5's #1580 review round caught in this file's own first-draft correction. `Interrupt`/`RestartFresh`/
 `BeginRotation`/`ModelList` stay off `sessions.Runner` deliberately (adding any would be speculative
 surface, or in `ModelList`'s case would drag every test double in both packages into the diff for no
-compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs`
-and `SetPermissionMode` are on it instead, because — per their own docs — widening is
+compile-time guarantee since its consumer sits in `cmd/pyry`, not `internal/sessions`); `SetSpawnArgs`,
+`SetPermissionMode` and `SetSpawnPermissionMode` are on it instead, because — per their own docs — widening is
 compile-checked across the whole one-production/five-double set, whereas a type assertion at a future
 call site would fail silently at runtime and either fall back to `Restart` or leave a posture stuck
 while the caller reports success — the exact outcomes these swap/posture-changing methods exist to
-avoid. Both share the same placement rule: their consumers are inside `internal/sessions`, so there
-is no `cmd/pyry` dispatch site to type-assert at.
+avoid. All three share the same placement rule: their consumers are inside `internal/sessions`, so there
+is no `cmd/pyry` dispatch site to type-assert at. `SetSpawnPermissionMode` closes a staleness
+gap the other two don't have to: `Pool.UpdateSettings` never reconstructs a runner, so without an
+interface method a construction-time-only spawn posture would silently outlive the operator's own
+change and get re-asserted on the next crash-respawn. See [streamsup-package's Posture
+gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
 
 **`RevokeBypass` sat on the interface transitionally, side by side with `SetPermissionMode`, and the
 pair has since collapsed (#2043).** #2042 generalised the fixed-`"default"` revoke into a
