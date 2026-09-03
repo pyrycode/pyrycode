@@ -631,3 +631,51 @@ func TestStreamRunnerFactory_ErrorPropagation(t *testing.T) {
 		t.Errorf("runner = %v, want nil (no silent PTY fallback)", runner)
 	}
 }
+
+// TestMapStreamsupConfig_CarriesPermissionMode (#2064): the stored posture crosses
+// the mapper as a plain value, and its runtime partner does NOT — the same dividing
+// line ClaudeSessionsDir and Stdout already sit on either side of.
+//
+// bypassPermissions is carried rather than filtered here, and that is deliberate: the
+// mapper normalises nothing, and the refusal that matters is the runner's closed
+// allow-list at the spawn. Filtering here would be a second vocabulary to keep in step
+// with that one.
+func TestMapStreamsupConfig_CarriesPermissionMode(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"default", "plan", "bypassPermissions", ""} {
+		got := mapStreamsupConfig(sessions.RunnerConfig{
+			ClaudeBin:      "/opt/claude",
+			WorkDir:        "/work",
+			SessionID:      "sess-uuid",
+			PermissionMode: mode,
+		})
+		if got.SpawnPermissionMode != mode {
+			t.Errorf("SpawnPermissionMode = %q, want %q", got.SpawnPermissionMode, mode)
+		}
+		if got.PostureGate != nil {
+			t.Errorf("PostureGate = %v, want nil — it is a runtime object installed in newStreamRunnerFactory, not the pure mapper", got.PostureGate)
+		}
+	}
+}
+
+// TestNewStreamRunnerFactory_BindsTheParsersOwnGate (#2064) pins the binding that the
+// whole correlation rests on: the gate the runner ARMS must be the very object the
+// parser RELEASES. Asserting non-nil would pass against two separately minted gates,
+// under which every turn would be refused forever — so the assertion is identity,
+// exercised end to end by feeding the parser an ack for the id the runner armed.
+func TestNewStreamRunnerFactory_BindsTheParsersOwnGate(t *testing.T) {
+	t.Parallel()
+	parser, _, _ := newSessionParser(func(turnevent.Event) {}, nil)
+	gate := parser.PostureGate()
+	if gate == nil {
+		t.Fatal("newSessionParser's parser minted no posture gate")
+	}
+	if second := parser.PostureGate(); second != gate {
+		t.Error("PostureGate() returned a different object on the second call; the runner and the parser would hold different gates")
+	}
+	// The gate's own transitions are unexported and belong to internal/streamsup's
+	// tests. What this package owns is the BINDING, and its end-to-end proof is the
+	// fake-daemon suite: every stream session there now arms this gate, so a factory
+	// that handed the runner a gate the parser does not release would refuse every
+	// turn in every one of those tests rather than showing up as one missed assertion.
+}

@@ -389,3 +389,65 @@ func TestPool_PermissionModeNeverLogged(t *testing.T) {
 		t.Errorf("the rejection echoed the caller's value: %q", rejected.Error())
 	}
 }
+
+// TestPool_UpdateSettings_InstallsSpawnPostureOnBothBranches (#2064): the posture the
+// runner asserts to every child it SPAWNS is kept in step with the stored one on both
+// of UpdateSettings' branches, because neither branch rebuilds the runner.
+//
+// The escalation row is the one that earns the placement above the branch split, and
+// it is the sole red for the cheaper design that folds the install into
+// deliverSettingsInBand: that path is never reached for a bypass update, so the runner
+// would keep asserting the pre-escalation mode and a later crash-respawn would
+// downgrade a child the operator had just escalated. The paired permissionModes()
+// assertion is what keeps the two calls distinguishable — the escalation must install
+// WITHOUT writing anything to the live child.
+func TestPool_UpdateSettings_InstallsSpawnPostureOnBothBranches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// update is applied to a session that starts at the default posture.
+		update SettingsUpdate
+		// wantSpawn is the posture every later spawn must assert afterwards.
+		wantSpawn string
+		// wantLive is what the LIVE child was told over the control channel.
+		wantLive []string
+	}{
+		{
+			name:      "in-band branch installs the new mode",
+			update:    SettingsUpdate{PermissionMode: ptr("plan")},
+			wantSpawn: "plan",
+			wantLive:  []string{"plan"},
+		},
+		{
+			name:      "escalation branch installs bypass without writing it",
+			update:    SettingsUpdate{PermissionMode: ptr(permissionModeBypass)},
+			wantSpawn: permissionModeBypass,
+			wantLive:  nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			regPath := filepath.Join(t.TempDir(), "sessions.json")
+			pool := helperRestartPool(t, regPath, t.TempDir(), SessionSettings{})
+			runPoolInBackground(t, pool)
+			id := pool.Default().ID()
+			runner := runnerDouble(t, pool, id)
+			waitRunning(t, runner)
+
+			if err := pool.UpdateSettings(id, tc.update); err != nil {
+				t.Fatalf("UpdateSettings: %v", err)
+			}
+
+			// Exactly one install, carrying the MERGED posture — not a count of zero
+			// (the branch was missed) and not two (an install duplicated per branch).
+			installs := runner.spawnPermissionModes()
+			if len(installs) != 1 || installs[0] != tc.wantSpawn {
+				t.Fatalf("spawn posture installs = %v, want exactly [%s]", installs, tc.wantSpawn)
+			}
+			if got := runner.permissionModes(); !reflect.DeepEqual(got, tc.wantLive) {
+				t.Errorf("live-child control writes = %v, want %v", got, tc.wantLive)
+			}
+		})
+	}
+}
