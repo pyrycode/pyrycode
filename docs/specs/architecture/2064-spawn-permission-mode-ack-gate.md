@@ -536,3 +536,48 @@ sections record the rejected shapes rather than only the chosen one.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — implementation
+
+**Open questions, resolved.**
+
+1. *Does `withApprovalArgs` put `--permission-mode default` into a default session's
+   argv?* **Yes**, confirmed from a fake-daemon spawn record — the composed argv is
+   `… --permission-prompt-tool … --strict-mcp-config --permission-mode default
+   --session-id …`. So the spawn-time write is doubly redundant today exactly as the
+   ticket says, and AC 5's live child was one the argv had already put in `default`.
+   Nothing in the design changes; it is what makes the live measurement's
+   `response.mode` echo agree with the init echo.
+2. *Does any existing `internal/streamsup` test assert a spawn's exact byte stream?*
+   **No.** `SpawnPermissionMode` defaults to empty and the allow-list refuses it, so
+   every pre-existing construction site is byte-identical; the package's suite is green
+   with `-race` and needed only the mechanical `beginSpawn` arity update at two test
+   call sites.
+3. *Does the fake-daemon suite hold a non-default session the withheld rider would
+   disturb?* **No** — but the question found a different, real defect. See below.
+
+**One defect found and fixed: `runStreamJSONApprove` was never taught to answer.**
+#2067 added the `set_permission_mode` arm to `runStreamJSON`. The approve rider runs a
+**separate, duplicated read loop**, `runStreamJSONApprove`, whose doc claimed non-user
+lines are ignored *"exactly like runStreamJSON"* — untrue since #1692 and more so since
+#2067, because the duplication was of the LOOP and not of the DISPATCH. Nothing caught
+it while nothing sent the request.
+
+This ticket made it fatal: `TestRelayV2_StreamModalPermissionRoundTrip` failed on its
+deadline reporting no modal — a failure that reads as an approval-wiring fault and is
+not one. Measured: `origin/main` passes in 9.3 s, this branch without the arm fails in
+81 s, this branch with it passes in 9.5 s. Fixed in the fake (test-support code, not
+production) with a regression test that also gates non-vacuity by asserting the loop
+still emits its gated `tool_use`. It is in scope rather than a separate ticket: the
+red is this branch's own regression, not a pre-existing bug found alongside it.
+
+**Actual size.** 1,483 lines across 16 files on top of the 538-line spec commit —
+against the ~1,250 estimated. **6 production files** as planned. The seventh file
+touched, `internal/e2e/internal/fakeclaude/main.go`, is the e2e fixture binary and not
+production source, so the declared file overage is unchanged.
+
+**Design unchanged from the committed plan.** The rejected argv interlock and the
+`SetSpawnPermissionMode` decision were both settled in the security-review pass before
+the plan was committed; nothing was re-decided during implementation.

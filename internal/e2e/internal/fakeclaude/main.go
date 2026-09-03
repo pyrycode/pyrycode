@@ -2328,6 +2328,27 @@ func runStreamJSONApprove(r io.Reader, w io.Writer, socketFile string) {
 				if werr := writeVerdictResponse(w, msgID, verdict); werr != nil {
 					return
 				}
+			} else if reqID, mode, ok := setPermissionModeRequest([]byte(line)); ok {
+				// CORRECTED 2026-09-03 (#2064). This loop's doc says non-user lines are
+				// "ignored, exactly like runStreamJSON" — and that stopped being true of
+				// runStreamJSON at #1692 and again at #2067, which taught it to ANSWER
+				// initialize and set_permission_mode. Because the duplication was of the
+				// loop rather than of the dispatch, those two arms landed on one side
+				// only, and this rider's child stayed unable to confirm its posture.
+				//
+				// #2064 is what made that fatal rather than latent: the daemon now writes
+				// this request at every spawn and refuses every user turn until the child
+				// acks it, so a rider that drops the line refuses the modal test's turn
+				// forever and it dies on its deadline having shown no modal — a failure
+				// that reads as an approval-wiring fault and is not one.
+				//
+				// ONLY this subtype is mirrored, not initialize as well. Nothing gates a
+				// turn on the initialize ack, so an unanswered one costs this rider a
+				// model list it never reads; answering it here would be untested surface
+				// added on symmetry alone.
+				if werr := writeSetPermissionModeAck(w, reqID, mode); werr != nil {
+					return
+				}
 			}
 		}
 		if err != nil {
