@@ -1405,9 +1405,11 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser {
 func (p *Parser) PostureGate() *PostureGate { return p.postureGate }
 
 // noteControlAck releases the posture gate when line is the SUCCESS control_response
-// for the request_id the gate is armed against, and does nothing on every other
-// input. AC 2 in full: a different id, a non-success subtype, or an undecodable line
-// each leave the gate closed.
+// for the request_id the gate is armed against, and opens it on no other input. AC 2 in
+// full: a different id, a non-success subtype, or an undecodable line each leave the
+// gate closed. A non-success subtype for the ARMED id is additionally RECORDED on the
+// gate — still no release, and still not an event — so the turn path can distinguish
+// claude's refusal from a round trip still in flight.
 //
 // The sibling id is real rather than hypothetical. RequestInitializeOnSpawn writes an
 // initialize ask at the SAME spawn off the SAME counter, so its ack reaches this
@@ -1426,6 +1428,23 @@ func (p *Parser) noteControlAck(line []byte) {
 		return
 	}
 	if ack.Response.Subtype != controlResponseSuccess {
+		// A NAK is a DEFINITIVE answer, not silence, and dropping it here is what left a
+		// NAK'd session refusing turns forever under the retryable classification. The
+		// gate stays CLOSED — opening on a refusal is fail-open, and fatally so under
+		// #2065 — and is merely marked, so the turn path can say which of the two closed
+		// states it is in. Recovery is an operator's in-band posture change (retarget) or
+		// the next spawn, never anything read off this line.
+		//
+		// An EMPTY subtype is not an answer and is deliberately excluded rather than
+		// swept in with the refusals. The bound is "claude said something other than
+		// success", not "claude said error": a subtype spelled differently in a later
+		// version still terminates, while a line that names no subtype at all — a
+		// truncated response, a shape this target does not model — leaves the gate in the
+		// PENDING state, which is the safe classification for "the daemon does not know".
+		// Only an answer may tell an operator that claude refused.
+		if ack.Response.Subtype != "" {
+			p.postureGate.refuse(ack.Response.RequestID)
+		}
 		return
 	}
 	p.postureGate.release(ack.Response.RequestID)

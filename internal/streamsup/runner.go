@@ -250,10 +250,23 @@ type Config struct {
 // CONFIRMED the permission posture the daemon wrote to it (#2064). It is the first
 // thing in this package to READ a control ack; the three writers all write and stop.
 //
-// Its whole state is one string. armedID == "" is the OPEN state, so a gate nobody
-// armed is open and an ungated runner behaves exactly as it did before this type
+// Its state is one string and one bool. armedID == "" is the OPEN state, so a gate
+// nobody armed is open and an ungated runner behaves exactly as it did before this type
 // existed. arm closes it against exactly one locally-minted request_id, release opens
 // it only on an exact match, and ready reports open.
+//
+// The bool answers "and what happened to the request" for the one closed state that is
+// TERMINAL rather than pending: refuse records that claude answered the armed id with a
+// non-success subtype. It changes no decision — the gate is closed either way — it is
+// what lets the turn path tell an operator "claude refused this posture" instead of
+// repeating "not confirmed yet" forever. Every state change clears it, so the verdict
+// never outlives the request it answers.
+//
+// A NAK'd gate is not a dead session: retarget points a CLOSED gate at the id of a
+// later in-band posture write, so an operator's mode change is the recovery, and the
+// next spawn arms a fresh id regardless. What no path does is OPEN the gate on a NAK —
+// that would be fail-open, and under #2065 (every child launched in bypass) it would
+// admit turns to a child whose downgrade claude has just refused.
 //
 // A fresh arm OVERWRITES the previous id rather than clearing a separate flag, and
 // that is not a compression — it is what makes "a replacement child is never released
@@ -283,31 +296,40 @@ type PostureGate struct {
 	// so there is nothing for unpredictability to buy and nextControlID's short
 	// counter keeps the emitted line under PIPE_BUF.
 	armedID string
+	// refused records that claude answered armedID with a NON-SUCCESS subtype: a
+	// definitive negative rather than a round trip still in flight. Read only to choose
+	// which record the turn path writes, never to decide whether a turn passes — a
+	// refused gate and a pending one both refuse.
+	refused bool
 }
 
-// arm closes the gate against requestID, retiring whatever id stood before it. Called
-// once per spawn that writes a posture, strictly BEFORE setStdin publishes that
-// child's stdin handle — see spawnAndWait for why that ordering is the whole of "no
-// user turn reaches the child before the write".
+// arm closes the gate against requestID, retiring whatever id stood before it and
+// clearing any verdict that id had drawn. Called once per spawn — every spawn, since
+// arm("") is how a spawn that writes nothing publishes the OPEN state instead of
+// inheriting its predecessor's id — strictly BEFORE setStdin publishes that child's
+// stdin handle. See spawnAndWait for why that ordering is the whole of "no user turn
+// reaches the child before the write".
 func (g *PostureGate) arm(requestID string) {
 	if g == nil {
 		return
 	}
 	g.mu.Lock()
 	g.armedID = requestID
+	g.refused = false
 	g.mu.Unlock()
 }
 
 // release opens the gate if requestID is the one it is armed against, and does
 // nothing otherwise. Called from the parser goroutine for every SUCCESS
-// control_response; a NAK, an undecodable line and a mismatched id never reach it or
-// never match.
+// control_response; an undecodable line and a mismatched id never reach it or never
+// match, and a NAK goes to refuse instead.
 //
 // There is deliberately NO requestID != "" guard. nextControlID formats an
 // already-incremented uint64, so an armed gate's id is never empty and an ack
 // carrying no request_id cannot match one; against an already-open gate the
 // comparison succeeds and the assignment is a no-op. A guard here would defend a
-// state that cannot exist.
+// state that cannot exist. (refuse DOES need that guard, and the asymmetry is real —
+// see there.)
 func (g *PostureGate) release(requestID string) {
 	if g == nil {
 		return
@@ -315,6 +337,58 @@ func (g *PostureGate) release(requestID string) {
 	g.mu.Lock()
 	if g.armedID == requestID {
 		g.armedID = ""
+		g.refused = false
+	}
+	g.mu.Unlock()
+}
+
+// refuse records that claude answered requestID with a non-success subtype. The gate
+// STAYS CLOSED: a NAK is claude declining the posture, and opening on it would be
+// fail-open — fatally so under #2065, where the child launches in bypass and a refused
+// downgrade must not admit turns.
+//
+// Unlike release this DOES need the armedID != "" guard, and the asymmetry is the
+// point rather than an inconsistency. release's no-op against an open gate is
+// harmless; refuse's would not be — an open gate's id is "", so a NAK carrying no
+// request_id would otherwise mark a gate that nothing is waiting on as refused and
+// make the turn path report a refusal that never happened.
+//
+// What it does NOT do is end the session. The verdict is cleared by the next arm (the
+// next spawn) and by retarget (an operator's in-band posture change), which is the
+// recovery path a definitive answer has to leave open.
+func (g *PostureGate) refuse(requestID string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.armedID != "" && g.armedID == requestID {
+		g.refused = true
+	}
+	g.mu.Unlock()
+}
+
+// retarget points a CLOSED gate at requestID, the id of a posture write made after the
+// spawn's — SetPermissionMode's, once its line is on the wire. It is the recovery path
+// for a spawn write claude NAK'd: without it the only opener is a spawn, so a NAK'd
+// child stays healthy and refuses every turn until the daemon restarts.
+//
+// It never closes an OPEN gate, and that half is as load-bearing as the other. This
+// ticket gates SPAWNS; gating in-band changes too would refuse the /model and /effort
+// sends Pool.deliverSettingsInBand issues through WriteUserTurn immediately after the
+// posture write in the same call, dropping them with the update still reporting
+// success.
+//
+// Retargeting a merely PENDING gate (a spawn ack still in flight) is intended, not
+// collateral: the later write supersedes the earlier one, so the posture actually in
+// force is the one whose ack should open the gate.
+func (g *PostureGate) retarget(requestID string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.armedID != "" {
+		g.armedID = requestID
+		g.refused = false
 	}
 	g.mu.Unlock()
 }
@@ -328,6 +402,24 @@ func (g *PostureGate) ready() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.armedID == ""
+}
+
+// refusedByClaude reports whether the outstanding request was ANSWERED with a
+// non-success subtype, as opposed to still being in flight. It discriminates the two
+// closed states for the turn path's record and for nothing else — both refuse a turn,
+// identically and with the same error.
+//
+// It is read in its own acquisition, after ready, and that is sufficient rather than
+// sloppy: the pair is not a decision. ready alone decides the refusal; this decides
+// only which of two records is written, so a state change landing between the two reads
+// costs at most one turn's record naming the pending state after the answer arrived.
+func (g *PostureGate) refusedByClaude() bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.refused
 }
 
 // Runner supervises the claude child lifecycle. Construct with New; drive with
@@ -712,8 +804,22 @@ func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, paylo
 		// setStdin, and a Debug record anywhere in the daemon's stderr defeats #1330's
 		// e2e instrument guard. The session id is the only field — never the mode
 		// (#833 keeps settings values out of the daemon log) and never the request id.
-		r.log.Info("streamsup: turn refused; permission posture not yet confirmed by claude",
-			"session", r.liveSessionID())
+		//
+		// TWO RECORDS, because the two closed states need different operator actions
+		// even though they refuse identically. Pending resolves itself, so its record
+		// stays at Info. Refused does not: claude has ANSWERED, so nothing changes until
+		// the operator changes the session's posture (which retargets this gate) or the
+		// child is replaced — and repeating "not yet confirmed" at that point would
+		// describe a round trip that already finished. Warn, and it names the cause; the
+		// mode that was refused is deliberately still absent, and the record's existence
+		// is the only bit of claude's answer that reaches the log.
+		if r.postureGate.refusedByClaude() {
+			r.log.Warn("streamsup: turn refused; claude refused this session's permission posture — change the posture or restart the session",
+				"session", r.liveSessionID())
+		} else {
+			r.log.Info("streamsup: turn refused; permission posture not yet confirmed by claude",
+				"session", r.liveSessionID())
+		}
 		w = nil
 	}
 	if gated {
@@ -783,10 +889,28 @@ func (r *Runner) Interrupt() error {
 // wrong posture while the update reports success — so the interface method makes a
 // runner that cannot switch a build failure instead.
 //
+// A SUCCESSFUL write RETARGETS the posture gate when that gate is closed (#2064), and
+// this is the recovery path for a spawn-time write claude NAK'd. The gate's only other
+// opener is a spawn, so without this a NAK'd child stays healthy and refuses every turn
+// until the daemon restarts — and the operator's remedy would not reach it, since a
+// corrective mode change is in-band-deliverable and so never restarts anything. An OPEN
+// gate is left open: see retarget for why gating in-band changes would drop
+// deliverSettingsInBand's own follow-on sends.
+//
+// The retarget is deliberately AFTER the write and skipped on error, including the
+// allow-list refusal. A line that never reached the child will never be acked, so
+// pointing the gate at its id would replace a pending spawn id that still might be
+// acked with one that cannot be.
+//
 // Stdin() releases r.mu before returning, so the potentially-blocking write never
 // holds it. Safe from any goroutine.
 func (r *Runner) SetPermissionMode(mode string) error {
-	return WritePermissionMode(r.Stdin(), r.nextControlID(), mode)
+	id := r.nextControlID()
+	if err := WritePermissionMode(r.Stdin(), id, mode); err != nil {
+		return err
+	}
+	r.postureGate.retarget(id)
+	return nil
 }
 
 // RevokeBypass drops the live child's bypass posture by asking for the default

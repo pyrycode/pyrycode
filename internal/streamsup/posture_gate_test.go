@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +90,121 @@ func TestPostureGate_NilReceiverIsOpen(t *testing.T) {
 	g.release("1")
 	if !g.ready() {
 		t.Error("a nil gate reported closed; it must be open so no call site needs a nil branch")
+	}
+}
+
+// TestPostureGate_NakIsRecordedAndRetargetRecovers walks the transitions a NAK adds.
+// The two guard rows are the substance: refuse must NOT mark a gate nothing is waiting
+// on (an open gate's id is "", which is exactly what a NAK carrying no request_id
+// decodes to), and retarget must NOT close one (an in-band posture change happens
+// mid-session, and closing on it would drop deliverSettingsInBand's own follow-on
+// sends).
+//
+// The recovery rows are the MUST FIX itself: before them the gate's only opener was a
+// spawn, so a NAK'd child stayed healthy and refused every turn forever.
+func TestPostureGate_NakIsRecordedAndRetargetRecovers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		steps       func(g *PostureGate)
+		wantOpen    bool
+		wantRefused bool
+	}{
+		{
+			name:        "a NAK for the armed id is recorded and keeps the gate closed",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("7") },
+			wantOpen:    false,
+			wantRefused: true,
+		},
+		{
+			name:        "a NAK for a sibling request is not this gate's verdict",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("8") },
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "a NAK carrying no request_id cannot mark an OPEN gate refused",
+			steps:       func(g *PostureGate) { g.refuse("") },
+			wantOpen:    true,
+			wantRefused: false,
+		},
+		{
+			name:        "the next spawn clears the verdict with its own arm",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("7"); g.arm("9") },
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "an in-band write retargets a refused gate and clears the verdict",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("7"); g.retarget("9") },
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "the retargeted gate opens on the NEW id — the recovery",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("7"); g.retarget("9"); g.release("9") },
+			wantOpen:    true,
+			wantRefused: false,
+		},
+		{
+			name:        "the NAK'd id cannot open the retargeted gate",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("7"); g.retarget("9"); g.release("7") },
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "retarget never closes an open gate",
+			steps:       func(g *PostureGate) { g.arm("7"); g.release("7"); g.retarget("9") },
+			wantOpen:    true,
+			wantRefused: false,
+		},
+		{
+			name:        "retarget on a never-armed gate is a no-op",
+			steps:       func(g *PostureGate) { g.retarget("9") },
+			wantOpen:    true,
+			wantRefused: false,
+		},
+		{
+			name:        "a pending gate retargets too: the later write is the posture in force",
+			steps:       func(g *PostureGate) { g.arm("7"); g.retarget("9"); g.release("9") },
+			wantOpen:    true,
+			wantRefused: false,
+		},
+		{
+			name:        "a success for the armed id clears a verdict a mismatched NAK never set",
+			steps:       func(g *PostureGate) { g.arm("7"); g.refuse("7"); g.release("7") },
+			wantOpen:    true,
+			wantRefused: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &PostureGate{}
+			tc.steps(g)
+			if got := g.ready(); got != tc.wantOpen {
+				t.Errorf("ready() = %v, want %v", got, tc.wantOpen)
+			}
+			if got := g.refusedByClaude(); got != tc.wantRefused {
+				t.Errorf("refusedByClaude() = %v, want %v", got, tc.wantRefused)
+			}
+		})
+	}
+}
+
+// TestPostureGate_NilReceiverSwallowsTheNakPath extends the nil contract to the two
+// methods this slice adds, for the reason the original states: no call site may need a
+// nil branch.
+func TestPostureGate_NilReceiverSwallowsTheNakPath(t *testing.T) {
+	t.Parallel()
+	var g *PostureGate
+	g.refuse("1")
+	g.retarget("2")
+	if !g.ready() {
+		t.Error("a nil gate reported closed")
+	}
+	if g.refusedByClaude() {
+		t.Error("a nil gate reported a refusal; it has no request to refuse")
 	}
 }
 
@@ -564,6 +680,283 @@ func TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn(t *tes
 	// the only ask across both children is the first one's.
 	if modes, _ := permissionModeAsks(out.String()); len(modes) != 1 || modes[0] != "default" {
 		t.Fatalf("across both children the child saw %v, want exactly [default] — bypass is sent nothing", modes)
+	}
+}
+
+// --- claude's refusal, and the way out of it ---------------------------------
+
+// TestParser_NoteControlAck_NakMarksTheArmedRequestRefused is the read half of the NAK
+// policy: consumeLine's arm has to reach refuse, and refuse has to be as selective as
+// release. The last row is the guard — a NAK carrying no request_id decodes to "", which
+// is an OPEN gate's own id, so an unguarded refuse would report a refusal on a session
+// with nothing outstanding.
+func TestParser_NoteControlAck_NakMarksTheArmedRequestRefused(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		armedID     string // "" arms nothing, leaving the gate open
+		line        string
+		wantOpen    bool
+		wantRefused bool
+	}{
+		{
+			name:        "a NAK for the armed id is recorded",
+			armedID:     "3",
+			line:        `{"type":"control_response","response":{"subtype":"error","request_id":"3","error":"unsupported mode"}}`,
+			wantOpen:    false,
+			wantRefused: true,
+		},
+		{
+			name:        "the sibling initialize NAK is not this request's verdict",
+			armedID:     "3",
+			line:        `{"type":"control_response","response":{"subtype":"error","request_id":"4","error":"nope"}}`,
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "an absent subtype is not an answer to anything",
+			armedID:     "3",
+			line:        `{"type":"control_response","response":{"request_id":"3"}}`,
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "a numeric request_id cannot be correlated in either direction",
+			armedID:     "3",
+			line:        `{"type":"control_response","response":{"subtype":"error","request_id":3}}`,
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "an undecodable line records nothing",
+			armedID:     "3",
+			line:        `{"type":"control_response","response":[1,2,3]}`,
+			wantOpen:    false,
+			wantRefused: false,
+		},
+		{
+			name:        "a NAK with no request_id cannot mark an OPEN gate refused",
+			armedID:     "",
+			line:        `{"type":"control_response","response":{"subtype":"error"}}`,
+			wantOpen:    true,
+			wantRefused: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := NewParser(func(turnevent.Event) {}, nil)
+			g := p.PostureGate()
+			g.arm(tc.armedID)
+			if _, err := p.Write([]byte(tc.line + "\n")); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if got := g.ready(); got != tc.wantOpen {
+				t.Errorf("gate open = %v after %s, want %v", got, tc.line, tc.wantOpen)
+			}
+			if got := g.refusedByClaude(); got != tc.wantRefused {
+				t.Errorf("refusedByClaude() = %v after %s, want %v", got, tc.line, tc.wantRefused)
+			}
+		})
+	}
+}
+
+// TestRunner_NakThenInBandModeChange_RecoversTheSession drives the whole operator
+// sequence the second rework cycle blocked on: claude ANSWERS the spawn-time write with
+// a refusal, so the child stays healthy and nothing else ever spawns. Before the fix the
+// gate's only opener was a spawn and its only closer a NAK it discarded, so every turn
+// on that session refused forever under the RETRYABLE classification — and the
+// documented remedy could not reach it, because a corrective mode change is
+// in-band-deliverable and so restarts nothing.
+//
+// The parser is driven with claude's line directly, as the ack table above does: the
+// gate travels the production binding (minted by the parser, armed by the runner,
+// released through consumeLine), but echo_lines cannot mint a control_response of its
+// own.
+func TestRunner_NakThenInBandModeChange_RecoversTheSession(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	cfg.SpawnPermissionMode = "default"
+	p := NewParser(func(turnevent.Event) {}, nil)
+	gate := p.PostureGate()
+	cfg.PostureGate = gate
+	rec := &logRecorder{}
+	cfg.Logger = slog.New(rec)
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	spawnID := gate.armedIDForTest()
+	if spawnID == "" {
+		t.Fatal("the default spawn left the gate open; there is no request for claude to refuse")
+	}
+
+	// claude declines the posture. Documented behaviour, not a hypothetical: it refuses
+	// auto per MODEL (turnevent.ModelOption.SupportsAutoMode), and nothing re-checks
+	// that pairing when either the mode or the model changes.
+	nak := `{"type":"control_response","response":{"subtype":"error","request_id":"` + spawnID + `","error":"unsupported"}}`
+	if _, err := p.Write([]byte(nak + "\n")); err != nil {
+		t.Fatalf("Write(nak): %v", err)
+	}
+	if gate.ready() {
+		t.Fatal("a NAK opened the gate; a refused posture must not admit turns — under #2065 that child is still in bypass")
+	}
+	if !gate.refusedByClaude() {
+		t.Fatal("the NAK was dropped; the daemon holds a definitive answer and must be able to act on it")
+	}
+
+	const heldMarker = "nakked-turn"
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte(heldMarker)); !errors.Is(err, ErrNoLiveChild) {
+		t.Fatalf("WriteUserTurn against a NAK'd posture = %v, want ErrNoLiveChild", err)
+	}
+
+	// The operator's only evidence, and it has to name the cause: "not yet confirmed"
+	// describes a round trip that has already finished.
+	const refusedMsg = "streamsup: turn refused; claude refused this session's permission posture — change the posture or restart the session"
+	refusals := rec.withMessage(refusedMsg)
+	if len(refusals) != 1 {
+		t.Fatalf("captured %d refusal record(s), want exactly 1: %+v", len(refusals), rec.all())
+	}
+	if refusals[0].level != slog.LevelWarn {
+		t.Errorf("the refusal was recorded at %v, want Warn — a Debug record anywhere in the daemon's stderr defeats #1330's e2e instrument guard, and Info is the PENDING state's level", refusals[0].level)
+	}
+	if len(refusals[0].attrs) != 1 || refusals[0].attrs["session"] == "" {
+		t.Errorf("the refusal record carried %v; the session id is the only field it may carry — never the mode, the request id, or claude's own text", refusals[0].attrs)
+	}
+	if pending := rec.withMessage("streamsup: turn refused; permission posture not yet confirmed by claude"); len(pending) != 0 {
+		t.Errorf("the answered state was reported as pending %d time(s); the two states need different operator actions", len(pending))
+	}
+
+	// The remedy: an in-band posture change, which never restarts the child.
+	if err := r.SetPermissionMode("plan"); err != nil {
+		t.Fatalf("SetPermissionMode on a live child: %v", err)
+	}
+	recoveryID := gate.armedIDForTest()
+	if recoveryID == "" || recoveryID == spawnID {
+		t.Fatalf("after the corrective write the gate is armed on %q (spawn armed %q); it must track the write whose ack can actually arrive", recoveryID, spawnID)
+	}
+	if gate.refusedByClaude() {
+		t.Error("the retargeted gate still carries the previous request's verdict")
+	}
+
+	ack := `{"type":"control_response","response":{"subtype":"success","request_id":"` + recoveryID + `","response":{"mode":"plan"}}}`
+	if _, err := p.Write([]byte(ack + "\n")); err != nil {
+		t.Fatalf("Write(ack): %v", err)
+	}
+	if !gate.ready() {
+		t.Fatal("the ack for the corrective write did not open the gate; the session is still unrecoverable")
+	}
+
+	const flowMarker = "recovered-turn"
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte(flowMarker)); err != nil {
+		t.Fatalf("WriteUserTurn after the recovery ack: %v", err)
+	}
+	waitForContains(t, out, flowMarker, 3*time.Second)
+
+	// The barrier above proves every byte written to this child has come back, so the
+	// held marker's absence here is "never written" rather than "not yet echoed".
+	if strings.Contains(out.String(), heldMarker) {
+		t.Errorf("the turn refused during the NAK reached the child anyway:\n%s", out.String())
+	}
+}
+
+// TestRunner_SetPermissionMode_LeavesAnOpenGateOpen is the other half of the retarget
+// rule, and it guards a regression the recovery would otherwise introduce.
+// Pool.deliverSettingsInBand writes the posture and then sends /model and /effort
+// through WriteUserTurn in the SAME call, so a retarget that closed a confirmed gate
+// would drop those sends while UpdateSettings still reported success.
+func TestRunner_SetPermissionMode_LeavesAnOpenGateOpen(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	cfg.SpawnPermissionMode = "default"
+	gate := &PostureGate{}
+	cfg.PostureGate = gate
+	spawned := make(chan struct{}, 1)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+	gate.release(gate.armedIDForTest())
+
+	// deliverSettingsInBand's own order: the posture write, then the follow-on send with
+	// no wait for an ack in between.
+	if err := r.SetPermissionMode("plan"); err != nil {
+		t.Fatalf("SetPermissionMode: %v", err)
+	}
+	const marker = "in-band-follow-on-send"
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte(marker)); err != nil {
+		t.Fatalf("the send following an in-band posture change was refused: %v; an open gate must stay open", err)
+	}
+	waitForContains(t, out, marker, 3*time.Second)
+}
+
+// TestRunner_SetPermissionMode_FailedWriteDoesNotRetarget pins the reject row. A line
+// that never reached the child will never be acked, so pointing the gate at its id
+// would trade a pending id that might still be acked for one that cannot be. The runner
+// is deliberately never Run: Stdin() is nil, which is the no-live-child refusal.
+func TestRunner_SetPermissionMode_FailedWriteDoesNotRetarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mode    string
+		wantErr error
+	}{
+		{name: "no live child", mode: "plan", wantErr: ErrNoLiveChild},
+		{name: "a mode the allow-list refuses", mode: "bypassPermissions", wantErr: ErrUnsupportedPermissionMode},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
+			cfg.SpawnPermissionMode = "default"
+			gate := &PostureGate{}
+			cfg.PostureGate = gate
+			r, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			gate.arm("1")
+			if err := r.SetPermissionMode(tc.mode); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("SetPermissionMode(%q) = %v, want %v", tc.mode, err, tc.wantErr)
+			}
+			if got := gate.armedIDForTest(); got != "1" {
+				t.Errorf("the gate is armed on %q, want the pending spawn id \"1\" — a write that failed cannot be acked", got)
+			}
+		})
 	}
 }
 
