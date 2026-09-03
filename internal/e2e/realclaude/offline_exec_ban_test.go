@@ -366,6 +366,30 @@ var finOfflineExecBans = map[string][]string{
 		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
 		"probeClaudeVersion", "os.Getenv", "os.Environ",
 	},
+	// #1673. The entry above, copied WHOLE and for its reason: this file's whole
+	// value is that it settles all three of #1675's arms — seeded identity, stored
+	// posture, composed pre-spawn posture — with no claude binary and no credentials,
+	// and it loses that value the moment it can skip. resolveClaudeBin and
+	// WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is printed,
+	// and a skip exits 0, which reads as a pass under `make e2e-realclaude`.
+	//
+	// The pull toward resolveClaudeBin is stronger here than in either sibling above,
+	// because this file BUILDS A POOL: sessions.New reaches streamsup.New, which
+	// refuses a ClaudeBin exec.LookPath cannot resolve, so "just use the real one" is
+	// one line away. newInertClaudeStub is what supplies it instead, and its doc
+	// records why an EMPTY stub rather than a working one.
+	//
+	// t.TempDir stays available for #1651's reason and one more: the seed writes a
+	// sessions.json, and streamsup.New also demands a WorkDir that exists on disk.
+	// #1661's and #1662's wider entries are deliberately NOT copied — their
+	// packageDir/fixture/os read-write bans fence a file off from the committed
+	// testdata/, and this file neither reads nor writes a fixture, so those bans would
+	// defend against a failure mode it cannot have. It does call os.WriteFile, for the
+	// stub, into a t.TempDir() it just created.
+	"inband_bypass_revoke_harness_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "os.Getenv", "os.Environ",
+	},
 	// #1661. Wider than its sibling above, because this file performs no I/O in
 	// EITHER direction and the artifacts it fences off are committed. The first
 	// six keep a SKIP out, as everywhere else here. The rest keep the file away

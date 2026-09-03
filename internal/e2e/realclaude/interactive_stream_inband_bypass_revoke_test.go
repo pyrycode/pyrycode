@@ -39,12 +39,12 @@ package realclaude
 //
 // revokeBaseArgs is EMPTY. The child's bypass posture comes from the STORED
 // settings — a seeded registry entry carrying yolo:true, which Pool.New loads via
-// pickBootstrap and turns into --dangerously-skip-permissions through
-// claudeSettingsArgs. Both shortcuts the ticket names would yield a run that
-// measures a child nobody revoked: a stored posture already equal to the update
-// returns at UpdateSettings' no-change check having delivered nothing, and a base
-// argv carrying the flag survives Session.spawnArgs' recompose, so the installed
-// next-spawn argv keeps the bypass too. The seam gets TWO guards rather than a
+// pickBootstrap and canonicalises into the bypass mode. Both shortcuts the ticket
+// names would yield a run that measures a child nobody revoked: a stored posture
+// already equal to the update returns at UpdateSettings' no-change check having
+// delivered nothing, and a base argv carrying --dangerously-skip-permissions makes
+// operatorBypass(base) true, which since #2065 tells the daemon this escalation is
+// the OPERATOR's and may not be walked back at all. The seam gets TWO guards rather than a
 // code-reading argument — instrument check B before any child is spawned, and
 // instrument check C after turn 1.
 //
@@ -191,11 +191,13 @@ const (
 )
 
 // revokeBaseArgs is EMPTY, and that is the whole point of AC 2. The model test's
-// inbandBaseArgs is []string{"--dangerously-skip-permissions"}; copied here it
-// survives Session.spawnArgs' recompose, so the installed next-spawn argv keeps
-// the bypass and the run measures a child nobody revoked. The bypass posture on
-// this run comes from the seeded registry entry and from nowhere else, which is
-// also what makes --dangerously-skip-permissions traceable to exactly one place.
+// inbandBaseArgs is []string{"--dangerously-skip-permissions"}; copied here it lands
+// in the SETTINGS-FREE base, which is what operatorBypass reads, so
+// RunnerConfig.OperatorBypass comes out true — and since #2065 that means the daemon
+// may not walk this child back at all, making the revocation unperformable rather
+// than merely undone by a recompose. The bypass posture on this run comes from the
+// seeded registry entry and from nowhere else, which is also what keeps the
+// escalation traceable to exactly one place.
 //
 // No --model and no --max-turns either: the run is two one-word turns on claude's
 // own machine default, and every extra flag is another thing the recompose has to
@@ -410,8 +412,11 @@ type revokeSeedFile struct {
 // seedBypassRegistry writes a one-entry sessions.json whose bootstrap entry
 // carries the yolo posture the CALLER chooses, and returns the id it minted. That
 // posture is the launch posture: Pool.New lifts it off the entry via
-// pickBootstrap and claudeSettingsArgs turns true into
-// --dangerously-skip-permissions and false into nothing at all.
+// pickBootstrap, canonicalises it, and claudeSettingsArgs turns the stored posture
+// into the argv suffix. Since #2065 that suffix carries
+// --dangerously-skip-permissions on EVERY arm and adds --permission-mode default for
+// a false — the flag no longer says which posture the child runs in, only that the
+// daemon composed one, and the posture is decided by a spawn-time in-band write.
 //
 // It MUST run before sessions.New: the model test points RegistryPath at a fresh
 // t.TempDir() path that does not exist, which is the COLD-start shape —
