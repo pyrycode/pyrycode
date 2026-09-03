@@ -1,0 +1,1815 @@
+{
+  "claude_version_raw": "2.1.239 (Claude Code)",
+  "claude_version": "2.1.239",
+  "arm": "enable",
+  "launch_yolo_flag": false,
+  "argv": [
+    "/Users/juhanailmoniemi/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-haiku-4-5",
+    "--max-turns",
+    "12"
+  ],
+  "prompts": [
+    "Use the Bash tool to run `ls -la /` and report the first line of output.",
+    "Use the Bash tool to run `ls -la /tmp` and report the first line of output.",
+    "Use the Bash tool to run `ls -la /usr` and report the first line of output."
+  ],
+  "requested_mode": "bypassPermissions",
+  "control_request_id": "set-permission-mode-enable",
+  "control_request_sent": {
+    "type": "control_request",
+    "request_id": "set-permission-mode-enable",
+    "request": {
+      "subtype": "set_permission_mode",
+      "mode": "bypassPermissions"
+    }
+  },
+  "control_responses": [
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "error",
+        "request_id": "set-permission-mode-enable",
+        "error": "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"
+      }
+    }
+  ],
+  "control_response_request_id_matched": true,
+  "init_permission_modes": [
+    "default",
+    "default",
+    "default"
+  ],
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "tools": [
+        "Task",
+        "Artifact",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__blender__execute_blender_code",
+        "mcp__blender__execute_blender_code_for_cli",
+        "mcp__blender__get_blendfile_summary_datablocks",
+        "mcp__blender__get_blendfile_summary_datablocks_for_cli",
+        "mcp__blender__get_blendfile_summary_missing_files",
+        "mcp__blender__get_blendfile_summary_missing_files_for_cli",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli",
+        "mcp__blender__get_blendfile_summary_path_info",
+        "mcp__blender__get_blendfile_summary_path_info_for_cli",
+        "mcp__blender__get_blendfile_summary_usage_guess",
+        "mcp__blender__get_blendfile_summary_usage_guess_for_cli",
+        "mcp__blender__get_object_detail_summary",
+        "mcp__blender__get_objects_summary",
+        "mcp__blender__get_python_api_docs",
+        "mcp__blender__get_screenshot_of_area_as_image",
+        "mcp__blender__get_screenshot_of_window_as_image",
+        "mcp__blender__get_screenshot_of_window_as_json",
+        "mcp__blender__jump_to_tab_by_name",
+        "mcp__blender__jump_to_tab_by_space_type",
+        "mcp__blender__jump_to_view3d_object_by_name",
+        "mcp__blender__jump_to_view3d_object_data_by_name",
+        "mcp__blender__render_thumbnail_to_path",
+        "mcp__blender__render_viewport_to_path",
+        "mcp__blender__search_api_docs",
+        "mcp__blender__search_manual_docs",
+        "mcp__codegraph__codegraph_callees",
+        "mcp__codegraph__codegraph_callers",
+        "mcp__codegraph__codegraph_context",
+        "mcp__codegraph__codegraph_files",
+        "mcp__codegraph__codegraph_impact",
+        "mcp__codegraph__codegraph_node",
+        "mcp__codegraph__codegraph_search",
+        "mcp__codegraph__codegraph_status"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "connected"
+        },
+        {
+          "name": "codegraph",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "d7fa2201-bb23-4be2-9682-ece21d4e5092",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassReescalation-Probe586523688-001-bypass-reescalation-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/21668.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "uuid": "d65ed6a9-5c70-4853-a364-0a72f23be5ce",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 37,
+      "estimated_tokens_delta": 36,
+      "uuid": "5f53c083-658e-422f-ae76-a1fde72314aa",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 55,
+      "estimated_tokens_delta": 18,
+      "uuid": "61398f36-9db0-4802-af28-759ae2856840",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "rate_limit_event",
+      "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1788411000,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false
+      },
+      "uuid": "3887df23-6216-42da-9675-c6fde1f2029a",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 126,
+      "estimated_tokens_delta": 71,
+      "uuid": "0c4a2087-c1b7-401e-9d88-796734ec487c",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiA5Lm4rkTatBdwPYQs",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run a bash command to list the root directory and report the first line of output. This is straightforward - I'll use the Bash tool to run `ls -la /` and then report what the first line shows.",
+            "signature": "Eu8DCrIBCBEYAipAs4Pt3MiTwIX7Y1AgOVWJZ4SvEDP3ZIyMchletHM1i0ZFCKZ8jyvvnWjOT3BNQHR7XRugI6ysQ3lFgPHjD0fUxDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGUtOPUBrABAhIM8i19ssMbIUXGwejyGgwKvZ27evOewuSExP8iMPo4eRY0bUyvNmrNcQqN0VO3t+pvHRqTIxhm0ZwmHZ20JCnzVo3RADb9CRwNjTxvJSrpAULXXdWlzbxcuPafb/8Vpq3l09lPshUS29+XtvQNLkjeml/d4fL9YzvQuBWlR5VS1L+fsTlPGLaN8t6oMkJm7mw/2hSlwqqy8MapncgovOO2+ALJ7I2kuQvoP1T7KfZQ6DLGaycGLMv0ZHAjDveGAqQ01yWhcLngmJD7q+ya8Kn0j3N89WhlKG7CtMmdA9N6og1zBjwUAyVln6im0GKIAl68nBctGNm1ZbIRrxaNH0HiRnkcU6aUVGu4Ah1d+QmlKEoynNRx4c1BjvFoxtQea/63KFIFo6InlbxkX23ZuZxPo5AZNsy49+ufGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 9151,
+          "cache_read_input_tokens": 26631,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 9151
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "5c2f2dc7-5c7c-4e3b-8614-76440059fa4b",
+      "timestamp": "2026-09-03T02:23:16.828Z",
+      "request_id": "req_011CefiA4ha5ibKV6qTEt4rw"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiA5Lm4rkTatBdwPYQs",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01Nkvh7mbdJVAVkPw2GojCxy",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /",
+              "description": "List root directory with full details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 9151,
+          "cache_read_input_tokens": 26631,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 9151
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "abc16f68-66a8-4909-a6a9-28ee9620f167",
+      "timestamp": "2026-09-03T02:23:17.188Z",
+      "request_id": "req_011CefiA4ha5ibKV6qTEt4rw"
+    },
+    {
+      "type": "system",
+      "subtype": "permission_denied",
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01Nkvh7mbdJVAVkPw2GojCxy",
+      "message": "ls in '/' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+      "uuid": "c36f1248-c6e9-4016-a650-79f98109033f",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "ls in '/' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+            "is_error": true,
+            "tool_use_id": "toolu_01Nkvh7mbdJVAVkPw2GojCxy"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "f7fc0a19-3a5b-4136-9a98-7344e4d5ca44",
+      "timestamp": "2026-09-03T02:23:17.205Z",
+      "tool_use_result": "Error: ls in '/' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+      "tool_result_meta": [
+        {
+          "id": "toolu_01Nkvh7mbdJVAVkPw2GojCxy",
+          "non_execution_kind": "user-rejected"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 3,
+      "estimated_tokens_delta": 3,
+      "uuid": "13c766e3-5410-4d5a-a073-6e0579370d29",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 41,
+      "estimated_tokens_delta": 38,
+      "uuid": "23c31e3e-4ebf-4bdc-b637-f13e5e4823ee",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 73,
+      "estimated_tokens_delta": 32,
+      "uuid": "c59329a8-b3c3-4f47-8707-247ed2270be2",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 96,
+      "estimated_tokens_delta": 23,
+      "uuid": "3c3e3656-bb2b-4b44-9cc1-8270b28a07a9",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 166,
+      "estimated_tokens_delta": 70,
+      "uuid": "05557f4e-1ce5-458d-920f-7d3894947133",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAFMGsoQtsKDy9u7tb",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The command was blocked because I'm not allowed to access the root directory (`/`) - I can only list files in the allowed working directories for this session. The error message is clear about this security restriction.\n\nI should report this to the user - I can't run that command because Claude Code restricts file listing to the allowed working directories for security reasons.",
+            "signature": "EpIFCrIBCBEYAipA77gTtK04DrMFLlpdeY4Q3Z9H2PkgLXFnvsVKKYQLc4WBsvJfWVCzzVFtJTMlXW9trVpRrVhZDrTz1Cj1i4nwPjIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGXtOPUBrABAhIM/Qe4BsWkOjVbIwsYGgyUdkUVgebviwpy9jwiMH5VQQfICob96vseK9sGBUVteCeVoabqCGyrM6D9wiBMWA/+cNywXgiUk5nGrbiwiCqMA0GcJlmyIvvae1vSW5p9afwMS+wb539EeHm4kcQuW4Cbb0j9Y/gDh0jHxXyp0eSCYQ8vvwhsHMHka+0oujgtqvlSMeJVKF9MZNvCu7+k9ZeVtcMD7TKEY4MxHaaNjfw6wk/zE64dzSxdXBG9tu3Z80nz8bBSuQnMWmyeMCTXbkvoT90HTDYheA0vDLmR5nY7xXOdDsJxNygnZTUX5D/uFGz9zjfvioL36UkpHL8ZPEju08DfrsJg3TqSQ7My/36PiOMQHKMXCilkBKbf+dHJSxHJaiC80BBY1wJ8SSqBP2yhYWUyM+Tu8p3WiyyGYiU2QxPSriQYbDF255mX5iwMdL120dMSKFsU5SRruFbq234x6/CehHq6PZN5bZ8BlaHcLHG1mLvkz2HO9G41Ls015DfNE7PDTqIw/EC92KCbhrjRqeKZJVBwI/6jbbESByoERxSfg4MK+9jX1mw2HpKlBC0fRiC1FLIjQq4GPJstYNWWsJaWJfATTqZ8BPtgBs7sqviXAAFikWz2faFOxhgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 349,
+          "cache_read_input_tokens": 35782,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 349
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "85976457-7748-4303-95a7-27ab2701f655",
+      "timestamp": "2026-09-03T02:23:19.122Z",
+      "request_id": "req_011CefiAEe7GEWtntBswsBQT"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAFMGsoQtsKDy9u7tb",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The command was blocked for security reasons. Claude Code restricts file listing to the allowed working directories for this session: the bypass-reescalation-work directories. I can't access the root directory (`/`)."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 349,
+          "cache_read_input_tokens": 35782,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 349
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "4e085c92-7fc6-410b-8981-a99e076c56b9",
+      "timestamp": "2026-09-03T02:23:19.537Z",
+      "request_id": "req_011CefiAEe7GEWtntBswsBQT"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 6492,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "total_cost_usd": 0.0275573,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 9500,
+        "cache_read_input_tokens": 62413,
+        "output_tokens": 266,
+        "output_tokens_details": {
+          "thinking_tokens": 135
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 9500,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 129,
+            "cache_read_input_tokens": 35782,
+            "cache_creation_input_tokens": 349,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 349
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 11,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000968,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 18,
+          "outputTokens": 266,
+          "cacheReadInputTokens": 62413,
+          "cacheCreationInputTokens": 9500,
+          "webSearchRequests": 0,
+          "costUSD": 0.026589299999999996,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_01Nkvh7mbdJVAVkPw2GojCxy",
+          "tool_input": {
+            "command": "ls -la /",
+            "description": "List root directory with full details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The command was blocked for security reasons. Claude Code restricts file listing to the allowed working directories for this session: the bypass-reescalation-work directories. I can't access the root directory (`/`).",
+      "ttft_ms": 1966,
+      "ttft_stream_ms": 899,
+      "time_to_request_ms": 12,
+      "type": "result",
+      "duration_ms": 4702,
+      "uuid": "daa34fef-7344-48d4-9e84-0f065e28b90c"
+    },
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "error",
+        "request_id": "set-permission-mode-enable",
+        "error": "Cannot set permission mode to bypassPermissions because the session was not launched with --dangerously-skip-permissions"
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "tools": [
+        "Task",
+        "Artifact",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__blender__execute_blender_code",
+        "mcp__blender__execute_blender_code_for_cli",
+        "mcp__blender__get_blendfile_summary_datablocks",
+        "mcp__blender__get_blendfile_summary_datablocks_for_cli",
+        "mcp__blender__get_blendfile_summary_missing_files",
+        "mcp__blender__get_blendfile_summary_missing_files_for_cli",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli",
+        "mcp__blender__get_blendfile_summary_path_info",
+        "mcp__blender__get_blendfile_summary_path_info_for_cli",
+        "mcp__blender__get_blendfile_summary_usage_guess",
+        "mcp__blender__get_blendfile_summary_usage_guess_for_cli",
+        "mcp__blender__get_object_detail_summary",
+        "mcp__blender__get_objects_summary",
+        "mcp__blender__get_python_api_docs",
+        "mcp__blender__get_screenshot_of_area_as_image",
+        "mcp__blender__get_screenshot_of_window_as_image",
+        "mcp__blender__get_screenshot_of_window_as_json",
+        "mcp__blender__jump_to_tab_by_name",
+        "mcp__blender__jump_to_tab_by_space_type",
+        "mcp__blender__jump_to_view3d_object_by_name",
+        "mcp__blender__jump_to_view3d_object_data_by_name",
+        "mcp__blender__render_thumbnail_to_path",
+        "mcp__blender__render_viewport_to_path",
+        "mcp__blender__search_api_docs",
+        "mcp__blender__search_manual_docs",
+        "mcp__codegraph__codegraph_callees",
+        "mcp__codegraph__codegraph_callers",
+        "mcp__codegraph__codegraph_context",
+        "mcp__codegraph__codegraph_files",
+        "mcp__codegraph__codegraph_impact",
+        "mcp__codegraph__codegraph_node",
+        "mcp__codegraph__codegraph_search",
+        "mcp__codegraph__codegraph_status"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "connected"
+        },
+        {
+          "name": "codegraph",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "e0a18342-0c6a-48a6-b70c-ea5500735020",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassReescalation-Probe586523688-001-bypass-reescalation-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/21668.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 5,
+      "uuid": "49ca3548-73a1-401d-85c8-bfcd257d3425",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 27,
+      "estimated_tokens_delta": 22,
+      "uuid": "c670a3a3-8258-4044-b3a1-faf694941a73",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 97,
+      "estimated_tokens_delta": 70,
+      "uuid": "a1edaffa-fe29-49c5-aefa-ffd3ef46149f",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAS6SGbBgLKU44iEng",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run `ls -la /tmp` and report the first line of output. Let me try this command.",
+            "signature": "Ev0CCrIBCBEYAipAkMhO3LmnNQPOSE7J/ewiEK1QA2j0XY5SEE9oM9DiVzVYmWeExGfTVXleaeU4hWYj9Zhl6F0VtplN36s9yP7r/DIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGZtOPUBrABAhIMhZURAguOAf8thngjGgx2V9xACxLD1p55ygciMI1QAftQC0fXWtGB4z63b+4zsFNtwRuv+KrbFpx6XW5H3COo1+QE0gjfn3Npoa7agSp4v25e0Njcx723fdjqKlUmX4OOwW9Lcc5gtIF6rj6t1stODiIeNBMPRK65WJzBrREGHwJyKej8q0qgprYXEvaCq2oRvVunNGWTUoMUiFQn5H6Gw4ZTKcYcPgaeu+uVdoL28NsG1qQk33W8rljHAeC6e/WkOAmpnn7JGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 188,
+          "cache_read_input_tokens": 36131,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 188
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "166d9cad-f9b2-4b51-917f-1e77ac85bf64",
+      "timestamp": "2026-09-03T02:23:21.214Z",
+      "request_id": "req_011CefiARQm5YPVzzzV8TrnJ"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAS6SGbBgLKU44iEng",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01CtcYkbRE2MfC6njAkjHDGx",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /tmp",
+              "description": "List /tmp directory with full details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 188,
+          "cache_read_input_tokens": 36131,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 188
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "81f0ba8d-3b5b-4248-9ce2-54253f76759e",
+      "timestamp": "2026-09-03T02:23:21.338Z",
+      "request_id": "req_011CefiARQm5YPVzzzV8TrnJ"
+    },
+    {
+      "type": "system",
+      "subtype": "permission_denied",
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01CtcYkbRE2MfC6njAkjHDGx",
+      "message": "ls in '/private/tmp' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+      "uuid": "d8dd1a20-2788-4fba-9687-4c62fd2078de",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "ls in '/private/tmp' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+            "is_error": true,
+            "tool_use_id": "toolu_01CtcYkbRE2MfC6njAkjHDGx"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "6db930ec-e045-4803-922c-58c16e03acdb",
+      "timestamp": "2026-09-03T02:23:21.345Z",
+      "tool_use_result": "Error: ls in '/private/tmp' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+      "tool_result_meta": [
+        {
+          "id": "toolu_01CtcYkbRE2MfC6njAkjHDGx",
+          "non_execution_kind": "user-rejected"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 5,
+      "uuid": "5c00b722-08ff-419a-a7ee-e11d84fec671",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 37,
+      "estimated_tokens_delta": 32,
+      "uuid": "960e07bf-e522-4d55-891a-8eb37c80a87a",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 68,
+      "estimated_tokens_delta": 31,
+      "uuid": "164c4102-2b72-4490-a517-e5f4e4b668c9",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 139,
+      "estimated_tokens_delta": 71,
+      "uuid": "0f02be96-75c9-4bbb-af02-072571c755f3",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAZALfLCwuu8kM8rgN",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The command was also blocked. It's trying to access `/tmp` (which resolves to `/private/tmp`), and this is outside the allowed working directories. The security restriction prevents me from listing files outside the allowed directories.\n\nI should report this to the user.",
+            "signature": "EqUECrIBCBEYAipA9ZIJgwURKCJU45MGGLwFUScBmOIWC0voAhyHysnaMDSG36QPbD1qHIjs81peUocN9vgVj/glpMTkdZp71hbDETIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGatOPUBrABAhIMyy935kiAmCGDk/WVGgwJat6ZBbwl47hKqgkiMERfWfNUODs/LfyEyXPxi7aeuvB2nicZ1MZEK3RT4vPNFmboe/vYFr10UUy6psGqqSqfAs4404sKHICMHYLux1dbRI0D/KJYRrClXoq8OU0jArV1g85Dl9QQmKFi9T4hGkbIuw9+oZcvSkmExgtOmU/DMB9RT5HF0nG9qc56Zz6Q50oNfcBKWuRmf7RIvDUeaKgLWdoQSQ48ZNiKLHFx1K7NHZf1Q8TcSQQZhHpC5T29qEh59EXkFnq+OPQGKJeFprWPJJjFEaid1W6KDe/72R0U3WiWqWSKyhoGJ2UbUIlV2q3YJpqOULKj+y0j9Ud+0uGr1mUEZ92ZJm5pRR5QMZtKH4sLJ9ouxoeAXz/MpOsMNh67jmUMlSWQNgJ2KIbCfNgcsJpTfzElMJlkC0cB9yWXdpiqr/jazV7AjwUtzR4/0dhL8b6UMkVHRCsTQFpoECaMGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 330,
+          "cache_read_input_tokens": 36319,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 330
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "4c419c6e-1503-4fb2-8276-b62c2f0c3aae",
+      "timestamp": "2026-09-03T02:23:22.983Z",
+      "request_id": "req_011CefiAYRwBZQWJsZB49kZp"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAZALfLCwuu8kM8rgN",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The command was also blocked. Claude Code restricts file listing to the allowed working directories for this session. Access to `/tmp` (which resolves to `/private/tmp`) is not permitted for security reasons."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 330,
+          "cache_read_input_tokens": 36319,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 330
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "0f001b91-2557-47b8-8e07-490fa0a1fda3",
+      "timestamp": "2026-09-03T02:23:23.289Z",
+      "request_id": "req_011CefiAYRwBZQWJsZB49kZp"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 10054,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "total_cost_usd": 0.036981299999999995,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 518,
+        "cache_read_input_tokens": 72450,
+        "output_tokens": 225,
+        "output_tokens_details": {
+          "thinking_tokens": 94
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 518,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 110,
+            "cache_read_input_tokens": 36319,
+            "cache_creation_input_tokens": 330,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 330
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 11,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000968,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 36,
+          "outputTokens": 491,
+          "cacheReadInputTokens": 134863,
+          "cacheCreationInputTokens": 10018,
+          "webSearchRequests": 0,
+          "costUSD": 0.0360133,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_01CtcYkbRE2MfC6njAkjHDGx",
+          "tool_input": {
+            "command": "ls -la /tmp",
+            "description": "List /tmp directory with full details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The command was also blocked. Claude Code restricts file listing to the allowed working directories for this session. Access to `/tmp` (which resolves to `/private/tmp`) is not permitted for security reasons.",
+      "ttft_ms": 1493,
+      "ttft_stream_ms": 841,
+      "time_to_request_ms": 13,
+      "type": "result",
+      "duration_ms": 3582,
+      "uuid": "6fa60ced-5670-4d81-9cf0-1a6c4d3c5c2a"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "tools": [
+        "Task",
+        "Artifact",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__blender__execute_blender_code",
+        "mcp__blender__execute_blender_code_for_cli",
+        "mcp__blender__get_blendfile_summary_datablocks",
+        "mcp__blender__get_blendfile_summary_datablocks_for_cli",
+        "mcp__blender__get_blendfile_summary_missing_files",
+        "mcp__blender__get_blendfile_summary_missing_files_for_cli",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries",
+        "mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli",
+        "mcp__blender__get_blendfile_summary_path_info",
+        "mcp__blender__get_blendfile_summary_path_info_for_cli",
+        "mcp__blender__get_blendfile_summary_usage_guess",
+        "mcp__blender__get_blendfile_summary_usage_guess_for_cli",
+        "mcp__blender__get_object_detail_summary",
+        "mcp__blender__get_objects_summary",
+        "mcp__blender__get_python_api_docs",
+        "mcp__blender__get_screenshot_of_area_as_image",
+        "mcp__blender__get_screenshot_of_window_as_image",
+        "mcp__blender__get_screenshot_of_window_as_json",
+        "mcp__blender__jump_to_tab_by_name",
+        "mcp__blender__jump_to_tab_by_space_type",
+        "mcp__blender__jump_to_view3d_object_by_name",
+        "mcp__blender__jump_to_view3d_object_data_by_name",
+        "mcp__blender__render_thumbnail_to_path",
+        "mcp__blender__render_viewport_to_path",
+        "mcp__blender__search_api_docs",
+        "mcp__blender__search_manual_docs",
+        "mcp__codegraph__codegraph_callees",
+        "mcp__codegraph__codegraph_callers",
+        "mcp__codegraph__codegraph_context",
+        "mcp__codegraph__codegraph_files",
+        "mcp__codegraph__codegraph_impact",
+        "mcp__codegraph__codegraph_node",
+        "mcp__codegraph__codegraph_search",
+        "mcp__codegraph__codegraph_status"
+      ],
+      "mcp_servers": [
+        {
+          "name": "blender",
+          "status": "connected"
+        },
+        {
+          "name": "codegraph",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "596bd21b-03cc-4247-ad05-92ebce3e53bd",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassReescalation-Probe586523688-001-bypass-reescalation-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/21668.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 3,
+      "estimated_tokens_delta": 3,
+      "uuid": "20762a94-cea9-447a-9427-d969fcea43c7",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 44,
+      "estimated_tokens_delta": 41,
+      "uuid": "9d7d001e-ba8b-459a-9429-a469bdabf03c",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 57,
+      "estimated_tokens_delta": 13,
+      "uuid": "c2bca067-5670-45d3-94c2-bc544fdd1ccb",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 128,
+      "estimated_tokens_delta": 71,
+      "uuid": "57b661b0-f9bd-40fe-a410-077c6d07e9a5",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAhvvs36FCxHcZEjwU",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run `ls -la /usr` and report the first line of output. Based on the previous two attempts, I expect this will also be blocked since `/usr` is outside the allowed working directories. Let me try anyway.",
+            "signature": "EvgDCrIBCBEYAipACQ/zix7HX1ovgfN5V3QdmmE12ySNlz2/CNJ+ETF6hoOQ6myKR3oN7kSbMsozkpeB8ysYSHCYvk+Z3TF7sH9CTTIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGctOPUBrABAhIMCTV5QMf9seHTcWz5Ggy0FjS/0ec39/Uyw3QiMHfhsrNcDb8WFINnHDuMSFJgD1j860sXRD5mBwEPqpJ/nlU5vA+MSrwmS9QTxFj/fSryAcq8pQ/zxOZBZn3HTq46HK83HY1p7x32DEDTG2d2k6/M3//SpJ/D+SZsCHDzMTvVZCsuvt2jO39eJHTjDEYJJbtECN6o0KA0MvJucgUcktWIwxSo15yJP61YsEbcWlrKox0/zahWcV5q4Uax+xD4cIzlu70jIpEH3MPSYTm9C4NkHhpfqGAhxftLAWW7dpwHsk80IA3wZ1lgdUQcIy3khotEWPkXHeWZ3s8wpdqDhLz164D9ZENJnUiYIIM+S6e/r2XwIOFuz2cwiz7FNNbRF9Lzy17osHK3RWU8JRG5OClkD+5psgHhgAsdfqj7ZVWrvm3lGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 169,
+          "cache_read_input_tokens": 36649,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 169
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "328ad7fc-01cb-4d47-b2de-5c4470d1884c",
+      "timestamp": "2026-09-03T02:23:24.992Z",
+      "request_id": "req_011CefiAh5atw42XrRuxe33c"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiAhvvs36FCxHcZEjwU",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01QkByTf8QMKpfPeKeUMw45D",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /usr",
+              "description": "List /usr directory with full details"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 169,
+          "cache_read_input_tokens": 36649,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 169
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "df9e0b69-b80f-4e73-a5b2-3faedb10112e",
+      "timestamp": "2026-09-03T02:23:25.322Z",
+      "request_id": "req_011CefiAh5atw42XrRuxe33c"
+    },
+    {
+      "type": "system",
+      "subtype": "permission_denied",
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01QkByTf8QMKpfPeKeUMw45D",
+      "message": "ls in '/usr' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+      "uuid": "4f03c605-7d12-47ca-8501-79b0180ce3a3",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "ls in '/usr' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+            "is_error": true,
+            "tool_use_id": "toolu_01QkByTf8QMKpfPeKeUMw45D"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "9546f0cd-1b37-4301-ba6b-4baf5dd40149",
+      "timestamp": "2026-09-03T02:23:25.330Z",
+      "tool_use_result": "Error: ls in '/usr' was blocked. For security, Claude Code may only list files in the allowed working directories for this session: '/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work', '/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassReescalation_Probe586523688/001/bypass-reescalation-work'.",
+      "tool_result_meta": [
+        {
+          "id": "toolu_01QkByTf8QMKpfPeKeUMw45D",
+          "non_execution_kind": "user-rejected"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 1,
+      "estimated_tokens_delta": 1,
+      "uuid": "dc7309ba-efe8-4359-a31a-6c30fe47860a",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 4,
+      "uuid": "71cfb1ed-813b-41a6-b5ec-b6fd51d47db6",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 48,
+      "estimated_tokens_delta": 43,
+      "uuid": "5437ea5e-3529-45e2-b43d-a1db8f40c039",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 63,
+      "estimated_tokens_delta": 15,
+      "uuid": "7ad03bf3-f13c-43b9-9cec-d4355adfd8e2",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 133,
+      "estimated_tokens_delta": 70,
+      "uuid": "d214556f-1941-4a9c-bdc7-304e6d0adb1e",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiArJUKHE4G2khSwLsV",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "As expected, this was also blocked. Claude Code consistently restricts file listing to the allowed working directories. All three attempts to access directories outside the allowed scope (`/`, `/tmp`, `/usr`) have been blocked for security reasons.",
+            "signature": "Eo4ECrIBCBEYAipA1GIWZhWiMwnAZ9D14RChnEo3i1SWmksNFVzKckvlKk+Meb7hXn6yndCJ19Z3nlK5aB27YfRa3fbnpmFp+nrkQDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGetOPUBrABAhIM+MNjtev5d8ZdDBH6Ggzd1bON6W7vyOyaHtEiMDiZOcy4bE/hFdiMo1nbQbvyIWNuu2PvA6ZNXPk9JHQYb5X3rFy6LgQNbxZHa1qMdCqIAhA/YBnRMBYkbW20rFTOa3qaCHivtLNgzEDB2m68YaaVnVQ/l9znJ2aiUExAL8ZGgMnJRu128YSSawBfM0tJF1EssvVHOJClHYb0utjJimt38UolUvlPuUNMJuxak70F8HTrBuBcksSPd8bZ6m3RXjDP9jCgoMCPiK9hbphJ6D3Z7hX/shgafYzUnjsxroFFJfjaCp2qzdcH4UGuS4dwv7iBt1i/w43ij8tINJUm9JxXyihNKNAAnMeiFG1/WhXU+TbSDkueqxVpBGsLEXUS5lEmKEHoyl5631RD2VVOPVmlsk9uo1UhfXNlOHx/hOb7tIwrkBl1WtBVgYDdM3hGVYOZ/IKPSTO4wxgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 352,
+          "cache_read_input_tokens": 36818,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 352
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "2c054816-6bfe-43e8-878d-e5394c1928c2",
+      "timestamp": "2026-09-03T02:23:27.058Z",
+      "request_id": "req_011CefiAqTs948yaemuk9wNE"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefiArJUKHE4G2khSwLsV",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The command was blocked as well. Claude Code enforces a security restriction that only allows file listing within the designated working directories for this session. Attempts to access system directories like `/`, `/tmp`, and `/usr` are blocked."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 352,
+          "cache_read_input_tokens": 36818,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 352
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "uuid": "b3bfd6b4-7d6e-4938-be3d-908566157e21",
+      "timestamp": "2026-09-03T02:23:27.404Z",
+      "request_id": "req_011CefiAqTs948yaemuk9wNE"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 14079,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "f5120773-b9f1-43cf-a90b-093c91eb82d6",
+      "total_cost_usd": 0.046608,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 521,
+        "cache_read_input_tokens": 73467,
+        "output_tokens": 244,
+        "output_tokens_details": {
+          "thinking_tokens": 109
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 521,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 105,
+            "cache_read_input_tokens": 36818,
+            "cache_creation_input_tokens": 352,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 352
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 11,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000968,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 54,
+          "outputTokens": 735,
+          "cacheReadInputTokens": 208330,
+          "cacheCreationInputTokens": 10539,
+          "webSearchRequests": 0,
+          "costUSD": 0.04564,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_01QkByTf8QMKpfPeKeUMw45D",
+          "tool_input": {
+            "command": "ls -la /usr",
+            "description": "List /usr directory with full details"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The command was blocked as well. Claude Code enforces a security restriction that only allows file listing within the designated working directories for this session. Attempts to access system directories like `/`, `/tmp`, and `/usr` are blocked.",
+      "ttft_ms": 1617,
+      "ttft_stream_ms": 958,
+      "time_to_request_ms": 15,
+      "type": "result",
+      "duration_ms": 4047,
+      "uuid": "7843fcc3-92ee-4c94-bb4a-3bc5274f1ddb"
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    17,
+    33,
+    50
+  ],
+  "probe_outcomes": [
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    }
+  ],
+  "model": "claude-haiku-4-5",
+  "stdin_write_errors": null,
+  "stderr_capture": "",
+  "exit_code": 0,
+  "wait_error": "",
+  "context_deadline_tripped": false,
+  "duration_ms": 14221,
+  "scanner_error": ""
+}

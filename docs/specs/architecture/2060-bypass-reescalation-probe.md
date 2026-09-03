@@ -232,6 +232,31 @@ for an unobserved failure is not warranted.
 3. **Is `"12"` enough turn headroom for three Bash probes with a possible retry after a denial?**
    An `error_max_turns` result lands in the fixture plainly. Raise and rerun if it fires.
 
+## Revisions
+
+### 2026-09-03 — the live run resolved all three open questions; the design did not change
+
+The measurement ran clean at 2.1.239 (four children, 56 s, exit 0 on every arm, no tripped
+deadline). Recorded here because a plan whose Open Questions are left standing cannot be diffed
+against the code that answered them.
+
+1. **One `system/init` line per turn on a three-turn child — confirmed.** Every arm emitted
+   exactly three, so the gate took its primary INIT path and the behavioural fallback was not
+   exercised live. The fallback stays in, unit-tested by
+   `TestReescalateDowngrade_RefusesAVacuousReEscalationVerdict`: it exists for the run where the
+   init read is missing, and dropping it because one healthy run did not need it is how a probe
+   stops discriminating.
+2. **The re-escalation does produce a `control_response` — `subtype:"success"` echoing
+   `bypassPermissions`, correlated by `request_id`.** It did not enter the verdict, per AC 1;
+   the behavioural read agreed with it independently.
+3. **`"12"` was ample** — no arm approached it and no `error_max_turns` fired.
+
+One result worth naming beyond the questions: the `reescalate` arm's turn 2 came back **gated**
+between two ungated turns, with its init line reporting `bypassPermissions → default →
+bypassPermissions` in step. The downgrade gate is therefore confirmed by measurement rather than
+only by construction — the child demonstrably left bypass before the re-escalation was asked for,
+which is exactly what AC 2 exists to establish.
+
 ## Security review
 
 **Verdict:** PASS
