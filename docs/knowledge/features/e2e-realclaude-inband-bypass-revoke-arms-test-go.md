@@ -122,3 +122,42 @@
   that reuses that phrasing. Zero production files touched. See
   `docs/specs/architecture/1662-pool-revoke-fixture-record-and-capped-writer.md`
   for the full design and the mutation-to-assertion table.
+
+- `inband_bypass_revoke_harness_test.go` (#1673) — **the per-arm `sessions.Pool`
+  harness #1675's live three-arm probe consumes, pinning all three arms' seeded
+  identity, stored posture and composed argv with no child process started.**
+  `newPoolRevokeHarness` seeds that arm's own registry file via
+  `seedBypassRegistry` over the empty `revokeBaseArgs`, installs #1622's
+  `revokeTap`/`revokeLogHandler`, and calls `sessions.New` — `Pool.Run` is never
+  called, so the pool exists, its `RunnerFactory` has already run, and its
+  `RunnerConfig` is readable, with no spawn. **A posture read alone cannot tell a
+  correctly-seeded `control_default` arm from a cold start**: `loadRegistry`
+  returns `(nil, nil)` for an absent file, and the zero `SessionSettings`
+  canonicalises to the same `{YOLO:false, PermissionMode:"default"}` (and the
+  same composed `--permission-mode default`) a correct seed produces — only the
+  freshly-minted bootstrap id differs. Confirmed by mutation: forcing a cold
+  start (`pickBootstrap` → nil) reddens all five assertions on the two YOLO arms
+  but **exactly one** — the `BootstrapID` comparison — on `control_default`. Any
+  test in this family that reads posture without also reading identity is green
+  against a seed the pool never opened. Two more mutations confirmed the other
+  two load-bearing pins: dropping the unconditional
+  `--dangerously-skip-permissions` flag (since #2065, present on every arm,
+  `control_default` included) reddens only that clause on all three arms;
+  forcing `operatorBypass` to return `true` reddens only the
+  `RunnerConfig.OperatorBypass == false` clause on all three — the reading that
+  would otherwise leave #1675's `revoke` arm unrevocable while every other
+  pre-spawn reading stayed green, per `OperatorBypass`'s own doc block (see
+  [`claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)).
+  The stub `ClaudeBin` `streamsup.New` requires is an **empty** file at `0755`,
+  not a working script: `exec.LookPath` resolves any regular file with an
+  execute bit regardless of contents, so it satisfies construction, but an
+  actual exec of zero bytes fails immediately rather than running anything or
+  re-entering the test binary — the fork-bomb shape `resolveClaudeBin` already
+  defends against. That fail-closed property is invisible at the call site, so
+  it lives only in the stub helper's doc comment; "improving" it into a real
+  script or `resolveClaudeBin(t)`'s own binary would remove the property
+  silently. `finOfflineExecBans` gains the family's usual six-name entry only
+  (no fixture bans — this file reads and writes none). Zero production files
+  touched. See
+  `docs/specs/architecture/1673-pool-revoke-harness-and-pre-spawn-pins.md` for
+  the full design and the mutation-to-assertion table.
