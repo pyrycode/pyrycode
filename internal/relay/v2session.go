@@ -870,7 +870,7 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		}
 	}
 
-	m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext})
+	m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameRoute})
 }
 
 // enqueueAppFrame hands one frame to this conn's worker (off-Run) via a
@@ -921,7 +921,9 @@ type appFrameJob struct {
 
 	// kind is what dispatchAppFrame recognised the frame as, and therefore which
 	// handler the worker runs. appFrameRoute — the zero value — is every v1
-	// application frame, which routes through dispatch.Route unchanged.
+	// application frame, which routes through dispatch.Route unchanged. Every
+	// construction site names its kind rather than leaning on that zero value, so
+	// the producer and the worker's arms read as one enumeration.
 	kind appFrameKind
 }
 
@@ -994,7 +996,16 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// (safe from any goroutine) and its rejects through
 				// forwardToRun, so like the arm above it never touches s.send.
 				m.handleRequestAttachment(ctx, s, job.plaintext)
+			case appFrameRoute:
+				// The v1 application dispatch chain, unchanged: build the outbound
+				// channel, call dispatch.Route, forward its replies to Run.
+				m.routeAppFrame(ctx, s, job.plaintext)
 			default:
+				// Unreachable — every appFrameKind has an arm above, and Go cannot
+				// check that for us. A kind added without one lands here and takes
+				// the v1 chain, which answers an unrecognised type with
+				// protocol.unsupported; the alternative to keeping this arm is
+				// dropping such a frame in silence.
 				m.routeAppFrame(ctx, s, job.plaintext)
 			}
 		}

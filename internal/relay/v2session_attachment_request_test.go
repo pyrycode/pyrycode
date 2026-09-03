@@ -130,9 +130,12 @@ func requestPayload(conversationID, attachmentID string) string {
 // refusal from one that also served bytes.
 func waitForReplies(t *testing.T, sess *openSession, n int) []protocol.Envelope {
 	t.Helper()
-	msgs := waitForConnNoiseMsg(t, sess.rec, v2TestConnID, n)
+	// The wait establishes the lower bound and its return value is deliberately
+	// discarded: the settling window below may add frames, and the re-read is the
+	// only snapshot the exact-count assertion may be made against.
+	waitForConnNoiseMsg(t, sess.rec, v2TestConnID, n)
 	time.Sleep(150 * time.Millisecond)
-	msgs = noiseMsgsForConn(t, sess.rec, v2TestConnID)
+	msgs := noiseMsgsForConn(t, sess.rec, v2TestConnID)
 	if len(msgs) != n {
 		t.Fatalf("sealed frame count = %d, want exactly %d", len(msgs), n)
 	}

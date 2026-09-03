@@ -530,3 +530,32 @@ Verification is touched-scope: `go test -race ./internal/relay/... ./internal/e2
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — the enum's zero member is named at both ends
+
+Driven by the verification gate's `staticcheck` finding `const appFrameRoute is
+unused (U1000)`. § Design specified the `appFrameKind` enum but not the arm
+structure of the sites that read it, and the first implementation leaned on the
+zero value at both: the v1 arm built `appFrameJob{plaintext: plaintext}` with no
+kind, and `appFrameWorker` caught it with `default:`. Nothing named the identifier,
+so the enum's own member was dead to the compiler.
+
+Silencing that with a discard would have left the design claim — that the routing
+decision lives in one place and the worker branches on the tag — resting on a
+member neither producer nor consumer mentions. Instead both ends now name it: the
+v1 `enqueueAppFrame` call passes `kind: appFrameRoute`, and the worker gains an
+explicit `case appFrameRoute:` arm.
+
+That makes the `default:` arm genuinely unreachable, and it is kept rather than
+removed. Go cannot check a switch for exhaustiveness, so a fourth kind added
+without an arm would otherwise be dropped in silence; the retained default sends
+it down the v1 chain, which answers an unrecognised type with
+`protocol.unsupported`. The contract is unchanged — no wire behaviour, no reject
+code and no ordering moves.
+
+A second finding on the same run (`SA4006`, a dead assignment in
+`waitForReplies`) was a test-local fix with no design content: the lower-bound
+wait's return value is discarded and the post-settling re-read remains the
+exact-count assertion's only source, which is the property that helper exists for.
