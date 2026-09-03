@@ -846,8 +846,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			m.handleRequestSessionSettings(ctx, s, probeEnv)
 			return
 		case protocol.TypeAttachmentChunk:
-			// The one control type whose handler does NOT run inline on Run
-			// (#1897). Every other arm above is fast; a completing chunk hashes
+			// The FIRST control type whose handler does not run inline on Run
+			// (#1897), and one of two — the retrieval arm below joined it in
+			// #2054. Every other arm above is fast; a completing chunk hashes
 			// and writes up to the per-upload byte bound, which is exactly the
 			// work #1491 had to move off Run for handleDebugBundleRequest. So
 			// this arm only tags the frame and falls through to the same
@@ -856,12 +857,21 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// The case selector is what TestEveryInboundV2TypeHasHandler reads,
 			// and the guard reads selectors rather than bodies, so handing off
 			// satisfies it.
-			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, attachment: true})
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameAttachmentChunk})
+			return
+		case protocol.TypeRequestAttachment:
+			// The second arm to run off Run (#2054), and for the same reason as
+			// the one above rather than a new one: answering this frame reads a
+			// stored file of up to the per-upload byte bound, hashes it and
+			// base64-marshals one envelope per chunk. Tags and falls through to
+			// the same non-blocking enqueue; the worker routes it to
+			// handleRequestAttachment.
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameAttachmentRequest})
 			return
 		}
 	}
 
-	m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext})
+	m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameRoute})
 }
 
 // enqueueAppFrame hands one frame to this conn's worker (off-Run) via a
@@ -910,11 +920,34 @@ type appFrameJob struct {
 	// noise.CipherState.Decrypt and therefore aliasing nothing.
 	plaintext []byte
 
-	// attachment reports that dispatchAppFrame recognised this frame as an
-	// attachment_chunk. False for every v1 application frame, which routes
-	// through dispatch.Route unchanged.
-	attachment bool
+	// kind is what dispatchAppFrame recognised the frame as, and therefore which
+	// handler the worker runs. appFrameRoute — the zero value — is every v1
+	// application frame, which routes through dispatch.Route unchanged. Every
+	// construction site names its kind rather than leaning on that zero value, so
+	// the producer and the worker's arms read as one enumeration.
+	kind appFrameKind
 }
+
+// appFrameKind names the off-Run handlers, one member per dispatchAppFrame case
+// that hands off rather than handling inline.
+//
+// A TYPED KIND RATHER THAN ONE BOOL PER TYPE (#2054 widened #1897's lone
+// `attachment bool`): the members are mutually exclusive by construction, and a
+// set of bools can express a state that is not — two set at once, with the
+// worker's arm order silently deciding which wins. Widening rather than
+// re-probing the envelope type inside the worker is what keeps the routing
+// decision in ONE place, which is the property appFrameJob exists for.
+type appFrameKind uint8
+
+const (
+	// appFrameRoute is the v1 application dispatch chain (dispatch.Route). The
+	// zero value, so a job built without a kind routes the way it always did.
+	appFrameRoute appFrameKind = iota
+	// appFrameAttachmentChunk is the inbound upload leg (#1897).
+	appFrameAttachmentChunk
+	// appFrameAttachmentRequest is the inbound retrieval request (#2054).
+	appFrameAttachmentRequest
+)
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
 // off the Run goroutine (#965). Exactly one is spawned per session in
@@ -947,7 +980,8 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				return
 			default:
 			}
-			if job.attachment {
+			switch job.kind {
+			case appFrameAttachmentChunk:
 				// The upload path (#1897). Runs here rather than in
 				// routeAppFrame because it neither builds an outbound channel
 				// nor calls dispatch.Route — it emits its own replies straight
@@ -956,9 +990,25 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// precondition: strictly FIFO, one frame fully handled before
 				// the next is dequeued, one worker per conn.
 				m.handleAttachmentChunk(ctx, s, job.plaintext)
-				continue
+			case appFrameAttachmentRequest:
+				// The retrieval path (#2054), here for the same reason: it
+				// reads a stored file and enqueues one envelope per chunk,
+				// which must not run on Run. Its chunks leave through Push
+				// (safe from any goroutine) and its rejects through
+				// forwardToRun, so like the arm above it never touches s.send.
+				m.handleRequestAttachment(ctx, s, job.plaintext)
+			case appFrameRoute:
+				// The v1 application dispatch chain, unchanged: build the outbound
+				// channel, call dispatch.Route, forward its replies to Run.
+				m.routeAppFrame(ctx, s, job.plaintext)
+			default:
+				// Unreachable — every appFrameKind has an arm above, and Go cannot
+				// check that for us. A kind added without one lands here and takes
+				// the v1 chain, which answers an unrecognised type with
+				// protocol.unsupported; the alternative to keeping this arm is
+				// dropping such a frame in silence.
+				m.routeAppFrame(ctx, s, job.plaintext)
 			}
-			m.routeAppFrame(ctx, s, job.plaintext)
 		}
 	}
 }

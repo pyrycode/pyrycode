@@ -1046,27 +1046,29 @@ const (
 // partitions Type* constants between inboundAppTypeSet and v2OnlyTypes; this one
 // lives in the latter, and inboundAppTypeSet's asserted count does not move.
 //
-// THE GUARD FILES IT AS PENDING, and getting that wrong is a red build rather than
-// a style question. cmd/pyry/relay_guard_test.go's excludedTypes carries it as
-// "pending handler (#2054)". inboundTypes would fail Assertion #1, which requires an
-// inbound type to be wired into cmd/pyry/relay.go's Handlers map or
-// internal/relay/v2session.go's dispatchAppFrame, and this slice ships no dispatch;
-// "push", the reason the outbound neighbours give, is false for a genuinely inbound
-// frame, and filing it that way to dodge Assertion #1 would be a lie to the guard.
-// TypeQuestionAnswer / TypeQuestionRefused sat there under exactly this label
-// between #1983 and #1984, and TypeAttachmentChunk before #1897. Assertion #2 is
-// what then FORCES the entry up to inboundTypes as "switch-intercepted" the moment
-// #2054 adds its case — a wired type left in excludedTypes fails. Filing is required
-// from the moment the constant exists: Assertion #3 reports an unclassified
-// constant, not an unemitted one.
+// THE GUARD FILES IT WITH ITS INBOUND NEIGHBOURS, and getting that wrong is a red
+// build rather than a style question. cmd/pyry/relay_guard_test.go's inboundTypes
+// carries it as "switch-intercepted", beside TypeAttachmentChunk, because
+// internal/relay/v2session.go's dispatchAppFrame now has a case for it (#2054).
+// Between #2052 and #2054 it sat in excludedTypes as "pending handler (#2054)":
+// inboundTypes would have failed Assertion #1, which requires an inbound type to be
+// wired into cmd/pyry/relay.go's Handlers map or dispatchAppFrame, and that slice
+// shipped no dispatch; "push", the reason the outbound neighbours give, is false for
+// a genuinely inbound frame, and filing it that way to dodge Assertion #1 would have
+// been a lie to the guard. TypeQuestionAnswer / TypeQuestionRefused sat under exactly
+// that label between #1983 and #1984, and TypeAttachmentChunk before #1897; each had
+// to move the moment its case landed, which Assertion #2 makes mandatory rather than
+// tidy-up — a wired type left in excludedTypes fails. Filing is required from the
+// moment the constant exists: Assertion #3 reports an unclassified constant, not an
+// unemitted one.
 //
-// The declaring ticket (#2052) is wire vocabulary and publication only — no
-// producer, no consumer, no validator, and NO ADMISSION-TIME CHECK. #2053 builds the
+// The declaring ticket (#2052) was wire vocabulary and publication only — no
+// producer, no consumer, no validator, and NO ADMISSION-TIME CHECK. #2053 built the
 // outbound chunk stream and #2054 answers this verb, owning the shape check, the
 // registry validation and the CodeAttachmentNotFound reject path. Same
 // declare-then-serve sequencing as #1752→#1897, #1895→#1897 and #1983→#1984.
 const (
-	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (pending handler — #2054)
+	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (switch-intercepted — #2054)
 )
 
 // Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The

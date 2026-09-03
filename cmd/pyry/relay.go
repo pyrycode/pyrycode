@@ -845,6 +845,19 @@ func startRelayV2(
 		// which is what makes "a client cannot steer bytes into another
 		// conversation" structural rather than checked.
 		AttachmentIntake: attachmentIntake,
+		// Inbound attachment-RETRIEVAL seam (#2054): the read half of the leg
+		// above, wired to the SAME closure handlers.SendMessage already uses, over
+		// the same instance directory the intake writes into. Reuse rather than a
+		// second adapter — the closure's shape is already this seam's — and the
+		// closure now serves two callers whose registry validation differs: this
+		// one validates through KnownConversation above (membership alone, which
+		// reads a known but UNBOUND conversation as addressable — the correct
+		// reading for retrieval, and precisely the reopened conversation a
+		// SessionRouter.Route check would refuse), send_message through
+		// SessionRouter.Route. The closure itself discharges NEITHER; it wraps
+		// attachments.ResolvePath, whose stated precondition is that the caller
+		// already validated the conversation id.
+		AttachmentResolve: attachmentResolve,
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
 		// supervisor. The activeInterrupter adapter (main.go) resolves active →

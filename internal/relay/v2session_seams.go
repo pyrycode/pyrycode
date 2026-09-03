@@ -571,6 +571,49 @@ type V2SessionConfig struct {
 	// rather than by any lock.
 	AttachmentIntake AttachmentIntake
 
+	// AttachmentResolve answers the on-host path of one stored attachment inside
+	// one conversation (#2054) — the READ half of the seam above, and the retrieval
+	// leg's only filesystem reach. handleRequestAttachment is its sole reader.
+	// Optional: when nil the request_attachment frame is STILL CONSUMED by the
+	// interception — it no longer reaches dispatch.Route and so no longer draws its
+	// unknown-type error reply — but nothing is decoded, nothing is resolved and
+	// nothing is replied. That is the whole of the nil behaviour, matching
+	// AttachmentIntake's, and it is what leaves every non-production construction
+	// site compiling and behaving unchanged.
+	//
+	// COMMA-OK, NOT AN ERROR, and the collapse is the point rather than a
+	// simplification. attachments.ResolvePath answers ONE sentinel for an unknown
+	// id, a non-canonically-shaped id and an id resolving outside the named
+	// conversation's directory alike, precisely so a dispatch site cannot branch on
+	// what CodeAttachmentNotFound's deliberate merge forbids distinguishing; and its
+	// shape-invalid refusal formats the RAW client-supplied id into its message,
+	// which docs/protocol-mobile.md § Attachments forbids logging. So the error dies
+	// at the one adapter that ever holds it — cmd/pyry's attachmentResolve closure,
+	// already built there for handlers.SendMessage — and this seam receives only the
+	// bool. Primitive-typed in both directions, like KnownConversation, so
+	// internal/relay imports neither internal/attachments nor internal/conversations
+	// for it.
+	//
+	// IT DISCHARGES NO REGISTRY CHECK WHATSOEVER. attachments.ResolvePath's stated
+	// precondition is that conversationID is one the CALLER has already validated
+	// against the daemon's registry — "this function cannot check that, and a caller
+	// that gets it wrong defeats every check below" — and the production closure
+	// validates nothing. handleRequestAttachment is that caller: it consults
+	// KnownConversation BEFORE either id reaches this seam, which is what keeps an
+	// identifier § Attachments repeatedly calls not a capability from becoming one.
+	//
+	// SECURITY: the only sanctioned implementation wraps attachments.ResolvePath.
+	// StreamAttachment re-validates nothing it is handed, so a path from anywhere
+	// else carries NO containment guarantee — the traversal defence is that
+	// function's full-path equality check — and a path naming a NON-REGULAR FILE
+	// misbehaves rather than erroring: os.ReadFile on a FIFO blocks indefinitely,
+	// which here would wedge the conn's appFrameWorker and silently stall every
+	// later frame on that conn. ResolvePath answers only regular files at exactly
+	// the path its two ids build, so both are unreachable through it. The returned
+	// path is NOT fully daemon-authored — its leaf is a sanitised client filename —
+	// so it must never be logged, and no reply derived from it ever reaches the wire.
+	AttachmentResolve func(conversationID, attachmentID string) (path string, ok bool)
+
 	// Interrupter routes an inbound interactive `interrupt` control frame to
 	// the supervised claude as one Esc (#707). Optional: nil ⇒ interrupt is
 	// inert (no Esc) — the foreground / unwired case. Production wires

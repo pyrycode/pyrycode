@@ -25,8 +25,9 @@ import (
 // carry holds where it can.
 //
 // WHERE IT RUNS. On the conn's appFrameWorker, off the Run goroutine, reached
-// from appFrameWorker's job.attachment arm — not inline in dispatchAppFrame like
-// every other control arm. A completing chunk hashes and writes up to the
+// from that worker's case appFrameAttachmentChunk arm (the tag was a lone bool
+// field until #2054 widened it to appFrameKind) — not inline in dispatchAppFrame
+// like every other control arm. A completing chunk hashes and writes up to the
 // per-upload byte bound, which is precisely the work #1491 had to move off Run for
 // handleDebugBundleRequest. Being on that worker is also what discharges
 // Receive's single-feeder precondition, since exactly one is spawned per session
