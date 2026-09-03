@@ -161,3 +161,37 @@
   touched. See
   `docs/specs/architecture/1673-pool-revoke-harness-and-pre-spawn-pins.md` for
   the full design and the mutation-to-assertion table.
+
+- `inband_bypass_revoke_assemble_test.go` (#1674) — **the pure mapping from one
+  arm's live observations to #1662's eighteen-field fixture record**, lifting
+  "is every field filled" off a human reading committed JSON and onto an
+  offline reflection sweep. `poolRevokeObservation` carries the arm row, both
+  version strings, argv, prompts, the tap's snapshots and the log recorder's
+  readings as plain values; `assemblePoolRevokeFixture` is a total function
+  with no `*testing.T`, no I/O and no mutation, and `poolRevokeZeroFields`
+  derives its zero sweep from the record **type** via reflection plus #1662's
+  `fixtureFieldNonZero`, so a nineteenth field is covered with no test edit.
+  Two mutation-confirmed lessons for any future all-fields-non-zero fixture
+  test in this family: **a carrier where every bool is `true` cannot
+  discriminate a crossed bool pair** — an assembler that fed
+  `TakesSettingsUpdate` from `deadlineTripped` stayed green against both the
+  full carrier and a healthy control row, and reddened only on a second
+  control row whose deadline had actually tripped, so a same-typed-fields
+  table needs a row where the fields disagree, not merely one where all
+  fields are set; and **a "want" value computed through the function under
+  test pins nothing** — the `StdoutLines` conversion is checked against a
+  hand-written literal, not `poolRevokeStdoutLines(obs.stdoutLines)`, because
+  the latter would compare the conversion with itself and pass under any
+  conversion at all. AC 4's "exactly three honest zeros" claim is true of
+  `control_bypass` only, not "a control arm": `control_default`'s seeded
+  `launchYOLO:false` (see #1651 above) adds a fourth, so any later reader of a
+  control-arm record must name which control arm it means. Code review
+  flagged, non-blocking and left open: the file's `finOfflineExecBans` entry
+  copies #1661's fourteen names whole and omits `writeFixture`, the fourth
+  `packageDir` wrapper #1662's own entry already added to close this exact
+  residual elsewhere in the family — so this file's ban entry re-opens a gap
+  the family had already closed once; the next file to touch this entry
+  should add the name rather than re-copy #1661's fourteen. Zero production
+  files touched. See
+  `docs/specs/architecture/1674-pool-revoke-observation-carrier-and-assembler.md`
+  for the full design and the mutation-to-assertion table.

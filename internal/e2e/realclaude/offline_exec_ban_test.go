@@ -441,6 +441,59 @@ var finOfflineExecBans = map[string][]string{
 		"probeClaudeVersion", "os.Getenv", "os.Environ",
 		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture",
 	},
+	// #1674. inband_bypass_revoke_names_test.go's FOURTEEN-name entry above, copied
+	// whole, plus two — and NOT the entry directly above it, which is #1662's
+	// deliberately narrower ten: that file's whole subject is a write, a read-back and
+	// a directory listing, so it must keep the os read/write group its comment says it
+	// keeps. This file is the opposite shape. It performs no I/O in EITHER direction:
+	// it builds values and asserts on a pure function's return, so the wider entry is
+	// the right one to inherit and every name in the group is free.
+	//
+	// The first four keep a SKIP out, as everywhere in this family — resolveClaudeBin
+	// and WithWorktreeAuthenticated skip INSIDE the test body, after `=== RUN` is
+	// printed, and a skip exits 0, which reads as a pass under `make e2e-realclaude`.
+	// That is this file's AC 5 in person: its whole claim is that it settles with no
+	// claude and no credentials, and a skip is indistinguishable from a pass at the
+	// gate.
+	//
+	// captureClaudeVersion and os.LookupEnv are the two additions, for the reasons
+	// initialize_control_names_test.go's entry states rather than as harmonisation.
+	// captureClaudeVersion is the package's own direct `claude --version` exec and it
+	// returns the raw line AND its leading token — which is precisely the pair
+	// poolRevokeObservation holds — so it is the single exec a developer filling a
+	// carrier here is most likely to reach for, and
+	// `versionRaw, versionToken := captureClaudeVersion(t)` is already the literal line
+	// four sibling files in this package use. It t.Fatalf's rather than skipping, so it
+	// would not fake a pass; what it would destroy is this file's defining property.
+	// os.LookupEnv is the two-value form of os.Getenv over the same credential-bearing
+	// environment, which carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// The packageDir trio plus filepath.Glob and the four os read/write names fence the
+	// file off from the committed testdata/: `go test` runs in the package source
+	// directory, so a RELATIVE os.WriteFile("testdata/…") reaches #1675's artifacts
+	// while naming no wrapper at all.
+	//
+	// writePoolRevokeFixture was considered and DECLINED, and a reader diffing this
+	// against initialize_control_compare_test.go's entry — which does ban its family's
+	// writer — should know that rather than read it as an oversight. That writer takes
+	// its directory as a PARAMETER and resolves no packageDir, so its only route to the
+	// committed testdata/ is a relative path built out of the group already banned
+	// above. What this file must not do is CALL it, which is AC 1's "the assembler
+	// stops at the filled record" and is a review property here rather than an AST one.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: this file writes
+	// nothing and needs no directory. fixtureFieldNonZero is pure — a reflect kind
+	// switch — and is banned nowhere; this file calls it. The limit of all of it,
+	// stated so nobody over-reads the ban: this check is per-file SYNTAX, not a call
+	// graph, so a banned name stays reachable through a helper this file calls while
+	// the entry stays green.
+	"inband_bypass_revoke_assemble_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture",
+		"filepath.Glob", "os.ReadFile", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 	// #1696. Shaped like inband_bypass_revoke_names_test.go's entry above — that
 	// file performs no I/O in either direction either — with three additions and
 	// the same 4+2 split #1662's entry states: the first four keep a SKIP out
