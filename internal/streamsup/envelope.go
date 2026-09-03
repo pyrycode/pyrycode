@@ -271,11 +271,14 @@ func marshalPermissionModeEnvelope(requestID, mode string) ([]byte, error) {
 // must not reach the daemon log through an error return (see
 // ErrUnsupportedPermissionMode).
 //
-// The control_response ack is not read here — nothing correlates the request_id,
-// and reading it would need a stdout tap this slice has no consumer for. The
-// parser already consumes the ack content-free (#1500), so the reply is handled
-// without being interpreted. That is also where claude's own per-model refusal of
-// auto lands (#2041), unread for now.
+// The ack is not read HERE, but it IS read (#2064), and the distinction matters to
+// anyone reasoning about the request_id. This function still writes and returns; the
+// correlation lives one layer up, in the parser's noteControlAck, which matches the id
+// against Runner.PostureGate and either opens the gate or records claude's refusal.
+// Two consequences bind a caller: the id must stay locally minted and unique (see
+// above), and a caller that reuses one would hand a stale ack the power to open a gate
+// it does not belong to. Claude's own per-model refusal of auto (#2041) lands on that
+// same path and is no longer discarded — it is what marks the gate refused.
 func WritePermissionMode(w io.Writer, requestID, mode string) error {
 	if !permissionModeAllowed(mode) {
 		return ErrUnsupportedPermissionMode
@@ -341,10 +344,12 @@ func marshalInitializeEnvelope(requestID string) ([]byte, error) {
 // when the pipe closed mid-teardown) are returned wrapped — never mis-reported as
 // the retryable ErrNoLiveChild.
 //
-// The control_response ack is not read here: this slice writes the line and stops,
-// exactly as WritePermissionMode writes without reading its ack. Nothing
-// correlates the request_id yet, and the parser already consumes control responses
-// content-free (#1500), so the reply is handled without being interpreted.
+// The control_response ack is not read here: this function writes the line and stops.
+// Its ack is not ignored by the daemon, though, and the difference from
+// WritePermissionMode's is worth stating — the parser's noteControlAck sees BOTH acks,
+// off one counter, and refuses this one by id alone. That refusal is the whole reason
+// the two spawn-time writes must never share an id: an initialize ack that matched
+// would open a posture gate it never answered.
 func WriteInitialize(w io.Writer, requestID string) error {
 	if w == nil {
 		return ErrNoLiveChild

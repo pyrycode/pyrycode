@@ -212,10 +212,13 @@ type Config struct {
 	// changed. Same relationship SessionID has with r.sessionID.
 	//
 	// bypassPermissions is REFUSED here by the same non-membership that refuses it in
-	// WritePermissionMode, so a bypass session is sent nothing and its gate is never
-	// armed: its turns flow exactly as they do today. That is the intended reading and
-	// not a gap — a gate no write can ever release is a bricked session, not a
-	// fail-closed one. Re-granting bypass stays on the respawn path.
+	// WritePermissionMode, so a bypass session is sent nothing and its turns flow
+	// exactly as they do today — a gate no write can ever release is a bricked session,
+	// not a fail-closed one. Re-granting bypass stays on the respawn path.
+	//
+	// "Sent nothing" is NOT "gate untouched", and the difference was a defect: the gate
+	// outlives the child, so a spawn that writes nothing must still arm the OPEN state
+	// or it inherits its predecessor's id. See the arm site in spawnAndWait.
 	//
 	// Setting it REQUIRES PostureGate; New refuses the pairing otherwise. A posture
 	// written with nothing correlating its ack is a line the daemon believes in and
@@ -761,11 +764,13 @@ func (r *Runner) turnTarget() (w io.Writer, gated bool) {
 // WriteUserTurn writes the user envelope to the live child's stdin and claims
 // the turncommit gate, wrapping the reviewed WriteTurn free function (#1088). It
 // is the delivery path the session pool dispatches through (send_message →
-// Session.WriteUserTurn → here). A nil target — no live child, or a rotation armed
-// by BeginRotation (#1330) — yields ErrNoLiveChild without writing, the retryable
-// no-live-child refusal; a gate deny yields turncommit.ErrDropped with zero bytes
-// written. Both are WriteTurn's verbatim contract, so no new envelope construction
-// is introduced.
+// Session.WriteUserTurn → here). A nil target yields ErrNoLiveChild without writing,
+// the retryable no-live-child refusal, and there are THREE ways to get one: no live
+// child, a rotation armed by BeginRotation (#1330), and a permission posture this
+// child has not confirmed (#2064, whose own two states — awaiting an ack, and refused
+// by claude — refuse identically and are told apart only by the record). A turncommit
+// gate deny yields turncommit.ErrDropped with zero bytes written. All of it is
+// WriteTurn's verbatim contract, so no new envelope construction is introduced.
 //
 // The rotation refusal deliberately reuses ErrNoLiveChild rather than minting a
 // sentinel: that is already the retryable classification msgqueue and cmd/pyry
@@ -1005,10 +1010,15 @@ func (r *Runner) RequestInitialize() error {
 // on it through SetPermissionMode, minting exactly one id per call, not two). The atomic counter is
 // unique within the runner's lifetime — one sequence, not one per subtype, since
 // request_id must be unique across all in-flight control requests on the stream
-// rather than merely within one subtype. That is all a future ack-correlator
-// needs since each runner
-// drives exactly one child stream; this slice does not read the control_response
-// ack, so the id is write-only here.
+// rather than merely within one subtype.
+//
+// THE ACK CORRELATOR EXISTS NOW (#2064) and this counter is what it correlates on, so
+// the id is no longer write-only. The parser's noteControlAck matches a
+// control_response's request_id against the PostureGate's armed id; a spawn writes two
+// requests off this counter and the gate opens only for its own. One sequence per
+// runner is still exactly right — each runner drives exactly one child stream — and a
+// SECOND counter would break the correlator rather than help it, since two sequences
+// collide on their first id. That is the mistake this paragraph exists to prevent.
 func (r *Runner) nextControlID() string {
 	return strconv.FormatUint(r.controlSeq.Add(1), 10)
 }
