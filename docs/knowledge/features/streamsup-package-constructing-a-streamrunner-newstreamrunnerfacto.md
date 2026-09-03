@@ -6,25 +6,59 @@ delivered the constructor (as the bare `streamRunnerFactory` func, the first `st
 tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
 to send turnevents, and #1168 added the `mcpApprovePath` param to inject the permission-approval flags.
 Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
-withApprovalArgs(scfg.Args, mcpApprovePath)`; `parser, held :=
+withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)`; `parser, held :=
 newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
 `streamsup.New(scfg)`; on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil
 `sessions.Runner`; on success, `streamRunner{r: r, models: held}`.
 
-**`withApprovalArgs(args []string, mcpApprovePath string) []string` (#1168, extended #2043)** is the
-interactive-stream twin of `agent_run.go`'s non-yolo `permissionArgs` wiring (#1106) — the first live
-consumer of `permissionArgs`/`writeMCPApproveConfig` on the interactive path. Reads
-`--dangerously-skip-permissions` off `args` as the single deterministic per-spawn yolo signal (both the
-bootstrap operator pass-through and `sessions.claudeSettingsArgs`'s per-session YOLO funnel through that
-one flag): present → return `args` unchanged (byte-identical to pre-#1168, no duplicate flag); absent →
-append the approval set, dropping its own `--permission-mode default` pair first when `args` already
-names a mode (below). Runs inside the shared factory closure, so it covers **both** the bootstrap runner
+**`withApprovalArgs(args []string, mcpApprovePath, storedMode string, operatorBypass bool) []string`
+(#1168, extended #2043, #2065)** is the interactive-stream twin of `agent_run.go`'s non-yolo
+`permissionArgs` wiring (#1106) — the first live consumer of `permissionArgs`/`writeMCPApproveConfig`
+on the interactive path. Through #2043 it read `--dangerously-skip-permissions` off `args` as the
+single deterministic per-spawn yolo signal, because that flag's presence or absence *was* the
+posture. **#2065 makes the flag unconditional** (`sessions.claudeSettingsArgs` appends it to every
+argv, since the posture is now decided in-band rather than by what launches), so a predicate reading
+`args` for it answers "yes" for every session — the approval set would stop being injected for
+anyone and the daemon's approval gate would quietly disappear fleet-wide. The question this function
+answers moved from "is the flag on the argv" to "will this child **keep** the bypass it launches
+with", which is true in exactly two cases, both decided before this function runs and passed in
+rather than read off `args`: `storedMode == sessions.PermissionModeBypass` (internal/streamsup refuses
+to write that mode by non-membership, so nothing walks the child back), or `operatorBypass` — the
+escalation came from the operator's pass-through claude args, which never touch `SessionSettings`, so
+the daemon may not revoke a grant it did not make. Either → return `args` unchanged (byte-identical to
+pre-#2065 on both rows, and avoids re-emitting a flag already present). Otherwise → append the
+approval set, dropping its own `--permission-mode default` pair first when `args` already names a
+mode (below); this is now a child the daemon downgrades in-band before its first turn, and it needs
+the approval gate exactly as it did before #2065.
+
+**"A bypass child has no approval gate to lose" stops holding at #2065.** That sentence used to
+justify the yolo-present early return: the flag's presence *meant* the child was staying in bypass, so
+there was nothing to inject. After #2065 every child launches with the flag, so the sentence is only
+still true of the two rows above — the ones nothing downgrades. For every other child (any stored
+in-band mode, no operator grant) the approval gate is very much there to lose, and the row that used
+to read "no flag → inject" now reads "flag present, `storedMode` not bypass → inject anyway". That
+is the row that reddens on any tree that keeps keying on the bare presence of the flag instead of on
+`storedMode`/`operatorBypass` — #2065's code review measured a `go test -overlay` mutant restoring
+the old presence check specifically to confirm this row catches it.
+
+**Cosmetic, not a fail-safe: an operator-bypass daemon's argv can carry the escalation flag twice.**
+When `operatorBypass` is true, `args` already carries the flag from the pass-through *and*
+`sessions.claudeSettingsArgs` appended a second copy unconditionally before this function ever runs;
+`withApprovalArgs` returns `args` unchanged, so the duplicate reaches the spawn. `claude
+--dangerously-skip-permissions --dangerously-skip-permissions --help` parses and exits 0 — reviewed
+and accepted at #2065's code review rather than de-duplicated, since nothing hermetic in this
+package's own tests exercises the shape (`namesPermissionMode`/`dropPermissionMode` only ever touch
+`--permission-mode`, never the escalation flag).
+
+Runs inside the shared factory closure, so it covers **both** the bootstrap runner
 and per-conversation runners — a per-conversation stream session cannot silently bypass the approval
 gate. `mcpApprovePath` is the daemon-global `--mcp-config` file `runSupervisor` writes once at startup
 via `writeMCPApproveConfig` (gated on `cfg.InteractiveRunner == "stream-json"`, fail-closed on write
 error, removed at shutdown); on the `""`/`"pty"` path the factory is never built, so the PTY interactive
-argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) and
-[codebase/1168.md](../codebase/1168.md).
+argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md),
+[codebase/1168.md](../codebase/1168.md) and
+[`SessionSettings` / `claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)
+for the `OperatorBypass` provenance bit this function now consumes.
 
 **Since #2043, `args` can already name a permission mode, and this function runs at runner
 CONSTRUCTION on top of it — the path a daemon restart takes to rebuild a session from the registry.**
@@ -36,14 +70,16 @@ joined `--permission-mode=` forms — the operator's bootstrap pass-through args
 mirroring `stripSessionIDFlags`'s two-form handling; `dropPermissionMode` scans for the pair rather than
 slicing a known offset, so `permissionArgs`' own ordering is not load-bearing).
 
-**Rejected shortcut — a second early return, mirroring the yolo arm above
-(`if namesPermissionMode(args) { return args }`).** This looks like the natural sibling of the
-yolo-present early return but is a privilege escalation: it would spawn every mode-carrying session
+**Rejected shortcut — a second early return, mirroring the stay-in-bypass arm above
+(`if namesPermissionMode(args) { return args }`).** This looks like the natural sibling of that
+early return but is a privilege escalation: it would spawn every mode-carrying session
 with **no** `--permission-prompt-tool`, `--mcp-config`, or `--strict-mcp-config` at all — the daemon's
 approval gate entirely absent — reachable from a stored setting alone, no operator action beyond
-setting a permission mode. The yolo early return is safe only because a bypass child has no approval
-gate to lose in the first place; a mode-carrying child (`plan`, `acceptEdits`, `auto`, `dontAsk`) still
-needs one. Caught in the #2043 spec's mandated security review before any code shipped; a test asserts
+setting a permission mode. The stay-in-bypass early return was safe at #2043 because the flag's
+presence meant the child had no approval gate to lose in the first place; since #2065 that early
+return is keyed on `storedMode`/`operatorBypass` rather than the flag (above) for exactly this
+reason — a mode-carrying child (`plan`, `acceptEdits`, `auto`, `dontAsk`) still needs the gate, and
+the flag alone can no longer tell the two apart. Caught in the #2043 spec's mandated security review before any code shipped; a test asserts
 the three approval flags survive a mode-carrying spawn.
 
 **No PTY fallback, structurally.** The function has no branch that calls `supervisor.New` — a

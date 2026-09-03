@@ -65,19 +65,83 @@ func claudeSettingsArgs(s SessionSettings) []string
 ```
 
 Pure helper, unexported. `Model != ""` → `--model <x>`; `Effort != ""` →
-`--effort <x>`; then a **mutually exclusive posture slot**, in that
-deterministic order:
+`--effort <x>`; then the posture.
 
-- `YOLO == true` → `--dangerously-skip-permissions` and nothing else — never
-  `--permission-mode bypassPermissions`, so the escalation keeps exactly one
-  spelling and the flag can never be composed from a mode string.
-- else a non-`default` in-band mode → `--permission-mode <mode>`.
-- else (`default` or `""`) → nothing. `default` **is** claude's own default,
-  so emitting no flag is the equivalent of an empty `Model`, and it is what
-  keeps every argv this function composed before #2043 byte-identical.
+**Since #2065 the escalation flag is unconditional, and the posture slot is no
+longer mutually exclusive.** Every argv this function composes carries
+`--dangerously-skip-permissions`, always, including the zero value — so
+`claudeSettingsArgs` no longer returns `nil` for an unconfigured session, and
+neither construction site's argv is byte-identical to pre-#833 behaviour any
+more. What launches is bypass for every child; what the child actually *runs*
+as is decided afterward, in-band, by the write `internal/streamsup`'s
+`spawnAndWait` issues before any user turn can reach it (see [posture
+gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md)). The launch
+argv stopped being the posture's authority — that is the whole ticket, because
+claude refuses an in-band re-escalation at a child that did not launch with the
+flag, so tightening a posture used to be free and loosening it needed a
+respawn.
 
-Zero value → `nil`, so both call sites append nothing and the argv is
-byte-identical to pre-#833 behaviour.
+The property the old mutual exclusion existed for is preserved, restated
+rather than dropped:
+
+- **The escalation keeps exactly one spelling.** `YOLO == true` still emits the
+  flag alone and nothing else; a non-escalated posture emits
+  `--permission-mode <mode>` beside it, gated by `permissionModeInBand`, which
+  does not include `bypassPermissions` — so no mode string can ever compose
+  `--permission-mode bypassPermissions`.
+- **`default` now names itself.** It used to append nothing, on the reasoning
+  that `default` *is* claude's own default so silence was equivalent to an
+  empty `Model`. Silence beside an unconditional bypass flag no longer reads as
+  `default` — it reads as whatever the flag says — so `default` composes
+  `--permission-mode default` like every other in-band member. The assembled
+  argv shape is not new: every non-bypass stream spawn already ended in that
+  pair, injected by `cmd/pyry`'s `permissionArgs`; `withApprovalArgs`' own
+  mode-drop arm (#2043, below) simply becomes the common case instead of the
+  exception.
+
+A mode outside the in-band set (an unrecognised string, or `""` from a
+hand-built literal that skipped `canonicalSettings`) still appends no pair —
+the argv must never claim a posture nothing will go on to write in-band. A
+`Pool`-held `Session` cannot reach that state; a hand-built one in a test can,
+which is why `TestRunnerConfigPermissionModeIsAlwaysKnown` pins it across all
+three construction paths (below).
+
+**Provenance, not presence, is what the two former fail-safes read now.**
+Before #2065, `internal/streamsup`'s spawn-time write and `cmd/pyry`'s
+`withApprovalArgs` both used the flag's *absence* from the assembled argv as
+their safety signal. Once the flag is unconditional that signal reads "yes"
+for every session, and both readers invert into their permissive arm
+silently — `withApprovalArgs` stops injecting the approval set for anyone, and
+the spawn-time write stops downgrading anyone, i.e. every child stays in
+bypass with no approval gate, the exact inverse of this ticket, shipped green.
+Both were rewritten instead to read `operatorBypass(base)` — `base` being
+`Session.spawnBase`, the **settings-free** argv (template args, including the
+operator's `pyry install-service -- --dangerously-skip-permissions`
+pass-through, plus the construction-time `--session-id`/`--settings` suffixes)
+— because that is the one place a bypass this package composed from the stored
+posture is still separable from one the operator handed the daemon directly.
+`spawnBase` is immutable post-construction and every post-construction argv
+install (`Pool.UpdateSettings` → `Runner.Restart` / `Runner.SetSpawnArgs`)
+recomposes from that same base, so the bit cannot go stale. It crosses both
+package boundaries as a single `bool` — `RunnerConfig.OperatorBypass`, set once
+at each construction site from `operatorBypass(base)` and mapped straight
+through to `streamsup.Config.OperatorBypass` — never as a second read of the
+assembled argv. `PermissionModeBypass` is exported (an alias of
+`permissionModeBypass`, not a second literal) so `cmd/pyry`'s
+`withApprovalArgs` can pair the stored-posture half of that same distinction
+without a second vocabulary. See [`withApprovalArgs`](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)
+and [the posture gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
+
+**Cosmetic edge case, not a fail-safe: an operator-bypass daemon composes the
+flag twice.** `spawnArgs` is `spawnBase + claudeSettingsArgs(...)`; when the
+operator's pass-through already put the flag in `spawnBase`, the unconditional
+append puts a second copy on every spawn from that daemon. `claude
+--dangerously-skip-permissions --dangerously-skip-permissions --help` parses
+and exits 0, so nothing breaks — but nothing hermetic in this package's own
+tests covers the shape, because a duplicate is unreachable by construction from
+`claudeSettingsArgs`' own output alone; it only appears once `spawnBase` is
+concatenated in. Reviewed and accepted at #2065's code review as a documented
+cosmetic, not a correctness gap.
 
 **Two spawn sites, both appending to a cloned slice:**
 
