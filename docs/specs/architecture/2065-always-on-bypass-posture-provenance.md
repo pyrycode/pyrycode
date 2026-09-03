@@ -430,6 +430,53 @@ Each is resolved in Phase B and, if it changes the design, recorded under
 One boundary exceeded, and it is the one the ticket instructs to absorb rather
 than split, on the floor rule. Every other boundary holds.
 
+## Revisions
+
+### 2026-09-03 — Open questions resolved, and one that could not be
+
+The design landed as planned; nothing in Design or Concurrency model changed. The
+three Open Questions resolved as follows.
+
+**OQ 3 (fake-daemon e2e suite) — RESOLVED GREEN.** `go test -tags e2e -race
+-count=1 ./internal/e2e/...` passes, and
+`TestRelayV2_StreamModalPermissionRoundTrip` was run by name and reported PASS on
+all four subtests. Neither `fakeclaude` read loop reads the escalation flag, so
+the always-on flag is inert there as predicted.
+
+**OQ 1 and OQ 2 (does the flag beside a `--permission-mode` pair change anything
+at launch) — NOT RESOLVED. AC 5 is written but UNEXECUTED.** The live arm
+`TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows` skips in this
+environment: neither `ANTHROPIC_API_KEY` nor `CLAUDE_CODE_OAUTH_TOKEN` is set, and
+a skip exits 0. That is the established behaviour for a `needs-real-claude`
+ticket — the dispatch environment carries no Claude login and such tickets park
+for an operator's live run — not a defect in the test. Both #2065 additions (the
+argv instrument check and A5's first-`system/init` read) are in the tree and
+compile under `go vet -tags e2e_realclaude`; neither has been measured against a
+live claude, and the test's header says so in place of a fabricated transcript.
+
+Consequences, stated rather than left to be inferred:
+
+- The claim AC 5 exists to re-prove — #2060's closed launch→downgrade window,
+  measured on hand-driven argvs, still holding when the argv is composed by the
+  daemon — rests for now on #2060's own measurement plus the posture gate, which
+  refuses every user turn until the ack lands. It is not proven on this path.
+- The ticket's stop-and-report rule is live and encoded in A5's failure message:
+  if an operator's run finds `modes[0]` reporting the escalation, the window is
+  reachable, and the response is a comment plus `needs-rework:refiner`, never a
+  mitigation.
+
+**Evidence added beyond the plan.** The plan predicted which row of AC 3 and AC 4
+kills which wrong tree; those predictions were then measured with four `go test
+-overlay` mutants rather than left as reasoning. Each reddened exactly its
+predicted row: the old argv-presence predicate in `spawnAndWait` (AC 4 row 2), the
+interlock deleted there (row 3), the old argv-presence predicate in
+`withApprovalArgs` (AC 3), and its provenance clause deleted (AC 4 row 3 at the
+`cmd/pyry` seam). The results are recorded in the two test headers.
+
+**Security-review SHOULD FIX landed** as `TestRunnerConfigPermissionModeIsAlwaysKnown`
+in `internal/sessions`, driving a junk on-disk mode through all three construction
+paths.
+
 ## Security review
 
 **Verdict:** PASS
