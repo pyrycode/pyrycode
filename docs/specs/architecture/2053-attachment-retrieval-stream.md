@@ -474,3 +474,67 @@ it yet** stays true and stays. One dated `## Changelog` entry, newest first.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — implementation departures from the committed design
+
+Two places where Phase B did not do what Phase A wrote down, plus one field
+name. Recorded here rather than quietly folded into the design above, so the
+diff between the plan and the code reads as decisions instead of drift.
+
+**1. The oracle REJECTS a wrong-transfer frame; the plan said it skips one.**
+§ Design described `ReassembleAttachment` as selecting one transfer "by matching
+both `attachment_id` and `in_reply_to`, **skipping** every other frame." Writing
+the test exposed that as too weak. The two filters answer different questions and
+only one of them is a skip:
+
+- A frame answering **another request** (`in_reply_to` differs) is another
+  transfer's, and skipping it is right — it is what makes concurrent retrievals
+  over one connection separate cleanly, and it mirrors `ReassembleBundle`
+  skipping a non-bundle frame.
+- A frame answering **this request** while naming another transfer is not
+  somebody else's frame. It is the daemon answering the right ask with the wrong
+  bytes, and skipping it would let a receiver silently assemble a short or
+  wrong file. It is now an error.
+
+That distinction is also what makes the ticket's non-redundancy claim
+demonstrable rather than asserted: this is precisely the failure the payload id
+catches and `in_reply_to` cannot. Pinned by the `wrong-transfer-under-this-request`
+row of `TestReassembleAttachment`.
+
+**2. The cap is measured twice, in two fabrics, where the plan had one test.**
+§ Testing strategy put the escape worst case (255 filename bytes of `<`, which
+`encoding/json` expands to six bytes each) into the session test. That does not
+work as written — the session test streams from the filesystem, so its filename
+has to be a real on-disk name, and pinning the worst case there would have meant
+choosing between the two properties. Split instead:
+
+- `TestAttachmentEnvelopes_FrameWithinCapAtWorstCaseMetadata` (pure) measures the
+  **marshalled envelope** at the full escape worst case the arithmetic budgets.
+- `TestStreamAttachment_EveryFrameWithinCap` (session) measures the **real sealed
+  ciphertext** against `maxNoisePayloadBytes`, under a real 255-byte name.
+
+Strictly stronger than the single test planned, and it keeps AC#2's "measured on
+the real serialised frame" satisfied by the second while the first covers the
+metadata case a real filename cannot reach.
+
+**3. The debug line logs `chunks`, not `total_chunks`** — `StreamBundle`'s field
+name, kept so the two stream lines read the same way. No content difference.
+
+### 2026-09-03 — a fourth instance of the corrected claim, filed as #2056
+
+The § Attachments wording sweep found the same wrong claim in
+`protocol.AttachmentChunkPayload`'s own doc block, where its SECURITY paragraph
+calls the outbound fields "daemon-authored and **trustworthy**" — a stronger and
+more dangerous form than any of the three sentences AC#4 names, since it reads
+as a licence to dispatch on `mime_type`. Two field-contract bullets in the same
+block carry the narrower version.
+
+**Not fixed here.** AC#4 scopes the correction to `docs/protocol-mobile.md`
+§ Attachments and names three locations, all of which are corrected; this fourth
+one is in a production source file the ticket deliberately kept outside its
+one-file scope. The inconsistency is pre-existing rather than introduced by this
+slice — § Attachments already said the outbound values must not be read as
+trustworthy while that block said they are — so it is filed as **#2056** and left
+for its own ticket.
