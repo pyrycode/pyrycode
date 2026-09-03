@@ -221,7 +221,7 @@ func TestPool_UpdateSettings_InBandMode(t *testing.T) {
 	if len(installs) != 1 {
 		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
 	}
-	if got, want := installedArgv(t, installs[0]), []string{"--permission-mode", "acceptEdits"}; !reflect.DeepEqual(got, want) {
+	if got, want := installedArgv(t, installs[0]), alwaysOnPosture("acceptEdits"); !reflect.DeepEqual(got, want) {
 		t.Errorf("installed argv = %v, want %v", got, want)
 	}
 }
@@ -259,7 +259,7 @@ func TestPool_UpdateSettings_RevokeKeepsStoredMode(t *testing.T) {
 	if len(installs) != 1 {
 		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
 	}
-	want := []string{"--model", "opus", "--permission-mode", "plan"}
+	want := append([]string{"--model", "opus"}, alwaysOnPosture("plan")...)
 	if got := installedArgv(t, installs[0]); !reflect.DeepEqual(got, want) {
 		t.Errorf("installed argv = %v, want %v", got, want)
 	}
@@ -319,12 +319,12 @@ func TestPool_UpdateSettings_WarmStart_SpawnsUnderStoredMode(t *testing.T) {
 		stored SessionSettings
 		want   []string
 	}{
-		{"a stored in-band mode", SessionSettings{PermissionMode: "plan"}, []string{"--permission-mode", "plan"}},
+		{"a stored in-band mode", SessionSettings{PermissionMode: "plan"}, alwaysOnPosture("plan")},
 		// helperRestartPool writes the entry through permissionModeForDisk, so
 		// both rows below produce an entry with NO permission_mode key — exactly
 		// the pre-#2043 on-disk shape.
-		{"a pre-2043 entry with yolo", SessionSettings{YOLO: true}, []string{"--dangerously-skip-permissions"}},
-		{"a pre-2043 entry without yolo", SessionSettings{Model: "sonnet"}, []string{"--model", "sonnet"}},
+		{"a pre-2043 entry with yolo", SessionSettings{YOLO: true}, escalatedPosture()},
+		{"a pre-2043 entry without yolo", SessionSettings{Model: "sonnet"}, append([]string{"--model", "sonnet"}, alwaysOnPosture(permissionModeDefault)...)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

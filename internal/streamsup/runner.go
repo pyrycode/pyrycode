@@ -57,11 +57,20 @@ import (
 const killGrace = 5 * time.Second
 
 // bypassPermissionsFlag is claude's argv spelling of the escalation, and the only
-// spelling of it: cmd/pyry's withApprovalArgs records that its presence in a spawn's
-// args is "the single deterministic yolo signal", robust to both entry points that
-// can put it there. spawnAndWait reads it to suppress the spawn-time posture write at
-// a child that launched in bypass; see that site for why the argv, and not the stored
-// posture alone, has to be consulted.
+// spelling of it.
+//
+// NOTHING IN THIS PACKAGE'S PRODUCTION PATH READS IT ANY MORE, and that absence is
+// the point rather than an oversight. Until #2065 its presence in a spawn's args was
+// "the single deterministic yolo signal", and spawnAndWait consulted it to suppress
+// the spawn-time posture write at a child launched in bypass. #2065 made
+// sessions.claudeSettingsArgs append it to EVERY argv, so its presence stopped
+// distinguishing anything and the decision moved to Config.OperatorBypass, which
+// carries the flag's PROVENANCE across the seam. Reintroducing a reader here would
+// reintroduce the universally-true predicate that ticket exists to remove.
+//
+// It is retained rather than deleted so the flag keeps exactly one spelling in this
+// package for the spawn tests that compose an argv with it, instead of that literal
+// migrating into a test file where the next reader would not find it.
 //
 // This is the FLAG, not the mode name. #1603 emptied this package's production source
 // of the bypassPermissions MODE literal so that the escalation keeps exactly one
@@ -245,6 +254,33 @@ type Config struct {
 	// written with nothing correlating its ack is a line the daemon believes in and
 	// has not confirmed, which is the shape #2065 cannot tolerate.
 	SpawnPermissionMode string
+
+	// OperatorBypass reports that the escalation on this runner's spawn argv came
+	// from the OPERATOR's pass-through claude args rather than from the daemon's own
+	// settings composition (#2065). It is sessions.RunnerConfig.OperatorBypass
+	// carried across the seam, derived there from the settings-free spawnBase.
+	// Optional; the zero value is "the daemon composed whatever is on this argv",
+	// which is what leaves every construction site outside the interactive daemon
+	// byte-identical.
+	//
+	// TRUE SUPPRESSES THE SPAWN-TIME POSTURE WRITE. It is the second half of that
+	// decision, and it REPLACES the argv read that used to make it: until #2065 this
+	// runner asked whether the spawn's own args named the escalation, because that
+	// answered the same question. It stopped answering it when
+	// sessions.claudeSettingsArgs began appending the flag to every argv — a
+	// predicate reading the argv now answers "operator bypass" for every session, so
+	// no child is ever sent its stored posture and every child stays in the bypass it
+	// launched with. Read spawnAndWait's arm site for the whole derivation.
+	//
+	// It is a Config field where the argv read was per-spawn, and that is sound
+	// rather than a regression: the value it replaced was a property of the assembled
+	// argv, which Restart(newArgs) can change, whereas provenance is a property of
+	// the session's immutable spawnBase, which nothing can. SetSpawnArgs and Restart
+	// install an argv VERBATIM, so a future caller composing one from something other
+	// than sessions.Session.spawnArgs owns keeping this bit in step — though both
+	// mis-pairings fail safe: a flag with the bit false downgrades a child that IS in
+	// bypass, and the bit true with no flag writes nothing at a child that is not.
+	OperatorBypass bool
 
 	// PostureGate is the ack signal the spawn-time posture write is held against
 	// (#2064): armed with the write's locally-minted request_id before the child's
@@ -1521,11 +1557,11 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// armedID's doc already makes; nesting the call merely failed to reach the branch
 	// that needs it.
 	//
-	// A SPAWN THAT LAUNCHED IN BYPASS IS SENT NOTHING, whatever the stored posture
-	// says. This is the argv-derived interlock that an earlier revision of this
-	// comment recorded as "designed and REJECTED" on the grounds that it would brick
-	// #2065; the live-claude gate then falsified the premise the rejection rested on,
-	// and the reversal is recorded here rather than quietly applied.
+	// A SPAWN WHOSE BYPASS THE DAEMON DID NOT COMPOSE IS SENT NOTHING, whatever the
+	// stored posture says. This is the interlock an earlier revision of this comment
+	// recorded as "designed and REJECTED" on the grounds that it would brick #2065;
+	// the live-claude gate then falsified the premise the rejection rested on, and
+	// the reversal is recorded here rather than quietly applied.
 	//
 	// WHAT THE REJECTION ASSUMED: that the stored posture is kept accurate at its
 	// source by SetSpawnPermissionMode, so a disagreement between argv and stored mode
@@ -1533,9 +1569,12 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// withApprovalArgs' doc in cmd/pyry names both — and only one of them is modelled
 	// by the stored posture:
 	//
-	//   - sessions.claudeSettingsArgs, from the per-session YOLO bit. canonicalSettings
-	//     pins PermissionMode to the escalation alongside it, so permissionModeAllowed
-	//     already refuses this row by non-membership and the interlock is redundant on it.
+	//   - sessions.claudeSettingsArgs. canonicalSettings pins PermissionMode to the
+	//     escalation alongside a set YOLO bit, so permissionModeAllowed already
+	//     refuses THAT row by non-membership and the interlock is redundant on it.
+	//     Since #2065 this composer appends the flag UNCONDITIONALLY, so it also
+	//     produces the row where the stored posture is a real in-band mode and the
+	//     child must be walked back to it — the downgrade #2065 exists for.
 	//   - THE OPERATOR'S BOOTSTRAP PASS-THROUGH claude args, the shape main.go's own
 	//     install-service example documents. These never touch SessionSettings, so the
 	//     stored posture reads default while the child is launched in bypass — and
@@ -1547,22 +1586,27 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// spawnBootstrapDaemon's pass-through --dangerously-skip-permissions, and each
 	// failed with real claude refusing a real tool — permission_denied on Bash and on
 	// Write, and "I need permission to read that file" on Read — after this write put
-	// the child in default. The ticket's "no-op in effect on today's launch argv"
-	// premise holds only for the entry point the stored posture models.
+	// the child in default.
 	//
-	// WHAT #2065 MUST DO, since this predicate is the one it will trip over: it cannot
-	// key on the flag alone either, because the operator's pass-through survives that
-	// ticket unchanged and would be downgraded by it for exactly the reason above. It
-	// needs PROVENANCE — the daemon must be able to tell bypass it composed itself,
-	// and may therefore downgrade, from bypass an operator handed it, which it may
-	// not. Give this predicate that distinction and the gate keeps working; delete it
-	// and #2065 inherits this defect rather than avoiding it.
+	// WHY THIS READS A CONFIG FIELD AND NOT THE ARGV. #2064 read
+	// slices.Contains(args, bypassPermissionsFlag) here, and that was the right
+	// signal while the flag's presence still MEANT something: the two entry points
+	// above were the only ways it reached an argv. #2065 makes claudeSettingsArgs
+	// append it to every argv, so the argv read answers true universally — no child
+	// is ever sent its stored posture, every child stays in bypass, every gate stays
+	// open, and the ticket ships as its own exact inverse, green and silent. The
+	// distinction that survives is PROVENANCE: bypass the daemon composed itself,
+	// which it may walk back, versus bypass an operator handed it, which it may not.
+	// cfg.OperatorBypass carries exactly that, derived in internal/sessions from the
+	// settings-free spawnBase — the one place the two are still separable.
 	//
-	// Evaluated PER SPAWN against this spawn's args, which is what keeps it correct
-	// across Restart(newArgs) with no second acquisition and no Config field to go
-	// stale — the cadence withApprovalArgs' doc already prescribes for this signal.
+	// Losing per-spawn evaluation costs nothing here, and the reason is worth stating
+	// because the field it replaces was deliberately per-spawn: the old value was a
+	// property of the ASSEMBLED argv, which Restart(newArgs) can change, whereas
+	// provenance is a property of the immutable spawnBase every recompose is built
+	// from. See Config.OperatorBypass for the one constraint that keeps it true.
 	postureID := ""
-	if permissionModeAllowed(spawnMode) && !slices.Contains(args, bypassPermissionsFlag) {
+	if permissionModeAllowed(spawnMode) && !r.cfg.OperatorBypass {
 		postureID = r.nextControlID()
 	}
 	r.postureGate.arm(postureID)

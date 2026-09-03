@@ -55,16 +55,39 @@ documented at `withApprovalArgs` — see [Constructing a
 than through `sessions.claudeSettingsArgs`'s per-session YOLO bit. That pass-through never
 touches `SessionSettings`, so the stored posture read `default` at a child actually running in
 bypass, and the spawn-time write silently downgraded a bypass the operator asked for outside
-the daemon's own knowledge. Fixed by evaluating admissibility **per spawn** against that
-spawn's own `args` (already available in `spawnAndWait`) rather than only against the stored
-mode: a spawn whose argv already names the escalation writes nothing and arms OPEN. Neither the
-fake-daemon suite nor this package's own tests could see the gap — both drive the stored
-posture, neither spawns through the pass-through — so this needed the live-claude proof to
-surface at all. **#2065, which removes the posture from the launch argv entirely, inherits the
-same fact**: it cannot key admissibility on the flag alone either, because the daemon's own
-future in-band delivery will legitimately put every child in bypass. What it needs is
-provenance — bypass the daemon composed itself vs. bypass an operator handed it — and this
-predicate is the one place that distinction is currently recorded.
+the daemon's own knowledge. Fixed, originally, by evaluating admissibility **per spawn** against
+that spawn's own `args`: a spawn whose argv already named the escalation wrote nothing and armed
+OPEN.
+
+**#2065 could not keep that fix — the argv reading it depended on stopped existing.** Once
+`sessions.claudeSettingsArgs` puts the escalation flag on every argv (#2065's whole point — the
+posture is decided in-band, not by what launches), reading `args` for the flag answers "yes" for
+every spawn, and the predicate above inverts into its permissive arm for everyone: no child is
+ever downgraded, every gate stays open, the exact inverse of #2065's ticket, shipped green. There
+is no argv shape left to read that still tells the two cases apart, because after #2065 a bypass
+the daemon composed from the stored posture and a bypass the operator handed it on the
+pass-through look byte-identical on the assembled argv — both are just the flag.
+
+The fix is `Config.OperatorBypass bool` — a construction-time field, not a per-spawn argv read.
+`spawnAndWait`'s clause became `permissionModeAllowed(spawnMode) && !r.cfg.OperatorBypass`, and
+the id stays conditional while the `arm` call stays unconditional (the residual-arm fix above is
+not reintroduced). `OperatorBypass` is set once, in `internal/sessions`, from
+`operatorBypass(base)` — `base` is `Session.spawnBase`, the *settings-free* argv that carries the
+operator's pass-through and nothing `claudeSettingsArgs` ever appends — so it is exactly the
+signal the per-spawn `args` read used to approximate, computed from the one place that still
+separates the two provenances instead of from the place that stopped being able to. See
+[`SessionSettings` / `claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)
+for the provenance bit's full derivation and its `cmd/pyry` twin.
+
+Neither the fake-daemon suite nor this package's own tests could see the original gap — both
+drive the stored posture, neither spawns through the pass-through — so it needed the live-claude
+proof to surface at all the first time. #2065's live arm
+(`TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows`, extended) re-proves the
+closed launch→downgrade window on the daemon's *own* spawn path rather than on a hand-driven
+argv, but as of #2065 landing it is written and unexecuted in this environment — no Claude
+credentials, so the arm reports `--- SKIP` and exits 0. Until an operator's `make
+e2e-realclaude` run reads a nonzero `=== RUN` count for that arm, the re-proof rests on #2060's
+hand-driven measurement plus the gate itself, not on this path.
 
 ## Keeping the spawn posture in step
 

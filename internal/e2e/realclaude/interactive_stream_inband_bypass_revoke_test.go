@@ -145,6 +145,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -655,7 +656,9 @@ func firstOrEmpty(s []string) string {
 
 // --- #2064: the spawn-time posture gate, on the daemon's own spawn path --------
 
-// TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows is #2064 AC 5. It
+// TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows is #2064 AC 5,
+// extended by #2065 AC 5 (see "What #2065 added" below — its two assertions are
+// written but NOT yet measured against a live claude). It
 // drives one live claude session whose STORED posture is the default one — the
 // posture that arms the gate, unlike the bypass session the test above measures — and
 // proves the gate OPENS: the daemon writes its stored posture to the child it just
@@ -700,7 +703,39 @@ func firstOrEmpty(s []string) string {
 //     init.permissionMode echo. Logged and asserted as `default`, the stored posture.
 //   - A4 pins that this happened on ONE child, so no respawn is doing the work.
 //
-// # Measured 2026-09-03, claude on the operator's Max plan — EXECUTED, not skipped
+// # What #2065 added, and what is NOT yet measured
+//
+// #2065 made sessions.claudeSettingsArgs append --dangerously-skip-permissions to
+// every argv, so the child this test spawns now LAUNCHES IN BYPASS and is walked
+// back to its stored posture in-band. Two things were added for that ticket's AC 5:
+// an instrument check that the pool-composed argv really carries the flag (without
+// it every assertion here would pass for the pre-#2065 reason, measuring nothing),
+// and A5, which reads the FIRST init line rather than the last.
+//
+// A5 is #2060's race-window verdict re-proven on the daemon's own spawn path. That
+// ticket measured 3/3 consecutive spawns reporting the downgraded posture at their
+// own first system/init line, on HAND-DRIVEN argvs; the claim that has to hold now
+// is the same one where the argv is composed by the daemon.
+//
+// **THOSE TWO ASSERTIONS HAVE NOT BEEN EXECUTED AGAINST A LIVE CLAUDE.** The
+// dispatch environment carries no Claude login, so this test SKIPS there and a skip
+// exits 0. #2065 was built and verified with every hermetic gate green and this arm
+// skipped; it needs an operator's `make e2e-realclaude` run to become a
+// measurement. Until then, treat A5 as written-and-unproven, and read the count of
+// `=== RUN` lines that reported PASS — never the exit code, and never the presence
+// of the transcript below.
+//
+// If a live run finds modes[0] reporting the escalation, the window is REACHABLE on
+// the daemon's spawn path. Do not ship a mitigation: comment the finding on #2065
+// and apply needs-rework:refiner. A narrowed window is still a window, and a daemon
+// that sometimes starts a child in bypass is worse than one that sometimes needs a
+// respawn.
+//
+// # Measured 2026-09-03 for #2064, claude on the operator's Max plan — EXECUTED
+//
+// This transcript is from the PRE-#2065 tree: that child's argv carried no
+// escalation flag, so it records the gate opening and nothing about the always-on
+// flag. It is kept because A1-A4 are unchanged and it is their evidence.
 //
 // One `=== RUN` line, `--- PASS`, 3.72 s, one turn's tokens spent:
 //
@@ -742,7 +777,15 @@ func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing
 	logHandler, spawns, notDelivered := newRevokeLogRecorder()
 
 	var tap inbandRunner
+	var composedArgs []string
+	var composedOperatorBypass bool
 	factory := func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+		// #2065's instrument capture. The pool composed this argv, so it is the only
+		// place in the run that can show the always-on escalation flag actually
+		// reached a daemon-spawned child. Asserted after Pool.New returns, not here,
+		// so a mismatch is a test failure rather than a factory error.
+		composedArgs = slices.Clone(cfg.ClaudeArgs)
+		composedOperatorBypass = cfg.OperatorBypass
 		// The parser is the gate's minter, exactly as in production. It is teed in
 		// beside the tap rather than replacing it: the tap is what makes the ack and
 		// the init modes readable, and the parser is what RELEASES the gate. Its sink
@@ -756,8 +799,10 @@ func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing
 			Stdout:    io.MultiWriter(rec, parser),
 			Logger:    cfg.Logger,
 			// Read off the RunnerConfig rather than hard-coded, so the pool's own
-			// plumbing of the stored posture is part of what this run measures.
+			// plumbing of the stored posture and of #2065's provenance bit is part of
+			// what this run measures.
 			SpawnPermissionMode: cfg.PermissionMode,
+			OperatorBypass:      cfg.OperatorBypass,
 			PostureGate:         parser.PostureGate(),
 		})
 		if err != nil {
@@ -796,6 +841,26 @@ func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing
 			"registry seeded at %s with bootstrap id %s did not reach the pool, so the gate "+
 			"would never be armed and this run would measure nothing",
 			settings, ok, registryPath, seededID)
+	}
+
+	// #2065's instrument check, and the one that makes A5 below non-vacuous. On a
+	// tree where the escalation flag never went unconditional, this child launches
+	// WITHOUT it and reports "default" at its first init line for the pre-#2065
+	// reason — every assertion here would pass while measuring nothing new. Also
+	// deterministic and pre-spawn, so a tree that fails it costs zero tokens.
+	t.Logf("#2065: pool-composed argv %q (OperatorBypass=%v)", composedArgs, composedOperatorBypass)
+	if !slices.Contains(composedArgs, "--dangerously-skip-permissions") {
+		t.Fatalf("#2065: the argv the pool composed is %q, which carries no "+
+			"--dangerously-skip-permissions: this daemon does not launch its children in bypass, "+
+			"so nothing below measures the always-on flag", composedArgs)
+	}
+	// revokeBaseArgs is empty, so the escalation on that argv can only have come from
+	// claudeSettingsArgs. A true here would mean the daemon must NOT walk this child
+	// back, and the gate would never arm — the run would measure nothing.
+	if composedOperatorBypass {
+		t.Fatalf("#2065: OperatorBypass is true for a daemon whose bootstrap ClaudeArgs are %q; "+
+			"the provenance bit was derived from the assembled argv rather than the settings-free "+
+			"base, so no child is ever written its stored posture", revokeBaseArgs)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -854,5 +919,23 @@ func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing
 	if spawnCount != 1 {
 		t.Errorf("A4: %d spawns over the whole run, want exactly 1; the gate must open on "+
 			"the child that was spawned, not on a replacement", spawnCount)
+	}
+	// A5 is #2065's own: the FIRST init line, not the last. #2060 measured the
+	// launch→downgrade window closed on hand-driven argvs — 3/3 spawns reported the
+	// downgraded posture at their own first system/init line, i.e. before claude
+	// published an opening posture at all. This re-proves that verdict where the argv
+	// is composed by the daemon rather than by hand, which is where it now has to
+	// hold: every child this daemon spawns launches in bypass.
+	//
+	// A3 above cannot carry it. It reads the LAST init line, so it would stay green
+	// on a child that opened in bypassPermissions and was walked back afterwards —
+	// which is exactly the window this assertion exists to rule out.
+	if len(modes) == 0 || modes[0] != "default" {
+		t.Errorf("A5: the child's FIRST init.permissionMode is %q (all %q), want %q. Its argv "+
+			"carried --dangerously-skip-permissions, so a first line reporting the escalation "+
+			"means the launch→downgrade window is REACHABLE on the daemon's own spawn path. "+
+			"Do not mitigate: comment the finding on #2065, apply needs-rework:refiner, and "+
+			"leave the current shape alone (a narrowed window is still a window)",
+			firstOrEmpty(modes), modes, "default")
 	}
 }

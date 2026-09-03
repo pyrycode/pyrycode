@@ -182,7 +182,7 @@ func TestPool_UpdateSettings_InBand_ModelAndEffort(t *testing.T) {
 	if len(installs) != 1 {
 		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
 	}
-	if got, want := installedArgv(t, installs[0]), []string{"--model", "opus", "--effort", "high"}; !reflect.DeepEqual(got, want) {
+	if got, want := installedArgv(t, installs[0]), append([]string{"--model", "opus", "--effort", "high"}, alwaysOnPosture(permissionModeDefault)...); !reflect.DeepEqual(got, want) {
 		t.Errorf("installed argv = %v, want %v", got, want)
 	}
 	if disk := diskSettings(t, regPath); disk != (SessionSettings{Model: "opus", Effort: "high"}) {
@@ -232,7 +232,7 @@ func TestPool_UpdateSettings_InBand_EvictedNoLiveChild(t *testing.T) {
 	if len(installs) != 1 {
 		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
 	}
-	want := []string{"--session-id", string(id), "--model", "opus"}
+	want := append([]string{"--session-id", string(id), "--model", "opus"}, alwaysOnPosture(permissionModeDefault)...)
 	if got := installedArgv(t, installs[0]); !reflect.DeepEqual(got, want) {
 		t.Errorf("installed argv = %v, want %v", got, want)
 	}
@@ -240,8 +240,10 @@ func TestPool_UpdateSettings_InBand_EvictedNoLiveChild(t *testing.T) {
 
 // TestPool_UpdateSettings_ClearModel_KeepsRestart (AC #2's uncovered corner):
 // clearing the model to "" means "run at claude's own default", which
-// claudeSettingsArgs expresses by omitting the flag and which has no measured
-// /model form — so it keeps the restart. Every test AC #2 names either carries a
+// claudeSettingsArgs expresses by omitting the --model flag and which has no
+// measured /model form — so it keeps the restart. (The posture suffix is
+// unrelated and is on every argv since #2065; "no settings flags" below means no
+// model and no effort.) Every test AC #2 names either carries a
 // present YOLO or returns before the live-apply, so none of them exercises this.
 func TestPool_UpdateSettings_ClearModel_KeepsRestart(t *testing.T) {
 	t.Parallel()
@@ -263,8 +265,8 @@ func TestPool_UpdateSettings_ClearModel_KeepsRestart(t *testing.T) {
 	if len(restarts) != 1 {
 		t.Fatalf("Restart called %d times, want exactly 1: %v", len(restarts), restarts)
 	}
-	if got := installedArgv(t, restarts[0]); len(got) != 0 {
-		t.Errorf("restart argv = %v, want no settings flags at all", got)
+	if got, want := installedArgv(t, restarts[0]), alwaysOnPosture(permissionModeDefault); !reflect.DeepEqual(got, want) {
+		t.Errorf("restart argv = %v, want no model or effort flag, only the posture suffix %v", got, want)
 	}
 	if got := runner.userTurns(); len(got) != 0 {
 		t.Errorf("clearing the model invented a command: %q", got)

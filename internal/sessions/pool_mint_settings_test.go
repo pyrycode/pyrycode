@@ -56,7 +56,8 @@ func TestPool_CreateIn_InheritsOperatorSettings(t *testing.T) {
 	}
 
 	got := waitArgv(t, spawnDir)
-	want := []string{"--session-id", string(id), "--model", "opus", "--effort", "high"}
+	want := append([]string{"--session-id", string(id), "--model", "opus", "--effort", "high"},
+		alwaysOnPosture(permissionModeDefault)...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("minted argv = %v, want %v", got, want)
 	}
@@ -85,7 +86,8 @@ func TestPool_GetOrCreateIn_InheritsOperatorSettings(t *testing.T) {
 	}
 
 	got := waitArgv(t, spawnDir)
-	want := []string{"--session-id", string(target), "--model", "opus", "--effort", "high"}
+	want := append([]string{"--session-id", string(target), "--model", "opus", "--effort", "high"},
+		alwaysOnPosture(permissionModeDefault)...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("minted argv = %v, want %v", got, want)
 	}
@@ -105,11 +107,19 @@ func TestPool_MintedSession_NeverInheritsBypass(t *testing.T) {
 	pool := helperPoolMintBootstrap(t, regPath, tplWorkDir, SessionSettings{Model: "opus", Effort: "high", YOLO: true})
 	ctx, _ := runPoolInBackground(t, pool)
 
-	// The fixture proof: the bootstrap really did take the bypass, so an absent
-	// flag below means "not inherited" rather than "never configured".
+	// The fixture proof: the bootstrap really did take the escalation. Since #2065
+	// the FLAG is on every argv, so its presence proves nothing — what separates an
+	// escalated session from a downgraded one is the absence of the --permission-mode
+	// pair beside it, which claudeSettingsArgs suppresses only for a stored
+	// bypassPermissions. That absence is what makes the minted assertion below
+	// non-vacuous.
 	bootArgv := waitArgv(t, tplWorkDir)
 	if !slices.Contains(bootArgv, "--dangerously-skip-permissions") {
 		t.Fatalf("bootstrap argv = %v, want it to carry --dangerously-skip-permissions", bootArgv)
+	}
+	if slices.Contains(bootArgv, "--permission-mode") {
+		t.Fatalf("bootstrap argv = %v names a permission mode, so the yolo fixture never took: "+
+			"an escalated session composes the flag ALONE", bootArgv)
 	}
 
 	id, err := pool.CreateIn(ctx, "", spawnDir)
@@ -117,10 +127,17 @@ func TestPool_MintedSession_NeverInheritsBypass(t *testing.T) {
 		t.Fatalf("CreateIn: %v", err)
 	}
 
+	// The minted session inherits model and effort but NOT the posture, and since
+	// #2065 "not inherited" is spelled as a downgrade rather than as an omission:
+	// the minted child launches in bypass like every other, and carries
+	// --permission-mode default, which is the posture the daemon writes it back to
+	// before any turn reaches it. A tree that let the escalation be inherited would
+	// compose the bare flag here, exactly as the bootstrap above does.
 	got := waitArgv(t, spawnDir)
-	want := []string{"--session-id", string(id), "--model", "opus", "--effort", "high"}
+	want := append([]string{"--session-id", string(id), "--model", "opus", "--effort", "high"},
+		alwaysOnPosture(permissionModeDefault)...)
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("minted argv = %v, want %v (bypass must never be inherited)", got, want)
+		t.Errorf("minted argv = %v, want %v (the escalation must never be inherited)", got, want)
 	}
 }
 
@@ -141,7 +158,7 @@ func TestPool_Revive_DoesNotInheritOperatorSettings(t *testing.T) {
 	pool := helperPoolMintBootstrap(t, regPath, tplWorkDir, SessionSettings{Model: "opus", Effort: "high"})
 	ctx, _ := runPoolInBackground(t, pool)
 
-	if got, want := waitArgv(t, tplWorkDir), []string{"--model", "opus", "--effort", "high"}; !reflect.DeepEqual(got, want) {
+	if got, want := waitArgv(t, tplWorkDir), append([]string{"--model", "opus", "--effort", "high"}, alwaysOnPosture(permissionModeDefault)...); !reflect.DeepEqual(got, want) {
 		t.Fatalf("bootstrap argv = %v, want %v — the fixture never took", got, want)
 	}
 
@@ -161,10 +178,16 @@ func TestPool_Revive_DoesNotInheritOperatorSettings(t *testing.T) {
 		t.Fatalf("revived session never spawned a child; state=%+v lc=%v", sess.State(), sess.LifecycleState())
 	}
 
+	// AC 1's revive row. A revived session inherits nothing, and since #2065 that
+	// is spelled as a DOWNGRADE: the revived child launches in bypass like every
+	// other and carries --permission-mode default, the posture the daemon writes it
+	// back to. The mode pair is the assertion — a tree that left a revived child in
+	// bypass would compose the bare flag, which is what an escalated session looks
+	// like and is exactly the #1487 property that must not regress.
 	got := waitArgv(t, spawnDir)
-	want := []string{"--session-id", string(target)}
+	want := append([]string{"--session-id", string(target)}, alwaysOnPosture(permissionModeDefault)...)
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("revived argv = %v, want %v — a revived session inherits nothing (#1487)", got, want)
+		t.Errorf("revived argv = %v, want %v — a revived session inherits nothing and is downgraded, never left in bypass (#1487)", got, want)
 	}
 }
 
@@ -187,7 +210,7 @@ func TestPool_CreateIn_NoConfiguration_ArgvByteIdentical(t *testing.T) {
 	}
 
 	got := waitArgv(t, spawnDir)
-	want := []string{"--session-id", string(id)}
+	want := append([]string{"--session-id", string(id)}, alwaysOnPosture(permissionModeDefault)...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("minted argv = %v, want %v", got, want)
 	}
@@ -204,7 +227,20 @@ func TestPool_CreateIn_NoConfiguration_ArgvByteIdentical(t *testing.T) {
 func TestPool_MintSettings_NoBootstrap_NoFlags(t *testing.T) {
 	t.Parallel()
 	p := &Pool{}
-	if got := claudeSettingsArgs(p.mintSettings()); got != nil {
-		t.Errorf("claudeSettingsArgs(mintSettings()) with no bootstrap = %v, want nil", got)
+	// Since #2065 "contributes no argv tokens" means "contributes nothing BEYOND the
+	// escalation flag": inheritance still adds no --model and no --effort, which is
+	// the property this pins. The flag is not inheritance.
+	//
+	// No --permission-mode pair, and that is faithful rather than a gap.
+	// mintSettings returns a PRE-canonicalisation value — its two-field literal
+	// leaves PermissionMode "" — and claudeSettingsArgs deliberately composes no
+	// pair for a mode it cannot name, so the argv never claims a posture nothing
+	// will write. buildSession runs canonicalSettings before composing, so the argv
+	// a minted session actually spawns with does carry the pair;
+	// TestPool_CreateIn_NoConfiguration_ArgvByteIdentical pins that, and
+	// TestRunnerConfigPermissionModeIsAlwaysKnown pins that no construction path can
+	// hand a runner an unnameable mode.
+	if got, want := claudeSettingsArgs(p.mintSettings()), escalatedPosture(); !reflect.DeepEqual(got, want) {
+		t.Errorf("claudeSettingsArgs(mintSettings()) with no bootstrap = %v, want %v", got, want)
 	}
 }

@@ -270,8 +270,11 @@ func TestPool_BootstrapColdStart_SpawnsWithSessionID(t *testing.T) {
 	if got, want := waitSessionID(t, tplWorkDir), string(pool.BootstrapID()); got != want {
 		t.Errorf("cold-start bootstrap session id = %q, want %q", got, want)
 	}
-	if got := waitArgv(t, tplWorkDir); len(got) != 0 {
-		t.Errorf("cold-start bootstrap argv = %v, want no appended flags", got)
+	// Since #2065 a cold start appends the unconditional posture suffix and nothing
+	// else: no model, no effort, and the default mode named beside the flag the child
+	// is walked back from. "No appended flags" is no longer a shape any spawn has.
+	if got, want := waitArgv(t, tplWorkDir), alwaysOnPosture(permissionModeDefault); !reflect.DeepEqual(got, want) {
+		t.Errorf("cold-start bootstrap argv = %v, want %v", got, want)
 	}
 }
 
@@ -319,7 +322,7 @@ func TestPool_MintedSession_ZeroSettings_ArgvByteIdentical(t *testing.T) {
 	id := spawnMintedWithSettings(t, ctx, pool, spawnDir, SessionSettings{})
 
 	got := waitArgv(t, spawnDir)
-	want := []string{"--session-id", string(id)}
+	want := append([]string{"--session-id", string(id)}, alwaysOnPosture(permissionModeDefault)...)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("minted zero-settings argv = %v, want %v", got, want)
 	}

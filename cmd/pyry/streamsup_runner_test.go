@@ -290,16 +290,44 @@ func TestStreamClaudeSessionsDir_NoHome(t *testing.T) {
 	}
 }
 
-// TestWithApprovalArgs pins the per-spawn yolo probe that gates claude's
-// permission-approval flags onto a stream spawn (#1168). The presence of
-// --dangerously-skip-permissions is the single deterministic yolo signal — both
-// the operator bootstrap pass-through and internal/sessions.claudeSettingsArgs
-// funnel their yolo intent through that one flag — so the injection is:
+// TestWithApprovalArgs is #2065 AC 3 plus the third row of its AC 4, pinned
+// hermetically because the live-claude gate cannot see either: the rig there
+// builds a streamsup.Config by hand and never calls this function, and its base
+// args are empty so nothing there exercises the operator pass-through.
 //
-//   - non-yolo → args followed by exactly permissionArgs(false, path) (AC1: the
-//     enforcement set reaches claude),
-//   - yolo (flag present) → args UNCHANGED (AC2: byte-identical to today, and no
-//     duplicate --dangerously-skip-permissions).
+// The probe it pins used to be "does the spawn's argv name
+// --dangerously-skip-permissions". #2065 puts that flag on EVERY argv, so the
+// probe became "will this child keep the bypass it launches with", answered from
+// the stored posture and the provenance bit rather than from the argv:
+//
+//   - a downgraded child → args followed by exactly permissionArgs(false, path),
+//     minus that set's own mode pair when args already name a mode (#2043),
+//   - a child that keeps its bypass → args UNCHANGED, no duplicate flag.
+//
+// # Which subtest kills which tree
+//
+// "a downgraded child still gets the approval set" is the row that reddens on any
+// tree keying on the bare presence of the flag: its args CARRY the escalation, as
+// every #2065 argv does, and the approval set is injected anyway. On a
+// flag-presence tree it returns args unchanged and the daemon's approval gate is
+// absent for every session in the fleet.
+//
+// "the operator's pass-through keeps its bypass" is the row that reddens on any
+// tree that deletes the interlock and trusts the stored posture alone. Its args
+// and stored mode are IDENTICAL to the row above; only operatorBypass differs, so
+// the pair cannot both pass on either mistake.
+//
+// # Measured 2026-09-03, not predicted
+//
+// Both mutants applied through `go test -overlay`, so no mutated source was ever
+// written into the worktree:
+//
+//	M3  keyed on slices.Contains(args, "--dangerously-skip-permissions")
+//	    RED: "a downgraded child still gets the approval set" — and also the
+//	    unrecognised-mode and no-aliasing subtests, since that tree returns args
+//	    unchanged for every session
+//	M4  the operatorBypass clause deleted
+//	    RED: "the operator's pass-through keeps its bypass", alone
 //
 // It also pins that the input is never aliased or mutated — scfg.Args is freshly
 // owned by mapStreamsupConfig and the append runs on a clone.
@@ -307,55 +335,82 @@ func TestWithApprovalArgs(t *testing.T) {
 	t.Parallel()
 
 	const path = "/tmp/pyry-mcp-approve-xyz.json"
+	const bypass = "--dangerously-skip-permissions"
 
 	countSkip := func(args []string) int {
 		n := 0
 		for _, a := range args {
-			if a == "--dangerously-skip-permissions" {
+			if a == bypass {
 				n++
 			}
 		}
 		return n
 	}
 
-	t.Run("non-yolo appends exactly permissionArgs(false, path)", func(t *testing.T) {
-		t.Parallel()
-		in := []string{"--model", "haiku", "--settings", "p"}
-		got := withApprovalArgs(in, path)
+	// The argv every #2065 session composes for the default posture: the
+	// unconditional escalation flag, then the mode the daemon writes the child back
+	// to. Spelled out rather than imported so this file states the shape it is
+	// reasoning about.
+	alwaysOn := []string{"--model", "haiku", "--settings", "p", bypass, "--permission-mode", "default"}
 
-		want := append(slices.Clone(in), permissionArgs(false, path)...)
+	t.Run("a downgraded child still gets the approval set", func(t *testing.T) {
+		t.Parallel()
+		got := withApprovalArgs(alwaysOn, path, "default", false)
+
+		// permissionArgs' own --permission-mode default pair drops, because the argv
+		// already names a mode — #2043's arm, now the common case.
+		want := append(slices.Clone(alwaysOn), dropPermissionMode(permissionArgs(false, path))...)
 		if !slices.Equal(got, want) {
-			t.Fatalf("withApprovalArgs non-yolo = %q, want %q", got, want)
+			t.Fatalf("withApprovalArgs downgraded = %q, want %q", got, want)
 		}
-		// The four enforcement flags land, carrying the daemon's config path.
-		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config", "--permission-mode"} {
+		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
 			if !slices.Contains(got, f) {
-				t.Errorf("non-yolo args %q missing %q", got, f)
+				t.Errorf("downgraded args %q missing %q: this child is walked back to default in-band "+
+					"and has an approval gate to lose, so the whole enforcement set has to reach claude", got, f)
 			}
 		}
 		if !slices.Contains(got, path) {
-			t.Errorf("non-yolo args %q missing the mcp-config path %q", got, path)
+			t.Errorf("downgraded args %q missing the mcp-config path %q", got, path)
 		}
-		if countSkip(got) != 0 {
-			t.Errorf("non-yolo args %q must not carry --dangerously-skip-permissions", got)
+		if n := countSkip(got); n != 1 {
+			t.Errorf("downgraded args %q carry %d escalation flags, want exactly the one already in args", got, n)
 		}
 	})
 
-	t.Run("yolo returns args unchanged, no duplicate skip flag", func(t *testing.T) {
+	t.Run("the operator's pass-through keeps its bypass", func(t *testing.T) {
 		t.Parallel()
-		in := []string{"--model", "haiku", "--dangerously-skip-permissions", "--settings", "p"}
-		got := withApprovalArgs(in, path)
+		// Byte-identical args and stored mode to the subtest above. Only the
+		// provenance differs, and it is the whole decision.
+		got := withApprovalArgs(alwaysOn, path, "default", true)
 
-		if !slices.Equal(got, in) {
-			t.Fatalf("withApprovalArgs yolo = %q, want unchanged %q", got, in)
+		if !slices.Equal(got, alwaysOn) {
+			t.Fatalf("withApprovalArgs operator-bypass = %q, want unchanged %q", got, alwaysOn)
 		}
-		if n := countSkip(got); n != 1 {
-			t.Errorf("yolo args carry %d --dangerously-skip-permissions, want exactly 1", n)
-		}
-		// None of the approval flags are injected in yolo mode.
 		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
 			if slices.Contains(got, f) {
-				t.Errorf("yolo args %q must not carry approval flag %q", got, f)
+				t.Errorf("operator-bypass args %q must not carry approval flag %q: the operator asked for "+
+					"a bypass child and nothing downgrades it", got, f)
+			}
+		}
+	})
+
+	t.Run("a stored escalation keeps its bypass", func(t *testing.T) {
+		t.Parallel()
+		// What claudeSettingsArgs composes for a stored bypassPermissions: the flag
+		// ALONE, no mode pair. streamsup refuses to write that mode by
+		// non-membership, so nothing walks this child back either.
+		in := []string{"--model", "haiku", bypass, "--settings", "p"}
+		got := withApprovalArgs(in, path, sessions.PermissionModeBypass, false)
+
+		if !slices.Equal(got, in) {
+			t.Fatalf("withApprovalArgs stored-escalation = %q, want unchanged %q", got, in)
+		}
+		if n := countSkip(got); n != 1 {
+			t.Errorf("stored-escalation args carry %d escalation flags, want exactly 1", n)
+		}
+		for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+			if slices.Contains(got, f) {
+				t.Errorf("stored-escalation args %q must not carry approval flag %q", got, f)
 			}
 		}
 	})
@@ -375,26 +430,29 @@ func TestWithApprovalArgs(t *testing.T) {
 	// CONSTRUCTION on top of that — the path a daemon restart takes to rebuild a
 	// session out of the registry. Injecting the set unmodified would spawn it as
 	// "--permission-mode plan … --permission-mode default", and the last flag wins.
+	//
+	// The joined form is here because the operator's pass-through can spell the flag
+	// either way, which the composed argv never does.
 	t.Run("a spawn already naming a mode gets exactly one", func(t *testing.T) {
 		t.Parallel()
 		for _, in := range [][]string{
-			{"--model", "haiku", "--permission-mode", "plan", "--settings", "p"},
-			{"--permission-mode=plan", "--settings", "p"},
+			{"--model", "haiku", bypass, "--permission-mode", "plan", "--settings", "p"},
+			{"--permission-mode=plan", bypass, "--settings", "p"},
 		} {
-			got := withApprovalArgs(in, path)
+			got := withApprovalArgs(in, path, "plan", false)
 
 			if n := countMode(got); n != 1 {
 				t.Errorf("withApprovalArgs(%q) produced %d --permission-mode flags, want exactly 1: %q", in, n, got)
 			}
-			// The operator's own mode is the one that survives; the injected
-			// default is what drops.
+			// The session's own mode is the one that survives; the injected default
+			// is what drops.
 			if slices.Contains(got, "default") {
 				t.Errorf("withApprovalArgs(%q) kept the injected default mode: %q", in, got)
 			}
-			// It drops ONLY that pair. Returning args unchanged instead would
-			// spawn a mode-carrying session with no permission-prompt tool and no
-			// mcp-config — the daemon's approval gate absent, reachable from a
-			// stored setting. This is the assertion that forbids that shortcut.
+			// It drops ONLY that pair. Returning args unchanged instead would spawn a
+			// mode-carrying session with no permission-prompt tool and no mcp-config —
+			// the daemon's approval gate absent, reachable from a stored setting. This
+			// is the assertion that forbids that shortcut.
 			for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
 				if !slices.Contains(got, f) {
 					t.Errorf("withApprovalArgs(%q) = %q dropped the approval flag %q", in, got, f)
@@ -403,28 +461,34 @@ func TestWithApprovalArgs(t *testing.T) {
 			if !slices.Contains(got, path) {
 				t.Errorf("withApprovalArgs(%q) = %q dropped the mcp-config path", in, got)
 			}
-			if countSkip(got) != 0 {
-				t.Errorf("withApprovalArgs(%q) = %q invented a bypass flag", in, got)
+			if n := countSkip(got); n != 1 {
+				t.Errorf("withApprovalArgs(%q) = %q carries %d escalation flags, want exactly the one already in args", in, got, n)
 			}
 		}
 	})
 
-	// A yolo spawn is still returned untouched even when it names a mode: the
-	// mode-aware branch must not reorder the two arms, because a bypass child has
-	// no approval gate to inject in the first place.
-	t.Run("yolo beats a named mode and still injects nothing", func(t *testing.T) {
+	// An unrecognised or empty stored mode falls THROUGH to injection: the fail-safe
+	// direction for this consumer is "the approval gate is present". Deliberately not
+	// symmetric with streamsup's predicate, which writes nothing for the same value —
+	// see withApprovalArgs' doc.
+	t.Run("an unrecognised stored mode still gets the approval set", func(t *testing.T) {
 		t.Parallel()
-		in := []string{"--permission-mode", "plan", "--dangerously-skip-permissions"}
-		if got := withApprovalArgs(in, path); !slices.Equal(got, in) {
-			t.Errorf("withApprovalArgs yolo+mode = %q, want unchanged %q", got, in)
+		for _, mode := range []string{"", "notAMode"} {
+			got := withApprovalArgs([]string{bypass}, path, mode, false)
+			for _, f := range []string{"--permission-prompt-tool", "--mcp-config", "--strict-mcp-config"} {
+				if !slices.Contains(got, f) {
+					t.Errorf("stored mode %q produced %q, which is missing %q; an unexpected mode must "+
+						"leave the approval gate present", mode, got, f)
+				}
+			}
 		}
 	})
 
-	t.Run("does not mutate or alias the input on the non-yolo path", func(t *testing.T) {
+	t.Run("does not mutate or alias the input on the injecting path", func(t *testing.T) {
 		t.Parallel()
-		in := []string{"--model", "haiku"}
+		in := []string{"--model", "haiku", bypass}
 		saved := slices.Clone(in)
-		got := withApprovalArgs(in, path)
+		got := withApprovalArgs(in, path, "default", false)
 
 		if !slices.Equal(in, saved) {
 			t.Errorf("withApprovalArgs mutated its input: got %q, want %q", in, saved)
@@ -654,6 +718,38 @@ func TestMapStreamsupConfig_CarriesPermissionMode(t *testing.T) {
 		}
 		if got.PostureGate != nil {
 			t.Errorf("PostureGate = %v, want nil — it is a runtime object installed in newStreamRunnerFactory, not the pure mapper", got.PostureGate)
+		}
+	}
+}
+
+// TestMapStreamsupConfig_CarriesOperatorBypass (#2065): the provenance of the
+// escalation crosses the mapper as a plain bool, beside the posture it qualifies.
+//
+// Both halves have to arrive for the runner's spawn decision to be right, and only
+// one of them is derivable from anything else the config carries — hence a test that
+// names the pair rather than the field. The bit is NOT re-derived here from
+// ClaudeArgs: since #2065 every composed argv carries the flag, so a mapper reading
+// the argv would answer true for every session and every child would keep the bypass
+// it launched with.
+func TestMapStreamsupConfig_CarriesOperatorBypass(t *testing.T) {
+	t.Parallel()
+	for _, operatorBypass := range []bool{false, true} {
+		got := mapStreamsupConfig(sessions.RunnerConfig{
+			ClaudeBin:      "/opt/claude",
+			WorkDir:        "/work",
+			SessionID:      "sess-uuid",
+			PermissionMode: "default",
+			// The argv shape #2065 composes for every session. It disagrees with the
+			// false arm below, which is what makes that arm a real assertion: a mapper
+			// reading the argv could not produce it.
+			ClaudeArgs:     []string{"--dangerously-skip-permissions", "--permission-mode", "default"},
+			OperatorBypass: operatorBypass,
+		})
+		if got.OperatorBypass != operatorBypass {
+			t.Errorf("OperatorBypass = %v, want %v", got.OperatorBypass, operatorBypass)
+		}
+		if got.SpawnPermissionMode != "default" {
+			t.Errorf("SpawnPermissionMode = %q, want %q — the posture must cross beside its provenance", got.SpawnPermissionMode, "default")
 		}
 	}
 }

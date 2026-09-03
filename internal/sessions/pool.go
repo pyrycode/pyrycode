@@ -481,6 +481,11 @@ func New(cfg Config) (*Pool, error) {
 		// (#2064). settings is canonicalSettings'd above, so this is a real mode and
 		// never the empty one, whichever of the warm/cold-start branches ran.
 		PermissionMode: settings.PermissionMode,
+		// Read off BASE, never bootstrapArgs: base is the settings-free half, so the
+		// escalation can only be there because the operator's pass-through claude args
+		// put it there. bootstrapArgs carries claudeSettingsArgs' unconditional flag
+		// and would answer true for every daemon (#2065).
+		OperatorBypass: operatorBypass(base),
 		Logger:         cfg.Logger,
 		BackoffInitial: cfg.Bootstrap.BackoffInitial,
 		BackoffMax:     cfg.Bootstrap.BackoffMax,
@@ -910,8 +915,12 @@ func validatePermissionUpdate(update SettingsUpdate) error {
 //   - A revoke goes in-band INCLUDING when it equals the stored value, which
 //     sends a revocation to a child that was never in bypass. Harmless and
 //     deliberately not fixed: the delivery is fire-and-forget, the installed argv
-//     is the durable half and carries no bypass flag either way, and the child is
-//     not in bypass to begin with. It is the same redundancy this path already
+//     is the durable half and composes the same non-escalated posture either way,
+//     and the child is not in bypass to begin with. (Before #2065 that read "and
+//     carries no bypass flag either way"; every argv carries the flag now, and it
+//     is the --permission-mode pair beside it, plus the spawn-time write, that
+//     carry the revocation. The redundancy is unchanged; only its spelling is.)
+//     It is the same redundancy this path already
 //     tolerates for an unchanged model re-sent alongside a new effort.
 //   - A present-but-empty Model or Effort takes the restart. Empty means "run at
 //     claude's own default", which claudeSettingsArgs expresses by OMITTING the
@@ -1441,8 +1450,11 @@ func (p *Pool) SettingsFor(id SessionID) (SessionSettings, error) {
 //
 // Built field by field rather than by copying DefaultSettings' return, so YOLO
 // is excluded structurally rather than by a clearing statement someone could
-// later delete: a phone-granted --dangerously-skip-permissions can never reach
-// a minted session's argv, and any field added to SessionSettings in future is
+// later delete: a phone-granted escalation can never reach a minted session's
+// POSTURE. (Since #2065 it cannot reach its argv either, because the flag is
+// there unconditionally and carries no posture; what the excluded YOLO bit buys
+// is that the minted session's stored mode stays non-escalated, so its child is
+// written back down to that mode at every spawn.) Any field added in future is
 // likewise not inherited until someone opts it in. That is the fail-closed
 // direction and it is the same reasoning Revive's docstring records (#1487).
 //
@@ -1754,6 +1766,11 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		// Same seed as Pool.New's, and canonicalSettings runs above this site too
 		// (#2064).
 		PermissionMode: settings.PermissionMode,
+		// Same derivation as Pool.New's and off BASE for its reason (#2065). tpl is
+		// p.sessionTpl, which is cfg.Bootstrap verbatim, so a minted session inherits
+		// the same operator pass-through the bootstrap has — the provenance answer is
+		// per-daemon, not per-session.
+		OperatorBypass: operatorBypass(base),
 		Logger:         p.log,
 		BackoffInitial: tpl.BackoffInitial,
 		BackoffMax:     tpl.BackoffMax,

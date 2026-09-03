@@ -70,9 +70,15 @@ func closedChan() chan struct{} {
 // every writer either rejects (Pool.UpdateSettings, on an unknown mode or a
 // contradictory pair) or normalises (both construction sites and the registry
 // read, via canonicalPermissionMode). YOLO stays the authoritative half for the
-// escalation — claudeSettingsArgs derives the bypass flag from it and never from
-// the mode string — so the fail-safe is enforced in exactly one place even if a
-// hand-built Session literal in a test breaks the invariant.
+// escalation — claudeSettingsArgs suppresses the mode pair on it and never derives
+// a posture from the mode string — so the fail-safe is enforced in exactly one
+// place even if a hand-built Session literal in a test breaks the invariant.
+//
+// Since #2065 the pair no longer decides what the child LAUNCHES as — every child
+// launches in bypass — only what it is walked back to in-band. PermissionMode is
+// therefore the value that actually decides the running posture, and the safety
+// moved from "the flag is absent from the argv" to "the write was confirmed",
+// which is the fail-closed turn gate in internal/streamsup.
 //
 // yolo is not redundant and is not being phased out here: the mobile client
 // speaks it, and #1687 settles what the two mean together on the wire.
@@ -91,16 +97,62 @@ type SessionSettings struct {
 
 // permissionModeDefault is claude's own default posture and the mode a bypass
 // revocation lands in. It is a NAMEABLE mode, unlike an empty Model or Effort,
-// which is why claudeSettingsArgs still emits no flag for it: naming it would
-// change the argv every default session composes today.
+// and since #2065 claudeSettingsArgs NAMES it: silence used to be the equivalent
+// of an empty Model, but beside an unconditional --dangerously-skip-permissions
+// an unnamed posture reads as the escalation rather than as the default.
 //
 // permissionModeBypass is the escalation. It is stored and it reaches the spawn
 // argv ONLY as --dangerously-skip-permissions (claudeSettingsArgs), never as a
-// --permission-mode value, so the YOLO fail-safe keeps exactly one spelling.
+// --permission-mode value, so the YOLO fail-safe keeps exactly one spelling. That
+// property survives #2065 making the flag unconditional: the flag no longer says
+// which posture the session RUNS in, but it is still the only spelling of the
+// escalation the daemon composes, and no mode string can produce it.
 const (
 	permissionModeDefault = "default"
 	permissionModeBypass  = "bypassPermissions"
 )
+
+// PermissionModeBypass is the escalation's one spelling, exported for cmd/pyry's
+// withApprovalArgs — the only consumer outside this package that has to tell a
+// session which STAYS in bypass from one the daemon walks back in-band (#2065).
+// It is an alias of permissionModeBypass rather than a second literal, so the
+// vocabulary still lives in exactly one place.
+//
+// Nothing here decides authorisation from it. It answers "will this child keep
+// the posture it launched with?", and cmd/pyry pairs it with the provenance bit
+// (RunnerConfig.OperatorBypass) because the stored posture alone cannot answer
+// that — the operator's pass-through claude args put the escalation on an argv
+// without ever touching SessionSettings.
+const PermissionModeBypass = permissionModeBypass
+
+// bypassPermissionsArg is claude's argv spelling of the escalation and the only
+// spelling of it — the same constant internal/streamsup names bypassPermissionsFlag
+// for its own reader. Hoisted out of claudeSettingsArgs when #2065 gave the flag a
+// second reader in this package (operatorBypass), so the two cannot drift.
+const bypassPermissionsArg = "--dangerously-skip-permissions"
+
+// operatorBypass reports whether base — a SETTINGS-FREE spawn argv, i.e. a
+// Session.spawnBase — already carries the escalation. It is the provenance signal
+// #2065 turns both of the daemon's permission fail-safes on, and it exists because
+// after that ticket the ASSEMBLED argv can no longer answer the question:
+// claudeSettingsArgs appends the flag to every composition, so a reader keyed on
+// the assembled argv answers "yes" for every session and both fail-safes invert
+// into their permissive arms, silently.
+//
+// True means the operator handed this daemon a bypass — the shape
+// `pyry install-service -- --dangerously-skip-permissions` documents — which never
+// touches SessionSettings and which the daemon therefore may NOT walk back: doing
+// so revokes, in-band and unanswerable, an escalation the machine's owner asked for
+// outright. False means every escalation on this session's argv is one this package
+// composed from the stored posture, so the stored posture decides what the child
+// ends up in.
+//
+// It reads base and NEVER the assembled argv. A caller that hands it
+// Session.spawnArgs' output gets true unconditionally, which is the one way to
+// misuse it and is why the parameter is named for what it must be.
+func operatorBypass(base []string) bool {
+	return slices.Contains(base, bypassPermissionsArg)
+}
 
 // ErrUnsupportedPermissionMode is returned by Pool.UpdateSettings when the update
 // names a permission mode this daemon does not recognise. Nothing is persisted and
@@ -220,21 +272,41 @@ type SettingsUpdate struct {
 // deterministic order (model, effort, posture) for testability. Empty Model or
 // Effort emits no flag (inherit the template).
 //
-// The posture slot is mutually exclusive and emits at most one flag:
+// THE ESCALATION FLAG IS UNCONDITIONAL (#2065). Every child the daemon spawns —
+// bootstrap, minted and revived — launches with --dangerously-skip-permissions,
+// and the posture it actually RUNS in is decided by the in-band write
+// streamsup's spawnAndWait issues before any user turn can reach it. The launch
+// argv stopped being the posture's authority, which is the whole ticket: claude
+// gates a re-escalation on the launch argv and refuses it in-band, so a posture
+// change in that direction needed a respawn while the flag was conditional.
 //
-//   - YOLO==true appends --dangerously-skip-permissions and NOTHING else. The
-//     escalation keeps exactly one spelling, never --permission-mode
-//     bypassPermissions, so the fail-safe is enforced in one place. The flag is
-//     derived from the YOLO bit alone and never from PermissionMode, so no mode
-//     string can compose a bypass child.
-//   - a non-default in-band mode appends --permission-mode <mode> (#2043).
-//   - permissionModeDefault, and the zero value's "", append nothing. default IS
-//     claude's own default, so omitting the flag is the equivalent of an empty
-//     Model — and it is what keeps every argv this function composes today
-//     byte-identical.
+// The posture slot is therefore no longer mutually exclusive — the two flags sit
+// side by side — but the property the exclusion existed for is unchanged and is
+// restated here rather than dropped:
 //
-// YOLO==false alone still appends nothing, so the function can never emit a
-// permission-disabling flag and a zero value yields nil.
+//   - The escalation keeps EXACTLY ONE SPELLING. This function never emits
+//     --permission-mode bypassPermissions, because permissionModeInBand gates the
+//     value and the escalation is not a member. No mode string can compose the
+//     flag either: it is appended unconditionally, from nothing.
+//   - The YOLO bit stays the authoritative half of the posture. YOLO==true emits
+//     the flag alone, so a hand-built literal whose mode contradicts its bit
+//     cannot make the daemon assert a mode at a session stored as escalated.
+//   - A non-escalated posture appends --permission-mode <mode>, INCLUDING
+//     permissionModeDefault. That mode used to append nothing, on the reasoning
+//     that default IS claude's own default so silence was the equivalent of an
+//     empty Model. Silence beside an unconditional bypass flag no longer reads as
+//     default, so the reason is gone with the exclusion. The assembled argv is not
+//     new: every non-bypass stream spawn already ended in --permission-mode
+//     default, injected by cmd/pyry's permissionArgs, whose own copy
+//     withApprovalArgs then drops (#2043).
+//
+// A mode outside the in-band set — "" from a hand-built zero literal, or an
+// unrecognised string — appends NO pair, so the argv never claims a posture the
+// daemon will not go on to write. A Pool-held Session cannot reach that state:
+// canonicalSettings runs at both construction sites and the registry read. Do not
+// "harden" this by normalising "" to default here; that would put a posture on the
+// argv that nothing writes in-band, and the flag wins at launch, so the argv would
+// assert a safety the child does not have.
 func claudeSettingsArgs(s SessionSettings) []string {
 	var args []string
 	if s.Model != "" {
@@ -243,10 +315,8 @@ func claudeSettingsArgs(s SessionSettings) []string {
 	if s.Effort != "" {
 		args = append(args, "--effort", s.Effort)
 	}
-	switch {
-	case s.YOLO:
-		args = append(args, "--dangerously-skip-permissions")
-	case s.PermissionMode != permissionModeDefault && permissionModeInBand(s.PermissionMode):
+	args = append(args, bypassPermissionsArg)
+	if !s.YOLO && permissionModeInBand(s.PermissionMode) {
 		args = append(args, "--permission-mode", s.PermissionMode)
 	}
 	return args
@@ -300,9 +370,18 @@ type Session struct {
 	// the full argv from this base plus the live settings on every settings-change
 	// live-apply (#842's restart, #1581's in-band install). Immutable
 	// post-construction, so it is read
-	// without a lock. It never contains a YOLO-derived flag — the bypass flag has
-	// exactly one origin, claudeSettingsArgs — so no persisted-false state can
-	// recompose into a --dangerously-skip-permissions child.
+	// without a lock. It never contains a YOLO-derived flag, so no persisted-false
+	// state can recompose into an escalated child through the STORED posture.
+	//
+	// It CAN contain the escalation flag from the other direction, and since #2065
+	// that is the load-bearing fact about this field rather than a footnote: the
+	// operator's bootstrap pass-through claude args land here verbatim, so a base
+	// carrying --dangerously-skip-permissions is a bypass the machine's owner asked
+	// for outside SessionSettings entirely. That is the ONE signal separating a
+	// bypass the daemon composed (and may walk back) from one it was handed (and may
+	// not) — claudeSettingsArgs now appends the flag to every argv, so the assembled
+	// argv cannot answer it. operatorBypass reads this field for exactly that, and
+	// both RunnerConfig construction sites carry the answer across the runner seam.
 	spawnBase []string
 
 	// settingsPath is the absolute path to the per-session --settings file

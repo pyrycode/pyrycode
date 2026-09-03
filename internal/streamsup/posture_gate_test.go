@@ -683,42 +683,93 @@ func TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn(t *tes
 	}
 }
 
-// TestRunner_SpawnPermissionMode_OperatorBypassArgvIsSentNothing pins the ARGV half of
-// the spawn decision: a child launched in bypass is sent no posture, whatever the
-// stored mode says. The stored posture cannot answer this on its own, because the
-// operator's bootstrap pass-through claude args put --dangerously-skip-permissions in
-// the argv without ever touching SessionSettings — so the session reads default while
-// the child runs in bypass.
+// TestRunner_SpawnPermissionMode_ProvenanceDecidesTheWrite is #2065 AC 4, one row
+// per row of that ticket's fail-safe-2 table. It pins that the spawn-time posture
+// write is decided by the PROVENANCE of the escalation, not by its presence in the
+// argv.
 //
-// It is a regression test with measured provenance rather than a reasoned one. #2064's
-// first shape keyed the write on the stored posture alone and recorded an argv
-// interlock as deliberately rejected; the live-claude gate then reddened four
+// # Why presence stopped being an answer
+//
+// #2064 keyed this on the argv, and that was right at the time: the escalation
+// reached a spawn's argv from exactly two places, and only one of them was
+// modelled by the stored posture. #2065 makes sessions.claudeSettingsArgs append
+// the flag to EVERY argv, so a predicate reading the argv answers "operator
+// bypass" for every session, no child is ever sent its stored posture, and every
+// child stays in the bypass it launched with — the exact inverse of that ticket,
+// shipped green and silent. The signal that survives is
+// sessions.RunnerConfig.OperatorBypass, derived from the settings-free spawnBase
+// and carried here as Config.OperatorBypass.
+//
+// # Measured provenance, not reasoned
+//
+// #2064's first shape keyed the write on the stored posture alone and recorded an
+// argv interlock as deliberately rejected; the live-claude gate then reddened four
 // TestInteractiveStream* specs that pass on main. Each spawns through
-// spawnBootstrapDaemon's pass-through bypass with a stored posture of default, and the
-// write silently revoked the escalation the operator had asked for — real claude
-// answered with permission_denied on Bash and on Write, and refused to Read an
-// attached file. Neither this package nor the fake-daemon suite could see it, because
-// both drive the stored posture and neither spawns through the pass-through.
+// spawnBootstrapDaemon's pass-through bypass with a stored posture of default, and
+// the write silently revoked the escalation the operator had asked for — real
+// claude answered with permission_denied on Bash and on Write, and refused to Read
+// an attached file. Neither this package nor the fake-daemon suite could see it,
+// because both drive the stored posture and neither spawns through the
+// pass-through.
 //
-// The rows carry their own non-vacuity: the control row differs by the flag alone, so
-// a build that stopped writing the posture altogether reddens it instead of passing
-// both halves.
-func TestRunner_SpawnPermissionMode_OperatorBypassArgvIsSentNothing(t *testing.T) {
+// # Which row kills which tree
+//
+//   - "daemon-composed" is the row that reddens on any tree keying on the bare
+//     presence of the flag. Its argv CARRIES the escalation — as every #2065 argv
+//     does — and the mode is written anyway.
+//   - "operator pass-through" is the row that reddens on any tree that deletes the
+//     interlock and trusts the stored posture alone. Same argv, same stored mode
+//     as the row above; only the provenance bit differs, so the pair cannot both
+//     pass on either mistake.
+//   - "the escalation is sent nothing" is the non-membership row, unchanged from
+//     #2064 and here so a rewrite cannot quietly drop it.
+//
+// # Measured 2026-09-03, not predicted
+//
+// Both mutants applied through `go test -overlay`, so no mutated source was ever
+// written into the worktree. Each reddened exactly the row named for it and no
+// other:
+//
+//	M1  !slices.Contains(args, bypassPermissionsFlag)  — #2064's argv read
+//	    RED: "a daemon-composed bypass argv is still written its stored mode"
+//	    ("the gate was open before any ack; a spawn that writes must arm it")
+//	M2  the second clause deleted entirely
+//	    RED: "the operator's pass-through bypass suppresses the write"
+//	    ("the gate is armed on \"1\" after a spawn that writes nothing")
+func TestRunner_SpawnPermissionMode_ProvenanceDecidesTheWrite(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		args      []string
-		wantModes []string
+		name           string
+		mode           string
+		args           []string
+		operatorBypass bool
+		wantModes      []string
 	}{
 		{
-			name:      "the operator's pass-through bypass suppresses the write",
-			args:      []string{bypassPermissionsFlag},
-			wantModes: nil,
+			// Fail-safe-2 table, row 2: the daemon composed this bypass itself, so
+			// the stored posture decides and the child is walked back to it.
+			name:           "a daemon-composed bypass argv is still written its stored mode",
+			mode:           "default",
+			args:           []string{bypassPermissionsFlag},
+			operatorBypass: false,
+			wantModes:      []string{"default"},
 		},
 		{
-			name:      "the same spawn without the flag still writes",
-			args:      nil,
-			wantModes: []string{"default"},
+			// Row 3: byte-identical argv and stored mode to the row above. Only the
+			// provenance differs, and it is the whole decision.
+			name:           "the operator's pass-through bypass suppresses the write",
+			mode:           "default",
+			args:           []string{bypassPermissionsFlag},
+			operatorBypass: true,
+			wantModes:      nil,
+		},
+		{
+			// Row 1: refused by non-membership before provenance is consulted at all.
+			name:           "the escalation is sent nothing whatever the provenance",
+			mode:           "bypassPermissions",
+			args:           []string{bypassPermissionsFlag},
+			operatorBypass: false,
+			wantModes:      nil,
 		},
 	}
 	for _, tc := range tests {
@@ -726,10 +777,9 @@ func TestRunner_SpawnPermissionMode_OperatorBypassArgvIsSentNothing(t *testing.T
 			t.Parallel()
 			out, stderr := &safeBuffer{}, &safeBuffer{}
 			cfg := helperRunCfg(t, "echo_lines", out, stderr)
-			// The posture the four live specs store: default, while the child the
-			// operator asked for is a bypass one.
-			cfg.SpawnPermissionMode = "default"
+			cfg.SpawnPermissionMode = tc.mode
 			cfg.Args = tc.args
+			cfg.OperatorBypass = tc.operatorBypass
 			gate := &PostureGate{}
 			cfg.PostureGate = gate
 			spawned := make(chan struct{}, 1)
