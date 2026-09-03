@@ -676,6 +676,55 @@ var finOfflineExecBans = map[string][]string{
 		"setModeFixturePath", "writeSetModeFixture", "writeFixture", "writeInitControlFixture",
 		"os.WriteFile", "os.Create", "os.ReadDir",
 	},
+	// #2045. The entry above with TWO OF ITS THREE DROPPED NAMES PUT BACK, and that
+	// is the whole difference between the two files. Both read committed fixtures,
+	// so os.ReadFile is permitted in both; #1764's file discovers WHICH captures
+	// exist, and this one reads the single capture named by the version its caller
+	// is running against, through initControlFixtureName.
+	//
+	// So filepath.Glob and packageDir stay banned here. Neither is an oversight and
+	// neither is tidiness: a glob would match a capture at a DIFFERENT claude version
+	// and let inbandCompareMenu report "match" against the wrong baseline with nothing
+	// red anywhere, which is the exact misattribution #2045 exists to end — and the
+	// absence of a capture at the running version is a verdict that file reports
+	// rather than a hole for a neighbouring version to fill. packageDir has nothing
+	// to add for the same reason #1764's entry drops it in the other direction:
+	// `go test` runs in the package source directory, so inbandMenuCapturePath's
+	// relative testdata/ prefix resolves with no wrapper at all. os.ReadDir stays
+	// banned as the second route to the listing filepath.Glob would give.
+	//
+	// The relative-path hazard the sibling entries close is in the WRITE direction,
+	// and this file reads and must never write — so os.WriteFile, os.Create,
+	// writeFixture, writeSetModeFixture, setModeFixturePath and writeInitControlFixture
+	// all stay banned. That is not abstract here: #2045's own ticket declined a
+	// write-a-capture-on-red design because a pipeline run discards its worktree and
+	// a red run commits nothing, and this file's header says so. A write from it
+	// would land in the committed testdata/ of whoever ran it locally instead.
+	//
+	// captureClaudeVersion matters here more than anywhere else in this family, and
+	// it is the shortcut the file's own subject invites: the live caller passes it a
+	// version token, so "just call captureClaudeVersion" reads as the natural way to
+	// fill the table's version column. It would exec `claude --version` and pin the
+	// table to whatever the developer's machine has installed, replacing a fixed
+	// 2.1.239 expectation with a moving one — and the no-capture row, whose whole
+	// content is a version nothing has captured, would start passing or failing by
+	// accident. The first five keep a SKIP out for the family's usual reason:
+	// resolveClaudeBin and WithWorktreeAuthenticated skip INSIDE the test body, after
+	// `=== RUN` is printed, and a skip exits 0, which reads as a pass under
+	// `make e2e-realclaude`.
+	//
+	// The three environment readers are the credential guard for a process
+	// environment carrying CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+	//
+	// t.TempDir is absent for #1661's reason rather than #1651's: this file writes
+	// nothing and needs no directory of its own.
+	"interactive_stream_inband_menu_drift_test.go": {
+		"resolveClaudeBin", "WithWorktreeAuthenticated", "WithWorktree",
+		"probeClaudeVersion", "captureClaudeVersion",
+		"os.Getenv", "os.Environ", "os.LookupEnv",
+		"packageDir", "setModeFixturePath", "writeSetModeFixture", "writeFixture", "writeInitControlFixture",
+		"filepath.Glob", "os.WriteFile", "os.Create", "os.ReadDir",
+	},
 }
 
 // TestFinOfflineFilesReachNoExecHelper runs the check those headers describe.

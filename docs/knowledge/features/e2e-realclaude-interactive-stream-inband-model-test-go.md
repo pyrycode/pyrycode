@@ -86,7 +86,21 @@
   assumes claude's own responses hold still between the two runs, and when
   they don't, the diff attributes the flap to whichever side ran second —
   compare the two runs' *observed inputs*, not just their verdicts, before
-  accepting a live-gate regression as branch-caused.
+  accepting a live-gate regression as branch-caused. **Operationalised
+  (#2045):** `interactive_stream_inband_menu_drift_test.go` turns that
+  generalisation into a mechanical check. On the B1/B2 red path only, it
+  classifies the row phase 2 chose against the claude-version-keyed baseline
+  this repo already commits (`testdata/initialize_control_v<version>.json`)
+  and logs one of match/drift/no-capture, naming the version and, on drift,
+  listing both the committed and the live menus — turning a two-run diagnosis
+  into a one-run one. It fails nothing itself and never touches the committed
+  baseline. The baseline is addressed by **exact version name, never a
+  glob**: a glob would find a capture at a neighbouring claude version and
+  report "match" against the wrong baseline, silently reproducing the very
+  misattribution this generalisation exists to end — the absence of a capture
+  at the running version is itself the reportable `no-capture` verdict, not a
+  hole for a neighbouring version's capture to fill. The same caution applies
+  to any future baseline-vs-live comparison added to this package.
 
 - `set_permission_mode_probe_test.go` (#1595) — **does the bypass posture have
   an in-band form, the way #1581/#1582 proved the model does?** Four direct

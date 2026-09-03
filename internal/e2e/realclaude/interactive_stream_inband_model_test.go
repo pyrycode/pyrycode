@@ -148,6 +148,35 @@ package realclaude
 // published. Phase 1 keeps its pinned table because an ALIAS is stable across
 // versions in a way a variant row is not.
 //
+// # A red B1/B2 now says whether claude's own menu moved (#2045)
+//
+// On 2026-09-02 B1/B2 went red on a branch touching zero production source files.
+// Claude published `claude-fable-5-1[1m]` → `claude-fable-5-1` in the branch run and
+// `claude-fable-5[1m]` → `claude-fable-5` in the base re-run eight minutes later, at
+// ONE binary version (2.1.239), and did not apply the first form in band; three
+// re-runs on the branch then passed 3/3. B1's own message anticipates that outcome
+// and asks for it to be routed back rather than weakened, and it was right to. What
+// no assertion could do is tell a reader of a SINGLE red run that this is what
+// happened, so the branch was blamed for a change nothing in a git branch can make
+// and a rework leg was spent finding that out.
+//
+// A red run already carries the live menu — the t.Logf below prints the whole thing
+// unconditionally, before the assertions, and Go prints a failing test's buffered
+// log. What it could not say is whether that menu is the one claude published when
+// the baseline was taken. This repo commits that baseline per claude version, so on
+// the B1/B2 red path ONLY the phase now compares the row it chose against
+// testdata/initialize_control_v<version>.json and logs the verdict: match, drift, or
+// no-capture. inbandCompareMenu, in interactive_stream_inband_menu_drift_test.go, is
+// the comparator, and it fails nothing — B1/B2 have already failed the test, and a
+// second red would double-count one finding.
+//
+// B1 and B2 are neither weakened nor retried. A retry would hide the finding, which
+// is the opposite of what #1838 asks for.
+//
+// Producing that red needs no waiting for claude to flap again: the -overlay recipe
+// § Evidence describes works on this file, and an overlay forcing B1 red renders the
+// verdict with no mutated source written into the worktree.
+//
 // # Running it
 //
 //	go test -tags e2e_realclaude -race -v \
@@ -693,7 +722,14 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 		bModels, spawns(), pidAfter, pidEnd, rec.resultCount())
 	bLast := bModels[len(bModels)-1]
 
+	// #2045: whether the menu-drift verdict below is rendered at all. AC 3 asks for it
+	// on exactly the B1/B2 red path — a green phase has nothing to attribute, and
+	// rendering it anyway would spend a `claude --version` exec on every green run and
+	// put a finding in front of a reader who has none.
+	modelAssertionFailed := false
+
 	if bLast == baseline {
+		modelAssertionFailed = true
 		t.Errorf("B1: the child reported model %q both before and after `/model %s`; "+
 			"claude publishes that value in its own menu as the argument you pass to select "+
 			"the model, and did not apply it to the running child. The daemon now ACCEPTS the "+
@@ -702,6 +738,7 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 			"rather than weakening this assertion", baseline, bracketed)
 	}
 	if bLast != row.ResolvedModel {
+		modelAssertionFailed = true
 		t.Errorf("B2: the child reported model %q after `/model %s`, want %q — the "+
 			"resolvedModel claude's OWN menu gave for that row in this same session. "+
 			"If B1 passed, the bracketed value applied and claude's announcement disagrees "+
@@ -712,6 +749,26 @@ func TestInteractiveStream_InBandModelChange_LiveChildReportsNewModel(t *testing
 		t.Errorf("B3: child pid %d served the turn before the bracketed change but %d served "+
 			"the one after; AC 4 asks for a value delivered to a RUNNING child, and a respawn "+
 			"would produce B1's evidence through the recomposed argv instead", pidAfter, pidEnd)
+	}
+
+	// #2045: B1 or B2 is red, so say IN THIS RUN whether claude's published menu moved
+	// from the capture this repo committed for the running version. On 2026-09-02 that
+	// question cost a rework leg and a second gate run to answer.
+	//
+	// captureClaudeVersion is the package's own `claude --version` exec and the
+	// primitive every name under testdata/ is minted from, which is what anchors the
+	// comparison to the fixture family rather than to some other spelling of the
+	// version. It is NOT necessarily resolveClaudeBin's binary — that one honours
+	// PYRY_CLAUDE_BIN and this one always execs bare `claude` — and the verdict names
+	// the version it compared against for exactly that reason, rather than leaving a
+	// reader to assume which one it meant.
+	//
+	// t.Fatalf inside captureClaudeVersion is acceptable here and nowhere else in this
+	// phase: it is reached only once the test has already failed.
+	if modelAssertionFailed {
+		_, versionToken := captureClaudeVersion(t)
+		outcome, verdict := inbandCompareMenu(versionToken, row, menu)
+		t.Logf("menu-drift verdict [%s] — %s", outcome, verdict)
 	}
 }
 
