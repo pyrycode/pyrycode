@@ -1,4 +1,4 @@
-# `Pool.UpdateSettings` (#840, `PermissionMode` #2043, keeps the spawn posture current #2064)
+# `Pool.UpdateSettings` (#840, `PermissionMode` #2043, keeps the spawn posture current #2064, escalation routed in-band #2066)
 
 The persistence seam the v2 settings verb (#841, split into wire vocabulary #844 + handler #845) calls to change an existing session's `Model` / `Effort`
 / permission posture after creation — `SessionSettings` above was immutable
@@ -91,28 +91,42 @@ moment #2065 removes the posture from the launch argv. See [streamsup-package's
 Posture gate § Keeping the spawn posture in
 step](streamsup-package-posture-gate-spawn-permission-mode-ack.md#keeping-the-spawn-posture-in-step).
 
-**Which branch, and why (#1581, redrawn by #1604, generalised by #2043).**
+**Which branch, and why (#1581, redrawn by #1604, generalised by #2043, the
+escalation opened by #2066).**
 `inBandDeliverable(update)` partitions on what the update carried — which
 fields, and for the posture its *value* too — never on merged-vs-previous per
 field. `SetSessionSettingsPayload`'s `omitempty` pointers are a presence
 contract, so a client changing one setting sends one field, and a present
 `YOLO`/`PermissionMode` is read for its direction rather than diffed against
 stored state. Since #2043 one posture is expressed by two fields, so an update
-naming *either* is an update to the posture — the routing rule is unchanged,
-but what it now decides is whether the *resulting* posture is one of the five
-in-band modes:
+naming *either* is an update to the posture. Since #2066 the routing question
+is membership in `permissionModeKnown` — every posture this daemon can
+store — not `permissionModeInBand`, which stays the five NON-escalating modes
+on purpose (see [`SessionSettings` /
+`claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)
+for why `permissionModeInBand` itself must not widen: three *other* readers of
+that predicate — `canonicalPermissionMode`, `claudeSettingsArgs`,
+`permissionModeForDisk` — depend on it staying exactly five, and reusing
+`permissionModeKnown` here rather than widening `permissionModeInBand` in
+place is what keeps them safe.):
 
 - **A change claude accepts on the already-open stream** — a non-empty
   `Model`/`Effort`, and/or an update whose resulting posture is one of the
-  five in-band modes (refused by non-membership: `update.PermissionMode !=
-  nil && !permissionModeInBand(*update.PermissionMode)` returns `false`, so a
-  `bypassPermissions` mode and every unanticipated spelling fall out here) — →
+  **six** storable modes (refused by non-membership: `update.PermissionMode !=
+  nil && !permissionModeKnown(*update.PermissionMode)` returns `false`, so
+  every unanticipated spelling falls out here, but `bypassPermissions` no
+  longer does; the `update.YOLO != nil && *update.YOLO` clause that used to
+  refuse the bit spelling is gone outright, since `internal/relay`'s
+  `validPermissionMode` means a mobile client can only ever spell the
+  escalation as `yolo:true` and that clause was the one place it was still
+  refused) — →
   `sup.SetSpawnArgs(newArgs)` then `deliverSettingsInBand`, which writes
   `/model <v>` and `/effort <v>` as ordinary user turns via
   `sup.WriteUserTurn(context.Background(), "", …)`, and the **resulting**
-  posture as one `set_permission_mode` control request via
-  `sup.SetPermissionMode(merged.PermissionMode)` — model, then effort, then
-  posture, **exactly one send** for an update naming either posture field.
+  posture — including the escalation — as one `set_permission_mode` control
+  request via `sup.SetPermissionMode(merged.PermissionMode)` — model, then
+  effort, then posture, **exactly one send** for an update naming either
+  posture field.
   That arithmetic is deliberate and load-bearing: the pre-#2043 shape (a mode
   clause kept beside the old `!*update.YOLO → RevokeBypass()` clause) would
   emit *two* identical control requests for one revocation, because the
@@ -127,7 +141,11 @@ in-band modes:
   child already in it — the same redundancy this path already tolerates for
   an unchanged model re-sent alongside a new effort. Claude accepts all sends
   on the stream the daemon already holds open and applies them to the running
-  session, so **nothing is killed and the transcript survives**. The
+  session, so **nothing is killed and the transcript survives**, and since
+  #2066 that now includes the escalation: every child has launched with
+  `--dangerously-skip-permissions` since #2065, so `bypassPermissions` is a
+  request claude has been measured (#2060) to accept back on such a child
+  without a respawn. The
   `SetSpawnArgs` call is not optional: it is `Restart`'s swap half (#1580),
   and skipping it would let the operator's change silently revert on the next
   crash-respawn or evict → `Activate` — this is what makes a revocation
@@ -143,19 +161,16 @@ in-band modes:
   the seam's own bare unsupported-mode sentinel — which does not echo the
   rejected string, so it may be logged verbatim) all warrants the same
   response, with the dominant case — an evicted session — not a degradation.
-- **Everything else** → `sup.Restart(newArgs)`, unchanged. That is an
-  **escalation** — `yolo:true` or a `bypassPermissions` mode — where claude
-  gates the change on the launch argv and refuses the control request in
-  words (#1595 measured this live against claude 2.1.220, #2041 measured the
-  other four directions), so only a respawn under the recomposed argv can
-  grant it — and clearing model or effort to `""` ("run at claude's own
-  default", which `claudeSettingsArgs` expresses by *omitting* the flag, and
-  for which no `/model` invocation means "revert"). A revoke takes this
-  branch too when a present-but-empty `Model`/`Effort` is mixed into the same
-  frame — the empty-value reject wins, but costs nothing: the restart
-  recomposes argv from the **merged** settings, so the respawn still carries
-  the revocation. No frame can lose a revocation by mixing. Clean partition —
-  never both mechanisms for one change, no case left unserved.
+- **Everything else** → `sup.Restart(newArgs)`, unchanged. Since #2066 the
+  escalation no longer reaches this branch, so what is left is clearing model
+  or effort to `""` ("run at claude's own default", which `claudeSettingsArgs`
+  expresses by *omitting* the flag, and for which no `/model` invocation means
+  "revert") — including a `yolo:true` or `bypassPermissions` mode mixed into
+  the same frame as a cleared `Model`/`Effort`. The empty-value reject wins,
+  but costs nothing: the restart recomposes argv from the **merged** settings,
+  so the respawn still carries the escalation. No frame can lose a posture
+  change by mixing. Clean partition — never both mechanisms for one change, no
+  case left unserved.
 
 **A no-log test must capture the pool's logger, not a spawning runner's.**
 `(*streamsup.Runner)` already logs the full spawn argv at `Info`
@@ -173,9 +188,10 @@ with `--resume` on a session that has never run a turn; claude answers
 `No conversation found with session ID` and exits 1, and the daemon retries
 forever on a widening backoff (observed 2026-08-18). The in-band path
 **avoids** that rather than fixing it — no resume, no lost transcript, no
-crash-loop. Live-applying a `YOLO` revoke is #1604 — the enable direction has
-no in-band form; claude refuses it. #1574 may **not** delete `Restart`: the
-enable direction keeps a live production caller. **#1605 was split, not
+crash-loop. Live-applying a `YOLO` revoke is #1604; the enable direction gained
+its own in-band form at #2066, once #2065 put the launch argv permanently
+ahead of the stored posture. #1574 may **not** delete `Restart`: clearing
+`Model`/`Effort` to `""` is a live production caller that remains. **#1605 was split, not
 landed as such**: the live-claude proof that this composed path (`Pool` →
 `inBandDeliverable` → `deliverSettingsInBand` → `Runner.SetPermissionMode`,
 formerly `Runner.RevokeBypass` until #2043 collapsed the pair) reaches a real

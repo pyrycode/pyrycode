@@ -102,6 +102,46 @@ next spawn's write current. See [Runner interface +
 `RunnerFactory`](sessions-package-key-types-runner-interface-runnerfactory.md) and
 [`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md).
 
+## The escalation stays spawn-unwritable, deliberately (#2066)
+
+`permissionModeAllowed` (the writer's allow-list) has two production readers:
+`WritePermissionMode` and this gate's own spawn-time decision in
+`spawnAndWait`. #2066 opened the escalation at the writer — `bypassPermissions`
+became a member — but the spawn-time reader could not follow it without
+reproducing the exact bricking risk this document's first lesson above
+already paid for once. A widened `postureID` condition would arm the gate
+**closed** on a bypass spawn's first control request, before any turn — a
+shape #2060's live capture never measured (it captured the escalation on an
+*established* stream after two turns, not as a first write), and a NAK there
+would refuse turns from the session's very first one, with no prior in-band
+change to retarget the gate out of it.
+
+The fix is a second, narrower predicate rather than a widened first one:
+`permissionModeSpawnWritable(mode string)` is `permissionModeAllowed(mode) &&
+mode != permissionModeBypass` — **subtraction from the allow-list, not a
+second switch**, so a future seventh mode added to the vocabulary becomes
+spawn-writable automatically (the right default) and the two lists cannot
+drift apart by someone forgetting to update one of them. `spawnAndWait`'s
+`postureID` condition reads this predicate, not `permissionModeAllowed`
+directly.
+
+The exclusion is not caution for its own sake: since #2065 the launch argv
+already asserts `--dangerously-skip-permissions` on every child, so a bypass
+session's fresh child is *already* in the posture its stored settings ask
+for — there is nothing to walk it back to, and the write would be pure
+redundancy on top of being untested territory. Keeping the exclusion keeps
+`arm("")` (the OPEN zero value) for a bypass spawn, so its turns flow with no
+ack dependence — see [`SessionSettings` /
+`claudeSettingsArgs`](sessions-package-key-types-sessionsettings-claudesettingsargs.md)
+for why the launch argv, not the spawn-time write, is the escalation's
+authority now.
+
+The general shape: when a widening opens one reader of a shared allow-list, a
+second reader of the *same* list is not safe by association — each reader
+needs its own predicate, sized to what that reader can actually tolerate
+getting wrong. `TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn`
+is the red that would catch the spawn-time reader being widened in place.
+
 ## Fake-daemon regression this ticket exposed, not introduced
 
 `internal/e2e/internal/fakeclaude`'s `runStreamJSONApprove` is a **separate, duplicated** read

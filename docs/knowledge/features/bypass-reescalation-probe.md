@@ -11,10 +11,13 @@ the mechanism is now settled: **claude gates the escalation on the launch argv, 
 session's current mode.** A child launched without the flag can never reach bypass in-band; a
 child launched with it may leave and re-enter as often as it likes.
 
-This measures **claude**, not pyry. It adds no production writer and changes no daemon
-behaviour — `permissionModeAllowed` (`internal/streamsup/envelope.go`) still refuses
-`bypassPermissions` by non-membership, backing `SetPermissionMode`'s contract
-(`internal/streamsup/runner.go`). Whether anything is built on this answer is #1686's decision.
+This measures **claude**, not pyry, and at the time it landed changed no daemon
+behaviour. #2066 is what got built on it: `permissionModeAllowed`
+(`internal/streamsup/envelope.go`) now admits `bypassPermissions`, and the
+escalation routes in-band the same way this probe's `reescalate` arm drove it by
+hand — see [`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md)
+and [the posture gate's escalation
+carve-out](streamsup-package-posture-gate-spawn-permission-mode-ack.md#the-escalation-stays-spawn-unwritable-deliberately-2066).
 
 ## claude version measured
 

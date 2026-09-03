@@ -53,6 +53,15 @@ this?"), not authorisation gates — three in-band members (`acceptEdits`,
 approval flags, and who may request that is #1687's decision, not this
 primitive's.
 
+Since #2066, `permissionModeKnown` is also the routing membership predicate
+`inBandDeliverable` reads for the posture field — every storable posture is
+now delivered the same way, and `permissionModeInBand` staying at five is
+what keeps `canonicalPermissionMode`, `claudeSettingsArgs` and
+`permissionModeForDisk` reading exactly the set they read before: the routing
+question was moved to a *different* predicate that already existed, not
+answered by widening this one. See
+[`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md).
+
 `Pool.mintSettings` keeps its two-field literal (`Model`/`Effort` only) and
 gains no `PermissionMode` line — a posture is not inherited by a freshly-minted
 session, the same structural fail-safe already applied to `YOLO`;
