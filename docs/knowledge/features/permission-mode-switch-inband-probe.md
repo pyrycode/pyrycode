@@ -95,3 +95,6 @@ accidentally sweep five more live children into a run budgeted for four.
 - [`e2e-realclaude-interactive-stream-inband-model-test-go.md`](e2e-realclaude-interactive-stream-inband-model-test-go.md)
   — the file-level entry for `permission_mode_switch_probe_test.go`, with the namer-sanitisation
   and scrub-ordering lessons this measurement also surfaced.
+- [`bypass-reescalation-probe.md`](bypass-reescalation-probe.md) — #2060, which reuses
+  `setModeChildConfig` from this ticket and avoids the same `omitempty`-false-by-absence trap
+  `supports_auto_mode` above records, this time for a second control request's correlation bool.

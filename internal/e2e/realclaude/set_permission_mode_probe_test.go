@@ -86,6 +86,11 @@ package realclaude
 // arm's post-change read is its turn 2, so its control must also be a turn 2, or
 // the verdict folds in a turn-index confound.
 //
+// #2041 and #2060 ride this same driver with their own arms. #2060 widened it with
+// an optional third turn and a second control request between turns 2 and 3, both
+// INERT here: setModeChildConfig.promptThree is empty on this measurement, so these
+// four arms still drive exactly the two turns described above.
+//
 // # Why the echoed response is not the verdict
 //
 // #383 measured that a `default`-launched child auto-approved Bash anyway, at
@@ -192,6 +197,20 @@ type setModeArm struct {
 	name       string
 	launchYOLO bool
 	targetMode string
+
+	// secondTargetMode is the mode of a SECOND control request, written after turn
+	// 2 and before turn 3. Empty means the arm sends only one, which is what both
+	// existing construction sites get for free — each uses keyed fields.
+	//
+	// Additive rather than a []string replacing targetMode: only two sites build a
+	// setModeArm and neither has to change for a new field, whereas replacing
+	// targetMode would touch both plus every reader of RequestedMode. #2060 added it
+	// for the re-escalation measurement, whose whole subject is two sequential
+	// requests in one child.
+	//
+	// It is inert unless setModeChildConfig.promptThree is set: a second request is
+	// only meaningful when a turn follows it to read the result off.
+	secondTargetMode string
 }
 
 var setModeArms = []setModeArm{
@@ -562,6 +581,22 @@ func setModeWaitFor(count func() int, want int, budget time.Duration) bool {
 
 // --- the fixture -------------------------------------------------------------
 
+// setModeSecondRequest records an arm's SECOND control request, and is nil on
+// every arm that sent only one.
+//
+// A nested pointer rather than four flat omitempty fields beside their
+// first-request twins, and the bool is the reason: ControlResponseIDMatched's
+// FALSE is a finding — a reply that correlated to nothing — while an omitempty
+// bool spells false by ABSENCE, the exact trap modeSwitchAutoObservation's fields
+// exist to avoid. Nil says "no second request was sent"; a present value says all
+// four fields are real, false included.
+type setModeSecondRequest struct {
+	RequestedMode            string          `json:"requested_mode"`
+	ControlRequestID         string          `json:"control_request_id"`
+	ControlRequestSent       json.RawMessage `json:"control_request_sent"`
+	ControlResponseIDMatched bool            `json:"control_response_id_matched"`
+}
+
 // setModeFixtureRecord is the durable artifact. The JSON field names are the
 // contract #1596 and any future re-measurement read.
 //
@@ -584,6 +619,11 @@ type setModeFixtureRecord struct {
 	ControlRequestSent              json.RawMessage   `json:"control_request_sent"`
 	ControlResponses                []json.RawMessage `json:"control_responses"`
 	ControlResponseRequestIDMatched bool              `json:"control_response_request_id_matched"`
+
+	// SecondRequest is #2060's two-request arm and nil on every other. Both
+	// requests' replies land in ControlResponses in arrival order regardless — this
+	// records which line was SENT second and whether anything correlated to it.
+	SecondRequest *setModeSecondRequest `json:"second_control_request,omitempty"`
 
 	InitPermissionModes []string          `json:"init_permission_modes"`
 	StdoutEvents        []json.RawMessage `json:"stdout_events"`
@@ -692,6 +732,17 @@ type setModeChildConfig struct {
 	// "I already did that".
 	promptOne string
 	promptTwo string
+
+	// promptThree is an OPTIONAL third probe turn, driven after the second control
+	// request. Empty means the child stops after turn 2, which is what #1595's and
+	// #2041's callers get.
+	//
+	// It exists so a two-request arm's post-change read can sit at a turn of its
+	// own. The header's index-symmetry rule says a measurement arm's read and its
+	// control must share a turn index, so a measurement reading turn 3 needs
+	// controls that HAVE a turn 3; #2060's control arms set this and send no
+	// request at all.
+	promptThree string
 
 	maxTurns string
 
@@ -821,6 +872,53 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 			arm.name, setModeTurnBudget)
 	}
 
+	// The optional second control request and third turn, #2060's addition. Both are
+	// inert on a caller leaving promptThree empty, which is every caller before it.
+	// The second request goes BETWEEN turns 2 and 3 for the same reason the first
+	// goes between turns 1 and 2: the read that follows a posture change has to be a
+	// full turn, since the init line is emitted per turn rather than at spawn.
+	var secondRequest *setModeSecondRequest
+	if cfg.promptThree != "" {
+		if arm.secondTargetMode != "" {
+			// Minted from the arm name the same way the first request is, rather
+			// than derived from requestID: that one is empty on an arm sending no
+			// FIRST request, and deriving would silently mint a bare "-2".
+			requestIDTwo := "set-permission-mode-" + arm.name + "-2"
+			line, err := setModeControlLine(requestIDTwo, arm.secondTargetMode)
+			if err != nil {
+				t.Fatalf("#1595[%s]: %v", arm.name, err)
+			}
+			sent := json.RawMessage(bytes.TrimRight(line, "\n"))
+			t.Logf("#1595[%s]: writing second control request: %s", arm.name, sent)
+
+			// baseline+1, never an absolute 2: an unsolicited control_response
+			// earlier in this child would otherwise satisfy the wait before claude
+			// answered this request at all.
+			baseline := rec.controlResponseCount()
+			writeLine("control request 2", line)
+			if !setModeWaitFor(rec.controlResponseCount, baseline+1, setModeControlBudget) {
+				t.Logf("#1595[%s]: no second control_response within %s (recorded as absence, continuing)",
+					arm.name, setModeControlBudget)
+			}
+			secondRequest = &setModeSecondRequest{
+				RequestedMode:      arm.secondTargetMode,
+				ControlRequestID:   requestIDTwo,
+				ControlRequestSent: sent,
+			}
+		}
+
+		turnThree, err := setModeTurnLine(cfg.promptThree)
+		if err != nil {
+			t.Fatalf("#1595[%s]: %v", arm.name, err)
+		}
+		baseline := rec.resultCount()
+		writeLine("turn 3", turnThree)
+		if !setModeWaitFor(rec.resultCount, baseline+1, setModeTurnBudget) {
+			t.Logf("#1595[%s]: turn 3 produced no result line within %s (recorded, continuing)",
+				arm.name, setModeTurnBudget)
+		}
+	}
+
 	if err := stdinPipe.Close(); err != nil {
 		writeErrs = append(writeErrs, fmt.Sprintf("stdin close: %v", err))
 	}
@@ -863,6 +961,14 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 	if waitErr != nil {
 		waitErrStr = waitErr.Error()
 	}
+	// Correlated here rather than at send time: the reply had not arrived yet then.
+	if secondRequest != nil {
+		secondRequest.ControlResponseIDMatched = setModeResponseIDMatches(responses, secondRequest.ControlRequestID)
+	}
+	prompts := []string{cfg.promptOne, cfg.promptTwo}
+	if cfg.promptThree != "" {
+		prompts = append(prompts, cfg.promptThree)
+	}
 
 	record := &setModeFixtureRecord{
 		ClaudeVersionRaw: versionRaw,
@@ -871,7 +977,7 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		Arm:            arm.name,
 		LaunchYOLOFlag: arm.launchYOLO,
 		Argv:           append([]string{claudeBin}, argv...),
-		Prompts:        []string{cfg.promptOne, cfg.promptTwo},
+		Prompts:        prompts,
 		Model:          cfg.model,
 		ModeSwitchAuto: cfg.autoMode,
 
@@ -880,6 +986,7 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		ControlRequestSent:              controlSent,
 		ControlResponses:                responses,
 		ControlResponseRequestIDMatched: setModeResponseIDMatches(responses, requestID),
+		SecondRequest:                   secondRequest,
 
 		InitPermissionModes: rec.snapshotInitModes(),
 		StdoutEvents:        lines,
