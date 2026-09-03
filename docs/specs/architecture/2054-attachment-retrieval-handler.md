@@ -559,3 +559,40 @@ A second finding on the same run (`SA4006`, a dead assignment in
 `waitForReplies`) was a test-local fix with no design content: the lower-bound
 wait's return value is discarded and the post-settling re-read remains the
 exact-count assertion's only source, which is the property that helper exists for.
+
+### 2026-09-03 — the logging rationale on the resolver-miss arm, and three stale claims
+
+Driven by the verifier's review (three SHOULD FIX, one NIT). **No contract, code
+path, reject code or ordering moves**; every edit is a comment this branch either
+authored or falsified.
+
+The one with security content is the first. `handleRequestAttachment`'s
+resolver-miss arm justified logging `req.AttachmentID` by saying the resolver had
+just shape-checked it. That is false on precisely that arm: `!ok` is the outcome
+where `ResolvePath`'s `conversations.ValidID` check may itself have **failed**, and
+the comma-ok seam collapses "shape invalid" into the same `false` as "no such
+file" — by design, since § Design's step 5 requires the handler to be unable to
+branch on what it must not distinguish. So the id logged there can be an arbitrary
+client string. The behaviour is kept (it matches `handleAttachmentChunk` and is the
+most diagnostic field on a refusal), and the reason is restated to the sibling's
+honest one: the bound is that `slog`'s `TextHandler` escapes control bytes, so an
+escape-bearing id cannot forge log structure, plus one record per request rather
+than per chunk. The same claim appeared in two more places on this branch — the
+file header's never-log paragraph and `rejectAttachmentRequest`'s doc block — and
+all three now say the same true thing. It matters past tidiness on a
+`security-sensitive` ticket because § Attachments' `attachment_ids` rule turns on a
+shape-validated id being unable to carry injection text; a later reader acting on
+the false claim would make a genuinely unsafe call elsewhere.
+
+The other three are staleness this branch created. `dispatchAppFrame`'s
+`TypeAttachmentChunk` case still called itself *"the one control type whose handler
+does NOT run inline on Run"* three lines above the second such case; it now names
+itself the first of two. `codes.go`'s `TypeRequestAttachment` block still described
+the guard filing as pending — the marker, the `excludedTypes` sentence and the
+"Assertion #2 forces it up the moment #2054 adds its case" sentence, all falsified
+by this PR, in the block the next person filing a wire type reads. It is flipped to
+`switch-intercepted` with the pending state recorded as history, exactly as #1984's
+implementation commit `dac742dd` did for `TypeQuestionAnswer` / `TypeQuestionRefused`.
+And `v2session_attachment.go`'s header pointed at `appFrameWorker`'s
+`job.attachment` arm, a field this branch renamed to `kind`, so the pointer was
+grep-dead; it now names `case appFrameAttachmentChunk`.

@@ -122,10 +122,15 @@ var (
 // attachments.ResolvePath's doc block adds the resolved path to the banned side
 // because its leaf is a sanitised client filename. So: conn id, the attachment id
 // once it is non-empty, and the reject code may be logged; the file's bytes, the
-// filename, the digest and the host path never. The requested CONVERSATION id is
-// not logged either — this handler validates its membership, not its shape, and
-// § Attachments makes shape validation the precondition for logging a
-// client-supplied string. The error out of StreamAttachment is never logged on any
+// filename, the digest and the host path never. Past the resolver the logged id is
+// canonical, because ResolvePath answered true for it; on the resolver-MISS arm it
+// can be an arbitrary client string, since the comma-ok seam collapses a failed
+// shape check into the same false as a missing file. Logging it there is deliberate
+// and matches handleAttachmentChunk, whose header names the bound that makes it
+// safe: slog's TextHandler escapes control bytes, so an escape-bearing id cannot
+// forge log structure. The requested CONVERSATION id is not logged on ANY arm —
+// this handler validates its membership, not its shape, and § Attachments makes
+// shape validation the precondition for logging a client-supplied string. The error out of StreamAttachment is never logged on any
 // arm, only classified: #2053 rebuilt it around the stripped cause precisely so a
 // caller could classify without holding the path, and not logging it is the other
 // half of that bargain.
@@ -173,9 +178,16 @@ func (m *V2SessionManager) handleRequestAttachment(ctx context.Context, s *V2Ses
 
 	path, ok := m.cfg.AttachmentResolve(req.ConversationID, req.AttachmentID)
 	if !ok {
-		// Step 5. The attachment id is loggable from here on: it is non-empty and
-		// the resolver has just applied the canonical-shape check to it, which is
-		// the precondition § Attachments sets for logging a client string.
+		// Step 5. The attachment id is logged here even though this is the one arm
+		// where it may NOT be canonical: ResolvePath's shape check is one of the
+		// causes the comma-ok seam collapses into false, so "shape invalid" and
+		// "no such attachment" arrive identically and an arbitrary client string
+		// can reach the record. Logging it anyway matches handleAttachmentChunk,
+		// and the bound is the one that handler's header names — slog's
+		// TextHandler escapes control bytes, so an escape-bearing id cannot forge
+		// log structure — plus one record per request rather than per chunk. This
+		// is NOT the § Attachments shape-validated-first rule; that rule is why the
+		// conversation id above stays unlogged on every arm.
 		m.rejectAttachmentRequest(ctx, s, env.ID, rejectAttachmentNotFound, "no attachment resolves under that conversation", req.AttachmentID)
 		return
 	}
@@ -233,8 +245,9 @@ func attachmentStreamAborted(err error) bool {
 // separable in the daemon's own logs while staying identical on the wire, which is
 // the whole shape of the merge: indistinguishable to a client, diagnosable to an
 // operator. attachmentID is logged only where the caller has established it is
-// non-empty and shape-checked; "" means the caller had no id it was allowed to
-// name, and the field is then omitted rather than logged empty.
+// NON-EMPTY — not necessarily canonical, since the resolver-miss arm cannot tell a
+// failed shape check from a missing file; "" means the caller had no id it was
+// allowed to name, and the field is then omitted rather than logged empty.
 func (m *V2SessionManager) rejectAttachmentRequest(ctx context.Context, s *V2Session, inReplyTo uint64, rej attachmentReject, reason, attachmentID string) {
 	attrs := []any{
 		"event", "v2.attachment.request.refused",

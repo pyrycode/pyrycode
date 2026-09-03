@@ -846,8 +846,9 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			m.handleRequestSessionSettings(ctx, s, probeEnv)
 			return
 		case protocol.TypeAttachmentChunk:
-			// The one control type whose handler does NOT run inline on Run
-			// (#1897). Every other arm above is fast; a completing chunk hashes
+			// The FIRST control type whose handler does not run inline on Run
+			// (#1897), and one of two — the retrieval arm below joined it in
+			// #2054. Every other arm above is fast; a completing chunk hashes
 			// and writes up to the per-upload byte bound, which is exactly the
 			// work #1491 had to move off Run for handleDebugBundleRequest. So
 			// this arm only tags the frame and falls through to the same
