@@ -726,3 +726,97 @@ never armed"* (superseded by the previous entry's hoist), `WriteUserTurn` enumer
 refusal causes where there are now three, and fakeclaude's `runStreamJSONApprove` header
 still claimed non-user lines are *"ignored … exactly like runStreamJSON"* with the
 correction stranded forty lines down inside the arm that falsified it.
+
+### 2026-09-03 — rework, real-claude gate: the write revoked an operator's bypass
+
+**The defect, measured rather than reviewed.** The live-claude gate reddened four
+`TestInteractiveStream*` specs that pass on `origin/main` —
+`TestInteractiveStreamRunningTurn`, `TestInteractiveStreamInterruptStopsRunningTurn`,
+`TestInteractiveStreamAttachmentRead` and `TestInteractiveStreamNoUnrecognizedOnToolTurn`.
+Each failed with real claude refusing a real tool: `permission_denied` on `Bash`, on
+`Write`, and *"I need permission to read that file"* on `Read`. The spawn record on all
+four reads `--dangerously-skip-permissions`, and the daemon's own log line
+`streamsup: turn refused; permission posture not yet confirmed by claude` sits directly
+beneath it — so the gate armed at a child the operator had launched in bypass, and the
+spawn-time write then **downgraded it to `default`**.
+
+**Why the design missed it, and it is not the fake's fault.** § Design rested the whole
+write decision on the stored posture, on the strength of the ticket's *"on today's launch
+argv this is a no-op in effect"* premise. That premise holds only for the entry point the
+stored posture models. `withApprovalArgs`' doc names **two** ways bypass reaches the argv:
+
+- `sessions.claudeSettingsArgs`, from the per-session YOLO bit. `canonicalSettings` pins
+  `PermissionMode` to the escalation alongside it, so `permissionModeAllowed` already
+  refuses this row by non-membership. This is the one the plan reasoned about.
+- **The operator's bootstrap pass-through claude args** — the shape `main.go`'s own
+  `install-service -- --dangerously-skip-permissions` example documents. These never touch
+  `SessionSettings`, so the stored posture reads `default` at a child running in bypass.
+
+The four specs spawn through `spawnBootstrapDaemon`, which is exactly that second shape.
+Neither this package's suite nor the fake-daemon suite could see it, because both drive
+the stored posture and neither spawns through the pass-through. Direction: the write
+*tightens*, so nothing was loosened — but it silently revokes an escalation the operator
+asked for explicitly, in-band and unanswerable, which is a worse failure than the
+respawn it replaces.
+
+**The fix reverses a rejection this plan recorded, and the reversal is the substance.**
+§ Design and the security review both rejected an argv-derived interlock on the grounds
+that it *"would brick #2065, which launches every child in bypass and delivers the
+posture in-band"*. The rejection's own premise — that the stored posture is kept accurate
+at its source by `SetSpawnPermissionMode`, so argv and stored mode cannot disagree — is
+what the gate falsified. One line changes: the spawn mints an id only when
+`permissionModeAllowed(spawnMode)` **and** this spawn's args do not name
+`--dangerously-skip-permissions`. `arm("")` still runs unconditionally, so the previous
+entry's hoist is untouched and a suppressed spawn publishes the OPEN state.
+
+Evaluated **per spawn** against that spawn's `args`, which `spawnAndWait` already
+receives — correct across `Restart(newArgs)`, with no new `Config` field to go stale and
+no second acquisition. It is the cadence `withApprovalArgs` already prescribes for this
+signal (*"the single deterministic yolo signal … evaluated per-spawn"*), and the symmetry
+is exact: that function already declines to inject the daemon's approval gate onto a
+bypass child, and this declines to assert a posture at one.
+
+**What #2065 must now do, stated at the code rather than left implied.** It cannot key on
+the flag alone either. The operator's pass-through survives #2065 unchanged, so a ticket
+that launches every child in bypass and downgrades in-band would revoke that operator's
+escalation for exactly the reason above — #2065 inherits this defect whether or not this
+predicate exists. What it needs is **provenance**: the daemon must distinguish bypass it
+composed itself, and may therefore downgrade, from bypass an operator handed it, which it
+may not. The predicate is the single named place to add that distinction, and the comment
+at the arm site says so.
+
+**§ Error handling, amended.** Row 1 widens from *"spawn posture outside
+`permissionModeAllowed`"* to *"…, or a spawn whose argv already names the escalation"* —
+same outcome, no write and no id, gate published OPEN. Still 8 branches; no row is added,
+because this is a second way into an existing one.
+
+**§ Security review, amended.** The first pass's MUST FIX removed this interlock and
+called it *"a fail-open on the one path where the gate is the only defence left"*. That
+reading was wrong in fact and the correction runs the other way: the suppressed path is
+one where the child is **already in bypass**, so there is no downgrade being delivered and
+no defence being dropped — the daemon simply stops overriding a posture it did not choose.
+No authorisation decision moves, `permissionModeAllowed` is unwidened, and nothing new is
+logged.
+
+**Testing.** `TestRunner_SpawnPermissionMode_OperatorBypassArgvIsSentNothing` is
+table-driven with its own control row — the rows differ by the flag alone, so a build that
+stopped writing the posture altogether reddens the control rather than passing both
+halves. Confirmed RED against the pre-fix shape by `go test -overlay`
+(`the gate is armed on "1" after a spawn that writes nothing`) with the control row green,
+and green with the fix. The four live specs are the end-to-end proof and re-run on the
+gate.
+
+**Verifier SHOULD FIX / NIT from the PASS review, folded in here** since this push touches
+those comments. `emitModelList`'s provenance paragraph argued its conclusion from a
+mechanism this PR falsified (*"nothing retains it … the parser holds no link to it"* —
+`armedID`, `retarget` and `Parser.postureGate` are all retained links); the conclusion is
+kept and the supporting sentence is replaced by the `controlAckLine` distinction the
+ticket asked both named comments to carry. `PostureGate.retarget` justified its
+never-close-an-open-gate carve-out with an inverted ordering — `deliverSettingsInBand`
+sends `/model` and `/effort` **before** `SetPermissionMode`, so a gate closed there cannot
+reach the sends of its own call; the carve-out stands on the reason that survives
+checking (a fresh refusal window on a working session, and any LATER update's sends).
+`TestNewStreamRunnerFactory_BindsTheParsersOwnGate` named a function it never calls and is
+renamed `TestSessionParser_MintsOneStablePostureGate`, with the departure recorded: the
+far half of the binding is not observable from `cmd/pyry` because `streamsup.Config` is
+not reachable from the returned runner.

@@ -56,6 +56,19 @@ import (
 // when ctx is cancelled. Mirrors streamrunner's value.
 const killGrace = 5 * time.Second
 
+// bypassPermissionsFlag is claude's argv spelling of the escalation, and the only
+// spelling of it: cmd/pyry's withApprovalArgs records that its presence in a spawn's
+// args is "the single deterministic yolo signal", robust to both entry points that
+// can put it there. spawnAndWait reads it to suppress the spawn-time posture write at
+// a child that launched in bypass; see that site for why the argv, and not the stored
+// posture alone, has to be consulted.
+//
+// This is the FLAG, not the mode name. #1603 emptied this package's production source
+// of the bypassPermissions MODE literal so that the escalation keeps exactly one
+// spelling on the write path, and that still holds: permissionModeAllowed refuses the
+// mode by non-membership rather than by naming it, and nothing here composes an argv.
+const bypassPermissionsFlag = "--dangerously-skip-permissions"
+
 // Supervisor backoff defaults, matching internal/supervisor.
 const (
 	defaultBackoffInitial = 500 * time.Millisecond
@@ -215,6 +228,14 @@ type Config struct {
 	// WritePermissionMode, so a bypass session is sent nothing and its turns flow
 	// exactly as they do today — a gate no write can ever release is a bricked session,
 	// not a fail-closed one. Re-granting bypass stays on the respawn path.
+	//
+	// THAT REFUSAL IS NOT THE ONLY ONE, because this field cannot see every way a child
+	// ends up in bypass. The operator's bootstrap pass-through claude args put
+	// --dangerously-skip-permissions in the argv without touching SessionSettings, so
+	// this field reads default at a child launched in bypass; spawnAndWait consults the
+	// spawn's argv for exactly that case and writes nothing. Read that site before
+	// treating this field as the whole decision — a live-claude gate, not a review,
+	// found the gap.
 	//
 	// "Sent nothing" is NOT "gate untouched", and the difference was a defect: the gate
 	// outlives the child, so a spawn that writes nothing must still arm the OPEN state
@@ -376,10 +397,19 @@ func (g *PostureGate) refuse(requestID string) {
 // child stays healthy and refuses every turn until the daemon restarts.
 //
 // It never closes an OPEN gate, and that half is as load-bearing as the other. This
-// ticket gates SPAWNS; gating in-band changes too would refuse the /model and /effort
-// sends Pool.deliverSettingsInBand issues through WriteUserTurn immediately after the
-// posture write in the same call, dropping them with the update still reporting
+// ticket gates SPAWNS, and closing the gate on an in-band change would make every
+// posture update start a fresh refusal window on a session that was working: every
+// user turn until the ack lands, and the /model and /effort sends any LATER update
+// makes, which Pool.deliverSettingsInBand issues as ordinary turns through
+// WriteUserTurn and which would then be dropped with that update still reporting
 // success.
+//
+// CORRECTED 2026-09-03: this paragraph used to place those sends "immediately after the
+// posture write in the same call", which inverts deliverSettingsInBand — it sends
+// /model and /effort FIRST and calls SetPermissionMode last, so a gate closed there
+// cannot reach the sends of the call that closed it. The carve-out is unchanged; only
+// the mechanism it cited was wrong, and a reader who checks a false mechanism is a
+// reader who deletes a carve-out that errs toward staying open.
 //
 // Retargeting a merely PENDING gate (a spawn ack still in flight) is intended, not
 // collateral: the later write supersedes the earlier one, so the posture actually in
@@ -1491,14 +1521,48 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// armedID's doc already makes; nesting the call merely failed to reach the branch
 	// that needs it.
 	//
-	// An argv-derived interlock — refuse whenever this spawn's args name
-	// --dangerously-skip-permissions — was designed and REJECTED. It is exact on
-	// today's argv and it would brick #2065, which launches every child in bypass and
-	// delivers the posture in-band: an argv-keyed refusal would refuse every downgrade
-	// it exists to deliver. The stored posture is kept accurate at its source instead,
-	// by SetSpawnPermissionMode.
+	// A SPAWN THAT LAUNCHED IN BYPASS IS SENT NOTHING, whatever the stored posture
+	// says. This is the argv-derived interlock that an earlier revision of this
+	// comment recorded as "designed and REJECTED" on the grounds that it would brick
+	// #2065; the live-claude gate then falsified the premise the rejection rested on,
+	// and the reversal is recorded here rather than quietly applied.
+	//
+	// WHAT THE REJECTION ASSUMED: that the stored posture is kept accurate at its
+	// source by SetSpawnPermissionMode, so a disagreement between argv and stored mode
+	// could not arise. It can. Bypass reaches the argv from TWO entry points —
+	// withApprovalArgs' doc in cmd/pyry names both — and only one of them is modelled
+	// by the stored posture:
+	//
+	//   - sessions.claudeSettingsArgs, from the per-session YOLO bit. canonicalSettings
+	//     pins PermissionMode to the escalation alongside it, so permissionModeAllowed
+	//     already refuses this row by non-membership and the interlock is redundant on it.
+	//   - THE OPERATOR'S BOOTSTRAP PASS-THROUGH claude args, the shape main.go's own
+	//     install-service example documents. These never touch SessionSettings, so the
+	//     stored posture reads default while the child is launched in bypass — and
+	//     asserting default at that child SILENTLY REVOKES the bypass the operator
+	//     explicitly asked for, in-band and unanswerable.
+	//
+	// MEASURED, not reasoned: the #2064 live-claude gate reddened four
+	// TestInteractiveStream* specs that pass on main. Each spawns through
+	// spawnBootstrapDaemon's pass-through --dangerously-skip-permissions, and each
+	// failed with real claude refusing a real tool — permission_denied on Bash and on
+	// Write, and "I need permission to read that file" on Read — after this write put
+	// the child in default. The ticket's "no-op in effect on today's launch argv"
+	// premise holds only for the entry point the stored posture models.
+	//
+	// WHAT #2065 MUST DO, since this predicate is the one it will trip over: it cannot
+	// key on the flag alone either, because the operator's pass-through survives that
+	// ticket unchanged and would be downgraded by it for exactly the reason above. It
+	// needs PROVENANCE — the daemon must be able to tell bypass it composed itself,
+	// and may therefore downgrade, from bypass an operator handed it, which it may
+	// not. Give this predicate that distinction and the gate keeps working; delete it
+	// and #2065 inherits this defect rather than avoiding it.
+	//
+	// Evaluated PER SPAWN against this spawn's args, which is what keeps it correct
+	// across Restart(newArgs) with no second acquisition and no Config field to go
+	// stale — the cadence withApprovalArgs' doc already prescribes for this signal.
 	postureID := ""
-	if permissionModeAllowed(spawnMode) {
+	if permissionModeAllowed(spawnMode) && !slices.Contains(args, bypassPermissionsFlag) {
 		postureID = r.nextControlID()
 	}
 	r.postureGate.arm(postureID)

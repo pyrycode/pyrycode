@@ -3252,12 +3252,30 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 // nothing from the payload reaching a log (logControlResponse), and the render
 // boundary the CLIENT owes (protocol.ModelOption's SECURITY paragraph). The
 // alternative buys real provenance and costs new cross-object state:
-// Runner.nextControlID mints the id inline at the call site and nothing retains it,
-// exactly as its two sibling writers discard theirs, so the parser holds no link to
-// it. This paragraph once deferred the question to whenever the value first reached
-// a client; that HAPPENED, and the answer was re-taken here unchanged — recognise
-// the shape, hold no cross-object parser state for provenance. No new trigger is
-// set, because there is no later fact that would move the content bound.
+// correlating it would mean retaining a minted id and comparing it here. This
+// paragraph once deferred the question to whenever the value first reached a client;
+// that HAPPENED, and the answer was re-taken here unchanged — recognise the shape,
+// hold no cross-object parser state for provenance. No new trigger is set, because
+// there is no later fact that would move the content bound.
+//
+// CORRECTED 2026-09-03 (#2064): the sentence above used to argue the point from
+// mechanism — "nextControlID mints the id inline at the call site and nothing retains
+// it, exactly as its two sibling writers discard theirs, so the parser holds no link
+// to it". That is no longer true of the package. spawnAndWait hands its minted id to
+// PostureGate.armedID, SetPermissionMode hands its id to retarget, and Parser holds a
+// PostureGate — which is precisely a link from this parser to a retained id.
+//
+// THE CONCLUSION ABOVE IS UNCHANGED, and the distinction is what preserves it. That
+// correlation is decided on its own decode target, controlAckLine, over the same
+// top-level bytes, and it answers a DIFFERENT question: not "may this content be
+// attributed to the daemon's initialize ask" but "did claude answer the specific
+// request this daemon is holding turns for". controlAckLine declares subtype and
+// request_id and NO payload key at all, so it cannot carry a models array into a
+// decision, and it neither reads nor moves the rungs below. The content bound here is
+// still the caps, the no-payload-to-a-log rule, and the client's render boundary —
+// none of which a correlated id would tighten, for the reason the paragraph above
+// gives: a correlated inventory is claude's own claim about itself exactly as an
+// uncorrelated one is.
 //
 // The decode's input is `line` — the TOP-LEVEL bytes — never a nested field.
 // streamLine's doc states the property it preserves: control shapes are read from

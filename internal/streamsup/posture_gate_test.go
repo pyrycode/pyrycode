@@ -683,6 +683,112 @@ func TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn(t *tes
 	}
 }
 
+// TestRunner_SpawnPermissionMode_OperatorBypassArgvIsSentNothing pins the ARGV half of
+// the spawn decision: a child launched in bypass is sent no posture, whatever the
+// stored mode says. The stored posture cannot answer this on its own, because the
+// operator's bootstrap pass-through claude args put --dangerously-skip-permissions in
+// the argv without ever touching SessionSettings — so the session reads default while
+// the child runs in bypass.
+//
+// It is a regression test with measured provenance rather than a reasoned one. #2064's
+// first shape keyed the write on the stored posture alone and recorded an argv
+// interlock as deliberately rejected; the live-claude gate then reddened four
+// TestInteractiveStream* specs that pass on main. Each spawns through
+// spawnBootstrapDaemon's pass-through bypass with a stored posture of default, and the
+// write silently revoked the escalation the operator had asked for — real claude
+// answered with permission_denied on Bash and on Write, and refused to Read an
+// attached file. Neither this package nor the fake-daemon suite could see it, because
+// both drive the stored posture and neither spawns through the pass-through.
+//
+// The rows carry their own non-vacuity: the control row differs by the flag alone, so
+// a build that stopped writing the posture altogether reddens it instead of passing
+// both halves.
+func TestRunner_SpawnPermissionMode_OperatorBypassArgvIsSentNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		args      []string
+		wantModes []string
+	}{
+		{
+			name:      "the operator's pass-through bypass suppresses the write",
+			args:      []string{bypassPermissionsFlag},
+			wantModes: nil,
+		},
+		{
+			name:      "the same spawn without the flag still writes",
+			args:      nil,
+			wantModes: []string{"default"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, stderr := &safeBuffer{}, &safeBuffer{}
+			cfg := helperRunCfg(t, "echo_lines", out, stderr)
+			// The posture the four live specs store: default, while the child the
+			// operator asked for is a bypass one.
+			cfg.SpawnPermissionMode = "default"
+			cfg.Args = tc.args
+			gate := &PostureGate{}
+			cfg.PostureGate = gate
+			spawned := make(chan struct{}, 1)
+			cfg.onSpawn = func(int) {
+				select {
+				case spawned <- struct{}{}:
+				default:
+				}
+			}
+			r, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			cancel, join := runInBackground(t, r)
+			defer func() { cancel(); join() }()
+
+			select {
+			case <-spawned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("child never spawned")
+			}
+			waitForContains(t, out, "READY", 3*time.Second)
+
+			if len(tc.wantModes) == 0 {
+				// Nothing was written, so nothing can ever ack: the gate must be OPEN
+				// or this session refuses every turn for the rest of its life.
+				if !gate.ready() {
+					t.Fatalf("the gate is armed on %q after a spawn that writes nothing; "+
+						"a bypass child has no ack coming and its turns must flow as they do today",
+						gate.armedIDForTest())
+				}
+			} else {
+				if gate.ready() {
+					t.Fatal("the gate was open before any ack; a spawn that writes must arm it")
+				}
+				gate.release(gate.armedIDForTest())
+			}
+
+			// The error is not the oracle on either row — the bytes have to reach the child.
+			const marker = "argv-bypass-turn"
+			if err := r.WriteUserTurn(context.Background(), "c1", []byte(marker)); err != nil {
+				t.Fatalf("WriteUserTurn: %v", err)
+			}
+			waitForContains(t, out, marker, 3*time.Second)
+
+			modes, _ := permissionModeAsks(out.String())
+			if len(modes) != len(tc.wantModes) {
+				t.Fatalf("child was sent %d set_permission_mode line(s) %v, want %v:\n%s",
+					len(modes), modes, tc.wantModes, out.String())
+			}
+			for i, want := range tc.wantModes {
+				if modes[i] != want {
+					t.Errorf("write %d carried mode %q, want %q", i, modes[i], want)
+				}
+			}
+		})
+	}
+}
+
 // --- claude's refusal, and the way out of it ---------------------------------
 
 // TestParser_NoteControlAck_NakMarksTheArmedRequestRefused is the read half of the NAK

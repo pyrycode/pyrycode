@@ -658,12 +658,17 @@ func TestMapStreamsupConfig_CarriesPermissionMode(t *testing.T) {
 	}
 }
 
-// TestNewStreamRunnerFactory_BindsTheParsersOwnGate (#2064) pins the binding that the
-// whole correlation rests on: the gate the runner ARMS must be the very object the
-// parser RELEASES. Asserting non-nil would pass against two separately minted gates,
-// under which every turn would be refused forever — so the assertion is identity,
-// exercised end to end by feeding the parser an ack for the id the runner armed.
-func TestNewStreamRunnerFactory_BindsTheParsersOwnGate(t *testing.T) {
+// TestSessionParser_MintsOneStablePostureGate (#2064) pins the parser half of the
+// binding the whole correlation rests on: the gate the runner ARMS must be the very
+// object the parser RELEASES, so PostureGate() has to mint one gate and keep handing
+// back that same object. Asserting non-nil would pass against a fresh gate per call,
+// under which every turn would be refused forever — so the assertion is identity.
+//
+// It is named for what it pins rather than for the factory, deliberately. The obvious
+// name would say newStreamRunnerFactory, but streamsup.Config is not observable from
+// the runner the factory returns, so the far half of the binding cannot be asserted
+// from this package at all; the comment in the body names what carries it instead.
+func TestSessionParser_MintsOneStablePostureGate(t *testing.T) {
 	t.Parallel()
 	parser, _, _ := newSessionParser(func(turnevent.Event) {}, nil)
 	gate := parser.PostureGate()
