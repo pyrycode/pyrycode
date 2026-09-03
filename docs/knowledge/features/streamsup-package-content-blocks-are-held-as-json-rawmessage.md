@@ -115,9 +115,13 @@ general form is deliberately not the slice that migrates the consumer
 unchanged and the delegation mints exactly one id per call, not two. `sessions.Runner` gained
 `SetPermissionMode(mode string) error` beside `RevokeBypass` for the placement reason `RevokeBypass`
 was already on it (#1604): both methods' consumers are inside `internal/sessions`, where a
-structural type assertion would fail *open* rather than a build failure. The
-`control_response` ack (no reader needed — see the event-catalog row above, #1500) is unaffected;
-claude's per-model refusal of `auto` (#2041) lands there, unread for now.
+structural type assertion would fail *open* rather than a build failure. **CORRECTED 2026-09-03
+(#2064):** the `control_response` ack is no longer unread. `SetPermissionMode` now re-targets a
+closed `PostureGate` onto its own freshly-minted id after a successful write, so claude's
+per-model refusal of `auto` (#2041) — or any other NAK for a request this method sent — is
+recorded as a refusal and surfaces as a turn-gate Warn if it lands while the gate is closed; an
+**open** gate is never touched by this call, so a `/model`/`/effort` delivery that follows it on
+the same turn is unaffected. See [Posture gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md).
 See [codebase/1603.md](../codebase/1603.md),
 [set-permission-mode-inband-probe.md](set-permission-mode-inband-probe.md), and
 [permission-mode-switch-inband-probe.md](permission-mode-switch-inband-probe.md).

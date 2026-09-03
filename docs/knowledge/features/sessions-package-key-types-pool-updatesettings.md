@@ -1,4 +1,4 @@
-# `Pool.UpdateSettings` (#840, `PermissionMode` #2043)
+# `Pool.UpdateSettings` (#840, `PermissionMode` #2043, keeps the spawn posture current #2064)
 
 The persistence seam the v2 settings verb (#841, split into wire vocabulary #844 + handler #845) calls to change an existing session's `Model` / `Effort`
 / permission posture after creation — `SessionSettings` above was immutable
@@ -77,6 +77,19 @@ verbatim so the YOLO fail-safe has exactly one origin. `UpdateSettings` captures
 `newArgs := sess.spawnArgs(merged)` and `sup := sess.sup` under `Pool.mu`, then
 releases the lock before either live-apply branch runs — **outside** `Pool.mu`,
 never touching `Session.lcMu`.
+
+**`sup.SetSpawnPermissionMode(merged.PermissionMode)` runs unconditionally on the line
+above the branch split (#2064)**, the one place both branches pass through. Without it
+a runner's spawn-time posture write is construction-time-only — nothing rebuilds the
+runner here — so it would go stale the moment an operator changed the stored posture,
+and a later crash-respawn would silently re-assert the old one (able to *loosen* a
+posture just tightened). Two cheaper shapes were rejected first: piggybacking the
+install on `SetPermissionMode` covers every in-band `X → Y` change but not `X →
+bypassPermissions`, which takes the restart branch below and never reaches
+`SetPermissionMode` at all; deriving the posture from the installed argv dies the
+moment #2065 removes the posture from the launch argv. See [streamsup-package's
+Posture gate § Keeping the spawn posture in
+step](streamsup-package-posture-gate-spawn-permission-mode-ack.md#keeping-the-spawn-posture-in-step).
 
 **Which branch, and why (#1581, redrawn by #1604, generalised by #2043).**
 `inBandDeliverable(update)` partitions on what the update carried — which

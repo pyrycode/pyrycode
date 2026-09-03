@@ -2,7 +2,9 @@
 
 `*streamsup.Runner` gained the four methods [`internal/sessions.Runner`](sessions-package.md) requires
 beyond `Run`/`Stdin`, so a stream-json session can be driven through the exact seam `*supervisor.Supervisor`
-already satisfies (`internal/sessions/runner.go`, introduced by #1077). `send_message` (→
+already satisfies (`internal/sessions/runner.go`, introduced by #1077). A fifth,
+`SetSpawnPermissionMode(mode string)`, joined it by #2064 — see [Posture
+gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md). `send_message` (→
 `Session.WriteUserTurn` → `sup.WriteUserTurn`) and `set_session_settings` (→ `Pool.UpdateSettings` →
 `sup.Restart`) work unchanged the moment a `streamRunner` exists — no new dispatch wiring, because both
 paths already call through the interface rather than the concrete type.
