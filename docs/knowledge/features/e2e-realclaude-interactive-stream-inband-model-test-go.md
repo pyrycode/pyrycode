@@ -206,3 +206,28 @@
   #1582's recorder satisfy it with zero call-site edits. Zero production files
   touched. See `docs/specs/architecture/1622-live-pool-bypass-revocation.md` for
   the full design and the assertion-to-mutant mapping.
+
+- `bypass_reescalation_probe_test.go` (#2060) — **the re-escalation #1595 never
+  covered**: a child launched with the flag, downgraded in-band to `default`, then
+  asked back into `bypassPermissions` in the *same* child. Measured 2026-09-03
+  against 2.1.239: **RE-ESCALATION APPLIED** — the first committed capture of
+  #1686's uncaptured 2026-08-21 hand observation, and it reproduces. `enable`
+  (#1595's negative, no launch flag) is re-measured in the same run and still
+  refused, byte-identical to the 2.1.220 message, so the probe is shown to still
+  discriminate. Together the two settle the mechanism: claude gates the escalation
+  on the **launch argv**, not on the session's current mode. Drives **three** turns
+  per arm rather than #1595's two, because the post-re-escalation read is a turn 3
+  and #1595's index-symmetry rule requires the controls to carry a matching turn —
+  which also means the two directions (`reescalate` at turn 3, `enable` at turn 2)
+  are classified at different indices, so the no-discrimination check runs per
+  direction rather than once up front. A downgrade gate (`reescalateDowngrade`)
+  confirms the child actually left bypass before the second request was sent —
+  without it, "turn 3 matches the bypass control" is true whether or not the
+  downgrade ever landed, since a child that never left bypass looks identical to
+  one that returned to it. `setModeArm` and `setModeChildConfig` both gained
+  additive fields (`secondTargetMode`, `promptThree`) so `setModeArms` and #2041's
+  inline literal are untouched. Zero production files touched. See
+  [`bypass-reescalation-probe.md`](bypass-reescalation-probe.md) for the full
+  measurement writeup and
+  `docs/specs/architecture/2060-bypass-reescalation-probe.md` for the design and
+  security review.

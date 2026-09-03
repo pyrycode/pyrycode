@@ -113,3 +113,10 @@ the test file's header comment and per-field breakdown explain how to read that 
 [`permission-mode-switch-inband-probe.md`](permission-mode-switch-inband-probe.md) — #2041's
 sequel, measuring `acceptEdits`/`dontAsk`/`plan`/`auto` at 2.1.239 with the same argv shape and
 recorder. All four switch; `auto` is refused per model.
+
+[`bypass-reescalation-probe.md`](bypass-reescalation-probe.md) — #2060, the case this document's
+escalation finding could not measure: a child launched *with* the flag, dropped to `default`,
+then asked back into `bypassPermissions` in the same child. At 2.1.239, RE-ESCALATION APPLIED —
+confirming, not contradicting, the reading above: claude gates the escalation on the launch argv
+this child actually used, not on its current mode. The `enable` negative above is re-measured in
+that run and still refused, byte-identical, nineteen releases on.
