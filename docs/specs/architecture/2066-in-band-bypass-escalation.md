@@ -408,3 +408,66 @@ race suite and the live gate are the verifier's.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — implementation
+
+**The live arm wires the posture gate; the plan said it would not.** Testing strategy
+said the AC 5 arm would leave `PostureGate` unwired, mirroring the revocation arm, so
+a NAK could not turn into a turn-2 timeout. That is not reachable. The arm seeds
+`yolo:false`, and since #2065 the launch argv escalates every child — so without the
+spawn-time write the child simply STAYS in bypass, its first `init` line reports
+`bypassPermissions`, and there is no `default` posture to escalate away from. The
+spawn-time write requires `SpawnPermissionMode`, which `New` refuses without a
+`PostureGate`. The arm therefore copies the #2064 arm's production wiring (a real
+`streamsup.Parser` teed in beside the tap, minting the gate the runner arms).
+
+The consequence is stated in the test rather than hidden: turn 2 now doubles as the
+ack assertion — `SetPermissionMode` retargets the gate on the escalation's own id, so
+those bytes reach claude only if it acked — and a NAK makes the run die inside
+`inbandSendTurn` with the `control_response` log as the diagnostic. That is a
+STRONGER measurement than the plan's shape, since it proves the round trip and not
+only the echo, and the Error handling section's NAK analysis is unchanged by it.
+
+**Seven existing tests were re-scoped, which the plan did not budget for.** Each used
+the escalation as its example of something the daemon refuses, so each broke on a
+correct implementation rather than on a mistake:
+
+- `TestPool_UpdateSettings_LiveRestart_Bootstrap`, `_LiveRestart_Minted` and
+  `_Evicted_SwapOnly` used `YOLO: true` to force the restart branch. They now carry a
+  Model or Effort cleared to `""` beside it, which is the only thing that reaches that
+  branch now — and the pairing also pins the mixed case `inBandDeliverable`'s doc
+  claims, that a posture change cannot be lost by mixing.
+- `TestPool_UpdateSettings_BypassMode_TakesRestart` → `_BypassMode_MixedWithClearedValueTakesRestart`,
+  same reason.
+- `TestPool_UpdateSettings_InstallsSpawnPostureOnBothBranches` gained a third row: its
+  "escalation branch" was the restart branch and is now in band, so the restart row is
+  rebuilt from a cleared Model and an in-band escalation row is added beside it.
+- `TestRunner_SetPermissionMode_RefusesUnknownMode` and
+  `TestRunner_SetPermissionMode_FailedWriteDoesNotRetarget` drove `bypassPermissions`
+  as their refused mode. Both now drive a NEAR MISS, which keeps the property each
+  actually pins (a vocabulary refusal is permanent and distinct from the retryable
+  no-live-child error) and additionally proves the widening was by membership rather
+  than by a looser compare.
+
+**Open questions, resolved.**
+
+1. The envelope is **115 bytes** with its newline for `bypassPermissions`, against 109
+   for `acceptEdits` — measured, and pinned by
+   `TestMarshalPermissionModeEnvelope_LengthStaysUnderPipeBuf`, which re-derives the
+   longest member rather than hard-coding it and asserts against the POSIX `PIPE_BUF`
+   floor of 512.
+2. Both AC 3 containment pins **already existed** and are referenced rather than
+   duplicated: `claudeSettingsArgs`' "a mode cannot compose a bypass child" row in
+   `session_settings_test.go`, and `canonicalPermissionMode`'s hand-written
+   `bypassPermissions`-beside-`yolo:false` row in `registry_test.go`. Both stay green
+   because `permissionModeInBand` was not widened, which is the containment mechanism.
+3. `RevokeBypass` remains callerless and untouched, as the ticket directs.
+
+**Security review SHOULD FIXes, both landed.** The length bound is a test (above), and
+`WritePermissionMode`'s doc no longer miscounts its callers — it names both
+`(*Runner).SetPermissionMode` and `spawnAndWait`, since the argument that the
+escalation is reachable only from the routing path is an argument about that set.
+
+`internal/sessions/registry.go` was NOT edited, as Design § 5 predicted.
