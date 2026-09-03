@@ -376,3 +376,35 @@ call sites, 1 + 13 + 2 as the ticket states, every one of them gaining a single
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-03
+
+## Revisions
+
+### 2026-09-03 — the size table's total-work line was exceeded too, measured
+
+**What changed:** nothing in the design. This corrects a number § Size re-check states.
+
+The plan estimated **~750 lines** of total written work and passed that line of the
+table. The actual is **1062** — 684 implementation insertions (512 test, 180 `main.go`,
+30 across the two files holding the fifteen call sites) plus a 378-line spec. So a
+**second** line of the size table is exceeded, not one, and it was not visible at plan
+time.
+
+**Why the estimate missed.** It counted code volume, not comment volume, in a package
+whose convention is heavy explanatory doc comments — `initialize_control_test.go`, the
+analogue the estimate was derived from, runs close to one comment line per code line,
+and every new function here carries the same. The estimate's own basis makes the error
+legible: #1692's measured 931 lines was quoted, then netted *down* to ~750 on the
+argument that this arm's payload is smaller. The payload is indeed smaller. The prose
+around it is not, because it is prose about a permission-posture path, and the rider
+#1692 lacked came with its own paragraphs in three places.
+
+**Not acted on, deliberately.** The work is complete, green and mutation-checked, and
+the shape it exceeded is documentation of design rationale, not scope. Trimming
+verified comments to reach a line count would be worse work, and the split that would
+have separated the ack from the rider is the one the depth gate already forbade —
+`needs-human:sizing` is on the ticket for exactly this family of overage.
+
+**The reusable correction**, for whoever recalibrates the table: in this package,
+estimate from an analogue's *measured total* rather than from its production payload.
+The "smaller payload ⟹ smaller ticket" adjustment is the step that failed here, and it
+failed by ~40%.
