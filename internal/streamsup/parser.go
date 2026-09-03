@@ -1362,6 +1362,13 @@ type Parser struct {
 	// read-modify-write here needs no mutex. If a future slice adds a concurrent
 	// reader, this is the first field its guard has to cover.
 	thinkingSinceEmit int
+
+	// postureGate is the ack signal this parser releases for the runner it is
+	// installed on (#2064). Minted in NewParser, read by the runner through
+	// PostureGate(). It carries its OWN mutex, so it is the one piece of parser state
+	// that is legitimately touched from another goroutine and the single-writer
+	// invariant above does not extend to it.
+	postureGate *PostureGate
 }
 
 var _ io.Writer = (*Parser)(nil)
@@ -1379,7 +1386,49 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser {
 		sink:   sink,
 		log:    logger,
 		maxBuf: defaultMaxParseBuf,
+		// Minted HERE and handed to the runner through PostureGate() rather than
+		// accepted as a parameter (#2064). The parser is built BEFORE streamsup.New —
+		// newStreamRunnerFactory installs it as Config.Stdout — so the gate has to
+		// exist ahead of both halves, and minting it with the parser makes binding the
+		// two to different gates impossible, which is newSessionParser's own argument
+		// for minting a parser and its holds in one call. It also leaves this
+		// constructor's signature alone, which nine call sites depend on. A parser with
+		// no runner mints an inert gate: nothing arms it, so it stays open.
+		postureGate: &PostureGate{},
 	}
+}
+
+// PostureGate returns the ack signal this parser releases when claude confirms a
+// spawn-time permission-mode write (#2064). The value goes onto streamsup.Config, so
+// the runner arming the gate and the parser releasing it are the same object by
+// construction. Never nil for a parser built by NewParser.
+func (p *Parser) PostureGate() *PostureGate { return p.postureGate }
+
+// noteControlAck releases the posture gate when line is the SUCCESS control_response
+// for the request_id the gate is armed against, and does nothing on every other
+// input. AC 2 in full: a different id, a non-success subtype, or an undecodable line
+// each leave the gate closed.
+//
+// The sibling id is real rather than hypothetical. RequestInitializeOnSpawn writes an
+// initialize ask at the SAME spawn off the SAME counter, so its ack reaches this
+// function too and is refused here by id alone.
+//
+// IT LOGS NOTHING, ON ANY PATH, and the decode error is the case that rule exists for:
+// encoding/json QUOTES the offending input bytes into its error text, so `"err", err`
+// would route claude's own strings into the daemon log through a channel no
+// per-attribute check can see — emitModelList's undecodable arm argues this at length
+// and the argument is not weaker here. Neither the request id nor any payload field is
+// logged either. The one record every control_response produces remains
+// logControlResponse's, written by emitModelList below this call.
+func (p *Parser) noteControlAck(line []byte) {
+	var ack controlAckLine
+	if err := json.Unmarshal(line, &ack); err != nil {
+		return
+	}
+	if ack.Response.Subtype != controlResponseSuccess {
+		return
+	}
+	p.postureGate.release(ack.Response.RequestID)
 }
 
 // Write appends b to the line buffer, consumes every complete '\n'-delimited
@@ -1593,11 +1642,25 @@ type systemInitLine struct {
 // property that preserves — so every level between the line and the array has to
 // appear here, exactly as rateLimitEventLine spells rate_limit_info.
 //
-// request_id is deliberately absent, and so is `error`. Nothing correlates the id
-// (see emitModelList's provenance paragraph) and nothing reads the error string,
+// request_id is deliberately absent FROM THIS TYPE, and so is `error`. Nothing
+// correlates the id FOR CONTENT PROVENANCE — see emitModelList's provenance
+// paragraph, whose conclusion is unchanged — and nothing reads the error string,
 // which is claude's prose about a failure the daemon takes no action on; a field
 // never declared cannot reach a log or an event, which is systemInitLine's
 // argument for its own twenty-one omissions.
+//
+// CORRECTED 2026-09-03 (#2064): the id IS correlated now, on a DIFFERENT type
+// (controlAckLine) answering a DIFFERENT question. That reader gates a locally-minted
+// request the daemon is actively WAITING FOR; this type decides what a payload's
+// CONTENT may be read as. The paragraph above was never about the former and does not
+// pre-decide it.
+//
+// The separate type is also what keeps this one's decode behaviour fixed, and the
+// reason is worth stating where the temptation is: adding `RequestID string` here
+// would make a `request_id` that is not a JSON string fail the WHOLE-LINE decode, so a
+// payload that reaches emitModelList's model-list rung today would newly land on its
+// undecodable rung and emit nothing. Correlating on its own target makes that
+// non-disturbance structural rather than argued.
 //
 // The initialize payload's other twelve top-level keys are absent for that same
 // reason and one of them is why it matters: `account`. It is never decoded, never
@@ -1612,6 +1675,36 @@ type controlResponseLine struct {
 			// distinction nothing acts on.
 			Commands []commandEntryLine `json:"commands"`
 		} `json:"response"`
+	} `json:"response"`
+}
+
+// controlAckLine is the decode target of the ACK CORRELATION (#2064), and it is
+// deliberately a second, separate target rather than two fields added to
+// controlResponseLine above — that type's doc states the rung-disturbance this
+// separation makes structural.
+//
+// It declares `subtype` and `request_id` and NO PAYLOAD KEY AT ALL: not `mode`, which
+// the ack does carry and which would be a second confirmation, not `models`, not
+// `account`. Nothing from the payload can therefore reach the gate's decision, its
+// path, or a log — the strongest form of systemInitLine's argument, since here the
+// omission is total. `mode` is left unread on purpose: the id correlation already
+// answers WHICH REQUEST this answered, and the echoed mode is claude's claim about
+// its own posture, which the live rig reads through the next turn's
+// init.permissionMode instead.
+//
+// request_id sits on the INNER wrapper beside subtype, not top-level beside `type`.
+// That is claude's own shape, captured verbatim in
+// internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.239_reescalate.json, and
+// it is the same inversion controlResponseLine's doc records for subtype.
+//
+// Its decode input is the TOP-LEVEL LINE BYTES like every sibling's, never a nested
+// field: streamLine's doc states the property that preserves, and it is what stops a
+// tool result whose text is literally a control shape from forging an ack and opening
+// a gate the daemon is holding turns behind.
+type controlAckLine struct {
+	Response struct {
+		Subtype   string `json:"subtype"`
+		RequestID string `json:"request_id"`
 	} `json:"response"`
 }
 
@@ -2460,7 +2553,13 @@ func (p *Parser) consumeLine(line []byte) {
 		// daemon-authored constant. What has NOT changed is the BEHAVIOUR for every
 		// response that is not the initialize reply: an interrupt ack, a
 		// set_permission_mode ack and a NAK are each still consumed content-free, one
-		// record and no event, whether they carry an inner payload or none.
+		// record and no event, whether they carry an inner payload or none. That stays
+		// true after #2064: the posture gate's release is neither a record nor an event.
+		//
+		// noteControlAck runs ABOVE emitModelList so the gate opens without waiting
+		// behind an emit into a downstream sink, and it reads its own decode target, so
+		// which rung a models or commands payload lands on is untouched by construction.
+		p.noteControlAck(line)
 		p.emitModelList(line)
 	default:
 		if ignoredLineTypes[sl.Type] {

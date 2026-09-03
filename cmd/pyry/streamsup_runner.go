@@ -58,6 +58,19 @@ func (a streamRunner) Restart(args []string) { a.r.Restart(args) }
 // avoid. Dispatched from the in-band branch of Pool.UpdateSettings since #1581.
 func (a streamRunner) SetSpawnArgs(args []string) { a.r.SetSpawnArgs(args) }
 
+// SetSpawnPermissionMode forwards to (*streamsup.Runner).SetSpawnPermissionMode
+// (#2064), installing the posture the runner's next and every later spawn asserts to
+// its child in-band. It is ON the sessions.Runner interface for SetSpawnArgs' reason,
+// with the stakes one step higher: its consumer is Pool.UpdateSettings inside
+// internal/sessions, and a type assertion there whose unmatched arm silently no-ops
+// would leave every respawned child asserting the posture this daemon started with —
+// which can re-loosen one the operator has since tightened.
+//
+// The concrete method installs the mode verbatim and cannot fail, so this forward
+// carries no validation of its own; the vocabulary gate runs at the spawn, where the
+// runner's own allow-list decides whether anything is written at all.
+func (a streamRunner) SetSpawnPermissionMode(mode string) { a.r.SetSpawnPermissionMode(mode) }
+
 // SetPermissionMode forwards to (*streamsup.Runner).SetPermissionMode (#2042),
 // switching the live child's permission posture via a set_permission_mode control
 // request rather than a respawn. It is ON the sessions.Runner interface for the
@@ -208,6 +221,14 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		parser, heldModels, heldCommands := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
 		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
+		// #2064's posture gate is bound HERE rather than in mapStreamsupConfig, on the
+		// same dividing line Stdout sits on: it is a runtime object, not a plain value
+		// derived from a RunnerConfig field. Taken from the parser that was just built
+		// — the parser mints it, so the half that RELEASES the gate and the half that
+		// ARMS it are the same object by construction and cannot be bound apart. That
+		// is #1840's argument for minting the parser and its holds in one call, applied
+		// to a seam whose two ends sit in different packages.
+		scfg.PostureGate = parser.PostureGate()
 		r, err := streamsup.New(scfg)
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
@@ -341,6 +362,13 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 		// dividing line ClaudeSessionsDir sits on — and setting it in the pure
 		// mapper makes the policy directly assertable with no new scaffolding.
 		RequestInitializeOnSpawn: true,
+		// The session's stored posture, asserted to every child the runner spawns
+		// (#2064). Set HERE for RequestInitializeOnSpawn's reason verbatim: it is a
+		// plain string read off one RunnerConfig field, not a runtime object, so it
+		// belongs on ClaudeSessionsDir's side of the mapper's dividing line and the
+		// policy stays directly assertable with no scaffolding. Its partner
+		// PostureGate is the runtime half and is installed one layer up.
+		SpawnPermissionMode: cfg.PermissionMode,
 	}
 }
 

@@ -34,6 +34,8 @@ func (fakeRunner) Restart(args []string) {}
 
 func (fakeRunner) SetSpawnArgs(args []string) {}
 
+func (fakeRunner) SetSpawnPermissionMode(string) {}
+
 func (fakeRunner) SetPermissionMode(mode string) error { return nil }
 
 // TestRunnerFactory_InvokedAtEveryConstructionSite covers AC-4: a non-nil
@@ -162,6 +164,13 @@ type lifecycleRunner struct {
 	// refuses when no child is bound, and the pool's contract is to attempt the
 	// send unconditionally.
 	modes []string
+
+	// spawnModes records the posture of every SetSpawnPermissionMode call, in order
+	// (#2064). Kept beside modes rather than folded into it because the two answer
+	// different questions and diverge on the branch that matters: an escalation to
+	// bypass records here and NOT there, which is exactly the transition an install
+	// folded into deliverSettingsInBand would miss.
+	spawnModes []string
 }
 
 func (r *lifecycleRunner) State() State {
@@ -252,6 +261,24 @@ func (r *lifecycleRunner) SetPermissionMode(mode string) error {
 	r.modes = append(r.modes, mode)
 	r.mu.Unlock()
 	return nil
+}
+
+// SetSpawnPermissionMode records what Pool.UpdateSettings installs as the NEXT
+// spawn's posture (#2064), kept in its own slice beside modes so a test can tell the
+// live-child switch from the per-spawn install — the two are recorded together on the
+// in-band branch and only this one is recorded on the escalation branch.
+func (r *lifecycleRunner) SetSpawnPermissionMode(mode string) {
+	r.mu.Lock()
+	r.spawnModes = append(r.spawnModes, mode)
+	r.mu.Unlock()
+}
+
+// spawnPermissionModes is the read side of the record above, deep-copied under r.mu
+// like its three siblings.
+func (r *lifecycleRunner) spawnPermissionModes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.spawnModes...)
 }
 
 // restartArgs, spawnArgSets, userTurns and permissionModes are the read side of

@@ -199,6 +199,41 @@ type Config struct {
 	// unasked — the state the per-replacement ask exists to prevent.
 	RequestInitializeOnSpawn bool
 
+	// SpawnPermissionMode is the session's stored permission posture, written to
+	// every spawned child as a set_permission_mode control request before any user
+	// turn can reach it (#2064). Optional; the zero value writes nothing and arms
+	// nothing, which is what leaves every construction site other than the
+	// interactive daemon's mapStreamsupConfig byte-identical.
+	//
+	// It is the CONSTRUCTION-TIME seed only. The live value is r.spawnMode, which
+	// SetSpawnPermissionMode replaces when the session's stored posture changes —
+	// Pool.UpdateSettings rebuilds no runner, so a value read from this field at
+	// spawn time would go stale and could assert a posture the operator has already
+	// changed. Same relationship SessionID has with r.sessionID.
+	//
+	// bypassPermissions is REFUSED here by the same non-membership that refuses it in
+	// WritePermissionMode, so a bypass session is sent nothing and its gate is never
+	// armed: its turns flow exactly as they do today. That is the intended reading and
+	// not a gap — a gate no write can ever release is a bricked session, not a
+	// fail-closed one. Re-granting bypass stays on the respawn path.
+	//
+	// Setting it REQUIRES PostureGate; New refuses the pairing otherwise. A posture
+	// written with nothing correlating its ack is a line the daemon believes in and
+	// has not confirmed, which is the shape #2065 cannot tolerate.
+	SpawnPermissionMode string
+
+	// PostureGate is the ack signal the spawn-time posture write is held against
+	// (#2064): armed with the write's locally-minted request_id before the child's
+	// stdin is published, released only by that id's success control_response, and
+	// consulted by every WriteUserTurn in between. Optional; nil gates nothing.
+	//
+	// It is minted by the PARSER — (*Parser).PostureGate — because the parser is
+	// built before streamsup.New (newStreamRunnerFactory installs it as Config.Stdout)
+	// and the release side is the parser's. Minting it there is what makes it
+	// impossible to bind the two halves to different gates, which is
+	// newSessionParser's argument for minting a parser and its holds together.
+	PostureGate *PostureGate
+
 	// onSpawn is an unexported test seam, called once per spawn after cmd.Start
 	// and after the stdin handle is stored, with the child's pid. Nil in
 	// production. Lets a test observe "child N is up, Stdin() is live" without
@@ -209,6 +244,90 @@ type Config struct {
 	// nil there), but it is what makes a test that counts asks deterministic
 	// without polling the child's echo.
 	onSpawn func(pid int)
+}
+
+// PostureGate holds a session's user turns until the child it is armed against has
+// CONFIRMED the permission posture the daemon wrote to it (#2064). It is the first
+// thing in this package to READ a control ack; the three writers all write and stop.
+//
+// Its whole state is one string. armedID == "" is the OPEN state, so a gate nobody
+// armed is open and an ungated runner behaves exactly as it did before this type
+// existed. arm closes it against exactly one locally-minted request_id, release opens
+// it only on an exact match, and ready reports open.
+//
+// A fresh arm OVERWRITES the previous id rather than clearing a separate flag, and
+// that is not a compression — it is what makes "a replacement child is never released
+// by its predecessor's ack" hold with no bookkeeping. cmd/pyry builds ONE parser per
+// session, not per child, so a dead child's buffered stdout can still be parsed after
+// its successor has armed; the mismatched id refuses it.
+//
+// WHAT IT PROVES, AND WHAT IT DOES NOT. A released gate means "claude acked the
+// request this daemon minted". It does NOT mean "claude enforces that posture" — an
+// echoed posture is the child's claim about itself, the scope boundary
+// interactive_stream_inband_bypass_revoke_test.go already draws for the ack it reads.
+// A child that lies about its posture defeats this gate, and is also a child that
+// could simply ignore the mode; the gate buys protection against BENIGN failure — an
+// unsupported mode, a dropped line, a child slow to come up — not against a hostile
+// one. Read that limit before treating a released gate as an enforcement guarantee.
+//
+// Every method is NIL-RECEIVER-SAFE, following sessionModelHold.ModelList's
+// precedent, so neither the runner's turn path nor the parser's ack path needs a nil
+// branch. The mutex is a LEAF: it is never held across a log call, a write, or
+// another lock, and no path in this package holds it together with Runner.mu or
+// Runner.restartMu.
+type PostureGate struct {
+	mu sync.Mutex
+	// armedID is the request_id whose success ack opens this gate, or "" when the
+	// gate is open. Never logged and never serialised — it is a correlation token,
+	// not a capability: the daemon hands it to the child in the request line itself,
+	// so there is nothing for unpredictability to buy and nextControlID's short
+	// counter keeps the emitted line under PIPE_BUF.
+	armedID string
+}
+
+// arm closes the gate against requestID, retiring whatever id stood before it. Called
+// once per spawn that writes a posture, strictly BEFORE setStdin publishes that
+// child's stdin handle — see spawnAndWait for why that ordering is the whole of "no
+// user turn reaches the child before the write".
+func (g *PostureGate) arm(requestID string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.armedID = requestID
+	g.mu.Unlock()
+}
+
+// release opens the gate if requestID is the one it is armed against, and does
+// nothing otherwise. Called from the parser goroutine for every SUCCESS
+// control_response; a NAK, an undecodable line and a mismatched id never reach it or
+// never match.
+//
+// There is deliberately NO requestID != "" guard. nextControlID formats an
+// already-incremented uint64, so an armed gate's id is never empty and an ack
+// carrying no request_id cannot match one; against an already-open gate the
+// comparison succeeds and the assignment is a no-op. A guard here would defend a
+// state that cannot exist.
+func (g *PostureGate) release(requestID string) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	if g.armedID == requestID {
+		g.armedID = ""
+	}
+	g.mu.Unlock()
+}
+
+// ready reports whether turns may flow — that is, whether no unconfirmed posture is
+// outstanding. Safe from any goroutine, and cheap enough to sit on the per-turn path.
+func (g *PostureGate) ready() bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.armedID == ""
 }
 
 // Runner supervises the claude child lifecycle. Construct with New; drive with
@@ -329,6 +448,23 @@ type Runner struct {
 	// source; after construction the live id is r.sessionID.
 	sessionID string
 
+	// spawnMode is the permission posture each spawn writes to its child (#2064).
+	// Seeded from cfg.SpawnPermissionMode in New and replaced by
+	// SetSpawnPermissionMode; the mutable analogue of that immutable field exactly as
+	// sessionID is of cfg.SessionID.
+	//
+	// It lives under restartMu with the other spawn INPUTS rather than under mu with
+	// the turn-target state, and the split is the same one args sits on: this value
+	// decides what a spawn WRITES, not which child may receive a turn. beginSpawn
+	// reads it in the section it already takes, so the one-acquisition-per-spawn-setup
+	// charter holds with no second acquisition.
+	spawnMode string
+
+	// postureGate is cfg.PostureGate, hoisted so the turn path reads one field. Nil
+	// is the ungated runner, and every method on the type is nil-receiver-safe, so no
+	// call site branches on it.
+	postureGate *PostureGate
+
 	// rotatePending is set by RestartFresh and consumed once by beginSpawn: it
 	// re-arms first-run form so the next spawn uses --session-id <newID> (a fresh
 	// transcript), not --resume <newID>. firstRun stays Run-goroutine-private;
@@ -391,6 +527,14 @@ func New(cfg Config) (*Runner, error) {
 	if _, err := exec.LookPath(cfg.ClaudeBin); err != nil {
 		return nil, fmt.Errorf("streamsup: claude binary not found: %w", err)
 	}
+	// A posture with nothing to correlate its ack would be written and then believed
+	// on no evidence — the unenforced-write shape the gate exists to prevent — so the
+	// misconfiguration fails LOUDLY at construction rather than degrading to a silent
+	// ungated write at every spawn. The converse pairing is fine and is the ungated
+	// default: a gate with no mode is never armed.
+	if cfg.SpawnPermissionMode != "" && cfg.PostureGate == nil {
+		return nil, errors.New("streamsup: SpawnPermissionMode requires PostureGate")
+	}
 	workDir, err := agentrun.ResolveWorkdir(cfg.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("streamsup: resolve workdir: %w", err)
@@ -409,13 +553,15 @@ func New(cfg Config) (*Runner, error) {
 	}
 	cfg.Args = slices.Clone(cfg.Args)
 	return &Runner{
-		cfg:       cfg,
-		log:       cfg.Logger,
-		workDir:   workDir,
-		state:     State{Phase: PhaseStarting},
-		args:      slices.Clone(cfg.Args),
-		sessionID: cfg.SessionID,
-		restartCh: make(chan struct{}, 1),
+		cfg:         cfg,
+		log:         cfg.Logger,
+		workDir:     workDir,
+		state:       State{Phase: PhaseStarting},
+		args:        slices.Clone(cfg.Args),
+		sessionID:   cfg.SessionID,
+		spawnMode:   cfg.SpawnPermissionMode,
+		postureGate: cfg.PostureGate,
+		restartCh:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -546,6 +692,30 @@ func (r *Runner) turnTarget() (w io.Writer, gated bool) {
 // Neither may payload bytes be.
 func (r *Runner) WriteUserTurn(ctx context.Context, conversationID string, payload []byte) error {
 	w, gated := r.turnTarget()
+	// The POSTURE gate is read SECOND, in its own acquisition, and the order is the
+	// correctness argument rather than a detail (#2064). arm() strictly precedes
+	// setStdin, so a handle observed live has already had its child's gate armed;
+	// reading the gate first and the handle second would let child N's release admit
+	// a turn into child N+1. Two acquisitions rather than one because mu is a leaf and
+	// must never be held across another object's lock — and unlike the rotation gate
+	// this needs no single-acquisition treatment: turnTarget's two reads answer one
+	// question about the same instant, whereas this answer for a GIVEN handle can only
+	// become more permissive.
+	//
+	// Refusing by nilling the target reuses WriteTurn's verbatim contract — the
+	// retryable ErrNoLiveChild, ZERO BYTES written, no new envelope construction —
+	// which is the same classification the rotation gate above reuses and the one
+	// msgqueue and cmd/pyry already agree is worth retrying.
+	if w != nil && !r.postureGate.ready() {
+		// Outside every acquisition, and INFO not Debug, for the rotation record's
+		// reasons verbatim: a slow slog handler must not block the Run goroutine's
+		// setStdin, and a Debug record anywhere in the daemon's stderr defeats #1330's
+		// e2e instrument guard. The session id is the only field — never the mode
+		// (#833 keeps settings values out of the daemon log) and never the request id.
+		r.log.Info("streamsup: turn refused; permission posture not yet confirmed by claude",
+			"session", r.liveSessionID())
+		w = nil
+	}
 	if gated {
 		// Emitted OUTSIDE r.mu: a slow slog handler must never block the Run
 		// goroutine's setStdin, which is the thing that ends this very window.
@@ -633,6 +803,46 @@ func (r *Runner) SetPermissionMode(mode string) error {
 // no-live-child contract is SetPermissionMode's, unchanged.
 func (r *Runner) RevokeBypass() error {
 	return r.SetPermissionMode(permissionModeDefault)
+}
+
+// SetSpawnPermissionMode installs the posture EVERY LATER SPAWN asserts, without
+// touching the running child (#2064). It is SetPermissionMode's per-spawn twin and
+// the contrast is the point: that method changes the live child's posture and writes
+// nothing durable, this one changes what the next child is told and writes nothing at
+// all.
+//
+// It exists because Pool.UpdateSettings REBUILDS NO RUNNER — both its branches install
+// a recomposed argv onto the live runner and neither reconstructs it — so a posture
+// read from the construction-time Config at spawn time goes stale the moment an
+// operator changes the session's settings. A crash-respawn would then assert the
+// posture the session had at daemon start, which can LOOSEN one the operator has since
+// tightened. That is why the pool calls this on the line above its branch split, where
+// its own comment already reads "Both branches install newArgs".
+//
+// Two cheaper shapes do not cover it, and are recorded so they are not re-proposed:
+//
+//   - Piggybacking the install on SetPermissionMode, which the in-band branch already
+//     calls. It covers every mode-to-mode change but NOT an escalation to bypass,
+//     which is not in-band-deliverable, takes the restart branch, and never reaches
+//     that method — nor could it, since the allow-list refuses the escalation by
+//     non-membership and naming it here would put the literal back into production
+//     source #1603 deliberately emptied of it.
+//   - Deriving the posture from the installed argv. Exact today and dead on arrival
+//     under #2065, which takes the mode out of the launch argv entirely.
+//
+// mode is stored VERBATIM AND UNVALIDATED, including bypassPermissions and including
+// the empty string. This is a normalisation-free install of an already-canonical
+// stored value, not an operator-input path: the vocabulary gate that matters runs at
+// the SPAWN, where permissionModeAllowed decides whether anything is written at all,
+// and duplicating it here would be two copies of one defence rather than a second one.
+//
+// It takes restartMu alone — never mu, never a Pool lock — so the sessions layer can
+// call it after releasing Pool.mu with no lock-order concern, exactly as SetSpawnArgs
+// can. Safe from any goroutine; non-blocking.
+func (r *Runner) SetSpawnPermissionMode(mode string) {
+	r.restartMu.Lock()
+	r.spawnMode = mode
+	r.restartMu.Unlock()
 }
 
 // RequestInitialize writes a single initialize control_request line to the live
@@ -897,9 +1107,13 @@ func (r *Runner) RestartFresh(newID string) {
 // and be killed moments later by the very rotation that bumped it. "Set up before
 // that rotation's RestartFresh landed" is a statement about setup time, and only a
 // setup-time snapshot carries it.
+// spawnMode is this spawn's snapshot of the posture to assert, threaded through to
+// spawnAndWait. It is a READ inside the section that already exists, not a second
+// acquisition, so the one-acquisition-per-spawn-setup charter holds — the same
+// treatment freshSeq gets above.
 func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	iterCtx context.Context, cancel context.CancelFunc, args []string,
-	forceFirst bool, freshSeq uint64,
+	forceFirst bool, freshSeq uint64, spawnMode string,
 ) {
 	// Derived BEFORE the acquisition on purpose: context.WithCancel takes the
 	// parent cancelCtx's own internal mutex, and restartMu must never be held
@@ -912,11 +1126,12 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	r.rotatePending = false
 	base, id := r.args, r.sessionID
 	freshSeq = r.freshSeq
+	spawnMode = r.spawnMode
 	r.iterCancel = cancel
 	r.restartMu.Unlock()
 
 	args = buildArgs(base, useCreateForm(r.cfg.ClaudeSessionsDir, id, firstRun || forceFirst), id)
-	return iterCtx, cancel, args, forceFirst, freshSeq
+	return iterCtx, cancel, args, forceFirst, freshSeq, spawnMode
 }
 
 // liveSessionID snapshots the live session id under restartMu, for a diagnostic
@@ -992,7 +1207,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// with --session-id (a fresh transcript). firstRun's flip-back to false on a
 		// successful spawn (below) then makes the next respawn --resume the new id —
 		// see the started-gated flip.
-		iterCtx, cancel, args, forceFirst, freshSeq := r.beginSpawn(ctx, firstRun)
+		iterCtx, cancel, args, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
 		if forceFirst {
 			firstRun = true
 		}
@@ -1002,7 +1217,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()
-		started, waitErr := r.spawnAndWait(iterCtx, args, freshSeq)
+		started, waitErr := r.spawnAndWait(iterCtx, args, freshSeq, spawnMode)
 		cancel()
 		r.clearIterCancel()
 		uptime := time.Since(start)
@@ -1078,7 +1293,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // freshSeq is beginSpawn's setup-time snapshot, carried through untouched and
 // handed to setStdin as the rotation gate's release authorisation (#1482). Nothing
 // here reads or interprets it.
-func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint64) (started bool, waitErr error) {
+func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint64, spawnMode string) (started bool, waitErr error) {
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = r.workDir
 	cmd.Stdout = r.cfg.Stdout
@@ -1116,12 +1331,59 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 		return false, fmt.Errorf("streamsup: start: %w", err)
 	}
 
+	// The posture gate is ARMED BEFORE setStdin, and that ordering is load-bearing:
+	// setStdin publishes the live stdin handle and disarms the rotation gate in ONE
+	// acquisition, so turns become writable at that instant. Arming after it would
+	// leave a window in which a turn is delivered to a child whose posture the daemon
+	// has not written, let alone confirmed. The id is minted here so the gate and the
+	// line below carry the same one.
+	//
+	// Whether anything happens at all is permissionModeAllowed's single decision. The
+	// escalation fails it by NON-MEMBERSHIP, so a bypassPermissions session is sent
+	// nothing AND its gate is never armed — its turns flow exactly as they do today,
+	// which is the intended reading: a gate no write can ever release is a bricked
+	// session, not a fail-closed one. The empty mode of an unconfigured runner fails it
+	// the same way, which is what keeps every pre-#2064 construction site
+	// byte-identical.
+	//
+	// An argv-derived interlock — refuse whenever this spawn's args name
+	// --dangerously-skip-permissions — was designed and REJECTED. It is exact on
+	// today's argv and it would brick #2065, which launches every child in bypass and
+	// delivers the posture in-band: an argv-keyed refusal would refuse every downgrade
+	// it exists to deliver. The stored posture is kept accurate at its source instead,
+	// by SetSpawnPermissionMode.
+	postureID := ""
+	if permissionModeAllowed(spawnMode) {
+		postureID = r.nextControlID()
+		r.postureGate.arm(postureID)
+	}
+
 	r.setStdin(stdin, freshSeq)
 	r.updateState(func(st *State) {
 		st.Phase = PhaseRunning
 		st.ChildPID = cmd.Process.Pid
 		st.NextBackoff = 0
 	})
+	// One write per spawn, which is one per child, on RequestInitializeOnSpawn's shelf
+	// and for its stated reasons — see that field's doc for why the placement below
+	// cmd.Start is once-per-child by construction and why the child's per-turn init
+	// line is the wrong trigger. It goes ABOVE the initialize ask so the round trip
+	// that releases the gate starts first.
+	//
+	// The error is ABSORBED exactly as that ask's is: it must never become waitErr, or
+	// a benign teardown race would enter the backoff ladder and restart a child. What
+	// differs is the consequence — ABSORBING THE ERROR MUST NOT RELEASE THE GATE, and
+	// that is structural rather than a rule to remember: nothing on this path touches
+	// the gate, so a child whose write failed simply never has its posture confirmed
+	// and its turns keep refusing until it is replaced. Debug for the ask's reasons,
+	// and the record admits neither the mode nor the request id — WritePermissionMode
+	// documents that no wrap carries the mode and that its vocabulary refusal is a bare
+	// sentinel, which is what makes logging the error verbatim safe here.
+	if postureID != "" {
+		if err := WritePermissionMode(r.Stdin(), postureID, spawnMode); err != nil {
+			r.log.Debug("streamsup: permission mode not delivered", "err", err)
+		}
+	}
 	// One ask per spawn, which is one ask per child — see
 	// Config.RequestInitializeOnSpawn for why no bookkeeping is needed and why the
 	// child's per-turn init line is the wrong trigger. The error is absorbed
