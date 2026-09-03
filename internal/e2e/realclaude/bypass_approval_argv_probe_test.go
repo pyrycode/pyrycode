@@ -82,6 +82,11 @@ package realclaude
 //     allow-list is production code this ticket does not modify. It is also a
 //     claude-version fact rather than a contract — #1595's opposite-direction
 //     caveat held for nineteen releases, which is evidence, not a guarantee.
+//     SUPERSEDED as of #2066, which routed the escalation in band on purpose: the
+//     allow-list admits it now, so the fail-safe this bullet names has moved to the
+//     wire (internal/relay's validPermissionMode) and to permissionModeSpawnWritable
+//     at the spawn. The bullet stands as the record of what held when this probe ran,
+//     and its point — that the probe measures claude and not pyry — is unchanged.
 //
 // # Why neither #1595's nor #2060's capture answers these
 //

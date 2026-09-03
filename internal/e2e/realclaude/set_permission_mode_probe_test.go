@@ -71,6 +71,22 @@ package realclaude
 // This file measures and records. It adds no production writer for the subtype;
 // #1596 decides whether one is warranted.
 //
+// SUPERSEDED as of #2066, and left standing as the record of what was true when
+// this probe ran, like its two siblings (bypass_reescalation_probe_test.go,
+// bypass_approval_argv_probe_test.go). Two claims above are now historical. The
+// paragraph directly above: pyry no longer expresses the posture as a spawn-time
+// flag CHANGE, and inBandDeliverable no longer routes a YOLO update to the restart
+// — it reads permissionModeKnown, so all six storable postures go in band. And the
+// enable arm's design conclusion under "# The finding" above ("one that routes
+// both directions is not supported by this measurement") is the shape #2066 shipped:
+// what the arm measured is that a child launched WITHOUT the flag refuses the
+// escalation, which is still true and is precisely why #2065 put the flag on every
+// argv first. The chain this probe started ran #1603 (the writer), #1604 (the
+// revocation routed), #2060 (claude accepting a RE-escalation on a flag-launched
+// child at 2.1.239), #2065 (the flag unconditional) and #2066 (the enable routed).
+// The measurement below is unaffected; only the sentences about what pyry can do
+// with it are.
+//
 // # Four children, one drive sequence
 //
 //	arm             | launch flag                     | control request sent

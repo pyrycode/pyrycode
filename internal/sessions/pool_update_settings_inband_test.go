@@ -35,16 +35,25 @@ func waitRunning(t *testing.T, runner *lifecycleRunner) {
 	}
 }
 
-// TestInBandDeliverable pins the partition itself (#1581, redrawn by #1604):
-// which updates reach the live child in-band — /model + /effort command text, and
-// a bypass revocation as a control request — and which keep #842's restart. Total
-// over the shapes the wire can produce, so the restart tests stay green on purpose
-// rather than by luck.
+// TestInBandDeliverable pins the partition itself (#1581, redrawn by #1604 and
+// again by #2066): which updates reach the live child in-band — /model + /effort
+// command text, and any STORABLE posture as a control request — and which keep
+// #842's restart. Total over the shapes the wire can produce, so the restart tests
+// stay green on purpose rather than by luck.
 //
-// The YOLO rows are the #1604 split and read as a pair: a revoke goes in-band
-// because claude accepts set_permission_mode default on a held-open stream, an
-// enable keeps the restart because claude refuses the escalation, gating it on the
-// launch argv (#1595).
+// The posture rows no longer split on direction, and that is #2066's whole change.
+// A revoke and an ESCALATION both go in-band: claude gated the escalation on the
+// launch argv, #2065 put that flag on every argv, and #2060 measured claude
+// accepting the re-escalation on such a child at 2.1.239. What survives is the
+// split on VOCABULARY — a mode this daemon cannot store is refused by
+// non-membership in permissionModeKnown, which is why the garbage rows below read
+// false without the predicate naming any of them, and why the escalation's two
+// spellings had to be opened together (internal/relay's validPermissionMode
+// refuses the mode string, so the wire can only ever send the bit).
+//
+// The empty-Model and empty-Effort rejects still outrank a posture change in the
+// same frame, escalation included, and lose nothing: the restart recomposes argv
+// from the merged settings, so the respawn carries the posture anyway.
 func TestInBandDeliverable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -58,7 +67,7 @@ func TestInBandDeliverable(t *testing.T) {
 		{"model cleared to default", SettingsUpdate{Model: ptr("")}, false},
 		{"effort cleared to default", SettingsUpdate{Effort: ptr("")}, false},
 		{"one present field empty", SettingsUpdate{Model: ptr("opus"), Effort: ptr("")}, false},
-		{"model with yolo grant", SettingsUpdate{Model: ptr("opus"), YOLO: ptr(true)}, false},
+		{"model with yolo grant", SettingsUpdate{Model: ptr("opus"), YOLO: ptr(true)}, true},
 		// A present YOLO revoke goes in-band even when it equals the stored value:
 		// the rule keys on the frame's own value, never on merged-vs-previous.
 		{"model with yolo revoke", SettingsUpdate{Model: ptr("opus"), YOLO: ptr(false)}, true},
@@ -67,20 +76,26 @@ func TestInBandDeliverable(t *testing.T) {
 		// The empty-value reject wins over the revoke: the respawn recomposes argv
 		// from the merged settings, so it carries the revocation anyway.
 		{"yolo revoke with cleared model", SettingsUpdate{Model: ptr(""), YOLO: ptr(false)}, false},
-		{"yolo enable only", SettingsUpdate{YOLO: ptr(true)}, false},
+		{"yolo enable only", SettingsUpdate{YOLO: ptr(true)}, true},
+		// The empty-value reject outranks an ENABLE too, in both spellings. These
+		// two rows are the only surviving route from an escalation to the restart
+		// branch, and they are what keeps Pool.UpdateSettings' Restart call alive.
+		{"yolo enable with cleared model", SettingsUpdate{Model: ptr(""), YOLO: ptr(true)}, false},
+		{"yolo enable with cleared effort", SettingsUpdate{Effort: ptr(""), YOLO: ptr(true)}, false},
 		{"nothing present", SettingsUpdate{}, false},
-		// #2043's posture rows. Each of the five modes claude accepts on a
-		// held-open stream goes in-band; the escalation and every unanticipated
-		// spelling are refused by NON-MEMBERSHIP in the same clause, which is why
-		// the garbage rows read false without the predicate naming any of them.
+		// #2043's posture rows, widened by #2066. Every mode this daemon can STORE
+		// goes in-band — the five plus the escalation; every unanticipated spelling
+		// is refused by NON-MEMBERSHIP in the same clause, which is why the garbage
+		// rows read false without the predicate naming any of them.
 		{"mode default", SettingsUpdate{PermissionMode: ptr(permissionModeDefault)}, true},
 		{"mode acceptEdits", SettingsUpdate{PermissionMode: ptr("acceptEdits")}, true},
 		{"mode plan", SettingsUpdate{PermissionMode: ptr("plan")}, true},
 		{"mode auto", SettingsUpdate{PermissionMode: ptr("auto")}, true},
 		{"mode dontAsk", SettingsUpdate{PermissionMode: ptr("dontAsk")}, true},
 		{"mode with model and effort", SettingsUpdate{Model: ptr("opus"), Effort: ptr("high"), PermissionMode: ptr("plan")}, true},
-		{"escalation as a mode", SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}, false},
-		{"escalation as a mode beside a model", SettingsUpdate{Model: ptr("opus"), PermissionMode: ptr(permissionModeBypass)}, false},
+		{"escalation as a mode", SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}, true},
+		{"escalation as a mode beside a model", SettingsUpdate{Model: ptr("opus"), PermissionMode: ptr(permissionModeBypass)}, true},
+		{"escalation as a mode with cleared model", SettingsUpdate{Model: ptr(""), PermissionMode: ptr(permissionModeBypass)}, false},
 		{"unknown mode", SettingsUpdate{PermissionMode: ptr("Plan")}, false},
 		{"empty mode", SettingsUpdate{PermissionMode: ptr("")}, false},
 		// The empty-value reject still wins over a posture change, and loses
@@ -97,23 +112,27 @@ func TestInBandDeliverable(t *testing.T) {
 	}
 }
 
-// TestPool_DeliverSettingsInBand_EnableWritesNothing (#1604, AC #3's second
-// half): deliverSettingsInBand refuses to write a permission-mode change for an
-// escalation, and refuses it AT THE DELIVERY SITE rather than relying on
-// inBandDeliverable having rejected the frame first.
+// TestPool_DeliverSettingsInBand_EnableWritesTheEscalation is the inverse of
+// #1604's _EnableWritesNothing, which this replaces. That test pinned the delivery
+// site's own bypass guard — "the second of three independent stops for the
+// escalation" — and #2066 removes the stop, so the test that asserted it has to
+// become the test that asserts its absence rather than be deleted: a delivery that
+// silently wrote nothing for an escalation would ship this ticket as a green,
+// silent no-op, and this is the red for exactly that.
 //
-// It calls the unexported delivery directly with a shape the predicate never lets
-// through, which is the only way to reach the enable-direction fail-safe — and so
-// the only red available for a mutant that drops the bypass guard. That guard is
-// what makes the delivery independently correct instead of dependent on a
-// caller-side invariant; without this test it would be untested defence. Both
-// spellings of the escalation are passed, since #2043 gave it a second one: the
-// merged posture is what the guard reads, so a mode-spelled enable must be
-// refused by the same branch as a YOLO-spelled one.
+// It calls the unexported delivery directly, so it reads the delivery site alone
+// and does not depend on inBandDeliverable having routed the frame here. Both
+// spellings are passed because the merged POSTURE is what the delivery reads, not
+// the field the frame named: a mode-spelled enable and a YOLO-spelled one must
+// come out as the same single send.
+//
+// EXACTLY ONE send, not at least one. The posture is two fields expressing one
+// change, and the arithmetic is #2043's AC3: a frame naming both must not emit two
+// identical control requests.
 //
 // No runPoolInBackground: the delivery reads only p.log and the runner it is
 // handed, so a live child would add nothing to observe.
-func TestPool_DeliverSettingsInBand_EnableWritesNothing(t *testing.T) {
+func TestPool_DeliverSettingsInBand_EnableWritesTheEscalation(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
@@ -121,6 +140,7 @@ func TestPool_DeliverSettingsInBand_EnableWritesNothing(t *testing.T) {
 	}{
 		{"yolo-spelled enable", SettingsUpdate{YOLO: ptr(true)}},
 		{"mode-spelled enable", SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}},
+		{"both spellings in one frame", SettingsUpdate{YOLO: ptr(true), PermissionMode: ptr(permissionModeBypass)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,11 +155,94 @@ func TestPool_DeliverSettingsInBand_EnableWritesNothing(t *testing.T) {
 			merged := SessionSettings{YOLO: true, PermissionMode: permissionModeBypass}
 			pool.deliverSettingsInBand(id, runner, tc.update, merged)
 
-			if got := runner.permissionModes(); len(got) != 0 {
-				t.Errorf("an escalation wrote %v in-band, want no posture send at all", got)
+			if got, want := runner.permissionModes(), []string{permissionModeBypass}; !reflect.DeepEqual(got, want) {
+				t.Errorf("an escalation delivered %v in-band, want exactly %v", got, want)
 			}
 			if got := runner.userTurns(); len(got) != 0 {
 				t.Errorf("a posture-only update invented a command: %q", got)
+			}
+		})
+	}
+}
+
+// TestPool_UpdateSettings_InBand_Escalation_NoRespawn is #2066 AC 1: enabling
+// bypass on a running session no longer respawns it, proven by a spawn count that
+// does not move, for BOTH spellings the daemon accepts.
+//
+// The Restart record is the instrument, not the `done` sentinel, for the reason
+// runnerDouble's own doc gives: doneAppears cannot observe a respawn under this
+// double, whereas restartArgs records every Restart call. Zero restarts and one
+// delivered posture together are the proof — either alone is compatible with a
+// silent no-op, which is the failure mode this ticket is most exposed to.
+//
+// The mode spelling is exercised HERE and not through the relay, and that is not a
+// gap in coverage: internal/relay's validPermissionMode refuses bypassPermissions
+// as a mode string on purpose, so Pool.UpdateSettings is the only surface on which
+// both spellings exist and the only place the pair can be measured together.
+//
+// The installed argv is asserted too, because the in-band branch installs it and
+// the restart branch is where an escalation used to compose one: an escalated
+// session's argv is the flag ALONE, with no --permission-mode pair beside it, so a
+// tree that regressed to composing the mode into the argv reddens here rather than
+// at the next spawn.
+func TestPool_UpdateSettings_InBand_Escalation_NoRespawn(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		update SettingsUpdate
+	}{
+		{"yolo-spelled enable", SettingsUpdate{YOLO: ptr(true)}},
+		{"mode-spelled enable", SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			regPath := filepath.Join(t.TempDir(), "sessions.json")
+
+			pool := helperRestartPool(t, regPath, t.TempDir(), SessionSettings{})
+			runPoolInBackground(t, pool)
+			id := pool.Default().ID()
+			runner := runnerDouble(t, pool, id)
+			waitRunning(t, runner)
+
+			if err := pool.UpdateSettings(id, tc.update); err != nil {
+				t.Fatalf("UpdateSettings(%+v): %v", tc.update, err)
+			}
+
+			if restarts := runner.restartArgs(); len(restarts) != 0 {
+				t.Errorf("the escalation respawned the child: Restart%v", restarts)
+			}
+			if got, want := runner.permissionModes(), []string{permissionModeBypass}; !reflect.DeepEqual(got, want) {
+				t.Errorf("delivered posture = %v, want exactly %v; a no-respawn that writes "+
+					"nothing is this ticket shipped as a silent no-op", got, want)
+			}
+			if got := runner.userTurns(); len(got) != 0 {
+				t.Errorf("a posture-only update invented a command: %q", got)
+			}
+			installs := runner.spawnArgSets()
+			if len(installs) != 1 {
+				t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
+			}
+			if got, want := installedArgv(t, installs[0]), escalatedPosture(); !reflect.DeepEqual(got, want) {
+				t.Errorf("installed argv = %v, want %v — the escalation keeps exactly one spelling", got, want)
+			}
+			if got, want := runner.spawnPermissionModes(), []string{permissionModeBypass}; !reflect.DeepEqual(got, want) {
+				t.Errorf("SetSpawnPermissionMode records = %v, want %v; a crash-respawn would "+
+					"otherwise re-assert the pre-escalation posture", got, want)
+			}
+			// On disk the escalation has ONE spelling, the yolo key —
+			// permissionModeForDisk maps the mode to "" — so the mode-spelled and
+			// yolo-spelled enables must persist byte-identically. In memory the pair
+			// invariant is what holds, and SettingsFor is where it is readable.
+			if disk := diskSettings(t, regPath); disk != (SessionSettings{YOLO: true}) {
+				t.Errorf("on-disk settings = %+v, want yolo:true and no permission_mode key", disk)
+			}
+			got, err := pool.SettingsFor(id)
+			if err != nil {
+				t.Fatalf("SettingsFor: %v", err)
+			}
+			if got != (SessionSettings{YOLO: true, PermissionMode: permissionModeBypass}) {
+				t.Errorf("SettingsFor = %+v, want the escalated pair in step", got)
 			}
 		})
 	}

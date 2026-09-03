@@ -175,7 +175,7 @@ func TestWriteInterrupt_WriteError(t *testing.T) {
 // want literal unchanged, because what it pins is the REVOCATION line rather than
 // the marshaller — the one line a live claude has been sent since #1604, and the
 // one Pool.deliverSettingsInBand still emits. TestMarshalPermissionModeEnvelope_AllowedModes
-// covers the other four modes and repeats this row from its own table, so the two
+// covers the other five modes and repeats this row from its own table, so the two
 // agree by construction rather than by a shared constant.
 func TestMarshalBypassRevocationEnvelope(t *testing.T) {
 	t.Parallel()
@@ -206,15 +206,26 @@ func TestMarshalBypassRevocationEnvelope(t *testing.T) {
 
 // TestMarshalPermissionModeEnvelope_AllowedModes asserts every allow-listed mode
 // marshals to a byte-exact single-line control_request with the wire order the
-// measurements pin: subtype BEFORE mode. #1595 measured the default row live
-// against claude 2.1.220 and #2041 measured the other four in-band against
-// 2.1.239, each acked success with the next turn's init.permissionMode echoing
-// the new mode.
+// measurements pin: subtype BEFORE mode. Every row is a line a live claude has
+// acked. #1595 measured the default row against claude 2.1.220 and #2041 measured
+// the four other in-band modes against 2.1.239, each acked success with the next
+// turn's init.permissionMode echoing the new mode; #2060 measured the escalation
+// row against 2.1.239 on a flag-launched child, and its capture holds the sent
+// line — testdata/bypass_reescalation_v2.1.239_reescalate.json,
+// second_control_request.control_request_sent — so this row's literal is the
+// measured shape rather than an extrapolation from the encoder.
+//
+// #2066 added that sixth row when the allow-list gained the escalation. It is
+// cheap because the encoder is mode-generic, and it is not redundant with
+// TestWritePermissionMode_WritesTheEscalation: that test pins ACCEPTANCE by
+// comparing against the marshaller's own output, so it would stay green against a
+// marshaller that encoded the escalation into a wrong-but-consistent line. Only a
+// byte-exact literal catches that, and every other member has had one since #2042.
 //
 // The table carries its own literals rather than reading permissionModeAllowed.
 // A test that enumerated the production allow-list would pass identically against
 // a corrupted one — it would assert "whatever the writer accepts, it encodes",
-// which is not a contract. This asserts the five modes by name.
+// which is not a contract. This asserts the six modes by name.
 func TestMarshalPermissionModeEnvelope_AllowedModes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -226,6 +237,7 @@ func TestMarshalPermissionModeEnvelope_AllowedModes(t *testing.T) {
 		{"plan", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"plan"}}` + "\n"},
 		{"auto", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"auto"}}` + "\n"},
 		{"dontAsk", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"dontAsk"}}` + "\n"},
+		{"bypassPermissions", `{"type":"control_request","request_id":"fixed-id","request":{"subtype":"set_permission_mode","mode":"bypassPermissions"}}` + "\n"},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -261,17 +273,25 @@ func TestMarshalPermissionModeEnvelope_AllowedModes(t *testing.T) {
 // is refused with ZERO bytes reaching the writer, and the refusal is
 // distinguishable from the retryable no-live-child error (AC2, AC3).
 //
-// bypassPermissions is named directly, and this is the only place under
-// internal/streamsup it appears. #1603 kept the enable direction structurally
-// absent rather than merely undocumented, and #2042 keeps that property by
-// refusing it through NON-MEMBERSHIP in permissionModeAllowed rather than through a
-// deny-list entry — a deny-list would have to name the literal in production
-// source and would still fail open on any spelling it failed to anticipate. Naming
-// it HERE is what stops the carve-out from dissolving silently: a later slice that
-// edits the allow-list leaves this row red if it lets the escalation through.
+// bypassPermissions is NOT a row here, and the carve-out it used to hold ended by
+// design at #2066. #1603 kept the enable direction structurally absent from this
+// package and #2042 preserved that by refusing it through NON-MEMBERSHIP in
+// permissionModeAllowed; #2066 admitted it as a member on purpose, so the literal
+// now lives in production source as permissionModeBypass (envelope.go) with two
+// readers. What replaced the absence is not this test: it is
+// permissionModeSpawnWritable subtracting the escalation back out at the spawn,
+// pinned by TestPermissionModeSpawnWritable, and internal/relay's
+// validPermissionMode keeping the mode spelling off the wire. The writer's own
+// inverse row is TestWritePermissionMode_WritesTheEscalation, which reddens if a
+// later edit "restores" the refusal.
 //
-// The near-miss rows (wrong case, trailing space, lowercased) are the spellings a
-// deny-list would have missed and a closed allow-list refuses for free.
+// The mechanism this test still pins is the one that survived: refusal by
+// non-membership in a closed vocabulary rather than by a deny-list, which would
+// fail open on any spelling it failed to anticipate. The near-miss rows (wrong
+// case, trailing space, lowercased) are exactly those spellings, and they matter
+// MORE now that a neighbour of the escalation is one edit away from being admitted
+// — a widening implemented as a prefix or case-insensitive compare passes the
+// acceptance test and fails these.
 //
 // Each row also asserts the error text does not echo the rejected mode.
 // Pool.deliverSettingsInBand logs this error verbatim and #833 keeps settings
@@ -283,7 +303,9 @@ func TestWritePermissionMode_RefusesUnknownMode(t *testing.T) {
 		name string
 		mode string
 	}{
-		{"the escalation", "bypassPermissions"},
+		// The escalation is NOT a row here any more (#2066 admitted it); its
+		// acceptance is TestWritePermissionMode_WritesTheEscalation's job and the
+		// near misses below still cover the spellings a deny-list would have missed.
 		{"empty", ""},
 		{"wrong case", "Default"},
 		{"trailing space", "default "},
@@ -324,7 +346,10 @@ func TestWritePermissionMode_RefusesUnknownMode(t *testing.T) {
 // what goes red if a later edit tidies the nil check back to the top.
 func TestWritePermissionMode_RefusalOutranksNilWriter(t *testing.T) {
 	t.Parallel()
-	err := WritePermissionMode(nil, "id", "bypassPermissions")
+	// A near miss rather than the escalation, which the allow-list admits since
+	// #2066: the mode here has to be one the vocabulary refuses, or the assertion
+	// measures the nil-writer path instead of the ordering.
+	err := WritePermissionMode(nil, "id", "Bypasspermissions")
 	if !errors.Is(err, ErrUnsupportedPermissionMode) {
 		t.Fatalf("WritePermissionMode(nil, …, unsupported) = %v, want ErrUnsupportedPermissionMode", err)
 	}
@@ -344,13 +369,16 @@ func TestWritePermissionMode_RefusalOutranksNilWriter(t *testing.T) {
 // bounded by json.Marshal's escaping. Neither reaches the other's field.
 //
 // The escalating mode bypassPermissions is absent from THESE rows because the
-// attacker modelled here supplies a request_id, not a mode; the mode surface is
-// where it belongs, and TestWritePermissionMode_RefusesUnknownMode names it
-// directly. (The rule this comment used to state — that naming it in any Go string
-// literal under internal/streamsup would trip the ticket's grep — is narrower than
-// it read: #2042's grep excludes _test.go files, so the literal is banned from
-// production source only.) acceptEdits stands in as the attacker's substitute
-// mode; what is asserted is that no id-supplied mode survives at all.
+// attacker modelled here supplies a request_id, not a mode: the mode surface is
+// where the escalation is pinned, by TestWritePermissionMode_WritesTheEscalation
+// for what the writer accepts and TestPermissionModeSpawnWritable for what the
+// spawn still refuses. (Two rules this comment used to state are both dead. The
+// literal is not banned anywhere as of #2066 — that ticket put it in production
+// source as permissionModeBypass — and it is no longer a refusal row in
+// TestWritePermissionMode_RefusesUnknownMode.) acceptEdits stands in as the
+// attacker's substitute mode; what is asserted is that no id-supplied mode
+// survives at all, which is a property of json.Marshal and holds identically
+// whichever mode is substituted.
 func TestMarshalBypassRevocationEnvelope_RequestIDInjectionResistance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -425,6 +453,133 @@ func TestWritePermissionMode_WritesEnvelope(t *testing.T) {
 	}
 	if !bytes.Equal(buf.Bytes(), want) {
 		t.Fatalf("WritePermissionMode wrote %q, want %q", buf.Bytes(), want)
+	}
+}
+
+// TestPermissionModeSpawnWritable pins the carve-out #2066 needed once the writer
+// admitted the escalation: permissionModeAllowed has TWO production readers, and
+// only one of them was meant to widen.
+//
+// The rows are the whole contract. Every in-band mode is spawn-writable, so a
+// non-escalated child is still walked back to its stored posture before any turn
+// reaches it; the escalation is NOT, so a bypass spawn is still sent nothing and
+// its gate is still armed open. That second row is the one with teeth: since #2065
+// the launch argv already asserts the escalation, so the write would be redundant,
+// and it would be the first control request on a fresh stream — a shape nothing
+// has measured. #2060 captured the escalation on an ESTABLISHED stream after two
+// turns, which is a different question. A gate armed closed on an unmeasured write
+// is a bricked session if claude NAKs it, and Config.SpawnPermissionMode's doc
+// names that stake.
+//
+// The garbage rows are here because the predicate must stay a SUBTRACTION from the
+// allow-list rather than a second switch: implemented as its own list, it would
+// drift the moment the vocabulary grows again, and these rows plus the in-band
+// ones are what catch that.
+func TestPermissionModeSpawnWritable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		mode string
+		want bool
+	}{
+		{permissionModeDefault, true},
+		{"acceptEdits", true},
+		{"plan", true},
+		{"auto", true},
+		{"dontAsk", true},
+		{permissionModeBypass, false},
+		{"", false},
+		{"Bypasspermissions", false},
+		{permissionModeBypass + " ", false},
+		{"notAMode", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.mode, func(t *testing.T) {
+			t.Parallel()
+			if got := permissionModeSpawnWritable(tt.mode); got != tt.want {
+				t.Errorf("permissionModeSpawnWritable(%q) = %v, want %v", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWritePermissionMode_WritesTheEscalation is #2066's writer half: the closed
+// allow-list gained exactly one member, so the escalation is written like any
+// other posture instead of refused by non-membership.
+//
+// It is the direct inverse of the row #1603 put into
+// TestWritePermissionMode_RefusesUnknownMode and #2042 kept there, and it is what
+// goes red if a later edit "restores" the carve-out — which would leave the
+// sessions-side routing sending an escalation the writer swallows, i.e. an
+// UpdateSettings that reports success and changes nothing.
+//
+// The near-miss row is here rather than left to the refusal test because the two
+// have to be read together: admitting the member must not admit its neighbours,
+// and a widening implemented as a prefix or case-insensitive compare passes the
+// first assertion and fails the second.
+func TestWritePermissionMode_WritesTheEscalation(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := WritePermissionMode(&buf, "id", permissionModeBypass); err != nil {
+		t.Fatalf("WritePermissionMode(…, %q) = %v, want the escalation accepted (#2066)", permissionModeBypass, err)
+	}
+	want, err := marshalPermissionModeEnvelope("id", permissionModeBypass)
+	if err != nil {
+		t.Fatalf("marshalPermissionModeEnvelope: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("WritePermissionMode wrote %q, want %q", buf.Bytes(), want)
+	}
+	var near bytes.Buffer
+	if err := WritePermissionMode(&near, "id", permissionModeBypass+"X"); !errors.Is(err, ErrUnsupportedPermissionMode) {
+		t.Fatalf("WritePermissionMode(…, %q) = %v, want ErrUnsupportedPermissionMode; the "+
+			"widening admitted a neighbour, so it is not membership", permissionModeBypass+"X", err)
+	}
+}
+
+// TestMarshalPermissionModeEnvelope_LengthStaysUnderPipeBuf pins what
+// permissionModeAllowed's membership actually BOUNDS, which is easy to lose in a
+// refactor and is the reason the vocabulary is closed at all: one write(2) under
+// PIPE_BUF is what keeps a control line atomic, so it cannot tear and interleave
+// with a concurrent WriteTurn on the same fd.
+//
+// #2066 made bypassPermissions the longest member — six bytes longer than
+// acceptEdits, which held the title from #2042 — so the bound is re-derived here
+// rather than restated in prose. Prose does not redden; this does, and the next
+// widening inherits the same constraint.
+//
+// The ceiling is POSIX's _POSIX_PIPE_BUF floor of 512 and NOT the platform value
+// (4096 on Linux, 512 on macOS): the guarantee has to hold on the smallest pipe
+// any supported platform can present, and asserting against the local value would
+// make the test's meaning depend on where it runs.
+//
+// The request id is the one field this bound cannot see — it is minted locally
+// from a counter, so it grows by a digit per decade of requests, not by caller
+// input — which is why the assertion is over the allow-list's members with a fixed
+// id and not over an arbitrary line.
+func TestMarshalPermissionModeEnvelope_LengthStaysUnderPipeBuf(t *testing.T) {
+	t.Parallel()
+	const posixPipeBufFloor = 512
+	longest, longestLen := "", 0
+	for _, mode := range []string{permissionModeDefault, "acceptEdits", "plan", "auto", "dontAsk", permissionModeBypass} {
+		if !permissionModeAllowed(mode) {
+			t.Fatalf("permissionModeAllowed(%q) = false; this list has drifted from the allow-list it measures", mode)
+		}
+		env, err := marshalPermissionModeEnvelope("1", mode)
+		if err != nil {
+			t.Fatalf("marshalPermissionModeEnvelope(%q): %v", mode, err)
+		}
+		if len(env) > longestLen {
+			longest, longestLen = mode, len(env)
+		}
+	}
+	if longest != permissionModeBypass {
+		t.Errorf("the longest member is %q at %d bytes, want %q; the doc's length argument "+
+			"names the wrong member", longest, longestLen, permissionModeBypass)
+	}
+	if longestLen >= posixPipeBufFloor {
+		t.Fatalf("the longest envelope is %d bytes (mode %q), at or over the POSIX PIPE_BUF "+
+			"floor of %d; a control line that long can tear against a concurrent turn",
+			longestLen, longest, posixPipeBufFloor)
 	}
 }
 

@@ -135,6 +135,22 @@ package realclaude
 // package's standard absent-binary / absent-credentials guards. Read the count of
 // tests that EXECUTED, never the exit code: a build failure and a full credentials
 // skip both exit 0.
+//
+// # The other two arms in this file
+//
+// The header above is #1622's and describes the REVOCATION arm. Two later arms
+// share its rig — seedBypassRegistry, revokeTap, newRevokeLogRecorder — and each
+// carries its own doc block rather than extending this one, because each seeds a
+// different posture and measures a different transition:
+//
+//   - TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows (#2064,
+//     extended by #2065): the SPAWN-time write and the gate it arms.
+//   - TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode
+//     (#2066): the default→bypass ESCALATION, this arm's mirror image. It is the
+//     one measurement the hermetic suite cannot make, because fakeclaude echoes
+//     any mode it is asked for.
+//
+// Run all three with -run 'TestInteractiveStream_' and the same flags.
 
 import (
 	"bytes"
@@ -937,5 +953,258 @@ func TestInteractiveStream_SpawnPostureGate_LiveChildAcksAndTurnFlows(t *testing
 			"Do not mitigate: comment the finding on #2065, apply needs-rework:refiner, and "+
 			"leave the current shape alone (a narrowed window is still a window)",
 			firstOrEmpty(modes), modes, "default")
+	}
+}
+
+// --- #2066: the escalation on the daemon's own routing path -------------------
+
+// TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode is #2066
+// AC 5, and it is the mirror image of this file's first test: that one drives a
+// bypass→default REVOCATION in band, this one drives a default→bypass ESCALATION,
+// which until #2066 was the one posture transition that could only be granted by
+// killing the child and relaunching it under a recomposed argv.
+//
+// # Why a live run is required at all
+//
+// The hermetic tests prove the daemon no longer respawns and that it writes the
+// escalation, in both spellings, with a spawn count that does not move. They cannot
+// prove the escalation TAKES: fakeclaude echoes whatever mode it is asked for
+// (writeSetPermissionModeAck's doc records that as deliberate), so a green hermetic
+// suite is equally consistent with claude refusing the request in words — which is
+// exactly what it did before #2065 put --dangerously-skip-permissions on every
+// launch argv. The two halves are one proof and neither is sufficient alone.
+//
+// # Why the full gate is wired here and not in the revocation arm
+//
+// The revocation arm leaves SpawnPermissionMode and PostureGate unset, because its
+// session is seeded yolo:true and there is nothing to walk back. This arm is seeded
+// yolo:false, so without the spawn-time write its child would simply STAY in the
+// bypass its always-on launch flag put it in, the first init line would report
+// bypassPermissions, and there would be no default posture to escalate FROM. The
+// wiring is copied from the #2064 arm above: a real streamsup.Parser teed in beside
+// the tap, minting the gate the runner arms — the production shape.
+//
+// # What the second turn proves that no assertion can state directly
+//
+// (*streamsup.Runner).SetPermissionMode RETARGETS the posture gate after a
+// successful write (#2064), and until #2066 an escalation never reached that
+// method. So the gate CLOSES on the escalation's own request id and every turn is
+// refused until claude acks it. Turn 2 completing is therefore the ack, measured
+// through the production path rather than read off a counter — the same argument
+// the #2064 arm makes for its A2.
+//
+// The cost of that is stated rather than hidden: if claude NAKs the escalation, this
+// run dies inside inbandSendTurn waiting for a result that a refused turn can never
+// produce, and the control_response log below is what tells a reader whether the
+// answer was a refusal or silence. #2060 measured claude ACCEPTING the escalation on
+// a flag-launched child at 2.1.239 and #2065 makes every child flag-launched, so a
+// NAK here would falsify this ticket's premise: comment the finding on #2066 rather
+// than mitigating it, because a daemon that closes a gate no write can reopen is
+// worse than one that needs a respawn.
+//
+// # The spelling this arm drives
+//
+// yolo:true, the ONLY spelling a client can put on the wire — internal/relay's
+// validPermissionMode refuses bypassPermissions as a mode string on purpose. The
+// mode spelling reaches the same delivery through Pool.UpdateSettings and is pinned
+// hermetically by TestPool_UpdateSettings_InBand_Escalation_NoRespawn, which runs
+// both. Spending a second live session on the second spelling would measure claude
+// twice and the daemon not at all.
+//
+// # Which assertion carries which proof
+//
+//   - Instrument check C fixes the FIRST init line at `default`, so the child is
+//     provably not already escalated when the enable is sent. Without it every
+//     assertion below passes on a tree where the spawn-time downgrade never ran.
+//   - A1 is the correlation: a control_response arrived after the enable.
+//   - A2 is the escalation TAKING — the child's own init echo reporting
+//     bypassPermissions. This is the assertion the hermetic suite cannot make.
+//   - A3 and A4 are the no-respawn half: one pid, one spawn, across both turns.
+//
+// **NOT YET EXECUTED AGAINST A LIVE CLAUDE.** The dispatch environment carries no
+// Claude login, so this test SKIPS there and a skip exits 0. Read the count of
+// `=== RUN` lines that reported PASS — never the exit code.
+func TestInteractiveStream_InBandBypassEscalate_LiveChildReportsBypassMode(t *testing.T) {
+	claudeBin := resolveClaudeBin(t)     // t.Skip when claude is not on PATH
+	home := WithWorktreeAuthenticated(t) // t.Skip when there are no credentials
+
+	workdir := filepath.Join(home, revokeWorkdirName+"-2066")
+	if err := os.MkdirAll(workdir, 0o700); err != nil {
+		t.Fatalf("#2066: create workdir: %v", err)
+	}
+
+	// yolo:false — the posture this arm escalates AWAY from, and the one that arms
+	// the spawn gate so the child is walked back to `default` before turn 1.
+	registryPath := filepath.Join(t.TempDir(), "sessions.json")
+	seededID := seedBypassRegistry(t, registryPath, false)
+
+	rec := newRevokeTap()
+	logHandler, spawns, notDelivered := newRevokeLogRecorder()
+
+	var tap inbandRunner
+	var composedArgs []string
+	var composedOperatorBypass bool
+	factory := func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
+		composedArgs = slices.Clone(cfg.ClaudeArgs)
+		composedOperatorBypass = cfg.OperatorBypass
+		parser := streamsup.NewParser(func(turnevent.Event) {}, cfg.Logger)
+		r, err := streamsup.New(streamsup.Config{
+			ClaudeBin:           cfg.ClaudeBin,
+			WorkDir:             cfg.WorkDir,
+			SessionID:           cfg.SessionID,
+			Args:                cfg.ClaudeArgs,
+			Stdout:              io.MultiWriter(rec, parser),
+			Logger:              cfg.Logger,
+			SpawnPermissionMode: cfg.PermissionMode,
+			OperatorBypass:      cfg.OperatorBypass,
+			PostureGate:         parser.PostureGate(),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("#2066: stream runner: %w", err)
+		}
+		tap = inbandRunner{Runner: r}
+		return tap, nil
+	}
+
+	pool, err := sessions.New(sessions.Config{
+		Bootstrap: sessions.SessionConfig{
+			ClaudeBin:  claudeBin,
+			WorkDir:    workdir,
+			ClaudeArgs: revokeBaseArgs,
+		},
+		RegistryPath:  registryPath,
+		RunnerFactory: factory,
+		Logger:        slog.New(logHandler),
+	})
+	if err != nil {
+		t.Fatalf("#2066: sessions.New: %v", err)
+	}
+
+	// Instrument check A — the runner the test drives must be the runner
+	// UpdateSettings will deliver the escalation to.
+	sup := pool.Default().Runner()
+	if sup != sessions.Runner(tap) {
+		t.Fatalf("#2066: pool.Default().Runner() is not the runner the test captured; "+
+			"the tap observes a different child than UpdateSettings drives (%T vs %T)", sup, tap)
+	}
+
+	// Instrument check B — deterministic and pre-spawn, so a seed that did not reach
+	// the pool costs zero tokens. A stored bypass here would mean the enable below is
+	// a no-op update that returns before the live-apply.
+	settings, ok := pool.DefaultSettings()
+	if !ok || settings.YOLO || settings.PermissionMode != "default" {
+		t.Fatalf("#2066: pool.DefaultSettings() = %+v (ok=%v), want the default posture: the "+
+			"registry seeded at %s with bootstrap id %s did not reach the pool, so there is "+
+			"nothing for the escalation to change", settings, ok, registryPath, seededID)
+	}
+	if composedOperatorBypass {
+		t.Fatalf("#2066: OperatorBypass is true for a daemon whose bootstrap ClaudeArgs are %q; "+
+			"the daemon would refuse to walk this child back and turn 1 would run in bypass, "+
+			"so the escalation would change nothing observable", revokeBaseArgs)
+	}
+	t.Logf("#2066: pool-composed argv %q (OperatorBypass=%v)", composedArgs, composedOperatorBypass)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		_ = tap.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runDone:
+		case <-time.After(inbandRunExitWait):
+			t.Errorf("#2066: streamsup.Run did not return within %s of cancel", inbandRunExitWait)
+		}
+	})
+
+	if !inbandWaitForChild(tap) {
+		t.Fatalf("#2066: no live child within %s: claude never spawned", inbandSpawnWait)
+	}
+	pidBefore := tap.State().ChildPID
+	if pidBefore == 0 {
+		t.Fatalf("#2066: ChildPID is 0 with a live stdin handle; the instrument cannot answer A3")
+	}
+
+	inbandSendTurn(t, sup, rec, revokePromptOne)
+
+	// Instrument check C — the LIVE half of the baseline, BEFORE the enable, so its
+	// red cannot be confused with a delivery failure. A first init line reporting
+	// anything but `default` means the spawn-time downgrade did not take and this run
+	// would be escalating a child that was already escalated.
+	modes := rec.snapshotInitModes()
+	if len(modes) == 0 || modes[0] != "default" {
+		t.Fatalf("#2066: first init.permissionMode is %q (all: %q), want %q; the child was "+
+			"not walked back from its always-on launch flag, so there is no default posture "+
+			"for the escalation to move away from", firstOrEmpty(modes), modes, "default")
+	}
+
+	// The correlation baseline. The spawn-time write already produced one ack, so
+	// this is expected to be 1 — read rather than assumed, because the verdict is
+	// "strictly greater after".
+	baseline := rec.controlResponseCount()
+
+	// YOLO ONLY, and true. A non-nil Model or Effort would add a /model or /effort
+	// turn and, if empty, would route the whole frame onto the RESTART path
+	// (inBandDeliverable's empty-value reject still outranks a posture change) —
+	// silently making this test measure the mechanism it exists to replace.
+	yes := true
+	if err := pool.UpdateSettings(pool.Default().ID(), sessions.SettingsUpdate{YOLO: &yes}); err != nil {
+		t.Fatalf("#2066: UpdateSettings(YOLO=true): %v", err)
+	}
+
+	// The escalation is a CONTROL REQUEST, not a turn: it produces no result line, so
+	// the settle waits on the ack. The timeout is TOLERATED here and only here — a
+	// tree that does not deliver produces no response at all, and the run has to reach
+	// the assertions rather than dying on this wait.
+	if !setModeWaitFor(rec.controlResponseCount, baseline+1, revokeControlBudget) {
+		t.Logf("#2066: no control_response within %s of the escalation — expected on a tree "+
+			"that does not deliver in-band; continuing to the assertions", revokeControlBudget)
+	}
+
+	// Turn 2 is also the gate assertion: SetPermissionMode retargeted the gate on the
+	// escalation's own id, so these bytes reach claude only if it acked.
+	inbandSendTurn(t, sup, rec, revokePromptTwo)
+
+	modes = rec.snapshotInitModes()
+	responses := rec.snapshotControlResponses()
+	undelivered := notDelivered()
+	spawnCount := spawns()
+	pidAfter := tap.State().ChildPID
+	t.Logf("#2066: init permissionModes %q, control_responses %d (baseline %d), spawns %d, "+
+		"pid %d -> %d, results %d, dropped partials %d, non-JSON lines %d, "+
+		"not-delivered records %d",
+		modes, len(responses), baseline, spawnCount, pidBefore, pidAfter,
+		rec.resultCount(), rec.droppedCount(), rec.nonJSONCount(), len(undelivered))
+	for i, resp := range responses {
+		t.Logf("#2066: control_response[%d] verbatim: %s", i, resp)
+	}
+	for i, line := range undelivered {
+		t.Logf("#2066: deliverSettingsInBand did not deliver [%d]: %s", i, line)
+	}
+
+	if len(responses) <= baseline {
+		t.Errorf("A1: %d control_response(s) before the escalation and %d after; claude never "+
+			"answered the set_permission_mode request, so nothing shows the escalation "+
+			"reached the live child", baseline, len(responses))
+	}
+	// A2 is the one the hermetic suite cannot make. FIRST and LAST, never a fixed
+	// index: a resent turn adds an init line and changes no verdict. Instrument check
+	// C already fixed the first at "default" and snapshotInitModes only appends.
+	last := modes[len(modes)-1]
+	if last != "bypassPermissions" {
+		t.Errorf("A2: the child reported init.permissionMode %q after the enable, want %q; "+
+			"the default -> bypassPermissions move did not happen, so the daemon wrote a line "+
+			"and claude did not take it (first %q, last %q, all %q)",
+			last, "bypassPermissions", modes[0], last, modes)
+	}
+	if pidAfter != pidBefore {
+		t.Errorf("A3: child pid %d served the first turn but %d served the last; "+
+			"the child was torn down across the escalation", pidBefore, pidAfter)
+	}
+	if spawnCount != 1 {
+		t.Errorf("A4: %d spawns over the whole run, want exactly 1; "+
+			"the escalation respawned the child", spawnCount)
 	}
 }

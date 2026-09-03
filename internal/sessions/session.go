@@ -88,10 +88,15 @@ type SessionSettings struct {
 	YOLO   bool
 
 	// PermissionMode is the posture claude runs the session under: one of the
-	// five modes it accepts on a held-open stream (permissionModeInBand) or
-	// permissionModeBypass, which only a relaunch can grant (#1595). Empty is
-	// the zero value's "never chosen", read as the default posture and
-	// normalised to permissionModeDefault at every construction site.
+	// five non-escalating modes (permissionModeInBand) or permissionModeBypass.
+	// Membership in the whole storable set is permissionModeKnown, and since
+	// #2066 that set is also the set the daemon DELIVERS on a held-open stream:
+	// all six are granted the same way, as a set_permission_mode control
+	// request. The escalation used to be the exception — only a relaunch under a
+	// recomposed argv could grant it (#1595) — so a reader of this field no
+	// longer has to model its two halves differently. Empty is the zero value's
+	// "never chosen", read as the default posture and normalised to
+	// permissionModeDefault at every construction site.
 	PermissionMode string
 }
 
@@ -178,12 +183,30 @@ var ErrUnsupportedPermissionMode = errors.New("sessions: unsupported permission 
 // ErrUnsupportedPermissionMode's reason.
 var ErrPermissionModeConflict = errors.New("sessions: permission mode contradicts yolo")
 
-// permissionModeInBand reports whether mode is one claude accepts on a stream it
-// is already reading — #2041 measured all five live at 2.1.239, extending #1595's
-// default — and so one Pool.UpdateSettings can deliver without tearing the child
-// down. It mirrors internal/streamsup's writer-side allow-list, which this package
-// may not import; a mode outside it is refused by the writer anyway, so the two
-// lists disagreeing costs a swallowed Info record, never a wrong posture.
+// permissionModeInBand reports whether mode is one of the five NON-ESCALATING
+// postures claude accepts on a stream it is already reading — #2041 measured all
+// five live at 2.1.239, extending #1595's default.
+//
+// IT IS NO LONGER THE ROUTING PREDICATE, and reading it as one is the mistake this
+// paragraph exists to prevent. #2066 made the escalation in-band-deliverable too
+// (#2065 put the launch flag on every argv; #2060 measured claude accepting the
+// re-escalation on such a child), so "deliverable in band" is now the SIX-member
+// question permissionModeKnown answers, and inBandDeliverable calls that instead.
+// This predicate deliberately stayed at five, because its other three callers ask a
+// different question and every one of them breaks silently if the escalation joins:
+//
+//   - canonicalPermissionMode would canonicalise (bypassPermissions, yolo:false) to
+//     the escalation instead of degrading it to default, so a hand-edited registry
+//     entry would escalate itself on warm start — reversing settingsFromEntry's
+//     guarantee that the tolerance can only ever move AWAY from the escalation.
+//   - claudeSettingsArgs would start emitting --permission-mode bypassPermissions,
+//     giving the escalation a second spelling on the argv; non-membership here is
+//     the named mechanism that function's doc relies on.
+//   - permissionModeForDisk would write the escalation into the permission_mode key
+//     beside the yolo key that already carries it.
+//
+// None of those is a build error, so the containment is this predicate's membership
+// and nothing else. Widen the CALL SITE that needs six, never this list.
 //
 // A switch, deliberately, and NOT a package-level slice or map: the latter is
 // mutable package state holding a security vocabulary, which anything in this
@@ -195,7 +218,7 @@ var ErrPermissionModeConflict = errors.New("sessions: permission mode contradict
 // dontAsk) genuinely LOOSEN a child launched behind the daemon's approval flags
 // (cmd/pyry's withApprovalArgs), and dontAsk means the permission-prompt tool
 // never fires at all. Who may ask for that is #1687's decision; this slice's only
-// caller is in-package.
+// callers are in-package.
 func permissionModeInBand(mode string) bool {
 	switch mode {
 	case permissionModeDefault, "acceptEdits", "plan", "auto", "dontAsk":
@@ -205,10 +228,20 @@ func permissionModeInBand(mode string) bool {
 }
 
 // permissionModeKnown reports whether mode is one this daemon can STORE: the
-// in-band five plus the escalation, which is stored and delivered by relaunching
-// rather than in-band. It is the gate Pool.UpdateSettings applies to operator
-// input, and it is what keeps an unrecognised value out of the registry — and
-// therefore out of every argv composed from it later.
+// non-escalating five plus the escalation. It is the gate Pool.UpdateSettings
+// applies to operator input, and it is what keeps an unrecognised value out of the
+// registry — and therefore out of every argv composed from it later.
+//
+// Since #2066 it is ALSO the routing predicate inBandDeliverable reads, because
+// every posture this daemon can store is now one it can deliver in band: the
+// escalation used to be the exception, stored but granted only by relaunching, and
+// that ticket removed the exception. Two questions, one answer, and no second
+// predicate minted for a set that already has a name — a duplicate would be two
+// copies of one membership rule rather than a second defence.
+//
+// They would diverge again if claude ever accepted a mode on the launch argv that
+// it refused on a held-open stream. That mode gets its own predicate when it
+// arrives; until then, do not pre-split this one.
 func permissionModeKnown(mode string) bool {
 	return mode == permissionModeBypass || permissionModeInBand(mode)
 }
@@ -217,6 +250,11 @@ func permissionModeKnown(mode string) bool {
 // describes, establishing SessionSettings' invariant. Total, and it never
 // escalates: an unrecognised or empty mode, and a bypassPermissions mode paired
 // with yolo:false, all land on the default posture.
+//
+// It reads permissionModeInBand, the FIVE non-escalating modes, and #2066 left it
+// on that predicate on purpose while widening the routing one: the tolerance here
+// must keep moving away from the escalation, so an unrecognised value and a
+// hand-written bypassPermissions beside yolo:false both still land on default.
 //
 // It NORMALISES TRUSTED INPUT and is not a validation path — its callers are the
 // two construction sites and the registry read, never operator input, which
@@ -286,8 +324,13 @@ type SettingsUpdate struct {
 //
 //   - The escalation keeps EXACTLY ONE SPELLING. This function never emits
 //     --permission-mode bypassPermissions, because permissionModeInBand gates the
-//     value and the escalation is not a member. No mode string can compose the
-//     flag either: it is appended unconditionally, from nothing.
+//     value and the escalation is not a member. That non-membership is a live
+//     invariant rather than a historical accident: #2066 widened the routing
+//     predicate to six members and deliberately left permissionModeInBand at five
+//     for this clause and its two siblings, so a later slice that "tidies" the two
+//     predicates into one hands the escalation a second argv spelling. No mode
+//     string can compose the flag either: it is appended unconditionally, from
+//     nothing.
 //   - The YOLO bit stays the authoritative half of the posture. YOLO==true emits
 //     the flag alone, so a hand-built literal whose mode contradicts its bit
 //     cannot make the daemon assert a mode at a session stored as escalated.

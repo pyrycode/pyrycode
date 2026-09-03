@@ -57,10 +57,13 @@ package protocol
 //     rather than precedence means there is no rule for a client author or a
 //     reviewer to get wrong, and no client sends both.
 //
-// The accepted vocabulary is claude's five in-band modes (default, acceptEdits,
-// plan, auto, dontAsk), measured live by #2041. bypassPermissions is refused on
-// this field: the escalation stays reachable only through YOLO, so it keeps
-// exactly one spelling on the wire.
+// The accepted vocabulary is claude's five NON-ESCALATING modes (default,
+// acceptEdits, plan, auto, dontAsk), measured live by #2041. bypassPermissions is
+// refused on this field: the escalation stays reachable only through YOLO, so it
+// keeps exactly one spelling on the wire. That refusal is a wire-vocabulary
+// decision and not a statement about what the daemon can deliver — since #2066 it
+// delivers the escalation in band too, spelled as the bit — so widening this field
+// to six needs its own argument rather than following from the daemon's.
 type SetSessionSettingsPayload struct {
 	SessionID      string  `json:"session_id"`
 	Model          *string `json:"model,omitempty"`

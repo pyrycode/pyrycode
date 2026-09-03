@@ -108,13 +108,19 @@ success or failure, never a silent drop. Control flow, in load-bearing order:
   `cmd/pyry`.
 - **`validPermissionMode(mode string) bool`** (#1687) — a closed enum like
   `validEffort`, not `validModel`'s byte-class grammar: a permission mode is
-  a fixed vocabulary (claude's five in-band modes, measured live by #2041),
-  where a model identifier is not. `{default, acceptEdits, plan, auto,
-  dontAsk}`; `""` and `bypassPermissions` are both deliberately excluded —
-  `""` because an explicit empty string names no posture (see the payload
-  doc), `bypassPermissions` because that posture must keep exactly one
-  spelling on the wire (`yolo: true`), which is the ticket's whole
-  privilege-escalation bound. Carries the same direction hazard `validEffort`
+  a fixed vocabulary (the five NON-ESCALATING modes claude accepts in band,
+  measured live by #2041), where a model identifier is not — claude in fact
+  accepts a sixth, `bypassPermissions`, in band as of #2066, but that count is
+  a **wire** decision following from the two exclusions below, not from what
+  claude will parse. `{default, acceptEdits, plan, auto, dontAsk}`; `""` and
+  `bypassPermissions` are both deliberately excluded — `""` because an
+  explicit empty string names no posture (see the payload doc),
+  `bypassPermissions` because that posture must keep exactly one spelling on
+  the wire (`yolo: true`), which is the ticket's whole privilege-escalation
+  bound and is untouched by #2066: the daemon now *delivers* the escalation
+  in band once accepted as `yolo:true`, but this validator still refuses it
+  as a mode string outright, so a mobile client still has exactly one
+  spelling to send. Carries the same direction hazard `validEffort`
   already flags: a closed enum refuses inbound anything claude adds later,
   so widening it needs a fresh live measurement, not a hunch.
 - **`settingsReplyError(ctx, s, inReplyTo, code, message, retryable)`** — a

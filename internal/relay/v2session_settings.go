@@ -38,13 +38,15 @@ const (
 // lock-free under the package's single-owner invariant. Unlike the fire-and-forget
 // verbs (interrupt / new_session / dequeue_message) the interactive path ALWAYS
 // replies. A RUNNING session picks the change up immediately, by a mechanism the
-// seam picks on what the frame carried — a model/effort-only change, or a bypass
-// REVOCATION, is written to the live child as command text or a control request
-// (#1581, #1604); a bypass ENABLE or a model/effort cleared to default
-// live-restarts the session's supervisor instead (#842), because claude refuses
-// the escalation over the control channel and gates it on the launch argv
-// (#1595). Both mechanisms install the recomposed argv (#833's path), so the next
-// spawn carries it too.
+// seam picks on what the frame carried — a model/effort change, or ANY posture
+// change including a bypass ENABLE, is written to the live child as command text
+// or a control request (#1581, #1604, #2066); only a model or effort cleared back
+// to claude's own default live-restarts the session's supervisor (#842). The
+// enable used to restart too, because claude refused the escalation over the
+// control channel and gated it on the launch argv (#1595); #2065 put that flag on
+// every argv and #2060 measured claude accepting the re-escalation on such a
+// child, so #2066 routed it in band with the other five. Both mechanisms install
+// the recomposed argv (#833's path), so the next spawn carries it too.
 //
 // Order is load-bearing:
 //  1. Capability gate (the authz boundary): a non-interactive conn is fully inert
@@ -148,8 +150,9 @@ func (m *V2SessionManager) handleSetSessionSettings(ctx context.Context, s *V2Se
 
 	// Success (AC #1/#2): the change is persisted atomically and reaches a running
 	// claude immediately — in-band as command text or a control request for a
-	// model/effort change or a bypass revocation (#1581, #1604), by live restart
-	// for a bypass enable or a model/effort cleared to default (#842). Build the
+	// model/effort change or ANY posture change, the bypass enable included since
+	// #2066 (#1581, #1604); by live restart only for a model or effort cleared back
+	// to claude's own default (#842), which is the surviving restart case. Build the
 	// reply inline, mirroring handleRequestSnapshot. Echoing p.SessionID is safe —
 	// on the nil-error path it matched a real session key exactly, so it is a
 	// confirmed-real, non-secret routing id in a typed struct field, not an
@@ -522,11 +525,15 @@ func validEffort(e string) bool {
 // holding a security vocabulary is something any code in this package, a test
 // included, could append the escalation onto. Control flow cannot be appended to.
 //
-// The set is claude's five IN-BAND modes, measured live at 2.1.239 by #2041 and
-// mirrored from internal/sessions' permissionModeInBand — defined relay-local
+// The set is claude's five NON-ESCALATING modes, measured live at 2.1.239 by #2041
+// and mirrored from internal/sessions' permissionModeInBand — defined relay-local
 // because internal/relay cannot import internal/sessions, the same reason
-// validEffort duplicates cmd/pyry's --effort enum. Two omissions are the ticket's
-// decisions rather than oversights:
+// validEffort duplicates cmd/pyry's --effort enum. Five is not a claim about what
+// claude accepts in band: the daemon has delivered all SIX storable postures on the
+// held-open stream since #2066, and permissionModeInBand stayed at five precisely
+// so its three non-routing readers keep seeing the non-escalating set. This is a
+// WIRE vocabulary, and its count follows from the two omissions below rather than
+// from the daemon's. Both are the ticket's decisions rather than oversights:
 //
 //   - "" is REFUSED, and this is where the three validators in this file
 //     deliberately disagree. validModel and validEffort accept "" as "emit no

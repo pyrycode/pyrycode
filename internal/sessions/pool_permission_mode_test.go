@@ -265,22 +265,29 @@ func TestPool_UpdateSettings_RevokeKeepsStoredMode(t *testing.T) {
 	}
 }
 
-// TestPool_UpdateSettings_BypassMode_TakesRestart (AC #4): the escalation named as
-// a mode is not dropped — it takes the existing restart path, and the relaunched
-// child carries it spelled by the skip-permissions flag ALONE, never as a
-// --permission-mode value.
-func TestPool_UpdateSettings_BypassMode_TakesRestart(t *testing.T) {
+// TestPool_UpdateSettings_BypassMode_MixedWithClearedValueTakesRestart is #2043's
+// AC #4 rewritten for #2066. That ticket routed the escalation in band, so a
+// mode-spelled enable ALONE no longer reaches the restart — see
+// TestPool_UpdateSettings_InBand_Escalation_NoRespawn for the pin on that.
+//
+// What this covers is the surviving route and it is worth keeping: an escalation
+// mixed with a Model cleared to "" takes the restart, because the empty-value
+// reject outranks a posture change in the same frame, and the relaunched child
+// still carries the escalation spelled by the skip-permissions flag ALONE, never as
+// a --permission-mode value. That is the "no frame can lose a posture change by
+// mixing" claim in inBandDeliverable's doc, asserted rather than argued.
+func TestPool_UpdateSettings_BypassMode_MixedWithClearedValueTakesRestart(t *testing.T) {
 	t.Parallel()
 	regPath := filepath.Join(t.TempDir(), "sessions.json")
 	tplWorkDir := t.TempDir()
 
-	pool := helperRestartPool(t, regPath, tplWorkDir, SessionSettings{})
+	pool := helperRestartPool(t, regPath, tplWorkDir, SessionSettings{Model: "sonnet"})
 	runPoolInBackground(t, pool)
 	id := pool.Default().ID()
 	runner := runnerDouble(t, pool, id)
 	waitRunning(t, runner)
 
-	if err := pool.UpdateSettings(id, SettingsUpdate{PermissionMode: ptr(permissionModeBypass)}); err != nil {
+	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr(""), PermissionMode: ptr(permissionModeBypass)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
@@ -394,17 +401,23 @@ func TestPool_PermissionModeNeverLogged(t *testing.T) {
 // runner asserts to every child it SPAWNS is kept in step with the stored one on both
 // of UpdateSettings' branches, because neither branch rebuilds the runner.
 //
-// The escalation row is the one that earns the placement above the branch split, and
-// it is the sole red for the cheaper design that folds the install into
-// deliverSettingsInBand: that path is never reached for a bypass update, so the runner
-// would keep asserting the pre-escalation mode and a later crash-respawn would
-// downgrade a child the operator had just escalated. The paired permissionModes()
-// assertion is what keeps the two calls distinguishable — the escalation must install
-// WITHOUT writing anything to the live child.
+// The RESTART row is the one that earns the placement above the branch split, and it
+// is the sole red for the cheaper design that folds the install into
+// deliverSettingsInBand: that path is never reached on the restart branch, so the
+// runner would keep asserting the pre-change mode and a later crash-respawn would
+// re-assert a posture the operator had already replaced. #2066 changed which update
+// reaches that branch — a mode-spelled escalation used to, and now goes in band — so
+// the row pairs the escalation with a Model cleared to "", which is what puts a frame
+// on the restart today. The paired permissionModes() assertion is what keeps the two
+// calls distinguishable: the restart branch installs WITHOUT writing anything to the
+// live child, and the in-band branch does both.
 func TestPool_UpdateSettings_InstallsSpawnPostureOnBothBranches(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
+		// start is the session's settings before the update. Only the restart row
+		// needs a non-zero one, so its cleared-Model is a real change.
+		start SessionSettings
 		// update is applied to a session that starts at the default posture.
 		update SettingsUpdate
 		// wantSpawn is the posture every later spawn must assert afterwards.
@@ -419,8 +432,15 @@ func TestPool_UpdateSettings_InstallsSpawnPostureOnBothBranches(t *testing.T) {
 			wantLive:  []string{"plan"},
 		},
 		{
-			name:      "escalation branch installs bypass without writing it",
+			name:      "in-band branch installs bypass and writes it (#2066)",
 			update:    SettingsUpdate{PermissionMode: ptr(permissionModeBypass)},
+			wantSpawn: permissionModeBypass,
+			wantLive:  []string{permissionModeBypass},
+		},
+		{
+			name:      "restart branch installs bypass without writing it",
+			start:     SessionSettings{Model: "sonnet"},
+			update:    SettingsUpdate{Model: ptr(""), PermissionMode: ptr(permissionModeBypass)},
 			wantSpawn: permissionModeBypass,
 			wantLive:  nil,
 		},
@@ -429,7 +449,7 @@ func TestPool_UpdateSettings_InstallsSpawnPostureOnBothBranches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			regPath := filepath.Join(t.TempDir(), "sessions.json")
-			pool := helperRestartPool(t, regPath, t.TempDir(), SessionSettings{})
+			pool := helperRestartPool(t, regPath, t.TempDir(), tc.start)
 			runPoolInBackground(t, pool)
 			id := pool.Default().ID()
 			runner := runnerDouble(t, pool, id)

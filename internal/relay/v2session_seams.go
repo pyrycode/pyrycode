@@ -82,10 +82,12 @@ type SettingsUpdate struct {
 	// sessions.SettingsUpdate's field of the same name. It reaches this struct
 	// only after handleSetSessionSettings has checked it against
 	// validPermissionMode, so a non-nil value here is always one of claude's five
-	// in-band modes — never "", never bypassPermissions, never an unrecognised
-	// string. The escalation therefore has no expression on this field at all: it
-	// travels as YOLO and nothing else, which is what keeps the bypass fail-safe
-	// to a single bit.
+	// NON-ESCALATING modes — never "", never bypassPermissions, never an
+	// unrecognised string. The escalation therefore has no expression on this field
+	// at all: it travels as YOLO and nothing else, which is what keeps the bypass
+	// fail-safe to a single bit. That is a wire-vocabulary bound and not a claim
+	// about delivery — the daemon has routed the escalation in band, spelled as the
+	// bit, since #2066.
 	PermissionMode *string
 }
 

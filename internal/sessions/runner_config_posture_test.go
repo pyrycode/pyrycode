@@ -78,7 +78,9 @@ func newCapturePool(t *testing.T, passThrough []string, storedMode string, yolo 
 // than a new bug.
 //
 // internal/streamsup's spawnAndWait writes nothing when the mode it was handed is
-// outside permissionModeAllowed. Before #2065 that arm meant "the child launched
+// outside permissionModeSpawnWritable (permissionModeAllowed minus the escalation
+// since #2066; the empty and unrecognised values this test is about are outside
+// both). Before #2065 that arm meant "the child launched
 // with no escalation flag, nothing was written, it runs in default" — benign.
 // After #2065 the same arm means "the child launched IN BYPASS, nothing was
 // written, its posture gate is open, and its turns flow in bypass". The

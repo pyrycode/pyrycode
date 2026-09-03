@@ -17,9 +17,11 @@ came back "yes," so neither closes #1686 as answered-no**:
   child that wrote the downgrade before turn 1 drew its ack before turn 1 was written, and all
   three were gated on that turn.
 
-This measures **claude**, not pyry, and changes no daemon behaviour. `permissionModeAllowed`
-(`internal/streamsup/envelope.go`) still refuses `bypassPermissions` by non-membership; whether
-anything is built on this answer is #1686's decision.
+This measures **claude**, not pyry, and at the time it landed changed no daemon
+behaviour. #2066 built on this and #2060 together: `permissionModeAllowed`
+(`internal/streamsup/envelope.go`) now admits `bypassPermissions`, and the escalation
+routes in-band on the argv this probe measured — see
+[`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md).
 
 ## claude version measured
 

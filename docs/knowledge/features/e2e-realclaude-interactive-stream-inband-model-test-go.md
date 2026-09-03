@@ -245,3 +245,33 @@
   measurement writeup and
   `docs/specs/architecture/2060-bypass-reescalation-probe.md` for the design and
   security review.
+
+- `interactive_stream_inband_bypass_revoke_test.go`, escalation arm (#2066) —
+  **the plan said this arm would leave `PostureGate` unwired, mirroring #1622's
+  revoke arm; that shape turned out unreachable.** The revoke arm can leave the
+  gate unwired because a NAK there just means the child never left bypass — an
+  observable outcome either way. The escalation arm cannot: it seeds the
+  registry at `yolo:false`, and since #2065 the launch argv escalates every
+  child regardless of stored posture, so without the spawn-time write the
+  child would simply *stay* in bypass and there would be no `default` posture
+  to escalate away from in the first place. The spawn-time write requires
+  `SetSpawnPermissionMode`, which `New` refuses to build without a
+  `PostureGate` — so the arm ended up copying #2064's production wiring (a
+  real `streamsup.Parser` teed in beside the tap, minting the gate the runner
+  arms) rather than the bare tap #1622's arm gets away with. The consequence
+  is stated in the test rather than hidden: turn 2 now doubles as the
+  escalation's ack assertion — `SetPermissionMode` retargets the gate onto the
+  escalation's own `request_id`, so turn 2's bytes reach claude only if it
+  acked, and a NAK kills the run inside `inbandSendTurn` with the
+  `control_response` log as the diagnostic. That is a *stronger* measurement
+  than the original plan's shape (it proves the round trip, not only the
+  echo), but it means this arm is not a drop-in copy of the revoke arm's
+  minimal-wiring shape even though the two read as siblings in the table.
+  Asserts, from claude's own per-turn `system/init`: the *last* reported
+  `permissionMode` is `bypassPermissions` (first is `default`), pid unchanged,
+  spawn count 1. See
+  [`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md)
+  and [the posture gate's escalation
+  carve-out](streamsup-package-posture-gate-spawn-permission-mode-ack.md#the-escalation-stays-spawn-unwritable-deliberately-2066)
+  for why the spawn-time write exists at all and why it stays off for a
+  bypass session's *own* spawn.

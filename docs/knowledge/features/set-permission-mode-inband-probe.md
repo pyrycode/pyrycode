@@ -85,9 +85,16 @@ mid-session.
 
 1. YOLO **true → false** can be delivered in-band, no respawn. Verified three ways:
    `success` response, `init` echo flipped, behaviour matched the `default` control.
-2. YOLO **false → true** cannot. It must keep the `sup.Restart(newArgs)` path.
-3. Splitting `inBandDeliverable` on the *direction* of the change is supported here;
-   routing both directions in-band is not.
+2. YOLO **false → true** could not, *at the time this was measured*: claude refused
+   the escalation on a child not launched with `--dangerously-skip-permissions`. This
+   was a claude-version-and-launch-argv fact, not a permanent daemon limitation — see
+   [`bypass-reescalation-probe.md`](bypass-reescalation-probe.md) (#2060), which shows
+   the same escalation succeeding on a child launched *with* the flag, and #2066,
+   which made that the daemon's only launch shape and routed the escalation in band.
+3. Splitting `inBandDeliverable` on the *direction* of the change was the only
+   correct routing **for the argv every session launched with at the time**.
+   #2065 changed that argv and #2066 routes both directions in-band today; see
+   [`Pool.UpdateSettings`](sessions-package-key-types-pool-updatesettings.md).
 4. **Superseded by #1603:** the production writer now exists —
    `(*Runner).RevokeBypass`/`WriteBypassRevocation`/`marshalBypassRevocationEnvelope`
    (`internal/streamsup`), revoke direction only, mode fixed in code rather than taken as a
