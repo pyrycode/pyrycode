@@ -581,3 +581,36 @@ production source, so the declared file overage is unchanged.
 **Design unchanged from the committed plan.** The rejected argv interlock and the
 `SetSpawnPermissionMode` decision were both settled in the security-review pass before
 the plan was committed; nothing was re-decided during implementation.
+
+### 2026-09-03 — rework, verifier MUST FIX: the arm is unconditional
+
+**The defect.** § Design said a bypass spawn's *"gate is never armed"*, and the code
+implemented that literally — the `arm` call sat inside the `permissionModeAllowed`
+branch, so a spawn that writes nothing installed **nothing**. But the gate outlives the
+child: `Restart` reuses the same `*Runner` and the same `*PostureGate`, so "install
+nothing" means "inherit the predecessor's id". An un-acked `default` child followed by
+an escalation to `bypassPermissions` — which is not in-band-deliverable and so takes
+`Pool.UpdateSettings`' restart branch — left the replacement child armed on an id
+nothing could ever ack, refusing every turn on that session forever under the
+*retryable* classification. That contradicts AC 1's bypass clause verbatim, on the one
+posture the AC says must never be gated.
+
+**The fix**, one line: hoist `r.postureGate.arm(postureID)` out of the branch, leaving
+only the id conditional. `arm("")` installs the OPEN state, which is the statement
+`armedID`'s own doc already makes — nesting the call merely failed to reach the branch
+that needed it. Direction: the gate errs *closed*, so nothing was ever loosened; this
+was an availability defect, not a privilege one.
+
+**Why the suite missed it, and what now covers it.** Both existing spawn tests judge the
+bypass state against a **fresh** gate, where open is the zero value and the assertion is
+vacuous — `TestRunner_SetSpawnPermissionMode_TakesEffectOnTheNextSpawn` releases before
+each respawn, which is precisely what hid this.
+`TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn` drives the
+operator sequence with the first gate deliberately **not** released, and asserts
+non-vacuity first (the residual arm is real) before asserting the respawn's gate is
+open, the turn's bytes reach the child, and bypass was still sent nothing. Confirmed RED
+against the pre-fix shape by `go test -overlay` (`armed on "1" (the predecessor armed
+"1")`) and green with the fix.
+
+§ Design's "its gate is never armed" is superseded by the code comment at the arm site:
+every spawn publishes its own gate state, and only the id it publishes is conditional.

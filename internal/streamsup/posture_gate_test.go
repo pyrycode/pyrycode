@@ -484,6 +484,89 @@ func TestRunner_SetSpawnPermissionMode_TakesEffectOnTheNextSpawn(t *testing.T) {
 	}
 }
 
+// TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn is AC 1's
+// bypass clause held across a RESPAWN, which is the only place it can actually fail.
+// The gate outlives the child — Restart reuses this Runner and this PostureGate — so a
+// spawn that writes nothing has to install the OPEN state rather than leave whatever
+// its predecessor armed.
+//
+// The sequence is the operator one, not a synthetic one: a default child comes up and
+// never acks (it crashed, claude NAK'd, or the write hit EPIPE — AC 4 keeps the gate
+// closed for all three), then the posture is escalated to bypassPermissions, which is
+// not in-band-deliverable and so takes Pool.UpdateSettings' RESTART branch. With the
+// arm nested inside the admissibility check the replacement child inherited id "1",
+// which nothing can ever ack, and every turn on that session refused forever — under
+// the RETRYABLE classification, so callers retry against a gate with no opener.
+//
+// Not releasing the first gate is the whole point of the test.
+// TestRunner_SetSpawnPermissionMode_TakesEffectOnTheNextSpawn releases before each
+// respawn and TestRunner_SpawnPermissionMode_WrittenOncePerChild only ever judges a
+// FRESH gate, where open is the zero value and the bypass assertion is vacuous.
+func TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "echo_lines", out, stderr)
+	cfg.SpawnPermissionMode = "default"
+	gate := &PostureGate{}
+	cfg.PostureGate = gate
+	spawned := make(chan struct{}, 2)
+	cfg.onSpawn = func(int) {
+		select {
+		case spawned <- struct{}{}:
+		default:
+		}
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+	defer func() { cancel(); join() }()
+
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	// Non-vacuity: the residual arm has to be real, or the assertion below passes
+	// against a gate that was open the whole time.
+	residual := gate.armedIDForTest()
+	if residual == "" {
+		t.Fatal("the default spawn left the gate open; there is no residual arm for the respawn to inherit")
+	}
+
+	// The escalation the allow-list refuses. echo_lines never self-exits, so the
+	// second spawn is attributable to Restart.
+	r.SetSpawnPermissionMode("bypassPermissions")
+	r.Restart(cfg.Args)
+	select {
+	case <-spawned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement child never spawned")
+	}
+	waitForContains(t, out, "READY", 3*time.Second)
+
+	if got := gate.armedIDForTest(); got != "" {
+		t.Fatalf("after a bypass respawn the gate is armed on %q (the predecessor armed %q); "+
+			"a spawn that writes nothing must install the OPEN state, or the session is bricked", got, residual)
+	}
+
+	// The error alone is not the oracle — the bytes have to reach the child.
+	const marker = "residual-arm-turn"
+	if err := r.WriteUserTurn(context.Background(), "c1", []byte(marker)); err != nil {
+		t.Fatalf("WriteUserTurn to a bypass child: %v; AC 1 says its turns flow exactly as they do today", err)
+	}
+	waitForContains(t, out, marker, 3*time.Second)
+
+	// And the refusal is still by non-membership: the bypass spawn wrote nothing, so
+	// the only ask across both children is the first one's.
+	if modes, _ := permissionModeAsks(out.String()); len(modes) != 1 || modes[0] != "default" {
+		t.Fatalf("across both children the child saw %v, want exactly [default] — bypass is sent nothing", modes)
+	}
+}
+
 // armedIDForTest reads the gate's armed id under its own mutex, so a test can play
 // claude's ack without the race detector seeing an unsynchronised field read. It
 // lives in this file rather than beside the type: production has no reader for it —

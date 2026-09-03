@@ -1338,13 +1338,24 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// has not written, let alone confirmed. The id is minted here so the gate and the
 	// line below carry the same one.
 	//
-	// Whether anything happens at all is permissionModeAllowed's single decision. The
+	// Whether anything is WRITTEN at all is permissionModeAllowed's single decision. The
 	// escalation fails it by NON-MEMBERSHIP, so a bypassPermissions session is sent
-	// nothing AND its gate is never armed — its turns flow exactly as they do today,
+	// nothing AND its gate ends up open — its turns flow exactly as they do today,
 	// which is the intended reading: a gate no write can ever release is a bricked
 	// session, not a fail-closed one. The empty mode of an unconfigured runner fails it
 	// the same way, which is what keeps every pre-#2064 construction site
 	// byte-identical.
+	//
+	// THE ARM IS UNCONDITIONAL, and only the id it installs is conditional. Every spawn
+	// must publish its OWN gate state, because the gate outlives the child: Restart
+	// reuses this Runner and this PostureGate, so a branch that installs nothing leaves
+	// the PREDECESSOR's id standing. That is not hypothetical — an un-acked default
+	// child followed by an escalation to bypass takes exactly that path (the escalation
+	// is not in-band-deliverable, so Pool.UpdateSettings restarts rather than rebuilds),
+	// and the bypass child would then refuse every turn forever against an id nothing
+	// can ever ack. arm("") installs the OPEN state, which is the same statement
+	// armedID's doc already makes; nesting the call merely failed to reach the branch
+	// that needs it.
 	//
 	// An argv-derived interlock — refuse whenever this spawn's args name
 	// --dangerously-skip-permissions — was designed and REJECTED. It is exact on
@@ -1355,8 +1366,8 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	postureID := ""
 	if permissionModeAllowed(spawnMode) {
 		postureID = r.nextControlID()
-		r.postureGate.arm(postureID)
 	}
+	r.postureGate.arm(postureID)
 
 	r.setStdin(stdin, freshSeq)
 	r.updateState(func(st *State) {
