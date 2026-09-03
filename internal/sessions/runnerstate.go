@@ -76,10 +76,15 @@ type RunnerConfig struct {
 	// through Runner.SetSpawnPermissionMode instead. This field seeds; that method
 	// updates.
 	//
-	// bypassPermissions travels here like any other mode. The stream runner refuses to
-	// write it — the escalation is not in its allow-list — so a bypass session is sent
-	// nothing and its turns are never gated, and re-granting bypass stays on the
-	// respawn path.
+	// bypassPermissions travels here like any other mode, and the stream runner still
+	// writes nothing for it AT SPAWN — so a bypass session is sent nothing and its
+	// turns are never gated. What changed with #2066 is the mechanism, not the
+	// outcome: the runner's writer allow-list admits the escalation now, and the spawn
+	// path subtracts it back out (permissionModeSpawnWritable) because the launch argv
+	// already asserts the escalation on every child since #2065 and nothing has
+	// measured claude answering one as a fresh stream's first control request.
+	// Re-granting bypass on a RUNNING child no longer waits for a respawn: it goes
+	// in-band through Runner.SetPermissionMode.
 	PermissionMode string
 
 	// OperatorBypass reports that the escalation reached this spawn's argv from the

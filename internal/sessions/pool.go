@@ -736,8 +736,8 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 // carried — which fields, and for the posture its value too (inBandDeliverable):
 //
 //   - A change claude accepts on the stream the daemon already holds open is
-//     delivered IN-BAND (#1581, #1604, #2043): the /model and /effort commands as
-//     ordinary user turns, and any of the five in-band postures as a
+//     delivered IN-BAND (#1581, #1604, #2043, #2066): the /model and /effort
+//     commands as ordinary user turns, and ANY of the six storable postures as a
 //     set_permission_mode control request, so the child is neither terminated nor
 //     respawned and its transcript survives. That branch still installs the
 //     recomposed argv, via SetSpawnArgs — Restart's swap half — because skipping
@@ -747,16 +747,18 @@ func (p *Pool) Rename(id SessionID, newLabel string) error {
 //   - Every other change keeps the live restart (#842): the argv is recomposed
 //     from the persisted settings and, if a child is running, that child is
 //     killed so the supervisor relaunches it — resuming the conversation — under
-//     the new settings. This is the path a bypass ENABLE takes, whether it is
-//     spelled as yolo:true or as the bypassPermissions mode, and the path a model
-//     or effort cleared back to claude's own default takes.
+//     the new settings. Since #2066 this is the path a model or effort cleared back
+//     to claude's own default takes, and nothing else.
 //
-// The bypass split is on the POSTURE ASKED FOR, not on presence, and it is
-// measured rather than assumed (#1595, #2041): claude accepts each of the other
-// five modes on a held-open stream but refuses the escalation in words, gating it
-// on the launch argv. So a switch among the five applies to the running child with
-// no respawn, and bypass can only be granted by relaunching under the recomposed
-// argv.
+// The posture split is on the POSTURE ASKED FOR, not on presence, and it is
+// measured rather than assumed. #1595 and #2041 measured the five non-escalating
+// modes on a held-open stream; #2060 measured the ESCALATION the same way, on a
+// child launched with --dangerously-skip-permissions, which #2065 made every child.
+// So all six now apply to the running child with no respawn. Before #2066 the
+// escalation was the exception, because claude refused it in words on a child
+// launched without the flag and only a relaunch under a recomposed argv could grant
+// it; that asymmetry is what this ticket removed, and every caller that modelled it
+// can stop.
 //
 // For an evicted session neither mechanism finds a child; the argv install alone
 // applies on the next Activate, and the caller still sees success. Both branches
@@ -844,15 +846,17 @@ func (p *Pool) UpdateSettings(id SessionID, update SettingsUpdate) error {
 		p.deliverSettingsInBand(id, sup, update, merged)
 		return nil
 	}
-	// This is a LIVE PRODUCTION CALLER of Restart, and #1604 did not remove it.
-	// #1574 may NOT delete Restart: its premise — that once model, effort and the
-	// bypass posture have all moved off Restart(args) it has no production caller
-	// left — is false, because the bypass posture only half-moved. A revoke goes
-	// in-band above; an ENABLE reaches here, and only the kill-and-relaunch under
-	// the recomposed argv can grant it, since claude refuses the escalation over
-	// the control channel (#1595). Deleting this call would regress an enable from
-	// "applies now" to "applies at the next spawn", the same regression in the
-	// opposite direction to the one the revoke exists to prevent.
+	// This is a LIVE PRODUCTION CALLER of Restart, and #2066 did not remove it —
+	// though it did remove the reason the previous revision gave. The bypass posture
+	// has now moved off this branch ENTIRELY: both spellings of an enable go in-band
+	// above, so the escalation reaches Restart only in combination with something
+	// else. What keeps this call reachable is the OTHER half of inBandDeliverable's
+	// reject set: a Model or Effort explicitly cleared to "" means "run at claude's
+	// own default", which claudeSettingsArgs expresses by omitting the flag and which
+	// has no measured /model or /effort form, so it can only be applied by relaunching
+	// under the recomposed argv. #1574 may still NOT delete Restart, and a future
+	// slice that gives the empty value an in-band form is the one that inherits the
+	// question.
 	sup.Restart(newArgs)
 	return nil
 }
@@ -907,11 +911,17 @@ func validatePermissionUpdate(update SettingsUpdate) error {
 // are deliberate rather than incidental:
 //
 //   - The split is on the POSTURE ASKED FOR, not on the presence of a posture
-//     field (#1595 and #2041 measured both directions live). The five in-band
-//     modes and a yolo:false go in-band; an ESCALATION takes the restart, whether
-//     spelled as yolo:true or as the bypassPermissions mode, because claude gates
-//     it on the launch argv and refuses the control request in words, so only a
-//     respawn under the recomposed argv can grant it.
+//     field (#1595 and #2041 measured the five live, #2060 the escalation). It no
+//     longer splits on DIRECTION, which is #2066's change: all six postures go in
+//     band, an escalation included, whether spelled as yolo:true or as the
+//     bypassPermissions mode. Claude used to gate the escalation on the launch argv
+//     and refuse the control request in words, so only a respawn under the
+//     recomposed argv could grant it; #2065 put that flag on every argv and #2060
+//     measured claude accepting the re-escalation on such a child at 2.1.239. Both
+//     spellings had to open together — internal/relay's validPermissionMode refuses
+//     the mode string, so a mobile client can only ever send the bit, and opening
+//     the mode clause alone would have shipped the change as a no-op for every
+//     relay session.
 //   - A revoke goes in-band INCLUDING when it equals the stored value, which
 //     sends a revocation to a child that was never in bypass. Harmless and
 //     deliberately not fixed: the delivery is fire-and-forget, the installed argv
@@ -925,25 +935,29 @@ func validatePermissionUpdate(update SettingsUpdate) error {
 //   - A present-but-empty Model or Effort takes the restart. Empty means "run at
 //     claude's own default", which claudeSettingsArgs expresses by OMITTING the
 //     flag; no /model invocation means "revert to default". That reject wins over
-//     a revoke in the same frame — and loses nothing, since the restart recomposes
-//     argv from the merged settings, so the respawn carries the revocation. No
-//     frame can lose a revocation by mixing.
+//     ANY posture change in the same frame — an escalation as much as a revoke —
+//     and loses nothing, since the restart recomposes argv from the merged
+//     settings, so the respawn carries the posture. No frame can lose a posture
+//     change by mixing. Since #2066 these two clauses are also the ONLY surviving
+//     route from an escalation to the restart branch, which is what keeps
+//     Pool.UpdateSettings' Restart call reachable at all.
 //
 // Total over any SettingsUpdate. The nothing-present clause is redundant at the
 // one call site, since an all-nil update returns early as a no-op before the
 // live-apply, but keeping it makes the predicate independently testable instead
 // of dependent on a caller-side invariant.
 func inBandDeliverable(update SettingsUpdate) bool {
-	if update.YOLO != nil && *update.YOLO {
-		return false
-	}
-	// Refused by NON-MEMBERSHIP, so the escalation is not named here and every
-	// unanticipated spelling is refused with it — the shape #2042's writer-side
-	// allow-list uses for the same reason. An unrecognised mode never reaches
-	// this predicate in production (validatePermissionUpdate rejects the frame
-	// outright), so this arm is the escalation's route to the restart, plus
-	// defence.
-	if update.PermissionMode != nil && !permissionModeInBand(*update.PermissionMode) {
+	// Refused by NON-MEMBERSHIP, so no spelling is named here and every
+	// unanticipated one is refused for free — the shape the writer-side allow-list
+	// uses for the same reason. permissionModeKnown rather than permissionModeInBand
+	// is #2066's one-word routing open: every posture this daemon can STORE is now
+	// one it can deliver in band, so the predicate that answers "storable" answers
+	// this too. permissionModeInBand is deliberately NOT widened — three other
+	// callers read it for a different question and must keep excluding the
+	// escalation; see its own doc. An unrecognised mode never reaches this predicate
+	// in production (validatePermissionUpdate rejects the frame outright), so this
+	// arm is defence rather than a live route.
+	if update.PermissionMode != nil && !permissionModeKnown(*update.PermissionMode) {
 		return false
 	}
 	if update.Model == nil && update.Effort == nil && update.YOLO == nil && update.PermissionMode == nil {
@@ -993,15 +1007,22 @@ func inBandDeliverable(update SettingsUpdate) bool {
 // some other field changed too — an update that changes nothing returns as a
 // no-op in UpdateSettings before the live-apply.
 //
-// The bypass guard is unreachable under today's inBandDeliverable, which rejects
-// an escalation outright; it is kept as the enable-direction fail-safe so this
-// site is independently correct rather than dependent on a caller-side invariant —
-// the same argument inBandDeliverable's own doc makes for its redundant
-// nothing-present clause. TestPool_DeliverSettingsInBand_EnableWritesNothing
-// asserts it directly rather than leaving it untested defence. It is the second of
-// three independent stops for the escalation, after the routing predicate and
-// before the writer's own allow-list, which refuses it by non-membership in
-// another package.
+// THE BYPASS GUARD IS GONE (#2066), and its absence is load-bearing rather than a
+// simplification. Until that ticket this site returned early for a merged posture of
+// bypassPermissions, as "the second of three independent stops for the escalation,
+// after the routing predicate and before the writer's own allow-list". All three
+// stops existed because claude gated the escalation on the launch argv and refused
+// the control request in words; #2065 removed that gate and #2060 measured the
+// acceptance, so keeping any of them would mean the routing sends an escalation this
+// site silently drops — an UpdateSettings that reports success and changes nothing.
+// TestPool_DeliverSettingsInBand_EnableWritesTheEscalation is the inverse of the
+// test that used to assert the guard, and it is the red for a tree that restores it.
+//
+// What still stops an escalation is upstream and unchanged: internal/relay's
+// validPermissionMode refuses bypassPermissions as a mode string, so the wire keeps
+// exactly one spelling of the escalation (the YOLO bit), and Pool.UpdateSettings
+// gates every stored posture through permissionModeKnown. This site is a delivery,
+// not a policy.
 //
 // Two ordering facts a reader will otherwise get wrong:
 //
@@ -1056,9 +1077,6 @@ func (p *Pool) deliverSettingsInBand(id SessionID, sup Runner, update SettingsUp
 		send("effort", "/effort "+*update.Effort)
 	}
 	if update.PermissionMode == nil && update.YOLO == nil {
-		return
-	}
-	if merged.PermissionMode == permissionModeBypass {
 		return
 	}
 	if err := sup.SetPermissionMode(merged.PermissionMode); err != nil {

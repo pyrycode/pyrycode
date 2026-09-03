@@ -72,10 +72,12 @@ const killGrace = 5 * time.Second
 // package for the spawn tests that compose an argv with it, instead of that literal
 // migrating into a test file where the next reader would not find it.
 //
-// This is the FLAG, not the mode name. #1603 emptied this package's production source
-// of the bypassPermissions MODE literal so that the escalation keeps exactly one
-// spelling on the write path, and that still holds: permissionModeAllowed refuses the
-// mode by non-membership rather than by naming it, and nothing here composes an argv.
+// This is the FLAG, not the mode name; permissionModeBypass is the mode. #1603 kept
+// this package's production source empty of the mode literal so the escalation
+// stayed structurally absent from the write path, and #2066 ended that: the writer's
+// allow-list admits the escalation now, so the mode has a named constant beside
+// permissionModeDefault. The two are different strings for one posture, neither is
+// derived from the other, and nothing here composes an argv from either.
 const bypassPermissionsFlag = "--dangerously-skip-permissions"
 
 // Supervisor backoff defaults, matching internal/supervisor.
@@ -233,18 +235,26 @@ type Config struct {
 	// spawn time would go stale and could assert a posture the operator has already
 	// changed. Same relationship SessionID has with r.sessionID.
 	//
-	// bypassPermissions is REFUSED here by the same non-membership that refuses it in
-	// WritePermissionMode, so a bypass session is sent nothing and its turns flow
-	// exactly as they do today — a gate no write can ever release is a bricked session,
-	// not a fail-closed one. Re-granting bypass stays on the respawn path.
+	// bypassPermissions is REFUSED here, and since #2066 that is a SUBTRACTION rather
+	// than the same non-membership WritePermissionMode applies: that ticket admitted
+	// the escalation to the writer's allow-list so a LIVE child can be escalated in
+	// band, and scoped the widening away from this path with
+	// permissionModeSpawnWritable. So a bypass session is still sent nothing at spawn
+	// and its turns still flow exactly as they do today — a gate no write can ever
+	// release is a bricked session, not a fail-closed one — while re-granting bypass
+	// now reaches the running child through SetPermissionMode instead of a respawn.
+	// The exclusion costs nothing: since #2065 the launch argv already asserts the
+	// escalation, so a bypass child is in the right posture before the write would
+	// have run, and nothing has measured claude answering an escalation as the FIRST
+	// control request on a fresh stream.
 	//
 	// THAT REFUSAL IS NOT THE ONLY ONE, because this field cannot see every way a child
 	// ends up in bypass. The operator's bootstrap pass-through claude args put
 	// --dangerously-skip-permissions in the argv without touching SessionSettings, so
-	// this field reads default at a child launched in bypass; spawnAndWait consults the
-	// spawn's argv for exactly that case and writes nothing. Read that site before
-	// treating this field as the whole decision — a live-claude gate, not a review,
-	// found the gap.
+	// this field reads default at a child launched in bypass; spawnAndWait consults
+	// Config.OperatorBypass for exactly that case and writes nothing. Read that site
+	// before treating this field as the whole decision — a live-claude gate, not a
+	// review, found the gap.
 	//
 	// "Sent nothing" is NOT "gate untouched", and the difference was a defect: the gate
 	// outlives the child, so a spawn that writes nothing must still arm the OPEN state
@@ -944,10 +954,12 @@ func (r *Runner) Interrupt() error {
 // RequestInitialize share.
 //
 // mode is refused unless it is in WritePermissionMode's closed allow-list, which
-// is how the enable direction stays off this surface: bypassPermissions is refused
-// by NON-MEMBERSHIP, so the literal never appears in production source and every
-// unanticipated spelling is refused with it. Re-granting bypass stays on the
-// respawn path. The refusal (ErrUnsupportedPermissionMode) is permanent and stays
+// since #2066 has SIX members and the escalation among them: re-granting bypass
+// arrives HERE now, not on the respawn path, because #2065 put the launch flag on
+// every argv and #2060 measured claude accepting the re-escalation on such a child
+// at 2.1.239. What the allow-list still refuses, by NON-MEMBERSHIP, is every mode
+// claude will not parse, near misses of the escalation included. The refusal
+// (ErrUnsupportedPermissionMode) is permanent and stays
 // errors.Is-distinguishable from the retryable ErrNoLiveChild, which is what a
 // caller gets when no child is live — Stdin() is nil then, so nothing is written
 // and nothing panics.
@@ -1017,11 +1029,13 @@ func (r *Runner) RevokeBypass() error {
 // Two cheaper shapes do not cover it, and are recorded so they are not re-proposed:
 //
 //   - Piggybacking the install on SetPermissionMode, which the in-band branch already
-//     calls. It covers every mode-to-mode change but NOT an escalation to bypass,
-//     which is not in-band-deliverable, takes the restart branch, and never reaches
-//     that method — nor could it, since the allow-list refuses the escalation by
-//     non-membership and naming it here would put the literal back into production
-//     source #1603 deliberately emptied of it.
+//     calls. #2066's reason for rejecting it is gone — an escalation now IS
+//     in-band-deliverable and does reach that method — but the verdict stands on the
+//     branch that remains: a Model or Effort cleared to "" still takes
+//     Pool.UpdateSettings' restart branch, which never calls SetPermissionMode, so a
+//     piggybacked install would miss every such change and let a crash-respawn
+//     re-assert a stale posture. An install on the line ABOVE the branch split is the
+//     only shape that covers both.
 //   - Deriving the posture from the installed argv. Exact today and dead on arrival
 //     under #2065, which takes the mode out of the launch argv entirely.
 //
@@ -1538,24 +1552,32 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// has not written, let alone confirmed. The id is minted here so the gate and the
 	// line below carry the same one.
 	//
-	// Whether anything is WRITTEN at all is permissionModeAllowed's single decision. The
-	// escalation fails it by NON-MEMBERSHIP, so a bypassPermissions session is sent
-	// nothing AND its gate ends up open — its turns flow exactly as they do today,
-	// which is the intended reading: a gate no write can ever release is a bricked
-	// session, not a fail-closed one. The empty mode of an unconfigured runner fails it
-	// the same way, which is what keeps every pre-#2064 construction site
-	// byte-identical.
+	// Whether anything is WRITTEN at all is permissionModeSpawnWritable's single
+	// decision — the writer's allow-list MINUS the escalation, and the subtraction is
+	// #2066's. That ticket widened permissionModeAllowed so a live child can be
+	// escalated in band, and this reader is the one that had to be scoped away from
+	// the widening: a bypassPermissions session is still sent nothing AND its gate
+	// still ends up open, so its turns flow exactly as they do today. That is the
+	// intended reading — a gate no write can ever release is a bricked session, not a
+	// fail-closed one — and it is why the spawn write was NOT extended alongside the
+	// routing one: #2060 measured claude accepting the escalation on an ESTABLISHED
+	// stream after two turns, and nothing has measured it as the FIRST control request
+	// on a fresh child. The launch argv already asserts the escalation on every child
+	// since #2065, so there is nothing here for the write to change anyway. The empty
+	// mode of an unconfigured runner fails the predicate the same way, which is what
+	// keeps every pre-#2064 construction site byte-identical.
 	//
 	// THE ARM IS UNCONDITIONAL, and only the id it installs is conditional. Every spawn
 	// must publish its OWN gate state, because the gate outlives the child: Restart
 	// reuses this Runner and this PostureGate, so a branch that installs nothing leaves
-	// the PREDECESSOR's id standing. That is not hypothetical — an un-acked default
-	// child followed by an escalation to bypass takes exactly that path (the escalation
-	// is not in-band-deliverable, so Pool.UpdateSettings restarts rather than rebuilds),
-	// and the bypass child would then refuse every turn forever against an id nothing
-	// can ever ack. arm("") installs the OPEN state, which is the same statement
-	// armedID's doc already makes; nesting the call merely failed to reach the branch
-	// that needs it.
+	// the PREDECESSOR's id standing. That is not hypothetical, and #2066 changed only
+	// which sequence reaches it: an un-acked default child that is escalated IN BAND
+	// (SetSpawnPermissionMode installs bypassPermissions as the spawn posture, no
+	// respawn) and then CRASHES takes exactly that path, and the replacement bypass
+	// child would refuse every turn forever against an id nothing can ever ack. Before
+	// #2066 the same shape arrived through Pool.UpdateSettings' restart branch instead.
+	// arm("") installs the OPEN state, which is the same statement armedID's doc
+	// already makes; nesting the call merely failed to reach the branch that needs it.
 	//
 	// A SPAWN WHOSE BYPASS THE DAEMON DID NOT COMPOSE IS SENT NOTHING, whatever the
 	// stored posture says. This is the interlock an earlier revision of this comment
@@ -1570,8 +1592,8 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// by the stored posture:
 	//
 	//   - sessions.claudeSettingsArgs. canonicalSettings pins PermissionMode to the
-	//     escalation alongside a set YOLO bit, so permissionModeAllowed already
-	//     refuses THAT row by non-membership and the interlock is redundant on it.
+	//     escalation alongside a set YOLO bit, so permissionModeSpawnWritable already
+	//     refuses THAT row by subtraction and the interlock is redundant on it.
 	//     Since #2065 this composer appends the flag UNCONDITIONALLY, so it also
 	//     produces the row where the stored posture is a real in-band mode and the
 	//     child must be walked back to it — the downgrade #2065 exists for.
@@ -1606,7 +1628,7 @@ func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint6
 	// provenance is a property of the immutable spawnBase every recompose is built
 	// from. See Config.OperatorBypass for the one constraint that keeps it true.
 	postureID := ""
-	if permissionModeAllowed(spawnMode) && !r.cfg.OperatorBypass {
+	if permissionModeSpawnWritable(spawnMode) && !r.cfg.OperatorBypass {
 		postureID = r.nextControlID()
 	}
 	r.postureGate.arm(postureID)

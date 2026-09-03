@@ -156,47 +156,100 @@ func WriteInterrupt(w io.Writer, requestID string) error {
 // a production caller.
 const permissionModeDefault = "default"
 
+// permissionModeBypass is claude's escalating permission mode, and the only
+// spelling of it — the mode-string counterpart to bypassPermissionsFlag above,
+// which is the argv spelling. This is a MODE NAME and not a flag; the two are
+// different strings for the same posture and neither is derived from the other.
+//
+// #1603 emptied this package's production source of this literal so the escalation
+// stayed structurally absent from the write path, and #2066 puts it back
+// deliberately, because that ticket's whole point is that the writer now admits the
+// escalation. What replaces the absence is that the literal has exactly ONE
+// spelling here with two readers — permissionModeAllowed, which admits it, and
+// permissionModeSpawnWritable, which subtracts it back out for the spawn path — so
+// a reader looking for "where does this package name the escalation?" finds one
+// answer rather than a scattering of quoted strings.
+const permissionModeBypass = "bypassPermissions"
+
 // permissionModeAllowed reports whether mode is one claude's set_permission_mode
 // accepts. It is a CLOSED allow-list and membership is the whole gate.
 //
-// The escalating mode is refused by NON-MEMBERSHIP rather than by a deny-list
-// entry. #1603 kept the enable direction structurally absent rather than merely
-// undocumented, and a deny-list would break that twice over: it would have to name
-// the literal in production source, and it would fail open on every spelling it
-// failed to anticipate. Refusing by non-membership also refuses the near misses —
-// a wrong case, a trailing space — for free.
+// It has SIX members since #2066, and the escalation is one of them. Until then it
+// had five and refused the escalation by NON-MEMBERSHIP — #1603's carve-out, kept
+// because claude gated the escalation on the launch argv and refused the control
+// request in words on a child launched without --dangerously-skip-permissions
+// (#1595). #2065 removed that gate by launching every child with the flag, and
+// #2060 measured claude accepting the re-escalation on such a child at 2.1.239
+// (internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.239_reescalate.json),
+// so the mode is now one claude will parse and refusing it here would only mean
+// the daemon's own routing sent a line this writer swallowed.
+//
+// The member is added rather than the gate opened, and the distinction is the
+// whole safety argument. Every unanticipated spelling — a wrong case, a trailing
+// space, a mode claude adds in a later version — is still refused, because the
+// refusal is still by non-membership. A deny-list would fail open on each of them.
 //
 // The set is a switch rather than a package-level slice or map on purpose. A
 // `var permissionModes = []string{…}` reads more like a list, but it is mutable
 // package state holding a security allow-list: anything in this package, a test
-// included, could append the escalation onto it and dissolve the carve-out
-// globally. Control flow cannot be appended to.
+// included, could append onto it and widen the vocabulary globally. Control flow
+// cannot be appended to, and that argument gained rather than lost force when the
+// list came to include the escalation.
 //
-// THIS IS A VOCABULARY CHECK, NOT AN AUTHORISATION CHECK. It answers "is this a
-// permission mode claude will parse?" and nothing else. It does not answer "may
-// this caller change this session's posture?" — that decision belongs to whoever
-// accepts the mode from a wire frame. Three of the five members (acceptEdits, auto,
-// dontAsk) genuinely LOOSEN a child launched in default behind the daemon's
-// approval flags (cmd/pyry's withApprovalArgs), and #2041 measured claude
-// accepting each of them in-band on exactly such a child at 2.1.239: they arrive
-// because this daemon asked, not because claude vetted them. bypassPermissions is
-// the one mode claude refuses for itself, on a child launched without
-// --dangerously-skip-permissions (#1595, recorded there as a claude-version fact
-// rather than a guarantee — which is why it is the backstop here and this
-// allow-list is the defence).
+// THIS IS A VOCABULARY CHECK, NOT AN AUTHORISATION CHECK, and after #2066 that
+// sentence carries the ticket's whole risk. It answers "is this a permission mode
+// claude will parse?" and nothing else. It does not answer "may this caller change
+// this session's posture?" — that decision belongs to whoever accepts the mode from
+// a wire frame, and for the escalation it is made in exactly two places: internal/
+// relay's validPermissionMode, which refuses bypassPermissions as a mode string so
+// the wire keeps exactly one spelling of the escalation (the YOLO bit), and
+// sessions.Pool.UpdateSettings, which gates every stored posture. This writer is no
+// longer a third stop and must not be mistaken for one.
 //
 // Membership also bounds the emitted line's LENGTH, which is load-bearing and easy
-// to lose in a refactor. The longest member is acceptEdits, so the envelope stays
-// near 110 bytes — far under PIPE_BUF — which is what keeps one write(2) atomic so
-// a control line cannot interleave with a concurrent WriteTurn on the same fd. An
-// unbounded caller-supplied mode could push the line past PIPE_BUF and tear it
-// against a turn. A future widening of the vocabulary inherits that constraint.
+// to lose in a refactor. The longest member is bypassPermissions since #2066 — six
+// bytes longer than the acceptEdits that held the title before it — so the envelope
+// is 115 bytes with its newline, still far under PIPE_BUF, which is what keeps one
+// write(2) atomic so a control line cannot interleave with a concurrent WriteTurn
+// on the same fd. An unbounded caller-supplied mode could push the line past
+// PIPE_BUF and tear it against a turn. A future widening of the vocabulary inherits
+// that constraint, and it is measured rather than restated:
+// TestMarshalPermissionModeEnvelope_LengthStaysUnderPipeBuf re-derives the longest
+// member and its byte count against the POSIX PIPE_BUF floor of 512.
 func permissionModeAllowed(mode string) bool {
 	switch mode {
-	case permissionModeDefault, "acceptEdits", "plan", "auto", "dontAsk":
+	case permissionModeDefault, "acceptEdits", "plan", "auto", "dontAsk", permissionModeBypass:
 		return true
 	}
 	return false
+}
+
+// permissionModeSpawnWritable reports whether mode is one a FRESH SPAWN may be sent
+// as its posture write. It is the allow-list minus the escalation, and it exists
+// because permissionModeAllowed has two production readers that #2066 had to
+// separate: WritePermissionMode, which widened, and spawnAndWait's postureID
+// decision, which must not.
+//
+// SUBTRACTION, not a second switch. A seventh mode added to the allow-list becomes
+// spawn-writable automatically, which is the right default, and the two lists
+// cannot drift into disagreeing about what claude parses. The one carve-out is
+// spelled once, here.
+//
+// Why the escalation is excluded is not caution. Since #2065 the launch argv
+// asserts the escalation on every child, so a bypass session's fresh child is
+// ALREADY in the posture its stored settings ask for: there is nothing to walk it
+// back to and the write would be pure redundancy. It would also be the FIRST
+// control request on a fresh stream, a shape nothing has measured — #2060 captured
+// the escalation on an established stream after two turns — and spawnAndWait arms
+// the posture gate CLOSED for any spawn that writes. A gate no write can ever
+// release is a bricked session, so an unmeasured spawn-time escalation would risk
+// refusing turns from a session's very first one. Excluding it keeps arm("") and
+// keeps a bypass child's turns flowing with no ack dependence.
+//
+// The escalation still reaches a LIVE child, through SetPermissionMode. This
+// predicate scopes the widening to the routing path; it does not undo it.
+func permissionModeSpawnWritable(mode string) bool {
+	return mode != permissionModeBypass && permissionModeAllowed(mode)
 }
 
 // marshalPermissionModeEnvelope returns the single newline-terminated
@@ -243,10 +296,14 @@ func marshalPermissionModeEnvelope(requestID, mode string) ([]byte, error) {
 // half-close/EOF forgery.
 //
 // It replaced #1603's WriteBypassRevocation, which took no mode and emitted
-// "default" alone. The safety property that writer held was never "one literal"
-// but "no escalation reachable from this surface", and the allow-list keeps it:
-// see permissionModeAllowed, including why the gate here is a VOCABULARY check and
-// not an authorisation one.
+// "default" alone. That writer's safety property was "no escalation reachable from
+// this surface", and #2066 ENDS it deliberately rather than eroding it: the
+// allow-list now admits the escalation, because a re-escalation is the transition
+// that ticket routes in band. What this surface still guarantees is narrower and
+// exact — no mode claude will not parse reaches the child, refused by
+// non-membership so every unanticipated spelling is refused with it. Authorisation
+// was never this function's job and is now the only stop the escalation has: see
+// permissionModeAllowed for where it is made.
 //
 // The two refusals, in the order they are checked:
 //
@@ -255,15 +312,21 @@ func marshalPermissionModeEnvelope(requestID, mode string) ([]byte, error) {
 //
 // The allow-list check comes FIRST, and the order is a contract rather than an
 // accident. Both orderings write zero bytes, so this is not about the wire; it is
-// about what the caller is told. Reversed, a caller naming an escalation while no
-// child was bound would get back the RETRYABLE ErrNoLiveChild and could reasonably
-// retry forever against a request that can never succeed. A vocabulary refusal is
-// permanent and must read as permanent whatever the child is doing.
+// about what the caller is told. Reversed, a caller naming a mode claude cannot
+// parse while no child was bound would get back the RETRYABLE ErrNoLiveChild and
+// could reasonably retry forever against a request that can never succeed. A
+// vocabulary refusal is permanent and must read as permanent whatever the child is
+// doing.
 //
-// requestID must be a LOCALLY-MINTED id — Runner.nextControlID is the only source
-// that satisfies this, and (*Runner).SetPermissionMode is the only in-repo caller.
-// The structured encoding makes a hostile id non-catastrophic rather than merely
-// unlikely, but the contract is the primary defence and the escaping the backstop.
+// requestID must be a LOCALLY-MINTED id, and Runner.nextControlID is the only
+// source that satisfies it. There are TWO in-repo callers, not one:
+// (*Runner).SetPermissionMode for a live child's posture change, and spawnAndWait
+// for the spawn-time write — both mint off that counter, so the contract holds at
+// each. (The count matters beyond bookkeeping: #2066's argument that the escalation
+// is reachable only from the routing path is an argument about this caller set, so
+// a reader auditing it needs the set to be right.) The structured encoding makes a
+// hostile id non-catastrophic rather than merely unlikely, but the contract is the
+// primary defence and the escaping the backstop.
 //
 // A marshal failure (not reachable for two strings, defensive) and a write failure
 // (e.g. EPIPE when the pipe closed mid-teardown) are returned wrapped, never

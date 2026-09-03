@@ -287,6 +287,13 @@ func TestRunner_SetPermissionMode_NoLiveChild(t *testing.T) {
 //
 // This is the method a wire-driven caller will reach (#1687, #1686), so the
 // refusal has to survive the one hop between WritePermissionMode and the seam.
+//
+// The mode is a NEAR MISS of the escalation rather than the escalation itself,
+// which #2066 admitted to the allow-list. The property under test never was "the
+// escalation is refused" — it is that a VOCABULARY refusal reaches the caller
+// through the runner and does not read as the retryable no-live-child error — and a
+// near miss exercises it while also pinning that the widening was by membership and
+// did not spread to its neighbours.
 func TestRunner_SetPermissionMode_RefusesUnknownMode(t *testing.T) {
 	t.Parallel()
 	cfg := helperRunCfg(t, "echo_lines", &safeBuffer{}, &safeBuffer{})
@@ -294,12 +301,13 @@ func TestRunner_SetPermissionMode_RefusesUnknownMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	err = r.SetPermissionMode("bypassPermissions")
+	const nearMiss = "Bypasspermissions"
+	err = r.SetPermissionMode(nearMiss)
 	if !errors.Is(err, ErrUnsupportedPermissionMode) {
-		t.Fatalf("SetPermissionMode(escalation) = %v, want ErrUnsupportedPermissionMode", err)
+		t.Fatalf("SetPermissionMode(%q) = %v, want ErrUnsupportedPermissionMode", nearMiss, err)
 	}
 	if errors.Is(err, ErrNoLiveChild) {
-		t.Fatalf("SetPermissionMode(escalation) reported the retryable ErrNoLiveChild: %v", err)
+		t.Fatalf("SetPermissionMode(%q) reported the retryable ErrNoLiveChild: %v", nearMiss, err)
 	}
 }
 

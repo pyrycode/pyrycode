@@ -57,10 +57,13 @@ type Runner interface {
 	// was CONSTRUCTED with, so a crash-respawn after an operator's change would
 	// re-assert the startup posture and can LOOSEN one that was since tightened.
 	//
-	// The two shapes that look sufficient and are not: piggybacking the install on
-	// SetPermissionMode misses an escalation to bypass, which is not
-	// in-band-deliverable and never reaches that method; deriving the posture from
-	// the installed argv is exact today and dies with #2065, which takes the mode out
+	// The two shapes that look sufficient and are not. Piggybacking the install on
+	// SetPermissionMode misses every update that takes the RESTART branch, which
+	// never calls that method — since #2066 that is a Model or Effort cleared to ""
+	// rather than an escalation, because the escalation now is in-band-deliverable
+	// and does reach it; the miss moved, it did not go away, and a piggybacked
+	// install would still let a crash-respawn re-assert a stale posture. Deriving the
+	// posture from the installed argv was exact until #2065, which takes the mode out
 	// of the launch argv entirely.
 	//
 	// mode is installed VERBATIM AND UNVALIDATED — bypassPermissions included, the
@@ -87,11 +90,20 @@ type Runner interface {
 	// non-bypass mode of its own. (*streamsup.Runner) keeps its own RevokeBypass
 	// and its package-level coverage; nothing outside that package calls it.
 	//
-	// mode is refused unless it is in the runner's closed allow-list — today
-	// "default", "acceptEdits", "plan", "auto" and "dontAsk". The escalating mode is
-	// refused by NON-MEMBERSHIP rather than by a deny-list entry, so it names no
-	// literal and refuses every unanticipated spelling with it; re-granting bypass
-	// stays on the respawn path, where claude gates it on the launch argv.
+	// mode is refused unless it is in the runner's closed allow-list — since #2066
+	// "default", "acceptEdits", "plan", "auto", "dontAsk" AND "bypassPermissions".
+	// Re-granting bypass arrives HERE now rather than on the respawn path: claude used
+	// to gate the escalation on the launch argv, #2065 put that flag on every argv,
+	// and #2060 measured claude accepting the re-escalation on such a child at
+	// 2.1.239. What the list still refuses, by NON-MEMBERSHIP rather than by a
+	// deny-list entry, is every mode claude will not parse — near misses of the
+	// escalation included.
+	//
+	// A SUCCESSFUL write retargets the runner's posture gate, so a posture the child
+	// NAKs holds that session's turns until another in-band change retargets it. That
+	// window has applied to every in-band posture change since #2064; the escalation
+	// joined the class rather than creating it, and the operator's remedy — naming any
+	// other mode — reaches this same method.
 	//
 	// The refusal is a distinct, PERMANENT error, and a caller must not treat it as
 	// the retryable no-live-child error: the two are errors.Is-distinguishable and a

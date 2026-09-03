@@ -139,13 +139,16 @@ func mintEvicted(t *testing.T, pool *Pool, spawnDir string, settings SessionSett
 // its claude with the new argv, resuming via its deterministic --session-id
 // (#839 retired --continue for the bootstrap).
 //
-// #1604 extends it rather than adding a second test, because the YOLO false→true
-// this already flips IS the enable direction: claude gates the escalation on the
-// launch argv and refuses the control request (#1595), so only the respawn under
-// the recomposed argv can grant it. The restart-argv read below is one half of
-// that pin; an empty permissionModes() is the other — no production path writes an
-// ENABLE over the control channel, under any update, in either of the two
-// spellings #2043 gave it.
+// #1604 extended it rather than adding a second test, because the YOLO false→true
+// it flips was the enable direction and an enable could only be granted by the
+// respawn. #2066 routes an enable in band, so the update below carries a CLEARED
+// EFFORT beside it: an empty Model or Effort is now the only thing that puts a
+// frame on this branch, and pairing it with the escalation keeps this test on the
+// restart path while pinning the mixed case inBandDeliverable's doc claims — the
+// empty-value reject outranks a posture change, and the respawn carries the posture
+// anyway, so no frame can lose one by mixing. An empty permissionModes() is still
+// the other half of the pin: the restart branch writes nothing to the live child,
+// whatever posture the frame named.
 func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -167,30 +170,37 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 	}
 	clearRecording(t, tplWorkDir)
 
-	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus"), Effort: ptr("high"), YOLO: ptr(true)}); err != nil {
+	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus"), Effort: ptr(""), YOLO: ptr(true)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
 	// AC #1 + #2: relaunch resumes via --session-id (#839, not --continue) and
-	// carries the new settings; the id is stable across the restart.
+	// carries the new settings; the id is stable across the restart. No --effort
+	// (cleared to claude's own default) and no --permission-mode pair (the flag is
+	// the escalation's one spelling).
 	got := waitArgv(t, tplWorkDir)
-	want := []string{"--model", "opus", "--effort", "high", "--dangerously-skip-permissions"}
+	want := []string{"--model", "opus", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("restart argv = %v, want %v", got, want)
 	}
-	// #1604: the enable direction never travels over the control channel.
+	// The restart branch writes nothing to the live child — it kills it.
 	if got := runner.permissionModes(); len(got) != 0 {
-		t.Errorf("a YOLO enable wrote %v in-band, want no posture send at all", got)
+		t.Errorf("the restart branch wrote %v in-band, want no posture send at all", got)
 	}
 	// AC #3: the same call persisted the change.
-	if disk := diskSettings(t, regPath); disk != (SessionSettings{Model: "opus", Effort: "high", YOLO: true}) {
-		t.Errorf("on-disk settings = %+v, want opus/high/true", disk)
+	if disk := diskSettings(t, regPath); disk != (SessionSettings{Model: "opus", Effort: "", YOLO: true}) {
+		t.Errorf("on-disk settings = %+v, want opus/cleared-effort/true", disk)
 	}
 }
 
 // TestPool_UpdateSettings_LiveRestart_Minted (AC #1/#2): a running minted session
 // relaunches with the new argv, resuming via its baked --session-id (ResumeLast
 // is false for minted sessions, so no --continue).
+//
+// The cleared Effort is what puts the frame on the restart branch since #2066 —
+// see _LiveRestart_Bootstrap for why. It is present-but-equal to the stored value
+// here, which is deliberate: inBandDeliverable keys on the frame's own value and
+// never on merged-vs-previous, so a re-sent empty still routes to the restart.
 func TestPool_UpdateSettings_LiveRestart_Minted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -208,7 +218,7 @@ func TestPool_UpdateSettings_LiveRestart_Minted(t *testing.T) {
 	}
 	clearRecording(t, spawnDir)
 
-	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus"), YOLO: ptr(true)}); err != nil {
+	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus"), Effort: ptr(""), YOLO: ptr(true)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 
@@ -282,6 +292,10 @@ func TestPool_UpdateSettings_PersistFailure_NoRestart(t *testing.T) {
 // persists + swaps the spawn argv but spawns no child; the next Activate then
 // launches with the swapped argv (closes the reused-supervisor gap noted in the
 // spec).
+//
+// The cleared Effort keeps the frame on the RESTART branch, which is what this test
+// exists to cover for an evicted session — _InBand_EvictedNoLiveChild covers the
+// other branch. Since #2066 an escalation alone would take that one instead.
 func TestPool_UpdateSettings_Evicted_SwapOnly(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -294,7 +308,7 @@ func TestPool_UpdateSettings_Evicted_SwapOnly(t *testing.T) {
 
 	id := mintEvicted(t, pool, spawnDir, SessionSettings{Model: "sonnet"})
 
-	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus"), YOLO: ptr(true)}); err != nil {
+	if err := pool.UpdateSettings(id, SettingsUpdate{Model: ptr("opus"), Effort: ptr(""), YOLO: ptr(true)}); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 	// No live child to kill/relaunch while evicted.

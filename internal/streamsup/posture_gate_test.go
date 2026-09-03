@@ -1092,7 +1092,11 @@ func TestRunner_SetPermissionMode_FailedWriteDoesNotRetarget(t *testing.T) {
 		wantErr error
 	}{
 		{name: "no live child", mode: "plan", wantErr: ErrNoLiveChild},
-		{name: "a mode the allow-list refuses", mode: "bypassPermissions", wantErr: ErrUnsupportedPermissionMode},
+		// A near miss of the escalation, which #2066 admitted to the allow-list. The
+		// row exists for the vocabulary-refusal arm of "a failed write does not
+		// retarget", so it needs a mode the list still refuses — and the escalation
+		// itself is now covered by the live-child arms above it.
+		{name: "a mode the allow-list refuses", mode: "Bypasspermissions", wantErr: ErrUnsupportedPermissionMode},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
