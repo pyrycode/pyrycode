@@ -52,6 +52,7 @@ go install github.com/pyrycode/pyrycode/cmd/pyry@latest
 git clone https://github.com/pyrycode/pyrycode
 cd pyrycode
 make build           # ./pyry — current platform
+make install         # build HEAD, swap it into ~/.local/bin/pyry, restart the daemon
 make linux           # cross-compile dist/pyry-linux-amd64
 make dist            # adds darwin × {amd64, arm64}
 ```
@@ -101,6 +102,8 @@ For the full walkthrough — multi-instance, troubleshooting, hooks under servic
 ```bash
 make check           # vet + race-enabled tests + staticcheck + substrate-guard + fake-daemon e2e suite
 make build           # ./pyry
+make install         # build HEAD as dev-<sha>, swap into ~/.local/bin/pyry, restart the daemon
+make rollback        # put ~/.local/bin/pyry.prev back and restart
 make linux           # cross-compile for Linux
 ```
 
