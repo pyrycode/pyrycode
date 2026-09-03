@@ -1,0 +1,1203 @@
+{
+  "claude_version_raw": "2.1.239 (Claude Code)",
+  "claude_version": "2.1.239",
+  "arm": "bypass_then_default",
+  "launch_yolo_flag": true,
+  "argv": [
+    "/Users/juhanailmoniemi/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-haiku-4-5",
+    "--max-turns",
+    "8",
+    "--dangerously-skip-permissions",
+    "--permission-prompt-tool",
+    "mcp__pyry_approve__approve",
+    "--mcp-config",
+    "\u003cmcp-config: run-local temp path redacted\u003e",
+    "--strict-mcp-config",
+    "--permission-mode",
+    "default"
+  ],
+  "prompts": [
+    "Use the Bash tool to run `ls -la /` and report the first line of output.",
+    "Use the Bash tool to run `ls -la /tmp` and report the first line of output."
+  ],
+  "requested_mode": "default",
+  "control_request_id": "set-permission-mode-bypass_then_default",
+  "control_request_sent": {
+    "type": "control_request",
+    "request_id": "set-permission-mode-bypass_then_default",
+    "request": {
+      "subtype": "set_permission_mode",
+      "mode": "default"
+    }
+  },
+  "control_responses": [
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "set-permission-mode-bypass_then_default",
+        "response": {
+          "mode": "default"
+        }
+      }
+    }
+  ],
+  "control_response_request_id_matched": true,
+  "init_permission_modes": [
+    "bypassPermissions",
+    "default"
+  ],
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/bypass-approval-argv-work",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "tools": [
+        "Task",
+        "Artifact",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "bypassPermissions",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "79a16b36-3cb7-4a80-a3cb-7d395bcc24be",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassApprovalArgv-Probe349640107-001-bypass-approval-argv-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/10086.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "rate_limit_event",
+      "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1788411000,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": false
+      },
+      "uuid": "b9022a83-6b93-4a1f-8da9-2c3fc2f0e325",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 5,
+      "uuid": "215cd22b-0e15-4b12-9f28-83bd01a8bc3d",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 34,
+      "estimated_tokens_delta": 29,
+      "uuid": "51daa045-3334-4ec0-8c21-4061e14023b5",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 52,
+      "estimated_tokens_delta": 18,
+      "uuid": "f5c0b7f1-868a-43cc-893c-fbfff1b1490b",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 122,
+      "estimated_tokens_delta": 70,
+      "uuid": "14660689-ff62-45f4-bc5c-09f72dc5a411",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnCvj9B1WTDwzfGJQoU",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user is asking me to run a simple command `ls -la /` using the Bash tool and report the first line of output.\n\nThis is a straightforward request - I should use the Bash tool to execute this command.",
+            "signature": "EuADCrIBCBEYAipAW4dn7algyXRDdrDbnAAYgm6A81sEyYBTnNBHqDPsiM77IxI2qIMy0kHk7BKv5To3eD4F4ZP4zOP17YYAq1HTrjIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGGzePUBrABAhIMUDyBBlV+G3g7hUFyGgxWQLxaifDlP14LT5ciMMFiSMyyDyRooiLVgT/MZRVDAl//4ZmWR5+Z870D19PGv/XYeF29vMYeFLpU5JeXgyraAfBukokRfgEDMoU4zGdqPBBxJHeKfujdvw40j6z8ENGRa9CE/pme6/21JqxXHwqIP6Ux6hC9aF1r4tA6BwPFKpCds+Sitjqod55ey49w8q7ProtlqY5ZeT3pSZ/ckN6jIaiz5Cshr+lAmwes/Uv5JiQZ9euhFLPFdJq9baBwvr4xumUZmXCfHonRJzXFcJEU13d0roxyZYg8L81j1pocbOVKt3rZ7u6ZTQeeXBu6iS9XKjU40bdvM4FJC0MRaUSraYBAgHGk6P14c2rkAoF/NfOHJVD6OGH75AkBGAE="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 35841,
+          "cache_read_input_tokens": 0,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 35841
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "ae15b9ca-68da-422e-ac98-704da03de731",
+      "timestamp": "2026-09-03T03:16:22.946Z",
+      "request_id": "req_011CefnCv1jHnHPwbAkNYmRA"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnCvj9B1WTDwzfGJQoU",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01FA3bSJE8eFLbrfxznGCPFq",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /",
+              "description": "List root directory contents"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 35841,
+          "cache_read_input_tokens": 0,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 35841
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "1cfe7a34-65ea-40c9-b731-42d4c3accd22",
+      "timestamp": "2026-09-03T03:16:23.002Z",
+      "request_id": "req_011CefnCv1jHnHPwbAkNYmRA"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_01FA3bSJE8eFLbrfxznGCPFq",
+            "type": "tool_result",
+            "content": "total 10\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 .\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 ..\nlrwxr-xr-x   1 root  admin    36 May 21 11:57 .VolumeIcon.icns -\u003e System/Volumes/Data/.VolumeIcon.icns\n----------   1 root  admin     0 May 21 11:57 .file\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .nofollow\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .resolve\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .vol\ndrwxrwxr-x  33 root  admin  1056 Sep  3 02:18 Applications\ndrwxr-xr-x  68 root  wheel  2176 Jun 26 17:56 Library\ndrwxr-xr-x@ 10 root  wheel   320 May 21 11:57 System\ndrwxr-xr-x   5 root  admin   160 Jun 26 17:56 Users\ndrwxr-xr-x  20 root  wheel   640 Aug 31 08:38 Volumes\ndrwxr-xr-x@ 39 root  wheel  1248 May 21 11:57 bin\ndrwxrwxr-t   2 root  admin    64 Nov 22  2025 cores\ndr-xr-xr-x   4 root  wheel  4926 Jun 26 17:55 dev\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 etc -\u003e private/etc\nlrwxr-xr-x   1 root  wheel    25 Jun 26 17:56 home -\u003e /System/Volumes/Data/home\ndrwxr-xr-x   3 root  wheel    96 Mar 11 08:40 opt\ndrwxr-xr-x   6 root  wheel   192 Jun 26 17:56 private\ndrwxr-xr-x@ 76 root  wheel  2432 May 21 11:57 sbin\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 tmp -\u003e private/tmp\ndrwxr-xr-x@ 11 root  wheel   352 May 21 11:57 usr\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 var -\u003e private/var",
+            "is_error": false
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "f01db724-94ba-4033-b151-0b0281409bee",
+      "timestamp": "2026-09-03T03:16:23.099Z",
+      "tool_use_result": {
+        "stdout": "total 10\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 .\ndrwxr-xr-x  22 root  wheel   704 May 21 11:57 ..\nlrwxr-xr-x   1 root  admin    36 May 21 11:57 .VolumeIcon.icns -\u003e System/Volumes/Data/.VolumeIcon.icns\n----------   1 root  admin     0 May 21 11:57 .file\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .nofollow\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .resolve\ndrwxr-xr-x   2 root  wheel    64 May 21 11:57 .vol\ndrwxrwxr-x  33 root  admin  1056 Sep  3 02:18 Applications\ndrwxr-xr-x  68 root  wheel  2176 Jun 26 17:56 Library\ndrwxr-xr-x@ 10 root  wheel   320 May 21 11:57 System\ndrwxr-xr-x   5 root  admin   160 Jun 26 17:56 Users\ndrwxr-xr-x  20 root  wheel   640 Aug 31 08:38 Volumes\ndrwxr-xr-x@ 39 root  wheel  1248 May 21 11:57 bin\ndrwxrwxr-t   2 root  admin    64 Nov 22  2025 cores\ndr-xr-xr-x   4 root  wheel  4926 Jun 26 17:55 dev\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 etc -\u003e private/etc\nlrwxr-xr-x   1 root  wheel    25 Jun 26 17:56 home -\u003e /System/Volumes/Data/home\ndrwxr-xr-x   3 root  wheel    96 Mar 11 08:40 opt\ndrwxr-xr-x   6 root  wheel   192 Jun 26 17:56 private\ndrwxr-xr-x@ 76 root  wheel  2432 May 21 11:57 sbin\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 tmp -\u003e private/tmp\ndrwxr-xr-x@ 11 root  wheel   352 May 21 11:57 usr\nlrwxr-xr-x@  1 root  wheel    11 May 21 11:57 var -\u003e private/var",
+        "stderr": "",
+        "interrupted": false,
+        "isImage": false,
+        "noOutputExpected": false
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 3,
+      "estimated_tokens_delta": 3,
+      "uuid": "9aeb0a43-8dcd-4aaa-bd76-e99df51ccb70",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 4,
+      "estimated_tokens_delta": 1,
+      "uuid": "c966bb6d-6b14-4818-b2d8-6debf530ae4e",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 31,
+      "estimated_tokens_delta": 27,
+      "uuid": "c5580b5f-29e8-498d-8e2d-f7d5f63b61c4",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 102,
+      "estimated_tokens_delta": 71,
+      "uuid": "dacbf810-7e1f-4fd2-9f2d-696ec9e2ffd6",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnD6ZEm5FynwWBhyn6T",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The command ran successfully. Looking at the output, the first line is `total 10`. That's what I should report to the user.",
+            "signature": "EpEDCrIBCBEYAipAyfRK6Uu6y3JGY9u0XHs8wd8RzZgUp5kEa/Fv6Yords2nfeFIVbO9Gp5D69nUgpp+tFbNFpuBypXRGQzRfYymxDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGIzePUBrABAhIMo+T7kGPcqGijYqCFGgyR5GFE4bMkeiw6xJUiMJQoNA77rcxaZNd0lOsdeCBB9kNsHa2z/uqALLPmlKHCxLe0R0NmJ6/VrdFU9rxgQyqLAVDX84lP3FZBLoR6b3XTKCKAc4RGyctCT56zGFRzTgZL25oApEbQfLqk2NEWBqSsRRYke9dqx84s9XOMKopLWxpv/hxH2vvQR7tMp0M/gHPc8H7wubJ2v4NXLT6oZGKlo9st4BSbX4H2ysEDqhdoKvq2PKI9dS3nCQaFx+A0GOG+8mh2NUwRcPzxmr4YAQ=="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 888,
+          "cache_read_input_tokens": 35841,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 888
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "db8f90ac-2500-48e8-a036-ad2f7f65ea76",
+      "timestamp": "2026-09-03T03:16:24.640Z",
+      "request_id": "req_011CefnD5hPr3WgG5sGc8QmL"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnD6ZEm5FynwWBhyn6T",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The first line of output is: `total 10`"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 888,
+          "cache_read_input_tokens": 35841,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 888
+          },
+          "output_tokens": 2,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "a273b387-c987-4682-9af7-24bab1e6d071",
+      "timestamp": "2026-09-03T03:16:24.645Z",
+      "request_id": "req_011CefnD5hPr3WgG5sGc8QmL"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 4578,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "total_cost_usd": 0.0789481,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 36729,
+        "cache_read_input_tokens": 35841,
+        "output_tokens": 184,
+        "output_tokens_details": {
+          "thinking_tokens": 88
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 36729,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 52,
+            "cache_read_input_tokens": 35841,
+            "cache_creation_input_tokens": 888,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 888
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 11,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000968,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 18,
+          "outputTokens": 184,
+          "cacheReadInputTokens": 35841,
+          "cacheCreationInputTokens": 36729,
+          "webSearchRequests": 0,
+          "costUSD": 0.0779801,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The first line of output is: `total 10`",
+      "ttft_ms": 2156,
+      "ttft_stream_ms": 1117,
+      "time_to_request_ms": 16,
+      "type": "result",
+      "duration_ms": 3880,
+      "uuid": "a9dc7b58-61e9-4fb6-a8b6-515e8b9772a0"
+    },
+    {
+      "type": "control_response",
+      "response": {
+        "subtype": "success",
+        "request_id": "set-permission-mode-bypass_then_default",
+        "response": {
+          "mode": "default"
+        }
+      }
+    },
+    {
+      "type": "system",
+      "subtype": "status",
+      "status": null,
+      "permissionMode": "default",
+      "uuid": "13f7560d-1bf2-4061-a1e9-eea73da578a2",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "/private/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/bypass-approval-argv-work",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "tools": [
+        "Task",
+        "Artifact",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskCreate",
+        "TaskGet",
+        "TaskList",
+        "TaskOutput",
+        "TaskStop",
+        "TaskUpdate",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-haiku-4-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "goal",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.239",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "claude-code-guide",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design",
+        "design-sync",
+        "dataviz",
+        "artifact-design",
+        "artifact-diagramming",
+        "artifact-capabilities",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "96e019c2-7e90-4ba1-ade2-cde3fe1a8b8d",
+      "memory_paths": {
+        "auto": "/var/folders/k0/gc07w9ws319b07n0plnw6y8r0000gn/T/TestRealClaude_BypassApprovalArgv_Probe349640107/001/.claude/projects/-private-var-folders-k0-gc07w9ws319b07n0plnw6y8r0000gn-T-TestRealClaude-BypassApprovalArgv-Probe349640107-001-bypass-approval-argv-work/memory/"
+      },
+      "messaging_socket_path": "/tmp/cc-socks/10086.sock",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 5,
+      "estimated_tokens_delta": 5,
+      "uuid": "18b2f4d2-c6b9-48a0-bbd3-e16891a67489",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 20,
+      "estimated_tokens_delta": 15,
+      "uuid": "008d1e90-c106-4b47-aa07-1c275f725e81",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 90,
+      "estimated_tokens_delta": 70,
+      "uuid": "cca526d7-d32a-43b7-99ef-00d748c7fdff",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnDDwjzuehcjvv6nWSJ",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user wants me to run `ls -la /tmp` and report the first line of output.",
+            "signature": "EuACCrIBCBEYAipAMlWuPJkWdRvvGhG/4f08qQrS4RBHWJ2SLxTMh2woL7Q7OZXgC8IPR6TC4v37q0scEO8miZgBIa8hjrxuE6epgTIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGKzePUBrABAhIMwXa+BODGyFobSTUbGgzggTQfEcNYNiUErTsiMOuXG3Q//6KpYjDnsYX+dk8j1BXd8sSNQ5GXxbVYXaMK354Kpu1PtyTXx7SkKonavCpbIyrjBxkZEujNpwEvSN2ab5jFWDX6pSrJQv7zCNPtl3cLj4PFPmvx1+uyW+IIMWEkz2WaezSDEdW2SY7RzCd8+ZY+a4yP8337yGS3NvhYK99NmGk1/NrXMMfeZhgB"
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 111,
+          "cache_read_input_tokens": 36729,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 111
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "843e096e-232b-455a-9f27-96472312a341",
+      "timestamp": "2026-09-03T03:16:26.133Z",
+      "request_id": "req_011CefnDD6Pf12wGko8dJzwd"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnDDwjzuehcjvv6nWSJ",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_01N9P9XP2ADwBBZfejiqVXYp",
+            "name": "Bash",
+            "input": {
+              "command": "ls -la /tmp",
+              "description": "List /tmp directory contents"
+            },
+            "caller": {
+              "type": "direct"
+            }
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 111,
+          "cache_read_input_tokens": 36729,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 111
+          },
+          "output_tokens": 4,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "53f1dba8-ebfc-40f1-9528-77bd5cc5d73e",
+      "timestamp": "2026-09-03T03:16:26.570Z",
+      "request_id": "req_011CefnDD6Pf12wGko8dJzwd"
+    },
+    {
+      "type": "user",
+      "message": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "#2061 probe: every gated call is denied",
+            "is_error": true,
+            "tool_use_id": "toolu_01N9P9XP2ADwBBZfejiqVXYp"
+          }
+        ]
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "b342490d-a8e7-4a19-95e2-7e44f942ced5",
+      "timestamp": "2026-09-03T03:16:26.589Z",
+      "tool_use_result": "Error: #2061 probe: every gated call is denied",
+      "tool_result_meta": [
+        {
+          "id": "toolu_01N9P9XP2ADwBBZfejiqVXYp",
+          "non_execution_kind": "permission-rule"
+        }
+      ]
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 4,
+      "estimated_tokens_delta": 4,
+      "uuid": "ed7b7106-20af-4eea-bb11-a579e94b1c9e",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 32,
+      "estimated_tokens_delta": 28,
+      "uuid": "68857d9b-c4bf-4d88-974a-422201b29e51",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 71,
+      "estimated_tokens_delta": 39,
+      "uuid": "783fb386-e4d7-4f6e-889c-d0dad5e42f8d",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 86,
+      "estimated_tokens_delta": 15,
+      "uuid": "531c1f86-b378-4b4e-878e-3d6efd27f938",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 104,
+      "estimated_tokens_delta": 18,
+      "uuid": "d827a065-c46e-4b1b-87d9-2e2e1e7895d9",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 122,
+      "estimated_tokens_delta": 18,
+      "uuid": "db2982c8-a06a-4758-8f38-25233d0e4c38",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "system",
+      "subtype": "thinking_tokens",
+      "estimated_tokens": 192,
+      "estimated_tokens_delta": 70,
+      "uuid": "5a23ad9d-1839-4205-8af7-22b2d87ff474",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnDMLV9Tj94J7xEBD9k",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The command was denied. This indicates that the tool call was blocked by the permission gating system. The error \"#2061 probe: every gated call is denied\" suggests that this is a test scenario where gated calls are being denied. This makes sense given the context that we're in a test environment called \"TestRealClaude_BypassApprovalArgv_Probe\" - it appears to be testing the behavior when approval is being bypassed and gated calls are denied.\n\nI should report this to the user.",
+            "signature": "EvYFCrIBCBEYAipAsUrpE8bbmpqLBsQU1uXRm0RSyvDz13geQ+Orkv0pPiJDK5daScNMHMulZw7449vM5vdux2GjBwZX88iw24vQxDIZY2xhdWRlLWhhaWt1LTQtNS0yMDI1MTAwMTgAQgh0aGlua2luZ1okNzdiMjY2MGYtNmIxZS00ZmUwLTlkODEtMWE1ZmNkMzM5Zjk2chDpF7CI+lx9QT45Z+oJc7lQiAEBqAGNzePUBrABAhIMzmf/PfTfMsFq2DyeGgyVVnlfs13LNeuRhx8iMOCCIsBu2CFx+t//uLiH8JWHpz4i84iD7JdTynBXA6U8dqtw68wrKDCa5LFPwE2nPCrwAyzm5dqTqFzlqgIkJrrxUn83ALJd4iDqj9e23AZJZnpa0sBD0nQnss34kA8eeZOUPmzYb+4DlvHhKJ4NmcPACEVKeJcmKmnp7IpZOuY8ixNtTKIUziYuFjPPZXUDy6Sa5xtju2jheEj5cmjelPntkwlpBJrsQ9asYySdIHr2cAEJpAxfGkIEim5k62ZEphg8oIZpVIRFOt3iTl80sYLsoYUlU3U0ESfEtnq6btrmn9BOZ0Ijb+nsdX8Ch9b+NVEVItpWSsE1jnkzxDzr5d5poABlVF7hAuPZFHNcSCF7UtxgjfE+YBrxXVKPjvpdeaQfSzbrE5hmHXSSDMGjs/A8QuaQU+a6PVoEdkspDYFFJ4FwxNq8yMZM5CiHxbZfHRGKr2xXjgTTRzX+ExRgMm8tvhkVaoS5eGs4DEH6W4GSwr0f3qAJ8hiiPZ8oZTBsOW8MqlUE3uMZcBRN/nVcKrkgUG7r4K3FTv/MjEsuIut+XehoDjQgjRK1w5oOfFYRsldMagApBVurZeB6/APAViWyrHr+/XRDG9VL1Y6Wu7MoOexdd987Br5xhQzOy5H7VlGWHLirWFYX0Cb2/GEtpLr8OI/WES/FqfEhnZoWdAUaU5ms7aGJehxU7LCLOe5UwT2LCnllam1b5sBMPU884viz8GcYAQ=="
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 174,
+          "cache_read_input_tokens": 36840,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 174
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "bf6f477c-0a36-45d4-888a-13725a11be80",
+      "timestamp": "2026-09-03T03:16:29.478Z",
+      "request_id": "req_011CefnDLdpZzxUywfApyPC6"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-haiku-4-5-20251001",
+        "id": "msg_011CefnDMLV9Tj94J7xEBD9k",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The Bash command was denied. The system blocked the gated call with the error: \"every gated call is denied\". This appears to be a result of permission/approval restrictions in place for this test environment."
+          }
+        ],
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 8,
+          "cache_creation_input_tokens": 174,
+          "cache_read_input_tokens": 36840,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 174
+          },
+          "output_tokens": 3,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "uuid": "3b11085c-bc10-44b2-883f-0a09d34e4a26",
+      "timestamp": "2026-09-03T03:16:29.552Z",
+      "request_id": "req_011CefnDLdpZzxUywfApyPC6"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 9310,
+      "num_turns": 2,
+      "stop_reason": "end_turn",
+      "session_id": "e7202eba-d297-49f5-8d79-08b12e25148d",
+      "total_cost_usd": 0.088268,
+      "usage": {
+        "input_tokens": 18,
+        "cache_creation_input_tokens": 285,
+        "cache_read_input_tokens": 73569,
+        "output_tokens": 275,
+        "output_tokens_details": {
+          "thinking_tokens": 145
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 285,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 8,
+            "output_tokens": 169,
+            "cache_read_input_tokens": 36840,
+            "cache_creation_input_tokens": 174,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 174
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 913,
+          "outputTokens": 11,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.000968,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        },
+        "claude-haiku-4-5": {
+          "inputTokens": 36,
+          "outputTokens": 459,
+          "cacheReadInputTokens": 109410,
+          "cacheCreationInputTokens": 37014,
+          "webSearchRequests": 0,
+          "costUSD": 0.0873,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty"
+        }
+      },
+      "permission_denials": [
+        {
+          "tool_name": "Bash",
+          "tool_use_id": "toolu_01N9P9XP2ADwBBZfejiqVXYp",
+          "tool_input": {
+            "command": "ls -la /tmp",
+            "description": "List /tmp directory contents"
+          }
+        }
+      ],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "The Bash command was denied. The system blocked the gated call with the error: \"every gated call is denied\". This appears to be a result of permission/approval restrictions in place for this test environment.",
+      "ttft_ms": 1326,
+      "ttft_stream_ms": 951,
+      "time_to_request_ms": 13,
+      "type": "result",
+      "duration_ms": 4757,
+      "uuid": "f669bbe9-751d-4b06-a543-78974146d114"
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    15,
+    34
+  ],
+  "probe_outcomes": [
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": false,
+      "permission_denials": 0,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": [
+        "Bash"
+      ],
+      "tool_result_seen": true,
+      "tool_result_is_error": true,
+      "permission_denials": 1,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    }
+  ],
+  "model": "claude-haiku-4-5",
+  "approval": {
+    "requests": [
+      {
+        "seq": 1,
+        "tool_name": "Bash"
+      }
+    ],
+    "requests_seen": 1,
+    "requests_dropped": 0,
+    "decode_errors": 0,
+    "non_approve_requests": 0,
+    "stages": [
+      {
+        "stage": "start",
+        "approvals": 0,
+        "control_responses": 0
+      },
+      {
+        "stage": "pre_turn_control",
+        "approvals": 0,
+        "control_responses": 0
+      },
+      {
+        "stage": "turn_1",
+        "approvals": 0,
+        "control_responses": 0
+      },
+      {
+        "stage": "control_1",
+        "approvals": 0,
+        "control_responses": 1
+      },
+      {
+        "stage": "turn_2",
+        "approvals": 1,
+        "control_responses": 1
+      }
+    ]
+  },
+  "stdin_write_errors": null,
+  "stderr_capture": "",
+  "exit_code": 0,
+  "wait_error": "",
+  "context_deadline_tripped": false,
+  "duration_ms": 10350,
+  "scanner_error": ""
+}

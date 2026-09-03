@@ -392,6 +392,44 @@ A live run that spends tokens and lands no artifact does not satisfy this ticket
 Each is resolved in Phase B and any that changes the design gets a `## Revisions`
 entry.
 
+## Revisions
+
+### 2026-09-03 — the live run, and the three open questions resolved
+
+The measurement ran: five children, 52 s, claude 2.1.239, model `claude-haiku-4-5`,
+every arm exit 0 with no tripped deadline and empty stderr. Both verdicts are
+recorded in the probe file's header and every capture is committed under
+`internal/e2e/realclaude/testdata/bypass_approval_argv_v2.1.239_*.json`.
+
+- **Q2 — APPROVAL GATE INTACT.** The combined argv launches, `mcp_servers` reports
+  `[{"name":"pyry_approve","status":"connected"}]` even while the session is in
+  bypass, and the post-downgrade turn reached the stub socket once where the
+  in-bypass turn reached it zero times. The bridge comes back.
+- **Q3 — RACE WINDOW CLOSED** on all three spawns, with no disagreement. Every
+  prewrite child drew its ack before turn 1 and was gated on turn 1.
+
+**Open Question 1 — resolved: yes.** claude accepts `--dangerously-skip-permissions`
+beside `--permission-mode default` on one argv, and comes up in
+`bypassPermissions`. The no-init-line launch-failure branch did not fire.
+
+**Open Question 2 — resolved: `mcp_servers` is the key**, spelled as an array of
+objects carrying `name` and `status`. `bypassArgvInitMCPServers` records it verbatim
+rather than decoding it, so the design did not depend on the answer and does not
+change now that it is known.
+
+**Open Question 3 — resolved: the three spawns agree**, so the per-spawn tally
+reports one uniform outcome and the disagreement branch did not fire. It stays in
+the code: a nondeterministic window would be a stronger finding than a uniform one,
+and one run agreeing is not evidence that a later one will.
+
+**One design point the run added, no code change.** The redactor covers the argv and
+the stderr capture — the two places this ticket puts a run-local path — and NOT
+claude's own `cwd` echo inside `system/init`, which lands in `stdout_events`. Every
+committed capture in this package already carries that path (fifteen occurrences in
+#2060's `enable` arm, six in #1595's `revoke`), and `stdout_events` is a verbatim
+recording whose value is that nothing rewrites it. Recorded in the probe header so
+the redactor is not read as a guarantee it does not make.
+
 ## Security review
 
 **Verdict:** PASS
