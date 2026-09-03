@@ -159,8 +159,8 @@ func TestPool_UpdateSettings_LiveRestart_Bootstrap(t *testing.T) {
 
 	// First spawn: baseline settings. The deterministic id (#839) is a field on
 	// the handover since #1348, checked separately.
-	if got := waitArgv(t, tplWorkDir); !reflect.DeepEqual(got, []string{"--model", "sonnet"}) {
-		t.Fatalf("first spawn argv = %v, want [--model sonnet]", got)
+	if got, want := waitArgv(t, tplWorkDir), append([]string{"--model", "sonnet"}, alwaysOnPosture(permissionModeDefault)...); !reflect.DeepEqual(got, want) {
+		t.Fatalf("first spawn argv = %v, want %v", got, want)
 	}
 	if gotID := waitSessionID(t, tplWorkDir); gotID != string(id) {
 		t.Fatalf("first spawn session id = %q, want %q", gotID, string(id))
@@ -203,8 +203,8 @@ func TestPool_UpdateSettings_LiveRestart_Minted(t *testing.T) {
 
 	id := spawnMintedWithSettings(t, ctx, pool, spawnDir, SessionSettings{Model: "sonnet"})
 
-	if got := waitArgv(t, spawnDir); !reflect.DeepEqual(got, []string{"--session-id", string(id), "--model", "sonnet"}) {
-		t.Fatalf("first minted spawn argv = %v", got)
+	if got, want := waitArgv(t, spawnDir), append([]string{"--session-id", string(id), "--model", "sonnet"}, alwaysOnPosture(permissionModeDefault)...); !reflect.DeepEqual(got, want) {
+		t.Fatalf("first minted spawn argv = %v, want %v", got, want)
 	}
 	clearRecording(t, spawnDir)
 
@@ -375,15 +375,16 @@ func TestPool_UpdateSettings_YOLORevoke_DropsBypassInBand(t *testing.T) {
 	if len(installs) != 1 {
 		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
 	}
+	// The durable half, in its post-#2065 spelling. A revoke can no longer be read as
+	// "the flag is gone" — the flag is on every argv — so what is asserted is that the
+	// next spawn is DOWNGRADED: it names an in-band mode beside the flag, where an
+	// escalated session names none. A tree that lost the revocation composes the bare
+	// flag here, which assertDowngraded reddens on.
 	got := installedArgv(t, installs[0])
-	for _, a := range got {
-		if a == "--dangerously-skip-permissions" {
-			t.Fatalf("post-revoke installed argv still carries the bypass flag: %v", got)
-		}
-	}
-	// Revoked YOLO with no model or effort leaves no settings flags at all.
-	if len(got) != 0 {
-		t.Errorf("post-revoke installed argv = %v, want none", got)
+	assertDowngraded(t, "post-revoke installed argv", got)
+	// Revoked YOLO with no model or effort leaves nothing beyond that suffix.
+	if want := alwaysOnPosture(permissionModeDefault); !reflect.DeepEqual(got, want) {
+		t.Errorf("post-revoke installed argv = %v, want %v", got, want)
 	}
 	if turns := runner.userTurns(); len(turns) != 0 {
 		t.Errorf("a YOLO-only update invented a command: %q", turns)
@@ -440,13 +441,11 @@ func TestPool_UpdateSettings_YOLOAbsent_NoBypassInBand(t *testing.T) {
 	if len(installs) != 1 {
 		t.Fatalf("SetSpawnArgs called %d times, want exactly 1: %v", len(installs), installs)
 	}
+	// An absent YOLO must not ESCALATE the next spawn. Post-#2065 that is the mode
+	// pair being present rather than the flag being absent — see assertDowngraded.
 	got := installedArgv(t, installs[0])
-	for _, a := range got {
-		if a == "--dangerously-skip-permissions" {
-			t.Fatalf("absent YOLO installed a bypass argv for the next spawn: %v", got)
-		}
-	}
-	if want := []string{"--model", "opus"}; !reflect.DeepEqual(got, want) {
+	assertDowngraded(t, "absent-YOLO installed argv", got)
+	if want := append([]string{"--model", "opus"}, alwaysOnPosture(permissionModeDefault)...); !reflect.DeepEqual(got, want) {
 		t.Errorf("installed argv = %v, want %v", got, want)
 	}
 }

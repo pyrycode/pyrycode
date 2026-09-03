@@ -82,6 +82,46 @@ type RunnerConfig struct {
 	// respawn path.
 	PermissionMode string
 
+	// OperatorBypass reports that the escalation reached this spawn's argv from the
+	// OPERATOR's pass-through claude args rather than from this package's own
+	// settings composition (#2065). Derived at construction by operatorBypass over
+	// the session's settings-free base (Session.spawnBase), which is where the
+	// pass-through lands verbatim.
+	//
+	// It is the PROVENANCE signal, and it exists because #2065 made
+	// claudeSettingsArgs append --dangerously-skip-permissions to every argv. Both
+	// of the daemon's permission fail-safes used to read that flag off the assembled
+	// argv, and both invert into their permissive arms the moment the flag is
+	// universally present:
+	//
+	//   - cmd/pyry's withApprovalArgs skipped the approval-flag injection when the
+	//     flag was present, so a universally-present flag deletes the daemon's
+	//     approval gate for every session.
+	//   - internal/streamsup's spawnAndWait suppressed the spawn-time posture write
+	//     when the flag was present, so a universally-present flag leaves every child
+	//     in bypass and every posture gate open — the exact inverse of #2065.
+	//
+	// TRUE means the daemon may NOT walk this child back: asserting a stored mode at
+	// a child the operator launched in bypass revokes that escalation in-band and
+	// unanswerably, which a live-claude gate caught reddening four specs before the
+	// interlock existed. FALSE means every escalation on this session's argv is one
+	// this package composed, so the stored PermissionMode above decides the posture.
+	//
+	// It is CONSTRUCTION-FIXED and, unlike PermissionMode, cannot go stale: spawnBase
+	// is immutable post-construction, and every post-construction argv install
+	// (Pool.UpdateSettings → Session.spawnArgs → Runner.Restart / SetSpawnArgs)
+	// recomposes from that same base. A future caller that installs an argv composed
+	// from something other than Session.spawnArgs owns keeping this bit in step —
+	// though both mis-pairings fail safe: a flag with the bit false downgrades a
+	// child that is in bypass, and the bit true with no flag writes nothing at a
+	// child that was not.
+	//
+	// Nothing a remote client controls can set it. SessionConfig.ClaudeArgs is
+	// written at one production site, cmd/pyry's daemon composition from the
+	// operator's CLI; Pool.Create, Pool.CreateIn, Pool.GetOrCreateIn and Pool.Revive
+	// take only a label and a spawn dir.
+	OperatorBypass bool
+
 	// Logger is used for the runner's diagnostics. Optional; nil falls back to
 	// the package default.
 	Logger *slog.Logger

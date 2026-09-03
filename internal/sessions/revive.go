@@ -27,10 +27,18 @@ package sessions
 // ids); nothing here logs, and nothing added here should.
 //
 // A revived session carries zero SessionSettings: any persisted per-session
-// model / effort / YOLO is deliberately NOT restored, so a phone-granted
-// --dangerously-skip-permissions does not survive a daemon restart. A restart
-// is a natural revocation point for a permission bypass and re-granting is one
-// settings verb away.
+// model / effort / YOLO is deliberately NOT restored, so a phone-granted bypass
+// does not survive a daemon restart. A restart is a natural revocation point for
+// a permission bypass and re-granting is one settings verb away.
+//
+// Since #2065 that revocation is a DOWNGRADE rather than an omission, and the
+// distinction is worth reading. canonicalSettings turns the zero value into the
+// default posture, and claudeSettingsArgs puts --dangerously-skip-permissions on
+// every argv, so the revived child LAUNCHES in bypass and is walked back to
+// default in-band before any user turn can reach it (internal/streamsup's
+// spawn-time write, held behind its posture gate). The #1487 property is
+// unchanged — a revived session is not escalated — but what enforces it moved
+// from "the flag is absent from the argv" to "the write was confirmed".
 //
 // Returns:
 //   - sess, nil — id is registered (existed before, or this call registered it)
@@ -45,9 +53,10 @@ package sessions
 // Concurrency: safe for concurrent use. Two callers racing the same id both
 // receive the same *Session; exactly one registration happens.
 func (p *Pool) Revive(id SessionID, label, spawnDir string) (*Session, error) {
-	// Zero settings make a revive fail closed, so a phone-set
-	// --dangerously-skip-permissions never survives a daemon restart (#1487
-	// security review). Deliberately NOT mintSettings, which GetOrCreateIn
+	// Zero settings make a revive fail closed, so a phone-set escalation never
+	// survives a daemon restart (#1487 security review) — as the default posture
+	// the revived child is downgraded into, since #2065 (see the contract above).
+	// Deliberately NOT mintSettings, which GetOrCreateIn
 	// passes: a revived session inherits neither its own dropped settings nor
 	// the bootstrap's — see the contract paragraph above.
 	sess, _, err := p.materialise(id, label, spawnDir, SessionSettings{})

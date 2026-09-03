@@ -217,7 +217,11 @@ func mapStreamState(s streamsup.State) sessions.State {
 func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) sessions.RunnerFactory {
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
-		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath)
+		// The posture and its provenance are BOTH read off cfg, never off scfg.Args:
+		// since #2065 every argv carries the escalation flag, so the assembled argv
+		// cannot say which children the daemon downgrades and which keep the bypass
+		// they launch with. See withApprovalArgs' doc for the derivation.
+		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)
 		parser, heldModels, heldCommands := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
 		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
@@ -238,45 +242,82 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 }
 
 // withApprovalArgs injects claude's permission-approval flags onto a stream
-// spawn's args unless the spawn is already in yolo / skip-permissions mode
-// (#1168). It is the interactive-stream twin of agent_run.go's non-yolo
-// permissionArgs wiring — the first live consumer of permissionArgs on the
-// interactive path.
+// spawn's args unless the spawn's child will actually RUN in bypass (#1168, and
+// #2065 for how that question is now answered). It is the interactive-stream twin
+// of agent_run.go's non-yolo permissionArgs wiring — the first live consumer of
+// permissionArgs on the interactive path.
 //
-// Yolo is expressed to claude as exactly one flag, --dangerously-skip-permissions,
-// and both yolo entry points funnel through it: the operator's bootstrap
-// pass-through claude args (main.go) and internal/sessions.claudeSettingsArgs
-// (which appends it when the per-session YOLO bit is set). So the flag's presence
-// in the spawn's args is the single deterministic yolo signal, robust to both
-// entry points and evaluated per-spawn here:
+// # Why the flag's presence stopped being the signal
 //
-//   - yolo (flag present) → return args UNCHANGED. The flag is already in base;
-//     injecting nothing keeps AC2 byte-identical to today and avoids a duplicate
-//     --dangerously-skip-permissions. Do NOT call permissionArgs(true, …) here —
-//     that would re-emit the flag already present.
-//   - non-yolo → append permissionArgs(false, mcpApprovePath): the
+// Until #2065 yolo was expressed to claude as exactly one flag,
+// --dangerously-skip-permissions, both entry points funnelled through it — the
+// operator's bootstrap pass-through claude args (main.go) and
+// internal/sessions.claudeSettingsArgs, which appended it for a set YOLO bit — and
+// so its presence in the spawn's args WAS the single deterministic yolo signal.
+//
+// #2065 makes claudeSettingsArgs append it to EVERY argv, because the posture is
+// now decided by an in-band write rather than by the launch argv. A predicate
+// reading the flag therefore answers "yolo" for every session, the approval set
+// stops being injected anywhere, and the daemon's approval gate quietly
+// disappears for every non-bypass session. So the question moved: not "is the flag
+// there" but "will this child KEEP the bypass it launches with", which is true in
+// exactly two cases, both of them decided before this function runs:
+//
+//   - storedMode is the escalation — internal/streamsup refuses to write that mode
+//     by non-membership, so nothing walks the child back.
+//   - operatorBypass — the escalation came from the operator's pass-through claude
+//     args, which never touch SessionSettings; the daemon may not revoke a bypass
+//     it did not grant, so again nothing walks the child back. This is
+//     sessions.RunnerConfig.OperatorBypass, derived there from the settings-free
+//     spawnBase, and it is the same provenance bit streamsup's spawnAndWait reads.
+//
+// Everything else is a child the daemon downgrades in-band before its first turn,
+// and it needs the approval gate on its argv exactly as it did before this ticket.
+// So:
+//
+//   - staying in bypass → return args UNCHANGED. The flag is already in args;
+//     injecting nothing keeps this byte-identical to pre-#2065 behaviour on both
+//     of those rows and avoids a duplicate --dangerously-skip-permissions. Do NOT
+//     call permissionArgs(true, …) here — that would re-emit the flag already
+//     present.
+//   - otherwise → append permissionArgs(false, mcpApprovePath): the
 //     --permission-prompt-tool / --mcp-config / --strict-mcp-config /
 //     --permission-mode default set that routes every non-allowlisted tool use
 //     through the daemon approval registry.
 //
-// Since #2043 the spawn's own args can already name a permission mode: a session
-// storing one composes --permission-mode <mode> through
-// sessions.claudeSettingsArgs, and this function runs at runner CONSTRUCTION on
-// top of that — the path a daemon restart takes to rebuild a session out of the
-// registry. Injecting the set unmodified would spawn it as
-// "--permission-mode plan … --permission-mode default", so the injected set drops
-// its own mode pair in that case.
+// # The mode-pair drop, now the common case
 //
-// It drops ONLY that pair. Returning args unchanged instead — the shape the yolo
-// arm above uses — would spawn every mode-carrying session with no
+// Since #2043 the spawn's own args can already name a permission mode: a session
+// storing one composes --permission-mode <mode> through claudeSettingsArgs, and
+// this function runs at runner CONSTRUCTION on top of that — the path a daemon
+// restart takes to rebuild a session out of the registry. Injecting the set
+// unmodified would spawn it as "--permission-mode plan … --permission-mode
+// default", so the injected set drops its own mode pair in that case. #2065 makes
+// every non-escalated posture name itself, so this arm is now the common case
+// rather than the exception; the reasoning is unchanged, only its frequency.
+//
+// It drops ONLY that pair. Returning args unchanged instead — the shape the
+// staying-in-bypass arm uses — would spawn every mode-carrying session with no
 // permission-prompt tool and no mcp-config, i.e. with the daemon's approval gate
-// entirely absent, reachable from a stored setting. The yolo arm is safe only
-// because a bypass child has no approval gate to lose; a mode-carrying child does.
+// entirely absent, reachable from a stored setting. That arm used to be justified
+// by "a bypass child has no approval gate to lose", and THAT SENTENCE STOPS
+// HOLDING at #2065: every child now launches in bypass, so the sentence is only
+// true of the children this function still returns unchanged — the ones nothing
+// downgrades. For every other child the gate is very much there to lose.
+//
+// # Polarity, deliberately not symmetric with streamsup's predicate
+//
+// An unrecognised or empty storedMode falls THROUGH to injection here, where the
+// same value makes spawnAndWait write nothing. Each is the fail-safe direction for
+// its own consumer: an unexpected value here leaves the approval gate present, and
+// there it asserts no posture and so leaves every construction site outside the
+// interactive daemon byte-identical. sessions guarantees a canonical mode at this
+// seam either way (TestRunnerConfigPermissionModeIsAlwaysKnown).
 //
 // The append runs on a clone so the caller's args (scfg.Args, freshly owned by
 // mapStreamsupConfig) is never aliased or mutated.
-func withApprovalArgs(args []string, mcpApprovePath string) []string {
-	if slices.Contains(args, "--dangerously-skip-permissions") {
+func withApprovalArgs(args []string, mcpApprovePath, storedMode string, operatorBypass bool) []string {
+	if storedMode == sessions.PermissionModeBypass || operatorBypass {
 		return args
 	}
 	extra := permissionArgs(false, mcpApprovePath)
@@ -369,6 +410,11 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 		// policy stays directly assertable with no scaffolding. Its partner
 		// PostureGate is the runtime half and is installed one layer up.
 		SpawnPermissionMode: cfg.PermissionMode,
+		// The provenance of the escalation on this session's argv (#2065), mapped
+		// here for SpawnPermissionMode's reason verbatim — a plain bool read off one
+		// RunnerConfig field. It is what lets the runner tell a bypass the daemon
+		// composed, and may walk back, from one the operator handed it.
+		OperatorBypass: cfg.OperatorBypass,
 	}
 }
 
