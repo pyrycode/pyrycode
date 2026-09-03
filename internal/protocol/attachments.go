@@ -135,10 +135,17 @@ const (
 //     count from the first chunk, which is why this frame needs no completion
 //     peer of DebugBundleDonePayload. ">= 1" is a shape constraint and NOT a
 //     sufficient bound — see the allocation rule below.
-//   - Filename is the client's own name for the file: a display string and a
-//     sanitiser input, never a path.
-//   - MimeType is the client's declared media type: a display and dispatch hint,
-//     not a verified property of the bytes.
+//   - Filename is a display string and a sanitiser input, never a path, on
+//     either leg. Inbound it is the client's own name for the file; outbound it
+//     is the sanitised single path component the bytes are stored under, since
+//     attachments.Store hands the client's string to SanitizeFilename and keeps
+//     only the result — never the client's own bytes.
+//   - MimeType is a display hint and not a verified property of the bytes, on
+//     either leg, and never something to dispatch on in a way that grants the
+//     content privileges. Inbound it is the client's declared media type;
+//     outbound it is sniffed from the stored bytes, because the declared value
+//     is never stored at all — attachments.Store takes a directory, a filename
+//     and the data, so there is nothing to echo.
 //   - Size is the declared byte length of the WHOLE FILE, not of this chunk.
 //     int64 mirrors os.FileInfo.Size(); a receiver checks it against the
 //     assembled length.
@@ -181,10 +188,37 @@ const (
 // a different frame, and validating the id it names against the daemon's registry
 // is #2054's problem.
 //
-// SECURITY: on the INBOUND leg every field is an unverified CLAIM, not a fact;
-// on the outbound leg the same fields are daemon-authored and trustworthy. One
-// type carries both and nothing in it reports which direction a value came from,
-// so a consumer must decide that from where it received the frame.
+// SECURITY: on the INBOUND leg every field is an unverified CLAIM, not a fact.
+// OUTBOUND every field but one is daemon-authored, and none of the content
+// metadata is a stored client string echoed back verbatim — nothing a client
+// declares is kept,
+// so the daemon derives what it did not store. That improves their PROVENANCE,
+// not their TRUSTWORTHINESS, and the difference is the whole of this paragraph:
+// docs/protocol-mobile.md § Attachments, "Trust and content hygiene", draws it
+// the same way. One type carries both legs and nothing in it reports which
+// direction a value came from, so a consumer must decide that from where it
+// received the frame.
+//
+// AttachmentID IS THE EXCEPTION to "daemon-authored". Nothing daemon-side mints
+// one — the client supplies it on every chunk of an upload,
+// attachments.EnsureDir makes it a directory name, and retrieval echoes that
+// same value back byte-identical (internal/relay's attachmentEnvelopes copies
+// what StreamAttachment was handed). So it is client-chosen text on BOTH legs,
+// constrained only by the canonical-shape check below, and that check therefore
+// binds A RECEIVING CLIENT TOO: an id read off an outbound frame is no more
+// path-safe than one read off an inbound one.
+//
+// PROVENANCE DOES NOT MAKE A VALUE SAFE TO ACT ON. A sniffed text/html is
+// exactly as dangerous to render as a declared one, and a sanitised filename is
+// still attacker-shaped text, so § Attachments keeps every client obligation
+// binding on both legs: sanitise Filename before rendering it, never use it as a
+// path or a filesystem name unsanitised, and NEVER DISPATCH ON MimeType in any
+// way that grants the content privileges. What the derived MimeType does buy is
+// narrower — it is drawn from a closed set of daemon-authored constants
+// (attachmentEnvelopes carries the reasoning), so it can carry neither the
+// log-injection nor the envelope-budget hazard an arbitrary declared string can.
+// That is a property of the value and NOT a slackening of
+// MaxAttachmentMimeTypeBytes, which budgets the inbound leg regardless.
 //
 // Filename, Size and SHA256 are the claims a reader expects. AttachmentID, Index
 // and TotalChunks are claims too, and theirs is the falsification that actually
@@ -205,6 +239,12 @@ const (
 // TotalChunks >= 1. That check is available from the FIRST chunk, before a
 // single byte is accumulated, and attachments.CheckDeclaration is where it runs.
 //
+// THE RULE DOES NOT LAPSE OUTBOUND, where the two integers are daemon-authored:
+// § Attachments obliges a client to bound what it allocates from a received Size
+// and TotalChunks against its own memory budget and to refuse a transfer larger
+// than it can hold rather than attempt it. The daemon is trusted there, but a
+// fixed-budget client still has a budget.
+//
 // AttachmentID is validated for canonical shape BEFORE it is used as a path
 // component. It resolves to a file on the host in #1743 and #2037, and a
 // client-chosen id reaching filepath.Join unvalidated is a traversal;
@@ -219,7 +259,10 @@ const (
 // treatment for two independent reasons: a filename is often private in itself,
 // and a client-supplied string in a line-oriented log is a log-injection shape.
 // Log the attachment id, the index and the total; never the bytes, and never a
-// raw filename. #1744 enforces it.
+// raw filename. #1744 enforces it. SANITISING DOES NOT LIFT THE RULE, so the
+// retrieval leg's filename is no more loggable than the upload leg's:
+// attachments.SanitizeFilename's own doc block records that its output can forge
+// no log line but that the privacy reason stands untouched.
 //
 // SHA256 is INTEGRITY, NOT AUTHENTICITY. The same party supplies the bytes and
 // the digest, so a match proves the transfer was not corrupted and proves
@@ -233,8 +276,8 @@ type AttachmentChunkPayload struct {
 	AttachmentID string `json:"attachment_id"` // the transfer this chunk belongs to; repeated on every chunk
 	Index        int    `json:"index"`         // 0-based position in [0, TotalChunks); decides where the bytes land
 	TotalChunks  int    `json:"total_chunks"`  // chunk count for the whole attachment, >= 1, identical on every chunk
-	Filename     string `json:"filename"`      // the client's own name for the file; display + sanitiser input, never a path
-	MimeType     string `json:"mime_type"`     // the client's declared media type; a hint, not a verified property
+	Filename     string `json:"filename"`      // inbound the client's own name, outbound the sanitised component the bytes are stored under; display + sanitiser input, never a path
+	MimeType     string `json:"mime_type"`     // inbound the client's declared type, outbound sniffed from the stored bytes; a hint, never a verified property
 	Size         int64  `json:"size"`          // declared byte length of the WHOLE file, not of this chunk
 	SHA256       string `json:"sha256"`        // lowercase hex sha256 of the WHOLE file; always 64 hex characters
 	Data         []byte `json:"data"`          // this chunk's raw bytes; base64 on the wire, content-bearing, never logged
