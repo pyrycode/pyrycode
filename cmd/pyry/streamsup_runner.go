@@ -26,14 +26,15 @@ import (
 // the turnevent sink) — the interactive_runner selection that injects it on
 // sessions.Config.RunnerFactory is #1081.
 //
-// models is the per-session model-list retention added by #1840 and commands the
-// slash-command-list retention added by #2004. Both are pointers, so the adapter
-// stays a value type and the compile-time sessions.Runner assertion below is
-// unaffected.
+// models is the per-session model-list retention added by #1840, commands the
+// slash-command-list retention added by #2004, and tasks the background-task-roster
+// retention added by #2077. All three are pointers, so the adapter stays a value
+// type and the compile-time sessions.Runner assertion below is unaffected.
 type streamRunner struct {
 	r        *streamsup.Runner
 	models   *sessionModelHold
 	commands *sessionSlashCommandHold
+	tasks    *sessionBackgroundTaskHold
 }
 
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
@@ -147,6 +148,33 @@ func (a streamRunner) SlashCommandList() (turnevent.SlashCommandList, bool) {
 	return a.commands.SlashCommandList()
 }
 
+// BackgroundTaskRoster reports the set of background tasks this session's child last
+// said it was tracking (#2077), or ok == false when no child has reported a roster at
+// all. It reads the hold newSessionParser bound to this runner's parser, so it answers
+// outside a turn, on any goroutine, with no turn in flight — and a runner whose
+// retention was never minted answers the unreported state rather than panicking, the
+// read being nil-receiver-safe.
+//
+// The two false-y answers are NOT the same answer, and that is this variant's own
+// property rather than the two forwards' above: ok == false means no roster has ever
+// been reported, while ok == true with no entries means claude reported that nothing is
+// alive. sessionBackgroundTaskHold.BackgroundTaskRoster's doc gives the derivation; a
+// caller that collapses the two reconciles a live session as a silent one.
+//
+// It is the SIXTH concrete method OFF the sessions.Runner interface (un-widened,
+// #1077), after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330),
+// ModelList (#1840) and SlashCommandList (#2004), and it is off for their reason
+// exactly rather than by resemblance to them: the rule those docs state is that the
+// interface carries a method when its consumer sits INSIDE internal/sessions, where a
+// structural assertion would fail open. This one's consumer is #2079's resolver in
+// cmd/pyry, which reaches it by type assertion off Session.Runner the way
+// interruptRunner already does — so widening the interface would buy no compile-time
+// guarantee and would drag every fake runner under internal/sessions and cmd/pyry into
+// the diff.
+func (a streamRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bool) {
+	return a.tasks.BackgroundTaskRoster()
+}
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
@@ -191,7 +219,10 @@ func mapStreamState(s streamsup.State) sessions.State {
 // which is what keeps the retention upstream of the droppable send that can
 // otherwise discard the one initialize reply a child ever sends. #2004 adds the
 // slash-command retention as a SECOND decorator on that same chain, on the same
-// argument and from the same call.
+// argument and from the same call, and #2077 the background-task roster as a THIRD.
+// The roster is the one of the three whose producer fires repeatedly rather than once
+// per child, so what the retention buys there is a mid-run connect an answer between
+// changes rather than a value that would otherwise be lost forever.
 //
 // #1109 constructed the runner via streamsup.New (the first caller tree-wide) and
 // deliberately left Config.Stdout nil for this ticket to fill. It is the arm the
@@ -222,7 +253,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		// cannot say which children the daemon downgrades and which keep the bypass
 		// they launch with. See withApprovalArgs' doc for the derivation.
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)
-		parser, heldModels, heldCommands := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		parser, heldModels, heldCommands, heldTasks := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
 		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
 		// #2064's posture gate is bound HERE rather than in mapStreamsupConfig, on the
@@ -237,7 +268,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
-		return streamRunner{r: r, models: heldModels, commands: heldCommands}, nil
+		return streamRunner{r: r, models: heldModels, commands: heldCommands, tasks: heldTasks}, nil
 	}
 }
 
