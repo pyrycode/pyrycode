@@ -96,6 +96,15 @@ package realclaude
 // ACCEPTING a re-escalation is not the daemon acquiring the ability to ask for one.
 // #1686 decides whether anything is built on the answer.
 //
+// SUPERSEDED as of #2066, and left standing as the record of what was true when
+// this probe ran. That ticket is what #1686 decided to build on the finding above:
+// permissionModeAllowed gained the escalation as a member, so an in-band escalation
+// IS now reachable from pyry's surface, deliberately and through Pool.UpdateSettings.
+// What replaced the non-membership fail-safe is upstream — the wire admits only the
+// yolo bit (internal/relay's validPermissionMode still refuses the mode string) and
+// permissionModeSpawnWritable subtracts the escalation back out at the spawn. The
+// measurement below is unaffected; only the sentence about what pyry can ask for is.
+//
 // # Four children, one drive sequence
 //
 //	arm             | launch flag                    | control 1 | control 2          | read

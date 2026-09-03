@@ -38,13 +38,15 @@ const (
 // lock-free under the package's single-owner invariant. Unlike the fire-and-forget
 // verbs (interrupt / new_session / dequeue_message) the interactive path ALWAYS
 // replies. A RUNNING session picks the change up immediately, by a mechanism the
-// seam picks on what the frame carried — a model/effort-only change, or a bypass
-// REVOCATION, is written to the live child as command text or a control request
-// (#1581, #1604); a bypass ENABLE or a model/effort cleared to default
-// live-restarts the session's supervisor instead (#842), because claude refuses
-// the escalation over the control channel and gates it on the launch argv
-// (#1595). Both mechanisms install the recomposed argv (#833's path), so the next
-// spawn carries it too.
+// seam picks on what the frame carried — a model/effort change, or ANY posture
+// change including a bypass ENABLE, is written to the live child as command text
+// or a control request (#1581, #1604, #2066); only a model or effort cleared back
+// to claude's own default live-restarts the session's supervisor (#842). The
+// enable used to restart too, because claude refused the escalation over the
+// control channel and gated it on the launch argv (#1595); #2065 put that flag on
+// every argv and #2060 measured claude accepting the re-escalation on such a
+// child, so #2066 routed it in band with the other five. Both mechanisms install
+// the recomposed argv (#833's path), so the next spawn carries it too.
 //
 // Order is load-bearing:
 //  1. Capability gate (the authz boundary): a non-interactive conn is fully inert

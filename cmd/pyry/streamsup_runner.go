@@ -263,8 +263,13 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 // there" but "will this child KEEP the bypass it launches with", which is true in
 // exactly two cases, both of them decided before this function runs:
 //
-//   - storedMode is the escalation — internal/streamsup refuses to write that mode
-//     by non-membership, so nothing walks the child back.
+//   - storedMode is the escalation — internal/streamsup's SPAWN path writes no
+//     posture for it, so nothing walks the child back. Still by non-membership,
+//     but since #2066 the predicate is permissionModeSpawnWritable rather than the
+//     writer's allow-list, which admits the escalation now so that a LIVE child can
+//     be escalated in band. The verdict on this row is unchanged; only the
+//     mechanism behind it moved, and it is worth naming precisely because this
+//     function decides whether the daemon's approval gate reaches the argv.
 //   - operatorBypass — the escalation came from the operator's pass-through claude
 //     args, which never touch SessionSettings; the daemon may not revoke a bypass
 //     it did not grant, so again nothing walks the child back. This is

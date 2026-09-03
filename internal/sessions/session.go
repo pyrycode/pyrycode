@@ -88,10 +88,15 @@ type SessionSettings struct {
 	YOLO   bool
 
 	// PermissionMode is the posture claude runs the session under: one of the
-	// five modes it accepts on a held-open stream (permissionModeInBand) or
-	// permissionModeBypass, which only a relaunch can grant (#1595). Empty is
-	// the zero value's "never chosen", read as the default posture and
-	// normalised to permissionModeDefault at every construction site.
+	// five non-escalating modes (permissionModeInBand) or permissionModeBypass.
+	// Membership in the whole storable set is permissionModeKnown, and since
+	// #2066 that set is also the set the daemon DELIVERS on a held-open stream:
+	// all six are granted the same way, as a set_permission_mode control
+	// request. The escalation used to be the exception — only a relaunch under a
+	// recomposed argv could grant it (#1595) — so a reader of this field no
+	// longer has to model its two halves differently. Empty is the zero value's
+	// "never chosen", read as the default posture and normalised to
+	// permissionModeDefault at every construction site.
 	PermissionMode string
 }
 

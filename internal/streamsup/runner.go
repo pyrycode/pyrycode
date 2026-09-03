@@ -1042,8 +1042,17 @@ func (r *Runner) RevokeBypass() error {
 // mode is stored VERBATIM AND UNVALIDATED, including bypassPermissions and including
 // the empty string. This is a normalisation-free install of an already-canonical
 // stored value, not an operator-input path: the vocabulary gate that matters runs at
-// the SPAWN, where permissionModeAllowed decides whether anything is written at all,
-// and duplicating it here would be two copies of one defence rather than a second one.
+// the SPAWN, where permissionModeSpawnWritable decides whether anything is written at
+// all, and duplicating it here would be two copies of one defence rather than a second
+// one.
+//
+// That predicate and not permissionModeAllowed is #2066's carve-out, and the one mode
+// they disagree on is the one this paragraph installs verbatim. The writer's allow-list
+// admits the escalation now, so a LIVE child can be walked back up to it; the spawn is
+// still sent nothing for it, because since #2065 the launch argv already asserts it —
+// there is nothing to walk a fresh child TO — and arming the posture gate on a control
+// request nothing has measured as a fresh stream's first would be the bricked-session
+// shape #2064 rejected.
 //
 // It takes restartMu alone — never mu, never a Pool lock — so the sessions layer can
 // call it after releasing Pool.mu with no lock-order concern, exactly as SetSpawnArgs

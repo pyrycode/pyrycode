@@ -397,8 +397,10 @@ func TestWithApprovalArgs(t *testing.T) {
 	t.Run("a stored escalation keeps its bypass", func(t *testing.T) {
 		t.Parallel()
 		// What claudeSettingsArgs composes for a stored bypassPermissions: the flag
-		// ALONE, no mode pair. streamsup refuses to write that mode by
-		// non-membership, so nothing walks this child back either.
+		// ALONE, no mode pair. streamsup's spawn path writes no posture for that
+		// mode — non-membership in permissionModeSpawnWritable since #2066, which
+		// subtracts the escalation back out of the writer's allow-list — so nothing
+		// walks this child back either.
 		in := []string{"--model", "haiku", bypass, "--settings", "p"}
 		got := withApprovalArgs(in, path, sessions.PermissionModeBypass, false)
 

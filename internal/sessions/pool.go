@@ -895,8 +895,9 @@ func validatePermissionUpdate(update SettingsUpdate) error {
 
 // inBandDeliverable reports whether update's PRESENT fields are all changes
 // claude accepts on a stream it is already reading — a non-empty Model or Effort
-// as a /model or /effort command (#1581), and any of the five in-band postures as
-// a set_permission_mode control request (#1604, #2043) — and so the changes
+// as a /model or /effort command (#1581), and any of the SIX storable postures —
+// the five non-escalating ones and, since #2066, the escalation — as a
+// set_permission_mode control request (#1604, #2043, #2066) — and so the changes
 // Pool.UpdateSettings can live-apply without tearing the child down.
 //
 // The rule keys on what the wire carried, never on merged-vs-previous per field:

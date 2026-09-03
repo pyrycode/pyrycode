@@ -471,3 +471,62 @@ correct implementation rather than on a mistake:
 escalation is reachable only from the routing path is an argument about that set.
 
 `internal/sessions/registry.go` was NOT edited, as Design § 5 predicted.
+
+### 2026-09-03 — rework lap 1: doc claims outside the enumerated list
+
+The verifier passed the code, the tests and the live arm and failed AC 2's other half:
+doc comments elsewhere in the repo still argue from "the escalation is not
+in-band-deliverable", or name a predicate this branch replaced. No production behaviour
+changed on this lap — every edit is a comment.
+
+The four it named, restated rather than deleted:
+
+- `SessionSettings.PermissionMode` (`internal/sessions/session.go`) — its field doc said
+  the escalation is the mode "which only a relaunch can grant". Now states that all six
+  storable postures are delivered the same way and points at `permissionModeKnown` for
+  membership.
+- `inBandDeliverable` (`internal/sessions/pool.go`) — the one-sentence summary still
+  admitted "any of the five in-band postures" while the body three paragraphs below it
+  already said six. Summary now says six.
+- `SetSpawnPermissionMode` (`internal/streamsup/runner.go`) — the verbatim-install
+  paragraph pointed at `permissionModeAllowed` as the gate that runs at the spawn. It is
+  `permissionModeSpawnWritable`, and the one mode the two disagree on is the one that
+  paragraph installs verbatim, so a reader following the old pointer concluded the exact
+  inverse of the brick-safety carve-out.
+- `withApprovalArgs` (`cmd/pyry/streamsup_runner.go`) — its staying-in-bypass bullet
+  credited the writer's non-membership. The verdict holds on the spawn predicate now.
+
+**The sweep found five more of the same class, which is why the verifier asked for a repo
+grep rather than a diff read.** Four of the five are in packages this branch never opened:
+
+- `internal/relay/v2session_settings.go` → `handleSetSessionSettings`' doc claimed a
+  bypass ENABLE live-restarts the supervisor. That is the wire handler for this very
+  verb, and it described the behaviour this ticket removed. `validPermissionMode` itself
+  is untouched and still closed.
+- `internal/protocol/settings.go` → `SetSessionSettingsPayload.PermissionMode` called its
+  five "claude's five in-band modes". The field's vocabulary is unchanged and its refusal
+  argument survives verbatim; what is now false is the implied claim that five is all
+  claude accepts in band. Restated as the five NON-ESCALATING modes, with the note that
+  widening this field needs its own argument.
+- `TestRunnerConfigPermissionModeIsAlwaysKnown` (`internal/sessions/runner_config_posture_test.go`)
+  and the escalation comments in
+  `TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn`
+  (`internal/streamsup/posture_gate_test.go`) — both named `permissionModeAllowed` as the
+  spawn gate. The residual-arm test's doc additionally derived its sequence from the
+  escalation taking `Pool.UpdateSettings`' restart branch; it now reaches a bypass spawn
+  through `SetSpawnPermissionMode` plus a crash-respawn, which is the same gate inheritance
+  the test judges. No assertion moved.
+- `cmd/pyry/streamsup_runner_test.go`'s stored-escalation row carried the same sentence as
+  its production twin.
+
+The two live-probe records (`bypass_reescalation_probe_test.go`,
+`bypass_approval_argv_probe_test.go`) state that an in-band escalation is unreachable from
+pyry's surface. Both are left standing and marked SUPERSEDED by this ticket rather than
+rewritten: they record what held when the probe ran, and #2066 is what #1686 decided to
+build on the finding directly above one of them.
+
+**Gate:** `go test -race` green on `internal/sessions`, `internal/streamsup`,
+`internal/relay`, `internal/protocol` and `cmd/pyry`; `go vet ./...` and
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/` clean (the live package is
+tag-gated, so the untagged vet cannot see the two probe edits); `go build ./cmd/pyry` and
+`make cite-guard` pass.

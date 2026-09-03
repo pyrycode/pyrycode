@@ -608,8 +608,14 @@ func TestRunner_SetSpawnPermissionMode_TakesEffectOnTheNextSpawn(t *testing.T) {
 //
 // The sequence is the operator one, not a synthetic one: a default child comes up and
 // never acks (it crashed, claude NAK'd, or the write hit EPIPE — AC 4 keeps the gate
-// closed for all three), then the posture is escalated to bypassPermissions, which is
-// not in-band-deliverable and so takes Pool.UpdateSettings' RESTART branch. With the
+// closed for all three), then the posture is escalated to bypassPermissions and a later
+// spawn asserts it. #2066 changed which spawn that is, and not the sequence: the
+// escalation used to be undeliverable in band and so took Pool.UpdateSettings' RESTART
+// branch; it now goes in band and installs the escalation through
+// SetSpawnPermissionMode, so the spawn that inherits the residual arm is the next
+// CRASH-respawn (or a restart driven by a Model or Effort cleared to ""). Either way a
+// bypass spawn meets a gate its predecessor armed, which is the only thing this test
+// judges. With the
 // arm nested inside the admissibility check the replacement child inherited id "1",
 // which nothing can ever ack, and every turn on that session refused forever — under
 // the RETRYABLE classification, so callers retry against a gate with no opener.
@@ -653,8 +659,9 @@ func TestRunner_SpawnPermissionMode_ResidualArmDoesNotBrickABypassRespawn(t *tes
 		t.Fatal("the default spawn left the gate open; there is no residual arm for the respawn to inherit")
 	}
 
-	// The escalation the allow-list refuses. echo_lines never self-exits, so the
-	// second spawn is attributable to Restart.
+	// The escalation the SPAWN path refuses — permissionModeSpawnWritable, which
+	// subtracts it back out of the writer's allow-list (#2066). echo_lines never
+	// self-exits, so the second spawn is attributable to Restart.
 	r.SetSpawnPermissionMode("bypassPermissions")
 	r.Restart(cfg.Args)
 	select {
