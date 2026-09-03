@@ -530,3 +530,76 @@ build on the finding directly above one of them.
 `go vet -tags e2e_realclaude ./internal/e2e/realclaude/` clean (the live package is
 tag-gated, so the untagged vet cannot see the two probe edits); `go build ./cmd/pyry` and
 `make cite-guard` pass.
+
+### 2026-09-03 — rework lap 2: the last of the falsified doc claims
+
+Lap 1 fixed the four claims the verifier named and swept up five more; the verifier
+found six survivors of the same class plus one NIT, and handed over the grep that
+produced them so this would not become a third lap. Comment-only again, with one
+exception noted below. No production line moved.
+
+**Three in `internal/streamsup/envelope_test.go`** — the writer-side file this branch
+rewrote, where lap 1 left a doc block contradicting a comment it wrote three lines
+below:
+
+- `TestWritePermissionMode_RefusesUnknownMode`'s block promised a guard the same lap
+  deleted ("bypassPermissions is named directly, and this is the only place under
+  internal/streamsup it appears … a later slice that edits the allow-list leaves this
+  row red"). Restated: the carve-out this test used to hold ended by design, the
+  literal now lives in production source as `permissionModeBypass`, and what replaced
+  the absence is `permissionModeSpawnWritable` at the spawn plus `validPermissionMode`
+  at the wire. The near-miss rows are named as the mechanism that DID survive, and
+  they matter more now that a neighbour of the escalation is one edit from admission.
+- `TestMarshalBypassRevocationEnvelope_RequestIDInjectionResistance` carried two dead
+  rules — that the refusal test names the escalation, and that the literal is banned
+  from production source. Both restated; the test itself is untouched.
+- `TestMarshalPermissionModeEnvelope_AllowedModes` claimed to assert "every
+  allow-listed mode" while covering five of six. **This one is not comment-only**: the
+  sixth row was added rather than the sentence narrowed, because the escalation
+  otherwise has no byte-exact wire pin.
+  `TestWritePermissionMode_WritesTheEscalation` compares against the marshaller's own
+  output, so it stays green against a marshaller that encodes the escalation into a
+  wrong-but-consistent line. The row's literal is the measured shape, not an
+  extrapolation: #2060's capture holds the sent line at
+  `second_control_request.control_request_sent`. `TestMarshalBypassRevocationEnvelope`'s
+  cross-reference to "the other four modes" moved to five with it.
+
+**The `bypass enable → live restart` sentence had three copies** and lap 1 fixed one.
+The other two are `handleSetSessionSettings`' success-branch body comment
+(`internal/relay/v2session_settings.go`, ~110 lines below the doc header lap 1
+restated) and `cmd/pyry`'s `SettingsUpdater` seam comment — the composition-root
+description of the seam this ticket re-routes. Both now say the same thing as the
+header: any posture change goes in band, and a Model or Effort cleared to `""` is the
+surviving restart case.
+
+**`validPermissionMode`'s "claude's five IN-BAND modes"** (`internal/relay`), with its
+twin on `SettingsUpdate.PermissionMode` (`internal/relay/v2session_seams.go`). The
+mirroring claim is true — `permissionModeInBand` is still five — but the implicature
+that five is what claude accepts in band is the exact misconception this ticket
+corrects, sitting on the one stop that must stay closed. Both restated to "five
+NON-ESCALATING modes" with the note that the count is a WIRE decision following from
+the two omissions below it, not from the daemon's. `validPermissionMode`'s own
+escalation bullet is untouched and the switch is still the five literals.
+
+**The NIT** — `set_permission_mode_probe_test.go` was the third probe record of the
+class and the only one that did not get lap 1's `SUPERSEDED as of #2066` marker. Added
+in the same one-paragraph shape, naming both claims it supersedes: the spawn-time-flag
+paragraph directly above it, and the enable arm's design conclusion that routing both
+directions is unsupported. That conclusion's measurement is still true as scoped — a
+child launched WITHOUT the flag does refuse the escalation — which is precisely why
+#2065 had to land first, and the marker says so rather than implying the arm was
+wrong.
+
+**Sweep.** Re-ran the verifier's grep (155 comment lines across the five packages) and
+a sharper one over all of `internal/` and `cmd/` for the falsifiable predicates
+themselves — `restart|respawn|relaunch|not in-band|unreachable|only a relaunch|
+permissionModeAllowed|five in-band`. Every remaining hit is either a lap-1 restatement
+in "used to / no longer" form, a claim still true as scoped (the relay validator's test
+doc: a mode string cannot grant bypass at any layer, which holds because
+`permissionModeInBand` was not widened), or one of the two doc classes the verifier
+ruled out of scope.
+
+**Gate:** `go test -race` green on `internal/sessions`, `internal/streamsup`,
+`internal/relay`, `internal/protocol` and `cmd/pyry`; `go vet ./...` and
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/` clean; `go build ./cmd/pyry`
+and `make cite-guard` pass.
