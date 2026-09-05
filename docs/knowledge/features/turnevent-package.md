@@ -118,7 +118,8 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `ThoughtChunk` | `MessageID, Text string` | streaming reasoning ("thinking") text |
 | `ToolStart` | `ToolCallID, Title string`, `Kind ToolKind`, `RawInput json.RawMessage`, `Locations []Location` | a new tool invocation |
 | `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent`, `ResultDetail string` | changed fields of an existing tool call; `Content` may be `nil` (status-only update). `ResultDetail` (#2024, all five sidecar shapes since #2025) is daemon-composed display text derived from claude's stdout sidecar — a read's or shell's line count, an edit's `+10 −3`, a write's `created · 54 lines`, a search's `78 lines`/`5 files` — named generically because it composes across shapes rather than minting a new event field per shape. Its two separator glyphs (U+2212, U+00B7) are the field's first non-ASCII bytes; every byte is still daemon-formatted from claude's counts, never claude's text passed through — see [streamsup-package-content-blocks-are-held-as-json-rawmessage.md](streamsup-package-content-blocks-are-held-as-json-rawmessage.md) |
-| `TurnEnd` | `Reason TurnEndReason` | end of a claude turn; carries the reason only |
+| `TurnEnd` | `Reason TurnEndReason`, `ModelWindows []ModelWindow`, `DroppedModelWindows int` (#2101) | end of a claude turn; reason plus claude's per-model context-window reading, decoded independently of the reason and unreachable on the wire — see below |
+| `ModelWindow` (#2101, element type — not an `Event`, no marker) | `ModelID string`, `WindowTokens int` | one model's context-window reading off the `result` line's `modelUsage` map, sorted by `ModelID` |
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
 | `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |
 | `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
@@ -209,11 +210,54 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
   it on their own terms. `json.RawMessage` is preferred over `map[string]any`
   precisely because it does not force a parse. `TestToolStart_RawInputOpaque`
   round-trips structured JSON, invalid-JSON bytes, and `nil` unchanged.
-- **`TurnEnd` carries `reason` only — an ACP divergence.** ACP models end-of-turn
-  as the `stopReason` *return value* of `session/prompt`, not as an event.
-  Converting `TurnEnd` back into that RPC return is the **ACP adapter's** job
-  (design-doc divergence 1), not this model's. The internal model is the
-  event-stream shape; here we just carry the reason.
+- **`TurnEnd.Reason` is what the ACP divergence is about — an ACP divergence.**
+  ACP models end-of-turn as the `stopReason` *return value* of
+  `session/prompt`, not as an event. Converting `TurnEnd` back into that RPC
+  return is the **ACP adapter's** job (design-doc divergence 1), not this
+  model's. `ModelWindows`/`DroppedModelWindows` (#2101, below) have no ACP
+  equivalent and are not part of that divergence.
+- **`TurnEnd` gained `ModelWindows []ModelWindow` / `DroppedModelWindows int`
+  (#2101)** — claude's per-model `contextWindow` reading off the `result`
+  line's `modelUsage` map. Decoded by a second, independent unmarshal off the
+  raw line bytes, so a hostile `modelUsage` shape cannot disturb turn-end
+  segmentation; `Reason` still comes from the already-decoded `streamLine`
+  regardless of what this decode does (see [streamsup-package.md](streamsup-package.md)).
+  Sorted by `ModelID` because Go randomises map iteration — capping a decoded
+  map directly would make *which* entries survive nondeterministic between
+  runs on identical bytes, so the sort is what makes the cut reproducible.
+  Bounded on both dimensions claude's map has (`maxModelWindowID` 256 bytes,
+  `maxModelWindowEntries` 16); unlike every truncating cap in this family, an
+  over-long id is **dropped, not truncated** — a future consumer joins on
+  `ModelID`, and a truncated id names no model, which is strictly worse than
+  no entry. `DroppedModelWindows` is one counter for every reason an entry is
+  missing (unusable window, over-long id, over-cap):
+  `len(ModelWindows) + DroppedModelWindows == len(modelUsage)` is the
+  invariant, matching `ModelList.DroppedModels`' "true size is len + dropped".
+  Unreachable on the wire by construction, not by omission:
+  `turnbridge.MapEvent`'s `TurnEnd` arm builds `protocol.TurnEndPayload` field
+  by field rather than embedding the event
+  ([turnbridge-package.md](turnbridge-package.md)), so these fields reach no
+  client until some future consumer explicitly wires them. `ModelID` is
+  claude-authored text, bounded but not sanitized (no control-character or
+  terminal-escape stripping) — `ModelOption.DisplayName`'s SECURITY posture
+  applies unchanged: the render boundary owing sanitization is the client's.
+  See [contextwindow-package.md](contextwindow-package.md) for the believed-window
+  consumer this is meant to feed (`Usage.WindowTokens`, `defaultWindowTokens`).
+- **Widening a sealed sum-type variant with a slice breaks `==`, and a grep for
+  the variant's type name will not find where it breaks.** `TurnEnd` stopped
+  being comparable the moment `ModelWindows` landed, and the site that
+  actually broke was `cmd/pyry`'s `TestSessionModelHold_OtherVariantsChangeNothing`,
+  which compared two `turnevent.Event` **interface** values with `!=` — a
+  comparison that dispatches to the dynamic type's equality and panics once
+  that type carries a slice, taking its parallel subtests down with it. A
+  sweep for source shaped like `== turnevent.TurnEnd` cannot find this: the
+  comparison names no type at all, it reads `seen[0] != tt.ev` on two
+  `Event`s. `ModelList` had carried a slice since #1812 and escaped only by
+  not appearing in that particular table. What actually finds this is running
+  every consumer package's tests (or grepping for interface-value `==`/`!=`
+  against `turnevent.Event`, and `map[turnevent.Event]...` keys) — the next
+  variant to grow a slice needs that sweep, not a search keyed on the type
+  that has already proven it can miss.
 
 ### `Location` (field of `ToolStart`)
 
