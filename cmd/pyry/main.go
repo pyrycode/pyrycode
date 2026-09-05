@@ -1016,12 +1016,13 @@ func runSupervisor(args []string) error {
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
 		},
-		retainedModelLists:        retainedModelLists(convReg, pool),
-		retainedSlashCommandLists: retainedSlashCommandLists(convReg, pool),
-		approvals:                 approvals,
-		streamSink:                streamSink,
-		busy:                      turnBusy,
-		approvalParked:            approvalParked,
+		retainedModelLists:            retainedModelLists(convReg, pool),
+		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
+		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),
+		approvals:                     approvals,
+		streamSink:                    streamSink,
+		busy:                          turnBusy,
+		approvalParked:                approvalParked,
 	})
 	if err != nil {
 		return fmt.Errorf("relay start: %w", err)

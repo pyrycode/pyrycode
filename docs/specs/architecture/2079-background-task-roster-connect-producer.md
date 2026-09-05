@@ -176,3 +176,23 @@ Each is resolved during implementation and, if the resolution changes the design
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — Phase B
+
+**Neither open question changed the design**, so nothing above is superseded; both are recorded here so the resolutions are findable rather than merely absent.
+
+- **`TaskType` sentinels.** Resolved as the expected case: `turnevent.BackgroundTask.TaskType` is documented as "a plain string rather than a closed enum", and nothing on this path compares it against claude's `local_bash`. Conspicuous `ZZ…ZZ` sentinels stand, and `sentinelBackgroundTaskRoster`'s header records why.
+- **"Mints no id" in the idempotence test.** Only the NEGATIVE form was available, as the plan anticipated: there is no mint counter to assert against, so the property is pinned as the pool's session set and the registry's row set being unchanged across both enumerations. `TestRetainedBackgroundTaskRosters_TwoCallsAgreeAndMutateNothing`'s header states plainly that this cannot see an id minted and immediately discarded, only one that reached daemon state — stated rather than overclaimed.
+
+**The four sole-red claims the testing strategy makes were verified by mutation** (`go test -overlay`, no worktree writes), not assumed:
+
+| Mutant | Reddened |
+|---|---|
+| `len(payload.Tasks) == 0 { continue }` added to the enumeration loop | `TestRetainedBackgroundTaskRosters_EmptyRosterRowContributes` **only** |
+| Resolver forks the mapping to pre-allocate `Tasks` | `TestResolveBoundBackgroundTaskRoster_EmptyRosterResolvesToAnEmptyTaskList` **only** |
+| `List(ListFilter{IsArchived: &f})` narrowing the enumeration | `TestRetainedBackgroundTaskRosters_ArchivedConversationsContribute` **only** |
+| The `conv.CurrentSessionID == ""` guard deleted (#678) | 5 tests, including the unbound refusal row and the bootstrap-leak pin — appropriately broad for a disclosure rather than sole-red |
+
+One detail worth carrying forward from that run: with the #678 guard deleted, the refusal table's **empty conversation id** row stays GREEN, because `Registry.Get("")` misses one step earlier. The guard's sole red is the *unbound* row, not the empty-id one — so a future variant of this test that dropped the unbound row while keeping the empty-id row would pin nothing at all.
