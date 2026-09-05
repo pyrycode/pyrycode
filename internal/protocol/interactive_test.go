@@ -2176,3 +2176,100 @@ func TestQuestionDismissedType_IsNotClaudesVocabulary(t *testing.T) {
 		t.Errorf("wire type: got %q, want %q", TypeQuestionDismissed, "question_dismissed")
 	}
 }
+
+// TestRequestModelListPayload_RoundTrip pins the on-demand model-list REQUEST
+// (#2125) against its committed fixture.
+//
+// It is the ONLY test in this package that pins the wire STRING
+// "request_model_list". None of the three registries in compat_test.go can — all
+// three key on the Go symbol, so renaming the constant's value moves through them
+// consistently and reddens none (measured by mutant on #1895's sibling, recorded
+// in the drift-detectors overview).
+//
+// THE CONVERSATION ID IS THE TIE, not an arbitrary string. It is "c1", exactly the
+// conversation_id the committed model_list.json carries, so the two files describe
+// ONE exchange — the ask, and the frame shape that answers it. The correlation
+// itself is NOT pinned here and cannot be: model_list.json is the unsolicited form
+// (live lane and connect-time reconcile), which carries no in_reply_to at all. The
+// answer's envelope — same type, same payload source, in_reply_to set, event_id
+// absent — is pinned against bytes the daemon actually emits, in
+// internal/relay's handler test, which is stronger evidence than a hand-written
+// file for a shape this package never constructs.
+//
+// InReplyTo is asserted NIL, the structural half of the classification
+// cmd/pyry/relay_guard_test.go's inboundTypes records: this frame is a request,
+// and the correlation runs FROM it rather than to it.
+func TestRequestModelListPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "request_model_list.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRequestModelList {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRequestModelList)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got pointer to %d, want nil — this frame is a request, not a reply", *env.InReplyTo)
+	}
+
+	var payload RequestModelListPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if want := "c1"; payload.ConversationID != want {
+		t.Errorf("ConversationID: got %q, want %q (model_list.json's conversation — the two fixtures describe one exchange)", payload.ConversationID, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestRequestModelListPayload_WireKeys pins the payload's COMPLETE set of wire
+// keys, so a later field cannot be added without this failing. It is the
+// machine-checked form of the frame's central omission — NO REQUEST-ID KEY,
+// because correlation rides the envelope's InReplyTo.
+//
+// It marshals a freshly populated struct rather than reading the fixture, and that
+// is the whole point: adding an undeclared field reddens both this and the round
+// trip, but regenerating the fixture under that change turns the round trip green
+// again while this stays red. It is also what exercises the struct tags at all —
+// the round trip above re-emits env.Payload's own json.RawMessage bytes, so an
+// omitempty added here for tidiness is invisible to it.
+func TestRequestModelListPayload_WireKeys(t *testing.T) {
+	b, err := json.Marshal(RequestModelListPayload{ConversationID: "c1"})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	want := map[string]bool{"conversation_id": true}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected wire key %q: the payload's key set is fixed at %v — correlation rides the envelope's in_reply_to, so this frame carries no request-id key", k, want)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q, got: %s — the key is always present (no omitempty), so absent and empty stay the same case", k, b)
+		}
+	}
+}
+
+// TestRequestModelListPayload_ZeroValue_KeyPresent pins the no-omitempty decision
+// directly: a zero-valued payload still carries the key.
+//
+// Separate from the key-set test above because the two fail on different mutants.
+// That one marshals a POPULATED struct, so an omitempty added to ConversationID
+// leaves it green; only a zero value forces the tag to speak.
+func TestRequestModelListPayload_ZeroValue_KeyPresent(t *testing.T) {
+	b, err := json.Marshal(RequestModelListPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	if want := `{"conversation_id":""}`; string(b) != want {
+		t.Errorf("zero payload: got %s, want %s — the key is unconditional, so a client that names no conversation still sends a well-formed frame", b, want)
+	}
+}

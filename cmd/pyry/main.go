@@ -1038,7 +1038,10 @@ func runSupervisor(args []string) error {
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
 		},
-		modelWindows:                  sessionModelWindows(pool),
+		modelWindows: sessionModelWindows(pool),
+		// The conversation-keyed half of the model-list pair (#2125), built beside its
+		// enumerating twin below over the same registry and pool.
+		modelListFor:                  modelListFor(convReg, pool),
 		retainedModelLists:            retainedModelLists(convReg, pool),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),

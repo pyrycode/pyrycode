@@ -289,6 +289,9 @@ var v2OnlyTypes = map[string]bool{
 	// the page it is answered with (outbound reply).
 	TypeRequestHistory: true,
 	TypeHistoryPage:    true,
+	// v2 on-demand model-list request verb (inbound control). Its ANSWER is
+	// TypeModelList above, unchanged — this verb mints no second outbound shape.
+	TypeRequestModelList: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -373,6 +376,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestAttachment,
 		// v2 conversation-history vocabulary.
 		TypeRequestHistory, TypeHistoryPage,
+		// v2 on-demand model-list request verb (inbound control).
+		TypeRequestModelList,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
@@ -414,6 +419,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeAttachmentStorageFailed":     CodeAttachmentStorageFailed,
 		"CodeAttachmentNotFound":          CodeAttachmentNotFound,
 		"CodeAttachmentStreamAborted":     CodeAttachmentStreamAborted,
+		"CodeModelListUnavailable":        CodeModelListUnavailable,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -437,6 +443,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeAttachmentStorageFailed":     "attachment.storage_failed",
 		"CodeAttachmentNotFound":          "attachment.not_found",
 		"CodeAttachmentStreamAborted":     "attachment.stream_aborted",
+		"CodeModelListUnavailable":        "model_list.unavailable",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))

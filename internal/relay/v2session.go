@@ -845,6 +845,15 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 		case protocol.TypeRequestSessionSettings:
 			m.handleRequestSessionSettings(ctx, s, probeEnv)
 			return
+		case protocol.TypeRequestModelList:
+			// Inline on Run (#2125), beside its shape twin above rather than with
+			// the three hand-off arms below: answering is a registry lookup, a copy
+			// of at most ten model rows and one small marshal. None of that is the
+			// hashing, disk reading or cap-budgeting that moved those arms off Run,
+			// so an appFrameJob kind and a worker route would buy nothing. See
+			// handleRequestModelList's file header for what that placement obliges.
+			m.handleRequestModelList(ctx, s, probeEnv)
+			return
 		case protocol.TypeAttachmentChunk:
 			// The FIRST control type whose handler does not run inline on Run
 			// (#1897), and one of two — the retrieval arm below joined it in

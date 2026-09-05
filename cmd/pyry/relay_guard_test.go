@@ -114,6 +114,22 @@ var inboundTypes = map[string]string{
 	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
 	// TypeHistoryPage, is outbound-only and stays excluded.
 	"TypeRequestHistory": "switch-intercepted",
+	// The on-demand model-list request verb (#2125). It NEVER sat in excludedTypes
+	// as "pending handler", unlike the three above: its declaration and its handler
+	// land in one ticket, because the declaration's only daemon-side consumer is
+	// that handler. Filed here from the moment the constant exists — Assertion #3
+	// reports an unclassified constant, and Assertion #1 is satisfied by the
+	// dispatchAppFrame case in the same commit.
+	//
+	// Its case DISPATCHES INLINE rather than tagging and handing off, so unlike the
+	// three above it is the settings/modal shape rather than the worker shape:
+	// answering is a registry lookup and one small marshal, not a file read. The
+	// guard reads case selectors rather than bodies, so the distinction does not
+	// change the filing — it is recorded because a future edit that moves this arm
+	// off Run has an emit-path obligation (see handleRequestModelList's header).
+	// Its reply half is TypeModelList, which is outbound-only and stays excluded,
+	// exactly as TypeHistoryPage does for TypeRequestHistory.
+	"TypeRequestModelList": "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -427,7 +443,9 @@ func TestOutstandingQuestionsWiredToSurfacerRegistry(t *testing.T) {
 	// all three facts live in relay.go, so three parses would buy nothing.
 	file := parseGoFile(t, relayPath)
 
-	registry, read := configSeamSelector(t, file, relayPath, questionSeamField)
+	registry, read := configSeamSelector(t, file, relayPath, questionSeamField,
+		"the connect-time question reconcile (#1979) has no daemon-side source, so a client "+
+			"that connects while claude is waiting on a question is never sent it (#1980).")
 
 	// Fact #1b (AC #2): the non-retiring current-truth read, not a consuming one.
 	// Snapshot leaves the batch parked, so a batch outstanding across a reconnect is
@@ -477,12 +495,67 @@ const (
 	surfacerQuestionField = "questions"
 )
 
-// configSeamSelector returns the receiver identifier and method name of the sole
-// composite-literal element keyed fieldName, asserting the value is a method value
-// on a plain identifier (`reg.Method`). Anything else — a call expression receiver,
-// a closure, a nil — is Fatal: those are the shapes that would leave the seam
-// pointed at a registry the producer never touches, or at no registry at all.
-func configSeamSelector(t *testing.T, file *ast.File, path, fieldName string) (recv, method string) {
+// Structural guard: the on-demand model-list seam (#2125) must be assigned in the
+// V2SessionConfig literal, from the wiring struct the composition root fills.
+//
+// It exists for the reason #1980's neighbour above exists and no other: startRelayV2
+// has no test and cannot cheaply get one (TestBootstrapSnapshotUsage's doc comment
+// records that), so without a gate that READS the wiring rather than constructing
+// it, deleting this one line ships a daemon that answers every request_model_list
+// with the retryable model_list.unavailable — silently, on every client, caught by
+// nothing. TestModelListFor_* in this package exercises the resolver directly and
+// stays green with the line deleted; the relay-side handler tests wire the seam
+// themselves and stay green too. That gap is exactly what this closes.
+//
+// ONE FACT, NOT THREE, and the difference from the question guard is the point. That
+// one has to prove the seam reads the SAME registry the producer records into,
+// because a second, always-empty registry is constructible and would look right.
+// There is no second anything here: the value is a plain field on the wiring struct,
+// filled once at the composition root from the conversations registry and the pool.
+// So the fact worth pinning is that the field is assigned at all, from that struct
+// rather than from something minted inline — which configSeamSelector's shape check
+// already refuses. Do not grow this into a copy of #1980's three-fact shape; the
+// third fact would be a restatement of the compiler's work.
+//
+// MUTATION-TESTING NOTE, inherited: go test -overlay cannot reach any guard in the
+// parseGoFile family. They call parser.ParseFile against the file on disk at test
+// runtime, so a mutant written under an overlay is invisible here while go build
+// sees it, and the guard reports a false green. Mutate by editing and restoring the
+// real file in one shell invocation.
+func TestModelListForWiredToTheCompositionRoot(t *testing.T) {
+	t.Parallel()
+
+	file := parseGoFile(t, relayPath)
+
+	recv, field := configSeamSelector(t, file, relayPath, modelListSeamField,
+		"a client asking for a conversation's model menu (#2125) is answered "+
+			"model_list.unavailable forever, because the daemon has no source to resolve it from.")
+
+	if recv != relayWiringRecv || field != modelListSeamSource {
+		t.Errorf("%s is bound to %s.%s, want %s.%s — the seam must read the wiring struct's own "+
+			"field, which the composition root fills over the conversations registry and the "+
+			"session pool. Anything else resolves against something this daemon does not own.",
+			modelListSeamField, recv, field, relayWiringRecv, modelListSeamSource)
+	}
+}
+
+// Names the model-list wiring guard reads relay.go for.
+const (
+	modelListSeamField  = "ModelListFor"
+	modelListSeamSource = "modelListFor"
+	relayWiringRecv     = "w"
+)
+
+// configSeamSelector returns the receiver identifier and selected name of the sole
+// composite-literal element keyed fieldName, asserting the value is a selector on a
+// plain identifier (`x.Y` — a method value or a struct field). Anything else — a
+// call expression receiver, a closure, a nil — is Fatal: those are the shapes that
+// would leave the seam pointed at something freshly constructed here rather than at
+// the daemon's own, or at nothing at all.
+//
+// missing is the consequence a caller wants stated when the element is absent
+// entirely, which differs per seam and is the failure a reader most needs named.
+func configSeamSelector(t *testing.T, file *ast.File, path, fieldName, missing string) (recv, method string) {
 	t.Helper()
 	found := 0
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -497,23 +570,21 @@ func configSeamSelector(t *testing.T, file *ast.File, path, fieldName string) (r
 		found++
 		sel, ok := kv.Value.(*ast.SelectorExpr)
 		if !ok {
-			t.Fatalf("%s in %s is bound to a %T, want a method value on the registry identifier "+
-				"(reg.Method) — update the guard if the wiring shape changed deliberately.",
+			t.Fatalf("%s in %s is bound to a %T, want a selector on a plain identifier "+
+				"(x.Y) — update the guard if the wiring shape changed deliberately.",
 				fieldName, path, kv.Value)
 		}
 		ident, ok := sel.X.(*ast.Ident)
 		if !ok {
-			t.Fatalf("%s in %s selects on a %T rather than a plain identifier — a registry "+
-				"constructed inline here is not the one the surfacer records into.",
+			t.Fatalf("%s in %s selects on a %T rather than a plain identifier — something "+
+				"constructed inline here is not the daemon's own.",
 				fieldName, path, sel.X)
 		}
 		recv, method = ident.Name, sel.Sel.Name
 		return true
 	})
 	if found != 1 {
-		t.Fatalf("found %d %q elements in %s, want exactly 1 — the connect-time question "+
-			"reconcile (#1979) has no daemon-side source, so a client that connects while "+
-			"claude is waiting on a question is never sent it (#1980).", found, fieldName, path)
+		t.Fatalf("found %d %q elements in %s, want exactly 1 — %s", found, fieldName, path, missing)
 	}
 	return recv, method
 }

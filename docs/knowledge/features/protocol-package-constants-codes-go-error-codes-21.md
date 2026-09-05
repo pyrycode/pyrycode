@@ -1,4 +1,4 @@
-# Error codes (25)
+# Error codes (26)
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -29,6 +29,7 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeHistoryInvalidPageSize` | `history.invalid_page_size` |
 | `CodeHistoryInvalidCursor` | `history.invalid_cursor` |
 | `CodeHistoryUnavailable` | `history.unavailable` |
+| `CodeModelListUnavailable` | `model_list.unavailable` |
 
 **The seven `attachment.*` codes (#1751) are vocabulary declared ahead of any consumer** — #1741 (reassembly), #1743 (storage), #1897 (inbound dispatch, split from #1744) and #1746 (retrieval, closed `NOT_PLANNED` and split into #2052 the request verb, #2053 the outbound stream, #2054 the handler that answers with these codes) are all wired blocked-by this ticket precisely so none of the four invents its own name for the same condition. Two decisions are worth carrying forward past this ticket:
 
@@ -45,5 +46,7 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 **The generalizable point:** when an existing code's retry contract is already true of a new condition, reuse it — minting a code is a protocol-publication step (a `codes.go` constant plus a new spec row), not something a single consumer ticket should do on its own, and #1751 declared this vocabulary in one place precisely so implementations wouldn't each invent a name.
 
 Docs-and-Go review lesson from #1751 (a documentation-only ticket, no consumer code): **when a spec's prose gives per-constant comment guidance, check it against the same spec's own design table before writing the comment** — this ticket's spec text asked for a trailing comment marking `attachment.too_many_uploads` as "the group's only retryable member," but the spec's own table two paragraphs up marked three of the seven codes retryable. Following the prose instruction literally would have shipped a false claim into `codes.go` that no test catches (the pins in `TestErrorCode_Constants_MatchSpec` check wire *values*, not comment prose). Where a spec's prose and its own table disagree on a count, the table is the artifact that was reasoned about row by row — trust it.
+
+**`CodeModelListUnavailable` (#2125) merges two causes on the same disclosure reasoning `attachment.not_found` already states above: the client's repair is identical either way, so a distinguishable code would leak something about the host rather than the request.** Past `request_model_list`'s `conversation.not_found` (a plain membership check), the daemon can fail to answer for two different reasons — nothing is retained anywhere for that conversation, or no model-list source is wired into the daemon at all — and both collapse into this one retryable code rather than splitting on the receiver-resource precedent above. The reason the two precedents diverge is retryability: `too_many_uploads` vs. `too_large` split because one clears with time and the other doesn't, but here *both* causes clear on their own (a bootstrap child answering its `initialize` ask, or a daemon later gaining a wired source) and neither reveals a traversal-probe-shaped id the way a merged `attachment.not_found` protects against — the reason for this merge is narrower: it hides whether the *host* is configured with a model-list source, a fact about the machine rather than the request. See [Inbound `request_model_list`](v2-session-manager-state-machine-inbound-request-model-list-modellistfor-seam.md) for the seam that produces both causes.
 
 **Minting a code needs `TestErrorCode_Constants_MatchSpec` updated in the same change, or a spelling drift goes uncaught.** The four `history.*` codes (#2116) shipped without new rows in that pin; every assertion elsewhere in the PR compared `protocol.CodeHistory*` to itself, so a rename anywhere would move both sides together and stay green (confirmed by mutation: `go test -overlay` renaming two of the four still passed the full wired suite). #1751 populated this same map in the commit that minted its seven `attachment.*` codes — treat updating it as part of minting a code, not an optional follow-up a later ticket can catch.
