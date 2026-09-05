@@ -173,14 +173,14 @@ stream-mode analogue (the #1080 approval bridge) was already wired unconditional
 stream needed a replacement. See [codebase/1081.md](../codebase/1081.md) for the full wiring and
 [config-package.md](config-package.md) for the operator-facing `interactive_runner` field and rollback.
 
-**Known gap (tracked, fail-closed): frozen sink tag vs. `new_session` rotation.** The sink tags each
-event with the runner's *construction-time* `SessionID`; `RestartFresh` (a stream-mode `new_session`)
-rebinds `conv.CurrentSessionID` to a fresh id but doesn't retag the Parser, so `boundSessionIDForActive`
-and the event tag diverge and the drain's scoping gate drops everything for that conversation until the
-daemon restarts. No cross-session disclosure (unmatched tag ⇒ dropped, not misdelivered). Follow-up: #1133. Confirmed live (not just by inspection) by the #1137 `new_session` e2e: after a stream rotation, a
-subsequent turn's `assistant_delta` never reaches the phone, so that spec's post-rotation "serving a turn"
-milestone asserts delivery at the fakeclaude stdin boundary instead — see
-[codebase/1137.md § The post-rotation drain divergence](../codebase/1137.md).
+**Fixed (#1133): the sink tag now rotates with `RestartFresh`.** The sink used to tag each event with
+the runner's *construction-time* `SessionID`; a stream-mode `new_session` rebound `conv.CurrentSessionID`
+to a fresh id without retagging the Parser, so `boundSessionIDForActive` and the event tag diverged and
+the drain's scoping gate dropped everything for that conversation until the daemon restarted. An
+atomic-backed `streamSessionTag` now moves with the rotation, read once per event by both fan-in lanes —
+see [§ Session rotation notification](streamsup-package-session-rotation-notification-onsessionrotate.md).
+This is what the #1137 `new_session` e2e's post-rotation milestone (`codebase/1137.md` § The post-rotation
+drain divergence) could not assert at a phone-side frame before #1133 landed; `relay_v2_stream_new_session_test.go`'s M6 now does.
 
 ## Test fake for this wire — fakeclaude stream-json mode (#1140)
 
@@ -232,5 +232,6 @@ search can reach it.
 - [Rotation-delivery gate (#1330)](streamsup-package-per-conversation-turn-busy-track-rotation-delivery-gate.md) — Closes #1295's Open question 4 ("the clear-before-`RestartFresh` window … not structurally excluded"). 
 - [Resolve an in-flight tool call to its conversation (#1917)](streamsup-package-per-conversation-turn-busy-track-resolve-an-in-flight-tool-call.md) — A third feed, `inflight`, retains which `tool_use_id`s are in flight per conversation and reports membership only.
 - [Posture gate — hold turns until claude acks the spawn-time mode (#2064)](streamsup-package-posture-gate-spawn-permission-mode-ack.md) — Every spawn arms a `PostureGate` on the `request_id` it minted for the stored-posture write; `WriteUserTurn` refuses until a matching `success` ack releases it.
+- [Session rotation notification — `Config.OnSessionRotate` (#1133)](streamsup-package-session-rotation-notification-onsessionrotate.md) — `RestartFresh` now moves the turn-event sink's live tag instead of leaving it frozen at construction, closing the fail-closed gap where a `new_session` rotation went dark until daemon restart.
 - [A cardinality cut's pre-allocation must match the cap, not the input (#2101)](streamsup-package-a-cardinality-cut-s-pre-allocation-must-match-t.md) — `decodeModelWindows`'s survivor slice was pre-allocated to the untrusted decoded map's length before filtering, so a `cap()` far past the cap rode the event out even though `len()` and every behavioural assertion stayed correct.
 - [Related](streamsup-package-related.md) — see the document

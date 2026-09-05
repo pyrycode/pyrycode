@@ -17,7 +17,7 @@ type streamTurnEnvelope struct {
 type streamTurnSink struct { /* one buffered chan streamTurnEnvelope */ }
 
 func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink
-func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) // non-blocking send
+func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) // non-blocking send; frozen-tag form, delegates to sinkForTag
 
 func startStreamTurnDrainV2(
     ctx context.Context,
@@ -54,7 +54,16 @@ not inside the sink, so the drop decision stays consistent with the cursor `Hand
 flushes the prior conversation's buffered delta and re-mints a fresh turn for the new one — the drain
 supplies session-level gating, the emitter's existing follow-active logic does the rest.
 
-**The same gate also drops one turn's worth of delivery across every session rotation (#2010, from the `slash_command_list`/`model_list` docs re-derivation) — a stale tag, not a race.** `sinkFor`'s session tag is captured once, at runner construction, by `newStreamRunnerFactory` (see [streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md)); `Pool.rekeyLocked` (`RotateForNewSession`) re-keys the pool entry and rebinds the conversation **in place**, while the surviving runner's already-bound sink keeps its construction-time tag. So immediately after a rotation, the reporting child's tag and the conversation's active binding are simply different ids, and this gate drops the report — even though the rotation did spawn a genuine new child, and therefore a new ask. Nothing about interleaving order can close this; it is a mapping that goes stale at rekey, not a narrow race window.
+**Fixed (#1133): the gate no longer drops a turn's worth of delivery across a session rotation.** Until
+\#1133, `sinkFor`'s session tag was captured once, at runner construction, by `newStreamRunnerFactory` (see
+[streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md](streamsup-package-constructing-a-streamrunner-newstreamrunnerfacto.md));
+`Pool.rekeyLocked` (`RotateForNewSession`) re-keyed the pool entry and rebound the conversation **in
+place**, while the surviving runner's already-bound sink kept its construction-time tag — a mapping gone
+stale at rekey (#2010, surfaced by the `slash_command_list`/`model_list` docs re-derivation), not a narrow
+race window. `newStreamRunnerFactory` now mints an atomic-backed `streamSessionTag` that `RestartFresh`
+rotates through `Config.OnSessionRotate`, and both fan-in lanes (`sinkForTag`/`exitForTag`, which `sinkFor`
+now delegates to) read that tag once per event rather than a captured constant — see [Session rotation
+notification](streamsup-package-session-rotation-notification-onsessionrotate.md).
 
 **Single-writer invariant.** Only the drain goroutine ever calls `emitter.Handle`/`flushDelta` — same
 single-Run-goroutine assumption the PTY producer relies on, `-race`-tested by feeding two sessions'

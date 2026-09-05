@@ -60,10 +60,15 @@
   `--resume`. Five milestones: M1 turn-1 liveness (#1153's
   `drainForCompletedTurn`), M2 on-disk id rotation (#1031's actuation
   loop), M3 client-observed `session_transition{clear}` (#1154's
-  `drainForControlEvent`), M4 turn-2 accepted (**ack only** —  a
-  phone-side delta would hang, the drain gate's sink tag is fixed at
-  runner construction and drops post-rotation deltas, #1081 out of
-  scope), M5 a fresh `<idAfter>.jsonl` transcript appears alongside the
+  `drainForControlEvent`), M4 turn-2 accepted (**ack only** at the time this
+  spec shipped — the drain gate's sink tag was fixed at runner construction
+  and dropped every post-rotation delta, #1081 out of scope. #1133 retired
+  that premise: `RestartFresh` now rotates the sink tag with the runner, so
+  a post-rotation delta is deliverable in principle. This file sits behind
+  the `e2e_realclaude` build tag and was deliberately left unrevisited by
+  #1133 — touching it would have pulled a comment edit onto the live gate —
+  so M4 stays ack-only here pending a follow-up that upgrades it to a
+  phone-side delta assertion), M5 a fresh `<idAfter>.jsonl` transcript appears alongside the
   untouched `<idBefore>.jsonl` (the word-independent, fake-unregressable
   fresh-spawn proof; transcript dir located empirically to sidestep the
   #989 `canonicalCase` hazard). Zero production files touched. Split from

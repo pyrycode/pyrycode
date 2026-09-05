@@ -136,6 +136,18 @@ func feedLines(sink *streamTurnSink, sessionID string, lines ...string) {
 	}
 }
 
+// feedLinesTagged is feedLines through the LIVE-tag handle (#1133): the parser is
+// built once, against a tag the caller can rotate between calls, which is the
+// production shape newStreamRunnerFactory installs. feedLines' frozen-string form
+// is kept beside it because most tests never rotate and the constant tag reads
+// better there.
+func feedLinesTagged(sink *streamTurnSink, tag *streamSessionTag, lines ...string) {
+	p := streamsup.NewParser(sink.sinkForTag(tag.ID), discardLogger())
+	for _, ln := range lines {
+		_, _ = p.Write([]byte(ln + "\n"))
+	}
+}
+
 // --- collection helpers ---------------------------------------------------
 
 func collectEnvs(t *testing.T, ch <-chan protocol.Envelope, n int) []protocol.Envelope {
@@ -877,5 +889,214 @@ func TestStreamTurnSink_TurnEndDropWhenFull(t *testing.T) {
 	}
 	if len(attrs) != 3 {
 		t.Errorf("turn-close drop attrs = %v, want exactly event + kind + session_id", attrs)
+	}
+}
+
+// --- #1133: the live session tag -------------------------------------------
+
+// TestStreamSessionTag_RotatesAndRefusesEmpty covers the tag's whole contract in
+// one sequence, because the sequence IS the contract: a refused rotation must leave
+// the previous value rather than reset to the construction one, which a per-case
+// table with a fresh tag each row cannot distinguish.
+//
+// The empty-id refusal is the invariant this type owns — an empty tag matches no
+// bound session (boundSessionIDForActive reports ok == false for an empty
+// CurrentSessionID, and no non-empty active can equal ""), so it would black-hole
+// the conversation's stream for the life of the runner. RestartFresh refuses ""
+// above its own fire site, so production never reaches this guard; it is here
+// because the invariant belongs to the value, not to one of its callers.
+func TestStreamSessionTag_RotatesAndRefusesEmpty(t *testing.T) {
+	t.Parallel()
+	tag := newStreamSessionTag("sess-a")
+	if got := tag.ID(); got != "sess-a" {
+		t.Fatalf("fresh tag ID() = %q, want %q", got, "sess-a")
+	}
+	tag.Rotate("sess-b")
+	if got := tag.ID(); got != "sess-b" {
+		t.Fatalf("after Rotate(%q) ID() = %q, want %q", "sess-b", got, "sess-b")
+	}
+	tag.Rotate("")
+	if got := tag.ID(); got != "sess-b" {
+		t.Fatalf("after the refused Rotate(\"\") ID() = %q, want the previous %q held", got, "sess-b")
+	}
+	tag.Rotate("sess-c")
+	if got := tag.ID(); got != "sess-c" {
+		t.Fatalf("after Rotate(%q) ID() = %q, want %q — the refusal left the tag unusable", "sess-c", got, "sess-c")
+	}
+}
+
+// TestStreamTurnSink_TagRotationRetagsBothLanes is AC1 at the fan-in tier: after a
+// rotation, BOTH lanes newStreamRunnerFactory installs on a runner — the turnevent
+// sink and the child-exit callback — tag their envelopes with the new id.
+//
+// Both lanes in ONE test, against ONE tag, is the assertion rather than a
+// convenience: identical tags on the two lanes are what let the drain's exit arm
+// clear exactly the conversation whose events it is ordered behind, so a rotation
+// that moved one lane and not the other is the defect worth catching, and two
+// separate tests could each pass while that held.
+//
+// No drain runs — the envelopes are read straight off the channel, so the ordering
+// is the send ordering and nothing is timing-dependent.
+func TestStreamTurnSink_TagRotationRetagsBothLanes(t *testing.T) {
+	t.Parallel()
+	sink := newStreamTurnSink(0, discardLogger())
+	tag := newStreamSessionTag("sess-old")
+	events := sink.sinkForTag(tag.ID)
+	exit := sink.exitForTag(tag.ID)
+
+	events(turnevent.TextChunk{MessageID: "m1", Text: "before"})
+	exit()
+	tag.Rotate("sess-new")
+	events(turnevent.TextChunk{MessageID: "m2", Text: "after"})
+	exit()
+
+	want := []streamTurnEnvelope{
+		{sessionID: "sess-old"},
+		{sessionID: "sess-old", exit: true},
+		{sessionID: "sess-new"},
+		{sessionID: "sess-new", exit: true},
+	}
+	for i, w := range want {
+		var got streamTurnEnvelope
+		select {
+		case got = <-sink.ch:
+		default:
+			t.Fatalf("envelope %d never arrived; want session_id=%q exit=%t", i, w.sessionID, w.exit)
+		}
+		if got.sessionID != w.sessionID || got.exit != w.exit {
+			t.Errorf("envelope %d: session_id=%q exit=%t, want session_id=%q exit=%t",
+				i, got.sessionID, got.exit, w.sessionID, w.exit)
+		}
+	}
+}
+
+// TestStreamTurnSink_TagRotationRefusedLeavesEnvelopeTag is AC3 carried through to
+// what actually rides on it: a refused rotation must leave the ENVELOPES tagged as
+// they were, not merely the tag's field. An empty tag would match no bound session,
+// so every later envelope would be dropped at the drain's gate and that
+// conversation would be dark for the life of the runner — the failure mode is
+// silent, which is why it is asserted at the envelope rather than at the accessor.
+func TestStreamTurnSink_TagRotationRefusedLeavesEnvelopeTag(t *testing.T) {
+	t.Parallel()
+	sink := newStreamTurnSink(0, discardLogger())
+	tag := newStreamSessionTag("sess-old")
+	events := sink.sinkForTag(tag.ID)
+
+	tag.Rotate("")
+	events(turnevent.TextChunk{MessageID: "m1", Text: "after the refusal"})
+
+	select {
+	case got := <-sink.ch:
+		if got.sessionID != "sess-old" {
+			t.Errorf("envelope session_id = %q after the refused rotation, want %q held", got.sessionID, "sess-old")
+		}
+	default:
+		t.Fatal("no envelope arrived")
+	}
+}
+
+// TestStreamTurnDrainV2_PostRotationForwardsAndStaleStillDrops is the pair of ACs
+// that have to hold TOGETHER, which is why they are one test: after a rotation the
+// drain forwards the rotated runner's events for the conversation now bound to the
+// new id (AC1 — the dark-stream defect is gone), AND an envelope still carrying the
+// pre-rotation id is still dropped before emitter.Handle with the unchanged
+// content-free record (AC2 — the gate stays fail-closed and was not widened).
+//
+// Asserting only the first would pass against a gate someone had relaxed to a
+// fallback or a prefix match, which is the one change this ticket must not make.
+//
+// The stale envelope is fed LAST and its drop is the barrier: the drain is serial,
+// so observing it proves the forwarded event ahead of it was already handled.
+func TestStreamTurnDrainV2_PostRotationForwardsAndStaleStillDrops(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	active := &stubActiveSession{}
+	active.set("sess-old")
+	bcast := newChanBcast("conn-a")
+	emitter := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	drops := make(chan string, 8)
+	sink := newStreamTurnSink(0, discardLogger())
+	cleanup := startStreamTurnDrainV2(ctx, sink, emitter, active.get, nil,
+		slog.New(dropWatcher{kinds: drops}))
+	defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
+
+	// The rotation, in the production order: the pool rebinds the conversation to
+	// the new id first (startFreshRunner's rotate), then RestartFresh moves the tag.
+	tag := newStreamSessionTag("sess-old")
+	active.set("sess-new")
+	tag.Rotate("sess-new")
+
+	feedLinesTagged(sink, tag, assistantTextLine("m2", "post-rotation"), resultLine)
+
+	got := collectEnvs(t, bcast.pushed, 4)
+	wantTypes := []string{
+		protocol.TypeTurnState,      // responding
+		protocol.TypeAssistantDelta, // post-rotation
+		protocol.TypeTurnEnd,        // end_turn
+		protocol.TypeTurnState,      // idle
+	}
+	if !slices.Equal(envTypes(got), wantTypes) {
+		t.Fatalf("post-rotation envelope types:\n got %v\nwant %v", envTypes(got), wantTypes)
+	}
+	d := decodeDelta(t, got[1])
+	if d.Text != "post-rotation" {
+		t.Errorf("assistant_delta text = %q, want %q", d.Text, "post-rotation")
+	}
+	if d.ConversationID != testConvID {
+		t.Errorf("assistant_delta conversation_id = %q, want %q", d.ConversationID, testConvID)
+	}
+
+	// A producer that has NOT rotated onto the active conversation's bound session
+	// is still refused, and the record is still the content-free not-active one.
+	feedLines(sink, "sess-old", assistantTextLine("m3", "STALE"), resultLine)
+	waitDropKind(t, drops, "turn_end")
+	assertNoPush(t, bcast.pushed)
+}
+
+// TestStreamSessionTag_ConcurrentRotateAndRead exists for the -race run: the tag is
+// written from the dispatch goroutine running RestartFresh and read per event on
+// claude's stdout forwarder goroutine, so an unsynchronised field would be a real
+// data race rather than a theoretical one. The value assertion is deliberately weak
+// — every read must return one of the ids ever stored, never "" — because which id
+// a given read sees is exactly the thing that is racing.
+func TestStreamSessionTag_ConcurrentRotateAndRead(t *testing.T) {
+	t.Parallel()
+	const rounds = 200
+	tag := newStreamSessionTag("sess-0")
+	valid := map[string]bool{"sess-0": true}
+	for i := 1; i <= rounds; i++ {
+		valid[fmt.Sprintf("sess-%d", i)] = true
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 1; i <= rounds; i++ {
+			tag.Rotate(fmt.Sprintf("sess-%d", i))
+		}
+	}()
+	bad := make(chan string, 1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			if got := tag.ID(); !valid[got] {
+				select {
+				case bad <- got:
+				default:
+				}
+			}
+		}
+	}()
+	wg.Wait()
+	select {
+	case got := <-bad:
+		t.Fatalf("concurrent read saw %q, which was never stored", got)
+	default:
 	}
 }
