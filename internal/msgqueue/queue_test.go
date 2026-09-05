@@ -1096,7 +1096,7 @@ func TestQueue_EnqueueDelivery_DeliversPayloadAndSnapshotsText(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- q.Run(ctx) }()
 
-	if id := q.EnqueueDelivery("c", deliveryText, deliveryPayload); id != 1 {
+	if id := q.EnqueueDelivery("c", clientMessageID, deliveryText, deliveryPayload); id != 1 {
 		t.Fatalf("EnqueueDelivery id = %d, want 1", id)
 	}
 	if got := recvWithin(t, f.entered, "deliver"); got != deliveryPayload {
@@ -1177,12 +1177,12 @@ func TestQueue_EnqueueDelivery_RejectedAtCap(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- q.Run(ctx) }()
 
-	if id := q.EnqueueDelivery("c", deliveryText, deliveryPayload); id != 1 {
+	if id := q.EnqueueDelivery("c", clientMessageID, deliveryText, deliveryPayload); id != 1 {
 		t.Fatalf("first EnqueueDelivery id = %d, want 1", id)
 	}
 	recvWithin(t, f.entered, "deliver")
 
-	if id := q.EnqueueDelivery("c", "second", "second payload"); id != 0 {
+	if id := q.EnqueueDelivery("c", clientMessageID, "second", "second payload"); id != 0 {
 		t.Errorf("EnqueueDelivery at cap = %d, want 0 (reject, never drop)", id)
 	}
 	if snap := q.Snapshot("c"); len(snap) != 1 || snap[0].Text != deliveryText {
@@ -1195,5 +1195,157 @@ func TestQueue_EnqueueDelivery_RejectedAtCap(t *testing.T) {
 	cancel()
 	if err := <-runErr; !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
+	}
+}
+
+// clientMessageID is a UUID of the shape both clients mint for a send_message.
+// The queue neither parses nor validates it — it is opaque transit, like text —
+// so the constant exists for readability, not because any shape is required.
+const clientMessageID = "3f2a9c14-7b6e-4d51-9a08-2e5c1b7d4f60"
+
+// TestQueue_EnqueueDelivery_CarriesMessageIDToBothProjections is #2092's core
+// pin. The client's message_id must survive to BOTH engine projections, because
+// they feed the two independent queue_state arms — Snapshot the change-driven
+// push, SnapshotAll the connect-time reconcile — as two separate literals in two
+// separate methods. A test exercising only Snapshot passes against a SnapshotAll
+// that drops the field, which is the exact case a client reconnecting mid-backlog
+// hits.
+//
+// The queue is deliberately never Run, so no drain spawns and the backlog stays
+// readable without gating a delivery.
+func TestQueue_EnqueueDelivery_CarriesMessageIDToBothProjections(t *testing.T) {
+	t.Parallel()
+	q, err := New(Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if id := q.EnqueueDelivery("c", clientMessageID, deliveryText, deliveryPayload); id != 1 {
+		t.Fatalf("EnqueueDelivery id = %d, want 1", id)
+	}
+	if id := q.EnqueueDelivery("c", "second-client-id", "second", "second"); id != 2 {
+		t.Fatalf("second EnqueueDelivery id = %d, want 2", id)
+	}
+
+	want := []string{clientMessageID, "second-client-id"}
+	arms := map[string][]QueuedMessage{
+		"Snapshot":    q.Snapshot("c"),
+		"SnapshotAll": q.SnapshotAll()["c"],
+	}
+	for name, got := range arms {
+		if len(got) != len(want) {
+			t.Fatalf("%s len = %d, want %d", name, len(got), len(want))
+		}
+		for i := range want {
+			if got[i].MessageID != want[i] {
+				t.Errorf("%s[%d].MessageID = %q, want %q", name, i, got[i].MessageID, want[i])
+			}
+			// The queued text must be untouched by the new field: a build that
+			// stored the id into the wrong half would still pass the check above.
+			if got[i].Text == "" {
+				t.Errorf("%s[%d].Text is empty; the message_id carry clobbered the text", name, i)
+			}
+		}
+	}
+}
+
+// TestQueue_Enqueue_MintsNoMessageID pins that the two-argument shim mints
+// nothing. Its empty id is not a sentinel and nothing branches on it — it is the
+// true value for a message no client minted, and it is the same value a client
+// that sent "message_id": "" gets (#2092 AC 3). The two being indistinguishable
+// is correct precisely because nothing reads the field.
+func TestQueue_Enqueue_MintsNoMessageID(t *testing.T) {
+	t.Parallel()
+	q, err := New(Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	q.Enqueue("c", deliveryText)
+
+	snap := q.Snapshot("c")
+	if len(snap) != 1 {
+		t.Fatalf("Snapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].MessageID != "" {
+		t.Errorf("Enqueue MessageID = %q, want %q — the daemon must never mint one", snap[0].MessageID, "")
+	}
+	if snap[0].Text != deliveryText {
+		t.Errorf("Snapshot Text = %q, want %q", snap[0].Text, deliveryText)
+	}
+}
+
+// TestQueue_EnqueueDelivery_MessageIDIsVerbatim pins #2092 AC 3 at the engine:
+// the stored value is byte-for-byte what the caller passed. Not trimmed, not
+// lower-cased, not re-encoded, not defaulted. Each row would survive a build that
+// normalised in a DIFFERENT way, so the set catches trimming, case-folding and
+// empty-defaulting independently rather than relying on one representative value.
+func TestQueue_EnqueueDelivery_MessageIDIsVerbatim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		messageID string
+	}{
+		{"uuid", clientMessageID},
+		{"empty is legal, never replaced", ""},
+		{"surrounding whitespace survives", "  spaced-id\t"},
+		{"case is preserved", "MiXeD-CaSe-ID"},
+		{"non-ascii survives", "идентификатор-メッセージ"},
+		{"quotes and newlines are transit, not syntax", "a\"b\nc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			q, err := New(Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			q.EnqueueDelivery("c", tt.messageID, deliveryText, deliveryPayload)
+
+			snap := q.Snapshot("c")
+			if len(snap) != 1 {
+				t.Fatalf("Snapshot len = %d, want 1", len(snap))
+			}
+			if snap[0].MessageID != tt.messageID {
+				t.Errorf("MessageID = %q, want the caller's bytes %q", snap[0].MessageID, tt.messageID)
+			}
+		})
+	}
+}
+
+// TestQueue_MessageIDAddressesNothing pins #2092 AC 4 behaviourally rather than
+// by assertion. Two messages deliberately share one message_id — legal, since the
+// value is client-chosen and uniqueness is enforced nowhere. Both must enqueue
+// under distinct queued_msg_ids, both must appear, and Remove must still address
+// exactly one by queued_msg_id. A build that deduplicated on message_id, or
+// resolved a removal through it, fails here.
+func TestQueue_MessageIDAddressesNothing(t *testing.T) {
+	t.Parallel()
+	q, err := New(Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if id := q.EnqueueDelivery("c", clientMessageID, "first", "first"); id != 1 {
+		t.Fatalf("first EnqueueDelivery id = %d, want 1", id)
+	}
+	if id := q.EnqueueDelivery("c", clientMessageID, "second", "second"); id != 2 {
+		t.Fatalf("second EnqueueDelivery id = %d, want 2 — a shared message_id must not dedupe", id)
+	}
+	if snap := q.Snapshot("c"); len(snap) != 2 {
+		t.Fatalf("Snapshot len = %d, want 2 — both messages stay queued", len(snap))
+	}
+
+	if !q.Remove("c", 1) {
+		t.Fatal("Remove(c, 1) = false, want true")
+	}
+	snap := q.Snapshot("c")
+	if len(snap) != 1 {
+		t.Fatalf("after Remove, Snapshot len = %d, want 1", len(snap))
+	}
+	if snap[0].ID != 2 || snap[0].Text != "second" {
+		t.Errorf("survivor = {ID:%d Text:%q}, want the second message — Remove addressed the wrong item", snap[0].ID, snap[0].Text)
+	}
+	if snap[0].MessageID != clientMessageID {
+		t.Errorf("survivor MessageID = %q, want %q", snap[0].MessageID, clientMessageID)
 	}
 }

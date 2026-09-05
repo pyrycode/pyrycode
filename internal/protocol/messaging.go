@@ -324,11 +324,27 @@ type ModalDismissedPayload struct {
 // QueuedItem is one element of QueueStatePayload.Queued — the wire form of
 // msgqueue.QueuedMessage (the producer #722 maps QueuedMessage.ID → QueuedMsgID).
 // Named for its role in the array (the ModalOption precedent), not after the
-// engine type, to keep it wire-scoped. Text is untrusted, phone-originated
-// transit content (see the producer/handler #722/#723 for the never-log
-// discipline).
+// engine type, to keep it wire-scoped.
+//
+// TWO fields are untrusted, client-originated transit content, not one: Text and
+// MessageID (see the producer/handler #722/#723 for the never-log discipline).
+// The two ids sit adjacent but their provenance is opposite, and nothing in the
+// type says so — QueuedMsgID is the daemon's own per-conversation counter, while
+// MessageID is a string the client chose. Do not read them as a matched pair.
+//
+// MessageID (#2092) is the message_id from the send_message that produced this
+// item, relayed byte-for-byte: never trimmed, lower-cased or re-encoded, "" when
+// the client sent none, and never minted by the daemon. It exists so a client can
+// merge this row with the optimistic echo it drew when the operator hit send —
+// in interactive mode no user-message event is streamed, so that echo is the
+// client's only record of its own message. It addresses nothing: dequeue_message
+// still resolves conversation_id + queued_msg_id, and no code path reads this to
+// route, authorize, match or dedupe. queue_state fans out to EVERY interactive
+// connection, so a client sees ids it never minted and must merge only against
+// echoes it minted itself — uniqueness across devices is enforced nowhere.
 type QueuedItem struct {
 	QueuedMsgID uint64    `json:"queued_msg_id"`
+	MessageID   string    `json:"message_id"`
 	Text        string    `json:"text"`
 	TS          time.Time `json:"ts"`
 }

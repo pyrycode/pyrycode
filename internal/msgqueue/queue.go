@@ -44,7 +44,11 @@
 // payload alongside it (EnqueueDelivery), composed by the send_message handler
 // and possibly naming an on-host path; it gets the same treatment and is the one
 // value that must never reach a client, which QueuedMessage's shape enforces
-// rather than a rule. NEITHER IS EVER LOGGED at any level (mirrors
+// rather than a rule. Since #2092 a message also carries the CLIENT'S OWN
+// message_id, which is untrusted in exactly the same way but travels the opposite
+// direction — it is echoed back to every paired device on purpose, as the key a
+// client merges its optimistic echo on. NONE OF THE THREE IS EVER LOGGED at any
+// level (mirrors
 // internal/relay/handlers/send_message.go's discipline); the drain's
 // warn-on-error logs only conversation_id, the queued message id, and the
 // enqueue timestamp. convID is used solely as a map key; validating/resolving it
@@ -170,19 +174,36 @@ type Config struct {
 
 // QueuedMessage is the engine-side projection of ADR 025's
 // {queued_msg_id, text, ts} record (the producer maps ID -> queued_msg_id). It
-// is the ordered element Snapshot returns. Text is untrusted, phone-originated
-// transit content: the consumer must never log it and must only surface it to
-// the authorized conversation it belongs to.
+// is the ordered element Snapshot returns.
+//
+// TWO fields are untrusted, phone-originated content, not one: Text and
+// MessageID. The consumer must never log either and must only surface them to
+// the authorized conversation they belong to. ID is the daemon's own
+// per-conversation counter and is the odd one out — do not read MessageID as its
+// sibling because both are ids. MessageID is the client's own id for the
+// message, carried since #2092 so a client can recognise a queued item as one of
+// its own sent messages and draw it once instead of twice; it is relayed
+// verbatim, is "" when the client sent none, and the daemon never mints one.
+// Nothing reads it — it addresses, authorizes, matches and dedupes nothing.
 type QueuedMessage struct {
-	ID   uint64
-	Text string
-	TS   time.Time
+	ID        uint64
+	MessageID string
+	Text      string
+	TS        time.Time
 }
 
 // queued is one buffered inbound message: the stable per-conversation id, the
-// untrusted text a client reads back, the payload actually delivered to claude,
-// and the enqueue timestamp (ADR 025's {queued_msg_id, text, ts}). Both strings
-// are opaque transit and neither is ever logged.
+// client's own id for the message, the untrusted text a client reads back, the
+// payload actually delivered to claude, and the enqueue timestamp (ADR 025's
+// {queued_msg_id, text, ts}). All three strings are opaque transit and none is
+// ever logged.
+//
+// messageID is the message_id from the send_message that produced this record
+// (#2092). It exists so a client can correlate this item with the optimistic
+// echo it posted when the operator hit send — in interactive mode the daemon
+// streams no user-message event, so that echo is the client's only record of its
+// own message, and without a shared key the client draws the message twice.
+// Nothing here reads it: it is stored, projected, and read for nothing.
 //
 // text and delivery differ only for a message whose client named stored
 // attachments (#2038): the send_message handler composes a prompt naming each
@@ -195,10 +216,11 @@ type QueuedMessage struct {
 // Enqueue passes text explicitly, so no branch anywhere distinguishes the two
 // fields' provenance and drain stays one unconditional expression.
 type queued struct {
-	id       uint64
-	text     string
-	delivery string
-	ts       time.Time
+	id        uint64
+	messageID string
+	text      string
+	delivery  string
+	ts        time.Time
 }
 
 // convQueue is one conversation's FIFO plus its id counter and the drain-state
@@ -294,11 +316,18 @@ func New(cfg Config) (*Queue, error) {
 // maps a 0 return to a retryable "backlog full" reply so the phone re-issues
 // later.
 //
-// It is EnqueueDelivery with the two halves equal: what a client reads back is
-// byte-for-byte what claude receives. Every caller but the attachment-composing
-// one wants that, which is why this signature is the one that did not change.
+// It is EnqueueDelivery with the two halves equal and no client message id: what
+// a client reads back is byte-for-byte what claude receives. Every caller but the
+// attachment-composing one wants that, which is why this signature is the one
+// that did not change.
+//
+// The empty message id is not a sentinel and nothing branches on it. It is the
+// true value — a message enqueued through this path was not minted by a client,
+// so it carries no client id — and it is the same value a client that sent
+// "message_id": "" gets. The two being indistinguishable is correct precisely
+// because nothing reads the field.
 func (q *Queue) Enqueue(convID, text string) uint64 {
-	return q.EnqueueDelivery(convID, text, text)
+	return q.EnqueueDelivery(convID, "", text, text)
 }
 
 // EnqueueDelivery appends a message whose queued TEXT and delivered PAYLOAD
@@ -312,6 +341,17 @@ func (q *Queue) Enqueue(convID, text string) uint64 {
 // send_message handler composing a prompt that names an attachment's on-host
 // path (#2038).
 //
+// messageID is the client's own id for this message, stored on the record and
+// projected beside text (#2092). It is the correlation key a client needs to
+// merge the queued row with the optimistic echo it already drew. It is relayed
+// verbatim — never trimmed, normalised, defaulted or minted — and reaches
+// neither claude (drain delivers delivery, never this) nor any log line.
+//
+// PARAMETER ORDER: the two identifiers lead, then the content pair. All four are
+// strings, so a transposition compiles; grouping them this way keeps the
+// text/delivery adjacency — the pair whose difference carries the security
+// meaning below — unbroken rather than threading an unrelated id through it.
+//
 // SECURITY, and it is the reason this method exists rather than a wider Enqueue.
 // The delivery payload may carry a HOST PATH, which docs/protocol-mobile.md
 // § Error codes forbids putting on the wire from the other side (neither
@@ -319,9 +359,16 @@ func (q *Queue) Enqueue(convID, text string) uint64 {
 // layout). QueuedMessage carries no delivery field, so Snapshot and SnapshotAll
 // are structurally incapable of projecting one and no consumer can leak it by
 // omission — a future consumer that wants the path on the wire has to widen the
-// exported type to get it. Both strings stay opaque transit and neither is ever
-// logged, delivery least of all.
-func (q *Queue) EnqueueDelivery(convID, text, delivery string) uint64 {
+// exported type to get it. All three strings stay opaque transit and none is
+// ever logged, delivery least of all.
+//
+// #2092 widened QueuedMessage for messageID, which is the deliberate act that
+// note describes — and the distinction that keeps the property intact is
+// PROVENANCE, not shape: delivery is daemon-composed and may name an on-host
+// path, while messageID is client-authored and is being returned to the trust
+// domain that authored it. Widening for the second is not licence to widen for
+// the first.
+func (q *Queue) EnqueueDelivery(convID, messageID, text, delivery string) uint64 {
 	q.mu.Lock()
 	c := q.convs[convID]
 	if c == nil {
@@ -342,7 +389,7 @@ func (q *Queue) EnqueueDelivery(convID, text, delivery string) uint64 {
 	}
 	id := c.nextID
 	c.nextID++
-	c.items = append(c.items, queued{id: id, text: text, delivery: delivery, ts: time.Now()})
+	c.items = append(c.items, queued{id: id, messageID: messageID, text: text, delivery: delivery, ts: time.Now()})
 
 	q.maybeSpawnDrainLocked(convID, c)
 	q.mu.Unlock()
@@ -373,7 +420,7 @@ func (q *Queue) Snapshot(convID string) []QueuedMessage {
 	}
 	out := make([]QueuedMessage, len(c.items))
 	for i := range c.items {
-		out[i] = QueuedMessage{ID: c.items[i].id, Text: c.items[i].text, TS: c.items[i].ts}
+		out[i] = QueuedMessage{ID: c.items[i].id, MessageID: c.items[i].messageID, Text: c.items[i].text, TS: c.items[i].ts}
 	}
 	return out
 }
@@ -404,7 +451,7 @@ func (q *Queue) SnapshotAll() map[string][]QueuedMessage {
 		}
 		msgs := make([]QueuedMessage, len(c.items))
 		for i := range c.items {
-			msgs[i] = QueuedMessage{ID: c.items[i].id, Text: c.items[i].text, TS: c.items[i].ts}
+			msgs[i] = QueuedMessage{ID: c.items[i].id, MessageID: c.items[i].messageID, Text: c.items[i].text, TS: c.items[i].ts}
 		}
 		out[convID] = msgs
 	}

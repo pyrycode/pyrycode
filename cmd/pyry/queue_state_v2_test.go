@@ -232,12 +232,25 @@ func TestToQueueStatePayload(t *testing.T) {
 			name:   "maps id and preserves order",
 			convID: "c",
 			items: []msgqueue.QueuedMessage{
-				{ID: 7, Text: "first", TS: ts1},
-				{ID: 9, Text: "second", TS: ts2},
+				{ID: 7, MessageID: "mid-7", Text: "first", TS: ts1},
+				{ID: 9, MessageID: "mid-9", Text: "second", TS: ts2},
 			},
 			want: []protocol.QueuedItem{
-				{QueuedMsgID: 7, Text: "first", TS: ts1},
-				{QueuedMsgID: 9, Text: "second", TS: ts2},
+				{QueuedMsgID: 7, MessageID: "mid-7", Text: "first", TS: ts1},
+				{QueuedMsgID: 9, MessageID: "mid-9", Text: "second", TS: ts2},
+			},
+		},
+		{
+			// A message enqueued through the two-argument Enqueue shim carries no
+			// client id, and the mapping must relay that empty value rather than
+			// substituting anything (#2092 AC 3).
+			name:   "empty message_id maps across unchanged",
+			convID: "c",
+			items: []msgqueue.QueuedMessage{
+				{ID: 1, MessageID: "", Text: "no client id", TS: ts1},
+			},
+			want: []protocol.QueuedItem{
+				{QueuedMsgID: 1, MessageID: "", Text: "no client id", TS: ts1},
 			},
 		},
 	}
@@ -256,6 +269,7 @@ func TestToQueueStatePayload(t *testing.T) {
 			}
 			for i := range got.Queued {
 				if got.Queued[i].QueuedMsgID != tt.want[i].QueuedMsgID ||
+					got.Queued[i].MessageID != tt.want[i].MessageID ||
 					got.Queued[i].Text != tt.want[i].Text ||
 					!got.Queued[i].TS.Equal(tt.want[i].TS) {
 					t.Errorf("queued[%d] = %+v, want %+v", i, got.Queued[i], tt.want[i])
@@ -550,7 +564,7 @@ func TestQueueState_ComposedDeliveryNeverReachesTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if id := q.EnqueueDelivery(convID, userText, composed); id != 1 {
+	if id := q.EnqueueDelivery(convID, "mid-attach", userText, composed); id != 1 {
 		t.Fatalf("EnqueueDelivery id = %d, want 1", id)
 	}
 
@@ -584,6 +598,75 @@ func TestQueueState_ComposedDeliveryNeverReachesTheWire(t *testing.T) {
 		}
 		if strings.Contains(string(wire), hostPath) {
 			t.Errorf("%s: wire payload discloses the host path:\n%s", name, wire)
+		}
+	}
+}
+
+// TestQueueState_ClientMessageIDReachesBothArms covers #2092 AC 1 and AC 2
+// together, on the two read-back paths a client has: the change-driven
+// queue_state push (Snapshot → toQueueStatePayload) and the connect-time
+// reconcile (outstandingQueues → SnapshotAll → the same mapping). Both must name
+// the identical client-minted message_id.
+//
+// Asserting both is the point rather than belt-and-braces. The arms diverge
+// upstream of the shared mapping — Snapshot and SnapshotAll are two separate
+// projection loops in msgqueue — so a test exercising only the push passes
+// against a SnapshotAll that drops the field, and the client that would notice is
+// exactly the one reconnecting mid-backlog, which is the case the merge has to
+// survive.
+//
+// The queue is deliberately never Run, so nothing drains and the backlog stays
+// readable.
+func TestQueueState_ClientMessageIDReachesBothArms(t *testing.T) {
+	t.Parallel()
+	const (
+		convID    = "conv-merge"
+		messageID = "3f2a9c14-7b6e-4d51-9a08-2e5c1b7d4f60"
+		userText  = "queued while claude was busy"
+	)
+
+	q, err := msgqueue.New(msgqueue.Config{Deliver: func(context.Context, string, []byte) error { return nil }})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if id := q.EnqueueDelivery(convID, messageID, userText, userText); id != 1 {
+		t.Fatalf("EnqueueDelivery id = %d, want 1", id)
+	}
+
+	reconciled := outstandingQueues(q)()
+	if len(reconciled) != 1 {
+		t.Fatalf("outstandingQueues returned %d payloads, want 1", len(reconciled))
+	}
+	arms := map[string]protocol.QueueStatePayload{
+		"queue_state push":       toQueueStatePayload(convID, q.Snapshot(convID)),
+		"connect-time reconcile": reconciled[0],
+	}
+
+	for name, payload := range arms {
+		if payload.ConversationID != convID {
+			t.Errorf("%s: ConversationID = %q, want %q", name, payload.ConversationID, convID)
+		}
+		if len(payload.Queued) != 1 {
+			t.Fatalf("%s: Queued len = %d, want 1", name, len(payload.Queued))
+		}
+		if payload.Queued[0].MessageID != messageID {
+			t.Errorf("%s: MessageID = %q, want the client's own id %q",
+				name, payload.Queued[0].MessageID, messageID)
+		}
+		// The daemon-side id keeps addressing the item; message_id is a
+		// correlation key and replaces nothing (#2092 AC 4).
+		if payload.Queued[0].QueuedMsgID != 1 {
+			t.Errorf("%s: QueuedMsgID = %d, want 1", name, payload.Queued[0].QueuedMsgID)
+		}
+		// Marshalled, because the wire is what the ACs are about: a mapping that
+		// dropped the tag, or an omitempty that elided an empty id, has to fail
+		// here and not only in the struct comparison above.
+		wire, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("%s: marshal payload: %v", name, err)
+		}
+		if !strings.Contains(string(wire), `"message_id":"`+messageID+`"`) {
+			t.Errorf("%s: wire payload does not name the client's message_id:\n%s", name, wire)
 		}
 	}
 }

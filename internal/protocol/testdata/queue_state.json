@@ -1,1 +1,1 @@
-{"id":601,"type":"queue_state","ts":"2026-06-23T10:00:00Z","payload":{"conversation_id":"conv-1","queued":[{"queued_msg_id":1,"text":"first queued","ts":"2026-06-23T09:59:58Z"},{"queued_msg_id":2,"text":"second queued","ts":"2026-06-23T09:59:59Z"}]}}
+{"id":601,"type":"queue_state","ts":"2026-06-23T10:00:00Z","payload":{"conversation_id":"conv-1","queued":[{"queued_msg_id":1,"message_id":"3f2a9c14-7b6e-4d51-9a08-2e5c1b7d4f60","text":"first queued","ts":"2026-06-23T09:59:58Z"},{"queued_msg_id":2,"message_id":"","text":"second queued","ts":"2026-06-23T09:59:59Z"}]}}

@@ -635,18 +635,27 @@ func TestQueueStatePayload_RoundTrip(t *testing.T) {
 	if len(payload.Queued) != 2 {
 		t.Fatalf("Queued: got len %d, want 2", len(payload.Queued))
 	}
+	// Item 2's message_id is deliberately "" — the client-minted id is relayed
+	// verbatim and the daemon never mints one, so an empty id is a legal value
+	// rather than a missing field (#2092 AC 3). It is also the omitempty pin: the
+	// round trip below re-marshals the payload STRUCT, so an omitempty on
+	// MessageID would drop this key and redden the byte comparison.
 	wantItems := []struct {
-		id   uint64
-		text string
-		ts   time.Time
+		id        uint64
+		messageID string
+		text      string
+		ts        time.Time
 	}{
-		{1, "first queued", time.Date(2026, 6, 23, 9, 59, 58, 0, time.UTC)},
-		{2, "second queued", time.Date(2026, 6, 23, 9, 59, 59, 0, time.UTC)},
+		{1, "3f2a9c14-7b6e-4d51-9a08-2e5c1b7d4f60", "first queued", time.Date(2026, 6, 23, 9, 59, 58, 0, time.UTC)},
+		{2, "", "second queued", time.Date(2026, 6, 23, 9, 59, 59, 0, time.UTC)},
 	}
 	for i, want := range wantItems {
 		got := payload.Queued[i]
 		if got.QueuedMsgID != want.id {
 			t.Errorf("Queued[%d].QueuedMsgID: got %d, want %d", i, got.QueuedMsgID, want.id)
+		}
+		if got.MessageID != want.messageID {
+			t.Errorf("Queued[%d].MessageID: got %q, want %q", i, got.MessageID, want.messageID)
 		}
 		if got.Text != want.text {
 			t.Errorf("Queued[%d].Text: got %q, want %q", i, got.Text, want.text)
