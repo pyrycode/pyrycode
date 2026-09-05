@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -1135,6 +1136,103 @@ const maxSlashCommandAliasCount = 8
 // maxTaskRosterEntries' accepted trade, but the FIGURE is this struct's own.
 const maxSlashCommandListEntries = 128
 
+// maxModelWindowID caps the model id of one turnevent.ModelWindow — the key
+// claude uses in the `result` line's modelUsage map. Applied at CONSTRUCTION like
+// every cap above, so an oversized value never enters the event stream, the push
+// queue, or any log.
+//
+// MEASURED, not chosen, and against a wider base than the caps above it: every
+// modelUsage in the tree, re-counted 2026-09-05 — 55 `result` objects across 30
+// committed capture files spanning five claude versions (2.1.143, 2.1.158,
+// 2.1.199, 2.1.220, 2.1.239). The longest id is 25 bytes
+// (claude-haiku-4-5-20251001), so 256 is roughly 10.2x the observation. That is
+// maxModelField's and maxModelResolved's multiple over the SAME identifier shape,
+// and for their reason verbatim: room for a naming scheme claude has not shipped
+// yet, and still a hard cut on anything that has stopped being an identifier.
+//
+// A separate constant even though it currently equals maxModelField,
+// maxModelResolved and maxModelValue: maxRateLimitField's paragraph applies —
+// they bound different fields for different reasons, and folding them into one
+// would make a future change to one budget silently move this one.
+//
+// OVERFLOW DROPS THE ENTRY RATHER THAN TRUNCATING IT, which is where this cap
+// parts company with all three of those siblings, and the departure is the whole
+// point rather than an inconsistency. truncateField is deliberately NOT called
+// here. #2102 JOINS on this id, so a cut id names no model and matches nothing —
+// a consumer holding it cannot tell a truncation from a model it has never heard
+// of, where an absent entry it can see. A mangled identifier is the cheaper
+// failure when the field is DISPLAYED, which is what the sibling caps bound; it
+// is the more expensive one when the field is a KEY. There is consequently no
+// TruncatedFields on this shape at all: the report is
+// turnevent.TurnEnd.DroppedModelWindows, and its doc states why one counter
+// covers every cause.
+//
+// No RATE bound, and none is owed: a `result` line is the turn boundary, so this
+// fires once per TURN — maxModelField's own situation, below the ~1-2 per turn
+// that minThinkingTokensPerEvent's gate already accepts.
+const maxModelWindowID = 256
+
+// maxModelWindowEntries caps how many entries turnevent.TurnEnd.ModelWindows
+// carries. The family's third cardinality bound, after maxTaskRosterEntries and
+// maxModelListEntries, and it follows their doctrine: a per-entry text cap alone
+// leaves the total a function of a number claude chooses, so the count bound
+// supplies the missing factor. Overflow is REPORTED
+// (turnevent.TurnEnd.DroppedModelWindows), not silent.
+//
+// The number is DERIVED:
+//
+//   - Multiplicand: 256 bytes per entry (maxModelWindowID). The int beside it is
+//     DAEMON-decoded and carries none of claude's bytes, so it is excluded exactly
+//     as maxModelListEntries excludes turnevent.ModelOption.SupportsAutoMode.
+//   - Ceiling: maxUnrecognizedRaw's whole-line 16 KiB, at 1/4 of it — the package's
+//     ordering rule that a whole KNOWN event must not approach the cap on an entire
+//     UNKNOWN line, measured retained-against-retained. The fraction is RE-DERIVED
+//     for this shape rather than inherited from the roster's 1/2 or the model
+//     list's 5/8, which is ADR 036's rule. 16 * 256 = 4096 = 16384/4 exactly.
+//   - Floor: the observed map is TWO entries, in all 55 of them, across all five
+//     versions. But entries are not models: an alias pair names ONE model twice
+//     (claude-haiku-4-5 beside claude-haiku-4-5-20251001, identical window) in 27
+//     of the 30 capture files, so entries run at roughly twice the models a turn
+//     touched. 16 entries is therefore about 8 models in one turn, against an
+//     observation of at most two.
+//   - Product: 16 * 256 = 4096 bytes = 4 KiB retained. NO application-envelope
+//     percentage is quoted, and its absence is deliberate rather than an omission:
+//     turnbridge's MapEvent builds protocol.TurnEndPayload field by field, so this
+//     event is unreachable from the v2 envelope by construction and a percentage of
+//     it would measure a bound against a wire this data never touches. If #2102
+//     publishes the field, that arithmetic is owed THERE.
+//
+// A POWER OF TWO, matching every constant in this family except
+// maxModelListEntries, whose own doc explains why it alone is decimal.
+//
+// NOT 4. Twice an observation of two is not room, and under the alias doubling 4
+// entries is only 2 MODELS — a turn that spawns a subagent on a third model is
+// claude's ORDINARY output and would be cut. That is maxModelListEntries' NOT 8
+// failure one scale down: a cap firing on the everyday case.
+//
+// NOT 8. Four models. A turn using the session model, a haiku helper and two
+// subagent models, each aliased, is exactly 8 — a cap sitting ON the boundary of
+// plausible ordinary output rather than above it. The doubling is what makes 8
+// read tighter here than the same number reads on a list of models.
+//
+// NOT 32. 8192 bytes is half of maxUnrecognizedRaw, which is maxTaskRosterEntries'
+// fraction, and nothing observed asks for it. Taking half the unknown-line budget
+// for a field observed at two inverts the ordering rule the ceiling comes from.
+//
+// THE TRANSIENT FIGURE IS THIS SHAPE'S OWN, computed rather than inherited, and it
+// is the one place this decode costs more than its siblings. Both caps are applied
+// AFTER json.Unmarshal, so a hostile map is materialised before any of it is
+// bounded — maxTaskRosterEntries' accepted trade. defaultMaxParseBuf caps the whole
+// line at 4 MiB before the decoder sees it, and the densest window-CARRYING entry
+// is roughly `"aaaa":{"contextWindow":1},` at ~26 bytes, so one pathological line
+// is order 10^5 decoded entries. Unlike its siblings this shape then SORTS the
+// survivors, which is the one super-linear step in the package's decode paths: an
+// order-10^5-element slice at O(n log n) on the parser's reader goroutine. It is a
+// constant-factor multiple on top of the json.Unmarshal spike the family already
+// accepts, bounded by defaultMaxParseBuf and by nothing else, and reclaimed with
+// the line. What is RETAINED is only the capped result.
+const maxModelWindowEntries = 16
+
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
 // or a prefix: it is the SHARED PRECONDITION of both of emitModelList's emits, and
@@ -1531,6 +1629,44 @@ type systemTaskStartedLine struct {
 type systemTaskUpdatedLine struct {
 	TaskID string          `json:"task_id"`
 	Patch  json.RawMessage `json:"patch"`
+}
+
+// resultLine is the decoded payload of one `result` line's modelUsage map — the
+// per-model context windows claude reports at every turn end (#2101). Kept
+// separate from streamLine, which is the line-level SEGMENTATION struct and stays
+// at Type/Subtype/Message; systemTaskStartedLine's doc argues the boundary and
+// TestStreamLine_StaysSegmentationOnly enforces it.
+//
+// The SEPARATION is also what makes AC 4 structural rather than careful. The turn
+// boundary and its reason come from the already-decoded streamLine; this is a
+// SECOND, independent unmarshal off the same bytes, so a modelUsage of a hostile
+// type — a number, a string, an array, an object whose values are not objects —
+// fails THIS decode and never the line. There is no input that can both fail here
+// and disturb segmentation.
+//
+// The captured line carries twenty-two keys; one is declared. Absence from the
+// DECODE TARGET is a stronger guarantee than a test sweep, because a field that is
+// never declared cannot leak.
+type resultLine struct {
+	ModelUsage map[string]resultModelUsage `json:"modelUsage"`
+}
+
+// resultModelUsage is one entry of that map. The captured entry carries three
+// keys and one is declared: maxOutputTokens is nothing this daemon reads, and
+// canonicalModel is VERSION-DEPENDENT — present in the v2.1.220 and v2.1.239
+// captures, absent in the v2.1.143 / v2.1.158 / v2.1.199 ones — so declaring it
+// would invite a later reader to depend on a key three of the five observed
+// claude versions do not send. See turnevent.ModelWindow's doc, which states the
+// same omission from the other side of the boundary.
+//
+// ContextWindow is an int and SIGNED on purpose. A negative reading has to be
+// observable for decodeModelWindows to reject it; an unsigned type would wrap one
+// into an enormous positive window and report it as fact. An absent key, a JSON
+// null and an explicit 0 all decode to 0 here, which is deliberate — the rejection
+// below collapses all three into one reading, none of them being a window a
+// consumer could size anything against.
+type resultModelUsage struct {
+	ContextWindow int `json:"contextWindow"`
 }
 
 // systemBackgroundTasksLine is the decoded payload of one
@@ -2524,8 +2660,19 @@ func (p *Parser) consumeLine(line []byte) {
 		// minThinkingTokensPerEvent-1 tokens early — and a second reset path for it
 		// would buy a second boundary to keep correct, which is what having one
 		// boundary avoids.
+		//
+		// The line bytes ride along so decodeModelWindows can read the modelUsage
+		// map, a sibling of `subtype` rather than a field inside it — the shape
+		// emitUser and emitRateLimit both take the raw line for. The call sits
+		// BELOW the accumulator reset and its result is passed INTO the same emit,
+		// so no decode outcome can reorder, duplicate or suppress the boundary.
 		p.thinkingSinceEmit = 0
-		p.emit(turnevent.TurnEnd{Reason: resultTurnEndReason(sl.Subtype)})
+		windows, droppedWindows := decodeModelWindows(line)
+		p.emit(turnevent.TurnEnd{
+			Reason:              resultTurnEndReason(sl.Subtype),
+			ModelWindows:        windows,
+			DroppedModelWindows: droppedWindows,
+		})
 	case "rate_limit_event":
 		// Its own arm rather than an ignoredLineTypes member with a subtype
 		// carve-out (#1404). ignoredLineTypes is documented as top-level types only,
@@ -4107,6 +4254,96 @@ func resultTurnEndReason(subtype string) turnevent.TurnEndReason {
 	default:
 		return turnevent.TurnEndReasonEndTurn
 	}
+}
+
+// decodeModelWindows reads the modelUsage map off one `result` line and returns
+// the bounded, sorted per-model windows it reports plus how many entries claude
+// sent that the result does NOT carry (#2101). A pure function of the bytes: no
+// receiver, no parser state read or written, nothing logged on any path.
+//
+// IT CANNOT DISTURB THE TURN BOUNDARY, which is the property AC 4 rests on and
+// the reason this is a second unmarshal rather than a wider streamLine. The
+// reason and the emit are the caller's; every failure here returns a value, never
+// an error, and (nil, 0) is a complete answer to "claude said nothing usable".
+//
+// NOTHING IS LOGGED, on any path, and the decode error in particular is DISCARDED
+// rather than logged — emitModelList's undecodable arm argues it at length:
+// encoding/json QUOTES the offending input bytes into its error text, so `"err",
+// err` would route claude's own model ids into the daemon log through a channel
+// no per-attribute check can see. Logging nothing at all is what makes "no model
+// id and no window value reaches a log line" structural here rather than a rule
+// each future attribute has to be checked against.
+//
+// THE ORDER OF THE THREE BOUNDS IS LOAD-BEARING, and it is content-filters-first
+// deliberately. claude's output is untrusted input to this parser. Were the
+// cardinality cap taken first, a map padded with unusable entries could evict the
+// real readings before either was examined; filtering first makes that padding
+// inert. Padding with plausible entries can still evict, which is inherent to any
+// cardinality bound — what answers that is the cap's headroom over the observed
+// two and the fact that the eviction is REPORTED rather than silent.
+func decodeModelWindows(line []byte) ([]turnevent.ModelWindow, int) {
+	var rl resultLine
+	if err := json.Unmarshal(line, &rl); err != nil {
+		return nil, 0
+	}
+	// Absent, null and {} land here as one reading, and so does a map whose values
+	// claude changed the shape of — that fails the unmarshal above. The count is 0
+	// on every one of them BY CONSTRUCTION: no entry decoded, so none was dropped.
+	if len(rl.ModelUsage) == 0 {
+		return nil, 0
+	}
+	windows := make([]turnevent.ModelWindow, 0, len(rl.ModelUsage))
+	var dropped int
+	for id, entry := range rl.ModelUsage {
+		// Both rejections DROP the entry rather than repairing it, and both are
+		// counted into the one total turnevent.TurnEnd.DroppedModelWindows carries.
+		// ContextWindow <= 0 collapses absent, null, an explicit 0 and a negative
+		// into one reading — none of them is a window anything could be sized
+		// against. The id bound is maxModelWindowID's departure from truncateField,
+		// argued at that constant: a cut id names no model.
+		if entry.ContextWindow <= 0 || len(id) > maxModelWindowID {
+			dropped++
+			continue
+		}
+		windows = append(windows, turnevent.ModelWindow{
+			// claude's key VERBATIM: no lowercasing, no alias expansion, no
+			// date-stamping, no family mapping, no lookup against any published model
+			// list (#1600's rule). The cap is the only judgement made about it.
+			ModelID:      id,
+			WindowTokens: entry.ContextWindow,
+		})
+	}
+	// THE SORT IS WHAT MAKES THE CUT BELOW REPRODUCIBLE, and it is why this shape
+	// returns a slice rather than claude's map. Go randomises map iteration, so
+	// capping an unordered collection would make WHICH entries survive differ
+	// between two runs on identical bytes. The list-shaped siblings truncate "from
+	// the tail, claude's order preserved" because a JSON array HAS an order; an
+	// object has none, so there is nothing to preserve and the daemon's own total
+	// order is the only deterministic choice available. Ids are map keys and
+	// therefore unique, so no two entries tie and stability is not at issue.
+	slices.SortFunc(windows, func(a, b turnevent.ModelWindow) int {
+		return strings.Compare(a.ModelID, b.ModelID)
+	})
+	if len(windows) > maxModelWindowEntries {
+		dropped += len(windows) - maxModelWindowEntries
+		// CLONED, NOT RESLICED, and this is the one place this function departs from
+		// emitModelList's cut. That one reslices because its result is iterated and
+		// discarded inside the call; this one RETURNS the slice, and it rides the
+		// event for the event's whole life. A bare windows[:cap] would keep the
+		// decoder's full backing array reachable — every entry past the cap, and every
+		// model id string in it — which would make maxModelWindowEntries' claim that
+		// "what is RETAINED is only the capped result" false. The clone is on the
+		// over-cap path only; the ordinary two-entry map allocates once, exactly.
+		windows = slices.Clone(windows[:maxModelWindowEntries])
+	}
+	if len(windows) == 0 {
+		// A map whose every entry was rejected reads as an absent one — nil, per
+		// turnevent.TurnEnd.ModelWindows' five-shape collapse. The COUNT still
+		// reports, so "claude sent entries and none was usable" stays distinguishable
+		// from "claude sent none" without a second field to say so.
+		return nil, dropped
+	}
+	return windows, dropped
 }
 
 // emitAssistant maps one assistant message's content blocks. Unlike mapper.go

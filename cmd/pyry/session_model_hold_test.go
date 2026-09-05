@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 
@@ -143,7 +144,14 @@ func TestSessionModelHold_OtherVariantsChangeNothing(t *testing.T) {
 			if len(seen) != 1 {
 				t.Fatalf("downstream saw %d events, want 1", len(seen))
 			}
-			if seen[0] != tt.ev {
+			// DeepEqual rather than !=, and not as a matter of taste: these are
+			// turnevent.Event INTERFACE values, so == dispatches to the dynamic type's
+			// comparison and PANICS on any variant carrying a slice. ModelList has
+			// carried one since #1812 and only escaped this row by not being in the
+			// table; TurnEnd joined it in #2101 and turned the row into a panic that
+			// killed the parallel subtests around it. A table of variants cannot use
+			// == at all — the next variant to grow a slice would reintroduce it.
+			if !reflect.DeepEqual(seen[0], tt.ev) {
 				t.Errorf("downstream saw %#v, want the event forwarded unchanged", seen[0])
 			}
 		})

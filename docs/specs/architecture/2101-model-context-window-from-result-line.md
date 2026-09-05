@@ -175,3 +175,21 @@ Each is resolved in Phase B and recorded under `## Revisions` if it changes anyt
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — Phase B
+
+**1. § 1's comparability claim was wrong, and the correction is the ticket's main lesson.** The plan said "Nothing compares it: the only `TurnEnd{}` in the tree is the `var _ Event = TurnEnd{}` assertion." Measured false at the first cross-package run: `cmd/pyry`'s `TestSessionModelHold_OtherVariantsChangeNothing` compares two `turnevent.Event` **interface** values with `!=`, which dispatches to the dynamic type's comparison and panics once that type carries a slice — taking the parallel subtests around it down with it. The Phase-A sweep looked for source shaped like `== turnevent.TurnEnd`, and an interface-typed comparison (`seen[0] != tt.ev`) matches no such pattern, so a grep for the *type name* could never have found it. `ModelList` had carried a slice since #1812 and escaped only by not being in that table. Fixed in the test with `reflect.DeepEqual`, with a comment stating that a table of variants cannot use `==` at all. Test-only, and caused by this change rather than pre-existing.
+
+**2. The cardinality table was rewritten with literals, because as planned it pinned nothing.** § Testing said the exactly-at-cap row pins a cap firing one entry early. The first draft wrote every row as `maxModelWindowEntries - 1`, the constant, `+1`, `*4`, deriving the expectation from the same constant — so an overlay moving the cap to 15 moved the fixture and the expectation in lockstep and **the mutant survived a full run**. Rewritten with literals (15/16/17/64); the same overlay now reddens three rows. A cap's own test cannot be written in terms of the cap.
+
+**3. The cut clones rather than reslices — not in the plan, and load-bearing.** `emitModelList` reslices its cut because the result is iterated and discarded inside the call. This one *returns* the slice onto the event, so a bare `windows[:cap]` would keep the decoder's whole backing array — and every model id string in it — reachable for the event's life, falsifying `maxModelWindowEntries`' own claim that what is retained is only the capped result. `slices.Clone` on the over-cap path only; the ordinary two-entry map still allocates exactly once.
+
+**4. Tests live in `internal/streamsup/result_model_window_test.go`**, not appended to the 8744-line `parser_test.go` as § Testing said. `initialize_capture_test.go` is the package's precedent for a per-feature test file, and `logRecorder` and `initCaptureDir` are same-package either way. The capture fixture needs one transformation the plan did not anticipate: the capture files store their `stdout_events` indented, and the parser splits on newlines, so `json.Compact` is applied — whitespace between tokens only, key order and every literal preserved.
+
+**5. Open question 1 resolved.** A `contextWindow` past int64 fails the **whole map's** unmarshal rather than the single entry, so the line reports `(nil, 0)`. That is the declared-map behaviour `commandEntryLine` documents, and it is now pinned as its own row rather than assumed.
+
+**6. Open question 2 resolved, and it is the one revision 1 came out of.** The existing keyed `turnevent.TurnEnd{Reason: …}` fixtures compared with `reflect.DeepEqual` in `parser_test.go` all still pass — nil windows equal the zero value, as predicted. What that sweep did not cover was the interface-value `==` in revision 1, which is a different shape entirely.
+
+**Mutation testing run** (via `go test -overlay`, no worktree writes): cap 16→15 reddens three rows of the cardinality table (after revision 2; it survived before). Dropping the `slices.SortFunc` call reddens the determinism test, the cardinality table and the alias-pair capture pin. The comment on the determinism test was corrected from an overclaim — an under-cap line already catches order nondeterminism; what only an over-cap line catches is *membership* nondeterminism.
