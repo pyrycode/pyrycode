@@ -105,6 +105,15 @@ var inboundTypes = map[string]string{
 	// guard reads case SELECTORS rather than case bodies. Unlike that one it is
 	// inbound and nothing else — the chunk type also rides the outbound leg.
 	"TypeRequestAttachment": "switch-intercepted",
+	// The conversation-history request verb (#2116), moved up from excludedTypes'
+	// "pending handler (#2116)" when dispatchAppFrame gained its case — the move
+	// that entry named in advance, and mandatory rather than tidy-up: Assertion #2
+	// fails a wired type left sitting in that map. Same filing as the two above
+	// and for the same reason: its case tags the frame and hands it to the conn's
+	// appFrameWorker, where the segment reads and the page marshal run off Run,
+	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
+	// TypeHistoryPage, is outbound-only and stays excluded.
+	"TypeRequestHistory": "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -272,14 +281,12 @@ var excludedTypes = map[string]string{
 	// reasoning the two removal notes below preserve for the entries that used to
 	// sit here.
 	//
-	// THIS ENTRY MOVES when #2116's dispatchAppFrame case lands: up to
-	// inboundTypes as "switch-intercepted", beside TypeRequestAttachment, which
-	// made exactly this move out of exactly this label. Mandatory rather than
-	// tidy-up — Assertion #2 fails a wired type left sitting in this map. Filing
-	// it now is mandatory too: Assertion #3 reports an unclassified constant, not
-	// an unemitted one. Its reply half is TypeHistoryPage above, which is
-	// outbound-only and never moves.
-	"TypeRequestHistory": "pending handler (#2116)",
+	// TypeRequestHistory is NO LONGER HERE. It sat here as "pending handler
+	// (#2116)" while #2113 had declared the constant and nothing dispatched it;
+	// #2116 added the dispatchAppFrame case, so it moved up to inboundTypes as
+	// "switch-intercepted", beside TypeRequestAttachment, which made exactly this
+	// move out of exactly this label. Its reply half is TypeHistoryPage above,
+	// which is outbound-only and never moves.
 
 	// TypeRequestAttachment is NO LONGER HERE. It sat here as "pending handler
 	// (#2054)" while #2052 had declared the constant and nothing dispatched it;

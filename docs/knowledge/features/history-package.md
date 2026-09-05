@@ -302,6 +302,26 @@ again:**
   drop lines are filtered out separately. Two log statements at the same
   level would make that assertion vacuous.
 
+## Reader (#2116)
+
+The first caller of `Store.Page` outside this package's own tests is
+`internal/relay`'s `request_history` handler, adapted at
+`cmd/pyry/relay.go` via `newHistoryPager`. That adapter classifies
+`Store.Page`'s sentinels with `errors.Is` — the same pattern
+`historyAppendFailure` (above) established for the write side — into
+`historyPageFailure`, a read-path twin in the same file: `invalid_cursor`,
+`not_contained`, `corrupt_segment`, `unknown_version`, `read`, never the
+error's own text, for the same reason `historyAppendFailure` doesn't log one
+(`open segment %q` and `resolve log directory %q` format absolute
+filesystem paths). `ErrNotContained` earns its own discriminant despite
+being unreachable past the relay's membership gate, because an occurrence
+there is a symlink-containment attack signal rather than a malfunction, and
+an operator needs to be able to tell the two apart even when the client
+can't. See
+[Inbound `request_history`](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md)
+for the seam shape this classification feeds and why it carries an outcome
+enum rather than a bare error.
+
 ## Files
 
 ```

@@ -455,6 +455,35 @@ type V2SessionConfig struct {
 	// and linear-scans its slice; it is not a map lookup.
 	KnownConversation func(conversationID string) bool
 
+	// HistoryPage serves one backward step of a conversation-history walk for an
+	// inbound request_history (#2116), over the daemon's durable on-disk log
+	// (#2112). handleRequestHistory is its sole reader. Optional: when nil the
+	// frame is CONSUMED BUT INERT — no reply, and not one byte of its payload
+	// parsed — mirroring the nil AttachmentIntake / AttachmentResolve guards and
+	// buying the same property, that an unwired daemon performs zero parsing of
+	// remote-authored bytes.
+	//
+	// PRECONDITION, AND IT IS THE CALLER'S: conversationID MUST already have
+	// passed KnownConversation. history.Store.Page's own block states it — the id
+	// becomes a path component below this seam — and handleRequestHistory is the
+	// caller that discharges it, before it ever reaches here.
+	//
+	// cursor IS PASSED THROUGH UNPARSED, always. The wire declares it opaque and
+	// history.parseCursor is the only validator anywhere; nothing in
+	// internal/relay may decode one, log one, or branch on its contents.
+	//
+	// limit ARRIVES ALREADY POSITIVE AND ALREADY NARROWED: the handler substitutes
+	// its own page size for the client's 0, refuses a negative, and caps the rest
+	// at maxHistoryPageEntries. An implementation MUST NOT size any buffer from it
+	// — see HistoryPageResult.Entries.
+	//
+	// BOUNDED TIME, but NOT on the Run goroutine: this seam is called from the
+	// addressed conn's appFrameWorker, which is why it is allowed to read files at
+	// all. It still stalls that conn's later frames while it runs, so an
+	// implementation that blocks indefinitely is a bug — production wires it to a
+	// store whose work is bounded by the page rather than by the log.
+	HistoryPage HistoryPager
+
 	// SnapshotSettings reports the current model / effort / YOLO for the session
 	// whose screen the Snapshotter renders (the bootstrap), so
 	// handleRequestSnapshot can populate the screen_snapshot reply's settings
@@ -950,3 +979,101 @@ type V2SessionConfig struct {
 	// seams share. #2079 wires the daemon-side producer.
 	RetainedBackgroundTaskRosters func() []protocol.BackgroundTaskRosterPayload
 }
+
+// HistoryPager is the shape of the V2SessionConfig.HistoryPage seam (#2116),
+// which carries that field's full contract; this block carries only what is
+// about the SHAPE.
+//
+// PRIMITIVES IN, protocol TYPES OUT, and the asymmetry is the decision. Inbound,
+// the three values are the client's own claims and share no type worth carrying.
+// Outbound, the entries ARE the wire shape: protocol.HistoryEntry mirrors
+// history.Entry key for key, so returning four parallel primitive slices instead
+// would put that correspondence in a SECOND place, free to drift from a key set
+// TestHistoryPagePayload_WireKeys has frozen. internal/relay already imports
+// internal/protocol in every file; it imports internal/history nowhere, and this
+// seam is what keeps that true.
+//
+// NOT COMMA-OK, unlike AttachmentResolve, and that is why it has a result struct
+// at all. A bool collapses every failure into one answer, which is right there —
+// six causes deliberately share attachment.not_found — and wrong here: the merged
+// cursor refusal has to stay SEPARABLE from the read failures for the handler to
+// pick between history.invalid_cursor and history.unavailable, which differ in
+// the retryable flag a client branches on.
+type HistoryPager func(conversationID, cursor string, limit int) HistoryPageResult
+
+// HistoryPageResult is one answer from the HistoryPage seam: history.Page's three
+// fields, restated in wire types, plus the outcome that says whether they mean
+// anything.
+//
+// Entries, Cursor and AtStart are meaningful ONLY when Outcome is HistoryPageOK.
+// On any other outcome they are the zero values and the handler answers a reject
+// instead of reading them.
+type HistoryPageResult struct {
+	// Entries is this page's entries, NEWEST-FIRST, forwarded to the client
+	// verbatim.
+	//
+	// NEVER SIZED FROM limit. An implementation allocates from len() of what the
+	// log actually returned; make([]protocol.HistoryEntry, 0, limit) reads as
+	// ordinary Go and would pin capacity chosen by a remote caller, which is the
+	// rule protocol.RequestHistoryPayload.Limit states in as many words.
+	//
+	// The payload bytes inside are REPLAYED CONTENT and carry the trust class of
+	// the live frame they mirror — claude-authored for a stored assistant frame,
+	// so § Security model's threat 1 lands on them. They are forwarded UNCHANGED:
+	// not re-decoded, not re-encoded, not sanitised. That is what makes a page
+	// reducible through the client's existing live-lane reducer, and the
+	// sanitisation is the client's, exactly as it is on the live lane.
+	Entries []protocol.HistoryEntry
+
+	// Cursor is the opaque position to ask with next. Empty whenever AtStart.
+	Cursor string
+
+	// AtStart reports that the start of the log was reached while filling this
+	// page — the ONLY termination signal for a walk. It comes from the log and is
+	// never synthesised: a page the handler shortened to fit the envelope cap
+	// carries whatever the log said for the smaller ask, so shortening cannot
+	// forge an end-of-log.
+	AtStart bool
+
+	// Outcome says whether the three fields above mean anything.
+	Outcome HistoryPageOutcome
+}
+
+// HistoryPageOutcome discriminates the seam's answers finely enough for the
+// handler to choose a wire code, and no more finely than that.
+//
+// THREE MEMBERS, NOT ONE PER SENTINEL. internal/history raises six sentinels a
+// Page call can reach, and the published reject vocabulary has one code for the
+// cursor and one for everything else that fails, so a per-sentinel enum would be
+// two bodies duplicated three ways — and would tempt a future caller into
+// answering the distinctions the merge exists to hide.
+type HistoryPageOutcome uint8
+
+const (
+	// HistoryPageOK means the page is the log's answer, including the empty
+	// terminal page a conversation with no log reads as.
+	//
+	// THE ZERO VALUE DELIBERATELY: an implementation that forgets to set an
+	// outcome reports success with no entries, which is that same terminal page —
+	// inert, and never a refusal a client did not earn.
+	HistoryPageOK HistoryPageOutcome = iota
+
+	// HistoryPageBadCursor is the ONE merged client fault: a cursor that does not
+	// decode, one minted for another conversation, and one naming a position not
+	// in this log arrive here identically, because internal/history raises the
+	// single ErrInvalidCursor sentinel for all three. The handler therefore
+	// CANNOT branch on what it must not distinguish.
+	HistoryPageBadCursor
+
+	// HistoryPageUnavailable is every daemon-side failure: a corrupt or
+	// unknown-version segment, a containment refusal, an I/O error, and a daemon
+	// whose log is not wired at all. It is the only RETRYABLE outcome, because
+	// every cause can clear without the client changing its request.
+	//
+	// It also absorbs the two refusals that are unreachable by construction —
+	// a non-canonical conversation id and a page size below one — since the
+	// membership gate fires first and the handler never passes a limit below one.
+	// Answering a daemon bug as a daemon problem rather than as the client's
+	// malformed request is the fail-safe direction.
+	HistoryPageUnavailable
+)
