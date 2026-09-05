@@ -349,6 +349,20 @@ control run for comparison. An e2e that spawns *both* binaries needs mutants
 targeted at whichever one the claim under test actually lives in — `PYRY_E2E_BIN`
 does not reach fakeclaude and `PYRY_E2E_FAKE_CLAUDE_BIN` does not reach pyry.
 
+**A fixture whose two channel-halves are written from the same constant
+cannot fail (#2118).** `TestRelayV2_StreamSessionSettingsReportsTheObservedWindow`
+plants a transcript naming a model and a fake-claude rider reporting that
+model's context window, and passed full-stack while
+[`contextwindow.Read`](contextwindow-package.md#context-window-size--a-believed-default-not-an-asserted-fact)'s
+join between those two channels was broken — because the rider's model id and
+the planted transcript's model id were the same string literal, so the one
+divergence the test existed to catch could never appear in its own fixture.
+Any spec that joins two independently-sourced channels (a spawned fake's
+output against a planted input file, in general) only exercises the join if
+the two sides are seeded from two independently-chosen values, not two copies
+of one constant — pin the values the real channels are observed to disagree on,
+the way #2118's rider key and transcript id now do.
+
 **A test-local `t.Setenv("HOME", …)` must come after `ensurePyryBuilt`/
 `ensureFakeClaudeBuilt`, not before (#1631).** Both are `sync.Once`-guarded, so
 whichever caller runs first performs the actual `go build`; every later call

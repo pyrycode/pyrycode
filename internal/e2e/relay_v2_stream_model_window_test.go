@@ -56,10 +56,18 @@ func TestRelayV2_StreamSessionSettingsReportsTheObservedWindow(t *testing.T) {
 		sendReqID   = uint64(2172)
 		secondReqID = uint64(2173)
 
-		// The model the planted transcript names. It MUST match the id the
-		// fake-claude rider reports 1000000 for (fakeclaude's
-		// riderModelWindowSonnetID): the join is an exact, verbatim string match,
-		// so any other spelling would assert a miss while looking like a hit.
+		// The model the planted transcript names — the BASE of the id the
+		// fake-claude rider reports 1000000 under, which since #2118 the rider
+		// keys with a trailing variant group (riderModelWindowSonnetKey,
+		// "claude-sonnet-5[1m]") while its canonicalModel keeps this base.
+		//
+		// THE TWO HALVES ARE NOW TWO STRINGS, and that is the point. They used to
+		// come from one constant on the rider's side, so this spec passed while
+		// the production join could not fire on any real 1M session: the
+		// transcript records a bare id and claude's result line keys the same
+		// model with the group. Writing both halves from one string reproduced
+		// the "never checked against each other" defect inside the harness meant
+		// to catch it. Do not re-align them.
 		transcriptModel = "claude-sonnet-5"
 
 		// The four counters of the planted usage block, summing to 223075 — the
