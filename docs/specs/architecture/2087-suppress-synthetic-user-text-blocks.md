@@ -14,7 +14,7 @@
 - `internal/e2e/realclaude/interactive_stream_liveness_test.go` → `drainForCompletedTurn`, `writeStreamInteractiveConfig` — the shared drain that carries the zero-`unrecognized_message` alarm, and the config write that selects the stream-json interactive runner.
 - `internal/e2e/realclaude/interactive_stream_model_announced_test.go` → `spawnBootstrapDaemonVerbose`, `announcedSpawnAlias` — `spawnBootstrapDaemon` plus `-pyry-verbose` so the daemon logs at Debug into the captured stderr buffer. `announcedSpawnAlias` is `"haiku"`, identical to the shared spawner's model, so this is reusable verbatim rather than needing a fourth near-copy.
 - `internal/e2e/realclaude/harness_daemon_test.go` → `spawnBootstrapDaemon`, `bootstrapDaemon`, `lockedBuffer` — the spawn argv (`--model haiku --dangerously-skip-permissions`) and the stderr buffer the drop-record assertion reads.
-- `docs/knowledge/features/streamsup-package.md` — package overview; the block-level-suppression tier and the content-free-logging rule are stated there as standing package doctrine.
+- `docs/knowledge/features/streamsup-package-send-half-writeturn.md` § the 2026-07-30 (#1247) and 2026-08-02 (#1260) amendments — the package overview's home for this doctrine. Two things it settles that the parser's own docblocks do not: the block-level suppression is a **tier below `ignoredLineTypes`**, not an entry on it, and #1260's "second confirmed payload" means a second *occurrence of the same string*, which is a different claim from this ticket's second *kind* of payload. The two amendments would read as contradicting each other without that distinction spelled out, so the new docblock entry spells it out.
 - `CODING-STYLE.md`, `CLAUDE.md` § Testing — the live-suite rule (read the executed-test count, never the exit code) and the stdlib/table-driven test conventions.
 
 ## Context
@@ -177,3 +177,15 @@ The category that matters here is the first one, and it is not a formality: this
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — during implementation
+
+Two departures from the plan as committed, neither changing the design:
+
+1. **The live test's witness checks the drop record's MESSAGE, not its attributes.** § Testing strategy said the test asserts the daemon's stderr "carries the drop record with `site=user_block type=text`". As written it asserts only that the record's message string is present. Reason: matching `site=user_block` would couple the test to the daemon's slog handler encoding (a JSON handler renders `"site":"user_block"`), and the message string already identifies the drop site uniquely — nothing else in the daemon emits it — so the attributes add nothing to the witness while adding a way for it to break for an unrelated reason. The sibling live test that reads this same buffer (`TestInteractiveStream_ModelAnnounced`'s AC-4 assertion) searches a bare value for the same reason. The attribute pin is not lost: `TestParser_SyntheticDropIsLoggedContentFree` asserts the exact attribute map hermetically, where the handler is the test's own.
+
+2. **Two decoy-spelling rows were added to the hermetic table.** `"isMeta":true` and `"is_synthetic":true` must each still surface the text block. Not in the plan; added because both spellings are one plausible generalisation away from the right one (the transcript's name, and over-applying #2023's snake_case finding to a mixed-case envelope), and a decoder silently keyed on either is the exact failure mode #2023 paid a live run to discover. Additive test coverage of behaviour the plan already specifies, not a design change.
+
+**Open question 1 (does a skill line carry the flag on the stdout surface?) remains open** and is unchanged from the plan: it is unresolvable without credentials, which this environment does not have. The contract stated in § Context — ship the flag arm alone, record the failed inference and follow up with the prefix fallback if the live gate disproves it — is what the parser's docblock now carries, so the outcome cannot be quietly re-scoped later.
