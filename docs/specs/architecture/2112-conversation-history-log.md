@@ -630,6 +630,14 @@ Both halves are now closed, and the general form is worth carrying into
 "did the bytes land" but "what does a partial failure leave behind, and can the
 next reader still make progress past it".
 
+**Carried forward, not changed here.** The review also observed that `Append`
+holds the store-wide mutex across `resolveDir` — roughly seven syscalls — plus
+the open/write/close, and that every conversation pays it on one lock per
+envelope. Re-resolving on every call is the trade § Directory resolution argues
+for and it stands; but the emit chokepoint fans deltas out at token rate, so
+`#2114` should measure the hold there rather than discover it later. Recorded
+because the reason for the cost lives in this plan, not in the producer's.
+
 **Also in this rework**, neither a design change:
 
 - The `bytes.Clone` on entries leaving `Page` is removed. Its comment claimed the
