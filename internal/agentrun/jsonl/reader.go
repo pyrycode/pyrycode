@@ -32,6 +32,29 @@ const maxLineBytes = 16 << 20
 // initialBufCap is the starting capacity of the partial-line buffer.
 const initialBufCap = 8192
 
+// maxModelIDBytes caps Event.Model. This package caps no other decoded string
+// field — StopReason rides uncapped — so the departure is this field's own and
+// is argued here rather than inherited.
+//
+// The number is DERIVED, from the far side of the join Event.Model exists to
+// serve (#2107). internal/streamsup's decodeModelWindows DROPS any modelUsage
+// entry whose key exceeds its own maxModelWindowID, which is 256, so a retained
+// window report can never carry an id longer than that. An id longer than 256
+// bytes is therefore a guaranteed miss whatever this package does with it.
+//
+// Which is why an over-cap value yields NO KEY rather than a cut one. Truncating
+// to the 256-byte prefix would convert that guaranteed miss into a possible
+// FALSE MATCH, against a genuinely different model whose id happens to be that
+// prefix — and a consumer cannot tell a cut id from a model it has never heard
+// of. maxModelWindowID's own doc makes the same argument from the producer's
+// side.
+//
+// Because nothing is ever sliced, this cap also cannot alias the decoder's
+// buffer the way internal/streamsup's truncateField does (strings.ToValidUTF8 of
+// an already-valid prefix returns that prefix, pinning the whole pre-cap
+// allocation). The replacement here is the empty string, not a sub-slice.
+const maxModelIDBytes = 256
+
 // ErrLineTooLarge is returned when a single line without a trailing '\n'
 // exceeds maxLineBytes buffered bytes. Mirrors stdlib bufio.ErrTooLong.
 // The stream is structurally broken at this point; the consumer should
@@ -80,6 +103,28 @@ type Event struct {
 	// entries that carry a "usage" object. nil on every other kind and on
 	// assistant entries without a usage field.
 	Usage *UsageBlock
+
+	// Model mirrors message.model verbatim on an assistant entry — the model
+	// that produced this entry's Usage, and therefore the key a consumer joins
+	// on to size that usage against a window (#2107). Empty on every
+	// non-assistant entry, on an assistant entry with no model field, and on one
+	// whose model exceeds maxModelIDBytes (see that constant: over-cap yields no
+	// key rather than a cut one).
+	//
+	// SECURITY: claude-authored, model-influenced text, bounded at
+	// maxModelIDBytes and DELIBERATELY NOT SANITIZED — no control-character or
+	// terminal-escape stripping happens here or anywhere upstream, so it may
+	// carry either. Two obligations ride it, the pair
+	// cmd/pyry's sessionModelWindowHold.ModelWindows states for the same text
+	// arriving on the other channel. Sanitization is the CONSUMER's, should one
+	// ever render it. And AN ID IS NOT AN ARGV TOKEN: this is claude's own
+	// string with no allowlist check, no lookup against any published model
+	// list and no rejection of a leading dash, so joining one back onto a
+	// spawn's arguments as --model <id> would be argument injection into the
+	// daemon's own child. It is a comparison key and nothing else; #2107's
+	// consumer discharges both obligations by narrowing — it compares the value
+	// and reports an integer, so the text reaches no wire surface and no log.
+	Model string
 }
 
 // UsageBlock mirrors the assistant message.usage JSON object. Pointer-valued
@@ -145,6 +190,7 @@ type rawLine struct {
 // decoder leaves it nil when the field is absent.
 type rawAssistantMessage struct {
 	StopReason string `json:"stop_reason"`
+	Model      string `json:"model"`
 	Content    []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
@@ -232,6 +278,13 @@ func (r *Reader) Next() (Event, error) {
 					CacheReadInputTokens:     msg.Usage.CacheReadInputTokens,
 				}
 			}
+			// Applied at CONSTRUCTION, so an over-cap id never enters an Event at
+			// all — the discipline internal/streamsup's caps follow, and the
+			// reason maxModelIDBytes gives for dropping rather than truncating.
+			model := msg.Model
+			if len(model) > maxModelIDBytes {
+				model = ""
+			}
 			return Event{
 				StopReason: msg.StopReason,
 				TextChars:  textChars,
@@ -239,6 +292,7 @@ func (r *Reader) Next() (Event, error) {
 				Raw:        json.RawMessage(lineCopy),
 				Kind:       kind,
 				Usage:      usage,
+				Model:      model,
 			}, nil
 		}
 

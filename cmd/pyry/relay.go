@@ -235,6 +235,19 @@ type relayWiring struct {
 	// internal/relay; this cmd/pyry-typed value never does. nil in foreground/v1 ⇒
 	// no seam is built at all.
 	runSettings func(convID string) (boundRunSettings, bool)
+	// modelWindows answers the context windows a named SESSION's child has
+	// reported, keyed by claude's own model id, for the context-window half of
+	// both usage seams below (#2107). Built at main.go over *sessions.Pool for the
+	// SAME reason runSettings above is: the internal/sessions dependency stays at
+	// the composition root, and startRelayV2 holds no pool reference at all. It is
+	// keyed on the session id rather than the conversation id because both seams
+	// that consume it already hold one — snapshotUsageFor resolves a transcript by
+	// exactly that id, so the two halves are two readings of one child.
+	//
+	// nil in foreground/v1, which is NOT the either-half-unwired shape
+	// bootstrapIDFn has: a nil value leaves both usage seams working and reporting
+	// the default window, the pre-#2107 reading. See snapshotUsageFor.
+	modelWindows func(sessionID string) map[string]int
 	// retainedModelLists enumerates the daemon's currently-retained model lists as
 	// marshal-ready model_list payloads — one per conversation whose bound session
 	// holds a list — for the relay's connect-time reconcile seam (#1867 fills
@@ -687,7 +700,7 @@ func startRelayV2(
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply. session_settings read it too between #491 and #1610,
 	// and now sources all six of its fields from the conversation-keyed seam below.
-	snapshotUsage := bootstrapSnapshotUsage(w.claudeSessionsDir, w.bootstrapIDFn)
+	snapshotUsage := bootstrapSnapshotUsage(w.claudeSessionsDir, w.bootstrapIDFn, w.modelWindows)
 
 	// Conversation-keyed run-configuration seam (#1609): composes the settings half
 	// (main.go's resolveBoundRunSettings, over the conversations registry and the
@@ -697,8 +710,10 @@ func startRelayV2(
 	// reusing the binding above: bootstrapSnapshotUsage supplies the BOOTSTRAP id,
 	// so a seam composed through it would report the bootstrap's occupancy for
 	// every conversation. The closure it builds is stateless, so a second one costs
-	// nothing and leaves the three existing seams byte-identical.
-	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.claudeSessionsDir))
+	// nothing and leaves the three existing seams byte-identical. BOTH readers are
+	// handed the same w.modelWindows, so the two surfaces report one window for
+	// one session; wiring only one would make them disagree (#2107 AC 1).
+	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.claudeSessionsDir, w.modelWindows))
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),

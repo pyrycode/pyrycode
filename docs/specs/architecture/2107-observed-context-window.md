@@ -489,3 +489,19 @@ Each is resolved in Phase B; a resolution that changes the design above lands as
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — implementation
+
+**The resolver's file is `cmd/pyry/session_model_window_lookup.go`, not `session_model_windows.go`.** Go applies an implicit GOOS build constraint to any file whose name ends `_windows.go`, so the plan's name compiled the resolver on Windows only — `sessionModelWindows` was undefined everywhere else and the package did not build. The symbol keeps the plan's name; only the file is renamed, and its test with it (`_windows_test.go` carries the same constraint). Nothing about the design moves.
+
+**Open question 1 resolved: `writeStreamResponse` has two callers**, `runStreamJSON`'s default arm and `TestWriteStreamResponse_Shape`. `writeVerdictResponse` and `writeInterruptedResult` build their own `outResult` and are untouched. The test passes nil and now also asserts the emitted line carries no `modelUsage` key at all, which is what makes "byte-identical when the rider is off" a checked property rather than a claim about `omitempty`.
+
+**Open question 2 resolved: no reusable fake existed**, so `session_model_window_lookup_test.go` mints `modelWindowsRunner` / `modelWindowsPlan` / `newModelWindowsTestPool`, the `modelListRunner` family's shape. `sessionModelWindowHold` satisfies the assertion but is a *sink decorator* fed by the parser chain, not a `sessions.Runner`, so it cannot be handed to a `RunnerFactory`; the arm-by-id plan is needed for the same reason its precedent gives — `sessions.New` builds the bootstrap runner before the test can know that session's id.
+
+**Two additions the plan did not name, both from the security review's SHOULD FIX items.** `jsonl`'s `TestReader_NonStringModelSkipsTheEntry` pins the widened-decode failure mode; `contextwindow.Usage` carries an explicit comment stating that it deliberately has no model field, and why adding one would reopen both the render and the argv channel.
+
+**One test-design correction made during implementation.** The bound's own rows were first written as `maxModelIDBytes` and `maxModelIDBytes+1`, which moves fixture and expectation in lockstep and lets a mutant that retunes the constant survive green. They are literals 256 and 257, which is what pins the number to `streamsup`'s `maxModelWindowID`.
+
+**The e2e was verified non-vacuous by mutant** rather than by inspection: with `startRelayV2` passing `nil` in place of `w.modelWindows` to the `session_settings` seam, `TestRelayV2_StreamSessionSettingsReportsTheObservedWindow` fails with `window_tokens = 0, want 1000000`. The mutant was reverted.

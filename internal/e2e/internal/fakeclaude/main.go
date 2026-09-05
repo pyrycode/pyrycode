@@ -332,6 +332,20 @@
 //	                               rather than enabling some default roster, so a
 //	                               miswired test fails as "no frame arrived"
 //	                               instead of passing on a fixture nobody chose.
+//	PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS
+//	                               optional. When non-empty, every stream-mode
+//	                               result line carries a modelUsage map reporting
+//	                               a per-model context window (#2107) — the field
+//	                               claude uses to say how large each model's
+//	                               window actually is, which nothing else in this
+//	                               file produces. See riderModelUsage for the
+//	                               fixture and its provenance. A boolean rather
+//	                               than a value, unlike the two knobs above,
+//	                               because there is nothing here to count or to
+//	                               choose: the fixture is one canned map copied
+//	                               from a committed capture. Stream mode only.
+//	                               Unset or empty ⟹ off ⟹ byte-identical to prior
+//	                               behaviour (the field is omitempty).
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -386,6 +400,7 @@ const (
 	envStreamRateLimit    = "PYRY_FAKE_CLAUDE_STREAM_RATE_LIMIT"
 	envStreamWithholdMode = "PYRY_FAKE_CLAUDE_STREAM_WITHHOLD_MODE_ACK"
 	envStreamRoster       = "PYRY_FAKE_CLAUDE_STREAM_ROSTER"
+	envStreamModelWindows = "PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
@@ -708,9 +723,17 @@ func main() {
 		// value is 0, which is off, so a typo disables the rider instead of
 		// enabling some default roster nobody chose. Non-positive ⟹ off ⟹
 		// byte-identical.
+		//
+		// Model-window rider (envStreamModelWindows, default-off): ride a
+		// modelUsage map onto each turn's result line, reporting a per-model
+		// context window (#2107). Tested for emptiness rather than parsed, the
+		// envStreamWithholdMode spelling, because there is nothing to count and
+		// nothing to choose — the fixture is one canned map. Unset ⟹ off ⟹
+		// byte-identical, the field being omitempty.
 		rosterTasks, _ := strconv.Atoi(os.Getenv(envStreamRoster))
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
-			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "", rosterTasks)
+			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "", rosterTasks,
+			os.Getenv(envStreamModelWindows) != "")
 		return
 	}
 
@@ -1586,6 +1609,75 @@ type outResult struct {
 	Type      string `json:"type"`
 	Subtype   string `json:"subtype"`
 	SessionID string `json:"session_id"`
+	// ModelUsage is claude's per-model usage map on a result line, of which #2101
+	// decodes only contextWindow. omitempty is load-bearing: a nil map emits NO
+	// key, so every result line this file writes without the rider stays
+	// byte-identical to the pre-#2107 wire.
+	ModelUsage map[string]outModelUsage `json:"modelUsage,omitempty"`
+}
+
+// outModelUsage is one entry of that map, carrying the full field set the
+// committed captures show rather than only the one field the daemon reads. A
+// minimal {"contextWindow":N} would still exercise the decode, but it would stop
+// being a faithful copy of the wire, and the next reader of this fixture would
+// have to go back to the captures to learn what claude actually sends.
+type outModelUsage struct {
+	InputTokens              int     `json:"inputTokens"`
+	OutputTokens             int     `json:"outputTokens"`
+	CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+	WebSearchRequests        int     `json:"webSearchRequests"`
+	CostUSD                  float64 `json:"costUSD"`
+	ContextWindow            int     `json:"contextWindow"`
+	MaxOutputTokens          int     `json:"maxOutputTokens"`
+	CanonicalModel           string  `json:"canonicalModel"`
+	Provider                 string  `json:"provider"`
+}
+
+// riderModelWindowSonnetID is the model id the rider reports a 1M window for. A
+// test that plants a transcript naming a model must name THIS string: #2107's
+// join is an exact, verbatim match, so any other spelling asserts a miss while
+// looking like it asserts a hit.
+const riderModelWindowSonnetID = "claude-sonnet-5"
+
+// riderModelUsage is the modelUsage map the rider writes, copied field-for-field
+// from the committed capture internal/e2e/realclaude/testdata/
+// permission_mode_switch_v2.1.239_plan.json — read as DATA, with no live-claude
+// run behind it.
+//
+// That capture is chosen over the other 29 because it is one of the FOUR whose
+// two entries are two genuinely different models at two different window sizes,
+// where the other 26 are an alias pair for a single model at one size. A fixture
+// of the common shape could not tell a correct join from "report the only
+// window", "report the first" or "report the largest"; this one can, because a
+// consumer's answer has to name which of the two it followed.
+//
+// Note the haiku entry appears in its DATED form only, with no undated alias
+// beside it — that is how the capture reads, and normalising it here would
+// quietly delete the property the fixture exists to carry.
+func riderModelUsage() map[string]outModelUsage {
+	return map[string]outModelUsage{
+		"claude-haiku-4-5-20251001": {
+			InputTokens:     906,
+			OutputTokens:    8,
+			CostUSD:         0.000946,
+			ContextWindow:   200000,
+			MaxOutputTokens: 32000,
+			CanonicalModel:  "claude-haiku-4-5",
+			Provider:        "firstParty",
+		},
+		riderModelWindowSonnetID: {
+			InputTokens:              2,
+			OutputTokens:             4,
+			CacheReadInputTokens:     35298,
+			CacheCreationInputTokens: 11869,
+			CostUSD:                  0.0545796,
+			ContextWindow:            1000000,
+			MaxOutputTokens:          64000,
+			CanonicalModel:           riderModelWindowSonnetID,
+			Provider:                 "firstParty",
+		},
+	}
 }
 
 // syncWriter is an io.Writer that fsyncs after every Write, mirroring the PTY
@@ -1657,8 +1749,10 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // rather than grouped with the leading bools deliberately: the resulting string, bool
 // tail makes a mis-slotted call-site edit a compile error, which a third adjacent bool
 // would not. rosterTasks extends the same discipline — bool, int, not a fourth bool.
+// modelWindows extends it once more: it lands AFTER the int, so the tail reads
+// int, bool and a transposed call site is still a compile error.
 func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string,
-	withholdModeAck bool, rosterTasks int) {
+	withholdModeAck bool, rosterTasks int, modelWindows bool) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1703,11 +1797,19 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				}
 				// Default mode ends the turn (echo + result{success}); interrupt mode
 				// echoes ONLY, withholding the result so the turn stays in flight.
+				// The model-window rider is NOT a line of its own: it rides the
+				// result line claude actually carries modelUsage on, so the
+				// interrupt arm — which withholds that line to keep the turn in
+				// flight — correctly reports no windows either.
+				var usage map[string]outModelUsage
+				if modelWindows {
+					usage = riderModelUsage()
+				}
 				var werr error
 				if honorInterrupt {
 					werr = writeAssistantEcho(w, msgID, text)
 				} else {
-					werr = writeStreamResponse(w, msgID, text)
+					werr = writeStreamResponse(w, msgID, text, usage)
 				}
 				if werr != nil {
 					return
@@ -1863,14 +1965,19 @@ func setPermissionModeRequest(line []byte) (requestID, mode string, ok bool) {
 // (never string-concatenated) so text — caller-controlled bytes — is escaped and
 // each object is exactly one physical line regardless of prompt content. Returns
 // the first marshal/write error.
-func writeStreamResponse(w io.Writer, msgID, text string) error {
+//
+// modelUsage rides onto the result line when non-nil (#2107's rider). nil is the
+// default and emits no key at all, so the line stays byte-identical to the one
+// every existing spec already asserts against.
+func writeStreamResponse(w io.Writer, msgID, text string, modelUsage map[string]outModelUsage) error {
 	if err := writeAssistantEcho(w, msgID, text); err != nil {
 		return err
 	}
 	return writeJSONLine(w, outResult{
-		Type:      "result",
-		Subtype:   "success",
-		SessionID: streamSessionID,
+		Type:       "result",
+		Subtype:    "success",
+		SessionID:  streamSessionID,
+		ModelUsage: modelUsage,
 	})
 }
 
