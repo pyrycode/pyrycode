@@ -1203,10 +1203,15 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 // stored value is unvalidated bytes from a previous process lifetime.
 type sessionMinter struct{ p *sessions.Pool }
 
-// Create satisfies handlers.SessionCreator. The ctx is unused: nothing here
-// blocks any more — resolveSpawnDir does bounded filesystem work and Pool.Mint
-// is ctx-free by contract, because it cannot spawn. The parameter stays for the
-// seam's shape, which the handler shares with its cancellable siblings.
+// Create satisfies handlers.SessionCreator. The ctx is discarded because neither
+// half of this can observe one: resolveSpawnDir takes no context.Context, and
+// Pool.Mint is ctx-free by contract because it cannot spawn. The parameter stays
+// for the seam's shape, which the handler shares with its cancellable siblings.
+//
+// The honest consequence is that the handler's mint budget cannot interrupt this
+// — a wedged filesystem blocks in a syscall regardless of any deadline. See
+// handlers.createConversationMintTimeout, which records the same thing rather
+// than claiming a protection it no longer provides.
 func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, error) {
 	resolved, err := resolveSpawnDir(spawnDir)
 	if err != nil {

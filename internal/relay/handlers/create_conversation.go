@@ -54,15 +54,24 @@ const msgCreateConversationCwdRejected = "conversation working directory not all
 var ErrSpawnDirRejected = errors.New("conversation spawn directory rejected")
 
 // createConversationMintTimeout caps the per-handler wait for creator.Create to
-// mint and supervise the conversation's dedicated session. Since #2085 that call
-// does not spawn claude, so the budget no longer covers a PTY coming up; what it
-// still bounds is the implementation's filesystem work — the spawn-workdir
-// canonicalise + confine + trust-mark, and the pool's registry save — on a host
-// whose disk is wedged. The bound matters because in the v2 relay this runs on
-// the conn's app-frame worker (#965), so an unbounded wait would stall this
-// conn's subsequent frames; it turns the wedge into a retryable
-// server.binary_offline instead. Matches internal/control's session-create
-// budget. A tuning knob, not a contract.
+// mint and supervise the conversation's dedicated session.
+//
+// Be clear about what it buys today: nothing. It bounded a spawn — Pool
+// activation blocked until claude's PTY came up — and since #2085 there is no
+// spawn here. The one production SessionCreator (sessionMinter) now discards the
+// ctx outright, because neither half of what it does can observe one:
+// resolveSpawnDir takes no context.Context and Pool.Mint is ctx-free by design,
+// and a deadline does not interrupt a blocking filesystem syscall. So a wedged
+// disk pins the conn's app-frame worker (#965) with this budget exactly as it
+// would without it. Do not read protection into it that is not there; if a real
+// bound on that wedge is ever wanted it has to be built at the syscall, not
+// here.
+//
+// It is kept only as the ctx-honouring contract SessionCreator advertises: the
+// interface takes a context.Context, so an implementation that respects one
+// (a future minter that talks to something remote, say) gets a bound rather than
+// inheriting the conn's. Matches internal/control's session-create budget.
+// A tuning knob, not a contract.
 const createConversationMintTimeout = 30 * time.Second
 
 // ConversationCreator is the minimal write surface this handler consumes from
@@ -176,9 +185,9 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 		// message — which is the whole point of deferring the spawn. The label is
 		// the server-minted conversation id (a session↔conversation breadcrumb in
 		// the session registry); it never reaches claude's argv — buildSession uses
-		// only the SessionID for --session-id. The 30s budget turns a wedged
-		// filesystem into a retryable reply rather than pinning the conn's
-		// app-frame worker (#965) indefinitely.
+		// only the SessionID for --session-id. The 30s budget binds only a
+		// SessionCreator that honours a ctx, which the production one no longer
+		// does — see createConversationMintTimeout for why it is inert here.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
 		sessionID, err := creator.Create(mintCtx, string(id), spawnDir)
 		cancel()
@@ -195,10 +204,13 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 					"err", err)
 				return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgCreateConversationCwdRejected, false)
 			}
-			// Any other mint failure (pool not running, save failure, ctx
-			// deadline, transient trust-mark write error) is retryable. Returning
-			// before reg.Create leaves no half-bound orphan row, and the phone
-			// retries onto a fresh conversation + session.
+			// Any other mint failure (pool not running, save failure, transient
+			// trust-mark write error) is retryable. Returning before reg.Create
+			// leaves no half-bound orphan row, and the phone retries onto a fresh
+			// conversation + session. A mintCtx deadline is not in that list any
+			// more: the production minter discards the ctx, so only a
+			// ctx-honouring SessionCreator could return one — the arm stays a
+			// catch-all rather than an enumeration.
 			logger.Warn("relay: create_conversation session mint failed",
 				"event", "create_conversation.session_mint_failed",
 				"conn_id", c.ConnID(),

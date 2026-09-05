@@ -1633,9 +1633,16 @@ func (p *Pool) Ready() <-chan struct{} {
 // active anyway — see ctx-cancellation note below).
 //
 // Sequence: NewID → build *Session in stateEvicted → register under p.mu and
-// persist (rollback the in-memory entry on save failure) → register the UUID
-// in the rotation skip-set → schedule sess.Run on Pool.Run's errgroup via
-// supervise → call Pool.Activate (cap-aware) to wake the lifecycle goroutine.
+// persist (rollback the in-memory entry on save failure) → schedule sess.Run on
+// Pool.Run's errgroup via supervise → call Pool.Activate (cap-aware) to wake the
+// lifecycle goroutine. Everything up to and including supervise is Pool.Mint;
+// this is that plus the Activate.
+//
+// The rotation skip-set is primed inside that final Activate, not here. It sat
+// between the persist and the supervise until #2085 gave the pool a mint that
+// defers its spawn indefinitely, at which point the entry's allocatedTTL could
+// expire before the child ever opened the transcript — so the prime moved to be
+// adjacent to the spawn it protects. See Pool.Activate.
 //
 // We persist BEFORE activating: a save failure with claude already running
 // would leave an unsupervised orphan whose JSONL has no on-disk record. A
