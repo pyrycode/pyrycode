@@ -917,6 +917,22 @@ func startRelayV2(
 		// attachments.ResolvePath, whose stated precondition is that the caller
 		// already validated the conversation id.
 		AttachmentResolve: attachmentResolve,
+		// Inbound conversation-HISTORY seam (#2116): the read half of the durable
+		// log #2114 and #2115 append to, over w.hist — the daemon's ONE store,
+		// minted at the composition root, so a served page and a just-appended
+		// entry cannot disagree about ids. Wired unconditionally: newHistoryPager
+		// answers a nil store as unavailable rather than leaving the seam nil, and
+		// the difference is load-bearing — a nil SEAM makes the verb inert and
+		// parses nothing, which is the posture for a build with no history at all,
+		// not for a daemon whose store failed to open.
+		//
+		// It validates through KnownConversation above, membership alone, and that
+		// is the correct reading here for the same reason it is for attachment
+		// retrieval and the opposite reason it would be for send_message: a
+		// SessionRouter.Route check refuses a known conversation with NO BOUND
+		// SESSION, which is precisely the reopened conversation this verb exists to
+		// serve, and would answer it the retryable server.binary_offline.
+		HistoryPage: newHistoryPager(w.hist, logger),
 		// Inbound interrupt seam (#707): an interactive `interrupt` frame routes to
 		// the runner bound to the ACTIVE conversation (#1121) — not the bootstrap
 		// supervisor. The activeInterrupter adapter (main.go) resolves active →

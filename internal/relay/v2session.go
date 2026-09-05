@@ -868,6 +868,14 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// handleRequestAttachment.
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameAttachmentRequest})
 			return
+		case protocol.TypeRequestHistory:
+			// The third arm to run off Run (#2116), for the same reason as the two
+			// above rather than a new one: answering this frame opens log segments
+			// off disk, decodes them and marshals a page of up to the
+			// application-envelope cap. Tags and falls through to the same
+			// non-blocking enqueue; the worker routes it to handleRequestHistory.
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameHistoryRequest})
+			return
 		}
 	}
 
@@ -947,6 +955,8 @@ const (
 	appFrameAttachmentChunk
 	// appFrameAttachmentRequest is the inbound retrieval request (#2054).
 	appFrameAttachmentRequest
+	// appFrameHistoryRequest is the inbound conversation-history request (#2116).
+	appFrameHistoryRequest
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -997,6 +1007,13 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// (safe from any goroutine) and its rejects through
 				// forwardToRun, so like the arm above it never touches s.send.
 				m.handleRequestAttachment(ctx, s, job.plaintext)
+			case appFrameHistoryRequest:
+				// The conversation-history path (#2116), here because it reads log
+				// segments off disk. UNLIKE the two arms above it has only ONE
+				// emission route: a page is a single envelope rather than a stream,
+				// so both the page and every reject leave through forwardToRun and
+				// nothing on this path ever touches s.send.
+				m.handleRequestHistory(ctx, s, job.plaintext)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.

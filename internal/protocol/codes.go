@@ -71,6 +71,40 @@ const (
 	CodeAttachmentStorageFailed   = "attachment.storage_failed"
 	CodeAttachmentNotFound        = "attachment.not_found"
 	CodeAttachmentStreamAborted   = "attachment.stream_aborted" // a TypeError correlated via in_reply_to, never a second attachment frame
+
+	// Conversation-history errors (#2116; docs/protocol-mobile.md
+	// § Conversation history). MINTED WITH THE HANDLER THAT SENDS THEM, which is
+	// the rule that section states in as many words — it published the reject
+	// CONDITIONS ahead of any code and named this ticket the owner of the codes,
+	// the sequencing attachment_chunk established. None of these existed while
+	// request_history had no answer.
+	//
+	// A CONDITION THE SECTION LISTS IS ANSWERED BY AN EXISTING CODE, not by a
+	// fifth new one: a conversation_id that is not of canonical shape or names no
+	// conversation the daemon hosts is CodeConversationNotFound. That is the
+	// OPPOSITE of the attachment retrieval verb's choice above, deliberately —
+	// there, merging an unknown conversation into attachment.not_found prevents a
+	// path-existence oracle over a SECOND id. There is no second id here, and
+	// request_snapshot already answers an unknown or foreign conversation
+	// distinguishably, so a merge would buy nothing and cost a client the ability
+	// to tell "wrong conversation" from "wrong cursor".
+	//
+	// history.invalid_cursor IS DELIBERATELY MERGED, and it is the one merge on
+	// this path: a cursor that does not decode, one minted for another
+	// conversation, and one naming a position not in this log are ONE answer.
+	// Those distinctions are exactly what a probe would want, and internally they
+	// arrive as the single history.ErrInvalidCursor sentinel, so the handler
+	// CANNOT branch on what it must not distinguish. The refusal never echoes the
+	// cursor back.
+	//
+	// RETRYABILITY SPLITS THE SET THREE-TO-ONE, and it is the field a client
+	// actually branches on. The three client faults are permanent for the request
+	// as sent — a different request repairs each — while history.unavailable is
+	// the only one whose cause can clear without the client changing anything.
+	CodeHistoryInvalidRequest  = "history.invalid_request"   // the payload did not decode; never an empty-but-successful request
+	CodeHistoryInvalidPageSize = "history.invalid_page_size" // a NEGATIVE limit; 0 is not a reject, it asks the daemon to choose
+	CodeHistoryInvalidCursor   = "history.invalid_cursor"    // undecodable, foreign, or naming a position not in this log — one merged answer
+	CodeHistoryUnavailable     = "history.unavailable"       // the log could not be read; the only retryable member of this group
 )
 
 // Envelope-type constants — wire values for Envelope.Type
