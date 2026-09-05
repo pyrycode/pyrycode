@@ -54,13 +54,20 @@ One file, one dependency: `internal/agentrun/jsonl`.
 // latest usage-bearing assistant entry.
 type Usage struct {
     UsedTokens   int // input+cache_read+cache_creation+output on the latest usage entry
-    WindowTokens int // believed window (defaultWindowTokens), or 0 if UsedTokens disproved it
+    WindowTokens int // observed window for that entry's model, defaultWindowTokens on a miss, or 0 if UsedTokens disproved it
 }
 
 // Read scans the claude transcript at path and reports current context-window
-// usage.
-func Read(path string) (Usage, error)
+// usage, sizing the window from windows when the latest usage-bearing entry
+// names a model windows has an entry for (#2107).
+func Read(path string, windows map[string]int) (Usage, error)
 ```
+
+`Usage` deliberately carries no model field. The id that decided `WindowTokens` has no route
+out of `Read` — two ints leave, nothing else. Adding one "for diagnostics" would reopen two
+channels closed by design: the id is claude-authored, unsanitized text that must not reach a
+log line (#833's posture) or an argv token (`ModelWindows`'s own doc names that risk), and
+`Usage` has never had a path to either.
 
 ## Algorithm — last-usage-wins
 
@@ -89,24 +96,78 @@ figure. Compaction surfaces as a reset for free, with no dedicated marker.
 const defaultWindowTokens = 200_000
 ```
 
-`WindowTokens` is what this package *believes* a session's window is, absent
-anything better to go on — it is a guess, not a fact. A 1M-context session
-exists and was measured live on 2026-09-04 (latest usage-bearing entry summing
-to 223075, 111% of this constant), so a session's real window is not knowable
-from the transcript's usage blocks alone. **Deliberately no per-model map** and
-no `message.model` extraction — sourcing the real window that way is #2101/#2102;
-this constant stays as the fallback for a session whose window is not yet known.
+`WindowTokens` is `defaultWindowTokens` when nothing better is known — a guess,
+not a fact. A 1M-context session exists and was measured live on 2026-09-04
+(latest usage-bearing entry summing to 223075, 111% of this constant), so this
+fallback alone was not enough to keep the gauge honest.
 
-**#2100 — `Read` stops reporting a window its own data disproves.** A used
-count *above* the believed window is proof the belief is wrong, and `Read`
-reports `WindowTokens` 0 in that case rather than asserting a window it can see
-is false — the daemon needs no model knowledge to detect this, only the
-comparison `UsedTokens > WindowTokens`. `UsedTokens` still carries the true
-sum; only the denominator is withheld. Equality is not a contradiction (a
-session exactly at its window is full, not evidence of a wrong belief) and
-keeps its window. The comparison is against the field, not the constant, so it
-stays correct once #2101 makes the believed window per-session instead of a
-fixed default. This is deliberately not an error — see Error handling below.
+**The window and the used count arrive on different channels, and #2107 joins
+them by model id.** The used count comes off the transcript; the window comes
+off claude's stdout `result` line, decoded by #2101 and retained per session
+by \#2106 (see [the fourth retention application](streamsup-package-retaining-the-decoded-model-list-for-the-session.md#retaining-the-per-model-context-windows-the-fourth-application-2106)).
+`Read`'s `windows` parameter is that retained report, reduced to a plain
+`map[string]int`. The join key is `message.model` on the transcript's latest
+usage-bearing entry — read via [`jsonl.Event.Model`](jsonl-reader.md) — matched
+against `windows` by **exact, verbatim string comparison**: no lowercasing, no
+alias expansion, no date stripping. Measured across 30 committed captures, two
+`modelUsage` entries do not imply two models (26 of 30 are an alias pair for
+one model, identical window under either spelling) and no rule relating a
+dated to an undated spelling survives the data — so "the largest", "the
+first", and "the only one" are each wrong on some real capture, and only exact
+match is safe. **An empty model id is a miss on either side of the join and
+never matched**: an assistant entry with no `message.model` decodes to `""`,
+and #2101 keeps a `modelUsage` entry keyed `""` (with a positive window)
+reachable in the retained report, sorted first by `ModelID`. `Read` never
+performs the lookup when the transcript-side key is `""`, so that reachable
+`""` entry is structurally unreachable from this join — the rule is enforced
+once, not spelled on both sides.
+
+**#2100 — `Read` stops reporting a window its own data disproves — and this
+only holds if resolution runs before the check.** `Read` first resolves
+`WindowTokens` (from `windows`, falling back to `defaultWindowTokens` on a
+miss), *then* applies #2100's comparison: a used count above the resolved
+window is proof the resolved value is wrong, and `Read` reports `WindowTokens`
+0 rather than asserting a window it can see is false. Reversing the two steps
+changes the answer: a 1M session summing to 223075 reports `1000000` when
+resolved first, `0` when checked first (223075 exceeds the *default* 200000
+before the real window is even looked up). `UsedTokens` still carries the true
+sum in both orderings; only the denominator differs. Equality is not a
+contradiction (a session exactly at its window is full, not evidence of a
+wrong belief) and keeps its window. This is deliberately not an error — see
+Error handling below.
+
+**The gap #2107 deliberately leaves open.** A window learned from the stream
+is known only from the session's first completed turn onward, and again only
+from the first completed turn after a daemon restart — `windows` answers a
+miss in both gaps, and `Read` falls back to `defaultWindowTokens` exactly as
+it did before this join existed. No complaint has been observed about that
+sub-200K restart gap, and where the used count already exceeds the default
+in that gap, #2100's check still collapses the reading to 0 rather than a
+clamped lie. Persisting the observed window with the session record (closing
+the gap) is deferred; no successor ticket exists yet.
+
+**The resolver lives in `cmd/pyry`, one file, following `resolveBoundModelList`'s
+precedent minus its conversation hop** (see
+[the model-list resolver](sessions-package-key-types-runner-interface-runnerfactory.md)):
+type-assert `Session.Runner()` to the `ModelWindows() (modelWindowReport, bool)`
+method #2106 added, comma-ok as the only filter, and build a fresh
+`map[string]int` per call so `Read`'s "never retained" contract holds. Both
+`cmd/pyry` seams that call `contextwindow.Read` — `bootstrapSnapshotUsage`
+(`screen_snapshot`) and the by-id closure in `snapshotUsageFor`
+(`session_settings`) — take the resolver as a parameter; a `nil` resolver
+degrades to today's default-window reading rather than collapsing the seam to
+nil, the same "degrading one integer must not make a resolvable session
+unresolvable" rule `runConfigFor` already applies to its `usage` half.
+
+**Naming trap: a `cmd/pyry` file cannot be named `session_model_windows.go`.**
+Go applies an implicit `GOOS=windows` build constraint to any file whose name
+ends `_windows.go` — the plan named the resolver's file that, and the package
+failed to build on darwin/linux because `sessionModelWindows` was undefined
+everywhere except a Windows target this project doesn't support. The exported
+symbol keeps the name; only the file (and its `_test.go` twin) is renamed —
+here, `session_model_window_lookup.go`. Worth checking on any future
+`cmd/pyry` file whose natural name would end in `_windows`, `_linux`,
+`_darwin`, `_test`, or one of Go's other implicit build-constraint suffixes.
 
 ## Error handling — four-way split
 
@@ -134,22 +195,35 @@ non-erroring by contract (plain ints, mirroring `SnapshotSettings`). That
 recovery path discriminates on `err != nil`, never on the window value, so the
 disproved-window arm above (which returns a nil error) cannot be routed into it.
 
+`windows == nil` is legal and answers a miss on every lookup — "nothing
+observed" needs no second spelling. `path == ""` keeps `defaultWindowTokens`
+regardless of `windows`: no transcript means no model, so there is nothing to
+join on and the map is never consulted.
+
 ## Concurrency
 
 None. `Read` is a stateless open→scan→close call — no goroutines, channels,
 or shared state. Safe to call concurrently; each call opens its own file and
-`jsonl.Reader`. No logger is injected; the only logging inside the call is
-`jsonl`'s malformed-line warning (defaults to `slog.Default()`, content-safe
-by construction).
+`jsonl.Reader`, and now additionally reads — never writes or retains — a
+caller-supplied `windows` map. A shared map handed in by two concurrent
+callers is safe for the same reason: `Read` never mutates it and never hangs
+it off the package.
 
 ## Related
 
 - [jsonl-reader.md](jsonl-reader.md) — `internal/agentrun/jsonl`, the decode
-  this package reuses (`Event.Usage *UsageBlock`).
+  this package reuses (`Event.Usage *UsageBlock`, and since #2107
+  `Event.Model` — the join key).
 - [sessions-package.md](sessions-package.md) — `ResolveTranscript` /
   `newProbePreferredTranscriptResolver` (#838), the probe-preferred resolver
   precedent #857 followed via a *different*, cmd/pyry-local instance
   (`resolveOwnBootstrapJSONL`) rather than this seam directly — see above.
+- [streamsup-package-retaining-the-decoded-model-list-for-the-session.md](streamsup-package-retaining-the-decoded-model-list-for-the-session.md) —
+  #2106's `sessionModelWindowHold`, the retained report `Read`'s `windows`
+  parameter is built from.
+- [sessions-package-key-types-runner-interface-runnerfactory.md](sessions-package-key-types-runner-interface-runnerfactory.md) —
+  `resolveBoundModelList`, the resolver shape #2107's `sessionModelWindows`
+  copies minus the conversation hop.
 - [847](../codebase/847.md) / [848](../codebase/848.md) — the settings-leaf /
   settings-wire split this ticket mirrors.
 - [857](../codebase/857.md) — wires `Read` onto `screen_snapshot` via the
