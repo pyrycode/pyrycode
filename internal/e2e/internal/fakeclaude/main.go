@@ -342,8 +342,10 @@
 //	                               fixture and its provenance. A boolean rather
 //	                               than a value, unlike the two knobs above,
 //	                               because there is nothing here to count or to
-//	                               choose: the fixture is one canned map copied
-//	                               from a committed capture. Stream mode only.
+//	                               choose: the fixture is one canned map, its
+//	                               numbers copied from a committed capture and one
+//	                               key's variant suffix from #2118's live probe.
+//	                               Stream mode only.
 //	                               Unset or empty ⟹ off ⟹ byte-identical to prior
 //	                               behaviour (the field is omitempty).
 //
@@ -1634,11 +1636,28 @@ type outModelUsage struct {
 	Provider                 string  `json:"provider"`
 }
 
-// riderModelWindowSonnetID is the model id the rider reports a 1M window for. A
-// test that plants a transcript naming a model must name THIS string: #2107's
-// join is an exact, verbatim match, so any other spelling asserts a miss while
-// looking like it asserts a hit.
-const riderModelWindowSonnetID = "claude-sonnet-5"
+// riderModelWindowSonnetBase is the model id a TRANSCRIPT names for the entry the
+// rider reports a 1M window for; riderModelWindowSonnetKey is the modelUsage KEY
+// that same entry is reported under. THE TWO ARE DELIBERATELY DIFFERENT STRINGS
+// (#2118), and a test that plants a transcript must name the BASE.
+//
+// They used to be one constant, and that is exactly what made the full-stack e2e
+// unable to fail: both sides of the join were written from it, so the harness
+// reproduced the very defect it was meant to catch. The channels genuinely
+// disagree — measured end to end on 2026-09-05, claude keys its result-line map
+// "claude-opus-5[1m]" while every usage-bearing transcript entry of the same
+// session writes "claude-opus-5" — and a fake that spells them identically
+// cannot exercise the join's variant fallback at all.
+//
+// PROVENANCE: the suffixed SHAPE is the live probe recorded on #2118, not a
+// reading of a committed capture. No capture in this tree carries a bracketed
+// modelUsage key; all 31 key by claude-haiku-4-5, claude-haiku-4-5-20251001 or
+// claude-sonnet-5. Only riderModelUsage's NUMERIC fields are copied from a
+// capture.
+const (
+	riderModelWindowSonnetBase = "claude-sonnet-5"
+	riderModelWindowSonnetKey  = riderModelWindowSonnetBase + "[1m]"
+)
 
 // riderModelUsage is the modelUsage map the rider writes, copied field-for-field
 // from the committed capture internal/e2e/realclaude/testdata/
@@ -1655,6 +1674,11 @@ const riderModelWindowSonnetID = "claude-sonnet-5"
 // Note the haiku entry appears in its DATED form only, with no undated alias
 // beside it — that is how the capture reads, and normalising it here would
 // quietly delete the property the fixture exists to carry.
+//
+// The sonnet entry's KEY carries a trailing variant group (#2118) while its
+// canonicalModel keeps the base — that is what the field means, and it is the
+// live shape: the variant rides the key, not the canonical name. Its numbers are
+// still the capture's, field for field.
 func riderModelUsage() map[string]outModelUsage {
 	return map[string]outModelUsage{
 		"claude-haiku-4-5-20251001": {
@@ -1666,7 +1690,7 @@ func riderModelUsage() map[string]outModelUsage {
 			CanonicalModel:  "claude-haiku-4-5",
 			Provider:        "firstParty",
 		},
-		riderModelWindowSonnetID: {
+		riderModelWindowSonnetKey: {
 			InputTokens:              2,
 			OutputTokens:             4,
 			CacheReadInputTokens:     35298,
@@ -1674,7 +1698,7 @@ func riderModelUsage() map[string]outModelUsage {
 			CostUSD:                  0.0545796,
 			ContextWindow:            1000000,
 			MaxOutputTokens:          64000,
-			CanonicalModel:           riderModelWindowSonnetID,
+			CanonicalModel:           riderModelWindowSonnetBase,
 			Provider:                 "firstParty",
 		},
 	}

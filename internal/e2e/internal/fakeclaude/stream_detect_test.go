@@ -639,9 +639,11 @@ func TestRunStreamJSON_RosterRiderOffIsByteIdentical(t *testing.T) {
 // by default (the result line carries no modelUsage at all, so every existing
 // spec's wire is unchanged), and on it carries the canned two-model map.
 //
-// The on-arm asserts the 1M entry by its id rather than by counting entries: the
-// join downstream is an exact string match, so the id is what a consumer actually
+// The on-arm asserts the 1M entry by its KEY rather than by counting entries: the
+// join downstream matches on that string, so the key is what a consumer actually
 // needs, and an entry-count check would pass on a map whose keys had drifted.
+// Since #2118 the key is the variant-suffixed spelling and differs from the base a
+// transcript names, which is the whole reason it is asserted literally here.
 func TestRunStreamJSON_ModelWindowRider(t *testing.T) {
 	t.Parallel()
 
@@ -674,14 +676,14 @@ func TestRunStreamJSON_ModelWindowRider(t *testing.T) {
 	var on bytes.Buffer
 	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "", false, 0, true)
 	got := resultModelUsage(t, on.String())
-	entry, ok := got[riderModelWindowSonnetID]
+	entry, ok := got[riderModelWindowSonnetKey]
 	if !ok {
-		t.Fatalf("rider on: modelUsage has no %q entry: %v", riderModelWindowSonnetID, got)
+		t.Fatalf("rider on: modelUsage has no %q entry: %v", riderModelWindowSonnetKey, got)
 	}
 	// JSON numbers decode to float64 through an `any`; 1000000 is exactly
 	// representable, so the comparison is safe.
 	if entry["contextWindow"] != float64(1_000_000) {
-		t.Errorf("rider on: %q contextWindow = %v, want 1000000", riderModelWindowSonnetID, entry["contextWindow"])
+		t.Errorf("rider on: %q contextWindow = %v, want 1000000", riderModelWindowSonnetKey, entry["contextWindow"])
 	}
 	if len(got) != 2 {
 		t.Errorf("rider on: modelUsage has %d entries, want 2 — the two-models-at-two-sizes shape is what makes the "+
