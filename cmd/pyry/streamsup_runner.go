@@ -26,15 +26,22 @@ import (
 // the turnevent sink) — the interactive_runner selection that injects it on
 // sessions.Config.RunnerFactory is #1081.
 //
-// models is the per-session model-list retention added by #1840, commands the
-// slash-command-list retention added by #2004, and tasks the background-task-roster
-// retention added by #2077. All three are pointers, so the adapter stays a value
-// type and the compile-time sessions.Runner assertion below is unaffected.
+// The embedded sessionRetentions carries the per-session holds newSessionParser mints:
+// models the model-list retention added by #1840, commands the slash-command-list
+// retention added by #2004, tasks the background-task-roster retention added by #2077, and
+// windows the per-model context-window retention added by #2106. Every field is a pointer,
+// so the adapter stays a value type and the compile-time sessions.Runner assertion below is
+// unaffected.
+//
+// EMBEDDED rather than restated field by field, since #2106 made newSessionParser return
+// the set as one value: the holds then cross the factory unsplit and cannot be bound apart
+// on the way, the construction site sets one field instead of four, and a fifth hold costs
+// neither this declaration nor the factory a line. sessionRetentions declares no methods,
+// so nothing is promoted into this type's method set and the four accessors below reach
+// their holds by ordinary field promotion.
 type streamRunner struct {
-	r        *streamsup.Runner
-	models   *sessionModelHold
-	commands *sessionSlashCommandHold
-	tasks    *sessionBackgroundTaskHold
+	r *streamsup.Runner
+	sessionRetentions
 }
 
 func (a streamRunner) State() sessions.State { return mapStreamState(a.r.State()) }
@@ -175,6 +182,36 @@ func (a streamRunner) BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bo
 	return a.tasks.BackgroundTaskRoster()
 }
 
+// ModelWindows reports the per-model context windows this session's child last named in a
+// `result` line, or ok == false when no child has reported a usable one (#2106). It reads
+// the hold newSessionParser bound to this runner's parser, so it answers outside a turn, on
+// any goroutine, with no turn in flight — and a runner whose retention was never minted
+// answers the unreported state rather than panicking, the read being nil-receiver-safe.
+//
+// A turn that reported nothing usable does NOT erase what is retained, so what comes back is
+// the newest USABLE report rather than the last turn's: sessionModelWindowHold.Sink's doc
+// gives the derivation, and a caller reading this as "the window as of the last turn" would
+// be wrong on any run whose most recent turn said nothing about models.
+//
+// Both obligations that ride the returned value — sanitization is the consumer's, and a
+// model id is not an argv token — are stated on sessionModelWindowHold.ModelWindows and are
+// not repeated here; this forward adds no judgement of its own.
+//
+// It is the SEVENTH concrete method OFF the sessions.Runner interface (un-widened, #1077),
+// after Interrupt (#1120), RestartFresh (#1124), BeginRotation (#1330), ModelList (#1840),
+// SlashCommandList (#2004) and BackgroundTaskRoster (#2077), and it is off for their reason
+// exactly rather than by resemblance to them: the rule those docs state is that the
+// interface carries a method when its consumer sits INSIDE internal/sessions, where a
+// structural assertion would fail open. This one's consumer is #2107, in cmd/pyry, which
+// reaches it by type assertion off Session.Runner the way interruptRunner already does — so
+// widening the interface would buy no compile-time guarantee and would drag every fake
+// runner under internal/sessions and cmd/pyry into the diff.
+//
+// Returning a package-private type is what that placement makes possible and costs nothing:
+// every consumer is in this package. Should a later ticket need the value outside it, the
+// export is a rename at one declaration rather than a redesign.
+func (a streamRunner) ModelWindows() (modelWindowReport, bool) { return a.windows.ModelWindows() }
+
 // mapStreamState maps streamsup's native lifecycle snapshot to supervisor.State.
 // The two types mirror each other field-for-field; Phase maps by a plain string
 // conversion because the phase values are identical across the two packages.
@@ -219,10 +256,12 @@ func mapStreamState(s streamsup.State) sessions.State {
 // which is what keeps the retention upstream of the droppable send that can
 // otherwise discard the one initialize reply a child ever sends. #2004 adds the
 // slash-command retention as a SECOND decorator on that same chain, on the same
-// argument and from the same call, and #2077 the background-task roster as a THIRD.
-// The roster is the one of the three whose producer fires repeatedly rather than once
-// per child, so what the retention buys there is a mid-run connect an answer between
-// changes rather than a value that would otherwise be lost forever.
+// argument and from the same call, #2077 the background-task roster as a THIRD, and
+// #2106 the per-model context windows as a FOURTH. The last two are the ones whose
+// producers fire repeatedly rather than once per child, so what the retention buys there
+// is an answer BETWEEN reports rather than a value that would otherwise be lost forever.
+// Since #2106 the four cross this seam as one sessionRetentions value, which the adapter
+// embeds — so they cannot be bound apart on the way and a fifth costs this site no line.
 //
 // #1109 constructed the runner via streamsup.New (the first caller tree-wide) and
 // deliberately left Config.Stdout nil for this ticket to fill. It is the arm the
@@ -253,7 +292,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		// cannot say which children the daemon downgrades and which keep the bypass
 		// they launch with. See withApprovalArgs' doc for the derivation.
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)
-		parser, heldModels, heldCommands, heldTasks := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		parser, held := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
 		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
 		// #2064's posture gate is bound HERE rather than in mapStreamsupConfig, on the
@@ -268,7 +307,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
-		return streamRunner{r: r, models: heldModels, commands: heldCommands, tasks: heldTasks}, nil
+		return streamRunner{r: r, sessionRetentions: held}, nil
 	}
 }
 

@@ -134,8 +134,22 @@ func cloneModelList(list turnevent.ModelList) turnevent.ModelList {
 	return out
 }
 
+// sessionRetentions is the set of per-session holds newSessionParser mints and binds to
+// the parser it returns, carried as ONE value rather than a positional tuple.
+//
+// It is deliberately a plain struct with no methods and no constructor of its own: it
+// exists to keep the holds together across the two seams they cross — out of
+// newSessionParser and into `streamRunner`, which embeds it — not to become a fifth type
+// with behaviour of its own. Each field's accessor lives on the hold it names.
+type sessionRetentions struct {
+	models   *sessionModelHold
+	commands *sessionSlashCommandHold
+	tasks    *sessionBackgroundTaskHold
+	windows  *sessionModelWindowHold
+}
+
 // newSessionParser mints the per-session retentions and the parser bound to them in
-// ONE call, and returns all four. It is the only production caller of
+// ONE call, and returns both. It is the only production caller of
 // streamsup.NewParser.
 //
 // The single call is what makes the halves impossible to wire to different holds, and
@@ -144,23 +158,35 @@ func cloneModelList(list turnevent.ModelList) turnevent.ModelList {
 // production composition through the real decoder rather than by inspection. next is
 // the per-session downstream sink; logger is the parser's.
 //
-// The three holds are CHAINED, each decorating the next, and #2004's slash-command hold
-// and #2077's background-task hold are sibling types rather than further retentions
-// inside sessionModelHold — that type's doc argues the choice, and a third link is the
-// existing idea applied once more rather than anything new. The statements below are
-// written INNERMOST FIRST, because each link needs the one it forwards to; the event
-// travels the other way, from the parser's sink into the model hold, on into the
-// slash-command hold, on into the background-task hold, and out to next. NOTHING DEPENDS
-// ON THAT ORDER: every link stores unconditionally and forwards unconditionally, and what
-// puts each retention upstream of the droppable fan-in send is that all three sit on the
-// parser's side of the channel — not where any of them sits in the chain.
+// The four holds are CHAINED, each decorating the next, and #2004's slash-command hold,
+// #2077's background-task hold and #2106's model-window hold are sibling types rather than
+// further retentions inside sessionModelHold — that type's doc argues the choice, and each
+// further link is the existing idea applied once more rather than anything new. The
+// statements below are written INNERMOST FIRST, because each link needs the one it forwards
+// to; the event travels the other way, from the parser's sink into the model hold, on
+// through the slash-command, background-task and model-window holds, and out to next.
+// NOTHING DEPENDS ON THAT ORDER: every link stores unconditionally with respect to variant
+// and forwards unconditionally, and what puts each retention upstream of the fan-in send is
+// that all four sit on the parser's side of the channel — not where any of them sits in the
+// chain.
 //
-// Returning a fourth value rather than one struct is deliberate at THIS count: a struct
-// would rewrite two siblings' call sites for no behaviour change. A fourth hold is where
-// that trade flips, and is noted here so its author need not re-derive it.
-func newSessionParser(next func(turnevent.Event), logger *slog.Logger) (*streamsup.Parser, *sessionModelHold, *sessionSlashCommandHold, *sessionBackgroundTaskHold) {
-	tasks := newSessionBackgroundTaskHold(next)
+// RETURNING ONE STRUCT rather than a positional tuple, since #2106. This doc used to argue
+// the tuple was deliberate at three holds — "a struct would rewrite two siblings' call sites
+// for no behaviour change. A fourth hold is where that trade flips" — and #2106 is that
+// fourth hold, so the note is discharged here rather than left describing a shape that no
+// longer ships. The measured cost of the flip was five call sites, one production and four
+// in streamsup_runner_test.go, and no behaviour change. What it buys is that a fifth hold
+// costs none of them, and that `streamRunner` can embed the set instead of restating it
+// field by field.
+func newSessionParser(next func(turnevent.Event), logger *slog.Logger) (*streamsup.Parser, sessionRetentions) {
+	windows := newSessionModelWindowHold(next)
+	tasks := newSessionBackgroundTaskHold(windows.Sink)
 	commands := newSessionSlashCommandHold(tasks.Sink)
 	models := newSessionModelHold(commands.Sink)
-	return streamsup.NewParser(models.Sink, logger), models, commands, tasks
+	return streamsup.NewParser(models.Sink, logger), sessionRetentions{
+		models:   models,
+		commands: commands,
+		tasks:    tasks,
+		windows:  windows,
+	}
 }
