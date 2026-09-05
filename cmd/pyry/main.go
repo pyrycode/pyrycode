@@ -50,6 +50,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/debugbundle"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/install"
 	"github.com/pyrycode/pyrycode/internal/msgqueue"
 	"github.com/pyrycode/pyrycode/internal/permbridge"
@@ -974,6 +975,18 @@ func runSupervisor(args []string) error {
 	// staticcheck U1000; #1080 is the thin change that adds the reader.
 	approvals := permbridge.New()
 
+	// The daemon's ONE durable conversation log (#2112, first written by #2114).
+	// Minted here rather than inside startRelayV2 because exactly one Store may
+	// exist per instance directory: it caches each conversation's next id after
+	// recovering it from disk once, so two stores mint duplicate ids for the same
+	// conversation, and each undoes a failed write by truncating to a size it
+	// stat'd itself — which can drop an entry the other had just appended.
+	// #2115's producer is newInboundDeliver, wired above this call, so a store
+	// built one frame down would be unreachable from it. Constructing it costs
+	// nothing and touches no filesystem: the instance directory is resolved
+	// lazily, per Append.
+	conversationHistory := history.New(resolveInstanceDirPath(*name))
+
 	relayCleanup, approvalSurface, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
@@ -1023,6 +1036,7 @@ func runSupervisor(args []string) error {
 		approvals:                     approvals,
 		streamSink:                    streamSink,
 		busy:                          turnBusy,
+		hist:                          conversationHistory,
 		approvalParked:                approvalParked,
 	})
 	if err != nil {

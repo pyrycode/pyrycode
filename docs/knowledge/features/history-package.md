@@ -2,10 +2,11 @@
 
 The durable, append-only, per-conversation message log the daemon writes as it
 fans envelopes out, read newest-first by walking backwards on demand. Landed
-in #2112 as a **storage floor only** — no producer and no consumer ship with
-it. `#2114`/`#2115` are the two append sites (the emitter's `emit` chokepoint
-and the delivery path), `#2116` is the wire-serving consumer, `#2113` declares
-the cursor as an opaque wire string. Spec:
+in #2112 as a storage floor with no caller; #2114 gave it its first two —
+the interactive emitter's `emit` chokepoint and session transitions (see
+[Producers](#producers) below). #2115 adds the delivery-path producer
+(the operator's own typed message), `#2116` is the wire-serving consumer,
+`#2113` declares the cursor as an opaque wire string. Spec:
 [`specs/architecture/2112-conversation-history-log.md`](../../specs/architecture/2112-conversation-history-log.md).
 
 ## Why not claude's transcripts
@@ -201,14 +202,77 @@ of reasoning about partial-write visibility across every filesystem the daemon
 runs on, and holding a leaf mutex across a bounded read was judged cheaper
 than being wrong about that.
 
-**Carried forward for `#2114`/`#2115`, not fixed here:** `Append` holds the
-store-wide mutex across directory resolution (~7 syscalls: `Abs`, `MkdirAll`,
-`EvalSymlinks` twice, the `Lstat` walk) plus the open/write/close, and every
-conversation pays it on one shared lock per envelope. Re-resolving every call
-is the correct trade for the reason above and is not being revisited — but the
-emit chokepoint fans deltas out at token rate, so whichever of #2114/#2115
-lands first should measure the hold there rather than discover the cost after
-the fact.
+**Measured (#2114), against a fixed decision rule.** `Append`'s cost at the
+interactive emit chokepoint is dominated by the directory-resolution
+syscalls, not the write: `no_store` costs 1 688 ns/op and 3 allocs/op,
+`store` costs 51 377 ns/op and 144 allocs/op — a delta of ≈ 49.7 µs and +141
+allocations, essentially all of it the ~7 syscalls (`Abs`, `MkdirAll`,
+`EvalSymlinks` twice, the `Lstat` walk) plus open/write/close under the
+mutex. The allocation count, not the latency number, is what shows the cost
+is structural to the store's re-resolve-every-call design rather than an
+artifact of one filesystem — `ns/op` alone would not have distinguished the
+two. The append stays synchronous: the chokepoint's sustained rate is set by
+the *unbatched* envelope variants (turn_state, tool start/update,
+turn_end — assistant text deltas are already coalesced behind a 250 ms
+window and never reach this path at token rate), tens per turn, so a turn
+pays single-digit milliseconds of added serialised time in total — two
+orders of magnitude below the 250 ms window. This was measured with one
+producer holding the lock alone; #2115 adds a second on the delivery path,
+so the number to re-measure there is contention under both producers
+sharing the mutex, not the single-call cost above.
+
+## Producers (#2114)
+
+Two call sites in `cmd/pyry` append through one seam,
+`appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
+interactive emitter's `emit` chokepoint
+(`cmd/pyry/interactive_turn_v2.go`) and session transitions' `broadcast`
+(`cmd/pyry/session_transition_v2.go`). Both already resolve the four values
+`Append` wants — conversation id, wire type, marshalled payload, one hoisted
+timestamp — for the ring append or the fan-out itself, so the log append
+needed no new mapping, only a nil-guarded call before the per-conn loop in
+each.
+
+**Why the write point is the envelope, not `internal/turnevent`.** An
+earlier draft proposed writing the log from `turnevent`'s representation.
+That cannot work: `turnevent`'s variant set carries no operator message, no
+conversation id, no session transition and no question batch. The
+operator's own typed text goes `send_message` → msgqueue → delivery → the
+child's stdin and is never echoed back, so a log written from `turnevent`
+would hold assistant text and tool rows and none of what the operator
+typed. (The operator's own message is #2115's producer, written at delivery
+against the same store, not at emit.)
+
+**The store is nil-tolerant and a concrete pointer, never an interface** —
+the same trap `session_transition_v2.go`'s `busy` field already documents:
+a typed-nil store boxed into an interface is non-nil at the interface level
+and would sail past a `== nil` guard. `Store` is not nil-receiver-safe
+(`Append` locks immediately), so `appendConversationHistory` checks
+explicitly rather than relying on a nil-receiver method, and every emitter
+test that builds an emitter with no store keeps working unchanged. A
+failing append never suppresses the wire emit or the ring append — it is a
+statement with no branch after it — and the failure is logged at `Warn`
+with an `errors.Is`-derived discriminant (`invalid_id` / `invalid_payload`
+/ `write`), never the error's own text: `history`'s errors format absolute
+filesystem paths (`open segment %q`), and the log's own MUST-NOT-log-content
+rule would be defeated by relaying them.
+
+**Two test-shape traps worth knowing before touching either producer
+again:**
+- **A shared-timestamp assertion needs three fan-out targets, not two.**
+  `broadcast` used to mint `time.Now()` inside its per-conn loop; with only
+  two connections, a per-conn timestamp and a correctly hoisted one are
+  often indistinguishable, since the clock may not tick between two calls
+  on a fast machine. Three targets compared for byte-identical payloads and
+  `TS.Equal` is what makes the hoist's absence a deterministic test failure
+  instead of an occasional flake.
+- **A "nothing was appended" assertion is only meaningful below the drop's
+  own log level.** The append failure path logs at `Warn` while
+  `broadcast`'s pre-existing drops (unknown reason, unresolvable
+  conversation) log at `Debug`; asserting an empty log buffer on a
+  default-level handler only proves "no append was attempted" because the
+  drop lines are filtered out separately. Two log statements at the same
+  level would make that assertion vacuous.
 
 ## Files
 
