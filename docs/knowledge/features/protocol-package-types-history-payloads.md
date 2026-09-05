@@ -78,10 +78,12 @@ payload, so a faithful 4096-entry page can exceed the v2 application-envelope
 size cap and be undeliverable as the daemon's own outbound frame. The daemon
 may therefore hand back **fewer entries than asked for**. This is exactly why
 termination has to be the `AtStart` marker and never an entry count: a client
-that infers "short page ⇒ start of log" is wrong the moment byte budgeting (not
-yet built — `#2116`'s) trims a page for size reasons unrelated to the log's
-actual start. `AtStart` and `Cursor` are never both meaningful — `Cursor` is
-empty whenever `AtStart` is set.
+that infers "short page ⇒ start of log" is wrong the moment byte budgeting
+trims a page for size reasons unrelated to the log's actual start. `AtStart`
+and `Cursor` are never both meaningful — `Cursor` is empty whenever `AtStart`
+is set. `#2116` built the budgeting by re-asking the log at a smaller limit,
+never by truncating a returned slice — see
+[Inbound `request_history` § A page's cursor names a position](v2-session-manager-state-machine-inbound-request-history-historypager-seam.md#a-pages-cursor-names-a-position-so-shortening-by-truncation-silently-skips-entries).
 
 **Three page shapes ship as separate fixtures because two would have implied
 a false equivalence.** The first AC draft only distinguished empty-terminal
