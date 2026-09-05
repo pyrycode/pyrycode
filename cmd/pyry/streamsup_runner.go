@@ -230,20 +230,33 @@ func mapStreamState(s streamsup.State) sessions.State {
 // (sessions.Runner, error)) that constructs a stream-json runner AND installs the
 // #1088 turnevent Parser as its Config.Stdout, with the Parser's sink bound to
 // sink for the runner's session (#1098). The factory captures the
-// daemon-singleton fan-in sink once; each per-session invocation binds a fresh
-// Parser to sink.sinkFor(cfg.SessionID), so every runner's turnevents fan into
-// the one drain tagged by their pool session id. The install lives HERE, not in
+// daemon-singleton fan-in sink once; each per-session invocation mints a
+// streamSessionTag seeded with cfg.SessionID and binds a fresh Parser to
+// sink.sinkForTag(tag.ID), so every runner's turnevents fan into the one drain
+// tagged by their pool session id. The install lives HERE, not in
 // mapStreamsupConfig, so the mapper stays pure (its Stdout == nil assertion is
 // untouched) — the Parser is a runtime object, one layer up.
 //
-// #1210 installs the SECOND lane onto the same fan-in: sink.exitFor(cfg.SessionID)
-// as the runner's child-exit callback, which closes the turn of a conversation
-// whose child died mid-turn (no result line for the abandoned turn, and no pool
-// transition — the two feeds that are structurally silent on that path). The two
-// installs bind from the ONE cfg.SessionID and sit adjacent on purpose: identical
-// session tags on both lanes are what let the drain's exit arm clear exactly the
-// conversation whose events it is ordered behind, and reading them as a pair is
-// the evidence, not a derivation. exitFor is INSTALLED rather than re-derived —
+// #1133 makes that tag LIVE rather than frozen, and the tag is minted FIRST — above
+// newSessionParser, which is itself above streamsup.New — because both halves have
+// to read the one object: the Parser is built before the runner exists, and the
+// runner is what moves the tag. Before it, the session id was captured directly by
+// the two lane closures, so a stream-mode new_session left every later event tagged
+// with an id the pool had rebound away from and the drain dropped all of them until
+// the daemon restarted. tag.Rotate goes onto Config.OnSessionRotate below, so the
+// half that MOVES the tag and the halves that READ it are the same object by
+// construction and cannot be bound apart — #1840's argument for minting a parser
+// and its holds in one call, and #2064's for the posture gate, applied a third
+// time.
+//
+// #1210 installs the SECOND lane onto the same fan-in: the runner's child-exit
+// callback, which closes the turn of a conversation whose child died mid-turn (no
+// result line for the abandoned turn, and no pool transition — the two feeds that
+// are structurally silent on that path). The two installs bind from the ONE tag and
+// sit adjacent on purpose: identical session tags on both lanes are what let the
+// drain's exit arm clear exactly the conversation whose events it is ordered
+// behind, and reading them as a pair is the evidence, not a derivation. exitForTag
+// is INSTALLED rather than re-derived —
 // it owns the non-blocking send and the Warn drop diagnostic the seam's
 // must-not-block / must-not-panic contract requires, so a hand-rolled func() here
 // would duplicate that contract instead of consuming it.
@@ -292,9 +305,11 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 		// cannot say which children the daemon downgrades and which keep the bypass
 		// they launch with. See withApprovalArgs' doc for the derivation.
 		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)
-		parser, held := newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)
+		tag := newStreamSessionTag(cfg.SessionID)
+		parser, held := newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)
 		scfg.Stdout = parser
-		scfg.OnChildExit = sink.exitFor(cfg.SessionID)
+		scfg.OnChildExit = sink.exitForTag(tag.ID)
+		scfg.OnSessionRotate = tag.Rotate
 		// #2064's posture gate is bound HERE rather than in mapStreamsupConfig, on the
 		// same dividing line Stdout sits on: it is a runtime object, not a plain value
 		// derived from a RunnerConfig field. Taken from the parser that was just built
