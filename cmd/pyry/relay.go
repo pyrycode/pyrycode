@@ -236,6 +236,24 @@ type relayWiring struct {
 	// internal/relay; this cmd/pyry-typed value never does. nil in foreground/v1 ⇒
 	// no seam is built at all.
 	runSettings func(convID string) (boundRunSettings, bool)
+	// modelListFor resolves a NAMED conversation to the model menu it should be
+	// offered, already shaped as a marshal-ready protocol.ModelListPayload, for the
+	// relay's on-demand request seam (#2125 fills V2SessionConfig.ModelListFor).
+	// Built at main.go over the conversations registry and *sessions.Pool for the
+	// SAME reason runSettings above is: the internal/sessions dependency stays at
+	// the composition root, and startRelayV2 holds no pool reference at all.
+	//
+	// It is retainedModelLists' CONVERSATION-KEYED TWIN and reaches the same
+	// resolver — including the #2124 fallback that answers a conversation with no
+	// bound session from the daemon-wide vocabulary, which is the case the request
+	// verb exists to serve. The enumerator below is the connect-time shape and is
+	// forced to enumerate because a relay V2Session carries no conversation id;
+	// this path has one in the request, so it must not walk the registry.
+	//
+	// The value is already primitive to internal/relay (protocol is imported both
+	// sides), so it crosses into V2SessionConfig unwrapped. nil in foreground/v1 ⇒
+	// the verb refuses every request as model_list.unavailable.
+	modelListFor func(convID string) (protocol.ModelListPayload, bool)
 	// modelWindows answers the context windows a named SESSION's child has
 	// reported, keyed by claude's own model id, for the context-window half of
 	// both usage seams below (#2107). Built at main.go over *sessions.Pool for the
@@ -796,6 +814,22 @@ func startRelayV2(
 		// conversation gets ok=false and addresses nothing. nil in foreground/v1 (no
 		// settings resolver wired).
 		RunConfigFor: runConfig,
+		// On-demand model-list source (#2125): resolves the NAMED conversation's model
+		// menu for an inbound request_model_list, so a client can ask at any time
+		// instead of waiting for the live turn lane (which drops every event whose
+		// producing session is not the active conversation's) or for the next connect
+		// (whose reconcile cannot include a conversation that did not exist at
+		// handshake time). That window is what leaves a freshly created chat's model
+		// and effort menus blank (pyrycode-desktop#1054), and #2085 makes it universal.
+		//
+		// It reaches the same resolver RetainedModelLists below enumerates over, so the
+		// answer is the same one the connect-time reconcile would send for that
+		// conversation — same SOURCE, not the same fields copied. Assigned straight
+		// through rather than wrapped in a closure, for RetainedModelLists' stated
+		// reason: a wrapper would be non-nil even when the field is nil and would
+		// silently defeat the seam's nil ⇒ refuse contract. A pure read: it mints no
+		// id and mutates no daemon state.
+		ModelListFor: w.modelListFor,
 		// Connect-time modal reconcile source (#877): enumerates the outstanding-
 		// modal registry as marshal-ready modal_shown payloads so a phone that
 		// connects/reconnects while a permission prompt is pending is unicast the

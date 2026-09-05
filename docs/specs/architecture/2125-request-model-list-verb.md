@@ -519,3 +519,36 @@ the design gets a `## Revisions` entry in the same commit as the code that depar
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — a named `modelListFor` adapter instead of an inline closure
+
+**What changed.** The plan's Wiring section specified an inline closure at
+`cmd/pyry/main.go` delegating to `resolveBoundModelList`, and said explicitly "no new
+adapter function". The implementation adds `modelListFor` to
+`cmd/pyry/session_model_list.go` instead, and `main.go` calls it the way it already
+calls `retainedModelLists`.
+
+**What drove it.** A compile error, not a preference: `cmd/pyry/main.go` does not import
+`internal/protocol`, and an inline closure needs that import for its one type
+annotation. The choice was to add the import for a single line, or to build the closure
+in the file that already has it. The second is also the better shape on its own merits —
+it is byte-for-byte the construction its twin `retainedModelLists` uses, and the two are
+read together.
+
+**What it changes about the contract.** Nothing. The adapter forwards both returns and
+adds no filter, no second lookup and no re-derivation of which vocabulary answers; the
+seam, the handler and the wire are as planned.
+
+**What it changes about the count.** Production source files go from the plan's stated
+seven to **eight** — `cmd/pyry/session_model_list.go` joins the list. The overage against
+the size table's ceiling of five widens accordingly, on the same floor-rule reasoning the
+Size section states, and is recorded here rather than left to be discovered in the diff.
+
+**What it changes about the tests.** The adapter is directly reachable, so
+`TestModelListFor_ForwardsTheResolversAnswer` pins that it forwards rather than
+transforms — an argument swap, a dropped comma-ok or a filtered row. The plan's Testing
+section already named the wiring guard as the proof that the seam is *assigned*; the two
+are disjoint, and the guard's own doc comment states that this test stays green with the
+`ModelListFor:` line deleted.

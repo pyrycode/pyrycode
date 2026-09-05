@@ -916,3 +916,66 @@ func TestRetainedModelLists_LogsNothing(t *testing.T) {
 		t.Errorf("a skipped conversation's id leaked into a log record:\n%s", logs)
 	}
 }
+
+// TestModelListFor_ForwardsTheResolversAnswer is the adapter's whole contract
+// (#2125): it hands its id to resolveBoundModelList and forwards both returns
+// untouched.
+//
+// It is deliberately THIN, and that is the point rather than an omission. Every
+// arm of the resolution — the bound session's own menu, the #2124 daemon-wide
+// fallback, the nothing-retained-anywhere refusal, the untrusted-id refusal — is
+// already pinned against resolveBoundModelList directly in the tests above, and
+// re-testing them through one more call would be the same assertions run twice.
+// What only this test can catch is the adapter doing something OTHER than
+// forwarding: swapping the registry and the pool, dropping the comma-ok, filtering
+// a row, or stamping a different conversation id.
+//
+// The three rows are chosen to make each of those visible. A bound conversation
+// pins that the answer is the resolver's own. An UNBOUND one pins that the #2124
+// fallback survives the hop — a filter added here would refuse it, which is
+// precisely the case the request verb exists to serve. And a foreign id pins that
+// the refusal crosses as a refusal rather than as a zero payload with ok true.
+//
+// It is NOT a wiring test. It stays green with `ModelListFor: w.modelListFor`
+// deleted from the V2SessionConfig literal — that gap is what
+// TestModelListForWiredToTheCompositionRoot closes, reading the wiring instead of
+// constructing it.
+func TestModelListFor_ForwardsTheResolversAnswer(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	daemonWide := sentinelModelList("ADAPTER")
+	plan.arm(pool.BootstrapID(), daemonWide)
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-bound", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+
+	seam := modelListFor(reg, pool)
+
+	for _, convID := range []string{"conv-bound", "conv-unbound"} {
+		want, wantOK := resolveBoundModelList(reg, pool, convID)
+		if !wantOK {
+			t.Fatalf("resolveBoundModelList(%q) refused; the fixture is wrong, not the adapter", convID)
+		}
+		got, ok := seam(convID)
+		if !ok {
+			t.Errorf("modelListFor(...)(%q) refused; the resolver answers it, so the adapter dropped the comma-ok or swapped its arguments", convID)
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("modelListFor(...)(%q) = %+v, want the resolver's own answer %+v", convID, got, want)
+		}
+		if got.ConversationID != convID {
+			t.Errorf("ConversationID = %q, want %q — the id comes from the resolved record, not from a neighbour's", got.ConversationID, convID)
+		}
+	}
+
+	// A refusal must cross AS a refusal. Without the comma-ok the relay handler
+	// would emit a model_list with an empty models array, which is exactly what
+	// turnevent.ModelList.Models' never-empty contract forbids.
+	if got, ok := seam("conv-not-hosted"); ok {
+		t.Errorf("modelListFor(...)(%q) = (%+v, true); an id the registry does not carry must refuse", "conv-not-hosted", got)
+	}
+}
