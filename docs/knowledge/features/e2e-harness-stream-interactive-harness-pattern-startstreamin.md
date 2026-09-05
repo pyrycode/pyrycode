@@ -196,3 +196,35 @@ seal-and-send closure is thrown away after its window closes, the same as phone-
 model-list twin — so a later edit that tries to reuse either conn fails to build instead of failing
 as a decrypt error that reads like a daemon bug. Worth copying into any future third-conn design in
 this family: discard the closure, don't just note in prose that the conn shouldn't be reused.
+
+### `relay_v2_stream_background_task_roster_reconcile_test.go` — `TestRelayV2_StreamBackgroundTaskRosterReachesLateConnectingPhone` (#2080)
+
+Structurally #2009's twin (same three-conn sequencing, same nil-seam mutant as the acceptance
+criterion), with one precondition the prior two reconciles didn't have: `model_list` and
+`slash_command_list` both ride claude's `initialize` control reply, which fakeclaude already
+answers unconditionally. A background-task roster has no such source — it is claude's mid-turn
+`system`/`background_tasks_changed` line, which stream mode never emits — so this ticket had to add
+a rider (`PYRY_FAKE_CLAUDE_STREAM_ROSTER`) before the reconcile could be proven at all. Any future
+frame in this family whose live-lane source isn't part of `initialize` should expect to pay the same
+cost: check what claude event produces it before assuming the fake can already speak it.
+
+**The spawn-time "minter counter is an unordered race" finding does not transfer here.**
+\#1868/#2009 measured `listsOnMinter` as a genuine 0-or-1 race, because that family's live-lane
+producer fires at spawn from the `initialize` reply, racing the cursor stamp `sessionRouter.Route`
+sets from the first turn. This frame's live-lane producer fires **mid-turn**, off the very turn
+whose routing already stamped the cursor — so `rostersOnMinter` converged on a deterministic **1**
+on both the green run and the mutant run here. Still logged, never asserted, for the same reason as
+its twins (asserting it would redden this spec for a change in a lane it doesn't own) — but don't
+assume a new roster-family reconcile inherits the race just because its predecessors had one; check
+whether its emitter fires at spawn or mid-turn first. See
+[the family overview](v2-session-manager-state-machine-connect-time-background-task-roster-reconcile-retain.md)
+for the fuller mechanism.
+
+**Row 0 verbatim isn't enough to prove "tasks intact" — attribution across every row is.** The
+twins' single-row-focus assertion (a spawn-time list has no per-row identity to duplicate) doesn't
+carry over to an aggregate whose rows are independently identified: a payload that duplicated one
+row eight times, or that spliced rows from two different rosters, would satisfy a row-0-verbatim
+check and a row-count check both. The test's row loop also asserts every row after the first carries
+the rider's synthetic id prefix and that no id repeats — the one addition this spec made beyond its
+own plan, and the one that actually backs the acceptance criterion's "with its tasks … intact"
+clause rather than a payload that merely has the right shape and length.
