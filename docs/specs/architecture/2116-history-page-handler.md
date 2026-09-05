@@ -641,3 +641,54 @@ section was written)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — Phase B, resolving the Open Questions
+
+**Open question 1 — how the e2e gets entries into a conversation's log.**
+Resolved: the test seeds them through `history.New` over the daemon's instance
+directory (`<home>/.pyry/test`) **before the daemon starts**, using the log's own
+`Append`. That is the choice `TestRelayV2_AttachmentRetrieval` already makes about
+a stored file and for the same reasons — the producers are #2114's and #2115's
+subject and are covered where they live, driving one here would make this run
+depend on them, and it would cost a full turn round trip to reach the interactive
+chokepoint. Seeding through `Append` means what lands is byte-identical to what a
+producer leaves, and doing it before startup makes this process the only writer at
+any moment, so the "two stores mint duplicate ids" hazard never arises.
+
+**Open question 2 — `defaultHistoryPageEntries = 50`.** Unchanged. Nothing in
+Phase B contradicted it; the byte-budget tests drive shortening with deliberately
+large fixtures rather than with realistic ones, so the default was never the
+thing under measurement.
+
+**Design departure — where the page/live boundary is proven.** The plan put the
+whole of AC-4 in the e2e. Split in implementation, and the split is what makes
+each half falsifiable:
+
+- The **dedup key** (`type`, `ts`) is pinned in `internal/relay` by
+  `TestV2Session_RequestHistory_DedupKeyHoldsWithoutTurnID`, over a
+  `session_transition` entry — a type carrying no `turn_id`, whose producer skips
+  the replay ring so its live envelope carries no `event_id` either. It compares
+  the two lanes' **marshalled wire forms**, which is the claim that matters, and
+  it does so deterministically.
+- The **no gap, no duplicate** guarantee is pinned by
+  `TestV2Session_RequestHistory_ShortensAPageToFitTheEnvelopeCap` and by the e2e's
+  walk, both of which assert every entry exactly once across a whole walk. The
+  shortening test is the one that kills the truncate-instead-of-re-ask
+  implementation; a single-page assertion cannot.
+
+An e2e that appended a live entry mid-request would have had to race the daemon's
+own interactive chokepoint to produce a live twin at all, and a test whose subject
+may or may not appear cannot assert "exactly once" — it would have read green
+against a broken key. What the e2e does carry instead is the walk, both reject
+codes on the wire, the static-message and never-log claims checked against the
+values a leak would really contain, and the no-stall frame.
+
+**Addition not in the plan — `historyPageFailure`.** The security review required
+the adapter to log a content-free discriminant rather than discard the error
+(§ Error messages, logs, telemetry). Implemented as `historyPageFailure` in
+`cmd/pyry/conversation_history.go`, the read-path twin of `historyAppendFailure`,
+naming six sentinels plus a default. `ErrNotContained` gets its own arm despite
+being unreachable past the membership gate, because an occurrence is a
+symlink-containment attack signal rather than a malfunction.
