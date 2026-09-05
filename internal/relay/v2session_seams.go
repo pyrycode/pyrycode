@@ -554,6 +554,66 @@ type V2SessionConfig struct {
 	// that only SettingsUpdater, the write path, can change.
 	RunConfigFor func(conversationID string) (RunConfig, bool)
 
+	// ModelListFor reports the NAMED conversation's model menu, already shaped as a
+	// marshal-ready model_list payload, for an inbound request_model_list (#2125).
+	// handleRequestModelList is its sole reader.
+	//
+	// CONVERSATION-KEYED, NOT ENUMERATE-ALL, and that is the whole difference from
+	// RetainedModelLists below. That seam enumerates because a V2Session carries no
+	// conversation id, so there is nothing to key a connect-time reconcile on; this
+	// path has an id in the request, so RunConfigFor above is the shape it copies —
+	// a string in, a payload and a comma-ok out. Do not reach for the enumerator
+	// here: it would resolve every conversation the registry carries to answer about
+	// one.
+	//
+	// IT DECIDES NOTHING ABOUT WHICH VOCABULARY ANSWERS. That decision — a bound
+	// session's own retained list, else the daemon-wide copy (#2124) — lives inside
+	// the cmd/pyry resolver, whose block forbids a caller forking it. This seam
+	// answers "what is that conversation's menu" and the handler's separate
+	// KnownConversation call answers "is this conversation ours"; neither is a second
+	// opinion on the other's question.
+	//
+	// Comma-ok rather than an empty payload, and this is the ONE PLACE the model-list
+	// family cannot follow RunConfigFor's neighbour request_session_settings, whose
+	// all-zero reply is a real answer. turnevent.ModelList.Models is documented
+	// never-empty, so AN EMPTY Models MUST NEVER STAND IN FOR "UNKNOWN": false means
+	// no menu exists to send and the handler turns it into a coded error frame. A
+	// caller MUST NOT read the payload on false — the production producer happens to
+	// zero its refusal return, but that is a property of cmd/pyry rather than of this
+	// contract.
+	//
+	// Optional: nil ⇒ the verb refuses every request it has already accepted as
+	// hosted, with the same retryable model_list.unavailable a resolver refusal
+	// earns. The merge is deliberate: distinguishing them would publish whether the
+	// host's model-list source is wired, which is a fact about the machine rather
+	// than about the request. Foreground / v1 wirings leave it nil, as they leave
+	// RetainedModelLists nil, and no existing construction site changes.
+	//
+	// A closure returning protocol.ModelListPayload rather than a *sessions.Pool or a
+	// turnevent value: internal/relay imports neither internal/sessions nor
+	// internal/turnevent, and protocol is already imported both sides, so the payload
+	// crosses with no new import and no cycle — RetainedModelLists' reason, unchanged.
+	//
+	// SECURITY: conversationID is untrusted network input and reaches this seam only
+	// AFTER KnownConversation has passed on it. It stays a lookup key into the
+	// daemon's own registry — never returned, never joined into a path, never wrapped
+	// into an error — and the reported conversation_id in the payload comes out of
+	// the daemon's own registry record rather than being echoed back, RunConfigFor's
+	// posture. This seam accepts ALREADY-BOUNDED payloads only and applies no bound
+	// of its own: the entry count and each row's fields are capped at construction
+	// (ModelListPayload.DroppedModels, ModelOption.TruncatedFields, frozen by
+	// #1704/#1705), so a second cap here would be a second place the limit is decided.
+	// The payload text is claude-authored and untrusted (ModelOption's own doc) and
+	// is NEVER logged on this path.
+	//
+	// BOUNDED TIME, on the Run goroutine. The handler answers inline rather than
+	// handing off to the conn's appFrameWorker, so an implementation MUST stay a
+	// bounded in-memory read — production wires a registry lookup plus a copy of at
+	// most ten model rows. An implementation that reads a file or enumerates the
+	// registry belongs off Run, and moving it there means switching the handler's
+	// emit from forwardEnvelope to forwardToRun in the same change.
+	ModelListFor func(conversationID string) (protocol.ModelListPayload, bool)
+
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
 	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
 	// simply unwired — foreground, or pre-#708 before the producer is live).
