@@ -886,10 +886,31 @@ func runSupervisor(args []string) error {
 	// relay leg wires it) it reports negative for every conversation, which is the
 	// pre-#1911 behaviour exactly.
 	approvalParked := &approvalParkedReport{}
+	// The daemon's ONE durable conversation log (#2112, first written by #2114).
+	// Exactly one Store may exist per instance directory: it caches each
+	// conversation's next id after recovering it from disk once, so two stores
+	// mint duplicate ids for the same conversation, and each undoes a failed write
+	// by truncating to a size it stat'd itself — which can drop an entry the other
+	// had just appended. So this is the single mint, shared by every producer.
+	//
+	// It is the fourth value in this block built BEFORE msgqueue.New, for the same
+	// chicken-and-egg reason as queueChanges, giveUps and approvalParked: #2115's
+	// producer hangs off the queue's OnDelivered seam, a Config field set at New,
+	// and the store used to be minted a frame further down where that literal
+	// could not see it. Moving it costs nothing and touches no filesystem — the
+	// instance directory is resolved lazily, per Append. It is read again below by
+	// relayWiring.hist, which the #2114 producers reach it through.
+	conversationHistory := history.New(resolveInstanceDirPath(*name))
 	queue, err := msgqueue.New(msgqueue.Config{
 		Deliver:  approvalParked.markApprovalHolds(newInboundDeliver(router.resolve, turnBusy, streamTurnHoldTimeout)),
 		OnChange: queueStateNotify(queueChanges, logger),
 		OnGiveUp: blocked,
+		// #2115: the operator's own message reaches the durable log HERE and
+		// nowhere else. It cannot be written from the Deliver seam above, which
+		// receives the composed payload that may name an on-host path; this one
+		// carries the client-readable text. Fires only on a confirmed write, so a
+		// dequeued or abandoned message is never recorded as said.
+		OnDelivered: newOperatorMessageHistory(conversationHistory, logger),
 		// Pending exempts a head held behind an approval parked on a PERSON from the
 		// give-up bound (#1911). #1014 wired this seam to claude's startup trust modal;
 		// that modal only ever appeared on the terminal surface, which #1348 removed,
@@ -974,18 +995,6 @@ func runSupervisor(args []string) error {
 	// with no reader until #1080, a set-but-unread field would trip
 	// staticcheck U1000; #1080 is the thin change that adds the reader.
 	approvals := permbridge.New()
-
-	// The daemon's ONE durable conversation log (#2112, first written by #2114).
-	// Minted here rather than inside startRelayV2 because exactly one Store may
-	// exist per instance directory: it caches each conversation's next id after
-	// recovering it from disk once, so two stores mint duplicate ids for the same
-	// conversation, and each undoes a failed write by truncating to a size it
-	// stat'd itself — which can drop an entry the other had just appended.
-	// #2115's producer is newInboundDeliver, wired above this call, so a store
-	// built one frame down would be unreachable from it. Constructing it costs
-	// nothing and touches no filesystem: the instance directory is resolved
-	// lazily, per Append.
-	conversationHistory := history.New(resolveInstanceDirPath(*name))
 
 	relayCleanup, approvalSurface, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
