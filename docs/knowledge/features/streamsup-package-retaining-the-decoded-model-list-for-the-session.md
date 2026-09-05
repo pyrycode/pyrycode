@@ -1,6 +1,7 @@
 # Retaining the decoded model list for the session (#1840)
 
-_See also: [the twin retention for the slash-command list](#retaining-the-decoded-slash-command-list-the-twin-2004), below._
+_See also: [the twin retention for the slash-command list](#retaining-the-decoded-slash-command-list-the-twin-2004) and
+[the third application, for the background-task roster](#retaining-the-decoded-background-task-roster-the-third-application-2077), below._
 
 `emitModelList` (above) mints one `turnevent.ModelList` per child and hands it to the parser's sink —
 but that sink is `sink.sinkFor(cfg.SessionID)`, the droppable-class send into the turn-busy fan-in
@@ -107,14 +108,54 @@ The same aliasing applies to `sessionModelHold`'s retained `ModelList` for the i
 strings are truncated through the same helper — so this file's own footprint reasoning inherits the
 same correction if it is ever written down explicitly. `slices.Clone` on the read side does not fix
 this: it copies the slice header, not the string's backing bytes, since Go strings are immutable and
-`slices.Clone` of a `[]string` copies pointers-and-lengths, not string contents.
+`slices.Clone` of a `[]string` copies pointers-and-lengths, not string contents. #2077's own security
+review derives the identical one-parse-line bound for the third retained type,
+`turnevent.BackgroundTaskRoster`, correctly and from the outset — the ~25x understatement has not
+recurred a third time.
 
-**Two stale ticket-number references remain in shipped comments, flagged and not yet corrected.**
-`sessionModelHold.Sink`'s doc and the compile-time assertion comment in `streamsup_runner_test.go`
-both cite `#1867` as "the shape the publisher reaches by type assertion." The actual production type
-assertion (`resolveBoundModelList`) shipped in **#1857**; `#1867` is `retainedModelLists`, which calls
-that resolver, not the assertion site itself. #2004's branch touched both comments (rewriting them from
-the correct `#1837` to the incorrect `#1867`) while fixing the mutex-justification sentence next to one
-of them — an unrelated, undeclared edit code review caught as a non-blocking SHOULD FIX. Whoever next
-edits either file should correct both sites to `#1857` (or revert to `#1837`, the ticket that originally
-named the publisher) rather than propagate a third number.
+**Two stale ticket-number references, corrected by #2077.** `sessionModelHold.Sink`'s doc and the
+compile-time assertion comment in `streamsup_runner_test.go` both cited `#1867` as "the shape the
+publisher reaches by type assertion." The actual production type assertion (`resolveBoundModelList`)
+shipped in **#1857**; `#1867` is `retainedModelLists`, which calls that resolver, not the assertion
+site itself. #2004's branch had introduced the wrong number (rewriting both comments from the correct
+`#1837` to the incorrect `#1867`) while fixing the mutex-justification sentence next to one of them —
+an unrelated, undeclared edit code review caught as a non-blocking SHOULD FIX at the time. This
+package overview nominated the next editor of either file to fix both sites, and #2077, adding a
+third sink decorator to the same chain, was that editor: both now cite `#1857`.
+
+## Retaining the decoded background-task roster, the third application (#2077)
+
+`sessionBackgroundTaskHold` applies the identical placement to `turnevent.BackgroundTaskRoster`: a
+third sink decorator, chained beside `sessionModelHold` and `sessionSlashCommandHold` inside
+`newSessionParser`, storing before forwarding on the parser's side of `sinkFor`'s droppable send.
+`streamRunner` exposes the read as a sixth concrete method off `sessions.Runner`, for the same
+interface-placement reason as its two siblings — the consumer is #2079's resolver, in `cmd/pyry`, not
+`internal/sessions`.
+
+Two things diverge from both siblings, and neither transfers by analogy:
+
+- **`have` is load-bearing here, not merely tidier.** Both siblings make an empty retained value
+  unreachable (`ModelList.Models` documented never empty; `emitSlashCommandList` returns early on a
+  zero-length list, #1877), so `len(x) == 0` as a stand-in for "unreported" would merely be redundant
+  there. `emitBackgroundTaskRoster` emits for an empty `tasks` array on purpose — claude positively
+  reporting that nothing is alive — so `have` is the *only* thing separating that from "this session
+  has reported no roster at all," and a mutant collapsing the two reddens four test arms. This is
+  provable only through the real decoder: a hold-level unit test can construct the reported-and-empty
+  state directly, but only a wiring test that decodes an actual `"tasks":[]` line shows the producer
+  really reaches that state rather than returning early the way its sibling does.
+- **`DroppedTasks` rides the retained value.** It's the roster's only truncation report — this variant
+  has no top-level `TruncatedFields` the way `SlashCommandList` does — so a clone that dropped it would
+  let a capped roster read back as a whole one.
+
+**A refusal whose enforcement is "this component remembers nothing" needs its scope restated the
+moment anything upstream starts remembering.** `emitBackgroundTaskRoster`'s refusal paragraph
+(`internal/streamsup/parser.go`) makes parser amnesia the enforcement mechanism for the family's
+no-synthesized-finish rule; that claim stays true of the parser, but its closing clause — detecting a
+task's disappearance would require remembering the previous roster — read as a daemon-wide
+impossibility argument until #2077 became the first ticket to hold a previous roster and a newer one
+at the same instant, one layer up. The dated addendum narrows the claim rather than withdrawing it,
+and states the actual rule explicitly on the new type instead of leaving it implicit: replace, never
+diff — one roster retained, never a pair. `turnevent.BackgroundTaskRoster`'s own type doc needed no
+edit: it is scoped to the event family rather than the parser, and its "diffing successive snapshots
+is a legitimate thing for a *consumer* to do on its own terms" survives verbatim, since the hold makes
+no inference.

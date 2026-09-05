@@ -558,6 +558,17 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 			if _, reported := sr.SlashCommandList(); reported {
 				t.Errorf("SlashCommandList() ok = true on a freshly constructed runner, want false — no child has reported")
 			}
+			// #2077: the same for the background-task retention, the third decorator.
+			// The unreported assertion carries more weight on this variant than on the
+			// two above: an empty roster is a REPORTED value here, so a runner with no
+			// child answering ok = true would be claiming claude had said nothing is
+			// alive rather than that nothing has been said at all.
+			if sr.tasks == nil {
+				t.Errorf("streamRunner.tasks is nil, want the hold newSessionParser minted")
+			}
+			if _, reported := sr.BackgroundTaskRoster(); reported {
+				t.Errorf("BackgroundTaskRoster() ok = true on a freshly constructed runner, want false — no child has reported")
+			}
 		})
 	}
 }
@@ -574,7 +585,7 @@ func TestNewSessionParser_DecodesAndRetains(t *testing.T) {
 	t.Parallel()
 
 	var next recordingSink
-	parser, hold, _ := newSessionParser(next.sink, discardLogger())
+	parser, hold, _, _ := newSessionParser(next.sink, discardLogger())
 
 	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-1840",` +
 		`"response":{"models":[` +
@@ -623,7 +634,7 @@ func TestNewSessionParser_DecodesAndRetainsSlashCommands(t *testing.T) {
 	t.Parallel()
 
 	var next recordingSink
-	parser, _, hold := newSessionParser(next.sink, discardLogger())
+	parser, _, hold, _ := newSessionParser(next.sink, discardLogger())
 
 	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-2004",` +
 		`"response":{"commands":[` +
@@ -660,10 +671,89 @@ func TestNewSessionParser_DecodesAndRetainsSlashCommands(t *testing.T) {
 	}
 }
 
-// Assert at compile time that streamRunner carries the shape #1867 reaches by
-// type assertion. ModelList is deliberately NOT on sessions.Runner — see the
+// TestNewSessionParser_DecodesAndRetainsBackgroundTaskRoster is the #2077 member of the
+// pair above and proves the same thing for the third link of the chain: the parser
+// newSessionParser returned consumes one real system/background_tasks_changed line and
+// the background-task hold it returned holds the decoded roster, with the downstream
+// sink still seeing the event.
+//
+// The line is the committed capture's own (internal/e2e/realclaude/testdata/
+// dropped_lines_v2.1.220.json, its background_tasks_changed record), its keys copied
+// rather than invented — including the two the decode target deliberately does not
+// declare, uuid and session_id. Carrying them is the point: they are present in every
+// real line, and a retention that somehow surfaced either would be caught here rather
+// than downstream.
+//
+// It is also the only test in this package that drives the empty-roster path through
+// the REAL decoder. The hold's own unit test constructs that state directly, which
+// cannot show that the producer really does emit for an empty tasks array rather than
+// returning early the way emitSlashCommandList does for its zero-length list — the
+// difference AC 2 rests on.
+func TestNewSessionParser_DecodesAndRetainsBackgroundTaskRoster(t *testing.T) {
+	t.Parallel()
+
+	var next recordingSink
+	parser, _, _, hold := newSessionParser(next.sink, discardLogger())
+
+	const line = `{"type":"system","subtype":"background_tasks_changed","tasks":[` +
+		`{"task_id":"bybi8g8i8","task_type":"local_bash","description":"cat $FIFO"}],` +
+		`"uuid":"702eb3a1-a939-43d8-b47d-e200e77712ae","session_id":"sess-2077"}`
+	if _, err := parser.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("parser.Write(background_tasks_changed) error = %v, want nil", err)
+	}
+
+	got, ok := hold.BackgroundTaskRoster()
+	if !ok {
+		t.Fatalf("BackgroundTaskRoster() ok = false after the roster line, want true")
+	}
+	if len(got.Tasks) != 1 {
+		t.Fatalf("retained roster carries %d entries, want the line's 1 — %#v", len(got.Tasks), got.Tasks)
+	}
+	if got.Tasks[0].TaskID != "bybi8g8i8" || got.Tasks[0].TaskType != "local_bash" {
+		t.Errorf("retained entry = %q/%q, want the line's %q/%q",
+			got.Tasks[0].TaskID, got.Tasks[0].TaskType, "bybi8g8i8", "local_bash")
+	}
+	if got.Tasks[0].Description != "cat $FIFO" {
+		t.Errorf("Tasks[0].Description = %q, want the line's %q", got.Tasks[0].Description, "cat $FIFO")
+	}
+	if got.DroppedTasks != 0 {
+		t.Errorf("DroppedTasks = %d for a one-entry line, want 0", got.DroppedTasks)
+	}
+
+	// The empty roster through the real producer: claude reports that the task
+	// finished, and the retention must read back REPORTED-and-empty rather than
+	// reverting to unreported.
+	const emptyLine = `{"type":"system","subtype":"background_tasks_changed","tasks":[],` +
+		`"uuid":"9f1c0b22-1c53-4b1a-9f5e-2a0d6d1b4e77","session_id":"sess-2077"}`
+	if _, err := parser.Write([]byte(emptyLine + "\n")); err != nil {
+		t.Fatalf("parser.Write(empty background_tasks_changed) error = %v, want nil", err)
+	}
+	empty, ok := hold.BackgroundTaskRoster()
+	if !ok {
+		t.Fatalf("BackgroundTaskRoster() ok = false after an empty roster line, want true — " +
+			"the producer emits for an empty tasks array on purpose")
+	}
+	if len(empty.Tasks) != 0 {
+		t.Errorf("retained roster carries %d entries after the empty line, want 0", len(empty.Tasks))
+	}
+
+	seen := next.events()
+	if len(seen) != 2 {
+		t.Fatalf("downstream saw %d events, want the 2 rosters forwarded through the chain", len(seen))
+	}
+	for i, ev := range seen {
+		if _, isRoster := ev.(turnevent.BackgroundTaskRoster); !isRoster {
+			t.Errorf("downstream event %d is %T, want turnevent.BackgroundTaskRoster", i, ev)
+		}
+	}
+}
+
+// Assert at compile time that streamRunner carries the shape #1857's resolver reaches
+// by type assertion. ModelList is deliberately NOT on sessions.Runner — see the
 // method's own doc — so this is the only compile-time statement of its existence,
 // and the var _ sessions.Runner assertion in streamsup_runner.go is untouched.
+// (The number is corrected here from #1867, which is retainedModelLists — the
+// enumerator that CALLS that resolver, not the type assertion itself.)
 var _ interface {
 	ModelList() (turnevent.ModelList, bool)
 } = streamRunner{}
@@ -674,6 +764,14 @@ var _ interface {
 // names which reader lost its shape.
 var _ interface {
 	SlashCommandList() (turnevent.SlashCommandList, bool)
+} = streamRunner{}
+
+// The #2077 member, for the shape #2079 will reach by type assertion. A third separate
+// block for the reason the second one states — and this is the one that most needs it,
+// since #2079 opens against a shape nothing else in the tree consumes yet: without this
+// statement a roster would be retained that no compiler check says is reachable.
+var _ interface {
+	BackgroundTaskRoster() (turnevent.BackgroundTaskRoster, bool)
 } = streamRunner{}
 
 // TestStreamRunnerFactory_ErrorPropagation proves AC-3: a streamsup.New failure
@@ -768,7 +866,7 @@ func TestMapStreamsupConfig_CarriesOperatorBypass(t *testing.T) {
 // from this package at all; the comment in the body names what carries it instead.
 func TestSessionParser_MintsOneStablePostureGate(t *testing.T) {
 	t.Parallel()
-	parser, _, _ := newSessionParser(func(turnevent.Event) {}, nil)
+	parser, _, _, _ := newSessionParser(func(turnevent.Event) {}, nil)
 	gate := parser.PostureGate()
 	if gate == nil {
 		t.Fatal("newSessionParser's parser minted no posture gate")

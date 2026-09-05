@@ -2821,6 +2821,18 @@ func (p *Parser) emitBackgroundTaskUpdated(line []byte) bool {
 // at the turn boundary. That does not weaken the refusal by a step: the counter
 // remembers no task, no roster, and nothing any line said, so nothing about it
 // brings a synthesized finish event any closer to being derivable.
+//
+// RE-SCOPED 2026-09-03 (#2077): the paragraph above is still true of the PARSER,
+// which holds no roster and no per-task memory — but it is scoped to the parser
+// and can no longer be read as a daemon-wide impossibility argument. cmd/pyry's
+// sessionBackgroundTaskHold now retains the newest roster for the session's life,
+// one layer up, so the previous roster does outlive its line somewhere. The
+// refusal survives that intact and by an explicit rule rather than by an
+// accident of forgetting: the hold REPLACES and never diffs, and it holds one
+// roster rather than a previous-and-current pair, so a disappearance is still not
+// derivable from anything the daemon keeps. Whoever adds a second retention in
+// this family owes the same statement — the amnesia argument no longer carries it
+// on its own.
 func (p *Parser) emitBackgroundTaskRoster(line []byte) bool {
 	var tl systemBackgroundTasksLine
 	if err := json.Unmarshal(line, &tl); err != nil {
