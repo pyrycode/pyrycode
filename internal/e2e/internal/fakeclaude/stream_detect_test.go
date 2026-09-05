@@ -47,7 +47,7 @@ func TestRunStreamJSON_SingleTurn(t *testing.T) {
 
 	const prompt = "hello over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false, "", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, false, false, "", false, 0, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -85,7 +85,7 @@ func TestRunStreamJSON_MultipleTurns(t *testing.T) {
 		in.WriteString(userTurnLine(p) + "\n")
 	}
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, false, false, "", false, 0)
+	runStreamJSON(strings.NewReader(in.String()), &buf, false, false, "", false, 0, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2*len(prompts) {
@@ -119,7 +119,7 @@ func TestRunStreamJSON_NonUserLinesIgnored(t *testing.T) {
 	const ctrl = `{"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}`
 	input := ctrl + "\n" + "\n" + "not json at all\n"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(input), &buf, false, false, "", false, 0)
+	runStreamJSON(strings.NewReader(input), &buf, false, false, "", false, 0, false)
 
 	if buf.Len() != 0 {
 		t.Fatalf("non-user lines produced %d bytes of output, want 0: %q", buf.Len(), buf.String())
@@ -144,7 +144,7 @@ func TestRunStreamJSON_InterruptMode_UserTurnStaysInFlight(t *testing.T) {
 
 	const prompt = "in-flight over stream-json"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false, "", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine(prompt)+"\n"), &buf, true, false, "", false, 0, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -167,7 +167,7 @@ func TestRunStreamJSON_InterruptMode_InterruptEndsTurnCancelled(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false, "", false, 0)
+	runStreamJSON(strings.NewReader(interruptControlRequestLine("r1")+"\n"), &buf, true, false, "", false, 0, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 1 {
@@ -193,7 +193,7 @@ func TestRunStreamJSON_InterruptMode_InFlightThenInterrupt(t *testing.T) {
 	in.WriteString(userTurnLine(prompt) + "\n")
 	in.WriteString(interruptControlRequestLine("r1") + "\n")
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(in.String()), &buf, true, false, "", false, 0)
+	runStreamJSON(strings.NewReader(in.String()), &buf, true, false, "", false, 0, false)
 
 	events := parseEmitted(t, buf.Bytes())
 	if len(events) != 2 {
@@ -239,7 +239,7 @@ func TestRunStreamJSON_InterruptAckRider(t *testing.T) {
 	// have minted itself.
 	const reqID = "e2e-1500-interrupt-req"
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(interruptControlRequestLine(reqID)+"\n"), &buf, true, false, "", false, 0)
+	runStreamJSON(strings.NewReader(interruptControlRequestLine(reqID)+"\n"), &buf, true, false, "", false, 0, false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 2 {
@@ -291,8 +291,14 @@ func TestWriteStreamResponse_Shape(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	if err := writeStreamResponse(&buf, "m1", "echo me"); err != nil {
+	// nil modelUsage is the default path (#2107): the result line must stay
+	// byte-identical to the pre-rider wire, which the omitempty tag delivers and
+	// the no-modelUsage assertion below pins.
+	if err := writeStreamResponse(&buf, "m1", "echo me", nil); err != nil {
 		t.Fatalf("writeStreamResponse: %v", err)
+	}
+	if strings.Contains(buf.String(), "modelUsage") {
+		t.Errorf("result line carries a modelUsage key with a nil map: %q", buf.String())
 	}
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
 	if len(lines) != 2 {
@@ -340,7 +346,7 @@ func TestWriteStreamResponse_Shape(t *testing.T) {
 // normal reply still arrives intact.
 func TestRunStreamJSON_BogusRider(t *testing.T) {
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true, "", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, true, "", false, 0, false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 4 {
@@ -377,8 +383,8 @@ func TestRunStreamJSON_BogusRider(t *testing.T) {
 // untouched path always wrote.
 func TestRunStreamJSON_BogusRiderOffIsByteIdentical(t *testing.T) {
 	var on, off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0)
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true, "", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, true, "", false, 0, false)
 
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
@@ -420,7 +426,7 @@ func TestRunStreamJSON_RateLimitRider(t *testing.T) {
 			t.Parallel()
 
 			var buf bytes.Buffer
-			runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, tc.status, false, 0)
+			runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, tc.status, false, 0, false)
 
 			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 			if len(lines) != 3 {
@@ -501,8 +507,8 @@ func TestRunStreamJSON_RateLimitRiderOffIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	var on, off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0)
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "allowed", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "allowed", false, 0, false)
 
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	onLines := strings.Split(strings.TrimSpace(on.String()), "\n")
@@ -534,7 +540,7 @@ func TestRunStreamJSON_RosterRider(t *testing.T) {
 	// writes all nine — the CUT is the daemon's, and reproducing it here would hide
 	// the very thing the e2e measures.
 	var buf bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, "", false, 9)
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &buf, false, false, "", false, 9, false)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 3 {
@@ -594,7 +600,7 @@ func TestRunStreamJSON_RosterRider(t *testing.T) {
 
 	// The rider only PREPENDS; the tail must match the untouched output.
 	var off bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &off, false, false, "", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine("hello")+"\n"), &off, false, false, "", false, 0, false)
 	offLines := strings.Split(strings.TrimSpace(off.String()), "\n")
 	if len(offLines) != 2 {
 		t.Fatalf("rider-off line count: got %d, want 2", len(offLines))
@@ -613,7 +619,7 @@ func TestRunStreamJSON_RosterRiderOffIsByteIdentical(t *testing.T) {
 	t.Parallel()
 
 	var base bytes.Buffer
-	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &base, false, false, "", false, 0)
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &base, false, false, "", false, 0, false)
 	want := strings.TrimSpace(base.String())
 	if len(strings.Split(want, "\n")) != 2 {
 		t.Fatalf("rider-off line count: got %d, want 2", len(strings.Split(want, "\n")))
@@ -621,10 +627,64 @@ func TestRunStreamJSON_RosterRiderOffIsByteIdentical(t *testing.T) {
 
 	for _, count := range []int{0, -1} {
 		var buf bytes.Buffer
-		runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &buf, false, false, "", false, count)
+		runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &buf, false, false, "", false, count, false)
 		if got := strings.TrimSpace(buf.String()); got != want {
 			t.Errorf("rosterTasks=%d is not byte-identical to the untouched path:\n got %s\nwant %s",
 				count, got, want)
 		}
+	}
+}
+
+// TestRunStreamJSON_ModelWindowRider covers the #2107 rider from both sides: off
+// by default (the result line carries no modelUsage at all, so every existing
+// spec's wire is unchanged), and on it carries the canned two-model map.
+//
+// The on-arm asserts the 1M entry by its id rather than by counting entries: the
+// join downstream is an exact string match, so the id is what a consumer actually
+// needs, and an entry-count check would pass on a map whose keys had drifted.
+func TestRunStreamJSON_ModelWindowRider(t *testing.T) {
+	t.Parallel()
+
+	// resultModelUsage returns the modelUsage object on the single result line in
+	// out, or nil when the line carries no such key.
+	resultModelUsage := func(t *testing.T, out string) map[string]map[string]any {
+		t.Helper()
+		for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+			var decoded struct {
+				Type       string                    `json:"type"`
+				ModelUsage map[string]map[string]any `json:"modelUsage"`
+			}
+			if err := json.Unmarshal([]byte(line), &decoded); err != nil {
+				t.Fatalf("decode emitted line %q: %v", line, err)
+			}
+			if decoded.Type == "result" {
+				return decoded.ModelUsage
+			}
+		}
+		t.Fatalf("no result line in output: %q", out)
+		return nil
+	}
+
+	var off bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &off, false, false, "", false, 0, false)
+	if got := resultModelUsage(t, off.String()); got != nil {
+		t.Errorf("rider off: modelUsage = %v, want absent", got)
+	}
+
+	var on bytes.Buffer
+	runStreamJSON(strings.NewReader(userTurnLine("hi")+"\n"), &on, false, false, "", false, 0, true)
+	got := resultModelUsage(t, on.String())
+	entry, ok := got[riderModelWindowSonnetID]
+	if !ok {
+		t.Fatalf("rider on: modelUsage has no %q entry: %v", riderModelWindowSonnetID, got)
+	}
+	// JSON numbers decode to float64 through an `any`; 1000000 is exactly
+	// representable, so the comparison is safe.
+	if entry["contextWindow"] != float64(1_000_000) {
+		t.Errorf("rider on: %q contextWindow = %v, want 1000000", riderModelWindowSonnetID, entry["contextWindow"])
+	}
+	if len(got) != 2 {
+		t.Errorf("rider on: modelUsage has %d entries, want 2 — the two-models-at-two-sizes shape is what makes the "+
+			"downstream join's answer discriminating: %v", len(got), got)
 	}
 }

@@ -1016,6 +1016,7 @@ func runSupervisor(args []string) error {
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
 		},
+		modelWindows:                  sessionModelWindows(pool),
 		retainedModelLists:            retainedModelLists(convReg, pool),
 		retainedSlashCommandLists:     retainedSlashCommandLists(convReg, pool),
 		retainedBackgroundTaskRosters: retainedBackgroundTaskRosters(convReg, pool),

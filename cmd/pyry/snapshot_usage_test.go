@@ -41,7 +41,7 @@ func TestSnapshotUsageFor_ReadsTheBoundTranscript(t *testing.T) {
 	const id = "11111111-2222-4333-8444-555555555555"
 	writeUsageTranscript(t, dir, id, 5000, 800, 1500, 200)
 
-	read := snapshotUsageFor(dir)
+	read := snapshotUsageFor(dir, nil)
 	if read == nil {
 		t.Fatal("snapshotUsageFor returned nil for a wired dir")
 	}
@@ -111,7 +111,7 @@ func TestSnapshotUsageFor_WindowAgainstTheUsedCount(t *testing.T) {
 			dir := t.TempDir()
 			writeUsageTranscript(t, dir, tc.id, tc.input, tc.cacheCreate, tc.cacheRead, tc.output)
 
-			read := snapshotUsageFor(dir)
+			read := snapshotUsageFor(dir, nil)
 			if read == nil {
 				t.Fatal("snapshotUsageFor returned nil for a wired dir")
 			}
@@ -153,7 +153,7 @@ func TestSnapshotUsageFor_SiblingTranscriptIsNeverRead(t *testing.T) {
 	// time — the tiebreak a directory scan would fall for.
 	writeUsageTranscript(t, dir, siblingID, 150000, 0, 0, 0)
 
-	read := snapshotUsageFor(dir)
+	read := snapshotUsageFor(dir, nil)
 	if used, _ := read(boundID); used != 1000 {
 		t.Errorf("read(boundID) used = %d, want 1000 (the bound session's figure, never the sibling's 150000)", used)
 	}
@@ -172,7 +172,7 @@ func TestSnapshotUsageFor_UnresolvableReportsFreshSession(t *testing.T) {
 
 	dir := t.TempDir()
 	writeUsageTranscript(t, dir, "11111111-2222-4333-8444-555555555555", 5000, 0, 0, 0)
-	read := snapshotUsageFor(dir)
+	read := snapshotUsageFor(dir, nil)
 
 	// unreadableID's transcript path exists and stats clean but cannot be read,
 	// because prepare creates a DIRECTORY there. That is the deterministic
@@ -234,7 +234,7 @@ func TestSnapshotUsageFor_UnresolvableReportsFreshSession(t *testing.T) {
 func TestSnapshotUsageFor_UnwiredReturnsNilSeam(t *testing.T) {
 	t.Parallel()
 
-	if got := snapshotUsageFor(""); got != nil {
+	if got := snapshotUsageFor("", nil); got != nil {
 		t.Error("no sessions dir: want a nil reader")
 	}
 }
@@ -250,7 +250,7 @@ func TestBootstrapSnapshotUsage(t *testing.T) {
 
 	t.Run("no sessions dir is a nil seam", func(t *testing.T) {
 		t.Parallel()
-		if got := bootstrapSnapshotUsage("", func() string { return "id" }); got != nil {
+		if got := bootstrapSnapshotUsage("", func() string { return "id" }, nil); got != nil {
 			t.Error("bootstrapSnapshotUsage(no dir) is non-nil, want a nil seam")
 		}
 	})
@@ -262,7 +262,7 @@ func TestBootstrapSnapshotUsage(t *testing.T) {
 	// makes it structural: no closure exists that could invoke a nil id source.
 	t.Run("no id source is a nil seam", func(t *testing.T) {
 		t.Parallel()
-		if got := bootstrapSnapshotUsage(t.TempDir(), nil); got != nil {
+		if got := bootstrapSnapshotUsage(t.TempDir(), nil, nil); got != nil {
 			t.Error("bootstrapSnapshotUsage(no id source) is non-nil, want a nil seam")
 		}
 	})
@@ -282,7 +282,7 @@ func TestBootstrapSnapshotUsage(t *testing.T) {
 		writeUsageTranscript(t, dir, bootstrapID, 4200, 0, 0, 0)
 		writeUsageTranscript(t, dir, siblingID, 150000, 0, 0, 0)
 
-		usage := bootstrapSnapshotUsage(dir, func() string { return bootstrapID })
+		usage := bootstrapSnapshotUsage(dir, func() string { return bootstrapID }, nil)
 		if usage == nil {
 			t.Fatal("bootstrapSnapshotUsage(wired) returned a nil seam")
 		}
@@ -294,4 +294,137 @@ func TestBootstrapSnapshotUsage(t *testing.T) {
 			t.Errorf("window = %d, want %d", window, defaultWindow)
 		}
 	})
+}
+
+// transcriptModel is the model id writeUsageTranscript stamps on the assistant
+// entry it writes. Named here because #2107's join is keyed on exactly that
+// string: a test whose windows map used any other spelling would assert a MISS
+// while looking like it asserted a hit.
+const transcriptModel = "claude-opus-4-8"
+
+// TestSnapshotUsageFor_ReportsTheObservedWindow is #2107 at the seam: the reader
+// asks the windows resolver about the SAME id it resolved the transcript by, and
+// contextwindow.Read pairs the two.
+//
+// The used count is the figure measured live on 2026-09-04, and the observed
+// window is above it, so this row also proves the contradiction check runs AFTER
+// the join — a check-then-resolve seam would report 0 here.
+func TestSnapshotUsageFor_ReportsTheObservedWindow(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const id = "11111111-2222-4333-8444-666666666666"
+	writeUsageTranscript(t, dir, id, 2, 950, 221118, 1005)
+
+	read := snapshotUsageFor(dir, func(sessionID string) map[string]int {
+		if sessionID != id {
+			t.Errorf("windows asked about %q, want the id the transcript was resolved by (%q)", sessionID, id)
+		}
+		return map[string]int{transcriptModel: 1_000_000}
+	})
+	if read == nil {
+		t.Fatal("snapshotUsageFor returned nil for a wired dir")
+	}
+	used, window := read(id)
+	if used != 223075 {
+		t.Errorf("used = %d, want 223075", used)
+	}
+	if window != 1_000_000 {
+		t.Errorf("window = %d, want 1000000 — the observed window for the model that produced the used count", window)
+	}
+}
+
+// TestSnapshotUsageFor_NilWindowsStillReads pins the rule that is easiest to
+// pattern-match wrong: dir == "" collapses the seam to nil, a nil windows func
+// does NOT. A daemon that cannot resolve windows (foreground / v1) still has
+// transcripts, and its reading must stay the pre-#2107 one rather than becoming
+// no reading at all.
+//
+// The used count is deliberately below the default window so the assertion is
+// "the default was reported", not #2100's collapse — which would pass for a
+// broken seam too.
+func TestSnapshotUsageFor_NilWindowsStillReads(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const id = "11111111-2222-4333-8444-777777777777"
+	writeUsageTranscript(t, dir, id, 1000, 0, 0, 0)
+
+	read := snapshotUsageFor(dir, nil)
+	if read == nil {
+		t.Fatal("snapshotUsageFor(dir, nil) returned a nil seam — a nil windows resolver must degrade the window, not the reader")
+	}
+	used, window := read(id)
+	if used != 1000 {
+		t.Errorf("used = %d, want 1000", used)
+	}
+	if window != defaultWindow {
+		t.Errorf("window = %d, want the default %d", window, defaultWindow)
+	}
+}
+
+// TestSnapshotUsageFor_WindowIsolation is AC 5 at the seam: a window observed for
+// one session is never reported for another. Two transcripts of the SAME size sit
+// side by side and only one id has an observed window, so a reader that asked the
+// resolver with a fixed or stale id would report 1M for both.
+func TestSnapshotUsageFor_WindowIsolation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const (
+		observedID = "11111111-2222-4333-8444-888888888888"
+		siblingID  = "99999999-2222-4333-8444-888888888888"
+	)
+	writeUsageTranscript(t, dir, observedID, 1000, 0, 0, 0)
+	writeUsageTranscript(t, dir, siblingID, 1000, 0, 0, 0)
+
+	read := snapshotUsageFor(dir, func(sessionID string) map[string]int {
+		if sessionID != observedID {
+			return nil
+		}
+		return map[string]int{transcriptModel: 1_000_000}
+	})
+
+	if _, window := read(observedID); window != 1_000_000 {
+		t.Errorf("observed session window = %d, want 1000000", window)
+	}
+	if _, window := read(siblingID); window != defaultWindow {
+		t.Errorf("sibling session window = %d, want the default %d — one session's observed window must never be reported for another",
+			window, defaultWindow)
+	}
+}
+
+// TestBootstrapSnapshotUsage_ReportsTheObservedWindow proves the OTHER of the two
+// seams #2107 AC 1 names carries the join too. screen_snapshot reads this one,
+// session_settings reads the by-id reader above, and startRelayV2 builds them
+// side by side from the same resolver — wiring one alone would make the two
+// surfaces report different windows for one session.
+//
+// screen_snapshot itself cannot be driven end to end on the stream runner (it
+// short-circuits to server.binary_offline, having no terminal screen), so this is
+// where that half is proven.
+func TestBootstrapSnapshotUsage_ReportsTheObservedWindow(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const bootstrapID = "11111111-2222-4333-8444-999999999999"
+	writeUsageTranscript(t, dir, bootstrapID, 2, 950, 221118, 1005)
+
+	usage := bootstrapSnapshotUsage(dir, func() string { return bootstrapID },
+		func(sessionID string) map[string]int {
+			if sessionID != bootstrapID {
+				t.Errorf("windows asked about %q, want the bootstrap id %q", sessionID, bootstrapID)
+			}
+			return map[string]int{transcriptModel: 1_000_000}
+		})
+	if usage == nil {
+		t.Fatal("bootstrapSnapshotUsage(wired) returned a nil seam")
+	}
+	used, window := usage()
+	if used != 223075 {
+		t.Errorf("used = %d, want 223075", used)
+	}
+	if window != 1_000_000 {
+		t.Errorf("window = %d, want 1000000", window)
+	}
 }

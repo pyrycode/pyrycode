@@ -49,12 +49,28 @@ import (
 // transcript.StatByID validates the stem before any path join, so a malformed or
 // hostile id is rejected with no filesystem access at all.
 //
-// Every failure collapses to contextwindow.Read(""), the same deterministic
+// Every failure collapses to contextwindow.Read("", nil), the same deterministic
 // fresh-session report (zero used, default window) a brand-new session produces:
 // an id that is empty or malformed, a transcript not yet written, and a file that
 // raced away between the stat and the open. A usage reader has no business
 // surfacing an error to a client, and it NEVER logs a path.
-func snapshotUsageFor(dir string) func(id string) (usedTokens, windowTokens int) {
+//
+// #2107: windows is the second half of the context-window reading — the windows
+// claude reported for the models THIS session used, which the transcript never
+// carries. It is asked for the SAME id the transcript is resolved by, which is
+// what makes the two halves two readings of one child (see sessionModelWindows,
+// whose Pool.Lookup is the isolation enforcement point). contextwindow.Read
+// performs the join and every one of its rules; nothing is decided here.
+//
+// A NIL windows FUNC MUST NOT COLLAPSE THE SEAM, and this is the spot where the
+// neighbouring shape is close enough to be pattern-matched wrong. dir == ""
+// collapses to a nil seam because it protects the reader itself — see above. A
+// nil windows func is the runConfigFor case instead, whose doc argues it for its
+// own usage half: it yields a WORKING reader whose answers carry the default
+// window, which is the pre-#2107 reading exactly. A daemon that cannot resolve
+// windows still has transcripts to read, and degrading one integer must not make
+// a resolvable session unresolvable. Foreground / v1 is that daemon.
+func snapshotUsageFor(dir string, windows func(sessionID string) map[string]int) func(id string) (usedTokens, windowTokens int) {
 	if dir == "" {
 		return nil
 	}
@@ -63,14 +79,20 @@ func snapshotUsageFor(dir string) func(id string) (usedTokens, windowTokens int)
 		if res, err := transcript.StatByID(dir, id); err == nil {
 			path = res.Path
 		}
-		u, err := contextwindow.Read(path)
+		var observed map[string]int
+		if windows != nil {
+			observed = windows(id)
+		}
+		u, err := contextwindow.Read(path, observed)
 		if err != nil {
-			// A genuine open failure on a resolved path. Read("") never errors and
-			// yields the same fresh-session report, so this branch is deterministic
-			// and content-free. It also discards the error rather than propagating
-			// it, which is what keeps the resolved path off every surface — the
-			// error contextwindow.Read returns wraps the full path.
-			u, _ = contextwindow.Read("")
+			// A genuine open failure on a resolved path. Read("", nil) never errors
+			// and yields the same fresh-session report, so this branch is
+			// deterministic and content-free. It also discards the error rather than
+			// propagating it, which is what keeps the resolved path off every
+			// surface — the error contextwindow.Read returns wraps the full path.
+			// The windows map is dropped with it: with no transcript entry there is
+			// no model to join on, so passing it would change nothing.
+			u, _ = contextwindow.Read("", nil)
 		}
 		return u.UsedTokens, u.WindowTokens
 	}
@@ -89,8 +111,17 @@ func snapshotUsageFor(dir string) func(id string) (usedTokens, windowTokens int)
 // path reaches it today. Deciding it at BUILD time, before any closure exists,
 // is what makes "no path can invoke a nil id source" structural rather than a
 // promise.
-func bootstrapSnapshotUsage(dir string, bootstrapID func() string) func() (usedTokens, windowTokens int) {
-	read := snapshotUsageFor(dir)
+//
+// windows rides through to snapshotUsageFor unchanged and is deliberately NOT a
+// third half of the either-half-unwired rule above: a nil one degrades the window
+// to the default rather than making the seam unusable, for the reason
+// snapshotUsageFor states. Threading it here rather than only at the
+// conversation-keyed seam is what keeps screen_snapshot and session_settings
+// agreeing on one reading — the two are constructed side by side in startRelayV2,
+// and wiring one alone would make the two surfaces disagree for the same session
+// (#2107 AC 1).
+func bootstrapSnapshotUsage(dir string, bootstrapID func() string, windows func(sessionID string) map[string]int) func() (usedTokens, windowTokens int) {
+	read := snapshotUsageFor(dir, windows)
 	if read == nil || bootstrapID == nil {
 		return nil
 	}

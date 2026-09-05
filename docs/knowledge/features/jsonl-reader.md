@@ -14,6 +14,7 @@ type Event struct {
     Raw        json.RawMessage // verbatim line bytes, trailing '\n' stripped (CRLF '\r' preserved)
     Kind       string           // whitelisted: "assistant"|"user"|"tool_use"|"tool_result"|"system"|"attachment"|""
     Usage      *UsageBlock      // non-nil only on assistant entries that carry a `usage` object
+    Model      string           // assistant only; message.model verbatim, or "" if absent, non-assistant, or over 256 bytes (#2107)
 }
 
 type UsageBlock struct {
@@ -54,6 +55,16 @@ Two types, one struct, one constructor, three methods. `Reader` is **not safe fo
 `Kind` is a closed whitelist. Anything not in the six recognised values — including a missing `type` field — maps to `""`; the verbatim bytes survive on `Raw` so downstream re-emitters can still forward unrecognised line shapes byte-equivalent to claude's output. New claude line kinds land in the unrecognised bucket until the whitelist is widened.
 
 `Usage` is pointer-valued to distinguish "field absent" from "field present with all zeros". It is **never** non-nil on a non-assistant line, even if such a line carries a `usage`-shaped sub-object (defensive contract; not observed in practice).
+
+### `Model` — a comparison key, not renderable text (#2107)
+
+`Model` mirrors `message.model` verbatim on an assistant entry — the join key [`internal/contextwindow`](contextwindow-package.md) matches against a retained per-model window report. It is claude-authored, unsanitized text that may carry control characters or terminal escapes; nothing downstream may log it, render it, or pass it through to a subprocess argv.
+
+`maxModelIDBytes = 256` bounds it, and the bound is derived rather than chosen: the retained report on the other side of the join is itself capped at 256 bytes per id (`streamsup.maxModelWindowID`), so anything longer is a guaranteed miss regardless. **Over-cap yields the empty string, never a truncated prefix.** A cut id could collide with a genuinely different, shorter model whose id happens to match that prefix — a false match — where an empty id is only ever a guaranteed miss. This is `jsonl`'s first capped decoded field; `StopReason` still rides uncapped, because it is compared against a closed set of literal values rather than an open one, and a comparison key crossing a trust boundary is the case that earns a cap.
+
+No aliasing risk: `Model` is decoded through `encoding/json`'s normal struct-field path, which allocates a fresh string, unlike `strings.ToValidUTF8(s[:limit], "")`-style capping elsewhere in the codebase (see [contextwindow-package.md](contextwindow-package.md)'s and the streamsup retention doc's notes on that trap) — there is no `s[:limit]` slice here to alias the reader's line buffer.
+
+**Adding `Model` widened what a malformed `message` object can abort, and that widening is accepted rather than engineered around.** Before #2107, `rawAssistantMessage` had no `model` field at all, so any value there — of any JSON type — was silently ignored by `encoding/json` as an unknown field. Now a `model` field of the wrong JSON type (a number, an object) fails the inner unmarshal, and the entry — usage block included — is logged-and-skipped like any other malformed line, per the "malformed JSON line" row above. A caller reading the current context size can therefore lose the *latest* usage entry to a shape claude has never actually emitted (all 742 measured entries in a real transcript carried `message.model` as a string). `StopReason` carries the identical risk on the same struct already; a `json.RawMessage` two-step to avoid it would be more code for a shape not observed in practice. Pinned by `TestReader_NonStringModelSkipsTheEntry` so the tradeoff is chosen, not stumbled into.
 
 ## End-of-turn rule
 
@@ -97,6 +108,7 @@ type rawLine struct {
 }
 type rawAssistantMessage struct {
     StopReason string `json:"stop_reason"`
+    Model      string `json:"model"`
     Content    []struct {
         Type string `json:"type"`
         Text string `json:"text"`
@@ -157,6 +169,7 @@ Original source paths recorded in the test file's header comment so a future ope
 
 - **Sibling #349** (JSONL fsnotify watcher) — wraps this reader with a `fsnotify.Watcher` over `~/.claude/projects/<EncodeProjectDir(workdir)>/`, calls `Next` synchronously on each Write event, persists `Offset()` as the resume point, surfaces `EndOfTurn` to the dispatcher's max-turn enforcement loop. After #353 the watcher's `OnEvent` fires for every line kind (not just assistant entries); it adds no filtering of its own beyond what the reader does.
 - **Future stream-json emitter** (split from #335) — consumes `Event.Raw` to re-emit lines byte-equivalent to `claude -p --output-format stream-json`, aggregates `Event.Usage` across assistant entries to compose a result trailer. Not in tree yet; #353 only extends the reader contract.
+- [`internal/contextwindow`](contextwindow-package.md) (#2107) — `Read` tracks `Event.Model` alongside `Event.Usage` on the same branch ("latest usage-bearing entry" keeps one definition), and joins it against a per-model window report by exact string match.
 
 ## Out of scope
 
@@ -171,3 +184,4 @@ Original source paths recorded in the test file's header comment so a future ope
 - [agentrun-package.md](agentrun-package.md) — pre-spawn primitives + the dashed-directory encoder this reader's consumer points at.
 - [pyry-agent-run-command.md](pyry-agent-run-command.md) — the verb whose JSONL output this reader consumes.
 - [jsonl-reconciliation.md](jsonl-reconciliation.md) — separate concern: startup-time `<uuid>.jsonl` scan for the registry. Different code path; this reader is per-turn streaming.
+- [contextwindow-package.md](contextwindow-package.md) — the sole consumer of `Event.Model` (#2107), joining it against a per-model window report.

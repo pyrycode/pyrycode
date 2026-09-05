@@ -208,6 +208,17 @@ input buffer. Measured directly rather than assumed: unmarshalling a 300 KB line
 this way for each new field this family gains, rather than assuming a prior field's aliasing status
 transfers to the next one.
 
+**First production consumer: #2107**, joining `ModelWindows`' report against `internal/contextwindow.Read`'s
+transcript-side model id — see [contextwindow-package.md](contextwindow-package.md). Unlike
+`resolveBoundModelList`/`retainedModelLists` (#1857/#1867, one ticket apart), the reader and its first
+caller landed in the same ticket here: #2107's resolver (`cmd/pyry/session_model_window_lookup.go`,
+following the same type-assertion-off-`Runner()` shape) had no reusable fake to reach for, since
+`sessionModelWindowHold` is a sink decorator fed by the parser chain, not a `sessions.Runner` — it cannot
+be handed to a `RunnerFactory`. The resolver's test mints its own runner/plan/pool fixtures rather than
+reusing `modelListRunner`'s family, and its first cut named the resolver's own file
+`session_model_windows.go`, which Go silently build-constrains to `GOOS=windows` — the package failed to
+build on darwin/linux until the file (not the exported symbol) was renamed.
+
 **A fixture's provenance comment must name every capture it draws from, not just the one that inspired
 it.** `TestNewSessionParser_DecodesAndRetainsModelWindows`'s doc claimed its three-entry `modelUsage`
 fixture was "the committed capture's own, copied rather than invented" — true of two of the three

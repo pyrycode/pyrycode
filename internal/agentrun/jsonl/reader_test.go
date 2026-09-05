@@ -300,6 +300,113 @@ func TestReader_UsageNilOnNonAssistant(t *testing.T) {
 	}
 }
 
+// TestReader_ModelSurfacedOnAssistant covers the join key #2107 reads: the model
+// that produced an entry's usage block, verbatim, so a consumer can pair the used
+// count against the window claude reported for that same model.
+func TestReader_ModelSurfacedOnAssistant(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "assistant with model",
+			line: `{"type":"assistant","message":{"model":"claude-sonnet-5","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`,
+			want: "claude-sonnet-5",
+		},
+		{
+			// An entry with no model names no model. It must NOT be joinable
+			// against a report entry keyed by the empty string, which #2101
+			// retains when its window is positive — see contextwindow.Read, where
+			// that rule is enforced.
+			name: "assistant without model",
+			line: `{"type":"assistant","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`,
+			want: "",
+		},
+		{
+			// Defensive, mirroring TestReader_UsageNilOnNonAssistant: even a
+			// non-assistant line carrying a model-shaped field surfaces "".
+			name: "non-assistant line carrying a model field",
+			line: `{"type":"user","message":{"model":"claude-sonnet-5","content":"hi"}}`,
+			want: "",
+		},
+		{
+			// 256 and 257 are LITERALS, deliberately not maxModelIDBytes and
+			// maxModelIDBytes+1: writing a cap's own test in terms of the cap
+			// moves fixture and expectation in lockstep, so a mutant that
+			// retunes the constant survives green. The literal is what pins the
+			// number to streamsup's maxModelWindowID, which is the only reason
+			// this bound is 256 at all.
+			name: "exactly at the bound survives whole",
+			line: `{"type":"assistant","message":{"model":"` + strings.Repeat("m", 256) + `","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`,
+			want: strings.Repeat("m", 256),
+		},
+		{
+			// The assertion that matters: an over-bound id yields NO key, never a
+			// cut one. A truncating implementation would surface the 256-byte
+			// prefix here and pass a mere "!= the full value" check, while
+			// turning a guaranteed miss into a possible false match against a
+			// different model whose id IS that prefix.
+			name: "over the bound yields no key, not a prefix",
+			line: `{"type":"assistant","message":{"model":"` + strings.Repeat("m", 257) + `","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}`,
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewReader(strings.NewReader(tt.line+"\n"), Config{})
+			ev, err := r.Next()
+			if err != nil {
+				t.Fatalf("Next: %v", err)
+			}
+			if ev.Model != tt.want {
+				t.Errorf("Model = %q (len %d), want %q (len %d)",
+					ev.Model, len(ev.Model), tt.want, len(tt.want))
+			}
+		})
+	}
+}
+
+// TestReader_NonStringModelSkipsTheEntry pins the cost of widening
+// rawAssistantMessage by one field, so the behaviour is chosen rather than
+// stumbled into (#2107 security review, [Error messages, logs, telemetry]).
+//
+// Before the model field existed, "model" was an unknown key and encoding/json
+// skipped it whatever its type. Now a non-string value fails the whole message
+// unmarshal, so the entry is logged-and-skipped and its USAGE BLOCK is lost —
+// contextwindow.Read then reports an older entry's count. That is degraded
+// toward the fresh-session reading, never a wrong-and-confident answer, and it
+// is the failure mode stop_reason has always carried on the same struct.
+//
+// The second line proves the skip is per-line rather than terminal: iteration
+// continues and the next entry surfaces normally.
+func TestReader_NonStringModelSkipsTheEntry(t *testing.T) {
+	t.Parallel()
+
+	lines := `{"type":"assistant","message":{"model":123,"stop_reason":"end_turn","content":[{"type":"text","text":"lost"}],"usage":{"input_tokens":9}}}` + "\n" +
+		`{"type":"assistant","message":{"model":"claude-sonnet-5","stop_reason":"end_turn","content":[{"type":"text","text":"kept"}]}}` + "\n"
+	r := NewReader(strings.NewReader(lines), Config{Logger: slog.New(&recordingHandler{})})
+
+	ev, err := r.Next()
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if ev.Model != "claude-sonnet-5" {
+		t.Fatalf("first surfaced Model = %q, want the SECOND line's %q — a non-string model must skip its own entry only",
+			ev.Model, "claude-sonnet-5")
+	}
+	if ev.Usage != nil {
+		t.Errorf("Usage = %+v on the surviving entry, want nil — the skipped entry's usage must not leak forward", *ev.Usage)
+	}
+	if _, err := r.Next(); !errors.Is(err, io.EOF) {
+		t.Errorf("third Next err = %v, want io.EOF", err)
+	}
+}
+
 func TestReader_MalformedLineSkippedAndCounted(t *testing.T) {
 	t.Parallel()
 
