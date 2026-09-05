@@ -41,8 +41,13 @@ type HelloServerPayload struct {
 
 // HelloClientPayload is the body of a "hello" envelope sent by the phone
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
-// always "client". LastSeenTS is optional; when present it triggers a
-// backfill (docs/protocol-mobile.md § Reconnect / Backfill semantics).
+// always "client". LastSeenTS is optional and has NO CONSUMER — it is decoded
+// here and read by nothing, in internal/relay or anywhere else, so it triggers
+// no backfill and a hello carrying it behaves identically to one omitting it
+// (#2090). Kept because it is still accepted
+// wire vocabulary — a decoder that rejected it would be wrong — and because
+// whether real history should exist is #2091's decision, not this type's. A
+// reconnecting phone that wants the tail it missed sends LastEventID below.
 //
 // Token is the in-band carrier of the device-pairing token under v2
 // (docs/protocol-mobile.md § Authentication, line 420). Empty under v1
