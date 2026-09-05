@@ -19,11 +19,16 @@ import (
 	"github.com/pyrycode/pyrycode/internal/agentrun/jsonl"
 )
 
-// defaultWindowTokens is the context window every current Claude model exposes
-// (opus / sonnet / haiku are all 200K today), reported as WindowTokens for
-// every session. When Anthropic ships a model whose window differs, read
-// message.model from the latest usage-bearing entry and map it, keeping this
-// as the unknown-model fallback.
+// defaultWindowTokens is the context window this package BELIEVES a session has,
+// absent anything better to go on. It is a guess, not a fact: a 1M-context
+// session exists and was measured live on 2026-09-04 (latest usage-bearing entry
+// summing to 223075, which against this constant is 111%), so a session's real
+// window is not knowable from the transcript's usage blocks alone.
+//
+// Read reports it as WindowTokens for every session whose used count does not
+// contradict it, and reports 0 for one that does (see Read). Sourcing the real
+// window — off claude's stream rather than by guessing — is #2101/#2102; this
+// constant stays as the fallback for a session whose window is not yet known.
 const defaultWindowTokens = 200_000
 
 // Usage is the current context-window occupancy derived from a transcript's
@@ -34,7 +39,11 @@ type Usage struct {
 	// not a running total across turns. Zero when no such entry exists yet.
 	UsedTokens int
 
-	// WindowTokens is the context-window size (defaultWindowTokens today).
+	// WindowTokens is the believed context-window size (defaultWindowTokens
+	// today), or 0 when UsedTokens disproved it — a used count above the
+	// believed window is proof the belief is wrong, and 0 is this package's
+	// "no trustworthy window reading" report. UsedTokens stays meaningful in
+	// that case; only the denominator is withheld.
 	WindowTokens int
 }
 
@@ -49,6 +58,14 @@ type Usage struct {
 // non-empty path that cannot be opened, or a genuine read failure mid-scan,
 // returns a wrapped error with a zero Usage, so a consumer can tell "fresh
 // session" from "couldn't read".
+//
+// A used count ABOVE the believed window disproves it, and Read then reports
+// WindowTokens 0 rather than a window its own data contradicts — the daemon can
+// see the contradiction without knowing anything about models (#2100). This is
+// deliberately NOT an error: a wrong belief is a fact about the data, not a read
+// failure, and routing it through the error path would collapse it back onto the
+// disproved window. Equality is not a contradiction — a session exactly at its
+// window is full, not evidence of a wrong belief — so it keeps its window.
 //
 // Last-usage-wins is the whole of the compaction behaviour. After an
 // auto-compaction, claude's next turn records a smaller input_tokens (the
@@ -88,6 +105,12 @@ func Read(path string) (Usage, error) {
 	if last != nil {
 		usage.UsedTokens = last.InputTokens + last.CacheReadInputTokens +
 			last.CacheCreationInputTokens + last.OutputTokens
+		// Compared against the believed window rather than the constant, so this
+		// keeps meaning "the reading disproves what we believed" once the window
+		// is sourced per-session (#2101) instead of assumed.
+		if usage.UsedTokens > usage.WindowTokens {
+			usage.WindowTokens = 0
+		}
 	}
 	return usage, nil
 }

@@ -148,8 +148,13 @@ type RequestSessionSettingsPayload struct {
 //     one of claude's six modes, because the daemon normalises the stored value at
 //     every construction site — so "" occurs only in the all-zero reply, beside
 //     SessionID "". Read the pair together.
-//   - WindowTokens 0 means the usage seam was not wired; UsedTokens 0 against a
-//     non-zero WindowTokens is a genuine fresh session.
+//   - WindowTokens 0 means the daemon has no trustworthy window reading, and
+//     covers two cases (#2100): the usage seam was not wired, and the used count
+//     came out ABOVE the window the daemon believed, which disproves the belief.
+//     Read it with UsedTokens to tell them apart — 0 is the unwired seam, a real
+//     figure is the disproved window and is still the true context size. Either
+//     way "X of Y" is unavailable. UsedTokens 0 against a NON-zero WindowTokens
+//     is a genuine fresh session.
 //
 // PermissionMode and YOLO always agree, because the daemon stores them so they
 // cannot disagree: a session in bypass reports "bypassPermissions" AND yolo true.

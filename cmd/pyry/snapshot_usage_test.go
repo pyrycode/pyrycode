@@ -8,8 +8,10 @@ import (
 )
 
 // defaultWindow mirrors internal/contextwindow's unexported defaultWindowTokens:
-// the window size every current model exposes, and the value Read reports for
-// every unresolvable case.
+// the window size that package BELIEVES a session has absent anything better,
+// and the value Read reports for every unresolvable case. It is a guess, not a
+// fact — see #2100 and TestSnapshotUsageFor_WindowAgainstTheUsedCount below for
+// the used count that disproves it.
 const defaultWindow = 200_000
 
 // writeUsageTranscript writes a minimal claude transcript at <dir>/<id>.jsonl
@@ -49,6 +51,78 @@ func TestSnapshotUsageFor_ReadsTheBoundTranscript(t *testing.T) {
 	}
 	if window != defaultWindow {
 		t.Errorf("window = %d, want %d", window, defaultWindow)
+	}
+}
+
+// TestSnapshotUsageFor_WindowAgainstTheUsedCount walks the boundary #2100 draws:
+// a used count ABOVE the believed window disproves it, so the window collapses to
+// 0 ("no trustworthy reading") while the used count still carries the true sum;
+// at or below it, both figures are what they were before.
+//
+// It runs through snapshotUsageFor rather than calling contextwindow.Read
+// directly because that is the one seam session_settings and screen_snapshot
+// share — RunConfigFor and SnapshotUsage both bottom out here — so proving the
+// collapse once here proves it for both wire payloads. And it reads a transcript
+// written to disk rather than injecting figures, so nothing hands the seam the
+// answer; a relay-level test that injected (223075, 0) would assert only the
+// pass-through, which already existed before this ticket.
+//
+// The three rows are what make the guard's strictness non-arbitrary: relax it to
+// >= and the equality row reddens, drop the collapse entirely and the
+// over-window row reddens.
+func TestSnapshotUsageFor_WindowAgainstTheUsedCount(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name                                  string
+		id                                    string
+		input, cacheCreate, cacheRead, output int
+		wantUsed                              int
+		wantWindow                            int
+	}{
+		{
+			// The figures observed live on 2026-09-04 against an Opus 5 session
+			// on the 1M window: 2+950+221118+1005 = 223075. Against the believed
+			// 200000 that is 111%, which the client clamps to a confident 100% —
+			// the clamp is correct, and is what hid the overflow.
+			name:  "above the window reports no window, used intact",
+			id:    "aaaaaaaa-1111-4222-8333-444444444444",
+			input: 2, cacheCreate: 950, cacheRead: 221118, output: 1005,
+			wantUsed: 223075, wantWindow: 0,
+		},
+		{
+			// Equality is not a contradiction: full is not the same as wrong.
+			name:  "exactly at the window keeps it",
+			id:    "bbbbbbbb-1111-4222-8333-444444444444",
+			input: 150000, cacheCreate: 20000, cacheRead: 25000, output: 5000,
+			wantUsed: defaultWindow, wantWindow: defaultWindow,
+		},
+		{
+			name:  "one token under the window keeps it",
+			id:    "cccccccc-1111-4222-8333-444444444444",
+			input: 149999, cacheCreate: 20000, cacheRead: 25000, output: 5000,
+			wantUsed: defaultWindow - 1, wantWindow: defaultWindow,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeUsageTranscript(t, dir, tc.id, tc.input, tc.cacheCreate, tc.cacheRead, tc.output)
+
+			read := snapshotUsageFor(dir)
+			if read == nil {
+				t.Fatal("snapshotUsageFor returned nil for a wired dir")
+			}
+			used, window := read(tc.id)
+			if used != tc.wantUsed {
+				t.Errorf("used = %d, want %d", used, tc.wantUsed)
+			}
+			if window != tc.wantWindow {
+				t.Errorf("window = %d, want %d", window, tc.wantWindow)
+			}
+		})
 	}
 }
 

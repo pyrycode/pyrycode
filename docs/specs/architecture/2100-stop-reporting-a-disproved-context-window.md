@@ -204,3 +204,25 @@ Gate: `go test -race ./internal/contextwindow/... ./internal/protocol/... ./cmd/
    equality explicitly: "equality is not a contradiction and keeps its window".
    Recorded here because the guard is one character and the ACs are the only
    thing pinning which one.
+
+## Revisions
+
+### 2026-09-05 — Open questions resolved during implementation
+
+No design change; both questions resolved as the plan anticipated.
+
+1. **The `defaultWindow` mirror comment in `cmd/pyry/snapshot_usage_test.go` was
+   corrected.** It repeated the exact claim AC 3 removes, in a file this ticket
+   already edits, so leaving it would have kept the removed claim alive next to a
+   mirror of the constant. It now says the constant is what the package *believes*
+   absent anything better, and points at
+   `TestSnapshotUsageFor_WindowAgainstTheUsedCount` for the count that disproves
+   it.
+2. **The guard shipped as `>`**, per AC 2. `TestSnapshotUsageFor_WindowAgainstTheUsedCount`'s
+   equality row is the red that pins the strictness: relaxed to `>=` it reddens.
+
+One thing the plan did not anticipate, worth stating because it is what the
+RED run proved: the two rows added at and below the boundary passed *before* the
+production change as well as after. That is AC 2's "byte-identical to today" as a
+positive observation rather than an absence — the collapse is reachable only from
+the over-window arm.
