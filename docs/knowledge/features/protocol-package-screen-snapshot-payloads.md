@@ -21,7 +21,7 @@ type ScreenSnapshotPayload struct {
     Effort         string    `json:"effort"` // #847: bootstrap session's per-session effort override; "" = inherited default
     YOLO           bool      `json:"yolo"`   // #847: bypass-permissions on/off; false = permissions enforced (fail-safe)
     UsedTokens     int       `json:"used_tokens"`   // #857: current context size on the latest usage-bearing entry, NOT a running total
-    WindowTokens   int       `json:"window_tokens"` // #857: context-window size (200000 today); 0 = usage seam not wired
+    WindowTokens   int       `json:"window_tokens"` // #857: believed context-window size; 0 = no trustworthy reading (#2100)
 }
 ```
 
@@ -72,14 +72,21 @@ type ScreenSnapshotPayload struct {
   usage-bearing entry (input + cache-read + cache-creation + output), **not**
   a running total — a post-compaction snapshot reports a smaller figure with
   no dedicated marker, since the reader is last-usage-wins. `WindowTokens` is
-  the context-window size (200000 for every current model); `window_tokens:0`
-  means the usage seam was not wired (foreground / unwired), so a client
-  should treat "X of Y" as unavailable rather than divide by zero — this is
-  distinct from a wired-but-fresh session, which reports `(0, 200000)`. The
-  two fields are sufficient for a client to compute "N% used (X of Y)" as
-  `used_tokens / window_tokens` (pyrycode-desktop#182). Shipped unwired at
-  #856 (the handler serialized both fields at their zero values); wired by
-  #857 via the optional `SnapshotUsage` seam on `V2SessionConfig`
+  the believed context-window size, or 0 when the daemon has no trustworthy
+  reading (#2100) — which now covers **two** cases: the usage seam was not
+  wired (foreground / unwired, reporting `(0, 0)`), and the used count came out
+  *above* the window the daemon believed, which disproves the belief
+  (reporting `(usedTokens, 0)` with `usedTokens` still the true current
+  context size). Either way a client should treat "X of Y" as unavailable
+  rather than divide by zero; the two are told apart by whether `used_tokens`
+  is zero, not by `window_tokens` alone. This is distinct from a
+  wired-but-fresh session, which reports `(0, 200000)`. See
+  [contextwindow-package.md](contextwindow-package.md#context-window-size--a-believed-default-not-an-asserted-fact)
+  for where the comparison lives. The two fields are sufficient for a client
+  to compute "N% used (X of Y)" as `used_tokens / window_tokens`
+  (pyrycode-desktop#182). Shipped unwired at #856 (the handler serialized both
+  fields at their zero values); wired by #857 via the optional `SnapshotUsage`
+  seam on `V2SessionConfig`
   ([v2-session-manager.md § Inbound screen-snapshot handler](v2-session-manager.md)).
   Not `security-sensitive` — read-only reflection of two non-secret aggregate
   integers; the transcript content itself never crosses the wire.
