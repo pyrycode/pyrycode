@@ -42,8 +42,13 @@ type SessionSettingsPayload struct {
   always a real answer, not an absence: `SessionID ""` means "nothing to
   address", `Model`/`Effort` `""` mean "inherited default, no per-session
   override", `YOLO false` means permissions are enforced, and `WindowTokens 0`
-  means the usage seam is unwired (`UsedTokens 0` against a non-zero
-  `WindowTokens` is a genuine fresh session).
+  means the daemon has no trustworthy window reading — either the usage seam
+  is unwired, or (#2100) the used count came out above the window the daemon
+  believed, which disproves the belief; read it against `UsedTokens` to tell
+  the two apart (`UsedTokens 0` against a non-zero `WindowTokens` is a genuine
+  fresh session; a non-zero `UsedTokens` against `WindowTokens 0` is the
+  disproved case, and that used figure is still the true context size). See
+  [contextwindow-package.md](contextwindow-package.md#context-window-size--a-believed-default-not-an-asserted-fact).
 - **The field gates *which* session the reply describes (#1610).** A
   `conversation_id` naming a conversation this daemon hosts, with a live
   bound session, is answered with **that conversation's own** values — never

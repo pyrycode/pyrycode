@@ -54,7 +54,7 @@ One file, one dependency: `internal/agentrun/jsonl`.
 // latest usage-bearing assistant entry.
 type Usage struct {
     UsedTokens   int // input+cache_read+cache_creation+output on the latest usage entry
-    WindowTokens int // the context-window size (defaultWindowTokens today)
+    WindowTokens int // believed window (defaultWindowTokens), or 0 if UsedTokens disproved it
 }
 
 // Read scans the claude transcript at path and reports current context-window
@@ -83,38 +83,56 @@ Because `Read` always reports the latest usage-bearing entry — no `max()`, no
 running total — a post-compaction read naturally returns the smaller, current
 figure. Compaction surfaces as a reset for free, with no dedicated marker.
 
-## Context-window size — single documented default
+## Context-window size — a believed default, not an asserted fact
 
 ```go
 const defaultWindowTokens = 200_000
 ```
 
-`WindowTokens` is always `defaultWindowTokens`. Every current Claude model
-(opus/sonnet/haiku) shares a 200K window, so the reported number *is* the
-active model's window for every known model and the documented default for an
-unknown/absent one. **Deliberately no per-model map** and no `message.model`
-extraction — every entry would map to the same 200K value today (a defense
-for a divergence that hasn't been observed). See Open questions below for the
-seam.
+`WindowTokens` is what this package *believes* a session's window is, absent
+anything better to go on — it is a guess, not a fact. A 1M-context session
+exists and was measured live on 2026-09-04 (latest usage-bearing entry summing
+to 223075, 111% of this constant), so a session's real window is not knowable
+from the transcript's usage blocks alone. **Deliberately no per-model map** and
+no `message.model` extraction — sourcing the real window that way is #2101/#2102;
+this constant stays as the fallback for a session whose window is not yet known.
 
-## Error handling — three-way split
+**#2100 — `Read` stops reporting a window its own data disproves.** A used
+count *above* the believed window is proof the belief is wrong, and `Read`
+reports `WindowTokens` 0 in that case rather than asserting a window it can see
+is false — the daemon needs no model knowledge to detect this, only the
+comparison `UsedTokens > WindowTokens`. `UsedTokens` still carries the true
+sum; only the denominator is withheld. Equality is not a contradiction (a
+session exactly at its window is full, not evidence of a wrong belief) and
+keeps its window. The comparison is against the field, not the constant, so it
+stays correct once #2101 makes the believed window per-session instead of a
+fixed default. This is deliberately not an error — see Error handling below.
+
+## Error handling — four-way split
 
 - **`path == ""`** → `Usage{0, defaultWindowTokens}, nil` **without opening
   anything**. This is the transcript resolver's `("", 0, nil)` "no transcript
   resolved yet" signal — not an error.
 - **Transcript scanned, no usage entry found** (fresh session before the
   first turn completes) → `Usage{0, defaultWindowTokens}, nil`.
+- **Transcript scanned, latest usage entry's sum exceeds the believed window**
+  (#2100) → `Usage{sum, 0}, nil`. Deliberately **not** an error: a wrong belief
+  is a fact about the data, not a read failure. Routing it through the error
+  path would have collapsed it back onto the disproved window, since #857's
+  recovery (`Read("")`, below) reports `defaultWindowTokens`.
 - **`os.Open` failure or a non-`io.EOF` error from `jsonl.Reader.Next()`**
   (`ErrLineTooLarge` or an underlying read error) → wrapped error
   (`contextwindow: open/scan transcript: %w`), zero `Usage`.
 
-The two "nothing to report" cases are deliberately **not** errors, kept
-distinct from genuine I/O failure — a consumer can tell "fresh session" from
-"couldn't read". A raced-away file (`fs.ErrNotExist` on a path that existed
-moments earlier) surfaces here as an error; #857's closure maps that (and
-every other `Read` error) to `Read("")`'s deterministic fresh-session report
-rather than surfacing it — the seam is non-erroring by contract (plain ints,
-mirroring `SnapshotSettings`).
+The three "nothing wrong, just report it" cases above are deliberately **not**
+errors, kept distinct from genuine I/O failure — a consumer can tell "fresh
+session" and "disproved window" from "couldn't read". A raced-away file
+(`fs.ErrNotExist` on a path that existed moments earlier) surfaces here as an
+error; #857's closure maps that (and every other `Read` error) to `Read("")`'s
+deterministic fresh-session report rather than surfacing it — the seam is
+non-erroring by contract (plain ints, mirroring `SnapshotSettings`). That
+recovery path discriminates on `err != nil`, never on the window value, so the
+disproved-window arm above (which returns a nil error) cannot be routed into it.
 
 ## Concurrency
 
