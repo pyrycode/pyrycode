@@ -193,37 +193,51 @@ func TestResolveBoundModelList_ResolvesTheBoundSessionsMenu(t *testing.T) {
 	assertPayloadCarries(t, got, held)
 }
 
-// #1857 AC 3: a conversation id that is unknown, unbound or empty answers "no
-// list" and hands back the ZERO payload — never the bootstrap session's menu and
-// never another session's. The dangling-binding row rides along: it is the same
-// refusal one step further down the chain.
+// #2124 AC 3: an id the registry does not carry — the empty id included — answers
+// "no list" and hands back the ZERO payload EVEN WHILE a vocabulary is retained.
+// The registry lookup is the ONE arm #2124 left as a hard refusal, and it is the
+// whole security boundary: the daemon-wide fallback is reachable only through a
+// resolved registry record, so no caller-supplied id is ever answered from the
+// bootstrap's menu.
 //
-// The bootstrap session is armed with a distinguishable list in every row, which
-// is what makes the isolation guard's mutant SOLE-RED rather than invisible:
-// delete the `conv.CurrentSessionID == ""` clause from resolveBoundModelList and
-// Pool.Lookup("") hands back the bootstrap session, so the unbound and empty-id
-// rows flip to ok == true carrying ZZ...BOOTSTRAPZZ models. An unarmed bootstrap
-// would flip them to ok == false and pin nothing.
-func TestResolveBoundModelList_RefusesWithoutAList(t *testing.T) {
+// This was #1857's four-row refusal table. Its `unbound conversation` and
+// `binding names a session the pool lacks` rows have MOVED to
+// TestResolveBoundModelList_FallsBackToTheDaemonWideVocabulary, which is where
+// they now resolve; what stays here is the pair that must never move.
+//
+// The bootstrap session is armed with a distinguishable list, which is what makes
+// the boundary's mutant SOLE-RED rather than invisible: drop the registry
+// refusal — let an unresolved id fall through to the fallback the way every arm
+// below it now does — and both rows flip to ok == true carrying ZZ...BOOTSTRAPZZ
+// models under an id the daemon never minted. An unarmed bootstrap would flip
+// them to ok == false and pin nothing. The two leak assertions are that mutant's
+// only red and are not decorative.
+func TestResolveBoundModelList_RefusesAnIdTheRegistryDoesNotCarry(t *testing.T) {
 	t.Parallel()
 
 	pool, plan := newModelListTestPool(t)
 	plan.arm(pool.BootstrapID(), sentinelModelList("BOOTSTRAP"))
 
-	now := time.Now().UTC()
+	// One resolvable row, so the fixture proves the vocabulary really is reachable
+	// from this pool — otherwise "refused" would be indistinguishable from "nothing
+	// was retained to leak in the first place" and the rows below would pin nothing.
 	reg := &conversations.Registry{}
-	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
-	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+	reg.Create(conversations.Conversation{
+		ID:               "conv-resolvable",
+		CurrentSessionID: string(pool.BootstrapID()),
+		LastUsedAt:       time.Now().UTC(),
+	})
+	if _, ok := resolveBoundModelList(reg, pool, "conv-resolvable"); !ok {
+		t.Fatal("the fixture's own resolvable conversation refused; the rows below would pin nothing")
+	}
 
 	tests := []struct {
 		name   string
 		convID string
 		why    string
 	}{
-		{"unknown conversation", "conv-does-not-exist", "the registry has no such record"},
-		{"unbound conversation", "conv-unbound", "CurrentSessionID is empty; Pool.Lookup(\"\") would return the BOOTSTRAP session"},
-		{"empty conversation id", "", "no conversation carries an empty id, so the registry misses one step earlier"},
-		{"binding names a session the pool lacks", "conv-dangling", "Pool.Lookup reports ErrSessionNotFound"},
+		{"unknown conversation", "conv-does-not-exist", "the registry has no such record, so the fallback is never reached"},
+		{"empty conversation id", "", "no conversation carries an empty id, so the registry misses and nothing below runs"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,7 +250,200 @@ func TestResolveBoundModelList_RefusesWithoutAList(t *testing.T) {
 				t.Errorf("refusal returned %+v, want the zero payload", got)
 			}
 			if strings.Contains(got.ConversationID, "BOOTSTRAP") || len(got.Models) > 0 {
-				t.Errorf("refusal leaked a payload: %+v", got)
+				t.Errorf("refusal leaked the bootstrap's menu to an id the registry does not carry: %+v", got)
+			}
+		})
+	}
+}
+
+// #2124 AC 1: a conversation the registry carries whose OWN BINDING yields no
+// list resolves to the daemon-wide vocabulary, stamped with that conversation's
+// own id. All three arms below the registry lookup fall back — no session bound,
+// a binding the pool cannot resolve, and a bound session with no list to give.
+//
+// The assertion is an IDENTITY COMPARISON against the baseline rather than
+// against the fixture: AC 1 says the models, effort levels and dropped_models
+// must be identical to what the same retained vocabulary produces for a
+// conversation bound to the session holding it, so the baseline is resolved from
+// this same registry and compared field-for-field with only ConversationID
+// substituted. Comparing each row against sentinelModelList instead would pin the
+// contents but not the "identical to the bound reading" half.
+func TestResolveBoundModelList_FallsBackToTheDaemonWideVocabulary(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	daemonWide := sentinelModelList("DAEMONWIDE")
+	plan.arm(pool.BootstrapID(), daemonWide)
+
+	// A second pool session whose runner implements ModelList but has nothing
+	// armed: the "bound session holds no list" arm, one step deeper than the two
+	// that never reach a hold at all. Pool.Create schedules on the run group, so
+	// the pool has to be running.
+	ctx := runPoolReady(t, pool)
+	silent, err := pool.Create(ctx, "session-silent")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-bootstrap-bound", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-silent", CurrentSessionID: string(silent), LastUsedAt: now})
+
+	baseline, ok := resolveBoundModelList(reg, pool, "conv-bootstrap-bound")
+	if !ok {
+		t.Fatal("the conversation bound to the session HOLDING the vocabulary refused; there is no baseline to compare against")
+	}
+
+	tests := []struct {
+		name   string
+		convID string
+		why    string
+	}{
+		{"no session bound", "conv-unbound", "CurrentSessionID is empty"},
+		{"binding the pool cannot resolve", "conv-dangling", "Pool.Lookup reports ErrSessionNotFound"},
+		{"bound session holds no list", "conv-silent", "the bound runner implements ModelList and reports the unreported state"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := resolveBoundModelList(reg, pool, tc.convID)
+			if !ok {
+				t.Fatalf("resolveBoundModelList(%q) refused; want the daemon-wide vocabulary — %s", tc.convID, tc.why)
+			}
+			if got.ConversationID != tc.convID {
+				t.Errorf("ConversationID = %q, want %q — the fallback stamps the RESOLVED RECORD's id, never the holding session's conversation", got.ConversationID, tc.convID)
+			}
+			want := baseline
+			want.ConversationID = tc.convID
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("fallback payload differs from the bound reading of the same vocabulary:\n got %+v\nwant %+v", got, want)
+			}
+			assertPayloadCarries(t, got, daemonWide)
+		})
+	}
+}
+
+// #2124 AC 2: a conversation whose bound session holds its OWN list still
+// resolves from that session — the daemon-wide value never overrides a live
+// child's own report.
+//
+// Two DIFFERENT sentinel lists are armed, which is the whole test: with one list
+// armed on both sessions a resolver that read the bootstrap first would be
+// indistinguishable from one that defers to it. This is the sole red for an
+// ordering mistake in the fallback, which no AC 1 row can catch because every row
+// there has nothing of its own to prefer.
+func TestResolveBoundModelList_TheBoundSessionsOwnListWins(t *testing.T) {
+	t.Parallel()
+
+	pool, plan := newModelListTestPool(t)
+	ctx := runPoolReady(t, pool)
+	own, err := pool.Create(ctx, "session-own")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+	plan.arm(pool.BootstrapID(), sentinelModelList("DAEMONWIDE"))
+	ownList := sentinelModelList("OWN")
+	plan.arm(own, ownList)
+
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{
+		ID:               "conv-own",
+		CurrentSessionID: string(own),
+		LastUsedAt:       time.Now().UTC(),
+	})
+
+	got, ok := resolveBoundModelList(reg, pool, "conv-own")
+	if !ok {
+		t.Fatal("resolveBoundModelList(conv-own) refused; the bound session holds its own list")
+	}
+	assertPayloadCarries(t, got, ownList)
+	// Stated separately rather than left implicit above: the failure this test
+	// exists to catch is the bootstrap's menu overriding a live child's own, and a
+	// reader should not have to compare two sentinel tags to see it.
+	for _, m := range got.Models {
+		if strings.Contains(m.Value, "DAEMONWIDE") {
+			t.Fatalf("the daemon-wide vocabulary overrode the bound session's own report: %q", m.Value)
+		}
+	}
+}
+
+// #2124 AC 4: with NO vocabulary retained anywhere, every arm below the registry
+// resolves to nothing and hands back the zero payload. Absence stays the only
+// "no list" signal — no empty Models array standing in for "unknown".
+//
+// Nothing is armed, so the fallback source is as silent as the binding. This is
+// the negative half of TestResolveBoundModelList_FallsBackToTheDaemonWideVocabulary
+// and shares its three rows exactly, so a mutant that answered true with an empty
+// payload on any arm is red here rather than in a row this file does not have.
+func TestResolveBoundModelList_NoVocabularyRetainedAnywhere(t *testing.T) {
+	t.Parallel()
+
+	pool, _ := newModelListTestPool(t)
+	ctx := runPoolReady(t, pool)
+	silent, err := pool.Create(ctx, "session-silent")
+	if err != nil {
+		t.Fatalf("Pool.Create: %v", err)
+	}
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-silent", CurrentSessionID: string(silent), LastUsedAt: now})
+
+	for _, convID := range []string{"conv-unbound", "conv-dangling", "conv-silent"} {
+		t.Run(convID, func(t *testing.T) {
+			t.Parallel()
+			got, ok := resolveBoundModelList(reg, pool, convID)
+			if ok {
+				t.Fatalf("resolveBoundModelList(%q) = (%+v, true); nothing is retained anywhere, so there is no vocabulary to answer with", convID, got)
+			}
+			if !reflect.DeepEqual(got, protocol.ModelListPayload{}) {
+				t.Errorf("refusal returned %+v, want the zero payload", got)
+			}
+		})
+	}
+}
+
+// #2124 AC 4, the nil-bootstrap half: a pool with NO bootstrap to read from
+// resolves to nothing rather than panicking. Pool.Default returns
+// p.sessions[p.bootstrap] and is nil on a map miss — the case Pool.DefaultSettings
+// documents and answers with a comma-ok — and sessions.Config.BootstrapEvicted
+// (set by pyry acp) reaches the same "no vocabulary to read" outcome by a
+// different route.
+//
+// A zero-value &sessions.Pool{} is the fixture because it is the one shape whose
+// Default() is nil, which newModelListTestPool's cold start never produces. The
+// mutant this is sole-red for is dropping the nil guard in front of the fallback's
+// Runner() read: Session.Runner has a POINTER RECEIVER that dereferences
+// (`func (s *Session) Runner() Runner { return s.sup }`), so a nil session panics
+// rather than failing the type assertion cleanly — which is exactly why the twin
+// resolvers' "a nil Runner fails the assertion cleanly, so no nil check is needed"
+// sentence does NOT carry over to a session that is itself nil.
+//
+// Both rows also cross Pool.Lookup on a zero-value pool, whose nil session map
+// answers ErrSessionNotFound for the dangling id — so neither the lookup nor the
+// fallback may assume a constructed pool.
+func TestResolveBoundModelList_NoBootstrapToFallBackTo(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	reg := &conversations.Registry{}
+	reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+	reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+
+	for _, convID := range []string{"conv-unbound", "conv-dangling"} {
+		t.Run(convID, func(t *testing.T) {
+			t.Parallel()
+			got, ok := resolveBoundModelList(reg, &sessions.Pool{}, convID)
+			if ok {
+				t.Fatalf("resolveBoundModelList(%q) = (%+v, true); a pool with no bootstrap holds no vocabulary", convID, got)
+			}
+			if !reflect.DeepEqual(got, protocol.ModelListPayload{}) {
+				t.Errorf("refusal returned %+v, want the zero payload", got)
 			}
 		})
 	}
@@ -463,31 +670,37 @@ func TestRetainedModelLists_EnumeratesTheBoundSessionsMenu(t *testing.T) {
 	assertPayloadCarries(t, got[0], held)
 }
 
-// #1867 AC 2: each refusal contributes no payload and raises no error, and does
-// so WITHOUT aborting the enumeration or contaminating a sibling's payload.
+// #2124 AC 1 at the enumerator: once ANY vocabulary is retained, EVERY row the
+// registry carries contributes exactly one payload, whatever its own session
+// state. This replaces #1867's TestRetainedModelLists_SkipsEachRefusalAndKeepsGoing,
+// whose premise — three refusals behind one survivor — no longer exists, because
+// the only arm that still refuses is the registry miss and no id reaching this
+// loop can miss: every one of them came out of List.
 //
-// All four rows live in ONE registry on purpose — that is the whole point of the
-// test. A refusal that aborted the enumeration, appended a zero payload, or
-// carried the previous row's models forward is red here and invisible in four
-// single-row registries. The three refusing rows are the three reachable arms AC
-// 2 names; the resolver's unknown-conversation arm is unreachable from here
-// because every id came out of List.
+// The mutant coverage is REPLACED rather than dropped, and the replacement is a
+// different mutant because the old one is now equivalent. #1867's fixture order
+// (contributor last) existed to redden a `break`-instead-of-`continue`; with no
+// reachable refusal the `continue` never executes, so that mutation changes
+// nothing. What is still reachable and still load-bearing is an early exit AFTER
+// an append — `out = append(...); break`, or a loop that returns the first
+// payload — and a four-row registry in which every row contributes is sole-red
+// for it on the count alone. The four rows are the four distinct paths through
+// the resolver (bound-and-holding, unbound, dangling, bound-but-silent), so the
+// count also pins that no path drops a row.
 //
-// The contributing row is created LAST, after all three refusals, and that order
-// is load-bearing: List returns registry insertion order, so a mutant that broke
-// out of the loop on the first refusal instead of continuing would still return
-// the survivor — and go green — if the survivor came first. Behind three
-// refusals it returns nothing.
-func TestRetainedModelLists_SkipsEachRefusalAndKeepsGoing(t *testing.T) {
+// All four live in ONE registry on purpose: a payload carrying a sibling's models
+// or a duplicated id is red here and invisible in four single-row registries.
+func TestRetainedModelLists_EveryRowContributesOnceAVocabularyIsRetained(t *testing.T) {
 	t.Parallel()
 
 	pool, plan := newModelListTestPool(t)
-	held := sentinelModelList("SURVIVOR")
+	held := sentinelModelList("DAEMONWIDE")
 	plan.arm(pool.BootstrapID(), held)
 
 	// A second pool session whose runner implements ModelList but has nothing
-	// armed: the "holds no retained list" refusal, one step deeper than the two
-	// below. Bound to its own row so the refusal is reached through the registry.
+	// armed: the bound-but-silent path, one step deeper than the two that never
+	// reach a hold. Bound to its own row so the path is reached through the
+	// registry rather than asserted directly.
 	ctx := runPoolReady(t, pool)
 	silent, err := pool.Create(ctx, "session-silent")
 	if err != nil {
@@ -502,54 +715,63 @@ func TestRetainedModelLists_SkipsEachRefusalAndKeepsGoing(t *testing.T) {
 	reg.Create(conversations.Conversation{ID: "conv-live", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
 
 	got := retainedModelLists(reg, pool)()
-	if len(got) != 1 {
-		t.Fatalf("retainedModelLists returned %d payloads, want exactly 1 (only conv-live contributes): %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("retainedModelLists returned %d payloads, want 4 — every registry row contributes once a vocabulary is retained: %+v", len(got), got)
 	}
-	if got[0].ConversationID != "conv-live" {
-		t.Fatalf("the surviving payload names %q, want %q", got[0].ConversationID, "conv-live")
+	byID := indexByConversation(t, got)
+	for _, convID := range []string{"conv-silent", "conv-unbound", "conv-dangling", "conv-live"} {
+		p, ok := byID[convID]
+		if !ok {
+			t.Fatalf("%q contributed no payload: %+v", convID, got)
+		}
+		assertPayloadCarries(t, p, held)
 	}
-	assertPayloadCarries(t, got[0], held)
 	// An empty menu is never presented as a real one: no payload may carry zero
-	// models, whichever row produced it.
+	// models, whichever path produced it.
 	for _, p := range got {
 		if len(p.Models) == 0 {
-			t.Errorf("payload for %q carries an empty menu; a refusal must contribute nothing at all", p.ConversationID)
+			t.Errorf("payload for %q carries an empty menu; a row with nothing to say must contribute nothing at all", p.ConversationID)
 		}
 	}
 }
 
-// #1867 AC 2, the nothing-to-send half: an empty registry and a registry whose
-// every row refuses both enumerate to no payloads and no panic. Split from the
-// test above because that one always has a survivor, so it cannot distinguish
-// "skipped the refusals" from "returned the survivor and stopped".
+// #2124 AC 4 at the enumerator, plus #1867's nothing-to-send half: no payloads
+// and no panic. Two rows, two pools, because the two "nothing to send" states are
+// now genuinely different fixtures rather than two registries over one pool.
+//
+// `no vocabulary retained anywhere` is what #1867's `every row refuses` row
+// became: those same two rows now resolve whenever the bootstrap holds a list, so
+// the fixture that makes them silent is an UNARMED pool rather than an unbound
+// registry. It is the enumerator's half of AC 4 — no bootstrap reply yet, and
+// therefore no model_list frame for any conversation.
+//
+// `empty registry` keeps its own pool ARMED, which is the point of splitting them:
+// it is the sole red for a mutant that enumerated the POOL instead of the
+// registry, and an unarmed bootstrap would hide that.
 func TestRetainedModelLists_NothingToSend(t *testing.T) {
 	t.Parallel()
 
-	pool, plan := newModelListTestPool(t)
-	// Armed but never bound: a mutant that enumerated the POOL instead of the
-	// registry would contribute here, and an unarmed bootstrap would hide that.
-	plan.arm(pool.BootstrapID(), sentinelModelList("UNREACHABLE"))
+	t.Run("empty registry", func(t *testing.T) {
+		t.Parallel()
+		pool, plan := newModelListTestPool(t)
+		plan.arm(pool.BootstrapID(), sentinelModelList("UNREACHABLE"))
+		if got := retainedModelLists(&conversations.Registry{}, pool)(); len(got) != 0 {
+			t.Fatalf("retainedModelLists returned %d payloads over an empty registry, want none — the enumeration walks the registry, not the pool: %+v", len(got), got)
+		}
+	})
 
-	now := time.Now().UTC()
-	allRefuse := &conversations.Registry{}
-	allRefuse.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
-	allRefuse.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
-
-	tests := []struct {
-		name string
-		reg  *conversations.Registry
-	}{
-		{"empty registry", &conversations.Registry{}},
-		{"every row refuses", allRefuse},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := retainedModelLists(tc.reg, pool)(); len(got) != 0 {
-				t.Fatalf("retainedModelLists returned %d payloads, want none: %+v", len(got), got)
-			}
-		})
-	}
+	t.Run("no vocabulary retained anywhere", func(t *testing.T) {
+		t.Parallel()
+		pool, _ := newModelListTestPool(t) // nothing armed: the bootstrap never answered initialize.
+		now := time.Now().UTC()
+		reg := &conversations.Registry{}
+		reg.Create(conversations.Conversation{ID: "conv-unbound", CurrentSessionID: "", LastUsedAt: now})
+		reg.Create(conversations.Conversation{ID: "conv-dangling", CurrentSessionID: "session-not-in-pool", LastUsedAt: now})
+		reg.Create(conversations.Conversation{ID: "conv-bootstrap-bound", CurrentSessionID: string(pool.BootstrapID()), LastUsedAt: now})
+		if got := retainedModelLists(reg, pool)(); len(got) != 0 {
+			t.Fatalf("retainedModelLists returned %d payloads with nothing retained anywhere, want none: %+v", len(got), got)
+		}
+	})
 }
 
 // #1867: the enumeration is unfiltered, so an ARCHIVED conversation whose bound
@@ -650,6 +872,12 @@ func TestRetainedModelLists_DoesNotCrossConversations(t *testing.T) {
 // It must NOT call t.Parallel: slog.SetDefault is process-global. The pool is
 // built BEFORE the default is swapped, so sessions.New captures the old default
 // and the pool's own diagnostics cannot land in this buffer.
+//
+// #2124 moved the count from 1 to 3: the unbound and dangling rows now resolve
+// from the daemon-wide vocabulary rather than skipping. The registry deliberately
+// keeps them, because the fallback is a NEW place a "why did this row not use its
+// own session" line would be reached for, and that line's only possible content
+// is a conversation id or the model values themselves.
 func TestRetainedModelLists_LogsNothing(t *testing.T) {
 	pool, plan := newModelListTestPool(t)
 	held := sentinelModelList("ENUMLOGNEG")
@@ -667,8 +895,8 @@ func TestRetainedModelLists_LogsNothing(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	got := retainedModelLists(reg, pool)()
-	if len(got) != 1 {
-		t.Fatalf("retainedModelLists returned %d payloads, want 1; the log negative needs the happy path", len(got))
+	if len(got) != 3 {
+		t.Fatalf("retainedModelLists returned %d payloads, want 3; the log negative needs both the bound reading and the two fallbacks", len(got))
 	}
 
 	logs := buf.String()

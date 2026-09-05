@@ -19,9 +19,24 @@ import (
 // resolveBoundRunner, resolveBoundSession, resolveBoundRunSettings and
 // resolveBoundModelList, and it is resolveBoundModelList's TWIN: read that
 // function first, because everything below either cites it or states one of the
-// THREE ways this one differs. The refusal is INHERITED VERBATIM rather than
-// re-derived: an unknown conversation or an empty CurrentSessionID returns (zero,
-// false) BEFORE the pool is touched. That second guard is the #678 isolation
+// THREE ways this one differs.
+//
+// FOURTH DIVERGENCE, and it runs the other way — the twin gained a behaviour this
+// one deliberately does NOT have. Since #2124 resolveBoundModelList falls back to
+// the bootstrap child's daemon-wide vocabulary on every arm below the registry
+// lookup; this resolver does not, and must not. A model vocabulary varies by
+// machine and account, so the bootstrap's copy is a correct answer borrowed for a
+// conversation that has none. A slash-command inventory is WORKSPACE-scoped — the
+// same initialize reply's commands array is 51 entries for this repository and a
+// hand count in another working directory reported 74 — so the bootstrap's copy
+// would be a WRONG answer here rather than a borrowed one. Read the twin's own
+// "WHY THE #678 GUARD IS RELAXED HERE AND NOWHERE ELSE" paragraph before
+// following it.
+//
+// The refusal is therefore still INHERITED VERBATIM from resolveBoundRunner
+// rather than re-derived, and is what the twin's used to be: an unknown
+// conversation or an empty CurrentSessionID returns (zero, false) BEFORE the pool
+// is touched. That second guard is the #678 isolation
 // enforcement point resolveBoundRunner documents — Pool.Lookup("") returns the
 // BOOTSTRAP session rather than an error, so an unbound conversation that reached
 // a lookup would be handed the shared bootstrap child's inventory stamped with its

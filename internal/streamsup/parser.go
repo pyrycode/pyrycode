@@ -3465,11 +3465,15 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 //     direction here is the false NEGATIVE, and the choice is made with BOTH
 //     outcomes visible: a client on the live interactive lane reads the result
 //     today (#1849). A false ZERO would reach that client's menu as "claude offers
-//     no models". A false NEGATIVE shows no menu at all — cmd/pyry's
-//     sessionModelHold holds nothing, so resolveBoundModelList refuses rather than
-//     answering an empty list. Both are a MISSING menu; only the false positive is
-//     a WRONG one, and that asymmetry is the footing. It is stronger now that
-//     either outcome is observable than it was when neither was.
+//     no models". A false NEGATIVE shows no menu at all, or since #2124 the
+//     DAEMON-WIDE one — cmd/pyry's sessionModelHold holds nothing, so
+//     resolveBoundModelList never answers an empty list: it falls back to the
+//     bootstrap child's retained vocabulary, and refuses only when nothing is
+//     retained anywhere. Neither outcome weakens the footing, because the fallback
+//     is drawn from the SAME binary and account and so is not a wrong menu either.
+//     Both remaining outcomes are a MISSING or a BORROWED menu; only the false
+//     positive is a WRONG one, and that asymmetry is the footing. It is stronger
+//     now that either outcome is observable than it was when neither was.
 //  4. success, the same empty-models reading as rung 3, and a NON-EMPTY commands
 //     array → controlResponseCommandsOnly, and ONE SlashCommandList (#1891). It
 //     differs from rung 3 in the keyword AND in the emit; what it shares with rung 3

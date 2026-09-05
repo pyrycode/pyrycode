@@ -21,7 +21,11 @@ import (
 // payload type substituted — with ONE contract inverted, stated under THE EMPTY CASE
 // below. The refusal is INHERITED VERBATIM rather than re-derived: an unknown
 // conversation or an empty CurrentSessionID returns (zero, false) BEFORE the pool is
-// touched. That second guard is the #678 isolation enforcement point resolveBoundRunner
+// touched. Note that resolveBoundModelList NO LONGER REFUSES THAT WAY: since #2124 it
+// falls back to the bootstrap child's daemon-wide vocabulary on every arm below the
+// registry lookup, a VOCABULARY-ONLY exception it argues for at length. A roster is
+// per-child observed state, not a vocabulary — the bootstrap's tasks are not this
+// conversation's — so nothing about that exception transfers here. That second guard is the #678 isolation enforcement point resolveBoundRunner
 // documents — Pool.Lookup("") returns the BOOTSTRAP session rather than an error, so an
 // unbound conversation that reached a lookup would be handed the shared bootstrap
 // child's roster stamped with its own conversation id. There is deliberately NO third
