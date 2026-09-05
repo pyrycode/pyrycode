@@ -126,6 +126,34 @@ type ChangeFunc func(convID string)
 // production-visible effect — the give-up is real even when unobserved.
 type GiveUpFunc func(convID, reason string)
 
+// DeliveredFunc is the injected delivered-notification seam (#2115). It mirrors
+// ChangeFunc and GiveUpFunc: invoked NEVER while holding q.mu, from the drain
+// goroutine, once per head whose delivery the seam CONFIRMED. It MUST NOT block
+// indefinitely (it runs on the drain path, so it delays that conversation's next
+// delivery) and MUST be safe for concurrent invocation across conversations.
+// nil disables notification.
+//
+// Unlike ChangeFunc it is NOT edge-triggered: the delivered message is gone from
+// the backlog moments later, so a consumer that re-read Snapshot would find
+// nothing. It therefore carries the item itself, and the parameter type is the
+// reason this seam exists rather than a wider DeliverFunc.
+//
+// SECURITY. The parameter is QueuedMessage — the SAME projection Snapshot and
+// SnapshotAll return, which declares no delivery field. So this seam is
+// structurally incapable of handing a consumer the composed payload that may
+// name an on-host path (#2038, and docs/protocol-mobile.md § Error codes forbids
+// putting one on the wire); a consumer cannot leak it by forgetting a filter,
+// and a future one that wants it must widen the exported type to get it. That is
+// deliberately the same barrier EnqueueDelivery's doc block describes, inherited
+// rather than restated. The delivery seam cannot serve this purpose at all: it
+// receives only the payload bytes, which ARE the composed value.
+//
+// TS is the ENQUEUE timestamp, not the confirmation time. A consumer that stamps
+// a durable record must mint its own: a message can sit in the backlog for a
+// long time, and stamping at enqueue orders it behind entries carrying later
+// times.
+type DeliveredFunc func(convID string, msg QueuedMessage)
+
 // PendingFunc classifies a delivery error as a legitimate hold — the head is
 // being deliberately withheld awaiting an external decision (a person is being
 // asked to approve a tool call, so DeliverFunc declined having written nothing) —
@@ -161,6 +189,9 @@ type Config struct {
 	GiveUpAfter time.Duration
 	// OnGiveUp is the optional give-up-notification seam; nil ⇒ disabled.
 	OnGiveUp GiveUpFunc
+	// OnDelivered is the optional delivered-notification seam; nil ⇒ disabled.
+	// It fires once per CONFIRMED delivery, carrying the item just delivered.
+	OnDelivered DeliveredFunc
 	// Pending classifies a delivery error as a legitimate hold rather than a
 	// failure. While it returns true the drain retries the head WITHOUT counting
 	// the elapsed window toward GiveUpAfter and RESETS the give-up streak, so a
@@ -255,6 +286,7 @@ type Queue struct {
 	max         int           // per-conversation backlog cap; > 0 always in practice
 	onChange    ChangeFunc    // nil ⇒ change notification disabled
 	onGiveUp    GiveUpFunc    // nil ⇒ give-up notification disabled
+	onDelivered DeliveredFunc // nil ⇒ delivered notification disabled
 	pending     PendingFunc   // nil ⇒ no delivery error is treated as a hold
 	log         *slog.Logger
 
@@ -297,6 +329,7 @@ func New(cfg Config) (*Queue, error) {
 		max:         max,
 		onChange:    cfg.OnChange,
 		onGiveUp:    cfg.OnGiveUp,
+		onDelivered: cfg.OnDelivered,
 		pending:     cfg.Pending,
 		log:         log,
 		convs:       make(map[string]*convQueue),
@@ -555,6 +588,20 @@ func (q *Queue) notifyGiveUp(convID, reason string) {
 	}
 }
 
+// notifyDelivered fires the delivered seam for the head just confirmed, if one
+// is configured. Like notify and notifyGiveUp, the caller MUST have released
+// q.mu — OnDelivered is a caller-supplied seam that may block or re-enter.
+//
+// It projects the internal record through QueuedMessage, the same value-copy
+// Snapshot and SnapshotAll build, so the delivery payload is left behind at this
+// boundary by the type's own shape rather than by a filter here. m is a value
+// copy the drain already holds, so nothing is read from the FIFO off-lock.
+func (q *Queue) notifyDelivered(convID string, m queued) {
+	if q.onDelivered != nil {
+		q.onDelivered(convID, QueuedMessage{ID: m.id, MessageID: m.messageID, Text: m.text, TS: m.ts})
+	}
+}
+
 // Run binds the lifecycle ctx, starts a drain for any conversation that already
 // holds a backlog (covering Enqueue-before-Run, with no lost wakeup), then blocks
 // until ctx is done and joins every drain goroutine before returning ctx.Err().
@@ -658,6 +705,17 @@ func (q *Queue) drain(ctx context.Context, convID string) {
 			q.mu.Lock()
 			advanced := c.advanceLocked(head.id)
 			q.mu.Unlock()
+
+			// The write is confirmed, so this message HAS been said (#2115). Fire the
+			// delivered seam first — before the backlog notification below — so a
+			// durable record of it is written as close to the commit as possible.
+			//
+			// Deliberately NOT guarded by advanced, unlike q.notify: that guard is
+			// about the BACKLOG, and a Remove landing after the commit cancels nothing
+			// that already happened — the text reached claude's stdin and will be
+			// answered. This is also the only branch that fires it: a head dropped
+			// before it committed, or abandoned by giveUp, was never written.
+			q.notifyDelivered(convID, head)
 
 			// A confirmed-delivered head left the backlog. Reset the give-up clock so
 			// the next head starts with a fresh bound. Fire after unlock, and only if
