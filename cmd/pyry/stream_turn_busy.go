@@ -71,12 +71,17 @@ import (
 //
 // The narrower rotation edge #1202 was expected to own is UNREACHABLE, and is
 // recorded here rather than defended with a guard. It would need two distinct
-// producer tags resolving to one conversation at the same time: a /clear re-keys
-// ONE pool entry in place, and the Parser's sink tag is fixed at runner
-// construction (`newStreamRunnerFactory`) while RestartFresh rotates only the
-// runner's internal spawn id — so every id reachable through
-// conversationForSession's SessionHistory match belongs to the SAME runner that
-// continues under the successor id, tagging its events identically either way.
+// producer tags resolving to one conversation AT THE SAME TIME, and one runner has
+// exactly one tag at any instant: a /clear re-keys ONE pool entry in place, and a
+// stream-mode new_session moves that single tag (`streamSessionTag`, which
+// `newStreamRunnerFactory` binds to both fan-in lanes and `RestartFresh` rotates
+// through `streamsup.Config.OnSessionRotate`) from the old id to the new one rather
+// than duplicating it. So every id reachable through conversationForSession's
+// SessionHistory match belongs to the SAME runner, which tags its events with
+// whichever id it currently holds — never with two. #1133 replaced the premise this
+// paragraph used to rest on, that the tag was FROZEN at runner construction; the
+// conclusion is unaffected, because a moving tag is still one tag.
+//
 // Eviction cannot supply a second producer either: being binding-neutral, an
 // evicted id never enters SessionHistory (`RebindSession` is its
 // only production writer, reached solely from sessions/`notifyTransition`).
@@ -87,8 +92,10 @@ import (
 //
 // For the two SESSION-keyed feeds — observe and clearForSession — the key is never
 // taken from the wire or the stream bytes: it is resolved daemon-side from the
-// registry against the runner's construction-time session tag, so a hostile or
-// confused child can only ever mark its OWN conversation busy. openForDelivery is
+// registry against the runner's own session tag, so a hostile or confused child can
+// only ever mark its OWN conversation busy. That stays true after #1133 made the
+// tag rotatable, because the only value it can rotate onto is the id the daemon's
+// own `Pool.RotateForNewSession` minted and bound for that same runner. openForDelivery is
 // the one feed whose key does arrive in a send_message payload, and the honest
 // statement for it is narrower rather than the same: that conversation id has
 // already passed two independent daemon-side gates before it can reach the mark —

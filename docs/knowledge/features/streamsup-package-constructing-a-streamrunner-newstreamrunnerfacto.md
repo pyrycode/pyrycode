@@ -6,10 +6,14 @@ delivered the constructor (as the bare `streamRunnerFactory` func, the first `st
 tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
 to send turnevents, and #1168 added the `mcpApprovePath` param to inject the permission-approval flags.
 Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
-withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)`; `parser, held :=
-newSessionParser(sink.sinkFor(cfg.SessionID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
-`streamsup.New(scfg)`; on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil
-`sessions.Runner`; on success, `streamRunner{r: r, models: held}`.
+withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)`; `tag :=
+newStreamSessionTag(cfg.SessionID)` (#1133 — the live handle both fan-in lanes read); `parser, held :=
+newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
+`scfg.OnChildExit = sink.exitForTag(tag.ID)`; `scfg.OnSessionRotate = tag.Rotate` — see [Session rotation
+notification](streamsup-package-session-rotation-notification-onsessionrotate.md) for why the tag is
+minted here, ahead of both halves, rather than threaded through either signature; `streamsup.New(scfg)`;
+on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
+`streamRunner{r: r, models: held}`.
 
 **`withApprovalArgs(args []string, mcpApprovePath, storedMode string, operatorBypass bool) []string`
 (#1168, extended #2043, #2065)** is the interactive-stream twin of `agent_run.go`'s non-yolo

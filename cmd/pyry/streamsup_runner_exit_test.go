@@ -55,7 +55,12 @@ exit 0
 // and drives it on its own goroutine, joining in cleanup. Nothing about the wiring
 // is stubbed: this is newStreamRunnerFactory's own returned closure, so whatever
 // it installs on the streamsup Config is what the child exit fires.
-func runFactoryRunner(t *testing.T, sink *streamTurnSink, bin, sessionID string) {
+//
+// It RETURNS the runner (#1133) so a caller can reach the concrete methods the
+// production dispatch reaches by type assertion — RestartFresh above all, the one
+// input that moves the session tag both installed lanes read. Callers that only
+// need the child driven ignore the value.
+func runFactoryRunner(t *testing.T, sink *streamTurnSink, bin, sessionID string) sessions.Runner {
 	t.Helper()
 
 	runner, err := newStreamRunnerFactory(sink, "")(sessions.RunnerConfig{
@@ -72,6 +77,7 @@ func runFactoryRunner(t *testing.T, sink *streamTurnSink, bin, sessionID string)
 	done := make(chan error, 1)
 	go func() { done <- runner.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done }) // cancel-then-join; joining first deadlocks
+	return runner
 }
 
 // waitRecord returns the first record carrying event=want, or fails the test.
@@ -175,16 +181,18 @@ func TestStreamRunnerFactory_ChildExitClearsTurnBusy(t *testing.T) {
 	}
 }
 
-// AC4: the callback the factory installs IS (*streamTurnSink).exitFor, not a
-// hand-rolled equivalent.
+// AC4: the callback the factory installs IS (*streamTurnSink).exitForTag, not a
+// hand-rolled equivalent. (It was exitFor until #1133 moved production onto the
+// live-tag handle; that ticket kept the drop branch verbatim, which is why this
+// discriminant still holds unchanged.)
 //
 // The factory returns sessions.Runner — an interface over an unexported
 // *streamsup.Runner — so the installed callback cannot be read back, and the
-// discriminant has to be behavioural. exitFor has one no hand-rolled send would
-// reproduce: on a full fan-in its drop branch logs at WARN with exactly
+// discriminant has to be behavioural. The exit lane has one no hand-rolled send
+// would reproduce: on a full fan-in its drop branch logs at WARN with exactly
 // event=stream_turn.exit_sink_full plus session_id, and NOTHING else — no "kind"
-// (there is no event to name) and no content. sinkFor's sibling drop is Debug and
-// carries "kind", so the record below distinguishes the two lanes as well.
+// (there is no event to name) and no content. The event lane's sibling drop is
+// Debug and carries "kind", so the record below distinguishes the two lanes as well.
 //
 // No drain is started, so nothing consumes the channel and the buffer-of-1 fill is
 // deterministic and timing-free: the child's single assistant line takes the slot
@@ -234,5 +242,96 @@ func TestStreamRunnerFactory_ChildExitInstallsExitFor(t *testing.T) {
 	}
 	if len(attrs) != 2 {
 		t.Errorf("exit drop attrs = %v, want exactly event + session_id", attrs)
+	}
+}
+
+// TestStreamRunnerFactory_RestartFreshRetagsInstalledLanes is #1133's AC1 at the
+// WIRING tier, and it is the only test that can reach that tier at all: the factory
+// returns sessions.Runner over an unexported *streamsup.Runner, so the streamsup
+// Config it built is not readable back and the binding has to be proven
+// behaviourally — the same limitation TestSessionParser_MintsOneStablePostureGate
+// works around, here with an observable the posture gate does not have.
+//
+// The observable is the CHILD-EXIT lane. It is the harder half to prove: the event
+// lane is exercised by every drain test through sinkForTag directly, whereas the
+// exit callback exists only as a streamsup.Config field the factory sets, so
+// nothing short of a real spawned child fires it. Driving a real runner through the
+// real factory therefore asserts three separate things at once — the tag is bound
+// to the exit lane, tag.Rotate is bound to Config.OnSessionRotate, and RestartFresh
+// fires it — none of which a hand-built sink could distinguish.
+//
+// Sequence, and every step is a barrier rather than a sleep:
+//
+//	child 1 prints its assistant line   → envelope tagged with the CONSTRUCTION id
+//	RestartFresh(rotated)               → fires OnSessionRotate → the tag moves
+//	  …and cancels the iteration, so child 1 dies
+//	child 1's exit fires OnChildExit    → envelope tagged with the ROTATED id
+//
+// The pre-rotation envelope is not decoration: without it a tag that was ALWAYS the
+// rotated id — a factory that seeded the tag from the wrong value — would pass on
+// the exit assertion alone.
+//
+// No drain runs. The envelopes are read straight off the fan-in, so the ordering is
+// the production send ordering and no emitter or resolver stands between the
+// assertion and the lane under test.
+func TestStreamRunnerFactory_RestartFreshRetagsInstalledLanes(t *testing.T) {
+	t.Parallel()
+
+	const (
+		constructedID = "sess-constructed"
+		rotatedID     = "sess-rotated"
+	)
+
+	dir := t.TempDir()
+	bin, _ := fakeExitingClaude(t, dir)
+
+	sink := newStreamTurnSink(0, discardLogger())
+	runner := runFactoryRunner(t, sink, bin, constructedID)
+
+	// The first child's assistant line, tagged before any rotation. Waiting for it
+	// also guarantees the child is up, so the RestartFresh below has an iteration to
+	// cancel rather than landing on a not-yet-spawned runner.
+	first := waitEnvelope(t, sink, 10*time.Second, func(env streamTurnEnvelope) bool { return !env.exit })
+	if first.sessionID != constructedID {
+		t.Fatalf("pre-rotation event envelope session_id = %q, want the construction id %q",
+			first.sessionID, constructedID)
+	}
+
+	// Exactly how startFreshRunner reaches it: a type assertion off the un-widened
+	// sessions.Runner. An assertion that stopped matching would fail here rather
+	// than silently no-op, which is the failure mode that shape is chosen to avoid.
+	fresh, ok := runner.(interface{ RestartFresh(string) })
+	if !ok {
+		t.Fatalf("factory runner %T does not expose RestartFresh; the production new_session dispatch cannot reach it either", runner)
+	}
+	fresh.RestartFresh(rotatedID)
+
+	// RestartFresh cancels the live iteration, so child 1 dies and its exit fires
+	// the installed OnChildExit — under the tag the rotation just moved.
+	exit := waitEnvelope(t, sink, 10*time.Second, func(env streamTurnEnvelope) bool { return env.exit })
+	if exit.sessionID != rotatedID {
+		t.Errorf("post-rotation exit envelope session_id = %q, want the rotated %q — RestartFresh did not move the tag the factory installed on the exit lane",
+			exit.sessionID, rotatedID)
+	}
+}
+
+// waitEnvelope returns the first fan-in envelope matching want, or fails. The
+// budget matches waitDropKind's, and for its reason: these lanes are driven by a
+// real spawned child, so the tail is a busy machine rather than a wedged seam.
+func waitEnvelope(t *testing.T, sink *streamTurnSink, budget time.Duration, want func(streamTurnEnvelope) bool) streamTurnEnvelope {
+	t.Helper()
+	deadline := time.After(budget)
+	var seen []string
+	for {
+		select {
+		case env := <-sink.ch:
+			if want(env) {
+				return env
+			}
+			seen = append(seen, fmt.Sprintf("{session_id:%q exit:%t}", env.sessionID, env.exit))
+		case <-deadline:
+			t.Fatalf("timed out after %v waiting for a matching fan-in envelope; saw %v", budget, seen)
+			return streamTurnEnvelope{}
+		}
 	}
 }

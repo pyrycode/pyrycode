@@ -1279,6 +1279,134 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 	}
 }
 
+// TestRunner_RestartFresh_FiresOnSessionRotate covers the #1133 rotation
+// notification per outcome: an accepted rotation fires the callback exactly once
+// with the new id, the refused empty id fires it zero times (so a consumer's tag
+// can never be emptied by a call the runner itself declined), and a nil callback
+// is not a panic on either path.
+//
+// It asserts on the RUNNER, not on a consumer: what the callback is used for lives
+// in cmd/pyry, and this package's obligation is only that it fires once per
+// accepted rotation with the id that was accepted.
+func TestRunner_RestartFresh_FiresOnSessionRotate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		newID    string
+		wantFire []string
+	}{
+		{name: "accepted rotation fires once", newID: rotatedSessionID, wantFire: []string{rotatedSessionID}},
+		{name: "refused empty id never fires", newID: "", wantFire: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// mu guards got: RestartFresh fires the callback on THIS goroutine, but the
+			// runner is never Run here, so the lock is documentation of the contract
+			// rather than a live race guard. -race keeps it honest either way.
+			var mu sync.Mutex
+			var got []string
+			cfg := Config{
+				ClaudeBin: os.Args[0],
+				WorkDir:   t.TempDir(),
+				SessionID: testSessionID,
+				Logger:    slog.New(&spawnArgsRecorder{}), // swallows the empty-id Warn
+				OnSessionRotate: func(newID string) {
+					mu.Lock()
+					defer mu.Unlock()
+					got = append(got, newID)
+				},
+			}
+			r, err := New(cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			r.RestartFresh(tc.newID)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(got, tc.wantFire) {
+				t.Fatalf("OnSessionRotate fired with %q, want %q", got, tc.wantFire)
+			}
+		})
+	}
+}
+
+// TestRunner_RestartFresh_OnSessionRotateNilIsSafe pins the nil-check at the fire
+// site. Every construction path other than newStreamRunnerFactory leaves the field
+// nil, so a missing guard would panic on the first new_session of any other
+// consumer — including every test in this package that omits the field.
+func TestRunner_RestartFresh_OnSessionRotateNilIsSafe(t *testing.T) {
+	t.Parallel()
+	cfg := Config{
+		ClaudeBin: os.Args[0],
+		WorkDir:   t.TempDir(),
+		SessionID: testSessionID,
+		Logger:    slog.New(&spawnArgsRecorder{}),
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Both arms: the refused id returns above the fire site, the accepted one runs
+	// through it. The test completing is the no-panic proof.
+	r.RestartFresh("")
+	r.RestartFresh(rotatedSessionID)
+}
+
+// TestRunner_RestartFresh_OnSessionRotateFiresBeforeNextSpawnID is the ordering
+// pin the whole design rests on: the callback must observe the rotation BEFORE the
+// runner hands the new id to a spawn. Fire it after the teardown cancel instead and
+// the successor child's first events are tagged with the id the rotation replaced —
+// which is the exact defect #1133 exists to remove, reintroduced on the other side
+// of the rotation.
+//
+// beginSpawn stands in for "the successor spawn" because it is the single point
+// that consumes the rotation (rotatePending) and yields the argv the child is
+// launched with — reaching it at all means the runner considers the rotation
+// spent, so a callback that has not fired by then is provably too late.
+func TestRunner_RestartFresh_OnSessionRotateFiresBeforeNextSpawnID(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	firedWith := ""
+	cfg := Config{
+		ClaudeBin: os.Args[0],
+		WorkDir:   t.TempDir(),
+		SessionID: testSessionID,
+		Logger:    slog.New(&spawnArgsRecorder{}),
+		OnSessionRotate: func(newID string) {
+			mu.Lock()
+			defer mu.Unlock()
+			firedWith = newID
+		},
+	}
+	r, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	r.RestartFresh(rotatedSessionID)
+
+	mu.Lock()
+	seen := firedWith
+	mu.Unlock()
+	if seen != rotatedSessionID {
+		t.Fatalf("OnSessionRotate had not fired with %q before the next spawn was built (saw %q)",
+			rotatedSessionID, seen)
+	}
+
+	_, cancel, args, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	defer cancel()
+	if !forceFirst {
+		t.Error("beginSpawn forceFirst = false after RestartFresh, want true (the rotation was not the one consumed)")
+	}
+	if got := idFlagValue(args, "--session-id"); got != rotatedSessionID {
+		t.Errorf("beginSpawn argv --session-id = %q, want the rotated %q — the callback and the spawn disagree on the id:\n%v",
+			got, rotatedSessionID, args)
+	}
+}
+
 // --- #1481: a racer on the spawn-setup seam cannot miss both -----------------
 //
 // The window #1481 closed was the gap between "the spawn id was read" and "this
