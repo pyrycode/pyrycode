@@ -3,9 +3,11 @@
 The durable, append-only, per-conversation message log the daemon writes as it
 fans envelopes out, read newest-first by walking backwards on demand. Landed
 in #2112 as a storage floor with no caller; #2114 gave it its first two —
-the interactive emitter's `emit` chokepoint and session transitions (see
-[Producers](#producers) below). #2115 adds the delivery-path producer
-(the operator's own typed message), `#2116` is the wire-serving consumer,
+the interactive emitter's `emit` chokepoint and session transitions — and
+\#2115 gave it a third: the operator's own typed message, written from
+`msgqueue`'s `OnDelivered` seam rather than the delivery seam itself, since
+only that seam has the client-readable text in hand (see
+[Producers](#producers) below). `#2116` is the wire-serving consumer,
 `#2113` declares the cursor as an opaque wire string. Spec:
 [`specs/architecture/2112-conversation-history-log.md`](../../specs/architecture/2112-conversation-history-log.md).
 
@@ -217,21 +219,46 @@ turn_end — assistant text deltas are already coalesced behind a 250 ms
 window and never reach this path at token rate), tens per turn, so a turn
 pays single-digit milliseconds of added serialised time in total — two
 orders of magnitude below the 250 ms window. This was measured with one
-producer holding the lock alone; #2115 adds a second on the delivery path,
-so the number to re-measure there is contention under both producers
-sharing the mutex, not the single-call cost above.
+producer holding the lock alone. #2115 landed a third producer on the
+delivery path without re-measuring: contention across three producers
+sharing this **single, package-wide** `sync.Mutex` — not a per-conversation
+one, so `Append` on one conversation briefly gates another's producer too —
+remains open for whichever ticket next cares about append latency under
+load.
 
-## Producers (#2114)
+## Producers (#2114, #2115)
 
-Two call sites in `cmd/pyry` append through one seam,
+Three call sites in `cmd/pyry` append through one seam,
 `appendConversationHistory` (`cmd/pyry/conversation_history.go`): the
 interactive emitter's `emit` chokepoint
-(`cmd/pyry/interactive_turn_v2.go`) and session transitions' `broadcast`
-(`cmd/pyry/session_transition_v2.go`). Both already resolve the four values
-`Append` wants — conversation id, wire type, marshalled payload, one hoisted
-timestamp — for the ring append or the fan-out itself, so the log append
-needed no new mapping, only a nil-guarded call before the per-conn loop in
-each.
+(`cmd/pyry/interactive_turn_v2.go`), session transitions' `broadcast`
+(`cmd/pyry/session_transition_v2.go`), and (#2115) `newOperatorMessageHistory`
+(`cmd/pyry/operator_message_history.go`), wired to `msgqueue.Config.OnDelivered`.
+The first two already resolve the four values `Append` wants — conversation
+id, wire type, marshalled payload, one hoisted timestamp — for the ring
+append or the fan-out itself, so their log append needed no new mapping, only
+a nil-guarded call before the per-conn loop in each. The third resolves them
+from a `msgqueue.QueuedMessage` handed to it by a seam fired on confirmed
+delivery, not from an envelope in flight (see below).
+
+**Why this producer reads `text`, never the delivered payload.** Since #2038
+a queued message carries two strings — `text` (client-readable) and
+`delivery` (what reaches claude's stdin, which for an attachment-bearing
+message names an on-host path `docs/protocol-mobile.md` § Error codes
+forbids serving to a paired device). `newInboundDeliver` sees only
+`delivery`, so it cannot be this producer; `msgqueue`'s `OnDelivered` seam
+carries `QueuedMessage` instead, which declares no `delivery` field, making
+the omission structural rather than a filter this producer could forget.
+Full detail:
+[msgqueue-package.md § Delivered notification (#2115)](msgqueue-package.md#delivered-notification-2115).
+
+**One inherited gap, specific to the third producer.** `msgqueue`'s drain
+tests `ctx.Err() != nil` before its confirmed-delivery branch, so a delivery
+that confirms in the same instant the daemon shuts down leaves the head
+queued and fires neither `q.notify` nor `OnDelivered` — the message reached
+claude's stdin but this producer never runs for it. Pre-existing `drain`
+ordering (#487/#1484), not introduced by #2115; a client reading this log
+after a restart should not assume it is gap-free across that boundary.
 
 **Why the write point is the envelope, not `internal/turnevent`.** An
 earlier draft proposed writing the log from `turnevent`'s representation.
@@ -240,8 +267,9 @@ conversation id, no session transition and no question batch. The
 operator's own typed text goes `send_message` → msgqueue → delivery → the
 child's stdin and is never echoed back, so a log written from `turnevent`
 would hold assistant text and tool rows and none of what the operator
-typed. (The operator's own message is #2115's producer, written at delivery
-against the same store, not at emit.)
+typed. (The operator's own message is #2115's producer — see below — fired
+from `msgqueue`'s `OnDelivered` seam once the write to claude is confirmed,
+not from an envelope emitted in either direction.)
 
 **The store is nil-tolerant and a concrete pointer, never an interface** —
 the same trap `session_transition_v2.go`'s `busy` field already documents:
