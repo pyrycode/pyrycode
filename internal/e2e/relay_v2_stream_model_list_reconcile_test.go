@@ -383,8 +383,14 @@ func TestRelayV2_StreamModelListReachesLateConnectingPhone(t *testing.T) {
 	// retainedModelLists' own contribution, and NOT inherited from the live-lane
 	// sibling: the reconcile carries no turn context at all, so the id can only have
 	// come from the daemon's registry record via resolveBoundModelList. The bootstrap
-	// session contributes nothing (it has no conversation record), so exactly one
-	// payload is expected and the first arrival is it.
+	// session contributes no payload OF ITS OWN (it has no conversation record, so
+	// Registry.List never yields it and there is no id to stamp), so exactly one
+	// payload is expected and the first arrival is it. #2124 narrowed that sentence
+	// and it is worth reading in full here: the bootstrap's RETAINED LIST is now
+	// readable on another conversation's behalf, so this harness's single minted
+	// conversation would still contribute exactly one payload even if its own child
+	// had reported nothing — what the count pins is the number of registry ROWS, not
+	// the number of sessions holding a list.
 	if obs.list.ConversationID != obs.convID {
 		t.Errorf("conversation_id: got %q, want %q (the server-minted id)", obs.list.ConversationID, obs.convID)
 	}
