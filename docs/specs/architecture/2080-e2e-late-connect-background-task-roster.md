@@ -267,3 +267,32 @@ lines of total written work.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — implementation
+
+- **Open question resolved.** `rostersOnMinter` measured **1**, on both the green run and the mutant
+  run. The mid-turn lane does not reproduce the spawn-time twins' unordered race (#1868/#2009): the
+  cursor is stamped by the routing of the very turn that produces the roster line, so the live-lane
+  delivery to the minting conn is deterministic here. It is still logged rather than asserted, for
+  the stated reason — asserting it would redden this spec for a change in a lane it does not own —
+  but the mutant run's `minter=1, observer=0` is what tells the two producers apart by data rather
+  than by assumption, and that reading is now recorded in the field's own doc comment.
+- **Mutant run, as designed.** `go build -overlay` over a copy of `cmd/pyry/relay.go` with
+  `RetainedBackgroundTaskRosters` set to nil, the resulting binary handed to the suite via
+  `PYRY_E2E_BIN`. The daemon binary is what must carry the mutation — the harness shells out to its
+  own `go build`, so an overlay on the *test* process alone would have left the daemon unmutated and
+  the run green, which is the trap worth naming for whoever repeats this. RED at 22.66s (the full
+  observer deadline, exactly #1868's prediction); green at 6.1s. Nothing was committed mutated.
+- **Line count over the plan's estimate.** ~1130 lines of total written work against the stated
+  ~800: the spec's mandated `## Security review` section (~55 lines, which the ticket's `Estimate:`
+  line did not budget) and the fake's own rider unit tests (~140 lines, where the estimate allowed
+  ~65 for the whole rider). No boundary of the size table other than the already-declared call-site
+  line was crossed, and the shape of the work did not change — the overage is fixture and prose, not
+  a second deliverable.
+- **One addition beyond the plan's assertion list.** The observer's row loop also checks that every
+  row after the first carries the rider's synthetic id prefix and that no id repeats. The plan
+  listed only row 0 verbatim, which a payload that duplicated one row eight times would have
+  satisfied; attribution across rows is the claim the AC's "with its tasks … intact" actually needs,
+  and it costs one map and one loop.

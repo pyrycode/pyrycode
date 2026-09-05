@@ -317,6 +317,21 @@
 //	                               PTY-tier test can observe it even if the env
 //	                               leaked. Default off — when unset, byte-identical
 //	                               to prior behaviour.
+//	PYRY_FAKE_CLAUDE_STREAM_ROSTER optional decimal COUNT. When it parses to a
+//	                               positive number, each stream-mode user turn is
+//	                               preceded by one system/background_tasks_changed
+//	                               line canning that many task entries (#2080) —
+//	                               claude's mid-turn report of what is running in
+//	                               the background, which nothing else in this file
+//	                               produces. See writeBackgroundTaskRoster for the
+//	                               fixture and for why the knob carries a count
+//	                               rather than a boolean. Stream mode only.
+//	                               Unset, empty, unparsable or non-positive ⟹ off
+//	                               ⟹ byte-identical to prior behaviour, which is
+//	                               fail-CLOSED: a typo silently disables the rider
+//	                               rather than enabling some default roster, so a
+//	                               miswired test fails as "no frame arrived"
+//	                               instead of passing on a fixture nobody chose.
 //
 // The binary lives under internal/e2e/internal/ to visibility-fence it from
 // non-e2e callers. Because TUI mode makes this file carry claude-TUI
@@ -336,6 +351,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -369,6 +385,7 @@ const (
 	envStreamBogus        = "PYRY_FAKE_CLAUDE_STREAM_BOGUS"
 	envStreamRateLimit    = "PYRY_FAKE_CLAUDE_STREAM_RATE_LIMIT"
 	envStreamWithholdMode = "PYRY_FAKE_CLAUDE_STREAM_WITHHOLD_MODE_ACK"
+	envStreamRoster       = "PYRY_FAKE_CLAUDE_STREAM_ROSTER"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
@@ -681,8 +698,19 @@ func main() {
 		// rider above this one SUPPRESSES an answer rather than adding a line, which
 		// is why it is a rider at all: the answer itself is unconditional, on the
 		// `initialize` arm's terms. Unset ⟹ off ⟹ the ack is emitted.
+		//
+		// Roster rider (envStreamRoster, default-off): prepend one
+		// system/background_tasks_changed line canning N task rows ahead of the
+		// normal per-turn reply (#2080). Like the rate-limit knob it carries a
+		// VALUE rather than a boolean, and here the value is the ROW COUNT —
+		// writeBackgroundTaskRoster gives both reasons. Parsed rather than
+		// tested for emptiness, and the parse FAILS CLOSED: strconv.Atoi's error
+		// value is 0, which is off, so a typo disables the rider instead of
+		// enabling some default roster nobody chose. Non-positive ⟹ off ⟹
+		// byte-identical.
+		rosterTasks, _ := strconv.Atoi(os.Getenv(envStreamRoster))
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
-			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "")
+			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "", rosterTasks)
 		return
 	}
 
@@ -1618,12 +1646,19 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // line fall through to whatever arm follows, inert today and a latent bug the moment
 // one is added. False ⟹ off ⟹ the ack is emitted.
 //
+// rosterTasks selects the background-task-roster rider (#2080, default-off): a
+// positive count prepends one system/background_tasks_changed line canning that many
+// task entries, ahead of the normal reply, on the rate-limit rider's terms. Zero means
+// off. It is a COUNT rather than a bool for two reasons writeBackgroundTaskRoster
+// gives — it keeps the tail's mis-slot a compile error, and the number is what lets a
+// caller drive the roster over the daemon's entry cap.
+//
 // The riders are parameters in the order they landed, and withholdModeAck is appended
 // rather than grouped with the leading bools deliberately: the resulting string, bool
 // tail makes a mis-slotted call-site edit a compile error, which a third adjacent bool
-// would not.
+// would not. rosterTasks extends the same discipline — bool, int, not a fourth bool.
 func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string,
-	withholdModeAck bool) {
+	withholdModeAck bool, rosterTasks int) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1650,6 +1685,19 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				// no ordering race to tune.
 				if rateLimitStatus != "" {
 					if werr := writeRateLimitEvent(w, rateLimitStatus); werr != nil {
+						return
+					}
+				}
+				// The roster rider writes on the same terms and for the same
+				// reason again: BEFORE the reply, so a turn_end reaching a client
+				// implies the roster line has already been through the parser —
+				// and therefore that the daemon's per-session hold already holds
+				// it. That is the happens-before #2080's e2e uses in place of a
+				// sleep, and it survives whichever side of the hold's delegation
+				// the record happens on, because the two are different LINES read
+				// in order on one goroutine.
+				if rosterTasks > 0 {
+					if werr := writeBackgroundTaskRoster(w, rosterTasks); werr != nil {
 						return
 					}
 				}
@@ -1923,6 +1971,87 @@ const (
 	rateLimitResetsAt  = int64(1785699000)
 	rateLimitLimitType = "five_hour"
 	rateLimitUUID      = "44444444-4444-4444-8444-444444444444"
+)
+
+// writeBackgroundTaskRoster writes one system/background_tasks_changed line canning
+// `entries` task rows — claude's mid-turn report of what is running in the background,
+// and the one line in the daemon's background-task family that no other knob here can
+// produce. It is the fake half of #2080's late-connect proof: the daemon retains the
+// roster it decodes from this line, and a client connecting afterwards is unicast it.
+//
+// THE FIRST ROW IS TRANSCRIBED, THE REST ARE SYNTHETIC, and the split is stated
+// rather than blurred. Row 0 is the committed capture's own row verbatim
+// (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json, its
+// background_tasks_changed record, claude 2.1.220) — including `cat $FIFO`, a literal
+// shell command line for the local_bash task type. That value is deliberately kept:
+// it is built into the line by json.Marshal over a map (never a shell, never
+// os.Expand) and asserted verbatim four layers later, which is what proves the whole
+// path treats a command line as inert bytes (#833). The capture holds exactly ONE
+// row, so rows 1..entries-1 are synthetic siblings over the same key set — invented
+// values, transcribed shape — with ids distinct enough that no assertion can pass on
+// the wrong row.
+//
+// WHY THE KNOB CARRIES A COUNT rather than a boolean, twice over. runStreamJSON's own
+// doc records that withholdModeAck was appended so the resulting `string, bool` tail
+// makes a mis-slotted call-site edit a compile error, "which a third adjacent bool
+// would not"; an int keeps that. And the number is load-bearing: the daemon's parser
+// caps a roster at streamsup's maxTaskRosterEntries and reports the remainder as
+// dropped_tasks, so driving this OVER that cap is the only way an e2e can prove the
+// count is carried rather than defaulted — a fixture whose dropped_tasks is always 0
+// cannot tell "carried" from "never populated".
+//
+// uuid and session_id are carried even though the parser's decode target declares
+// NEITHER. That is the point rather than an oversight: every real line has them, and
+// a retention that somehow surfaced one would be caught by the e2e asserting the
+// payload's field set rather than downstream. The uuid is the capture's own; the
+// session_id is the fake's, as writeRateLimitEvent also substitutes.
+//
+// A map[string]any like writeRateLimitEvent: keys marshal sorted, so the line is
+// deterministic without declaring a struct for a shape nothing else reads. Returns
+// the first marshal/write error.
+func writeBackgroundTaskRoster(w io.Writer, entries int) error {
+	tasks := make([]map[string]any, 0, entries)
+	for i := range entries {
+		if i == 0 {
+			tasks = append(tasks, map[string]any{
+				"task_id":     rosterCapturedTaskID,
+				"task_type":   rosterCapturedTaskType,
+				"description": rosterCapturedDescription,
+			})
+			continue
+		}
+		tasks = append(tasks, map[string]any{
+			"task_id":     fmt.Sprintf("%s%d", rosterSyntheticIDPrefix, i),
+			"task_type":   rosterCapturedTaskType,
+			"description": fmt.Sprintf("%s%d", rosterSyntheticDescPrefix, i),
+		})
+	}
+	return writeJSONLine(w, map[string]any{
+		"type":       "system",
+		"subtype":    "background_tasks_changed",
+		"tasks":      tasks,
+		"uuid":       rosterUUID,
+		"session_id": streamSessionID,
+	})
+}
+
+// The roster rider's canned values. Constants rather than inline literals for the
+// rate-limit fixture's reason: the e2e asserts against the same values the fake
+// writes, across a main-package boundary it cannot import, so the two copies must at
+// least be greppable as one fixture.
+//
+// The first three are the capture's own bytes. The two synthetic prefixes are
+// obviously so, which is deliberate — no reader should mistake a generated row for a
+// measured one — and both stay far under the daemon's per-field caps (256 bytes for
+// the two ids, 512 for a roster description), so nothing this rider writes is ever
+// truncated and every delivered row's truncated_fields is null.
+const (
+	rosterCapturedTaskID      = "bybi8g8i8"
+	rosterCapturedTaskType    = "local_bash"
+	rosterCapturedDescription = "cat $FIFO"
+	rosterSyntheticIDPrefix   = "e2e-roster-task-"
+	rosterSyntheticDescPrefix = "e2e-roster-description-"
+	rosterUUID                = "702eb3a1-a939-43d8-b47d-e200e77712ae"
 )
 
 // writeInterruptAck writes the control_response ack real claude answers an interrupt
