@@ -476,6 +476,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. Nothing emits, accepts or enforces it yet. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 | **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
+| **`request_history`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for entries older than the ones it has, naming the conversation, an opaque `cursor` and a `limit` (#2113). Scroll-back over the **daemon-owned on-disk log** (#2112), which is **not** the [Mode A](#reconnect--backfill-semantics) event-ring replay: that one is catch-up across a dropped connection and is empty after a restart. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`history_page`](#history_page). **Nothing answers it yet** — the handler is #2116. See [Conversation history](#conversation-history-v2). |
+| **`history_page`** | binary → phone | no | **New in v2.** Outbound reply to a [`request_history`](#request_history), correlated by `in_reply_to` (#2113): one backward step of a walk — `entries` **newest-first**, an opaque `cursor` to ask again with, and `at_start`. **A walk terminates on `at_start`, never on an empty `entries`**, and a **short page is not an end-of-log signal** (the entry clamp bounds a count, not bytes). Each entry carries a durable per-conversation `id` — **not** an [`event_id`](#reconnect-replay--resync-consumer-647), which is the ring's per-process one — plus the stored frame's `type`, `payload` and `ts`, so a client re-reduces a page through its existing timeline reducer. Entries are **replayed content** and can be `claude`-authored, so [§ Security model](#security-model)'s threat 1 lands here. Nothing emits it yet (#2116). See [Conversation history](#conversation-history-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
 
@@ -2270,6 +2272,202 @@ Example:
 }
 ```
 
+### Conversation history (v2)
+
+Scroll-back. A client that opens an existing conversation sees only what arrived
+after it connected; this pair of frames is how it asks for what came before.
+Declared by **#2113**.
+
+**This is not [Mode A](#reconnect--backfill-semantics).** The `last_event_id`
+replay below is catch-up across a *dropped connection*, over a bounded in-memory
+ring that is empty after a daemon restart. History is a **daemon-owned log on
+disk**, landed in #2112, and it survives restarts. The two answer different
+questions and a client uses both.
+
+**Nothing answers `request_history` yet.** The handler is **#2116**; sent today
+the frame reaches no dispatch surface. The vocabulary is published ahead of it for
+the reason `attachment_chunk` (#1752) and `request_attachment` (#2052) were: the
+wire string is the contract, two client tickets are already written against this
+section rather than against the handler, and a name chosen twice is a name chosen
+wrong once.
+
+#### How a walk works
+
+**Paged, newest-first, walking backwards.** A client opens a conversation at its
+most recent entries and asks for older ones as the operator scrolls up. It never
+reads forward from the beginning.
+
+**A walk terminates on `at_start`, never on an empty `entries` list.** A page that
+fills *exactly* at the log's first entry reports `at_start` **false** with a
+usable `cursor`; the call after it returns no entries with `at_start` **true**.
+`cursor` is empty whenever `at_start` is set, so the two are never both
+meaningful. A client that stops when a page comes back empty is *usually* right
+and is wrong exactly at the boundary — which is why all three page shapes are
+committed as fixtures under `internal/protocol/testdata/` rather than left to
+inference.
+
+**A short page is not an end-of-log signal.** See [Page size](#page-size) below.
+
+#### `request_history`
+
+Direction **phone → binary** (inbound v2 control; not in `v1TypeSet` — an old
+phone never sends one, and `IsKnownAppType` rejects it, which is the structural
+bar against a v1 client pushing one into the application dispatch chain).
+
+**Every field is client-asserted.** This frame travels in one direction only, so
+unlike `attachment_chunk` there is no leg on which its fields are daemon-authored
+and no provenance to disambiguate.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | The conversation whose history is wanted. A **lookup key validated against the daemon's own registry before it resolves anything**, never a value trusted as sent — and **naming a conversation here is not authorization**. The same rule [`request_attachment`](#request_attachment) publishes with its own `conversation_id`, and the same lowercase-UUIDv4 shape. The daemon serves the conversation the *authenticated session* is entitled to, and the name is how the client says *which*, not *whether*. |
+| `cursor` | string | The position handed back by the previous page, echoed **verbatim**. **Empty means "start at the newest"** — the first ask of a walk has nothing to echo yet, so empty is the normal opening value and not a missing one. See [The cursor](#the-cursor). |
+| `limit` | number | How many entries the client wants. **`0` — sent as zero, or omitted — asks the daemon to choose**, and never means "zero entries". See [Page size](#page-size). |
+
+**All three keys are always present** (no `omitempty`), so a decoder may rely on
+all three. **Correlation rides `in_reply_to`, so there is no request-id key** —
+the decision [`attachment_stored`](#attachment_stored) already took.
+
+##### The cursor
+
+**Opaque.** The daemon mints it, the client stores it and hands it back
+unexamined. It names a position in an **append-only** file rather than an offset
+or a page number, both of which an append landing while the operator scrolls
+would invalidate. A client MUST NOT parse one, and the daemon's `parseCursor` is
+the only thing anywhere that does.
+
+**Opacity is a convention, not a security primitive**, and reading it as one is
+the mistake this paragraph exists to prevent. A cursor is **not a secret and not a
+capability**: the encoding is trivially reversible and what it carries is the
+conversation id the client already knows. It is bound to that conversation when it
+comes back, and it is deliberately **unsigned** — a MAC would imply an
+authorization it does not carry. Authorization is **pairing**, enforced
+structurally at the Noise IK handshake, exactly as for every other verb here.
+
+A cursor that does not decode, was minted for a different conversation, or names a
+position no longer in the log is refused with **one merged answer**, and the
+refusal never echoes the cursor back. The distinctions are exactly what a probe
+would want, so a client that cannot tell them apart cannot leak them.
+
+##### Page size
+
+`limit` is a **request, not a guarantee**, and three separate rules narrow it:
+
+- **`0` means "you choose."** The daemon substitutes its own page size. This is why
+  an absent key is safe: a client that omits `limit` gets a sensible page rather
+  than an error, where a literal zero reaching the log would be refused.
+- **A large ask is clamped, not refused.** The ceiling is `history.MaxPageEntries`
+  — **4096** entries as of #2112. Asking for more is not an error; it is silently
+  narrowed.
+- **The clamp bounds a *count*, not *bytes*.** Nothing bounds a stored entry's
+  payload, so a full page can exceed the
+  [application-envelope cap](#application-envelope-size-cap) and be undeliverable
+  as the daemon's **own** outbound frame. The daemon may therefore return **fewer
+  entries than asked for** to fit it.
+
+So: **a client reads the reply's actual entry count and never assumes its ask was
+honoured**, and — the consequence that matters — **never infers "short page ⇒
+start of log"**. Byte-driven truncation is safe *only* because termination is
+`at_start`. A negative `limit` is a reject.
+
+#### `history_page`
+
+Direction **binary → phone**. The answer to one `request_history`: one backward
+step of a walk, **correlated by `in_reply_to`**.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `entries` | array of [entry](#a-history-entry) | This page's entries, **newest-first**. Always present; an empty page carries `[]` and never `null` or an omitted key. |
+| `cursor` | string | The position to ask with next, opaque. **Empty whenever `at_start` is true.** |
+| `at_start` | bool | The start of the log was reached while filling this page. **The only termination signal.** |
+
+**It carries no `conversation_id`**, and that is a decision rather than an
+omission — the shape [`session_settings`](#session-settings-v2) already takes for
+the same reason. The client knows which conversation it asked about because it
+knows which envelope this answers, so it keeps its outstanding asks keyed by
+envelope id. Nothing in a page is echoed back from the request.
+
+##### A history entry
+
+One entry is **one wire envelope's worth**: a wire type, its payload, a timestamp
+and a durable entry id. That is what makes history renderable without a second
+mapping — a client re-reduces a loaded page **oldest-first** through the same
+timeline reducer it already runs for the live stream.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | number | The **durable, per-conversation** entry id. Monotonic within one conversation's log and **stable across daemon restarts**. |
+| `type` | string | The wire type the stored frame carried. |
+| `payload` | object | The stored frame's body, verbatim. |
+| `ts` | string (RFC 3339) | When the entry was appended. |
+
+**`id` is not an `event_id`.** [`event_id`](#reconnect-replay--resync-consumer-647)
+is the in-memory ring's id: per-process, reset by a daemon restart, and meaningful
+only to Mode A's replay. This one is on disk. They are different sequences that
+both look like small integers, and a client must not join them.
+
+**`type` is a stored string that nothing re-validates** against the type table
+above, so a client MUST tolerate an entry type it does not recognise rather than
+treating one as a protocol violation — the same forward-compatibility rule this
+document applies to unknown fields.
+
+**An entry carries exactly the trust class of the live frame it mirrors.** `type`
+and `payload` are **replayed content**: operator-authored for a stored
+`send_message`, and **`claude`-authored** for a stored assistant frame. So
+[§ Security model](#security-model)'s **threat 1 lands on this frame**, and a
+client applies exactly the sanitisation it applies on the live lane. This is the
+opposite of [`request_attachment`](#request_attachment), which carries no
+content-bearing bytes at all; that section's reasoning does not transfer here.
+
+#### Rejects
+
+The **conditions** are published here; their **codes are #2116's**, minted with
+the handler. No new code is invented ahead of the code that would send it — the
+rule [`attachment_chunk`](#attachment_chunk) states, and #2112's own security
+review assigns the sentinel-to-wire-code mapping to that ticket in as many words.
+A request is refused when:
+
+- the `conversation_id` is not of canonical shape, or names no conversation in the
+  daemon's registry;
+- the `limit` is negative (**`0` is not a reject** — it asks the daemon to choose);
+- the `cursor` does not decode, was minted for another conversation, or names a
+  position not in this log — **one merged answer**, per [The cursor](#the-cursor);
+- the payload does not decode. **A decode failure is a rejected frame, never an
+  empty-but-successful request.** Every key is optional to a JSON decoder, so a
+  truncated or hostile payload decodes to an empty conversation id, which names
+  nothing — and a receiver must not join it into a path, where an empty component
+  resolves to the log **root** rather than erroring.
+
+Both client-supplied strings are **loggable only after their shape is validated**,
+the rule this document already applies to an attachment's `filename`.
+
+```json
+{
+  "id": 140, "type": "request_history", "ts": "...",
+  "payload": {
+    "conversation_id": "3f8b1c04-9d27-4e5a-b6c1-2e9f70d8a413",
+    "cursor": "", "limit": 50
+  }
+}
+```
+
+```json
+{
+  "id": 812, "type": "history_page", "ts": "...", "in_reply_to": 140,
+  "payload": {
+    "entries": [
+      {"id": 412, "type": "assistant_delta", "payload": {"...": "..."}, "ts": "..."},
+      {"id": 411, "type": "send_message", "payload": {"...": "..."}, "ts": "..."}
+    ],
+    "cursor": "MS4zZjhiMWMwNC05ZDI3LTRlNWEtYjZjMS0yZTlmNzBkOGE0MTMuNy40MDk2",
+    "at_start": false
+  }
+}
+```
+
+The terminal page of that walk carries `"cursor": ""` and `"at_start": true`, with
+`entries` either populated or `[]`.
+
 ## Reconnect / Backfill semantics
 
 Every reconnect performs a fresh Noise_IK handshake (there is no session resumption in v2), and on every (re)connection the daemon brings the client back to **current truth**. Reconciliation runs in **two modes, keyed on the kind of data — not on how long the client was away**. The axis of difference is data type, not outage length: the interactive event stream keeps a cursor backfill; control state is always a cheap current-state snapshot.
@@ -2281,7 +2479,7 @@ Every reconnect performs a fresh Noise_IK handshake (there is no session resumpt
   - **Bounded per conversation.** Each conversation retains at most `MaxEventsPerConversation` = **1024** events, and the bound is **not a plain FIFO age-out**: the oldest `assistant_delta` is evicted first (deltas are lossy and coalescable per ADR 025) and control-class events are retained in preference. A position that has fallen off the window answers with a single `resync` marker rather than a partial, gap-ful replay.
   - **Daemon-resolved conversation only.** The daemon replays the conversation **its own** cursor names, never one the client names — `last_event_id` is a position, not an address, and a phone can never reach another conversation's events.
 
-**There is no bulk-history backfill.** A client that wants past messages the ring no longer holds has no verb to ask for them and receives none; the answer is a full reload of the conversation the `resync` marker names. Real history — a daemon-owned log rather than a replay window — is #2091's, and does not exist today.
+**Mode A is still not history, and there is still no bulk-history backfill on this path.** A client that wants past messages the ring no longer holds gets none from a reconnect; the answer Mode A gives is a full reload of the conversation the `resync` marker names. What has changed since #2090 is that the request is no longer unaskable: real history — a daemon-owned log rather than a replay window — landed as `internal/history` in #2112, and [§ Conversation history](#conversation-history-v2) publishes the verb to ask with (#2113). **Nothing answers that verb yet** (#2116), so today a client still receives nothing; and when it does, it will arrive as a `history_page` reply to its own ask rather than as anything a reconnect pushes. The two are complementary and neither substitutes for the other: this mode recovers events missed while disconnected, that one walks backwards through what is on disk.
 
 **Mode B — control state → current-state snapshot (the reconcile-on-connect rule).** Control state reconnects by *re-asserting current truth*, replaying no past events. This is the single written contract every client builds against:
 
@@ -2606,6 +2804,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-05`: **Published the conversation-history request verb and its page reply** (#2113) — `request_history` / `history_page`, plus the new § [Conversation history](#conversation-history-v2) and two rows in § Application message types. This is the verb #2090 established did not exist: `last_seen_ts` drove nothing, and the entry above says so. It sits on the **daemon-owned on-disk log** #2112 landed (`internal/history`), so the shapes here mirror a landed implementation rather than anticipating one. **Vocabulary only — nothing answers it** (#2116 is the handler), which is why the section publishes reject *conditions* and names #2116 as the owner of their **codes**: no parallel reject vocabulary is minted ahead of the code that would send it, the precedent #2052 set. It is published ahead of its handler because **pyrycode-desktop#1088 and pyrycode-mobile#623 are parked on this section**, not on the daemon. **Four decisions a client cannot infer, settled here.** (1) `limit`'s **zero is meaningful** — sent as `0` or omitted, it asks the daemon to choose, and never means zero entries; `history.Store.Page` refuses a limit below 1, so an absent key reaching it literally would break every client that omits the field. (2) A **walk terminates on `at_start`, never on an empty `entries`** — a page filling *exactly* at the log's first entry reports `at_start` false with a usable cursor, and the call after it is the empty one; all three shapes are committed as fixtures rather than left to inference. (3) The clamp at `history.MaxPageEntries` (**4096**) bounds an entry **count, not bytes**, so a page may come back **shorter than asked** to fit the application-envelope cap — which is exactly why termination is `at_start` and a client must never read a short page as the start of the log. (4) The request **names a `conversation_id`** (a lookup key validated against the registry, not authorization) and the reply **does not echo one**, the shape `session_settings` already takes. **Two trust properties are stated rather than borrowed**, both places the neighbouring `request_attachment` section says the opposite of what is true here: the **cursor is not a secret and not a capability** — opacity is a convention, the encoding is reversible, and it is deliberately unsigned because a MAC would imply an authorization it does not carry — and a page's **entries are replayed content**, `claude`-authored for a stored assistant frame, so [§ Security model](#security-model)'s **threat 1 lands on `history_page`**. § Reconnect / Backfill semantics is amended in one paragraph to match: Mode A is unchanged and still carries no history, but "has no verb to ask for them" is no longer true — the verb exists, and nothing answers it yet.
 - `2026-09-05`: **Corrected the published claim that `last_seen_ts` drives a bulk-history backfill** (#2090). It drives nothing. `LastSeenTS` occurs in exactly two Go files — its declaration on `HelloClientPayload` and that struct's round-trip test — with **no consumer in `internal/relay` or anywhere else**, so the field is decoded and dropped and a `hello` carrying it is answered byte-for-byte as one omitting it. The failure was **silent**, which is what made the document the whole defect: the claim was read as a working daemon capability during a 2026-09-04 desktop investigation and used to size client work as *"the daemon half already exists"*. **The field is not removed or deprecated** — it is still accepted vocabulary, a decoder rejecting it would be wrong, and its `omitempty` declaration is untouched; every surviving mention now names it as accepted-and-ignored. Whether real history should exist, and what would source it, is **#2091's** decision, already settled there as a **daemon-owned log** rather than claude's on-disk transcripts. **§ Reconnect / Backfill semantics needed more than the one deleted bullet**, because that bullet was what made Mode A's framing true: the section's intro, Mode A's heading and its closing two-modes paragraph each asserted "bulk transcript content" independently, and all three are corrected together so no surviving sentence describes Mode A as history. **Mode A keeps the name "cursor backfill"** — a rename was rejected, because § [`model_list`](#model_list) and § [`slash_command_list`](#slash_command_list) each cite *"Mode A, a cursor backfill"* in live prose, both accurately describe the `last_event_id` ring replay, and both are left untouched; a rename would have orphaned them. What Mode A publishes now is **one mechanism** and its three bounds, stated because a client plans around each: the ring is **in-memory** and does not survive a daemon restart (though it survives a claude-child respawn and any number of phone reconnects); retention is **bounded at `MaxEventsPerConversation` = 1024 per conversation** and is **not a plain FIFO age-out** — the oldest `assistant_delta` is evicted first and control-class events are retained in preference — with `resync` as the answer once a position falls off; and replay is scoped to the **daemon-resolved** conversation, so `last_event_id` is a position and never an address. The two-mode split itself is unchanged, keyed on data class rather than outage length. The `hello` example block and the § Worked example wire trace **keep the key**, with § `hello`'s prose — which documented `last_event_id` at length and `last_seen_ts` not at all — gaining the paragraph that owns the inertness for both. `internal/protocol`'s `HelloClientPayload` doc comment carried the same false claim and is corrected in the same pass, **comment-only**. Earlier changelog entries are historical and were left untouched, as are § Reconnect / Backfill semantics' deliberate note about the missing sixth (`model_list`) reconcile, which belongs to a sibling family. The desktop repo's mirror claim is pyrycode-desktop#1068 and is not this repo's to fix. Documentation only — no wire field added or removed, no fixture, test or behaviour changed.
 - `2026-09-05`: **`background_task_roster` now has a connect-time snapshot, and its empty case is published** (#2080). #2077 landed the per-session retention, #2078 the reconcile and #2079 the daemon-side enumeration; this slice proves the chain end to end and publishes the contract. The frame **joins [§ Reconnect / Backfill semantics](#reconnect--backfill-semantics)' Mode B list**, keyed on `conversation_id`, and § [`background_task_roster`](#background_task_roster) gains the **Reconcile on (re)connect** note its Mode B neighbours carry. **The empty case is the part a client author cannot infer, and it is the reverse of [`slash_command_list`](#slash_command_list)'s rule in this same document**: a reported-**empty** roster is reconciled as an explicit `"tasks": []` snapshot, while a roster that was **never reported** is simply absent — so absence means *nothing has been reported*, not *nothing is alive*, and the two must not be collapsed. That is the statement that stops a reader generalising from the neighbour and rendering a spinner forever on a conversation that has nothing alive and never will. The section's blanket **`event_id` claim is qualified** rather than left to mislead: the live-lane frame carries one, the reconciled frame deliberately carries none, is kept out of the #647 replay ring, advances no cursor and is inert to cursor-based dedup. **The proof is hermetic and its non-vacuity is the acceptance criterion, not a nicety** — two producers emit this exact variant, so a test that merely waits for a frame passes against a completely dead reconcile; #2080's e2e is therefore verified against the one-line mutant that unsets the enumeration seam, and reports the frame count on the minting connection beside the observing one so a miss names which producer failed. It also pins what the reconciled frame does **not** do: no turn opens or closes on the receiving connection, and the connection sends nothing to trigger the frame. `dropped_tasks` is driven **non-zero** on purpose, since a fixture whose count is always `0` cannot distinguish a carried count from one that was never populated. **Two things are deliberately left standing**, both the sibling family's: § [`model_list`](#model_list)'s *"no connect-time snapshot today"* and its absence from the Mode B list are still stale (#1863/#1867 shipped that reconcile and never reached this file), which is now **stated in the section itself** rather than left implied — the list names five frames while the daemon runs six. No behaviour changed; the only production change is a fake-claude test rider that scripts claude's mid-turn `system`/`background_tasks_changed` line, which no existing suite enables.
 - `2026-09-03`: **Corrected where the retrieval leg's fields come from** (#2053), alongside the outbound stream that emits them. The section said `filename` and `mime_type` *"arrive attacker-chosen at upload time, are stored, and are echoed back verbatim on the retrieval leg"*, and each clause was wrong in its own way: **`mime_type` is not stored at all** — `Intake.Receive` stores the bytes under the sanitised filename and discards the declared media type outright, while the declared `size` and `sha256` are checked against the assembled bytes at admission and then dropped — and **`filename` is stored *sanitised***, so what the retrieval leg carries is one safe path component and never the client's own string. The claim was restated in three places (the trust paragraph, the `mime_type` field row, and [`attachment_stored`](#attachment_stored)'s *"claims inbound and laundered client input outbound"*), and a reader acting on any of the three went looking for a stored media type that is not there. All three now say what actually happens: the daemon **derives** `size`, `sha256` and `mime_type` from the stored bytes, sniffing the media type **from the content** so a file whose name and client-declared type disagree with its bytes is described by its bytes. **This improves provenance, not trust, and the correction is deliberately narrow about that.** The value becomes genuinely daemon-authored rather than an attacker-chosen string handed back — and it is still computed from bytes an attacker chose, so a *sniffed* `text/html` is exactly as dangerous to render as a declared one. The **MUST NOT dispatch on `mime_type` in any way that grants the content privileges** rule and the sanitise-before-rendering rule on `filename` both survive the edit unchanged; only the sentences saying where the values come from were wrong. Also updated: the two status lines calling #2053 future work. The stream has landed and **ships unwired** — nothing calls it, exactly as #812 shipped `StreamBundle` ahead of #813 — so **nothing answers `request_attachment` yet** remains true and remains, with #2054 the handler that will join them.

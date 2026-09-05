@@ -144,6 +144,18 @@ var excludedTypes = map[string]string{
 	// frame has no inbound leg at all, so no entry ever moves to inboundTypes.
 	"TypeAttachmentStored": "reply",
 
+	// outbound reply — one backward step of a conversation-history walk (#2113),
+	// the answer to the request_history below. Filed on the same rule as its
+	// neighbours: correlation rides the envelope's in_reply_to, which is literally
+	// the definition this map gives above, and TypeSessionSettings is the shape
+	// copied — an outbound v2 answer to an inbound request verb that named a
+	// conversation and carrying no conversation id of its own. Mandatory from the
+	// moment the constant exists rather than from the moment something emits it
+	// (the producer is #2116): Assertion #3 reports an unclassified constant, not
+	// an unemitted one. Unlike its request half this frame has no inbound leg at
+	// all, so this entry never moves to inboundTypes.
+	"TypeHistoryPage": "reply",
+
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",
 	"TypeTurnState":           "push",
@@ -250,6 +262,24 @@ var excludedTypes = map[string]string{
 	// half #1907, and Assertion #3 reports an unclassified constant, not an
 	// unemitted one.
 	"TypeQuestionDismissed": "push",
+
+	// pending handler (#2116) — the conversation-history request verb (#2113).
+	// #2113 declares the constant, its payload and its published section; nothing
+	// dispatches it, so inboundTypes would fail Assertion #1, which requires an
+	// inbound type to be wired into the Handlers map or dispatchAppFrame. "push"
+	// is false for a genuinely inbound frame and filing it that way to dodge that
+	// assertion would be a lie to the guard rather than a classification — the
+	// reasoning the two removal notes below preserve for the entries that used to
+	// sit here.
+	//
+	// THIS ENTRY MOVES when #2116's dispatchAppFrame case lands: up to
+	// inboundTypes as "switch-intercepted", beside TypeRequestAttachment, which
+	// made exactly this move out of exactly this label. Mandatory rather than
+	// tidy-up — Assertion #2 fails a wired type left sitting in this map. Filing
+	// it now is mandatory too: Assertion #3 reports an unclassified constant, not
+	// an unemitted one. Its reply half is TypeHistoryPage above, which is
+	// outbound-only and never moves.
+	"TypeRequestHistory": "pending handler (#2116)",
 
 	// TypeRequestAttachment is NO LONGER HERE. It sat here as "pending handler
 	// (#2054)" while #2052 had declared the constant and nothing dispatched it;

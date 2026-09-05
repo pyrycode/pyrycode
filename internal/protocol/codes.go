@@ -1071,6 +1071,119 @@ const (
 	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (switch-intercepted — #2054)
 )
 
+// Mobile Protocol v2 CONVERSATION-HISTORY REQUEST VERB (#2113, split from #2091;
+// docs/protocol-mobile.md § Conversation history publishes it). The frame a client
+// sends to ask for entries older than the ones it already has. Its payload is
+// RequestHistoryPayload (history.go).
+//
+// THE DEFECT IT CLOSES: a client opening an existing conversation sees nothing
+// that happened before it connected, because there was no verb to ask with.
+// internal/relay's replayMissed is catch-up across a dropped connection over the
+// bounded in-memory ring in internal/eventring — empty after a daemon restart —
+// and § Reconnect / Backfill semantics said in as many words that a client wanting
+// more "has no verb to ask for them and receives none". The log it reads landed in
+// #2112 (internal/history); this constant puts that log's shapes on the wire.
+//
+// THE NAME follows the four inbound "ask the daemon for X" verbs already here —
+// TypeRequestSnapshot, TypeRequestDebugBundle, TypeRequestSessionSettings,
+// TypeRequestAttachment — rather than inventing a fifth idiom for the same act. It
+// is fixed by this declaring ticket rather than by the handler because a wire type
+// string IS the contract: pyrycode-desktop#1088 and pyrycode-mobile#623 are both
+// parked on the published section, not on the handler, and a name chosen twice is
+// a name chosen wrong once.
+//
+// PAGED, NEWEST-FIRST, WALKING BACKWARDS, ADDRESSED BY AN OPAQUE CURSOR rather
+// than by an offset or a page number, both of which a concurrent append
+// invalidates. RequestHistoryPayload's block carries the rules a handler's author
+// needs: the cursor is not a secret and not a capability, Limit's zero means "the
+// daemon chooses" and must never be allocated from, and the conversation id is a
+// lookup key validated against the registry before any path join rather than a
+// value trusted as sent.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is
+// a v2 CONTROL envelope intercepted before internal/dispatch.Route, exactly as
+// TypeRequestAttachment and TypeRequestSessionSettings are. IsKnownAppType
+// rejecting it with ErrUnknownType is also the structural bar against a v1 client
+// pushing one into the v1 handler chain, and that rejection's load-bearing half is
+// the inbound one because this leg really is inbound. The partition in
+// internal/protocol/compat_test.go files it in v2OnlyTypes, and
+// inboundAppTypeSet's asserted count does not move.
+//
+// IT SITS IN excludedTypes AS "pending handler (#2116)" UNTIL THAT SIBLING LANDS,
+// and moves to inboundTypes the moment internal/relay/v2session.go's
+// dispatchAppFrame gains its case — mandatory rather than tidy-up, since Assertion
+// #2 fails a wired type left behind. inboundTypes today would fail Assertion #1,
+// which requires a dispatch that this ticket does not ship, and "push" would be a
+// lie to the guard about a genuinely inbound frame. TypeRequestAttachment sat under
+// exactly that label between #2052 and #2054, and TypeQuestionAnswer /
+// TypeQuestionRefused between #1983 and #1984. Filing is required from the moment
+// the constant exists: Assertion #3 reports an unclassified constant, not an
+// unemitted one.
+//
+// The declaring ticket (#2113) is wire vocabulary and publication only — no
+// producer, no consumer, no validator and no admission-time check. #2116 answers
+// the verb, owning the shape check, the registry validation, the page's byte
+// budgeting and every reject code; the reject CONDITIONS are published here, their
+// codes are not, because minting a parallel reject vocabulary ahead of the handler
+// is what #2052's precedent declines to do. Same declare-then-serve sequencing as
+// #2052→#2054 and #1983→#1984.
+const (
+	TypeRequestHistory = "request_history" // phone → binary, inbound v2 control (pending handler — #2116)
+)
+
+// Mobile Protocol v2 CONVERSATION-HISTORY PAGE REPLY (#2113, split from #2091;
+// docs/protocol-mobile.md § Conversation history publishes it). One backward step
+// of a history walk: the entries, the cursor to ask again with, and whether the
+// start of the log was reached. Its payload is HistoryPagePayload (history.go),
+// mirroring history.Page.
+//
+// THE NAME names what the frame IS to a client — a page of history — which is
+// TypeQuestionShown's rule. "history" alone was rejected as describing the whole
+// log rather than the one step this frame carries, and a client that read it that
+// way would have no reason to walk.
+//
+// IT IS A REPLY, correlated via the envelope's InReplyTo, and that is ONE decision
+// expressed in three places that must agree: this block, the § Application message
+// types row, and cmd/pyry/relay_guard_test.go's excludedTypes entry, which defines
+// "reply" as exactly this. TypeSessionSettings is the nearest analogue on every
+// count — an outbound v2 answer to an inbound request verb that named a
+// conversation, filed "reply", published as correlated by in_reply_to, and
+// carrying NO conversation id of its own because the client already knows what it
+// asked. That last point is why the payload has no such key.
+//
+// ONE ENTRY IS ONE WIRE ENVELOPE'S WORTH: a wire type, its payload, a timestamp
+// and a durable entry id. That is what makes a page renderable without a second
+// mapping — a client re-reduces it oldest-first through the timeline reducer it
+// already has for the live stream. The id is the log's DURABLE per-conversation
+// one, deliberately not Envelope.EventID, whose ring ids are per-process and do
+// not survive a restart.
+//
+// A WALK TERMINATES ON at_start, NEVER ON AN EMPTY entries list, and the entry
+// clamp bounds a count rather than bytes — so a page may be short of what was
+// asked for and shortness means nothing. HistoryPagePayload's block carries both
+// rules with their reasoning, and all three page shapes are pinned by committed
+// fixtures rather than left to inference.
+//
+// UNLIKE ITS REQUEST HALF THIS FRAME CARRIES CONTENT, and the trust consequence is
+// stated on HistoryEntry rather than borrowed from a neighbour: each entry's type
+// and payload are REPLAYED content, claude-authored for a stored assistant frame,
+// so § Security model's threat 1 lands here. TypeRequestAttachment's family
+// publishes the opposite for itself and that sentence must not be carried over.
+//
+// MUST NOT be added to inboundAppTypeSet: an old (v1) phone never receives this
+// frame, and IsKnownAppType rejecting it is the structural bar against a v1 client
+// sending one into dispatch.Route. Filing it in inboundTypes is impossible anyway
+// — Assertion #1 requires a dispatch case and this frame has no inbound leg at
+// all, so its excludedTypes entry never moves. Two drift detectors classify it,
+// both mandatory from the moment the constant exists: v2OnlyTypes in
+// internal/protocol/compat_test.go, and excludedTypes as a reply.
+//
+// The declaring ticket (#2113) is wire vocabulary and publication only. #2116
+// emits it. Same declare-then-emit sequencing as #1895→#1897 and #1616→#1638.
+const (
+	TypeHistoryPage = "history_page" // binary → phone, one backward step of a history walk, correlated via in_reply_to
+)
+
 // Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The
 // questions claude asks mid-turn when it needs the operator to choose between
 // approaches, carried to a client as one frame per batch. The call rides the same
