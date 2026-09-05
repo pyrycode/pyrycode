@@ -105,6 +105,38 @@ const (
 	CodeHistoryInvalidPageSize = "history.invalid_page_size" // a NEGATIVE limit; 0 is not a reject, it asks the daemon to choose
 	CodeHistoryInvalidCursor   = "history.invalid_cursor"    // undecodable, foreign, or naming a position not in this log — one merged answer
 	CodeHistoryUnavailable     = "history.unavailable"       // the log could not be read; the only retryable member of this group
+
+	// On-demand model-list error (#2125; docs/protocol-mobile.md § Error codes).
+	// MINTED WITH THE HANDLER THAT SENDS IT, the sequencing #2052 established and
+	// the history group above followed: no reject vocabulary exists ahead of the
+	// code that can emit it.
+	//
+	// ONE NEW CODE, NOT TWO. The other condition request_model_list can refuse —
+	// the daemon does not host the named conversation — is answered by the EXISTING
+	// CodeConversationNotFound, for the history group's stated reason: there is no
+	// second id here to build a path-existence oracle over, and request_snapshot and
+	// request_history already answer an unknown conversation distinguishably, so a
+	// merge would buy nothing and cost a client the ability to tell "wrong
+	// conversation" from "no menu yet". KnownConversation is what separates the two
+	// arms.
+	//
+	// IT MERGES TWO CAUSES DELIBERATELY: nothing retained anywhere (no bootstrap in
+	// the pool, a bootstrap constructed evicted, or its initialize reply not yet
+	// arrived) and no daemon-side source wired at all. Both mean the same thing to a
+	// client — the daemon hosts this conversation and has no menu to give you — and
+	// the repair is identical. Distinguishing them would publish whether the host's
+	// model-list source is configured, which is a fact about the machine rather than
+	// about the request.
+	//
+	// RETRYABLE, and the retryability follows the dominant cause rather than the
+	// merged one: a child that has not yet answered its initialize ask will, and the
+	// caller changes nothing to make that happen.
+	//
+	// IT IS NOT AN EMPTY MENU. turnevent.ModelList.Models is documented never-empty,
+	// so an empty models array must NEVER stand in for "unknown" — this code is the
+	// only way to say "no list", alongside the absence of a frame on the
+	// unsolicited paths.
+	CodeModelListUnavailable = "model_list.unavailable" // the daemon hosts the conversation but has no vocabulary to answer with; retryable
 )
 
 // Envelope-type constants — wire values for Envelope.Type
@@ -1216,6 +1248,63 @@ const (
 // emits it. Same declare-then-emit sequencing as #1895→#1897 and #1616→#1638.
 const (
 	TypeHistoryPage = "history_page" // binary → phone, one backward step of a history walk, correlated via in_reply_to
+)
+
+// Mobile Protocol v2 ON-DEMAND MODEL-LIST REQUEST VERB (#2125, split from #2084;
+// docs/protocol-mobile.md § model_list publishes it). The frame a client sends to
+// ask for a conversation's model menu at any time. Its payload is
+// RequestModelListPayload (interactive.go).
+//
+// THE DEFECT IT CLOSES: TypeModelList reaches a client two ways and a conversation
+// created AFTER the client connected gets neither. The live interactive turn lane
+// drops every event whose producing session is not the active conversation's, and
+// the connect-time reconcile runs only inside the handshake, so a conversation
+// that did not exist then is not in it. Without a request verb there is no third
+// option, and a client's model and effort menus stay blank on a fresh chat
+// (pyrycode-desktop#1054). #2085 makes the case universal by deferring the spawn
+// to the first message.
+//
+// THE NAME follows the five inbound "ask the daemon for X" verbs already here —
+// TypeRequestSnapshot, TypeRequestDebugBundle, TypeRequestSessionSettings,
+// TypeRequestAttachment, TypeRequestHistory — rather than inventing a sixth idiom
+// for the same act. #2052's rule applies: a wire type string IS the contract, and a
+// name chosen twice is a name chosen wrong once.
+//
+// IT MINTS NO SECOND OUTBOUND SHAPE. The answer is TypeModelList and
+// ModelListPayload UNCHANGED, correlated by the envelope's InReplyTo and carrying
+// NO EventID — so the reply never enters the #647 replay ring and advances no
+// client cursor, exactly as the connect-time reconcile's frame does not. The
+// payload is what the daemon-side resolver already returns, so "the same payload
+// the reconcile would send" means the SAME SOURCE rather than the same fields
+// copied; the turnbridge mapping is not forked. That is why TypeModelList stays in
+// cmd/pyry/relay_guard_test.go's excludedTypes as an outbound push, exactly as
+// TypeHistoryPage does for TypeRequestHistory.
+//
+// UNLIKE ITS NEAREST SHAPE PRECEDENT IT CAN REFUSE. TypeRequestSessionSettings
+// answers every unresolvable case with an all-zero payload and never an error
+// frame; this verb cannot borrow that, because turnevent.ModelList.Models is
+// documented never-empty and an empty models array must never stand in for
+// "unknown". The reject shape is TypeRequestHistory's — a TypeError envelope
+// correlated by InReplyTo — with two codes: the existing CodeConversationNotFound
+// and CodeModelListUnavailable (above), minted by this same ticket because it is
+// the one that sends them.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is
+// a v2 CONTROL envelope intercepted before internal/dispatch.Route, exactly as
+// TypeRequestHistory and TypeRequestSessionSettings are. IsKnownAppType rejecting
+// it with ErrUnknownType is also the structural bar against a v1 client pushing one
+// into the v1 handler chain. The partition in internal/protocol/compat_test.go
+// files it in v2OnlyTypes, and inboundAppTypeSet's asserted count does not move.
+//
+// IT NEVER SITS IN excludedTypes AS "pending handler". Unlike TypeRequestHistory
+// (#2113→#2116) and TypeRequestAttachment (#2052→#2054), the declaration and the
+// handler land in ONE ticket — the declaration's only daemon-side consumer is that
+// handler, so cutting them apart would produce a slice consumed by exactly one
+// sibling. It is therefore filed in inboundTypes as "switch-intercepted" from the
+// moment it exists; filing it as pending would fail Assertion #2 the moment
+// dispatchAppFrame's case exists in the same commit.
+const (
+	TypeRequestModelList = "request_model_list" // phone → binary, inbound v2 control (switch-intercepted — #2125)
 )
 
 // Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The

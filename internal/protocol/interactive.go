@@ -634,6 +634,57 @@ func (p ModelListPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(p))
 }
 
+// RequestModelListPayload is the body of an Envelope whose Type ==
+// TypeRequestModelList (docs/protocol-mobile.md § model_list, published by #2125).
+// The frame a client sends to ask for a conversation's model menu on demand,
+// rather than waiting for the live turn lane or the next connect.
+//
+// ONE DIRECTION ONLY, phone → binary, so there is no provenance to disambiguate:
+// EVERY FIELD IS AN UNVERIFIED CLAIM, ALWAYS. The frame it is answered with —
+// ModelListPayload above — rides the other way and shares no type with it, so the
+// never-empty and DroppedModels contracts stated there say nothing about this one.
+//
+// IT NAMES A CONVERSATION, because a model menu is conversation-scoped on this
+// wire and this wire is multi-conversation; TypeRequestSessionSettings and
+// TypeRequestHistory both name one. THE ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED
+// AS SENT: it is resolved against the daemon's own registry, the reported id in
+// the reply comes out of the RESOLVED RECORD rather than being echoed back, and
+// NAMING A CONVERSATION IS NOT AUTHORIZATION — authorization is pairing, enforced
+// structurally at the Noise_IK handshake.
+//
+// UNLIKE RequestHistoryPayload THE ID NEVER BECOMES A PATH COMPONENT. That single
+// difference is why a decode failure here is TOLERATED rather than rejected: it
+// leaves ConversationID empty, which reaches only a registry membership check and
+// is refused there, where an empty path component would have resolved to a
+// directory root. Do not copy this tolerance to a verb that joins the id into a
+// path.
+//
+// CORRELATION RIDES THE ENVELOPE'S InReplyTo, so the payload carries NO
+// REQUEST-ID KEY — TypeAttachmentStored's decision, transferred unchanged.
+// TestRequestModelListPayload_WireKeys pins the key set so this is checked rather
+// than reviewed.
+//
+// NO omitempty AND NO MarshalJSON, matching RequestSessionSettingsPayload — its
+// stated reason applies verbatim. There is no presence contract: absent and empty
+// are the SAME case, "no conversation named", which names nothing and is refused,
+// so nothing needs to tell them apart. Keeping the key always on the wire lets a
+// fixture pin the full shape, and TestRequestModelListPayload_ZeroValue_KeyPresent
+// reddens if an omitempty is added later for tidiness.
+//
+// SECURITY: SENDING THIS FRAME IS NOT A CAPABILITY, and neither is receiving an
+// answer. There is no per-verb gate beyond the negotiated interactive capability,
+// which is settled at handshake and cannot be influenced by anything in this
+// payload. The id is loggable only AFTER it has been resolved against the
+// registry — raw it is an arbitrary client string, and that is the log-injection
+// shape § Attachments already forbids for a filename. The payload carries no
+// count and no length, so there is nothing here a hostile value could size.
+type RequestModelListPayload struct {
+	// ConversationID names the conversation whose model menu is wanted. A lookup
+	// key resolved against the daemon's registry, and not authorization; the empty
+	// string names nothing and resolves nothing.
+	ConversationID string `json:"conversation_id"`
+}
+
 // ModelOption is one row of a ModelListPayload (docs/protocol-mobile.md
 // § model_list, #1704). Its fields are a subset of the per-entry keys claude's
 // initialize reply carries and nothing invented. description and supportsFastMode
