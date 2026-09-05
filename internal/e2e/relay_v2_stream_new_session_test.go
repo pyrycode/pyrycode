@@ -47,6 +47,7 @@ import (
 //	    session_transition{clear, initialUUID → newID, knownConvID} broadcast        ── M3
 //	phone send_message #2(knownConvID→newID,"…two") → ack → the FRESH child's OWN
 //	  per-child stdin log (<stem>.<post.ID>), never the outgoing child's            ── M4
+//	  → drain gate (sink tag == active == post.ID ✓) → assistant_delta{"…two"}      ── M6
 //	no child's stdin log ever carries "/clear"                                      ── M5
 //
 // THE STREAM TWIN OF TestRelayV2_NewSessionRotatesOnDisk (the PTY new_session e2e).
@@ -61,17 +62,31 @@ import (
 // RestartFresh(newID) was invoked immediately after with the same id. Registry
 // rotated ⟹ the bound runner restarted fresh under newID.
 //
-// THE POST-ROTATION DRAIN DIVERGENCE (why M4 is proven at the fake boundary, not the
-// phone). The stream turn-drain gate forwards an event only when the producing
-// runner's sink tag equals the active conversation's bound session id. The sink tag
-// is fixed at runner CONSTRUCTION (cfg.SessionID = initialUUID) and RestartFresh
-// re-spawns the child IN PLACE — it never rebuilds the runner/Parser/sink — so the
-// runner's events stay tagged initialUUID forever, while the conversation rebinds to
-// newID. So a turn issued AFTER the rotation has its delta dropped at the gate and
-// never reaches the phone. This is a latent gap in the opt-in, still-under-construction
-// stream path (a SEPARATE concern from new_session routing, which this ticket proves
-// works; flagged for a production follow-up), and is why M4 asserts the fresh child's
-// STDIN, not a phone-side delta — asserting a delta would HANG.
+// THE POST-ROTATION DRAIN CONVERGENCE (why M4 and M6 are BOTH here, and why neither
+// subsumes the other). The stream turn-drain gate forwards an event only when the
+// producing runner's sink tag equals the active conversation's bound session id.
+// RestartFresh re-spawns the child IN PLACE — it never rebuilds the
+// runner/Parser/sink — so until #1133 that tag stayed frozen at cfg.SessionID
+// (= initialUUID) while the conversation rebound to newID, and every post-rotation
+// delta was dropped at the gate. That was this file's stated divergence, and M4
+// asserted the fresh child's STDIN precisely because a delta assertion would then
+// have hung.
+//
+// #1133 makes the tag LIVE: newStreamRunnerFactory binds one streamSessionTag to
+// both fan-in lanes and RestartFresh moves it through
+// streamsup.Config.OnSessionRotate, so after the rotation the runner tags its events
+// post.ID, the gate's UNCHANGED exact-match comparison admits them, and M6 asserts
+// the delta the old divergence made unassertable. M6 is this file's regression proof
+// for that ticket: revert the tag rotation and M6 is the milestone that times out.
+//
+// M4 STAYS, and not as a leftover. The two milestones answer different questions and
+// each is blind to the other's: M4 names WHICH CHILD served the turn — a turn
+// delivered to the outgoing child leaves the post-rotation child's per-child log
+// needle-free — while M6 proves the resulting event reaches the CLIENT. A turn
+// mis-routed to the outgoing child could still produce a phone-side delta once the
+// tag rotates, so M6 alone would not catch the #1330-class defect M4 exists for; and
+// a correctly-routed turn whose events the gate still drops passes M4 while the
+// stream is dark, which is the defect M6 exists for.
 //
 // WHY THAT STDIN EVIDENCE IS PER-CHILD (#1331). The tee's env value is a path STEM and
 // each child appends to <stem>.<its own session id>, so M4 reads ONLY the log of the
@@ -354,10 +369,10 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// poll the stdin log until it carries the …two bytes — the FRESH child received and
 	// is serving the subsequent turn.
 	//
-	// We deliberately do NOT drain a phone-side assistant_delta for turn #2: on the
-	// opt-in stream path its delta is dropped at the drain gate (the runner's sink keeps
-	// its construction-time tag while the conversation rebinds — see the header). The
-	// stdin-log delivery is the achievable "serving" observable.
+	// The phone-side delta for turn #2 is M6, below. It is drained AFTER this
+	// milestone rather than instead of it: this one names which child served the
+	// turn, M6 proves the resulting event reaches the client, and the header explains
+	// why neither implies the other.
 	sealSend(protocol.Envelope{
 		ID:   sendReqIDTwo,
 		Type: protocol.TypeSendMessage,
@@ -537,6 +552,57 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	}
 	t.Logf("[t=%s] M4: the post-rotation child (--session-id %s) received the subsequent turn — its OWN stdin log carries %q, so the turn was served by the FRESH child and not by the outgoing one", elapsed(), post.ID, echoNeedleTwo)
 
+	// --- M6 (#1133): the post-rotation turn's delta REACHES THE PHONE. The runner's
+	// sink tag rotated with the runner, so the drain gate now sees tag == active ==
+	// post.ID and forwards instead of dropping. This is the milestone that was
+	// impossible to write before that ticket and is its regression proof: revert the
+	// tag rotation and this loop times out while every other milestone stays green.
+	//
+	// The needle is turn #2's own text, not merely "some delta arrived". Turn #1's
+	// delta already reached this phone at M1 and its envelope may still be ahead of
+	// this loop in the queue, so a needle-free assertion would be discharged by the
+	// PRE-rotation turn and pass against the very defect it exists to catch.
+	//
+	// Ordered after M4 deliberately: M4's poll exits on the fresh child's stdin
+	// WRITE, which precedes its echo, so this loop starts inside the window where
+	// the child has the turn and has not yet answered — the deadline covers the echo,
+	// the parse, the fan-in and the emitter's ~250ms coalescing timer.
+	sawDeltaTwo := false
+	m6Deadline := time.Now().Add(20 * time.Second)
+	for !sawDeltaTwo {
+		env, ok := nextEnv(m6Deadline)
+		if !ok {
+			t.Fatalf("M6 (#1133): the phone never observed an assistant_delta carrying %q for the POST-ROTATION turn "+
+				"within 20s of M4. M4 is green, so the fresh child (--session-id %s) provably received that turn — "+
+				"which rules out delivery and routing and leaves the drain: the runner's turn-event sink tag did not "+
+				"rotate with the runner, so every event it produces is still tagged with the pre-rotation id %q while "+
+				"the conversation is bound to %q, and the active-session gate drops all of them. That is the exact "+
+				"pre-#1133 divergence this file's header used to document; check that newStreamRunnerFactory still "+
+				"binds both lanes through streamSessionTag and that RestartFresh still fires "+
+				"streamsup.Config.OnSessionRotate.\n%s",
+				echoNeedleTwo, post.ID, initialUUID, post.ID,
+				daemonLogWindow(h.Stderr.Bytes(), ackTwoLogLen, daemonLogBudget))
+		}
+		if env.Type != protocol.TypeAssistantDelta {
+			continue
+		}
+		var d protocol.AssistantDeltaPayload
+		if err := json.Unmarshal(env.Payload, &d); err != nil {
+			t.Fatalf("M6: phone A decode assistant_delta payload: %v", err)
+		}
+		if !strings.Contains(d.Text, echoNeedleTwo) {
+			// Turn #1's delta, or a coalesced fragment of turn #2 that does not yet
+			// carry the needle. Neither is a failure; keep draining.
+			continue
+		}
+		if d.ConversationID != knownConvID {
+			t.Errorf("M6: post-rotation assistant_delta ConversationID: got %q, want %q — the event was forwarded "+
+				"but stamped for the wrong conversation", d.ConversationID, knownConvID)
+		}
+		sawDeltaTwo = true
+	}
+	t.Logf("[t=%s] M6: the post-rotation turn's assistant_delta reached the phone — the sink tag rotated with the runner and the drain gate forwarded instead of dropping", elapsed())
+
 	// --- AC-1 instrument guard (#1318). Prove the daemon really is logging at Debug,
 	// so M4's pending/holds count above is a MEASUREMENT and not a suppression.
 	// StartStreamInteractiveWithRelay passes -pyry-verbose, which is the only thing
@@ -554,26 +620,31 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	// Every green run re-proves the flip, so the rare red run's record can be trusted
 	// when it finally arrives.
 	//
-	// WHY A DEBUG RECORD IS DETERMINISTIC HERE. After M2's rotation the runner's sink
-	// tag stays initialUUID while the conversation rebinds to post.ID, so every event
-	// the fresh child produces for turn #2 is dropped at the drain's active-session
-	// gate with a Debug "relay: stream-turn drop; not active session"
-	// (cmd/pyry/stream_turn_drain.go) — the very divergence this file's header
-	// documents, and the reason M4 asserts stdin rather than a phone-side
-	// delta. So on any run where M4 goes green, turn #2's echo owes at least one such
-	// record. The assertion is deliberately the WEAKER "some Debug record exists
-	// anywhere in the capture": the level flip is the thing under test, and pinning a
-	// specific message would couple this guard to that message's wording.
+	// WHY A DEBUG RECORD IS DETERMINISTIC HERE, AND WHY THAT ARGUMENT MOVED (#1133).
+	// It used to rest on the post-rotation drop: the sink tag stayed frozen at
+	// initialUUID while the conversation rebound to post.ID, so every turn-#2 event was
+	// dropped at the drain's active-session gate with a Debug "relay: stream-turn drop;
+	// not active session" and a green M4 owed at least one such record. #1133 rotates
+	// the tag, those events are now FORWARDED — that is M6 — and that record is no
+	// longer owed. The guard is unchanged and still sound on a strictly EARLIER anchor,
+	// upstream of everything it is placed after: mapStreamsupConfig sets
+	// RequestInitializeOnSpawn on every stream runner, so each spawn asks its child for
+	// an initialize report and the reply logs a Debug "streamsup: consuming solicited
+	// control_response". That is per SPAWN, so the bootstrap child alone discharges it
+	// before the first send_message is sent — measured 2026-09-06 on this test: the
+	// capture's first level=DEBUG record is that line, present by M1.
 	//
-	// The poll is bounded rather than one-shot because the drop is asynchronous
-	// (child stdout → parser → sink → drain goroutine) while M4's poll exits on the
-	// post-rotation child's stdin log, which that child writes to BEFORE it emits its
-	// echo. 5s at 50ms sits well inside the test's existing budget. That same ordering
-	// is where this guard's third reading comes from (#1331): received-but-never-echoed
-	// is a real window, and it is now the ONLY "the child did not produce an event"
-	// reading left — M4 attributes, so a green M4 has already proven the post-rotation
-	// child received the turn, and "it never received it" is excluded before this guard
-	// can fire.
+	// The assertion stays the deliberately WEAK "some Debug record exists anywhere in
+	// the capture", and after this ticket that weakness is load-bearing rather than
+	// merely convenient: the level flip is the thing under test, the anchor above is
+	// one of several Debug producers rather than the only one, and pinning a specific
+	// message would couple this guard to a wording that has now changed once.
+	//
+	// The poll is bounded rather than one-shot because the capture side is
+	// asynchronous — os/exec's stderr copier runs on its own goroutine, so a record
+	// written before this point can land just after it (the same approximation
+	// ackTwoLogLen's boundary documents). 5s at 50ms sits well inside the test's
+	// existing budget.
 	sawDebug := false
 	debugDeadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(debugDeadline) {
@@ -586,16 +657,15 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 	if !sawDebug {
 		t.Fatalf("AC-1: the daemon's captured stderr carries no %q record within 5s of M4, so this harness is "+
 			"NOT logging at Debug and M4's pending/holds count is a suppression rather than a measurement. "+
-			"Three readings, and they are different defects: either -pyry-verbose no longer reaches the handler "+
-			"level (internal/e2e/harness.go's extraFlags, or cmd/pyry/main.go's flag → slog.LevelDebug), or "+
-			"the drain stopped dropping post-rotation events at the active-session gate — which would mean "+
-			"this file's header divergence analysis (:64-74) is stale and M4 could assert a phone-side delta "+
-			"after all — or the post-rotation child received turn #2 but never echoed it, so the drain had no "+
-			"post-rotation event to drop at all: M4's poll exits on that child's stdin write, which precedes its "+
-			"echo, so received-but-never-echoed is a real window and this guard sits inside it. What is NOT a "+
-			"reading, and must not be read in: \"the fresh child never received the turn\". M4 reads only the "+
-			"post-rotation child's own per-child log (#1331) and this guard runs only on a green M4, so a green "+
-			"M4 is itself the proof that that child received it\nstderr=%q", daemonDebugLevel, h.Stderr.Bytes())
+			"ONE reading remains, and #1133 is why it is only one: the handler is not at Debug — -pyry-verbose no "+
+			"longer reaches it (internal/e2e/harness.go's extraFlags, or cmd/pyry/main.go's flag → slog.LevelDebug) "+
+			"or something later raised the level. The two readings this message used to offer were both about the "+
+			"post-rotation drop that USED to be this guard's anchor, and neither survives: that drop is gone by "+
+			"design (M6 asserts the events are forwarded now), and the anchor moved to the daemon's startup Debug "+
+			"records, which are emitted long before the rotation and are independent of it. What is NOT a reading, "+
+			"and must not be read in: anything about turn #2's delivery or echo. M4 and M6 are both green above — "+
+			"the fresh child received the turn AND its delta reached the phone — so no question about that turn is "+
+			"open by the time this guard runs\nstderr=%q", daemonDebugLevel, h.Stderr.Bytes())
 	}
 	t.Logf("[t=%s] AC-1: the daemon's capture carries a %q record — -pyry-verbose reached the handler, so M4's pending/holds count is a measurement", elapsed(), daemonDebugLevel)
 
