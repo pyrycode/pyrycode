@@ -402,6 +402,20 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 	// least time-sensitive of the five, so it goes last.
 	m.reconcileSlashCommandLists(ctx, s)
 
+	// Connect-time background-task-roster reconcile (#2078): send the retained
+	// background_task_roster for each session holding one to this conn — the sixth
+	// Mode B instance alongside the five reconciles above — so a client attaching to a
+	// long-running daemon shows what is still running instead of an empty panel. The
+	// live turn lane reaches only whoever is connected when claude CHANGES the roster,
+	// and Mode A cannot help a client that advertises no last_event_id. No-op for a
+	// non-interactive conn or an unwired seam (this slice ships it unwired; #2079 fills
+	// it). Correctness does not depend on the position: the six carry distinct payload
+	// types, none reads another's effect, and none of the six frames is droppable
+	// (pushQueue.enqueue marks only TypeAssistantDelta so). This tail is ordered by
+	// time-sensitivity — permission prompt first — and a roster snapshot is not
+	// time-sensitive in that sense, so it goes last.
+	m.reconcileBackgroundTaskRosters(ctx, s)
+
 	// Mid-turn-reconnect replay (#647): if the phone advertised where it left
 	// off, replay the conversation's missed tail (or emit a resync marker) on
 	// this conn before Run returns to its select to service the live stream

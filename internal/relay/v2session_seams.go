@@ -866,4 +866,87 @@ type V2SessionConfig struct {
 	// existing-test posture, the nil-resolver posture the other optional control
 	// seams share. #2007 wires the daemon-side producer.
 	RetainedSlashCommandLists func() []protocol.SlashCommandListPayload
+
+	// RetainedBackgroundTaskRosters enumerates the background-task rosters the
+	// daemon currently holds as marshal-ready background_task_roster payloads (one
+	// per session holding a roster, each already stamped with its own
+	// conversation_id) for connect-time reconcile (#2078) — the sixth Mode B
+	// instance after OutstandingModals, OutstandingQueues, RetainedModelLists,
+	// OutstandingQuestions and RetainedSlashCommandLists. Called on the Run
+	// goroutine from handleNoiseInit's interactive-open tail; the returned payloads
+	// are unicast to the just-opened conn only. background_task_roster is
+	// snapshot-shaped full state ("A SNAPSHOT, not a delta",
+	// BackgroundTaskRosterPayload's own doc) — it reports what is alive at one
+	// moment rather than what changed, it is conversation-scoped rather than
+	// turn-scoped, and receiving one neither opens nor closes a turn — so the
+	// re-send is idempotent by construction: re-connecting re-sends the same
+	// snapshot. A pure read: it mints nothing, retires nothing, and changes no
+	// daemon state.
+	//
+	// The reconcile exists because neither recovery mode in
+	// docs/protocol-mobile.md § Reconnect / Backfill semantics serves this family
+	// today. Mode A (cursor replay) needs the client to advertise
+	// hello.last_event_id and pyrycode-desktop advertises none, whose stated
+	// consequence is no replay at all; Mode B did not cover this frame until this
+	// seam. So a client opening an interactive session sees an empty background-task
+	// panel until claude next CHANGES the roster, which on a quiet session may never
+	// happen — the roster is only ever emitted on the live turn lane.
+	//
+	// AN EMPTY ROSTER IS A POSITIVE STATEMENT that nothing is alive, and this is the
+	// one place the five seams above give the wrong answer by analogy. Their
+	// producers filter an empty aggregate away; a producer for this seam MUST NOT,
+	// because "nothing is running" is exactly the signal a consumer of #1240's
+	// symptom needs, and BackgroundTaskRosterPayload.MarshalJSON exists to guarantee
+	// such a payload serialises as "tasks":[] rather than null. The consumer
+	// likewise sends it rather than skipping it.
+	//
+	// A closure returning []protocol.BackgroundTaskRosterPayload, not a
+	// *sessions.Pool or a turnevent value: internal/relay imports neither
+	// internal/sessions nor internal/turnevent (sessions appears only transitively
+	// via internal/control, so a go list -deps reading looks like a contradiction
+	// and is not one), and protocol is already imported, so the payload crosses the
+	// boundary with no new import and no cycle (matching the five seams above —
+	// define the dependency where it is consumed).
+	//
+	// Enumerate-all, not conversation-keyed. A V2Session carries no conversation id
+	// — it holds connID, state, resp, send, recv, device, interactive and peerStatic
+	// — so there is nothing to key on at connect time; each payload self-identifies
+	// by its own conversation_id. RetainedModelLists, OutstandingQuestions and
+	// RetainedSlashCommandLists state the same reasoning.
+	//
+	// Order is not part of the contract, and a caller MUST correlate a roster by its
+	// conversation_id rather than by its position in the returned slice — the
+	// envelope id this path stamps is fixed and non-load-bearing for the same
+	// reason.
+	//
+	// BOUNDED TIME, like every seam the manager calls on its Run goroutine: an
+	// implementation that blocks stalls Run and with it every conn the manager
+	// services. ModalResolver's doc block states the same obligation, and it is not
+	// hypothetical here — the #2079 producer walks a conversation registry under
+	// that registry's mutex, which is exactly the shape that can block.
+	//
+	// SECURITY: this seam accepts ALREADY-BOUNDED payloads only. The reconcile path
+	// applies no bound of its own — not on how many payloads are returned, not on
+	// any row's text — because the bound is decided upstream at construction
+	// (BackgroundTaskRosterPayload.DroppedTasks on the aggregate,
+	// BackgroundTask.TruncatedFields per row, over internal/streamsup's
+	// maxTaskRosterEntries and maxTaskRosterDescription caps). A second cap here
+	// would be a second place the limit is decided and the two could disagree
+	// silently, so the obligation stays the producer's. Note that those per-payload
+	// bounds do NOT bound how many payloads can be returned at once; on this path
+	// pushQueue's byte ceiling is the backstop, and a cardinality cap, if one is ever
+	// wanted, belongs to the producer and not to either half of this reconcile. All
+	// four strings a task row carries — TaskID, TaskType, Description and each entry
+	// of TruncatedFields — are claude-authored, untrusted text (BackgroundTask's own
+	// doc) and are NEVER logged on the reconcile path. Description is a literal
+	// command line for the local_bash task type, which BackgroundTask's doc grades
+	// as the more tempting shape of this family precisely because a LIST of command
+	// lines invites being fed somewhere structured; it is safe to RENDER as inert
+	// text and never to execute, re-shell, or feed to an HTML sink, an attribute or
+	// a URL.
+	//
+	// Optional: nil ⇒ no reconcile — byte-identical to the pre-#2078 / foreground /
+	// existing-test posture, the nil-resolver posture the other optional control
+	// seams share. #2079 wires the daemon-side producer.
+	RetainedBackgroundTaskRosters func() []protocol.BackgroundTaskRosterPayload
 }
