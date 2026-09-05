@@ -161,6 +161,14 @@ func TestIsKnownAppType(t *testing.T) {
 		// inbound one — this leg really is inbound, so this is the structural bar
 		// against a v1 client sending a request_attachment into dispatch.Route.
 		{"request_attachment-rejected", TypeRequestAttachment, false, ErrUnknownType},
+		// the v2-only conversation-history pair. The request is an inbound control
+		// type an old phone never sends, so as on the request_attachment row above
+		// the rejection's load-bearing half is the inbound one — it is the
+		// structural bar against a v1 client sending a request_history into
+		// dispatch.Route. The page is outbound-only, so there the load-bearing half
+		// is the other one: an old phone never receives it.
+		{"request_history-rejected", TypeRequestHistory, false, ErrUnknownType},
+		{"history_page-rejected", TypeHistoryPage, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,6 +285,10 @@ var v2OnlyTypes = map[string]bool{
 	TypeQuestionRefused: true,
 	// v2 attachment retrieval request verb (inbound control).
 	TypeRequestAttachment: true,
+	// v2 conversation-history vocabulary: the request verb (inbound control) and
+	// the page it is answered with (outbound reply).
+	TypeRequestHistory: true,
+	TypeHistoryPage:    true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -359,6 +371,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeQuestionRefused,
 		// v2 attachment retrieval request verb (inbound control).
 		TypeRequestAttachment,
+		// v2 conversation-history vocabulary.
+		TypeRequestHistory, TypeHistoryPage,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
