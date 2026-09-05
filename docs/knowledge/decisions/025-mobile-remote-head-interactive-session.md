@@ -115,7 +115,10 @@ Transport unchanged: every frame is a `noise_msg` carrying the existing `{id, ty
 - `turn_end` — `{conversation_id, turn_id}`.
 - `modal_shown` — `{conversation_id, modal_id, class, title, prompt, options:[{id,label,description}], default_option_id, multi_select}`. `modal_id` is a one-time nonce.
 - `modal_dismissed` — `{conversation_id, modal_id, reason: "answered"|"timeout"|"local"|"cancelled"}`.
-- `queue_state` — `{conversation_id, queued:[{queued_msg_id, text, ts}]}`.
+- `queue_state` — `{conversation_id, queued:[{queued_msg_id, message_id, text, ts}]}`.
+  `message_id` (#2092) is the client's own id from the `send_message` that
+  produced the item, relayed verbatim so a client can merge it with its own
+  optimistic echo; see `docs/protocol-mobile.md` § Queue.
 - `stall_detected` — `{conversation_id}`.
 - `screen_snapshot` — `{conversation_id, text, ts}`. A one-shot text picture of the current screen, rendered by tui-driver's `Render` / `Snapshot`. An always-available "show the literal screen" capability that doubles as the parser-independent degrade fallback; text only, never raw control codes.
 
