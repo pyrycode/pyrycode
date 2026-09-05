@@ -95,8 +95,12 @@ type TurnWriter interface {
 // halves here — rather than widening what is queued — is what keeps a host path
 // off the wire on both queue_state arms without any consumer having to remember
 // to strip it.
+// Since #2092 it also takes the client's own messageID, relayed verbatim onto the
+// queued record so a client can merge the queued row with the optimistic echo it
+// already drew. The handler neither validates, normalises nor mints it — an empty
+// id is legal and stays empty.
 type Enqueuer interface {
-	EnqueueDelivery(conversationID, text, delivery string) uint64
+	EnqueueDelivery(conversationID, messageID, text, delivery string) uint64
 }
 
 // AttachmentResolver resolves one attachment id named by a send_message to the
@@ -284,10 +288,16 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 		// the backlog", not "delivered/committed". payload.Text is NEVER logged,
 		// and neither is the composed prompt — it carries host paths.
 		//
-		// The two halves are what keeps AC 4 true: p.Text is what queue_state
+		// The two halves are what keeps #2038 AC 4 true: p.Text is what queue_state
 		// reports back on both the enqueue push and the connect-time reconcile,
 		// while the composed prompt goes only to claude.
-		id := queue.EnqueueDelivery(p.ConversationID, p.Text, composeAttachmentPrompt(p.Text, paths))
+		//
+		// p.MessageID rides along verbatim (#2092) — the client's own id for this
+		// message, which queue_state names on the item so the client can merge it
+		// with its optimistic echo instead of drawing the message twice. It is
+		// passed exactly as it arrived: nothing here validates, trims, normalises
+		// or substitutes it, and "" stays "".
+		id := queue.EnqueueDelivery(p.ConversationID, p.MessageID, p.Text, composeAttachmentPrompt(p.Text, paths))
 		if id == 0 {
 			// The conversation's backlog is at its per-conversation cap (#869).
 			// Reject, never drop: nothing was enqueued and the existing backlog is

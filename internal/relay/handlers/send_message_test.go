@@ -80,13 +80,17 @@ func routeTo(w TurnWriter) SessionRouter {
 	return &stubSessionRouter{tw: w}
 }
 
-// enqueueCall records one (conversationID, text, delivery) triple the handler
-// appended. delivery is what reaches claude; text is what a client reads back,
-// and the two differ only for a message naming attachments (#2038).
+// enqueueCall records one (conversationID, messageID, text, delivery) tuple the
+// handler appended. delivery is what reaches claude; text is what a client reads
+// back, and the two differ only for a message naming attachments (#2038).
+// messageID is the client's own id for the message, relayed verbatim onto the
+// queued record so a client can merge the queued row with its optimistic echo
+// (#2092); the handler neither validates nor mints it.
 type enqueueCall struct {
-	convID   string
-	text     string
-	delivery string
+	convID    string
+	messageID string
+	text      string
+	delivery  string
 }
 
 // fakeEnqueuer is the test double for Enqueuer. It records every (convID, text)
@@ -101,8 +105,8 @@ type fakeEnqueuer struct {
 	reject bool
 }
 
-func (f *fakeEnqueuer) EnqueueDelivery(convID, text, delivery string) uint64 {
-	f.calls = append(f.calls, enqueueCall{convID: convID, text: text, delivery: delivery})
+func (f *fakeEnqueuer) EnqueueDelivery(convID, messageID, text, delivery string) uint64 {
+	f.calls = append(f.calls, enqueueCall{convID: convID, messageID: messageID, text: text, delivery: delivery})
 	if f.reject {
 		return 0
 	}
@@ -267,9 +271,12 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 	send(t, convA, textA)
 	send(t, convB, textB)
 
+	// Both sends carry the same client message_id, since `send` builds one payload
+	// shape. That is legal and inert: the id addresses nothing, so it neither
+	// merges the two conversations' enqueues nor deduplicates them (#2092 AC 4).
 	want := []enqueueCall{
-		{convID: convA, text: textA, delivery: textA},
-		{convID: convB, text: textB, delivery: textB},
+		{convID: convA, messageID: sendMsgMessageID, text: textA, delivery: textA},
+		{convID: convB, messageID: sendMsgMessageID, text: textB, delivery: textB},
 	}
 	if len(q.calls) != len(want) {
 		t.Fatalf("Enqueue calls = %d, want %d", len(q.calls), len(want))
@@ -923,6 +930,62 @@ func TestSendMessage_AttachmentPathsNeverLogged(t *testing.T) {
 				if strings.Contains(got, banned) {
 					t.Errorf("log carries %q, which AC 5 forbids at any level:\n%s", banned, got)
 				}
+			}
+		})
+	}
+}
+
+// TestSendMessage_RelaysClientMessageIDVerbatim covers #2092 AC 3 at the handler:
+// the id the client sent is handed to the enqueue seam byte-for-byte. Not
+// trimmed, not lower-cased, not re-encoded, and never minted when the client
+// sent none — an empty message_id is legal (the field is non-omitempty and the
+// handler validates nothing about it) and must arrive empty rather than filled
+// in.
+//
+// Each row would survive a build that normalised in a DIFFERENT way, so the set
+// separates trimming, case-folding and empty-defaulting instead of trusting one
+// representative value to stand for all three. The hostile-shaped row is the
+// #2038 posture applied here: a client-chosen string is opaque transit, so shape
+// is not the handler's business either way.
+func TestSendMessage_RelaysClientMessageIDVerbatim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		messageID string
+	}{
+		{"uuid", "3f2a9c14-7b6e-4d51-9a08-2e5c1b7d4f60"},
+		{"empty is legal and never minted", ""},
+		{"surrounding whitespace survives", "  M1\t"},
+		{"case is preserved", "MiXeD-CaSe"},
+		{"hostile shape is transit, not syntax", "a\"b\nc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			router := &stubSessionRouter{tw: &stubTurnWriter{}}
+			q := &fakeEnqueuer{}
+			c, recv, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				MessageID:      tt.messageID,
+				Text:           sendMsgText,
+			})
+
+			h := SendMessage(router, q, nil, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1", len(q.calls))
+			}
+			if q.calls[0].messageID != tt.messageID {
+				t.Errorf("enqueued messageID = %q, want the client's bytes %q", q.calls[0].messageID, tt.messageID)
+			}
+			// The id must not have been sourced from, or clobbered, the text.
+			if q.calls[0].text != sendMsgText {
+				t.Errorf("enqueued text = %q, want %q", q.calls[0].text, sendMsgText)
 			}
 		})
 	}

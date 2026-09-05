@@ -19,6 +19,7 @@ intercept/resolve-convID/remove handler is #723.
 ```go
 type QueuedItem struct { // one element of QueueStatePayload.Queued
     QueuedMsgID uint64    `json:"queued_msg_id"` // plain per-conversation counter (≥1), NOT a nonce
+    MessageID   string    `json:"message_id"`    // #2092: client-chosen, from the send_message that produced this item — relayed verbatim, "" when absent, never minted by the daemon
     Text        string    `json:"text"`          // untrusted, phone-originated transit content
     TS          time.Time `json:"ts"`            // enqueue time, RFC3339Nano
 }
@@ -44,6 +45,18 @@ type DequeueMessagePayload struct { // phone → binary, inbound control (interc
   must decode it as a JSON **integer**, not a string. This is the discriminator
   from #701's `modal_id` (an unguessable nonce) — there is no secrecy property, so
   this slice is **unlabelled** (see below).
+- **`message_id` (#2092) correlates a queued item with the client's own
+  optimistic echo of the `send_message` that produced it — nothing else reads
+  it.** Text and position are not keys (identical text is legal; the backlog
+  mis-aligns by one the moment a middle item is dequeued), so this field is the
+  only correlation the client has. **Field position is deliberate**: it sits
+  immediately after `QueuedMsgID`, mirroring the order `send_message`'s enqueue
+  log line already prints the two ids in, and because `roundTripEnvelope`
+  re-marshals the payload struct while `canonical` (`messaging_test.go`) is
+  `json.Compact` with no key sorting, struct-field order **is** the wire byte
+  order the fixture pins — not just field presence. `dequeue_message` still
+  resolves only `conversation_id` + `queued_msg_id`; `message_id` addresses,
+  authorizes, matches and dedupes nothing.
 - **`queued` ordering + empty-backlog `[]` vs `null`.** Array order is canonical
   FIFO/enqueue order (the `Options []ModalOption` precedent). `[]QueuedItem(nil)`
   marshals to `"queued":null`, a non-nil empty slice to `[]`; the leaf type cannot
@@ -57,11 +70,17 @@ type DequeueMessagePayload struct { // phone → binary, inbound control (interc
   `SessionTransitionPayload.OccurredAt`.
 - **Unlabelled (`security-sensitive`: no) — mirrors #656, not #701.** Dequeuing is
   **ungated** for any paired phone (ADR 025 § Security model); only answering a
-  permission-class modal is gated. No nonce, no per-device gate. `Text` and the
-  inbound `ConversationID` are **untrusted, phone-originated** content (never log
-  `Text`; resolve `ConversationID` to an authorized conversation before acting) —
-  but the slice stores/inspects neither; that discipline lives in the
-  `security-sensitive` siblings #722/#723/#721.
+  permission-class modal is gated. No nonce, no per-device gate. `Text`,
+  `MessageID` (#2092), and the inbound `ConversationID` are **untrusted,
+  phone-originated** content (never log `Text` or `MessageID`; resolve
+  `ConversationID` to an authorized conversation before acting) — but the slice
+  stores/inspects none of them; that discipline lives in the `security-sensitive`
+  siblings #722/#723/#721. `MessageID` is deliberately echoed back to **every**
+  paired device (unlike a gated nonce, it carries no capability), so a client
+  must merge it only against echoes it minted itself, never against a store
+  shared across devices — a colliding id must not let one device attribute
+  another's queued message to itself. An item whose `message_id` matches no
+  local echo renders as a plain queued row and is never dropped.
 - **No `turnevent`/`turnbridge` neutral hop.** Queue backlog is daemon state, not a
   turn-stream event, so the producer builds the `protocol.*Payload` directly from
   engine state and the inbound frame is decoded at `dispatchAppFrame` — neither
@@ -70,8 +89,11 @@ type DequeueMessagePayload struct { // phone → binary, inbound control (interc
   mechanism rationale and the two-opposite-direction-sums note.
 
 `TestQueueStatePayload_RoundTrip` (`messaging_test.go`) asserts `len(Queued)==2` +
-positional `QueuedMsgID`/`Text` + per-item `TS` via `.Equal`, then byte-equal
-round-trips via `roundTripEnvelope`; `TestDequeueMessagePayload_RoundTrip` covers
+positional `QueuedMsgID`/`MessageID`/`Text` + per-item `TS` via `.Equal`, then
+byte-equal round-trips via `roundTripEnvelope` — one fixture item carries a real
+`MessageID`, the other `""`, doubling as the no-`omitempty` pin (#2092: with
+`omitempty` the empty-string item's key would vanish on re-marshal and the byte
+comparison would redden). `TestDequeueMessagePayload_RoundTrip` covers
 the inbound control; table-driven `TestDequeueMessagePayload_Malformed` pins the
 AC's "rejected cleanly (error, no panic)". Two fixtures (`queue_state.json` with
 N=2 items, `dequeue_message.json`) authored in **struct-field order**. See

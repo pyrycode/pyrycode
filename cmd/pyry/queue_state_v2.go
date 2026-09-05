@@ -165,15 +165,24 @@ func (e *queueStateEmitterV2) broadcast(ctx context.Context, bcast interactiveBr
 
 // toQueueStatePayload maps a conversation's msgqueue backlog onto the protocol
 // wire payload — the pure, unit-testable seam (mirrors toWirePayload). Each
-// QueuedMessage{ID,Text,TS} becomes a QueuedItem{QueuedMsgID,Text,TS},
-// preserving FIFO order. Queued is initialised to a non-nil zero-length slice so
-// an empty/unknown backlog (Snapshot → nil) marshals to [], not null (AC-1;
-// protocol note `QueuedItem` — the leaf type cannot force non-nil).
+// QueuedMessage{ID,MessageID,Text,TS} becomes a
+// QueuedItem{QueuedMsgID,MessageID,Text,TS}, preserving FIFO order. Queued is
+// initialised to a non-nil zero-length slice so an empty/unknown backlog
+// (Snapshot → nil) marshals to [], not null (AC-1; protocol note `QueuedItem` —
+// the leaf type cannot force non-nil).
+//
+// This one mapping serves BOTH queue_state arms — the change-driven push through
+// broadcast and the connect-time reconcile through outstandingQueues — so the
+// client's message_id (#2092) reaches both from a single line here. What differs
+// between the arms is upstream: Snapshot and SnapshotAll are two separate
+// projection loops in msgqueue, which is why both are asserted rather than one
+// standing for the other.
 func toQueueStatePayload(convID string, items []msgqueue.QueuedMessage) protocol.QueueStatePayload {
 	queued := make([]protocol.QueuedItem, 0, len(items))
 	for _, m := range items {
 		queued = append(queued, protocol.QueuedItem{
 			QueuedMsgID: m.ID,
+			MessageID:   m.MessageID,
 			Text:        m.Text,
 			TS:          m.TS,
 		})
