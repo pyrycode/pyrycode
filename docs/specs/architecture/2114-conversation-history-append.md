@@ -278,6 +278,46 @@ a literal `nil`.
    key is named in #2116's spec and the turn payloads already carry `turn_id` and `seq`.
    Recorded so a later reader does not mistake the discarded return value for an oversight.
 
+## Measurement (AC-5)
+
+`BenchmarkInteractiveEmitHistoryAppend`, `-benchtime 3000x -count 3`, darwin/arm64
+(Apple M4, APFS on local SSD), medians of three:
+
+| | ns/op | B/op | allocs/op |
+|---|---|---|---|
+| `no_store` (nil store, today's behaviour) | 1 688 | 482 | 3 |
+| `store` (wired) | 51 377 | 16 256 | 144 |
+| **delta the append adds** | **≈ 49.7 µs** | ≈ 15.8 KB | +141 |
+
+**The append stays synchronous.** Against the rule fixed above — small against the
+250 ms `coalesceWindow`, with single-digit milliseconds as the line — 49.7 µs is two
+orders of magnitude below it, about 0.02% of the window. The chokepoint's sustained rate
+is set by the *unbatched* variants (turn_state, tool start/update, turn_end), tens per
+turn, so a turn pays single-digit milliseconds of added serialised time in total. Moving
+the append off the emit goroutine would buy that back at the cost of an unbounded queue,
+a second goroutine to drain it and a shutdown path for both — not a trade this number
+justifies.
+
+The cost is dominated by what `history-package.md` § Concurrency named in advance: the
+~7 syscalls of directory re-resolution (`Abs`, `MkdirAll`, `EvalSymlinks` twice, the
+`Lstat` walk) that `Append` performs under the store-wide mutex, which is also what the
+144 allocations are. Two caveats for whoever re-measures: this is a local SSD, and a
+slower or networked filesystem scales the whole delta; and this is one producer holding
+the lock alone. #2115 adds a second on the delivery path, so the number to watch there
+is contention, not the single-call cost — re-run this benchmark with both wired.
+
+## Revisions
+
+**2026-09-05 — Open questions resolved.** No design change; recorded so the questions are
+answered rather than dropped.
+
+1. **AC-5 / synchronous append** — measured, recorded above, decision is *keep it
+   synchronous* against the rule fixed before the number was known.
+2. **UTC hoist in `broadcast`** — no existing assertion disturbed. The full `cmd/pyry`
+   suite passes under `-race` with the timestamp hoisted and normalised to UTC, as the
+   plan predicted (`time.Time.Equal` is location-independent).
+3. **Durable `Entry.ID` on the wire** — unchanged: deliberately not published here.
+
 ## Security review
 
 **Verdict:** PASS

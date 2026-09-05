@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/sessions"
 )
@@ -55,6 +56,15 @@ type sessionTransitionEmitterV2 struct {
 	// the id (race: session torn down); broadcast drops the whole event in that
 	// case rather than emit a guessed or empty routing key.
 	resolveConv func(string) (string, bool)
+
+	// hist is the durable conversation log (#2114). This producer deliberately
+	// skips the #647 replay ring, so the log is the ONLY place a session
+	// boundary is retained — it is what makes a /clear routed through pyry
+	// visible in served history. nil means no durable log and broadcast behaves
+	// exactly as it did before this field existed. Concrete pointer for the same
+	// reason busy is one, one guard down in startSessionTransitionStreamV2: a
+	// typed-nil inside an interface is non-nil at the interface level.
+	hist *history.Store
 
 	in chan sessions.SessionTransition
 
@@ -150,6 +160,21 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 		return
 	}
 
+	// ONE timestamp per logical transition, hoisted out of the per-conn loop and
+	// shared by the durable log entry and every envelope (#2114). It was minted
+	// inside the loop until then, which gave N conns N timestamps for one
+	// transition and left no single value a log entry could carry. UTC matches
+	// what the interactive chokepoint stamps, so entries from the two producers
+	// are orderable by the field the log stores.
+	ts := time.Now().UTC()
+	// Appended once, after the drops above: an unknown reason and an
+	// unresolvable conversation both return before this point, so the log
+	// records what was fanned out and never what was refused. This producer
+	// skips the #647 replay ring, so the log is the ONLY place a session
+	// boundary is retained.
+	appendConversationHistory(e.hist, e.logger, "session_transition.history_append_err",
+		convID, protocol.TypeSessionTransition, payloadJSON, ts)
+
 	// Fresh snapshot per transition: a phone that opened its session since the
 	// last event is included here; one that dropped is absent, or surfaces as a
 	// Push error below.
@@ -161,7 +186,7 @@ func (e *sessionTransitionEmitterV2) broadcast(ctx context.Context, t sessions.S
 		env := protocol.Envelope{
 			ID:      e.nextID,
 			Type:    protocol.TypeSessionTransition,
-			TS:      time.Now().UTC(),
+			TS:      ts,
 			Payload: payloadJSON,
 		}
 		if err := e.bcast.Push(ctx, c.ConnID, env); err != nil {
@@ -261,9 +286,15 @@ func startSessionTransitionStreamV2(
 	bcast interactiveBroadcaster,
 	resolveConv func(string) (string, bool),
 	busy *turnBusyTracker,
+	hist *history.Store,
 	logger *slog.Logger,
 ) func() {
 	emitter := newSessionTransitionEmitterV2(bcast, resolveConv, logger)
+	// Assigned rather than passed to the constructor, which has 10 call sites —
+	// exactly the size table's ceiling on simultaneous call-site updates. THIS
+	// function has 4, so it takes the store as a plain parameter; nil is a
+	// daemon (or a test) with no durable log.
+	emitter.hist = hist
 	sink.SetTransitionObserver(func(t sessions.SessionTransition) {
 		// The incumbent runs FIRST and unconditionally. Enqueue is a documented
 		// non-blocking buffered send that nothing downstream can delay, so keeping it

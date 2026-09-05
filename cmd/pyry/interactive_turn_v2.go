@@ -10,6 +10,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/eventring"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay"
 	"github.com/pyrycode/pyrycode/internal/turnbridge"
@@ -129,6 +130,21 @@ type interactiveTurnEmitterV2 struct {
 	// path) may touch, so the emitter's other fields stay unguarded and
 	// single-goroutine. Appended on emit, before the per-conn fan-out.
 	ring *eventring.Ring
+
+	// hist is the durable conversation log (#2114): the same envelopes the ring
+	// holds for reconnect catch-up, kept past the ring's per-conversation bound
+	// and past a daemon restart, which is what the ring cannot do. Appended on
+	// emit beside the ring, before the per-conn fan-out.
+	//
+	// nil means no durable log, and emitting is then exactly what it was before
+	// this field existed — which is what lets every emitter test here keep
+	// constructing emitters with no store. Assigned after construction rather
+	// than passed to newInteractiveTurnEmitterV2: that constructor has 86 call
+	// sites across 8 test files, and a positional parameter is not separable
+	// from its call sites in Go. Concrete pointer, never an interface; see
+	// appendConversationHistory for why that matters and where the nil guard
+	// lives.
+	hist *history.Store
 
 	// Delta-coalescing state (#609) — read/written only on the single Handle/
 	// flush goroutine, same contract as the lifecycle fields above. The invariant
@@ -652,6 +668,14 @@ func (e *interactiveTurnEmitterV2) emit(ctx context.Context, convID, typ string,
 	// mutex handles the future cross-goroutine read; the emitter takes no lock.
 	ts := time.Now().UTC()
 	eventID := e.ring.Append(convID, typ, payloadJSON, ts)
+	// The durable half of the same record (#2114), beside the ring and under the
+	// same four values: one append per LOGICAL event, before the per-conn
+	// fan-out, so a conversation with no interactive conn open still accumulates
+	// history. A failure never suppresses the ring append or the wire emit
+	// below — appendConversationHistory returns nothing, so there is no branch
+	// to take.
+	appendConversationHistory(e.hist, e.logger, "interactive_turn.history_append_err",
+		convID, typ, payloadJSON, ts)
 
 	// Fresh snapshot per envelope: a conn that joined mid-turn is included next
 	// emit; a dropped conn is absent here, or surfaces as a Push error below.

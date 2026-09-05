@@ -486,7 +486,7 @@ func TestStartSessionTransitionStreamV2_ComposedObserver(t *testing.T) {
 
 			sink := &captureObserverSink{}
 			bcast := newChanBcast("conn-i")
-			cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, discardLogger())
+			cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, nil, discardLogger())
 			defer func() { cancel(); cleanup() }() // cancel-then-join; joining first deadlocks
 
 			if sink.obs == nil {
@@ -526,7 +526,7 @@ func TestStartSessionTransitionStreamV2_UnknownReasonClearsNothing(t *testing.T)
 
 	sink := &captureObserverSink{}
 	bcast := newChanBcast("conn-i")
-	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, discardLogger())
+	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, nil, discardLogger())
 	defer func() { cancel(); cleanup() }()
 
 	sink.obs(sessions.SessionTransition{
@@ -559,7 +559,7 @@ func TestStartSessionTransitionStreamV2_ConcurrentFires(t *testing.T) {
 
 	sink := &captureObserverSink{}
 	bcast := newChanBcast("conn-i")
-	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, discardLogger())
+	cleanup := startSessionTransitionStreamV2(ctx, sink, bcast, resolve, busy, nil, discardLogger())
 	defer func() { cancel(); cleanup() }()
 
 	const perConv = 4

@@ -15,6 +15,7 @@ import (
 	"github.com/pyrycode/pyrycode/internal/conversations"
 	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/dispatch"
+	"github.com/pyrycode/pyrycode/internal/history"
 	"github.com/pyrycode/pyrycode/internal/identity"
 	"github.com/pyrycode/pyrycode/internal/keys"
 	"github.com/pyrycode/pyrycode/internal/modalbridge"
@@ -316,6 +317,13 @@ type relayWiring struct {
 	// send against it. This leg's two consumers are the stream turn drain (which
 	// FEEDS it) and that teardown clear.
 	busy *turnBusyTracker
+
+	// hist is the daemon's ONE durable conversation log (#2112), minted at the
+	// composition root and threaded here because both v2 stream producers write
+	// to it: the interactive chokepoint's emitter, built inside the streamSink
+	// branch, and the session-transition stream, started unconditionally. nil is
+	// a daemon with no durable log; every write site guards for it.
+	hist *history.Store
 	// approvalParked is the late-bound seam carrying #1919's ApprovalParked report
 	// back to the msgqueue delivery seam (#1911), which main.go builds FIRST:
 	// msgqueue.New runs well before this function constructs the bridge that answers
@@ -1083,6 +1091,14 @@ func startRelayV2(
 		// most once, because this branch does.
 		emitter := newInteractiveTurnEmitterV2(w.active, mgr, logger)
 		mgr.SetReplaySource(emitter.ring, w.active.CurrentConversation)
+		// The durable conversation log (#2114), assigned the same way the ring is
+		// reached one line up: newInteractiveTurnEmitterV2 has 86 call sites and a
+		// positional parameter is not separable from them in Go. w.hist is minted
+		// at the composition root, not here, because #2115's delivery-path
+		// producer must consume THIS store rather than a second one over the same
+		// instance directory — two stores mint duplicate ids for a conversation
+		// and each can truncate away the other's just-appended entry.
+		emitter.hist = w.hist
 		// The drain's AC2 scoping gate follows the ACTIVE conversation's bound
 		// session — the same follow-active cursor the PTY emitter reads, with the
 		// #678 conv.CurrentSessionID == "" isolation guard resolveBoundSession
@@ -1127,7 +1143,7 @@ func startRelayV2(
 	// nil in PTY mode (the composition root mints it only alongside streamSink) and
 	// the clear is nil-safe.
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
-		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, logger)
+		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger)
 
 	// Wire the queue_state producer (#722): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated
