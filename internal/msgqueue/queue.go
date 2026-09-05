@@ -47,14 +47,15 @@
 // rather than a rule. Since #2092 a message also carries the CLIENT'S OWN
 // message_id, which is untrusted in exactly the same way but travels the opposite
 // direction — it is echoed back to every paired device on purpose, as the key a
-// client merges its optimistic echo on. NONE OF THE THREE IS EVER LOGGED at any
-// level (mirrors
-// internal/relay/handlers/send_message.go's discipline); the drain's
-// warn-on-error logs only conversation_id, the queued message id, and the
-// enqueue timestamp. convID is used solely as a map key; validating/resolving it
-// to a real session is the caller's job (upstream of Enqueue), so a hostile
-// convID can at worst create an isolated FIFO that never drains — never reach
-// another conversation's session.
+// client merges its optimistic echo on. NONE OF THE THREE IS EVER LOGGED BY THIS
+// PACKAGE at any level; the drain's warn-on-error logs only conversation_id, the
+// queued message id, and the enqueue timestamp. For text and delivery that
+// mirrors internal/relay/handlers/send_message.go, which logs neither. It does
+// NOT for message_id: that handler logs the value at three sites, deliberately,
+// and those stay the only place it appears in any log. convID is used solely as
+// a map key; validating/resolving it to a real session is the caller's job
+// (upstream of Enqueue), so a hostile convID can at worst create an isolated
+// FIFO that never drains — never reach another conversation's session.
 package msgqueue
 
 import (

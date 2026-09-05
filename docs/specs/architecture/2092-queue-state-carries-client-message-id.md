@@ -432,3 +432,47 @@ re-walked, and the revision is in the Design above.)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+## Revisions
+
+### 2026-09-05 — verifier rework (round 1)
+
+Two prose corrections. No change to the field, its flow, the wire shape, the
+parameter order, the field position or any test.
+
+- **`docs/protocol-mobile.md` § Queue (v2) — restore the fan-out paragraph's
+  tail (MUST FIX).** Inserting the "Multi-device rule for `message_id`" block
+  absorbed the end of the original fan-out paragraph into the block's *second
+  bullet*, so the reconnect/reconcile sentences read as a continuation of the
+  client-side merge rule. "It is **not** part of the #647 reconnect-replay ring"
+  then resolved to the merge rule rather than to `queue_state`, asserting
+  something false about the one field this ticket ships, and buried AC 2's
+  mechanism — the connect-time reconcile that pyrycode-desktop#1075 must
+  implement — inside a bullet about merge policy. The second bullet now ends at
+  "…to its own echo." and the reconnect sentences stand as their own paragraph
+  after the bullet list, which is what the Design section asked for (the fan-out
+  paragraph *gains* the rule; it is not restructured). The restored paragraph
+  opens with `queue_state` named outright rather than the original "It": after a
+  bullet list the nearest antecedent is the merge rule, so the pronoun that was
+  unambiguous in the original single-paragraph form no longer is.
+
+- **`internal/msgqueue/queue.go` package doc, SECURITY paragraph — scope the
+  never-log cross-reference (SHOULD FIX).** Widening "NEITHER IS EVER LOGGED …
+  (mirrors `internal/relay/handlers/send_message.go`'s discipline)" to cover all
+  three strings carried the parenthetical onto a value it is false of: that
+  handler logs `message_id` at three sites, deliberately, and AC 4 preserves them
+  as the only place it appears in logs. Verified by inspection — three
+  `"message_id"` log fields in `SendMessage`, and neither `text` nor `delivery`
+  is logged there at all. The msgqueue-local claim is true and kept, now stated
+  as "NONE OF THE THREE IS EVER LOGGED BY THIS PACKAGE"; the mirror claim is
+  scoped to `text`/`delivery`, and `message_id`'s handler-side logging is stated
+  plainly. This is the same failure the Security review's Trust-boundaries MUST
+  FIX caught in `QueuedMessage` and `QueuedItem` — a provenance sentence widened
+  to cover a field it was never true of — in the one place the review did not
+  re-check after the revision. The comment was re-flowed in the same edit.
+
+**Open question 2 resolved.** The e2e queue suite asserts no exact item shape:
+`internal/e2e/relay_v2_stream_queue_drain_test.go` decodes each `queue_state`
+payload and reads named fields (`ConversationID`, `queued_msg_id`) rather than
+comparing whole JSON, so the additive field is transparent there. No golden
+comparison surfaced and no e2e file needed a change.
