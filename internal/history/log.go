@@ -58,7 +58,6 @@
 package history
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -247,8 +246,11 @@ func newStore(instanceDir string, maxSegmentBytes int64) *Store {
 // the wire) is what a consumer should copy.
 //
 // payload must be valid JSON and its encoded line must fit the segment bound;
-// both are ErrInvalidPayload, and both are checked before anything is created,
-// so a refusal leaves the filesystem exactly as it was.
+// both are ErrInvalidPayload. The JSON check and the payload's own length are
+// tested before the filesystem is touched at all; the encoded line carries the
+// id, which is only known once the conversation has been resolved, so that
+// refusal lands after the log directory exists. Neither stores an entry or
+// creates a segment file — an empty directory is the most a refusal leaves.
 //
 // Not durable against a machine crash: the bytes reach the page cache, not the
 // platter, because the ticket rules crash consistency out of scope rather than
@@ -296,6 +298,14 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 	}
 	written, err := s.writeSegment(filepath.Join(dir, segmentName(seg)), buf, seg != c.seg)
 	if err != nil {
+		// A write that lost leaves this process's belief about where the log
+		// ends unverified — how much of buf landed is exactly what the error
+		// does not say. Drop the belief rather than append against it: the next
+		// call re-derives the active segment, its size and the next id from
+		// what is actually on disk. That is also what gets a conversation
+		// moving again when the cleanup below could not run and a zero-length
+		// segment remains (load rolls past one).
+		c.loaded = false
 		return 0, err
 	}
 
@@ -423,12 +433,13 @@ func (s *Store) Page(convID conversations.ConversationID, cursor string, limit i
 		}
 
 		for k := end - 1; k >= 0; k-- {
-			e := entries[k].entry
-			// The decoded payload aliases the whole segment buffer. Cloning the
-			// entries that leave lets that buffer go, so a page pins its own
-			// content rather than every byte of the segments it walked.
-			e.Payload = bytes.Clone(e.Payload)
-			out = append(out, e)
+			// Nothing on the entry aliases the segment buffer, so a page pins
+			// its own content rather than every byte of the segments it walked:
+			// json.RawMessage.UnmarshalJSON is documented to set its receiver to
+			// a COPY of the input, and a decoded string is a fresh allocation
+			// too. No defensive clone here — one would be an allocation per
+			// entry per page, bought against a premise that does not hold.
+			out = append(out, entries[k].entry)
 			oldest = cursorPos{segment: segs[i].num, offset: entries[k].offset}
 			if len(out) == limit {
 				full = true
@@ -452,6 +463,14 @@ func (s *Store) Page(convID conversations.ConversationID, cursor string, limit i
 // walking further back covers a newest segment left holding only a header,
 // which a crash mid-append can produce and which would otherwise restart the id
 // space at 1 while older entries still carry higher ids.
+//
+// A newest segment of ZERO length is the same tolerance one step further, and
+// it is the state writeSegment's cleanup could not remove: it carries no header,
+// so appending an entry to it would put an entry line where the version belongs
+// and make the segment unreadable for good. It is reported as full instead, so
+// the next append rolls past it — listSegments tolerates the gap that leaves by
+// construction, which is the same property that lets a retention policy delete
+// segments out of the middle.
 func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog, error) {
 	c := s.convs[convID]
 	if c == nil {
@@ -474,6 +493,9 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 		}
 		if i == len(segs)-1 {
 			c.seg, c.segBytes = segs[i].num, size
+			if size == 0 {
+				c.segBytes = s.maxSegmentBytes // headerless: roll past it
+			}
 		}
 		if n := len(entries); n > 0 {
 			c.nextID = entries[n-1].entry.ID + 1
@@ -498,6 +520,14 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 // written through. On a fresh segment O_EXCL says the same thing more strongly —
 // it refuses an existing path of any kind, so a header can never be appended
 // into a file that already holds entries.
+//
+// A fresh segment is created before it is written, so a write or close that
+// loses — ENOSPC, EDQUOT, EIO; ordinary failures, not a machine crash — would
+// otherwise leave behind a segment holding no header. The file is removed on
+// that path, which is what keeps a failed append a failed append rather than a
+// conversation the reader then refuses whole. The removal is best-effort by
+// design: load tolerates a headerless segment (rolling past it) so that the
+// guarantee does not rest on this cleanup succeeding.
 func (s *Store) writeSegment(path string, buf []byte, fresh bool) (int64, error) {
 	flags := os.O_WRONLY | os.O_APPEND | syscall.O_NOFOLLOW
 	if fresh {
@@ -507,12 +537,19 @@ func (s *Store) writeSegment(path string, buf []byte, fresh bool) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("history: open segment %q: %w", path, err)
 	}
+	discardFresh := func() {
+		if fresh {
+			_ = os.Remove(path)
+		}
+	}
 	n, err := f.Write(buf)
 	if err != nil {
 		_ = f.Close()
+		discardFresh()
 		return 0, fmt.Errorf("history: write segment %q: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
+		discardFresh()
 		return 0, fmt.Errorf("history: close segment %q: %w", path, err)
 	}
 	return int64(n), nil

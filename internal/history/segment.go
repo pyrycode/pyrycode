@@ -118,6 +118,16 @@ func encodeEntry(e Entry) ([]byte, error) {
 // No error names a line's content. The payload is conversation content, so
 // refusals carry the entry's ORDINAL and nothing else.
 func decodeSegment(data []byte) ([]segEntry, error) {
+	// A zero-length file makes no version claim at all, so it is not a version
+	// this build fails to recognise — it is a segment created and never written,
+	// which writeSegment produces when its first write loses and its cleanup
+	// cannot run. It holds no entry, and saying so lets a reader walk past it to
+	// the segments that do rather than refusing the whole conversation. A file
+	// with bytes but no newline is a different thing and stays a version
+	// refusal: something wrote it, and this build cannot say what.
+	if len(data) == 0 {
+		return nil, nil
+	}
 	nl := bytes.IndexByte(data, '\n')
 	if nl < 0 {
 		return nil, fmt.Errorf("%w: segment carries no header line", ErrUnknownVersion)

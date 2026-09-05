@@ -100,6 +100,23 @@ func TestCursorFromAnotherConversationReadsNothing(t *testing.T) {
 	}
 }
 
+// A cursor minted by this package, naming this conversation, and still not
+// followable: nothing was ever written for the conversation, so no position in
+// it exists. An absent log answers a cursor-less page as empty-and-at-the-start,
+// which must not become a way to have an arbitrary cursor accepted.
+func TestCursorForAConversationWithNoLogIsRefused(t *testing.T) {
+	t.Parallel()
+	s := newStore(t.TempDir(), testSegmentBytes)
+
+	p, err := s.Page(convA, mintCursor(convA, 1, int64(len(segmentHeaderLine))), 5)
+	if !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("Page with a cursor into an absent log: err = %v, want ErrInvalidCursor", err)
+	}
+	if len(p.Entries) != 0 || p.AtStart || p.Cursor != "" {
+		t.Fatalf("a refused cursor answered %d entries, AtStart=%v, cursor=%q", len(p.Entries), p.AtStart, p.Cursor)
+	}
+}
+
 // The mint/parse pair is the only place the cursor's shape is known; a cursor
 // that survives a round trip must name the position it was minted for.
 func TestCursorRoundTrip(t *testing.T) {

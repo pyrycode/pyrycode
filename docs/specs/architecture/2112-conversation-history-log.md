@@ -567,3 +567,82 @@ all revised into the design above before this commit)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-05
+
+**Extended 2026-09-05** — the `[Network & I/O]` finding above examined the read
+direction only. See § Revisions for the write direction it did not open.
+
+## Revisions
+
+### 2026-09-05 — a failed write to a fresh segment (verifier MUST FIX, rework 1)
+
+**Finding.** `writeSegment` creates a fresh segment with `O_CREATE|O_EXCL` before
+it writes, and cleaned up neither the file nor the in-memory roll state when the
+write lost. The residue is a zero-length segment, and the consequence is not a
+lost append: `load` reaches it first and `decodeSegment` refuses it as
+`ErrUnknownVersion`, so `Page` **and** `Append` fail for that conversation
+forever — including the entries written successfully before the failure. In
+process, `c.seg`/`c.segBytes` kept their pre-write values, so every later append
+retargeted the same segment number and collided on `O_EXCL`. The trigger is an
+ordinary `write(2)` error (ENOSPC, EDQUOT, EIO), not a machine crash, so the
+ticket's "crash consistency is out of scope" does not cover it. § Design's
+tolerance of a *header-only* newest segment was aimed one case short of the one
+this package's own create-then-write sequence produces.
+
+**Design change**, three parts, all in § Design's append path:
+
+1. `writeSegment` removes a fresh segment whose write or close fails, so a
+   failed append is a failed append and leaves the log where it was.
+2. `Append` clears the conversation's `loaded` flag on any write error. How much
+   of the buffer landed is exactly what the error does not report, so the belief
+   about where the log ends is dropped rather than appended against: the next
+   call re-derives the active segment, its size and the next id from disk.
+3. `load` reports a zero-length newest segment as **full**, so the next append
+   rolls past it rather than writing an entry line where the version belongs.
+   The gap that leaves is already a supported shape — `listSegments` is a
+   listing rather than a probe precisely so that a retention delete can punch
+   holes in the numbering.
+
+**Why both a cleanup and a tolerance.** They are different fabric, not the same
+fix twice: (1) prevents the state, (3) makes it survivable. The cleanup is
+best-effort — `os.Remove` can itself fail, and a crash between create and write
+produces the same residue with no cleanup to run at all — so the guarantee that
+matters, *a conversation is never permanently unreadable*, rests on (3), which
+holds whatever produced the file. That split is also what makes the fix
+testable: an ENOSPC on a freshly created file cannot be induced from a unit test
+without a seam in production code, but the state it leaves can simply be planted
+on disk, and that is what `TestZeroLengthSegmentIsToleratedAndRolledPast` does.
+
+**Why not reuse the zero-length segment.** The alternative shape — adopt it as
+the active segment and write the header into it — was rejected. It would have to
+open a file this call did not create without `O_EXCL`, and it splits "does this
+segment need a header" from "is this segment new", two conditions currently
+carried by one flag. Rolling past is one rule (*a segment with no header is
+never appended to*) and needs no new state.
+
+**§ Security review, `[Network & I/O]`, extended.** That finding examined
+resource exhaustion through the file in the read direction — an
+out-of-band-enlarged segment pinning an allocation — and stopped there. The
+write direction belonged under the same heading and was not opened: a failed
+write can leave state that permanently denies the feature, which is a
+denial-of-service against one conversation reachable from an ordinary full disk.
+Both halves are now closed, and the general form is worth carrying into
+`#2114`/`#2115`: for an append-only store the durability question is not only
+"did the bytes land" but "what does a partial failure leave behind, and can the
+next reader still make progress past it".
+
+**Also in this rework**, neither a design change:
+
+- The `bytes.Clone` on entries leaving `Page` is removed. Its comment claimed the
+  decoded payload aliases the segment buffer; `json.RawMessage.UnmarshalJSON` is
+  documented to set its receiver to a *copy*, so the clone bought an allocation
+  per entry per page against a premise that does not hold.
+- `Append`'s doc comment claimed both `ErrInvalidPayload` refusals are checked
+  "before anything is created". True of the payload's own length; the encoded
+  line carries the minted id, so that check necessarily runs after the log
+  directory exists. The comment now says which is which, and the test asserts
+  what actually holds — that no segment file is created.
+- Reject branches § Testing strategy named but no test reached: the encoded-line
+  bound (a payload of *exactly* the segment bound passes the pre-check and
+  reaches it), `decodeSegment`'s unterminated-final-line and no-newline-at-all
+  arms, and `Page`'s refusal of a cursor for a conversation with no log
+  directory. Each mutant was confirmed to redden the new test.

@@ -48,6 +48,48 @@ func TestSegmentNamesSortNumerically(t *testing.T) {
 	}
 }
 
+// The arms decodeSegment answers with, at the level they are decided. Three of
+// them are the difference between "this build cannot read your segment" and
+// "there is nothing here to read", and confusing the two refuses a whole
+// conversation over a file that holds no entry.
+func TestDecodeSegmentArms(t *testing.T) {
+	t.Parallel()
+	const entry = `{"id":1,"type":"assistant_delta","payload":{"n":0},"ts":"2026-09-05T12:00:00Z"}`
+	tests := []struct {
+		name    string
+		data    string
+		wantErr error
+		want    int
+	}{
+		// Created and never written: no version claim was made, so there is
+		// none to fail to recognise.
+		{"zero length", "", nil, 0},
+		{"header only", segmentHeaderLine, nil, 0},
+		{"header and one entry", segmentHeaderLine + entry + "\n", nil, 1},
+		// Recognisable content, unterminated: something wrote these bytes and
+		// this build cannot say what, so it is a version refusal even though
+		// the text reads as the header it knows.
+		{"bytes but no newline anywhere", strings.TrimSuffix(segmentHeaderLine, "\n"), ErrUnknownVersion, 0},
+		{"unterminated final entry", segmentHeaderLine + entry + "\n" + entry, ErrCorruptSegment, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := decodeSegment([]byte(tt.data))
+			if tt.wantErr == nil {
+				if err != nil {
+					t.Fatalf("decodeSegment: %v, want no error", err)
+				}
+			} else if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("decodeSegment: err = %v, want %v", err, tt.wantErr)
+			}
+			if len(got) != tt.want {
+				t.Fatalf("decodeSegment returned %d entries, want %d", len(got), tt.want)
+			}
+		})
+	}
+}
+
 // AC 3's neighbour: a segment file grown out of band past the ceiling a
 // well-formed one can reach must not pin an arbitrary allocation.
 func TestOversizedSegmentIsRefused(t *testing.T) {

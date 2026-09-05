@@ -537,6 +537,130 @@ func TestUnstorablePayloadIsRefused(t *testing.T) {
 	}
 }
 
+// The refusal that only the ENCODED line can trigger: a payload of exactly the
+// segment bound passes the pre-check on its own length, and what puts the line
+// over is the id, type and timestamp written around it.
+func TestEncodedEntryOverTheSegmentBoundIsRefused(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	s := newStore(root, testSegmentBytes)
+
+	payload := json.RawMessage(`{"big":"` + strings.Repeat("x", testSegmentBytes-10) + `"}`)
+	if int64(len(payload)) != testSegmentBytes {
+		t.Fatalf("fixture payload is %d bytes, want exactly the bound (%d)", len(payload), testSegmentBytes)
+	}
+	if _, err := s.Append(convA, "assistant_delta", payload, testTS); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("Append with an over-long encoded line: err = %v, want ErrInvalidPayload", err)
+	}
+	// This refusal lands after the log directory exists, so what must hold is
+	// that nothing was stored: no segment file, not even an empty one.
+	segs, err := os.ReadDir(historyDir(root, convA))
+	if err != nil {
+		t.Fatalf("read history dir: %v", err)
+	}
+	if len(segs) != 0 {
+		t.Fatalf("a refused Append left %d file(s) in the log directory", len(segs))
+	}
+}
+
+// A segment created and never written is what a failed first write to a fresh
+// segment leaves when writeSegment's cleanup cannot run. It carries no header,
+// so it must neither be read as an unrecognised version — which would refuse the
+// whole conversation, forever, including the entries written before it — nor be
+// appended to, which would put an entry line where the version belongs.
+func TestZeroLengthSegmentIsToleratedAndRolledPast(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	s := newStore(root, testSegmentBytes)
+	want := appendN(t, s, convA, 0, 3)
+
+	orphan := filepath.Join(historyDir(root, convA), segmentName(2))
+	if err := os.WriteFile(orphan, nil, 0o600); err != nil {
+		t.Fatalf("plant a zero-length segment: %v", err)
+	}
+
+	// The read half: every entry already on disk still comes back.
+	reader := newStore(root, testSegmentBytes)
+	assertReversed(t, walkAll(t, reader, convA, 2), want)
+
+	// The write half: the conversation still accepts entries, and their ids
+	// continue past what is on disk rather than restarting.
+	writer := newStore(root, testSegmentBytes)
+	id, err := writer.Append(convA, "turn_end", json.RawMessage(`{"after":"the orphan"}`), testTS)
+	if err != nil {
+		t.Fatalf("Append past a zero-length segment: %v", err)
+	}
+	if wantID := want[len(want)-1].ID + 1; id != wantID {
+		t.Fatalf("Append past a zero-length segment minted id %d, want %d", id, wantID)
+	}
+	if info, err := os.Stat(orphan); err != nil || info.Size() != 0 {
+		t.Fatalf("the headerless segment was written to: stat = %v, %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(historyDir(root, convA), segmentName(3))); err != nil {
+		t.Fatalf("the append did not roll past the headerless segment: %v", err)
+	}
+
+	// And the whole log — across the gap the roll left — reads back in order.
+	third := newStore(root, testSegmentBytes)
+	assertReversed(t, walkAll(t, third, convA, 2), append(want, Entry{
+		ID: id, Type: "turn_end", Payload: json.RawMessage(`{"after":"the orphan"}`), TS: testTS,
+	}))
+}
+
+// The append side of the leaf protection: containment of the directory is not
+// containment of the file in it, so a segment name replaced by a symlink is
+// refused rather than written through. The repair half is the point — a failed
+// write must leave the conversation appendable, not wedged.
+func TestSymlinkedActiveSegmentIsNotWrittenThrough(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	s := newStore(root, testSegmentBytes)
+	want := appendN(t, s, convA, 0, 3)
+
+	active := filepath.Join(historyDir(root, convA), segmentName(1))
+	content, err := os.ReadFile(active)
+	if err != nil {
+		t.Fatalf("read the active segment: %v", err)
+	}
+	outside := filepath.Join(t.TempDir(), "moved.jsonl")
+	if err := os.WriteFile(outside, content, 0o600); err != nil {
+		t.Fatalf("stage the segment outside: %v", err)
+	}
+	if err := os.Remove(active); err != nil {
+		t.Fatalf("remove the active segment: %v", err)
+	}
+	if err := os.Symlink(outside, active); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, err := s.Append(convA, "assistant_delta", json.RawMessage(`{"n":"through"}`), testTS); err == nil {
+		t.Fatal("Append wrote through a symlinked segment")
+	}
+	after, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("read the staged file: %v", err)
+	}
+	if len(after) != len(content) {
+		t.Fatalf("the staged file grew by %d bytes: the append followed the symlink", len(after)-len(content))
+	}
+
+	// Put the real segment back: the store must re-derive its position from
+	// disk rather than carry the belief it held when the write lost.
+	if err := os.Remove(active); err != nil {
+		t.Fatalf("remove the symlink: %v", err)
+	}
+	if err := os.WriteFile(active, content, 0o600); err != nil {
+		t.Fatalf("restore the segment: %v", err)
+	}
+	id, err := s.Append(convA, "turn_end", json.RawMessage(`{"after":"repair"}`), testTS)
+	if err != nil {
+		t.Fatalf("Append after the segment was restored: %v", err)
+	}
+	if wantID := want[len(want)-1].ID + 1; id != wantID {
+		t.Fatalf("Append after repair minted id %d, want %d", id, wantID)
+	}
+}
+
 func TestPageSizeBounds(t *testing.T) {
 	t.Parallel()
 	s := newStore(t.TempDir(), testSegmentBytes)
