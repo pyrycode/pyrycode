@@ -77,19 +77,27 @@ daemon's bootstrap child spawns eagerly at startup — before any test can
 pair, dial and handshake. Proving delivery means making a *second* spawn
 happen while a client is already connected.
 
-Two routes force that second spawn and only one delivers. A child kill +
-respawn keeps the runner's construction-time session id, so the drain's
-active-session gate (`boundSessionIDForActive` in `cmd/pyry/relay.go`,
-feeding `startStreamTurnDrainV2`) still matches and lets the fresh child's
-events through. A `new_session` rotation does not: the rotation rebinds the
-conversation to a new id while the runner's sink tag stays on the outgoing
-one, so the gate drops every event the fresh child produces (see
-`relay_v2_stream_new_session_test.go`, which for exactly this reason asserts
-the post-rotation child's stdin rather than a phone-side frame). Building a
-frame observation on the rotation route asserts into a lane that is
-dropping. `driveModelListRespawn` is built on `killChild` +
-`waitForRunnerStatus` instead — the first helper in this package to combine
-a phone-side frame observation with a kill.
+Two routes force that second spawn. A child kill + respawn keeps the
+runner's construction-time session id, so the drain's active-session gate
+(`boundSessionIDForActive` in `cmd/pyry/relay.go`, feeding
+`startStreamTurnDrainV2`) still matches and lets the fresh child's events
+through. `driveModelListRespawn` is built on `killChild` +
+`waitForRunnerStatus` — the first helper in this package to combine a
+phone-side frame observation with a kill.
+
+**A `new_session` rotation used to be the route that couldn't reach a
+phone-side frame here — #1133 closed that gap, and this helper was never
+revisited to use it.** Before #1133 a rotation rebound the conversation to a
+new id while the runner's sink tag stayed on the outgoing one, so the gate
+dropped every event the fresh child produced; `relay_v2_stream_new_session_test.go`
+asserted the post-rotation child's stdin instead of a phone-side frame for
+exactly that reason. `RestartFresh` now moves the sink tag with the rotation
+(see [streamsup-package.md § Session rotation
+notification](streamsup-package-session-rotation-notification-onsessionrotate.md)),
+so a rotation-driven respawn's frames now reach the gate as themselves. Kill
++ respawn still works and nothing forced this helper to change, but a future
+reader should not treat "a `new_session` rotation can't produce an
+observable phone-side frame" as still true.
 
 The gate also has nothing to compare against until a turn has been driven —
 `activeConversation.set` is stamped only from `sessionRouter.Route`'s success
