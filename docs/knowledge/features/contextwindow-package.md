@@ -108,19 +108,43 @@ by \#2106 (see [the fourth retention application](streamsup-package-retaining-th
 `Read`'s `windows` parameter is that retained report, reduced to a plain
 `map[string]int`. The join key is `message.model` on the transcript's latest
 usage-bearing entry — read via [`jsonl.Event.Model`](jsonl-reader.md) — matched
-against `windows` by **exact, verbatim string comparison**: no lowercasing, no
-alias expansion, no date stripping. Measured across 30 committed captures, two
-`modelUsage` entries do not imply two models (26 of 30 are an alias pair for
-one model, identical window under either spelling) and no rule relating a
-dated to an undated spelling survives the data — so "the largest", "the
-first", and "the only one" are each wrong on some real capture, and only exact
-match is safe. **An empty model id is a miss on either side of the join and
-never matched**: an assistant entry with no `message.model` decodes to `""`,
-and #2101 keeps a `modelUsage` entry keyed `""` (with a positive window)
-reachable in the retained report, sorted first by `ModelID`. `Read` never
-performs the lookup when the transcript-side key is `""`, so that reachable
-`""` entry is structurally unreachable from this join — the rule is enforced
-once, not spelled on both sides.
+against `windows` first by **exact, verbatim string comparison**: no
+lowercasing, no alias expansion, no date stripping. Measured across 30
+committed captures, two `modelUsage` entries do not imply two models (26 of 30
+are an alias pair for one model, identical window under either spelling) and
+no rule relating a dated to an undated spelling survives the data — so "the
+largest", "the first", and "the only one" are each wrong on some real
+capture, and only exact match is safe. **An empty model id is a miss on
+either side of the join and never matched**: an assistant entry with no
+`message.model` decodes to `""`, and #2101 keeps a `modelUsage` entry keyed
+`""` (with a positive window) reachable in the retained report, sorted first
+by `ModelID`. `Read` never performs the lookup when the transcript-side key
+is `""`, so that reachable `""` entry is structurally unreachable from this
+join — the rule is enforced once, not spelled on both sides.
+
+**#2118 — an exact miss falls back to one trailing variant group, and only
+one.** claude keys a 1M-context model's `modelUsage` entry with a bracketed
+suffix (`claude-opus-5[1m]`) while the transcript names the model without it
+(`claude-opus-5`), so the exact join missed on every turn of every 1M session,
+fell back to `defaultWindowTokens`, and #2100's own contradiction check then
+zeroed the reading — a session that should show a real fraction of 1,000,000
+instead drew a blank gauge, which is what the exact-match paragraph above did
+not anticipate. After an exact match misses, `Read` now looks for windows keys
+that are the transcript's id plus exactly one trailing `[...]` group
+(`variantBase`, mirroring the grammar `internal/relay`'s `validModel` (#1838)
+machine-checks for the same shape, without sharing the function — that one
+guards an argv/turn-text sink in a package this one cannot import). If
+exactly one such key carries a positive window, that window is reported; zero
+or two-or-more is still a miss. The exact-match evidence above is why the
+tolerance stops at one bracket group: lowercasing, date-stripping and alias
+expansion are still refused, only the observed suffix shape is now bridged.
+Requiring a *unique* variant match (not "the first" or "the largest") is what
+makes the answer independent of Go's randomised map iteration, on top of
+guarding against a key that claims a base it doesn't exactly spell.
+**Non-positive entries are dropped before they are counted, not after**: a
+`modelUsage` entry `Read` already treats as absent by contract (see Error
+handling below) must not be able to manufacture an ambiguity that collapses a
+reading which has exactly one correct answer.
 
 **#2100 — `Read` stops reporting a window its own data disproves — and this
 only holds if resolution runs before the check.** `Read` first resolves
