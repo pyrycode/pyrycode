@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -569,6 +570,16 @@ func TestStreamRunnerFactory_Construct(t *testing.T) {
 			if _, reported := sr.BackgroundTaskRoster(); reported {
 				t.Errorf("BackgroundTaskRoster() ok = true on a freshly constructed runner, want false — no child has reported")
 			}
+			// #2106: the same for the model-window retention, the fourth decorator, and
+			// the first to reach the adapter through the embedded sessionRetentions
+			// rather than as its own constructor argument. A nil here would mean the set
+			// crossed the factory incomplete.
+			if sr.windows == nil {
+				t.Errorf("streamRunner.windows is nil, want the hold newSessionParser minted")
+			}
+			if _, reported := sr.ModelWindows(); reported {
+				t.Errorf("ModelWindows() ok = true on a freshly constructed runner, want false — no child has reported")
+			}
 		})
 	}
 }
@@ -585,7 +596,8 @@ func TestNewSessionParser_DecodesAndRetains(t *testing.T) {
 	t.Parallel()
 
 	var next recordingSink
-	parser, hold, _, _ := newSessionParser(next.sink, discardLogger())
+	parser, held := newSessionParser(next.sink, discardLogger())
+	hold := held.models
 
 	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-1840",` +
 		`"response":{"models":[` +
@@ -634,7 +646,8 @@ func TestNewSessionParser_DecodesAndRetainsSlashCommands(t *testing.T) {
 	t.Parallel()
 
 	var next recordingSink
-	parser, _, hold, _ := newSessionParser(next.sink, discardLogger())
+	parser, held := newSessionParser(next.sink, discardLogger())
+	hold := held.commands
 
 	const line = `{"type":"control_response","response":{"subtype":"success","request_id":"init-2004",` +
 		`"response":{"commands":[` +
@@ -693,7 +706,8 @@ func TestNewSessionParser_DecodesAndRetainsBackgroundTaskRoster(t *testing.T) {
 	t.Parallel()
 
 	var next recordingSink
-	parser, _, _, hold := newSessionParser(next.sink, discardLogger())
+	parser, held := newSessionParser(next.sink, discardLogger())
+	hold := held.tasks
 
 	const line = `{"type":"system","subtype":"background_tasks_changed","tasks":[` +
 		`{"task_id":"bybi8g8i8","task_type":"local_bash","description":"cat $FIFO"}],` +
@@ -744,6 +758,91 @@ func TestNewSessionParser_DecodesAndRetainsBackgroundTaskRoster(t *testing.T) {
 	for i, ev := range seen {
 		if _, isRoster := ev.(turnevent.BackgroundTaskRoster); !isRoster {
 			t.Errorf("downstream event %d is %T, want turnevent.BackgroundTaskRoster", i, ev)
+		}
+	}
+}
+
+// TestNewSessionParser_DecodesAndRetainsModelWindows is the #2106 member of the family
+// above and proves the same thing for the fourth link of the chain: the parser
+// newSessionParser returned consumes one real `result` line and the model-window hold it
+// returned holds the decoded report, with the downstream sink still seeing the event.
+//
+// The modelUsage keys are the committed capture's own (internal/e2e/realclaude/testdata/
+// bypass_reescalation_v2.1.239_control_default.json), copied rather than invented —
+// including maxOutputTokens, canonicalModel and provider, which the producer's decode target
+// deliberately does not declare. Carrying them is the point: they are present in every real
+// line, and a retention that somehow surfaced any of them would be caught here rather than
+// downstream.
+//
+// It carries BOTH shapes turnevent.TurnEnd.ModelWindows records as observed, in one line:
+// the capture's own ALIAS PAIR naming one model twice at an identical window, and a second
+// model at a different one. That is what makes the producer's sort observable — the three
+// ids come back in string order, which is neither the order they are written here nor an
+// order a Go map could have preserved.
+//
+// The SECOND line is a `result` with no modelUsage at all, and it is the half a hold-level
+// unit test cannot supply: it shows that the real producer reaches the silent shape, and
+// that a silent turn leaves the retained report intact rather than erasing it. A mutant that
+// replaces unconditionally — the three siblings' correct behaviour — reddens exactly there.
+func TestNewSessionParser_DecodesAndRetainsModelWindows(t *testing.T) {
+	t.Parallel()
+
+	var next recordingSink
+	parser, held := newSessionParser(next.sink, discardLogger())
+	hold := held.windows
+
+	const line = `{"type":"result","subtype":"success","modelUsage":{` +
+		`"claude-sonnet-5":{"inputTokens":18,"outputTokens":363,"costUSD":0.0270562,` +
+		`"contextWindow":1000000,"maxOutputTokens":64000,"canonicalModel":"claude-sonnet-5","provider":"firstParty"},` +
+		`"claude-haiku-4-5-20251001":{"inputTokens":913,"outputTokens":13,"costUSD":0.000978,` +
+		`"contextWindow":200000,"maxOutputTokens":32000,"canonicalModel":"claude-haiku-4-5","provider":"firstParty"},` +
+		`"claude-haiku-4-5":{"inputTokens":36,"outputTokens":710,"costUSD":0.0373089,` +
+		`"contextWindow":200000,"maxOutputTokens":32000,"canonicalModel":"claude-haiku-4-5","provider":"firstParty"}}}`
+	if _, err := parser.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("parser.Write(result) error = %v, want nil", err)
+	}
+
+	got, ok := hold.ModelWindows()
+	if !ok {
+		t.Fatalf("ModelWindows() ok = false after the result line, want true")
+	}
+	want := []turnevent.ModelWindow{
+		{ModelID: "claude-haiku-4-5", WindowTokens: 200000},
+		{ModelID: "claude-haiku-4-5-20251001", WindowTokens: 200000},
+		{ModelID: "claude-sonnet-5", WindowTokens: 1000000},
+	}
+	if !reflect.DeepEqual(got.Windows, want) {
+		t.Errorf("retained entries = %#v, want the line's three in the producer's sorted order %#v",
+			got.Windows, want)
+	}
+	if got.Dropped != 0 {
+		t.Errorf("Dropped = %d for a line whose every entry is usable, want 0", got.Dropped)
+	}
+
+	// A silent turn through the real producer: claude reports a turn end with no
+	// modelUsage, and the retention must survive it unchanged rather than reverting to
+	// unreported or to an empty report.
+	const silentLine = `{"type":"result","subtype":"success"}`
+	if _, err := parser.Write([]byte(silentLine + "\n")); err != nil {
+		t.Fatalf("parser.Write(result without modelUsage) error = %v, want nil", err)
+	}
+	after, ok := hold.ModelWindows()
+	if !ok {
+		t.Fatalf("ModelWindows() ok = false after a result line carrying no modelUsage, want true — " +
+			"claude saying nothing about windows must not erase what is retained")
+	}
+	if !reflect.DeepEqual(after.Windows, want) {
+		t.Errorf("retained entries = %#v after a silent turn, want the earlier report's %#v",
+			after.Windows, want)
+	}
+
+	seen := next.events()
+	if len(seen) != 2 {
+		t.Fatalf("downstream saw %d events, want the 2 turn ends forwarded through the chain", len(seen))
+	}
+	for i, ev := range seen {
+		if _, isEnd := ev.(turnevent.TurnEnd); !isEnd {
+			t.Errorf("downstream event %d is %T, want turnevent.TurnEnd", i, ev)
 		}
 	}
 }
@@ -866,7 +965,7 @@ func TestMapStreamsupConfig_CarriesOperatorBypass(t *testing.T) {
 // from this package at all; the comment in the body names what carries it instead.
 func TestSessionParser_MintsOneStablePostureGate(t *testing.T) {
 	t.Parallel()
-	parser, _, _, _ := newSessionParser(func(turnevent.Event) {}, nil)
+	parser, _ := newSessionParser(func(turnevent.Event) {}, nil)
 	gate := parser.PostureGate()
 	if gate == nil {
 		t.Fatal("newSessionParser's parser minted no posture gate")
