@@ -48,34 +48,47 @@ func TestSegmentNamesSortNumerically(t *testing.T) {
 	}
 }
 
-// The arms decodeSegment answers with, at the level they are decided. Three of
+// The arms decodeSegment answers with, at the level they are decided. Most of
 // them are the difference between "this build cannot read your segment" and
-// "there is nothing here to read", and confusing the two refuses a whole
-// conversation over a file that holds no entry.
+// "there is nothing more here to read", and confusing the two refuses a whole
+// conversation over one line a failed write left behind.
+//
+// The second return is the same question as "may an entry be appended to this
+// file": load turns a false into a roll, so an arm that reported the wrong
+// completeness would either wedge the conversation or write into a damaged
+// segment.
 func TestDecodeSegmentArms(t *testing.T) {
 	t.Parallel()
 	const entry = `{"id":1,"type":"assistant_delta","payload":{"n":0},"ts":"2026-09-05T12:00:00Z"}`
 	tests := []struct {
-		name    string
-		data    string
-		wantErr error
-		want    int
+		name         string
+		data         string
+		wantErr      error
+		want         int
+		wantComplete bool
 	}{
-		// Created and never written: no version claim was made, so there is
-		// none to fail to recognise.
-		{"zero length", "", nil, 0},
-		{"header only", segmentHeaderLine, nil, 0},
-		{"header and one entry", segmentHeaderLine + entry + "\n", nil, 1},
-		// Recognisable content, unterminated: something wrote these bytes and
-		// this build cannot say what, so it is a version refusal even though
-		// the text reads as the header it knows.
-		{"bytes but no newline anywhere", strings.TrimSuffix(segmentHeaderLine, "\n"), ErrUnknownVersion, 0},
-		{"unterminated final entry", segmentHeaderLine + entry + "\n" + entry, ErrCorruptSegment, 0},
+		// Created and never written, or torn inside the header: no version
+		// claim was made, so there is none to fail to recognise — and none to
+		// append under either.
+		{"zero length", "", nil, 0, false},
+		{"bytes but no newline anywhere", strings.TrimSuffix(segmentHeaderLine, "\n"), nil, 0, false},
+		{"header only", segmentHeaderLine, nil, 0, true},
+		{"header and one entry", segmentHeaderLine + entry + "\n", nil, 1, true},
+		// A write that transferred part of its buffer and then lost. The entry
+		// before it was acknowledged and still stands; the torn one never was.
+		{"unterminated final entry", segmentHeaderLine + entry + "\n" + entry, nil, 1, false},
+		{"unterminated first entry", segmentHeaderLine + entry, nil, 0, false},
+		// Neither of the two above: a COMPLETE line this build cannot read is
+		// damage, not a partial write, and nothing here produces one.
+		{"undecodable complete entry", segmentHeaderLine + "not an entry\n", ErrCorruptSegment, 0, false},
+		// And the version arm the tolerances must not have swallowed: a first
+		// line that IS complete and is not this format.
+		{`another version`, `{"format":"pyrycode.history","version":2}` + "\n" + entry + "\n", ErrUnknownVersion, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := decodeSegment([]byte(tt.data))
+			got, complete, err := decodeSegment([]byte(tt.data))
 			if tt.wantErr == nil {
 				if err != nil {
 					t.Fatalf("decodeSegment: %v, want no error", err)
@@ -85,6 +98,9 @@ func TestDecodeSegmentArms(t *testing.T) {
 			}
 			if len(got) != tt.want {
 				t.Fatalf("decodeSegment returned %d entries, want %d", len(got), tt.want)
+			}
+			if complete != tt.wantComplete {
+				t.Fatalf("decodeSegment reported complete = %v, want %v", complete, tt.wantComplete)
 			}
 		})
 	}

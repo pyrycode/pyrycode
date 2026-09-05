@@ -360,7 +360,7 @@ func entriesInFirstSegment(t *testing.T, s *Store, root string, convID conversat
 	if len(names) < 2 {
 		t.Fatalf("no rolled segment to measure (%d present)", len(names))
 	}
-	entries, _, err := s.readSegment(filepath.Join(dir, names[0].Name()))
+	entries, _, _, err := s.readSegment(filepath.Join(dir, names[0].Name()))
 	if err != nil {
 		t.Fatalf("read segment: %v", err)
 	}
@@ -563,47 +563,122 @@ func TestEncodedEntryOverTheSegmentBoundIsRefused(t *testing.T) {
 	}
 }
 
-// A segment created and never written is what a failed first write to a fresh
-// segment leaves when writeSegment's cleanup cannot run. It carries no header,
-// so it must neither be read as an unrecognised version — which would refuse the
-// whole conversation, forever, including the entries written before it — nor be
-// appended to, which would put an entry line where the version belongs.
-func TestZeroLengthSegmentIsToleratedAndRolledPast(t *testing.T) {
+// What a failed FIRST write to a fresh segment leaves when writeSegment's undo
+// cannot run: a file with no header, either because nothing was written or
+// because the write tore inside the header line. It must neither be read as an
+// unrecognised version — which would refuse the whole conversation, forever,
+// including the entries written before it — nor be appended to, which would put
+// an entry line where the version belongs.
+func TestHeaderlessSegmentIsToleratedAndRolledPast(t *testing.T) {
+	t.Parallel()
+	residues := map[string][]byte{
+		"created and never written": nil,
+		"torn inside the header":    []byte(`{"format":"pyryc`),
+	}
+	for name, residue := range residues {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			s := newStore(root, testSegmentBytes)
+			want := appendN(t, s, convA, 0, 3)
+
+			orphan := filepath.Join(historyDir(root, convA), segmentName(2))
+			if err := os.WriteFile(orphan, residue, 0o600); err != nil {
+				t.Fatalf("plant a headerless segment: %v", err)
+			}
+
+			// The read half: every entry already on disk still comes back.
+			reader := newStore(root, testSegmentBytes)
+			assertReversed(t, walkAll(t, reader, convA, 2), want)
+
+			// The write half: the conversation still accepts entries, and their
+			// ids continue past what is on disk rather than restarting.
+			writer := newStore(root, testSegmentBytes)
+			id, err := writer.Append(convA, "turn_end", json.RawMessage(`{"after":"the orphan"}`), testTS)
+			if err != nil {
+				t.Fatalf("Append past a headerless segment: %v", err)
+			}
+			if wantID := want[len(want)-1].ID + 1; id != wantID {
+				t.Fatalf("Append past a headerless segment minted id %d, want %d", id, wantID)
+			}
+			if info, err := os.Stat(orphan); err != nil || info.Size() != int64(len(residue)) {
+				t.Fatalf("the headerless segment was written to: stat = %v, %v", info, err)
+			}
+			if _, err := os.Stat(filepath.Join(historyDir(root, convA), segmentName(3))); err != nil {
+				t.Fatalf("the append did not roll past the headerless segment: %v", err)
+			}
+
+			// And the whole log — across the gap the roll left — reads back in
+			// order.
+			third := newStore(root, testSegmentBytes)
+			assertReversed(t, walkAll(t, third, convA, 2), append(want, Entry{
+				ID: id, Type: "turn_end", Payload: json.RawMessage(`{"after":"the orphan"}`), TS: testTS,
+			}))
+		})
+	}
+}
+
+// The same failure one branch over, and the branch nearly every append takes: a
+// write into the ACTIVE segment that transfers part of its buffer and then loses
+// leaves a torn final line. os.File.Write reports the bytes it did transfer
+// alongside the error, so an ordinary ENOSPC or EIO produces this — not only a
+// machine crash. Planted rather than induced: a post-create write failure needs a
+// seam in production code to provoke, but the state it leaves does not.
+//
+// Refusing that segment would deny the conversation both halves for good, and
+// appending after it would concatenate the next entry onto the torn line.
+func TestTornFinalLineIsToleratedAndRolledPast(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	s := newStore(root, testSegmentBytes)
 	want := appendN(t, s, convA, 0, 3)
 
-	orphan := filepath.Join(historyDir(root, convA), segmentName(2))
-	if err := os.WriteFile(orphan, nil, 0o600); err != nil {
-		t.Fatalf("plant a zero-length segment: %v", err)
+	active := filepath.Join(historyDir(root, convA), segmentName(1))
+	f, err := os.OpenFile(active, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open the active segment: %v", err)
 	}
+	// The head of an entry line, no terminating newline: exactly what a write
+	// that transferred 58 of its bytes would have left.
+	if _, err := f.WriteString(`{"id":4,"type":"assistant_delta","payload":{"n":"000003"}`); err != nil {
+		t.Fatalf("plant a torn final line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close the active segment: %v", err)
+	}
+	info, err := os.Stat(active)
+	if err != nil {
+		t.Fatalf("stat the torn segment: %v", err)
+	}
+	tornSize := info.Size()
 
-	// The read half: every entry already on disk still comes back.
+	// The read half: the entries that were acknowledged still come back, and
+	// the line that never was does not appear among them.
 	reader := newStore(root, testSegmentBytes)
 	assertReversed(t, walkAll(t, reader, convA, 2), want)
 
-	// The write half: the conversation still accepts entries, and their ids
-	// continue past what is on disk rather than restarting.
+	// The write half: the conversation still accepts entries, they do not land
+	// after the torn line, and the id the torn line was carrying is free again
+	// because no producer was ever told it was stored.
 	writer := newStore(root, testSegmentBytes)
-	id, err := writer.Append(convA, "turn_end", json.RawMessage(`{"after":"the orphan"}`), testTS)
+	id, err := writer.Append(convA, "turn_end", json.RawMessage(`{"after":"the tear"}`), testTS)
 	if err != nil {
-		t.Fatalf("Append past a zero-length segment: %v", err)
+		t.Fatalf("Append past a torn final line: %v", err)
 	}
 	if wantID := want[len(want)-1].ID + 1; id != wantID {
-		t.Fatalf("Append past a zero-length segment minted id %d, want %d", id, wantID)
+		t.Fatalf("Append past a torn final line minted id %d, want %d", id, wantID)
 	}
-	if info, err := os.Stat(orphan); err != nil || info.Size() != 0 {
-		t.Fatalf("the headerless segment was written to: stat = %v, %v", info, err)
+	if info, err := os.Stat(active); err != nil || info.Size() != tornSize {
+		t.Fatalf("the torn segment was appended to: stat = %v, %v", info, err)
 	}
-	if _, err := os.Stat(filepath.Join(historyDir(root, convA), segmentName(3))); err != nil {
-		t.Fatalf("the append did not roll past the headerless segment: %v", err)
+	if _, err := os.Stat(filepath.Join(historyDir(root, convA), segmentName(2))); err != nil {
+		t.Fatalf("the append did not roll past the torn segment: %v", err)
 	}
 
-	// And the whole log — across the gap the roll left — reads back in order.
+	// And a third store reads the whole log back across the roll.
 	third := newStore(root, testSegmentBytes)
 	assertReversed(t, walkAll(t, third, convA, 2), append(want, Entry{
-		ID: id, Type: "turn_end", Payload: json.RawMessage(`{"after":"the orphan"}`), TS: testTS,
+		ID: id, Type: "turn_end", Payload: json.RawMessage(`{"after":"the tear"}`), TS: testTS,
 	}))
 }
 

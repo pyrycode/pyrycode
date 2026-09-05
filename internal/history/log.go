@@ -40,6 +40,14 @@
 // ids continue past every id on disk. Surviving a machine crash is out of
 // scope, which is why no append fsyncs.
 //
+// A write that loses PARTWAY is not out of scope, and is not a crash: an
+// ordinary ENOSPC or EIO leaves behind a headerless segment or a torn final
+// line, because a failing write reports the bytes it already transferred. An
+// append undoes what it can, and the reader is built to make progress past what
+// it could not — see writeSegment, decodeSegment and load. The rule is that a
+// failed append is a failed append: it never costs a conversation the entries
+// that succeeded before it.
+//
 // # Concurrency
 //
 // Internally synchronised by one leaf mutex, the posture eventring establishes:
@@ -138,10 +146,13 @@ var ErrInvalidCursor = errors.New("history: cursor was not minted for this conve
 var ErrUnknownVersion = errors.New("history: segment carries a schema version this build does not recognise")
 
 // ErrCorruptSegment reports a segment that IS of a recognised version but does
-// not decode: a line that is not an entry, an unterminated final line, or a
-// file past the ceiling a well-formed segment can reach. Deliberately distinct
-// from ErrUnknownVersion — one says "not mine to read", the other "mine, and
-// damaged".
+// not decode: a complete line that is not an entry, or a file past the ceiling a
+// well-formed segment can reach. Deliberately distinct from ErrUnknownVersion —
+// one says "not mine to read", the other "mine, and damaged".
+//
+// An UNTERMINATED final line is deliberately not in that list: it is the residue
+// of a write that lost partway, it is dropped rather than refused, and
+// decodeSegment carries the reasoning.
 var ErrCorruptSegment = errors.New("history: segment does not decode")
 
 // Entry is one retained wire envelope: the durable id this package mints plus
@@ -303,8 +314,8 @@ func (s *Store) Append(convID conversations.ConversationID, typ string, payload 
 		// does not say. Drop the belief rather than append against it: the next
 		// call re-derives the active segment, its size and the next id from
 		// what is actually on disk. That is also what gets a conversation
-		// moving again when the cleanup below could not run and a zero-length
-		// segment remains (load rolls past one).
+		// moving again when writeSegment's undo could not run and a residue
+		// remains: load rolls past a segment it cannot safely append to.
 		c.loaded = false
 		return 0, err
 	}
@@ -405,7 +416,7 @@ func (s *Store) Page(convID conversations.ConversationID, cursor string, limit i
 	var oldest cursorPos
 	full := false
 	for i := start; i >= 0 && !full; i-- {
-		entries, _, err := s.readSegment(filepath.Join(dir, segs[i].name))
+		entries, _, _, err := s.readSegment(filepath.Join(dir, segs[i].name))
 		if err != nil {
 			return Page{}, err
 		}
@@ -464,11 +475,13 @@ func (s *Store) Page(convID conversations.ConversationID, cursor string, limit i
 // which a crash mid-append can produce and which would otherwise restart the id
 // space at 1 while older entries still carry higher ids.
 //
-// A newest segment of ZERO length is the same tolerance one step further, and
-// it is the state writeSegment's cleanup could not remove: it carries no header,
-// so appending an entry to it would put an entry line where the version belongs
-// and make the segment unreadable for good. It is reported as full instead, so
-// the next append rolls past it — listSegments tolerates the gap that leaves by
+// A newest segment that decodeSegment reports as INCOMPLETE is the same
+// tolerance one step further, and it covers both residues a write that lost can
+// leave when writeSegment's undo could not run: a file carrying no header, so
+// that an entry appended to it would sit where the version belongs; and a file
+// whose last line is torn, so that an appended entry would be concatenated onto
+// it and neither line would decode. Both are reported as FULL instead, so the
+// next append rolls past — listSegments tolerates the gap that leaves by
 // construction, which is the same property that lets a retention policy delete
 // segments out of the middle.
 func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog, error) {
@@ -487,14 +500,14 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 	}
 	c.nextID = 1
 	for i := len(segs) - 1; i >= 0; i-- {
-		entries, size, err := s.readSegment(filepath.Join(dir, segs[i].name))
+		entries, size, complete, err := s.readSegment(filepath.Join(dir, segs[i].name))
 		if err != nil {
 			return nil, err
 		}
 		if i == len(segs)-1 {
 			c.seg, c.segBytes = segs[i].num, size
-			if size == 0 {
-				c.segBytes = s.maxSegmentBytes // headerless: roll past it
+			if !complete {
+				c.segBytes = s.maxSegmentBytes // not appendable: roll past it
 			}
 		}
 		if n := len(entries); n > 0 {
@@ -507,9 +520,7 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 }
 
 // writeSegment appends buf to one segment file and reports how many bytes
-// landed. Callers hold s.mu, which is what makes each append one uninterrupted
-// write and therefore what makes a torn line unreachable while the process
-// lives.
+// landed. Callers hold s.mu, so each append is one uninterrupted write.
 //
 // No handle is kept open between calls and nothing is fsynced: the file is
 // append-only so there is no partial state to make atomic, and durability here
@@ -521,13 +532,21 @@ func (s *Store) load(convID conversations.ConversationID, dir string) (*convLog,
 // it refuses an existing path of any kind, so a header can never be appended
 // into a file that already holds entries.
 //
-// A fresh segment is created before it is written, so a write or close that
-// loses — ENOSPC, EDQUOT, EIO; ordinary failures, not a machine crash — would
-// otherwise leave behind a segment holding no header. The file is removed on
-// that path, which is what keeps a failed append a failed append rather than a
-// conversation the reader then refuses whole. The removal is best-effort by
-// design: load tolerates a headerless segment (rolling past it) so that the
-// guarantee does not rest on this cleanup succeeding.
+// A write or a close that loses — ENOSPC, EDQUOT, EIO; ordinary failures, not a
+// machine crash — leaves a residue that differs only by which file it lands in,
+// because os.File.Write reports the bytes it DID transfer alongside the error:
+// a fresh segment holding no header or a partial one, or an active segment
+// whose last line is torn. Both are undone here, the fresh one by removing the
+// file and the active one by truncating it back to the length it had before this
+// call, read off the file rather than taken from this process's belief about it.
+// That is what keeps a failed append a failed append.
+//
+// The undo is best-effort BY DESIGN and the guarantee does not rest on it:
+// os.Remove and Truncate can themselves fail, and a machine crash between the
+// create and the write leaves the same residue with no undo to run at all. What
+// carries the guarantee — a conversation is never permanently unreadable — is
+// that load reports either residue as full and rolls past it, and decodeSegment
+// drops a torn tail rather than refusing the segment that holds it.
 func (s *Store) writeSegment(path string, buf []byte, fresh bool) (int64, error) {
 	flags := os.O_WRONLY | os.O_APPEND | syscall.O_NOFOLLOW
 	if fresh {
@@ -537,37 +556,59 @@ func (s *Store) writeSegment(path string, buf []byte, fresh bool) (int64, error)
 	if err != nil {
 		return 0, fmt.Errorf("history: open segment %q: %w", path, err)
 	}
-	discardFresh := func() {
-		if fresh {
-			_ = os.Remove(path)
+	// The length to undo an active segment back to. Stat, not c.segBytes: a
+	// truncate to a length this process merely believes destroys entries that
+	// did land. -1 says no undo is available, and the residue is then the
+	// reader's tolerance to carry. Mutually exclusive with fresh, whose undo is
+	// to remove the file whole.
+	pre := int64(-1)
+	if !fresh {
+		if info, err := f.Stat(); err == nil {
+			pre = info.Size()
 		}
 	}
 	n, err := f.Write(buf)
 	if err != nil {
+		// Through the descriptor this call already opened, before it is closed:
+		// truncating by name would re-resolve a path the O_NOFOLLOW open has
+		// vouched for once already.
+		if pre >= 0 {
+			_ = f.Truncate(pre)
+		}
 		_ = f.Close()
-		discardFresh()
+		if fresh {
+			_ = os.Remove(path)
+		}
 		return 0, fmt.Errorf("history: write segment %q: %w", path, err)
 	}
 	if err := f.Close(); err != nil {
-		discardFresh()
+		// Some filesystems report a deferred write error here, so the same
+		// residue is possible; the descriptor is gone, so the undo goes by name.
+		if pre >= 0 {
+			_ = os.Truncate(path, pre)
+		}
+		if fresh {
+			_ = os.Remove(path)
+		}
 		return 0, fmt.Errorf("history: close segment %q: %w", path, err)
 	}
 	return int64(n), nil
 }
 
 // readSegment reads one segment whole and decodes it, reporting the entries,
-// the file's size, and the two AC-4 counters' worth of work it did. Callers
-// hold s.mu.
+// the file's size, whether a new entry may be appended to it (decodeSegment's
+// completeness), and the two AC-4 counters' worth of work it did. Callers hold
+// s.mu.
 //
 // The read is capped at segmentCeiling: a well-formed segment cannot exceed it,
 // so a file that reaches it was not written by this package — enlarged out of
 // band, or a symlink that slipped past listSegments' leaf check — and is
 // refused rather than allocated. Reading the segment whole is what bounds the
 // work: the bound is the segment constant, never the log's size.
-func (s *Store) readSegment(path string) ([]segEntry, int64, error) {
+func (s *Store) readSegment(path string) ([]segEntry, int64, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, 0, fmt.Errorf("history: open segment %q: %w", path, err)
+		return nil, 0, false, fmt.Errorf("history: open segment %q: %w", path, err)
 	}
 	defer func() { _ = f.Close() }() // read-only; nothing to report on close
 
@@ -576,17 +617,17 @@ func (s *Store) readSegment(path string) ([]segEntry, int64, error) {
 	s.segmentsOpened++
 	s.readBytes += int64(len(data))
 	if err != nil {
-		return nil, 0, fmt.Errorf("history: read segment %q: %w", path, err)
+		return nil, 0, false, fmt.Errorf("history: read segment %q: %w", path, err)
 	}
 	if int64(len(data)) > ceiling {
-		return nil, 0, fmt.Errorf("%w: %q exceeds the size a segment can reach", ErrCorruptSegment, path)
+		return nil, 0, false, fmt.Errorf("%w: %q exceeds the size a segment can reach", ErrCorruptSegment, path)
 	}
 
-	entries, err := decodeSegment(data)
+	entries, complete, err := decodeSegment(data)
 	if err != nil {
-		return nil, 0, fmt.Errorf("%q: %w", path, err)
+		return nil, 0, false, fmt.Errorf("%q: %w", path, err)
 	}
-	return entries, int64(len(data)), nil
+	return entries, int64(len(data)), complete, nil
 }
 
 // resolveDir returns the symlink-resolved path of convID's log directory,

@@ -405,12 +405,19 @@ makes **no `slog` call at all** — it takes no logger, which is the strongest
 form of that guarantee, and matches `eventring`'s and `attachments`'s posture
 (the consumer logs, the primitive does not).
 
-A truncated tail — a final line with no terminating newline — is
-`ErrCorruptSegment`, not a silent skip. It is unreachable while the process
-lives (writes are serialised under the mutex and each is one `write` call) and
-only a machine crash mid-append can produce it, which the ticket puts explicitly
-out of scope. Surfacing it as an explicit error beats silently dropping data or
-appending after it.
+A truncated tail — a final line with no terminating newline — is **dropped**,
+and the segment holding it is reported as one no entry may be appended to.
+`ErrCorruptSegment` is for a *complete* line that does not decode, which nothing
+this package writes can produce.
+
+*Revised 2026-09-05 (rework 2); the original text is quoted in the Revisions
+entry.* It said a truncated tail was `ErrCorruptSegment` because a partial write
+is "unreachable while the process lives" and takes a machine crash, which the
+ticket puts out of scope. That premise is false: a failing `write(2)` reports the
+bytes it already transferred, so an ordinary ENOSPC or EIO produces a torn line
+with no crash anywhere. Refusing it costs the conversation every entry that
+*was* acknowledged, permanently — while the bytes being dropped are an entry
+whose `Append` returned an error and which no producer was ever told was stored.
 
 ## Testing strategy
 
@@ -610,7 +617,9 @@ matters, *a conversation is never permanently unreadable*, rests on (3), which
 holds whatever produced the file. That split is also what makes the fix
 testable: an ENOSPC on a freshly created file cannot be induced from a unit test
 without a seam in production code, but the state it leaves can simply be planted
-on disk, and that is what `TestZeroLengthSegmentIsToleratedAndRolledPast` does.
+on disk, and that is what `TestHeaderlessSegmentIsToleratedAndRolledPast` does
+(named `TestZeroLengthSegmentIsToleratedAndRolledPast` when this entry was
+written; renamed in rework 2, where it grew a second residue).
 
 **Why not reuse the zero-length segment.** The alternative shape — adopt it as
 the active segment and write the header into it — was rejected. It would have to
@@ -625,7 +634,8 @@ out-of-band-enlarged segment pinning an allocation — and stopped there. The
 write direction belonged under the same heading and was not opened: a failed
 write can leave state that permanently denies the feature, which is a
 denial-of-service against one conversation reachable from an ordinary full disk.
-Both halves are now closed, and the general form is worth carrying into
+Both halves are now closed — **wrong, and corrected by the rework-2 entry below:
+this closed the fresh-segment half only.** The general form is worth carrying into
 `#2114`/`#2115`: for an append-only store the durability question is not only
 "did the bytes land" but "what does a partial failure leave behind, and can the
 next reader still make progress past it".
@@ -654,3 +664,73 @@ because the reason for the cost lives in this plan, not in the producer's.
   reaches it), `decodeSegment`'s unterminated-final-line and no-newline-at-all
   arms, and `Page`'s refusal of a cursor for a conversation with no log
   directory. Each mutant was confirmed to redden the new test.
+
+### 2026-09-05 — a lost write to the active segment (verifier MUST FIX, rework 2)
+
+**Finding.** The entry above closed one branch of `writeSegment`'s `if fresh`.
+The other branch is the one nearly every append takes, and it had the same
+defect: a `write(2)` into the *active* segment that transfers part of its buffer
+and then fails leaves a torn final line, which `decodeSegment` refused as
+`ErrCorruptSegment`. `readSegment` is on both paths, so `Page` failed **and**
+`Append` failed through `load`, for that conversation, forever — including every
+entry acknowledged before the failure. Clearing `loaded` did not help: the
+re-derivation reads the same damaged segment.
+
+Rework 1's tolerance did not reach it, because `load` rolled past a *zero-length*
+newest segment specifically, and § Error handling licensed leaving it open by
+asserting a torn tail takes a machine crash. It does not: `os.File.Write` returns
+the bytes already transferred alongside the error, so an ordinary ENOSPC, EDQUOT
+or EIO produces one. That premise is now corrected in § Error handling rather
+than worked around here.
+
+**Design change**, three parts:
+
+1. **§ Error handling — a torn tail is dropped, not refused.** `decodeSegment`
+   returns the entries before it and reports the segment as one no entry may be
+   appended to. The dropped bytes are an entry whose `Append` returned an error,
+   so no producer was ever told they were stored; refusing them denies the ones
+   that *were*. `ErrCorruptSegment` now means a **complete** line that does not
+   decode — a shape nothing this package writes produces.
+2. **§ Design, the append path — `load` rolls past any segment it cannot safely
+   append to**, not only a zero-length one. `decodeSegment`'s second return
+   answers exactly "may an entry be appended here", and the three noes are one
+   rule: no header at all, a header torn mid-line, and a torn entry line. The
+   first two are also the residue of a *fresh*-segment write that lost inside the
+   header — a case rework 1's zero-length tolerance did not cover either.
+3. **§ Design, the append path — the undo is no longer fresh-only.**
+   `writeSegment` truncates an active segment back to the length it had before
+   the call, taken from `Stat` on the descriptor it already opened rather than
+   from `convLog.segBytes`: a truncate to a length this process merely *believes*
+   would destroy entries that did land.
+
+**The fabrics stay different, and the split is the same one rework 1 argued.**
+(3) prevents the state and (1)+(2) make it survivable whatever produced it — a
+failed `Truncate`, or a machine crash between the write and the undo with no undo
+to run at all. The guarantee that carries — *a conversation is never permanently
+unreadable, and a failed append never costs it the entries that succeeded* —
+rests on the tolerance, which is why the tolerance is what the tests pin.
+
+**Testing, and its honest limit.** The tolerances are tested by planting each
+residue on disk (`TestTornFinalLineIsToleratedAndRolledPast`,
+`TestHeaderlessSegmentIsToleratedAndRolledPast` over both headerless shapes, and
+four new arms in `TestDecodeSegmentArms` including the completeness each answers
+with). Each was confirmed by mutation (`go test -overlay`): restoring the
+`ErrCorruptSegment` refusal, restoring the `ErrUnknownVersion` refusal, and
+restoring `load`'s zero-length-only rule each redden the new tests.
+
+The **truncate itself remains uncovered**, as `os.Remove` did in rework 1. A
+short write needs a real `write(2)` that fails after transferring bytes, and
+`RLIMIT_FSIZE` — the trigger the review used to reproduce the defect — is not
+enforced on this machine's darwin/APFS: measured 2026-09-05, with the soft limit
+confirmed at 340 bytes by `Getrlimit`, an 86-byte append at offset 300 returned
+`n=86, err=nil` and grew the file to 386, and a write starting *beyond* the limit
+behaved the same. A test built on it would skip on the machine the gate runs on
+while reading as coverage, so it was written, measured, and removed rather than
+shipped. Inducing the failure otherwise needs a fault seam in production code.
+
+**Carried into `#2114`/`#2115` alongside the lock-hold note above.** The general
+form, stated once more because rework 1 stated it correctly and then applied it
+to one branch: for an append-only store the durability question is not only "did
+the bytes land" but "what does a partial failure leave behind, and can the next
+reader still make progress past it" — asked of **every** branch that writes, not
+of the one the finding arrived on.

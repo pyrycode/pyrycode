@@ -109,32 +109,39 @@ func encodeEntry(e Entry) ([]byte, error) {
 // is what "decodes no entries from that segment, rather than parsing it as the
 // version it does know" means.
 //
-// A final line with no terminating newline is ErrCorruptSegment rather than a
-// silent skip. It is unreachable while a process lives — writes are serialised
-// under the store's mutex and each is one write call — so it can only be the
-// tail of a machine crash, which is out of scope for this package's durability
-// promise. Surfacing it beats dropping data or appending after it.
+// It also reports whether the segment is COMPLETE — every line it holds is
+// terminated and its first line is a header this build knows — which is the
+// same question as "may a new entry be appended to this file". A segment that is
+// not complete is one an append would damage: concatenated onto a torn line, or
+// written where the version belongs.
+//
+// A trailing line with no terminating newline is DROPPED rather than refused.
+// It is the residue of a write that transferred part of its buffer and then
+// lost — os.File.Write reports the bytes it did transfer alongside the error, so
+// an ordinary ENOSPC or EIO produces it, not only a machine crash. Those bytes
+// are an entry whose Append returned an error and which was therefore never
+// acknowledged to a producer, so dropping them loses nothing anyone was told was
+// stored; refusing them would instead deny every entry that WAS acknowledged,
+// for the life of the conversation. A complete line that does not decode is a
+// different thing and stays ErrCorruptSegment: nothing this package writes can
+// produce one.
 //
 // No error names a line's content. The payload is conversation content, so
 // refusals carry the entry's ORDINAL and nothing else.
-func decodeSegment(data []byte) ([]segEntry, error) {
-	// A zero-length file makes no version claim at all, so it is not a version
-	// this build fails to recognise — it is a segment created and never written,
-	// which writeSegment produces when its first write loses and its cleanup
-	// cannot run. It holds no entry, and saying so lets a reader walk past it to
-	// the segments that do rather than refusing the whole conversation. A file
-	// with bytes but no newline is a different thing and stays a version
-	// refusal: something wrote it, and this build cannot say what.
-	if len(data) == 0 {
-		return nil, nil
-	}
+func decodeSegment(data []byte) ([]segEntry, bool, error) {
 	nl := bytes.IndexByte(data, '\n')
 	if nl < 0 {
-		return nil, fmt.Errorf("%w: segment carries no header line", ErrUnknownVersion)
+		// No complete line, so no version claim was ever made — this is not a
+		// version this build fails to recognise. It is a segment created and
+		// never written (writeSegment's cleanup could not run) or one whose
+		// first write tore inside the header. Either way it holds no entry, and
+		// saying so lets a reader walk past it to the segments that do rather
+		// than refusing the whole conversation.
+		return nil, false, nil
 	}
 	var h segmentHeader
 	if err := json.Unmarshal(data[:nl], &h); err != nil || h.Format != segmentFormat || h.Version != segmentVersion {
-		return nil, fmt.Errorf("%w: segment is not %s v%d", ErrUnknownVersion, segmentFormat, segmentVersion)
+		return nil, false, fmt.Errorf("%w: segment is not %s v%d", ErrUnknownVersion, segmentFormat, segmentVersion)
 	}
 
 	var out []segEntry
@@ -142,17 +149,17 @@ func decodeSegment(data []byte) ([]segEntry, error) {
 	for rest := data[nl+1:]; len(rest) > 0; {
 		i := bytes.IndexByte(rest, '\n')
 		if i < 0 {
-			return nil, fmt.Errorf("%w: entry %d is unterminated", ErrCorruptSegment, len(out)+1)
+			return out, false, nil // torn tail: everything before it still stands
 		}
 		var e Entry
 		if err := json.Unmarshal(rest[:i], &e); err != nil {
-			return nil, fmt.Errorf("%w: entry %d does not decode", ErrCorruptSegment, len(out)+1)
+			return nil, false, fmt.Errorf("%w: entry %d does not decode", ErrCorruptSegment, len(out)+1)
 		}
 		out = append(out, segEntry{entry: e, offset: offset})
 		offset += int64(i + 1)
 		rest = rest[i+1:]
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // segmentRef is one segment of one conversation, in ascending number order.
