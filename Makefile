@@ -25,6 +25,14 @@
 #                   never the first real-stack execution. Needs live claude creds
 #                   (see docs/knowledge/features/e2e-realclaude.md); spends real
 #                   tokens and shares the Max-plan usage window.
+#   make install  — build HEAD stamped dev-<sha>, swap it into
+#                   ~/.local/bin/pyry by rename, keep a dated backup plus
+#                   pyry.prev, and bounce the managed daemon. NO_RESTART=1
+#                   swaps only. Never `cp` over the live binary by hand: on
+#                   Apple silicon that kills the daemon and leaves a file the
+#                   kernel refuses to exec (seen 2026-09-02). Runs no gate;
+#                   preship stays the deliberate step before a swap.
+#   make rollback — put pyry.prev back and bounce the daemon.
 #   make linux    — cross-compile for pyrybox (linux/amd64)
 #   make clean    — remove build artifacts
 #
@@ -144,6 +152,17 @@ docs-guard:
 .PHONY: build
 build:
 	$(GO) build -o $(BIN) ./cmd/pyry
+
+# install and rollback drive the operator's own daemon. The logic lives in
+# scripts/install-dev.sh so the swap is one reviewed path rather than a
+# recipe retyped from a runbook. PYRY_INSTALL_DIR overrides ~/.local/bin.
+.PHONY: install
+install:
+	NO_RESTART=$(NO_RESTART) ./scripts/install-dev.sh install
+
+.PHONY: rollback
+rollback:
+	NO_RESTART=$(NO_RESTART) ./scripts/install-dev.sh rollback
 
 .PHONY: linux
 linux:
