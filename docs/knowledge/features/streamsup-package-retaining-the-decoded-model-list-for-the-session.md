@@ -1,7 +1,8 @@
 # Retaining the decoded model list for the session (#1840)
 
-_See also: [the twin retention for the slash-command list](#retaining-the-decoded-slash-command-list-the-twin-2004) and
-[the third application, for the background-task roster](#retaining-the-decoded-background-task-roster-the-third-application-2077), below._
+_See also: [the twin retention for the slash-command list](#retaining-the-decoded-slash-command-list-the-twin-2004),
+[the third application, for the background-task roster](#retaining-the-decoded-background-task-roster-the-third-application-2077),
+and [the fourth, for per-model context windows](#retaining-the-per-model-context-windows-the-fourth-application-2106), below._
 
 `emitModelList` (above) mints one `turnevent.ModelList` per child and hands it to the parser's sink —
 but that sink is `sink.sinkFor(cfg.SessionID)`, the droppable-class send into the turn-busy fan-in
@@ -159,3 +160,62 @@ diff — one roster retained, never a pair. `turnevent.BackgroundTaskRoster`'s o
 edit: it is scoped to the event family rather than the parser, and its "diffing successive snapshots
 is a legitimate thing for a *consumer* to do on its own terms" survives verbatim, since the hold makes
 no inference.
+
+## Retaining the per-model context windows, the fourth application (#2106)
+
+`sessionModelWindowHold` applies the identical placement to `turnevent.TurnEnd`'s `ModelWindows` /
+`DroppedModelWindows` pair — the first hold in the family to retain **fields** of a variant rather than
+the whole variant, since `Reason` is turn-specific and must not travel with them. `newSessionParser`
+now returns one `sessionRetentions` struct instead of a growing positional tuple, the flip its own doc
+had already nominated this fourth hold to make, and `streamRunner` embeds it rather than restating four
+fields — so the three existing accessors and the factory test's assertions keep working by promotion.
+
+Three things diverge from all three siblings, and none transfers by analogy:
+
+- **Store-side clone — the first departure of the four applications.** Every sibling stores what it is
+  handed uncopied, on the ground that the producer allocates fresh per emit and retains no reference.
+  Both halves are true here too, and insufficient: `decodeModelWindows` pre-allocates
+  `make([]turnevent.ModelWindow, 0, len(rl.ModelUsage))` — sized by claude's map, not by
+  `maxModelWindowEntries` — and clones only on the over-cap path. A `modelUsage` padded with unusable
+  entries yields a short slice over a long backing array; storing as-handed the way the siblings do
+  would pin that array for the session's life. `Sink` clones on the write side to drop the pad before it
+  reaches long-lived state. General shape: "stored without copying because the producer allocates fresh"
+  is only half the argument for skipping a copy — check the producer's *capacity*, not just its
+  freshness.
+- **Silence is a no-op, not an erasure, and the mutant that would prove otherwise is on record.** A
+  `result` line without a usable `modelUsage` is claude saying nothing about windows, not claude saying
+  the window changed; erasing on silence would make a reader flicker between the true window and a
+  fallback across turns. Confirmed by mutation rather than asserted: swapping the store predicate for
+  the siblings' unconditional replace reddens both rows of `TestSessionModelWindowHold_SilentTurnIsANoOp`
+  and `TestNewSessionParser_DecodesAndRetainsModelWindows`.
+- **A sibling's opening paragraph can be false about the exact property it exists to justify.** All
+  three siblings open by stating their variant is droppable class, so the retention sits upstream of
+  `sinkFor`'s fan-in refusal. `turnMarkFor` answers `turnMarkClose` for `TurnEnd`, not `turnMarkNone` —
+  it rides the `streamTurnSinkCloseReserve` band and is never refused at `droppableCap`. The retention
+  still belongs upstream of the send, for a different reason stated on its own terms: past the reserve a
+  closer can still be lost, at Warn. The saturation test inherits the same trap in miniature — the
+  sibling's one-slot fixture still passes, but only because a one-slot channel makes "past
+  `droppableCap`" and "genuinely full" coincide; the *arm* of `sinkFor` doing the refusing underneath is
+  different.
+
+**The ~25x string-footprint understatement recorded for #2004 has now failed to recur a fourth time, for
+a different and checkable reason than #2077's.** `ModelID` is claude-authored text like every other
+retained string in this family, but it is decoded as an `encoding/json` map key rather than sliced out
+of a parse line by `truncateField` — a decoded map key is a fresh allocation, not a window into the
+input buffer. Measured directly rather than assumed: unmarshalling a 300 KB line and comparing the key's
+`unsafe.StringData` against the input's bounds showed no aliasing. The retained bound is genuinely
+`maxModelWindowEntries` × (`maxModelWindowID` + struct overhead) ≈ 4.5 KB per session. Worth re-checking
+this way for each new field this family gains, rather than assuming a prior field's aliasing status
+transfers to the next one.
+
+**A fixture's provenance comment must name every capture it draws from, not just the one that inspired
+it.** `TestNewSessionParser_DecodesAndRetainsModelWindows`'s doc claimed its three-entry `modelUsage`
+fixture was "the committed capture's own, copied rather than invented" — true of two of the three
+entries (the alias pair, from the bypass-reescalation capture), false of the third: `claude-sonnet-5`'s
+key and window are composed from a second capture (`permission_mode_switch`), with its usage numbers
+borrowed from the first capture's other entry. The fixture itself is fine — three ids at two distinct
+windows is what makes the producer's sort observable, which two aliased entries at one window would not
+— the defect was only in the sentence vouching for it, caught by code review re-deriving the citation
+rather than trusting it. Same shape as the stale `#1867`/`#1857` citation two sections up: in a family
+whose convention is that a citation can be checked, a citation naming one source when the fixture draws
+from two is a defect even when the fixture it describes is correct.
