@@ -11,7 +11,8 @@ turn-end. Landed in #704 (EPIC #597 Phase 3 — interactive modals/permissions/
 queue, ADR 025); the introspection / remove-by-id / change-notification API was
 added additively in #719; the per-conversation backlog bound landed in
 [#869](../codebase/869.md); the persistent-failure give-up bound landed in
-[#1000](../codebase/1000.md).
+[#1000](../codebase/1000.md); the delivered-notification seam feeding the
+durable conversation log landed in #2115.
 
 The package shipped **engine only, unwired** in #704 — the same rhythm as the
 `turnbridge` producer (#606 shipped unwired, #616 wired it). [#721](../codebase/721.md)
@@ -74,6 +75,14 @@ type ChangeFunc func(convID string)
 // to it, exactly as OnChange routes to the queue_state producer.
 type GiveUpFunc func(convID, reason string)
 
+// DeliveredFunc is the injected delivered-notification seam (#2115) — mirrors
+// ChangeFunc/GiveUpFunc (never under q.mu, MUST NOT block, concurrency-safe,
+// nil ⇒ disabled), fired once per head whose delivery was CONFIRMED. Unlike
+// ChangeFunc it is not edge-triggered: the delivered item is gone from the
+// backlog moments later, so it carries the item itself (the same QueuedMessage
+// projection Snapshot/SnapshotAll build — no delivery field, see § Security).
+type DeliveredFunc func(convID string, msg QueuedMessage)
+
 // PendingFunc classifies a delivery error as a legitimate hold — the head is
 // being deliberately withheld awaiting an external decision — rather than a
 // delivery failure (#1014). While it returns true the drain retries WITHOUT
@@ -106,6 +115,7 @@ type Config struct {
     OnChange                 ChangeFunc    // optional (#719); nil ⇒ change notification disabled
     GiveUpAfter              time.Duration // #1000: <= 0 ⇒ defaultGiveUpAfter (2m); per-head persistent-failure bound
     OnGiveUp                 GiveUpFunc    // optional (#1000); nil ⇒ give-up notification disabled (unwired in production)
+    OnDelivered              DeliveredFunc // optional (#2115); nil ⇒ delivered notification disabled
     Pending                  PendingFunc   // optional (#1014); nil ⇒ no exemption from GiveUpAfter
     Logger                   *slog.Logger  // nil ⇒ slog.Default()
 }
@@ -356,6 +366,45 @@ to bridge.
 See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007.md),
 [codebase/1008.md](../codebase/1008.md).
 
+## Delivered notification (#2115)
+
+A fourth optional seam beside `OnChange`/`OnGiveUp`/`Pending`, added so the
+operator's own typed message could get a producer into the durable
+per-conversation log ([history-package.md § Producers](history-package.md#producers-2114-2115))
+without touching `DeliverFunc`. `DeliveredFunc(convID string, msg QueuedMessage)`
+fires from the drain, after `q.mu` is released, once per **confirmed**
+delivery — unconditional on `advanced`, unlike the neighbouring `q.notify`:
+that guard is about the backlog, and once the write is confirmed the text has
+reached claude's stdin and will be answered, so a `Remove` racing the commit
+cancels nothing that already happened.
+
+**Why `QueuedMessage` and not a bespoke parameter list.** `DeliverFunc`'s 64
+`Deliver:` literals made a signature widening unsplittable, which forced an
+additive seam — but the parameter *type* was still a choice, and reusing the
+existing `Snapshot`/`SnapshotAll` projection rather than inventing
+`func(convID, messageID, text string)` was the one that mattered. `QueuedMessage`
+declares no `delivery` field, so this seam is *structurally* incapable of
+handing a consumer the daemon-composed payload that may name an on-host path
+(§ Security, `delivery`) — a consumer cannot leak it by forgetting a filter,
+where an all-strings signature would have compiled just as well with `text`
+and `messageID` transposed. **A projection type shaped to omit a field for one
+consumer's sake is a leak barrier that composes to a new consumer for free —
+reach for it before inventing a parameter list.**
+
+**A negative-only test proves nothing until its fire site exists.** Built RED
+in two steps (declare the seam, then wire the fire site), the give-up and
+removed-before-commit assertions here were green from the moment the seam was
+declared and stayed green with no fire site wired at all — nothing
+distinguished "correctly silent" from "cannot possibly fire yet" except a
+paired positive test's timeout. A suite of purely negative assertions gives no
+RED signal; pair every "does not fire" case with a "does fire" case exercising
+the same path.
+
+`QueuedMessage.TS` on the delivered value is the **enqueue** timestamp, not the
+confirmation time — a durable-record consumer wanting ordering must mint its
+own (`internal/history`'s producers all hoist `time.Now().UTC()` at their own
+commit point, never from this field).
+
 ## Concurrency model
 
 - **Goroutines:** one `Run` goroutine (the daemon spawns it in `runSupervisor` and
@@ -393,6 +442,13 @@ See [codebase/1000.md](../codebase/1000.md), [codebase/1007.md](../codebase/1007
 - **Shutdown:** parent ctx cancel → `deliver`'s `WaitReady` returns ctx error (or
   `sleepCtx` returns false) → each drain clears `draining` and returns → `wg.Done`
   → `Run`'s `wg.Wait` unblocks → `Run` returns `ctx.Err()`. No drain outlives `Run`.
+  A delivery that confirms in the same instant shutdown begins can land in the
+  window `drain` checks `ctx.Err()` **before** the confirmed-delivery branch —
+  that head is left queued and fires neither `q.notify` nor (#2115)
+  `OnDelivered`: the message reached claude's stdin but produces no downstream
+  record. Inherited from #487/#1484's ordering, not introduced by any one seam;
+  a consumer that persists what a seam reports (`internal/history`) is not
+  gap-free across a daemon restart for this reason.
 
 ## Error handling
 
@@ -537,12 +593,18 @@ are inbound message-dispatch **policy** on an internet-exposed surface (`#704` i
 
 ```
 internal/msgqueue/
-├── queue.go                  DeliverFunc, ChangeFunc, GiveUpFunc (#1000), QueuedMessage, Config,
-│                             Queue, queued, convQueue; New / Enqueue / Snapshot / SnapshotAll
-│                             (#878) / Remove / Run; notify, notifyGiveUp (#1000),
+├── queue.go                  DeliverFunc, ChangeFunc, GiveUpFunc (#1000), DeliveredFunc (#2115),
+│                             QueuedMessage, Config, Queue, queued, convQueue; New / Enqueue /
+│                             Snapshot / SnapshotAll (#878) / Remove / Run; notify,
+│                             notifyGiveUp (#1000), notifyDelivered (#2115),
 │                             maybeSpawnDrainLocked, drain, giveUp (#1000), advanceLocked,
 │                             shrinkLocked, sleepCtx; defaultRetryInterval,
 │                             defaultMaxQueuedPerConversation (#869), defaultGiveUpAfter (#1000)
+├── delivered_test.go         #2115: fires once on confirmed delivery carrying text (never
+│                             delivery), exactly one call across retries, no call on give-up,
+│                             no call when the head is removed before commit, fires even when a
+│                             Remove races a confirmed delivery (the test that pins "unconditional
+│                             on advanced" against an `if advanced` regression)
 ├── queue_test.go             #704: ordered one-at-a-time drain (in-flight counter fails >1),
 │                             empty no-op, per-conversation independence, idle-drains-promptly,
 │                             lossless-retry/respawn, stable independent ids,
@@ -628,3 +690,10 @@ give-up-notification path as the injected `GiveUpFunc`.
   (`streamApprovalBridge.ApprovalParked`, #1919) — see § Bounded give-up above for the gating
   pattern. Engine-side unchanged apart from the doc comments on `PendingFunc` and `Config.Pending`,
   which no longer name the deleted trust-modal producer as the wiring.
+- **#2115 added `OnDelivered`, the engine's fourth seam and the first
+  consumed outside `cmd/pyry`'s wire producers.** `cmd/pyry`'s `newOperatorMessageHistory` hooks it
+  to write the operator's own typed message into [`internal/history`](history-package.md)'s durable
+  conversation log — the first consumer for which `newInboundDeliver` (the delivery seam itself)
+  could not have worked, since it sees only the composed `delivery` payload and never `text`. See
+  § Delivered notification above and
+  [history-package.md § Producers](history-package.md#producers-2114-2115).
