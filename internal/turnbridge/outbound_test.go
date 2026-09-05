@@ -2453,3 +2453,64 @@ func TestTruncate(t *testing.T) {
 		})
 	}
 }
+
+// TestMapEventTurnEnd_ModelWindowsStayOffTheWire asserts the claim #2101's design
+// rests on rather than leaving it inferred from reading the arm: a TurnEnd
+// carrying per-model context windows maps to exactly the payload one without them
+// maps to.
+//
+// The property is structural — MapEvent's arm builds protocol.TurnEndPayload field
+// by field rather than embedding the event — but "structural" is what a later edit
+// silently undoes. A reader who adds a field to that literal to publish the window
+// reddens this test, which is the point: publishing it is #2102's decision to make
+// deliberately, with the envelope arithmetic neither cap states today, not one that
+// arrives as a side effect.
+//
+// Both halves matter. The two payloads are compared to each other, so the row
+// cannot pass by both being wrong in the same way; and the JSON encoding is
+// compared too, because a field added with a `json:"-"` tag would leave the structs
+// unequal while the wire stayed clean, and one added to an embedded struct would do
+// the reverse.
+func TestMapEventTurnEnd_ModelWindowsStayOffTheWire(t *testing.T) {
+	t.Parallel()
+	tc := TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 0}
+	bare := turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}
+	loaded := turnevent.TurnEnd{
+		Reason: turnevent.TurnEndReasonEndTurn,
+		ModelWindows: []turnevent.ModelWindow{
+			{ModelID: "claude-haiku-4-5-20251001", WindowTokens: 200000},
+			{ModelID: "claude-sonnet-5", WindowTokens: 1000000},
+		},
+		DroppedModelWindows: 7,
+	}
+
+	bareTyp, barePayload, bareOK := MapEvent(bare, tc)
+	gotTyp, gotPayload, gotOK := MapEvent(loaded, tc)
+	if !bareOK || !gotOK {
+		t.Fatalf("MapEvent ok: bare %v, loaded %v, want both true", bareOK, gotOK)
+	}
+	if gotTyp != bareTyp {
+		t.Errorf("envelope type: got %q, want %q", gotTyp, bareTyp)
+	}
+	if !reflect.DeepEqual(gotPayload, barePayload) {
+		t.Errorf("payload: got %#v, want %#v — a widened TurnEnd must not widen the "+
+			"envelope; publishing the window is #2102's call", gotPayload, barePayload)
+	}
+	wantJSON, err := json.Marshal(barePayload)
+	if err != nil {
+		t.Fatalf("marshalling the bare payload: %v", err)
+	}
+	gotJSON, err := json.Marshal(gotPayload)
+	if err != nil {
+		t.Fatalf("marshalling the loaded payload: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("payload JSON: got %s, want %s", gotJSON, wantJSON)
+	}
+	// Vacuity guard: sentinels that WOULD appear if the arm ever embedded the event.
+	for _, leak := range []string{"claude-sonnet-5", "1000000", "ModelWindows", "\"7\"", ":7"} {
+		if strings.Contains(string(gotJSON), leak) {
+			t.Errorf("payload JSON carries %q: %s", leak, gotJSON)
+		}
+	}
+}

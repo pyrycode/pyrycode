@@ -83,13 +83,134 @@ type ToolUpdate struct {
 	ResultDetail string
 }
 
-// TurnEnd marks the end of a claude turn, carrying the reason only.
+// TurnEnd marks the end of a claude turn, carrying the reason and — since #2101
+// — the context window claude reported for each model the turn touched.
 //
 // ACP models end-of-turn as the stopReason return value of session/prompt, not
 // as an event; converting TurnEnd back into that RPC return is the ACP
 // adapter's job, not this model's. Here we just carry the reason.
+//
+// THE WINDOW FIELDS RIDE THIS VARIANT RATHER THAN ONE OF THEIR OWN, and the
+// reason is that the window is learned at exactly the moment this event is
+// emitted: claude reports it on the `result` line, which IS the turn boundary,
+// so a separate variant would carry a second copy of one boundary. The
+// alternative — #1600's shape, a new variant off its own line — is the right
+// answer when the line is its own line, and this one is not.
+//
+// NONE OF IT REACHES THE WIRE, by construction rather than by omission.
+// turnbridge's MapEvent builds protocol.TurnEndPayload field by field
+// (ConversationID, TurnID, StopReason) rather than embedding this struct, so
+// widening the variant cannot widen the envelope. That is deliberate: no wire
+// consumer wants the window yet, and #2102 owns whatever publication it needs.
+// It is also why neither producer cap states a percentage of the v2
+// application-envelope — quoting one would measure a bound against a wire this
+// data never touches.
+//
+// This variant is therefore no longer comparable with ==. Nothing compared it
+// (the only TurnEnd{} in the tree is the sealed-interface assertion below), and
+// ModelList has put a slice-carrying variant through every emitter path this one
+// travels since #1812.
 type TurnEnd struct {
 	Reason TurnEndReason
+	// ModelWindows is claude's reported context window for each model the turn
+	// touched, one entry per model id claude used, SORTED BY ModelID.
+	//
+	// The sort is the daemon's and is not claude's order restored: claude sends a
+	// JSON OBJECT, which has no order to preserve, and Go randomises map iteration
+	// — so without a sort, which entries survived the count cap would differ
+	// between two runs on identical bytes. Sorting is what makes the cut
+	// reproducible. It is the one place this family orders anything itself; the
+	// list-shaped variants beside it (Models, Tasks) keep claude's order precisely
+	// because they HAVE one.
+	//
+	// EVERY ENTRY CARRIES A USABLE WINDOW. The producer drops an entry whose
+	// contextWindow is absent, zero or negative rather than reporting a zero, so a
+	// consumer joining on ModelID never has to re-ask whether the number means
+	// anything — which is the same answer contextwindow.Usage.WindowTokens gives
+	// with its own 0 (#2100), reached by not carrying the entry at all.
+	//
+	// TWO ENTRIES DO NOT IMPLY TWO MODELS. The committed captures show both shapes:
+	// a helper model beside the session's own (haiku at 200K, sonnet at 1M), and —
+	// in 27 of 30 capture files — an ALIAS PAIR naming one model twice
+	// (claude-haiku-4-5 and claude-haiku-4-5-20251001, identical window). So this
+	// list is carried whole and keyed by the id claude used: taking the max, the
+	// first, or "the one that isn't haiku" would each be wrong on one of those
+	// shapes.
+	//
+	// AN ABSENT KEY, A JSON null, A PUBLISHED EMPTY OBJECT, A modelUsage THAT DOES
+	// NOT DECODE, AND A MAP WHOSE EVERY ENTRY WAS DROPPED ARE ONE READING, SPELLED
+	// nil — ModelOption.EffortLevels' collapse (#1828), extended by two shapes that
+	// field has no equivalent of. Nothing downstream has to ask which of the five it
+	// is holding, because there is no question any of them answers differently.
+	//
+	// BOTH DIMENSIONS ARE BOUNDED at construction by the producer — how many
+	// entries (streamsup's maxModelWindowEntries) and how long one id is
+	// (streamsup's maxModelWindowID) — so neither an inflated map nor an oversized
+	// id enters the event stream, a queue, or a log.
+	ModelWindows []ModelWindow
+	// DroppedModelWindows is how many entries claude sent that this event does NOT
+	// carry; 0 when nothing was dropped. The map's true size is
+	// len(ModelWindows) + DroppedModelWindows.
+	//
+	// ONE COUNTER COVERS ALL THREE CAUSES — an unusable window, an id past the
+	// length cap, and the entry count past its cap. That is a deliberate departure
+	// from ModelList, whose DroppedModels counts a cardinality overflow only and
+	// leaves text cuts to a per-entry TruncatedFields. Here there IS no per-entry
+	// report to leave anything to: every bound on this shape DROPS rather than
+	// truncates, so a per-cause split would buy a consumer nothing — nothing renders
+	// this list, and #2102 joins on ids it either has or does not — while costing
+	// two fields to keep in step. What the single counter preserves is the property
+	// that matters: the sum above is exactly what claude sent, so an overflow is
+	// never silent.
+	//
+	// Like ModelList.DroppedModels it is DAEMON-derived rather than claude-derived:
+	// an int computed from map and slice lengths, carrying none of claude's bytes.
+	DroppedModelWindows int
+}
+
+// ModelWindow is one entry of TurnEnd.ModelWindows: the context window claude
+// reported for one model. Not an Event, so it carries no marker —
+// ModelOption's and BackgroundTask's shape, for their reason.
+//
+// The pair is claude's whole answer for one model. maxOutputTokens and
+// canonicalModel ride the same wire entry and are deliberately absent here: the
+// first is nothing this daemon reads, and the second is version-dependent —
+// present in the v2.1.220 and v2.1.239 captures, absent in v2.1.143 / v2.1.158 /
+// v2.1.199 — so a field for it would invite a consumer to depend on a key three
+// of the five observed claude versions do not send. Absence from the producer's
+// DECODE TARGET is the stronger half of that guarantee; see streamsup's
+// resultLine.
+type ModelWindow struct {
+	// ModelID is the key claude used in its modelUsage map. VERBATIM, per
+	// ModelAnnounced.Model's rule: no lowercasing, no alias expansion, no
+	// date-stamping, no family mapping, and no lookup against any published model
+	// list. It need not be dated and an alias pair may name one model twice — see
+	// TurnEnd.ModelWindows.
+	//
+	// SECURITY: this is claude-authored text. The daemon BOUNDS it (streamsup's
+	// maxModelWindowID) and does NOT sanitize it — no control-character or
+	// terminal-escape stripping happens on this path — so it stays untrusted,
+	// model-influenced text, exactly as protocol.ModelOption's SECURITY paragraph
+	// states for the three strings beside it. The render boundary owing the
+	// sanitization is the CLIENT's. Nothing renders it today, this variant being
+	// unreachable from the wire; #2102 inherits the obligation if it publishes it.
+	//
+	// It is never TRUNCATED. An id past the cap is dropped with its entry, because
+	// a cut id names no model and a consumer joining on it would silently match
+	// nothing — strictly worse than an absent entry, which it can see.
+	ModelID string
+	// WindowTokens is the context window claude reported for this model, in tokens.
+	// Always > 0: the producer drops an entry whose reading is absent, zero or
+	// negative rather than carrying one here.
+	//
+	// An int, matching contextwindow.Usage.WindowTokens — the field a gauge sizes
+	// against and the join this event exists to feed. It is claude's REPORTED
+	// number rather than one inferred from a model string, which is what makes it
+	// right by construction: the two-model capture was launched `--model sonnet`
+	// and announced the plain string claude-sonnet-5 with no [1m] variant marker,
+	// yet reports a 1M window — so any map keyed on the announced name would have
+	// been wrong there.
+	WindowTokens int
 }
 
 // BackgroundTaskStarted announces that claude started a background task — work
