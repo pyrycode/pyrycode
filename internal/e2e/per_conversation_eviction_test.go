@@ -19,14 +19,20 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// Phase 2.0 of EPIC #672: first-message lazy bind makes idle eviction
-// load-bearing — daemon RAM scales with *active* discussions, not the total
-// ever created. #677 mints+binds a dedicated claude session at
-// create_conversation time; #678 routes send_message through the bound
-// session's Pool.Activate (the cap-enforcing spawn entry). #680 adds no
-// production code: it proves that a *phone-created* discussion's bound session
-// is a full citizen of the idle-evict / active-cap machinery the bootstrap
-// already participates in.
+// Phase 2.0 of EPIC #672: idle eviction is load-bearing — daemon RAM scales
+// with *active* discussions, not the total ever created. #677 mints+binds a
+// dedicated claude session at create_conversation time; #678 routes
+// send_message through the bound session's Pool.Activate (the cap-enforcing
+// spawn entry). #680 adds no production code: it proves that a *phone-created*
+// discussion's bound session is a full citizen of the idle-evict / active-cap
+// machinery the bootstrap already participates in.
+//
+// Since #2085 the bind is still eager but the SPAWN is not: create_conversation
+// registers the session evicted and the child comes up on the conversation's
+// first message. Both tests therefore drive a turn per discussion through
+// activateViaTurn before asserting anything about leaving the active state —
+// see that helper for why the precondition is the difference between these
+// tests proving something and passing vacuously.
 //
 // The two tests below pin the four acceptance criteria at the binary boundary
 // using the v1 fakephone/fakerelay harness, an INTERACTIVE phone, and a
@@ -121,10 +127,21 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 		t.Fatalf("convA and convB share bound session %s — not distinct dedicated sessions", boundA)
 	}
 
+	// Each discussion's claude comes up on its FIRST MESSAGE since #2085, so
+	// drive one per conversation and confirm each reaches "active" before
+	// asserting anything about leaving that state. Without this the evicted-wait
+	// below would be satisfied instantly by a session born evicted, and a green
+	// run would stop proving "claude exited, RAM freed". The text is deliberately
+	// not the wake marker: the AC#2 assertion further down must be satisfiable
+	// only by the reactivated turn.
+	activateViaTurn(t, phone, initSend, initRecv, regPath, convA, boundA, 100, "m-prime-a", "e2e-2085-prime:a\n")
+	activateViaTurn(t, phone, initSend, initRecv, regPath, convB, boundB, 101, "m-prime-b", "e2e-2085-prime:b\n")
+
 	// AC#1: each per-discussion session idle-evicts. lifecycle_state=="evicted"
 	// is written only after the supervisor stops the child, so it faithfully
-	// witnesses "claude process exited, RAM freed". The wait must exceed the 8s
-	// window above.
+	// witnesses "claude process exited, RAM freed" — and, thanks to the
+	// activations above, it witnesses a genuine active→evicted transition. The
+	// wait must exceed the 8s window above.
 	waitForSessionState(t, regPath, boundA, "evicted", 15*time.Second)
 	waitForSessionState(t, regPath, boundB, "evicted", 15*time.Second)
 
@@ -247,9 +264,10 @@ func TestE2E_PerConversation_IdleEvictsAndReactivates(t *testing.T) {
 	}
 }
 
-// TestE2E_PerConversation_CapEvictsCrossDiscussion drives the active cap purely
-// with create_conversation operations (each is a spawning Pool.Activate, the
-// cleanest way to push past the cap) and asserts LRU victim selection:
+// TestE2E_PerConversation_CapEvictsCrossDiscussion drives the active cap with
+// one create_conversation plus one turn per discussion — the turn is what
+// activates, since #2085 moved the spawn off the create and onto the first
+// message — and asserts LRU victim selection:
 //
 //	AC#3 — activating one more session than the cap evicts the LRU active peer
 //	       rather than exceeding the cap; the active count is never > cap at any
@@ -290,15 +308,22 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 
 	phone, initSend, initRecv := dialHelloPhone(t, home, fr, pubKey, pairPayload.Token)
 
-	// Create A — active = {bootstrap, A} = 2, exactly at cap, no evict.
+	// Create A and drive its first turn — active = {bootstrap, A} = 2, exactly
+	// at cap, no evict. The create alone activates nothing since #2085; each
+	// activateViaTurn returns only once the session it woke reads "active", so
+	// the three activations below are ordered and the LRU sequence stays
+	// deterministic.
 	convA := createConversationViaPhone(t, phone, initSend, initRecv, 2)
 	boundA := boundSessionID(t, convPath, convA)
+	activateViaTurn(t, phone, initSend, initRecv, regPath, convA, boundA, 100, "m-cap-a", "e2e-2085-cap:a\n")
 	// 50ms gap so lastActiveAt timestamps are distinguishable for pickLRUVictim.
 	time.Sleep(50 * time.Millisecond)
 
-	// Create B — activating B = 3 > cap → cap-evicts LRU peer = bootstrap.
+	// Create B and drive its first turn — activating B = 3 > cap → cap-evicts
+	// LRU peer = bootstrap.
 	convB := createConversationViaPhone(t, phone, initSend, initRecv, 3)
 	boundB := boundSessionID(t, convPath, convB)
+	activateViaTurn(t, phone, initSend, initRecv, regPath, convB, boundB, 101, "m-cap-b", "e2e-2085-cap:b\n")
 	time.Sleep(50 * time.Millisecond)
 
 	// AC#3: bootstrap is the LRU victim; A and B stay active; count back to 2.
@@ -306,10 +331,12 @@ func TestE2E_PerConversation_CapEvictsCrossDiscussion(t *testing.T) {
 	assertActive(t, regPath, boundA)
 	assertActive(t, regPath, boundB)
 
-	// Create C — activating C = 3 > cap → cap-evicts LRU peer = boundA, a
-	// per-conversation session: discussion C's activity evicts discussion A.
+	// Create C and drive its first turn — activating C = 3 > cap → cap-evicts
+	// LRU peer = boundA, a per-conversation session: discussion C's activity
+	// evicts discussion A.
 	convC := createConversationViaPhone(t, phone, initSend, initRecv, 4)
 	boundC := boundSessionID(t, convPath, convC)
+	activateViaTurn(t, phone, initSend, initRecv, regPath, convC, boundC, 102, "m-cap-c", "e2e-2085-cap:c\n")
 
 	// AC#3: boundA is the LRU victim; B and C stay active; count never > 2.
 	waitForSessionState(t, regPath, boundA, "evicted", 3*time.Second)
@@ -443,12 +470,110 @@ func dialHelloPhone(t *testing.T, home string, fr *fakerelay.Server, pubKey []by
 	return phone, initSend, initRecv
 }
 
+// activateViaTurn drives one message on convID and drains the wire until that
+// turn has both opened (an assistant_delta on convID) and closed (a terminal
+// turn_state{idle} on convID), then waits for boundID to read "active" in the
+// session registry.
+//
+// It exists because since #2085 create_conversation does NOT spawn claude — the
+// child comes up on the conversation's first message. Both tests in this file
+// assert something about a session LEAVING the active state, and an evicted
+// session is what a freshly created one already is: without an activation first,
+// the cap test never reaches its cap and the idle test's evicted-wait is
+// satisfied instantly by a session that was never active. So this is not
+// scaffolding, it is the precondition that keeps those assertions non-vacuous.
+//
+// Draining the whole turn (not just the ack) is load-bearing for the idle test:
+// its AC#2 drain hard-fails on an assistant_delta for convA that lacks the wake
+// marker, so this turn's own deltas must be off the wire before the reactivation
+// phase begins. Every sealed frame is decrypted in arrival order for the reason
+// drainForReply documents — the receive CipherState is a lockstep counter.
+func activateViaTurn(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState,
+	regPath, convID, boundID string, reqID uint64, messageID, text string) {
+	t.Helper()
+	send := protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeSendMessage,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.SendMessagePayload{
+			ConversationID: convID,
+			MessageID:      messageID,
+			Text:           text,
+		}),
+	}
+	raw, err := json.Marshal(send)
+	if err != nil {
+		t.Fatalf("marshal priming send_message (conv=%s): %v", convID, err)
+	}
+	ct, err := initSend.Encrypt(raw)
+	if err != nil {
+		t.Fatalf("seal priming send_message (conv=%s): %v", convID, err)
+	}
+	sendNoiseMsg(t, phone, ct)
+
+	sawDelta := false
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			if !sawDelta {
+				t.Fatalf("priming turn on %s never produced an assistant_delta — the first message did not "+
+					"bring the conversation's child up", convID)
+			}
+			t.Fatalf("priming turn on %s opened but never closed with turn_state{idle}", convID)
+		}
+		frame, err := phone.ReceiveBytes(remaining)
+		if err != nil {
+			if errors.Is(err, fakephone.ErrReceiveTimeout) {
+				continue // deadline reached — re-loop into the t.Fatalf above
+			}
+			t.Fatalf("phone receive (priming %s): %v", convID, err)
+		}
+		var inner protocol.InnerFrameV2
+		if err := json.Unmarshal(frame, &inner); err != nil {
+			t.Fatalf("decode inner frame (priming %s): %v", convID, err)
+		}
+		if inner.Type != protocol.TypeNoiseMsg {
+			continue
+		}
+		env := decryptInnerEnvelope(t, inner, initRecv)
+		switch env.Type {
+		case protocol.TypeAssistantDelta:
+			var d protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &d); err != nil {
+				t.Fatalf("decode assistant_delta (priming %s): %v", convID, err)
+			}
+			if d.ConversationID == convID {
+				sawDelta = true
+			}
+		case protocol.TypeTurnState:
+			if !sawDelta {
+				continue // the leading responding state precedes the delta
+			}
+			var st protocol.TurnStatePayload
+			if err := json.Unmarshal(env.Payload, &st); err != nil {
+				t.Fatalf("decode turn_state (priming %s): %v", convID, err)
+			}
+			if st.State != "idle" || st.ConversationID != convID {
+				continue
+			}
+			// The registry write trails the in-memory transition, so poll rather
+			// than assert: the turn closing proves the child ran, this proves the
+			// state the eviction assertions are about to watch leave.
+			waitForSessionState(t, regPath, boundID, "active", 5*time.Second)
+			return
+		}
+	}
+}
+
 // createConversationViaPhone sends an all-null create_conversation (server
 // defaults) with envelope id reqID, drains to the matching conversation_created
 // reply, and returns the server-minted conversation id. Returns only after the
 // daemon has minted + bound + eagerly persisted the dedicated session (the reply
-// is sent after the handler's reg.Save). The 15s budget covers the mint+activate
-// spawn.
+// is sent after the handler's reg.Save). Since #2085 the mint spawns no child,
+// so the reply arrives without waiting on a PTY; the 15s budget is now slack for
+// a loaded host rather than a spawn allowance, and activateViaTurn is what
+// brings the conversation's claude up.
 func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState, reqID uint64) string {
 	t.Helper()
 	req := protocol.Envelope{
