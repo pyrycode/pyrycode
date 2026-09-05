@@ -181,3 +181,19 @@ RED first at every tier.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — implementation
+
+**Open question 1 resolved (what deterministically emits a `level=DEBUG` record once the post-rotation drop is gone).** Measured rather than argued: a temporary probe at M1 reported the capture's first `level=DEBUG` record as `streamsup: consuming solicited control_response` — the child's reply to the spawn-time `initialize` ask that `mapStreamsupConfig`'s `RequestInitializeOnSpawn` arms. That fires per SPAWN, so the bootstrap child discharges it before the first `send_message`, which puts the anchor strictly upstream of everything the AC-1 guard is placed after. The plan's candidate — a pre-cursor `stream_turn.not_active` drop — was **not** what the capture showed and is not what the rewritten paragraph claims. The guard's assertion is unchanged; only its rationale moved.
+
+**Open question 2 unchanged.** Window B still unmeasured, still stated as a bound rather than an observation, still unguarded.
+
+**Design departure: no factory-tier assertion of `Config.OnSessionRotate` by inspection.** The plan's third test tier proposed asserting `scfg.OnSessionRotate != nil`. That is not reachable: the factory returns `sessions.Runner` over an unexported `*streamsup.Runner`, so the `streamsup.Config` it built cannot be read back — the limitation `TestSessionParser_MintsOneStablePostureGate` already documents. Replaced with a **behavioural** proof at the same tier, which turned out stronger: `TestStreamRunnerFactory_RestartFreshRetagsInstalledLanes` drives a real spawned child through the real factory, reads the pre-rotation envelope off the fan-in, calls `RestartFresh` through the same type assertion `startFreshRunner` uses, and asserts the child-exit envelope carries the rotated id. That exercises the exit lane, which no other test can reach — it exists only as a `Config` field nothing but a real spawn fires. `runFactoryRunner` gained a return value to make it possible.
+
+**Added, not in the plan: `waitEnvelope`.** A fan-in read helper for the above, matching `waitDropKind`'s budget and rationale.
+
+**Non-vacuity evidence for M6 (AC 4).** Suppressing the `OnSessionRotate` fire in `RestartFresh` leaves M1–M4 green and reddens M6 alone, with exactly its intended diagnostic; restored and re-run green. **`go test -overlay` cannot produce this evidence** and reported a false green: `internal/e2e/harness.go` builds the daemon by shelling out to `go build`, a subprocess that does not inherit the parent's `-overlay`, so the mutant never reached the binary under test. The mutation has to be made in the worktree.
+
+**Comment corrections, one more site than the plan listed.** `cmd/pyry/streamsup_runner_exit_test.go`'s `TestStreamRunnerFactory_ChildExitInstallsExitFor` doc names `exitFor` as the callback the factory installs; production now installs `exitForTag`. The discriminant it relies on (the Warn drop record's exact field set) is unchanged, because the refactor carried that branch verbatim.
