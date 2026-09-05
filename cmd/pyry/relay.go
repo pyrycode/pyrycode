@@ -259,6 +259,24 @@ type relayWiring struct {
 	// both sides), so it crosses into V2SessionConfig unwrapped. nil in
 	// foreground/v1 ⇒ no reconcile.
 	retainedSlashCommandLists func() []protocol.SlashCommandListPayload
+	// retainedBackgroundTaskRosters enumerates the background-task rosters the
+	// daemon's sessions currently hold as marshal-ready background_task_roster
+	// payloads — one per conversation whose bound session has reported a roster —
+	// for the relay's connect-time reconcile seam (#2079 fills #2078's
+	// V2SessionConfig.RetainedBackgroundTaskRosters). retainedSlashCommandLists
+	// above is the twin in every respect including this placement: built at main.go
+	// over the conversations registry and *sessions.Pool so the internal/sessions
+	// dependency stays at the composition root, since this file deliberately does
+	// not import it. The value is already primitive to internal/relay (protocol is
+	// imported both sides), so it crosses into V2SessionConfig unwrapped. nil in
+	// foreground/v1 ⇒ no reconcile.
+	//
+	// Where it is NOT the twin: a session that reported an EMPTY roster contributes
+	// a payload carrying an empty task list rather than nothing, because an empty
+	// roster positively says nothing is alive. The producer states the rule; it is
+	// noted here so a reader wiring a seventh seam beside this one does not read the
+	// three retained* fields as interchangeable.
+	retainedBackgroundTaskRosters func() []protocol.BackgroundTaskRosterPayload
 	// approvals is the daemon-singleton pending-approval registry (#1103). The
 	// stream-approval bridge (#1080) constructed in startRelayV2 Lookups/Resolves
 	// parked completers against this SAME instance the control server parks into,
@@ -817,6 +835,24 @@ func startRelayV2(
 		// contract, which every foreground/v1 and test wiring relies on. A pure read:
 		// it mints no id and mutates no daemon state.
 		RetainedSlashCommandLists: w.retainedSlashCommandLists,
+		// Connect-time background-task-roster reconcile source (#2079): enumerates the
+		// roster each conversation's bound session retained from its child's last
+		// background_tasks_changed report (#2077), so a client that attaches to a
+		// long-running daemon sees what is still running instead of an empty panel that
+		// only fills when claude next CHANGES the roster — which on a quiet session may
+		// never happen. The live turn lane reaches only a client that was already
+		// connected (reconcileBackgroundTaskRosters names the loss points). Assigned
+		// straight through rather than wrapped in a closure, for RetainedModelLists'
+		// stated reason: a wrapper would be non-nil even when the field is nil and would
+		// silently defeat the seam's nil ⇒ no-reconcile contract, which every
+		// foreground/v1 and test wiring relies on. A pure read: it mints no id and
+		// mutates no daemon state, so connecting twice delivers the same payloads.
+		//
+		// Unlike its five predecessors an EMPTY payload is meaningful on this seam and is
+		// sent rather than filtered: an empty roster says nothing is alive, which is the
+		// signal a client needs. Both halves of that contract are the producer's and the
+		// reconcile's; nothing is decided at this assignment.
+		RetainedBackgroundTaskRosters: w.retainedBackgroundTaskRosters,
 		// Inbound modal-control resolver (#727): consumes the outstanding-modal
 		// registry, routes the resolving keystroke via the supervisor safe-answer
 		// seam, and audits. The keystroker is nil-safe-wrapped (#1131): PTY mode
