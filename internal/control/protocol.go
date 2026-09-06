@@ -99,6 +99,30 @@ const (
 	// namespace matches sessions.* — the dot is a documentation
 	// convention, not a parser rule.
 	VerbMCPApprove Verb = "mcp.approve"
+
+	// VerbAttachFile files a host file claude named — by a filesystem path
+	// the model chose — under the conversation bound to the CALLING
+	// session, and answers with the daemon-minted id of the stored
+	// attachment. Request.AttachFile carries the session id and the path;
+	// Response.AttachFile carries the id.
+	//
+	// The conversation is derived from the named session through the
+	// daemon's own conversation registry, never from the request and never
+	// from the follow-active cursor (which is stamped at enqueue by the
+	// session router, so a file produced by a background conversation's
+	// claude would otherwise be filed under whichever chat the operator
+	// last messaged). #2143 established the same rule for uploads: the
+	// destination travels per transfer, not through the cursor.
+	//
+	// Fail-closed: every error path answers. The path is confined to the
+	// conversation's recorded workspace before it is read, and a nil file
+	// attacher (never calling SetFileAttacher, or v1/foreground) returns
+	// Response.Error "attachment.file: no file attacher configured" — the
+	// same nil-dependency-degrades-cleanly shape as VerbRekey and
+	// VerbMCPApprove. The dotted namespace matches sessions.* and
+	// mcp.approve; the dot is a documentation convention, not a parser
+	// rule.
+	VerbAttachFile Verb = "attachment.file"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -149,6 +173,8 @@ type Request struct {
 	Sessions *SessionsPayload `json:"sessions,omitempty"` // populated for VerbSessionsNew (Phase 1.1+)
 	Rekey    *RekeyPayload    `json:"rekey,omitempty"`    // populated for VerbRekey
 	Approve  *ApprovePayload  `json:"approve,omitempty"`  // populated for VerbMCPApprove
+
+	AttachFile *AttachFilePayload `json:"attachFile,omitempty"` // populated for VerbAttachFile
 }
 
 // SessionsPayload carries arguments shared across the sessions.* verb
@@ -218,6 +244,49 @@ type ApproveResult struct {
 	Message      string          `json:"message,omitempty"`      // deny only
 }
 
+// AttachFilePayload names the session making the call and the host path the
+// file to file lives at. Both fields are required and both are rejected empty
+// by handleAttachFile's guard.
+//
+// SessionID is the CALLER's session, and it is the whole destination
+// mechanism: the daemon maps it to a conversation through its own registry
+// and takes the confinement root from that conversation's recorded workspace.
+// Nothing here names a conversation, and naming one would not be honoured if
+// it did. An empty SessionID is refused rather than defaulted — the seam it
+// would otherwise reach, sessions.Pool.Lookup(""), resolves to the BOOTSTRAP
+// session, so a defaulted empty id would silently file claude's bytes under a
+// conversation that never asked for them.
+//
+// Path is CLAUDE-AUTHORED and is the security surface of this verb: every
+// other attachment path component is daemon-minted or sanitised from a
+// client-declared name, and this one is a filesystem path chosen by the model
+// naming a file to read. It is confined, never trusted — made absolute
+// against the conversation's workspace, resolved through its symlinks, and
+// boundary-tested against that workspace canonicalised the same way, all
+// before anything opens it. A relative path resolves against the workspace,
+// not against the daemon's process directory.
+//
+// Neither field is loggable as sent: Path is a host path, and its leaf is the
+// filename docs/protocol-mobile.md § Attachments bans logging for a privacy
+// reason sanitising does not lift.
+type AttachFilePayload struct {
+	SessionID string `json:"sessionID"`
+	Path      string `json:"path"`
+}
+
+// AttachFileResult carries the daemon-minted id of the stored attachment. The
+// id is a lowercase UUIDv4 drawn from crypto/rand (conversations.NewID),
+// obeying the published attachment_id shape, and is NEVER taken from the
+// request — a client-chosen id here would let a caller address, and overwrite,
+// storage it did not create.
+//
+// The id is not a capability: #2054 re-validates it against the conversation
+// binding on retrieval, so holding one grants nothing an unannounced id would
+// not. Safe to log; nothing else about this exchange is.
+type AttachFileResult struct {
+	AttachmentID string `json:"attachmentID"`
+}
+
 // Response is the wire format for a single server response. On success
 // exactly one of the verb-specific fields is populated:
 //   - Status: payload for VerbStatus
@@ -226,6 +295,7 @@ type ApproveResult struct {
 //   - SessionsList: payload for VerbSessionsList
 //   - SessionsHasID: payload for VerbSessionsHasID
 //   - Approve: verdict for VerbMCPApprove (allow or deny)
+//   - AttachFile: minted attachment id for VerbAttachFile
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
@@ -236,6 +306,7 @@ type Response struct {
 	SessionsList  *SessionsListPayload `json:"sessionsList,omitempty"`  // populated for VerbSessionsList (1.1b-B1)
 	SessionsHasID *SessionsHasIDResult `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
 	Approve       *ApproveResult       `json:"approve,omitempty"`       // populated for VerbMCPApprove
+	AttachFile    *AttachFileResult    `json:"attachFile,omitempty"`    // populated for VerbAttachFile
 	OK            bool                 `json:"ok,omitempty"`
 	Error         string               `json:"error,omitempty"`
 	ErrorCode     ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)

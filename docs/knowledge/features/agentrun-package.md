@@ -1,6 +1,6 @@
 # `internal/agentrun` — workdir helpers and shared types for `pyry agent-run`
 
-> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts four small exported helpers: `ResolveWorkdir`, `ExitErrIsBenign` (#527), `IsNewLogicalTurn` (#574), and `ReapDescendantGroups` (#923, lifted from `ptyrunner`). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it.
+> **Post-#392, post-#508 surface.** The parent `internal/agentrun` package hosts four small exported helpers: `ResolveWorkdir`, `ExitErrIsBenign` (#527), `IsNewLogicalTurn` (#574), and `ReapDescendantGroups` (#923, lifted from `ptyrunner`). The PTY driver (`Drive` / `DriveConfig`), the per-spawn settings writer (`WriteSettings` / `SettingsFilename`), and the original sibling-file `MarkWorkdirTrusted` were all deleted in [#392](https://github.com/pyrycode/pyrycode/issues/392) when stream-json subprocess mode replaced PTY drive; the workdir-encoder wrapper `EncodeProjectDir` was deleted in [#508](../codebase/508.md) after the encoder fully migrated to [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver). The 2026-05-19 pivot back to PTY drive ([codebase/471.md](../codebase/471.md)) resurrected the spawn primitive, the trust pre-write, and the settings writer as **sibling subpackages** ([`ptyrunner`](ptyrunner-package.md), [`trust`](agentrun-trust-subpackage.md), [`settings`](agentrun-settings-subpackage.md)). See § "Subpackages" below. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks deletion of `ResolveWorkdir` itself once [`trust`](agentrun-trust-subpackage.md) migrates off it — no longer the only migration #516 would need, now that #2164 added `cmd/pyry`'s `fileAttacher` as a second production caller (§ Consumers).
 
 Stdlib-only helper for `pyry agent-run`. The parent package's residual responsibilities are **`projects[...]` key canonicalisation** — the macOS `/var → /private/var` realpath rule used by `agentrun/trust` to key into `~/.claude.json`'s projects map — a **shared benign-teardown-error predicate** consumed by every spawn-and-teardown subpackage to suppress the OS's "process already gone" responses to its own SIGTERM/SIGKILL/close from the WARN surface, a **shared logical-turn-boundary predicate** (`IsNewLogicalTurn`, #574) that both `budget`'s `--max-turns` enforcement and `streamjson`'s `num_turns` reporting call so the two counts cannot drift on what a claude turn is, and (#923) the **claude descendant-process-group reaper** (`ReapDescendantGroups`) — colocated here, not appended to `exitclass.go`, so a future second consumer (`streamrunner`, #924) can call it without importing a sibling `agentrun` subpackage. The dashed `~/.claude/projects/<encoded>/` directory-name encoding lives in [`tui-driver/pkg/tuidriver.EncodeCwd`](https://github.com/pyrycode/tui-driver), not here.
 
@@ -12,8 +12,10 @@ Stdlib-only helper for `pyry agent-run`. The parent package's residual responsib
 // ResolveWorkdir returns the resolved absolute path of workdir, canonicalised
 // the way claude canonicalises its own cwd before reading ~/.claude.json's
 // projects map: filepath.Abs, then filepath.EvalSymlinks, then each path
-// component rewritten to its on-disk spelling (#910). Sole remaining caller
-// after #508: internal/agentrun/trust.
+// component rewritten to its on-disk spelling (#910). Canonicalises a file
+// leaf correctly too, not just a directory, despite the workdir-shaped name
+// (canonicalCase folds a leaf against its parent directory either way) —
+// confirmed by #2164, whose confinement check depends on it.
 func ResolveWorkdir(workdir string) (string, error)
 
 // ExitErrIsBenign reports whether err is the OS-level "process already gone"
@@ -87,11 +89,12 @@ The substitution rule (canonicalised in `tuidriver.EncodeCwd` as of 2026-05-19) 
 
 ## Consumers
 
-- `internal/agentrun/trust` — calls `ResolveWorkdir(workdir)` to produce the `projects[...]` key inside `~/.claude.json`. Sole remaining production caller after [#508](../codebase/508.md); [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks migrating this call off `ResolveWorkdir` so the parent package can be deleted. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
+- `internal/agentrun/trust` — calls `ResolveWorkdir(workdir)` to produce the `projects[...]` key inside `~/.claude.json`. [#516](https://github.com/pyrycode/pyrycode/issues/516) tracks migrating this call off `ResolveWorkdir`, one of now three production callers (see the two below) that would all need a home before the parent package could be deleted. See [agentrun-trust-subpackage.md](agentrun-trust-subpackage.md).
 - `internal/agentrun/settings` — does **not** import this parent package; writes its tempfile to `os.TempDir()` and is stdlib-only. See [agentrun-settings-subpackage.md](agentrun-settings-subpackage.md).
 - `internal/agentrun/ptyrunner` — does not import this parent post-[#508](../codebase/508.md). Receives its `Config.WorkDir` from the caller; the trust pre-write supplies the resolved value via `trust.MarkWorkdirTrusted`'s return.
 - JSONL watcher (`internal/agentrun/jsonl/tail`) — **deleted by [#512](../codebase/512.md)**. `ptyrunner.Run` drains [`tuidriver.TailJSONL`](https://github.com/pyrycode/tui-driver) inline; the canonicalisation rule and the dashed-name encoding live inside tui-driver.
 - `internal/sessions/rotation/watcher.go` — uses `ResolveWorkdir` for path comparison against the platform probe.
+- `cmd/pyry`'s `fileAttacher` (`attach_file.go`, #2164) — calls `ResolveWorkdir` on both the confinement root (a conversation's recorded `Cwd`) and a model-chosen target path, so a differently-cased spelling of either compares soundly on a case-insensitive filesystem; the boundary test itself is `withinDir` (`cmd/pyry/main.go`), not `ResolveWorkdir`. See [control-plane-attachment-file-confine-and-store-a-claude-named-path.md](control-plane-attachment-file-confine-and-store-a-claude-named-path.md).
 
 ## History — deleted surfaces
 
