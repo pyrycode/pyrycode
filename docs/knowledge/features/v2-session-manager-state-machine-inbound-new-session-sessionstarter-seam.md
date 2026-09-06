@@ -140,10 +140,19 @@ one state, and pyrycode-desktop#1087 / pyrycode-mobile#625 always name their
 conversation — so on a chat idle long enough to evict, **New session** becomes
 a silent no-op with no reply to explain it, where the bare frame would have
 worked. Flagged at PR review (verdict PASS; a should-fix for the ticket owner,
-not a defect) and left as shipped rather than re-litigated here. Sibling #2103
-(`interrupt` gains the identical `conversation_id`) inherits the same
-cursor-vs-named question and should decide it once for both rather than
-re-discover it.
+not a defect) and left as shipped rather than re-litigated here.
+
+**Answered by #2103, for `interrupt`: no asymmetry arises there, and no guard was
+added.** `new_session`'s guard exists because `RestartFresh` on a childless runner
+mutates before it can discover there is nothing to restart; `interrupt`'s actuation
+(`WriteInterrupt`) checks for a nil writer first and returns `ErrNoLiveChild`
+having written nothing, so it is already inert by construction on both the named
+and bare paths — adding a guard would have introduced the asymmetry rather than
+closed it. See [interrupt § No liveness
+guard](v2-session-manager-state-machine-inbound-interrupt-interrupter-seam-esc.md#no-liveness-guard--a-blockers-late-fix-is-not-automatically-the-twins-requirement)
+for the generalized rule this ticket pair settled: a guard copied from a sibling
+is warranted only when the sibling's actuation can leave damage behind with
+nothing to show for it, not merely because the sibling needed one.
 
 ## Log-bounding: only the invalid-shape arm needs it
 
@@ -178,8 +187,11 @@ it was.
 - [`v2-session-manager-state-machine-inbound-dequeue-message-queueremover-sea.md`](v2-session-manager-state-machine-inbound-dequeue-message-queueremover-sea.md)
   — the tolerant-decode / debug-no-op shape this handler mirrors.
 - [`v2-session-manager-state-machine-inbound-interrupt-interrupter-seam-esc.md`](v2-session-manager-state-machine-inbound-interrupt-interrupter-seam-esc.md)
-  — `activeInterrupter`'s logger-field precedent, and #2103's identical
-  cursor-vs-named question for `interrupt`.
+  — `activeInterrupter`'s logger-field precedent, and #2103, which gave
+  `interrupt` the identical optional `conversation_id` and settled the
+  cursor-vs-named liveness-guard question this doc raised (answer: no guard,
+  no asymmetry — `interrupt`'s actuation refuses without writing, unlike
+  `RestartFresh`).
 - [e2e-harness.md § Build Helper](e2e-harness.md#build-helper) — the
   `-overlay` mutation-testing pitfalls this ticket's verification hit again,
   in a new shape: see that section's note on `go test` caching a daemon-spawning
