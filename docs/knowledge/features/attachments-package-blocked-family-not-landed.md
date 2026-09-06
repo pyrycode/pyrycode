@@ -32,7 +32,10 @@
   framing sentinels plus `ErrUnknownUpload` to `CodeAttachmentInvalidChunk`,
   the two integrity sentinels to `CodeAttachmentIntegrityFailed`,
   `ErrTooManyUploads` to `CodeAttachmentTooManyUploads`, and `ErrInvalidID`/
-  `ErrNotContained`/`ErrWriteFailed`/`ErrNoConversation` to
+  `ErrNotContained`/`ErrWriteFailed`/`ErrNoConversation` (the last of these,
+  and the resolver that raised it, retired by #2143 — see
+  [Chunk intake driver](attachments-package-intake-driver.md) § "The
+  conversation is resolved once, on the completing chunk only") to
   `CodeAttachmentStorageFailed`, all via `errors.Is` — see
   [Error codes § the seven `attachment.*` codes](protocol-package-constants-codes-go-error-codes-21.md)
   for the two choices' retryability rationale. `#1897` also wired
