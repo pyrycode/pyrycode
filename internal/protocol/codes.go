@@ -1083,13 +1083,15 @@ const (
 // client that consumes it writes its sender against the published name, and a name
 // chosen twice is a name chosen wrong once.
 //
-// IT NAMES A CONVERSATION AND AN ATTACHMENT, AND NOTHING ELSE, which is the one
-// place this family lets a client name a scope. AttachmentChunkPayload deliberately
-// carries no conversation_id because an upload lands in the conversation the
-// authenticated session is already on, so naming one there would only let a client
-// steer bytes elsewhere; a retrieval has to be able to say which conversation's
-// file it wants. That asymmetry was already published rather than decided here. The
-// safety is NOT in the id's shape or its randomness — it is CONFINEMENT: the id is
+// IT NAMES A CONVERSATION AND AN ATTACHMENT, AND NOTHING ELSE. It was the one place
+// this family let a client name a scope until #2142 gave AttachmentChunkPayload a
+// conversation_id as well, and the argument that had kept it the only one — that an
+// upload could only steer bytes elsewhere by naming a conversation — is reversed
+// there rather than qualified here. Publishing that field changed no trust level,
+// for the reason the rest of this paragraph gives, and it left the two ids doing
+// different work: this one selects which conversation's file to read, the chunk's is
+// inert until #2143. The safety was never in the id's shape or its randomness in
+// either case — it is CONFINEMENT: the id is
 // a lookup key validated against the daemon's own registry before it reaches a path
 // join, never a value trusted as sent, and naming a conversation is not
 // authorization. RequestAttachmentPayload's block carries that rule in full,
