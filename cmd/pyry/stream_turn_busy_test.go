@@ -613,6 +613,19 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// whitelist's default already answers it, so this row asserts an existing
 		// answer rather than a new arm — turnMarkFor is unchanged by that ticket.
 		{turnevent.SlashCommandList{Commands: []turnevent.SlashCommand{{Name: "clear"}}}, turnMarkNone},
+		// #2134. Neither an opener nor a closer, and its wedge argument is the
+		// SlashCommandList row's inverted rather than repeated: that inventory is not
+		// even per-turn, whereas this announcement lands mid-conversation and REPLACES
+		// the conversation it lands in. Opening a mark on it would wedge the OLD
+		// conversation permanently — the turn end that would clear it belongs to a
+		// transcript claude has already stopped writing. The whitelist's default
+		// already answers it, so this row asserts an existing answer rather than a new
+		// arm; turnMarkFor is unchanged by that ticket.
+		//
+		// turnMarkNone also makes the event DROPPABLE under sink saturation, which is
+		// a real consequence rather than a side effect of the classification and is
+		// #2135's to reason about at the actuator.
+		{turnevent.ConversationReset{NewConversationID: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"}, turnMarkNone},
 		{turnevent.Stall{}, turnMarkNone},
 		{turnevent.ApiRetry{Active: true, Current: 1, Total: 3}, turnMarkNone},
 		{turnevent.Compacting{Active: true}, turnMarkNone},
