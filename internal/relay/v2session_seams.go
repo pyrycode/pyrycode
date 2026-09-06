@@ -32,27 +32,74 @@ type ScreenSnapshotter interface {
 	ScreenSnapshot() (text string, live bool)
 }
 
-// Interrupter delivers a single Esc to the supervised claude — the remote
-// equivalent of a local Esc, claude's own interrupt. *supervisor.Supervisor
-// satisfies it via SendEsc (#726), so the supervisor needs no new method.
-// Declared here (consumer side), beside ScreenSnapshotter, so internal/relay
-// imports neither internal/supervisor nor tui-driver. Named for its relay-domain
-// role (matching ScreenSnapshotter.ScreenSnapshot / ModalResolver.Resolve*),
-// even though the method keeps the sealed surface's name. SendEsc is safe to call
-// from any goroutine — it is the same seam ResolveCancel / ResolveTimeout use.
-type Interrupter interface{ SendEsc() error }
+// Interrupter stops the running turn in ONE conversation (#707, widened by #2103)
+// — the remote equivalent of a local Esc, claude's own interrupt. Declared here
+// (consumer side), beside ScreenSnapshotter, so internal/relay imports neither
+// internal/supervisor nor tui-driver. Named for its relay-domain role (matching
+// ScreenSnapshotter.ScreenSnapshot / ModalResolver.Resolve*), even though the
+// method keeps the sealed surface's name — renaming it to match the actuation
+// would churn the whole package for no behavioural gain, and this doc is where
+// SendEsc is abstracted as "claude's own interrupt" (#1121). SendEsc is safe to
+// call from any goroutine.
+//
+// The sole implementation is cmd/pyry's activeInterrupter. *supervisor.Supervisor
+// used to satisfy this seam and has not since #1121 replaced the Interrupter:
+// w.sup wiring that mis-delivered every interrupt to the bootstrap supervisor
+// regardless of which conversation's turn was running; cmd/pyry/relay.go's comment
+// at the wiring site already says so, and this block said otherwise until #2103.
+//
+// conversationID names the conversation whose turn to stop, and the implementation
+// MUST treat it as UNTRUSTED: it arrives from a paired client, and this package
+// deliberately validates nothing about it. internal/relay imports neither
+// internal/conversations nor internal/sessions (see the note above
+// ScreenSnapshotter on that boundary), so it can neither shape-check the id nor
+// resolve it — the handler is a courier and every check lives in the composition
+// root. An implementation MUST shape-check before any use and MUST NOT let the
+// string become a path component. The obligation is stated here because Go's type
+// system cannot: the parameter is a bare string, exactly as SessionStarter's is.
+//
+// The EMPTY STRING is not an error: it means "the conversation the daemon's own
+// cursor points at", which is the pre-#2103 behaviour and the path an un-upgraded
+// client still takes, since interrupt carried no payload at all until then.
+// handleInterrupt maps every "nothing named" wire shape — absent payload, absent
+// field, explicit "", undecodable body — onto it, so an implementation has exactly
+// one such state to handle.
+//
+// An error is BEST-EFFORT diagnostic, not a failure the caller acts on: a
+// conversation with no live child yields streamsup.ErrNoLiveChild, which the
+// production implementation neither suppresses nor pre-empts — WriteInterrupt
+// refuses a nil writer having written nothing, so such a conversation is inert by
+// construction on the named and cursor paths alike (#2103; contrast
+// SessionStarter, whose actuator mutates before it can discover the same state).
+type Interrupter interface {
+	SendEsc(conversationID string) error
+}
 
-// SessionStarter drives the supervised claude's /clear — the remote equivalent
-// of a local `/clear`, starting a fresh session (#831). *supervisor.Supervisor
-// satisfies it via StartNewSession (#830), so the supervisor needs no new
-// method. Declared here (consumer side), beside Interrupter, so internal/relay
+// SessionStarter starts a fresh session in ONE conversation (#831, widened by
+// #2099). Declared here (consumer side), beside Interrupter, so internal/relay
 // imports neither internal/supervisor nor tui-driver. Named for its relay-domain
 // role (matching Interrupter / ScreenSnapshotter), even though the method keeps
-// the sealed surface's name; the doc comment fixes the /clear semantics so the
-// name is unambiguous against any pool/session lifecycle "start". StartNewSession
-// is safe to call from any goroutine — it is the same sealed sendModalKey seam
-// SendEsc / ResolveCancel use.
-type SessionStarter interface{ StartNewSession() error }
+// the sealed surface's name, so the name is unambiguous against any pool/session
+// lifecycle "start". StartNewSession is safe to call from any goroutine.
+//
+// conversationID names the conversation to restart, and the implementation MUST
+// treat it as UNTRUSTED: it arrives from a paired client, and this package
+// deliberately validates nothing about it. internal/relay imports neither
+// internal/conversations nor internal/sessions (see the note above ScreenSnapshotter
+// on that boundary), so it can neither shape-check the id nor resolve it — the
+// handler is a courier and every check lives in the composition root. An
+// implementation MUST shape-check before any use and MUST NOT let the string
+// become a path component; cmd/pyry's activeSessionStarter is the production one.
+//
+// The EMPTY STRING is not an error: it means "the conversation the daemon's own
+// cursor points at", which is the pre-#2099 behaviour and the path an un-upgraded
+// client still takes, since new_session carried no payload at all until then.
+// handleNewSession maps every "nothing named" wire shape — absent payload, absent
+// field, explicit "", undecodable body — onto it, so an implementation has exactly
+// one such state to handle.
+type SessionStarter interface {
+	StartNewSession(conversationID string) error
+}
 
 // QueueRemover drops a not-yet-drained queued message from a conversation's
 // inbound backlog by id (#723). *msgqueue.Queue satisfies it. Declared here, in
@@ -294,7 +341,22 @@ type AttachmentIntake interface {
 	// Receive routes one decoded chunk of one conn's upload. See the type doc
 	// for the three-way answer; connID is the registry key that keeps distinct
 	// conns' transfers separate.
-	Receive(connID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error)
+	//
+	// PRECONDITION, AND IT IS THE CALLER'S: conversationID MUST already have
+	// passed KnownConversation. attachments.EnsureDir's own block states it —
+	// the id becomes a path component below this seam — and
+	// handleAttachmentChunk is the caller that discharges it, on EVERY chunk
+	// rather than only the completing one, so a transfer naming an unusable
+	// conversation is refused on its FIRST frame. Identical in wording and in
+	// reason to HistoryPage's precondition below.
+	//
+	// It is a STRING and not a conversations.ConversationID on purpose: this
+	// package does not import internal/conversations — only
+	// internal/relay/handlers does — and KnownConversation is primitive-typed
+	// to keep it that way. Declaring the seam with the typed id would add the
+	// very import the seam's own docs argue against, so the conversion belongs
+	// on the implementing package's side.
+	Receive(connID, conversationID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error)
 
 	// ReleaseConn drops every upload still in flight for one conn, returning the
 	// daemon-wide capacity they held without waiting for the idle window. A
@@ -705,16 +767,20 @@ type V2SessionConfig struct {
 	// so it must never be logged, and no reply derived from it ever reaches the wire.
 	AttachmentResolve func(conversationID, attachmentID string) (path string, ok bool)
 
-	// Interrupter routes an inbound interactive `interrupt` control frame to
-	// the supervised claude as one Esc (#707). Optional: nil ⇒ interrupt is
-	// inert (no Esc) — the foreground / unwired case. Production wires
-	// *supervisor.Supervisor.
+	// Interrupter stops the running turn in the conversation an inbound
+	// interactive `interrupt` control frame names (#707, #2103) — or, when the
+	// frame names none, in the one the daemon's cursor points at. Optional: nil ⇒
+	// interrupt is inert (no actuation) — the foreground / unwired case.
+	// Production wires cmd/pyry's activeInterrupter, which owns the shape check
+	// and the registry resolution this package cannot perform.
 	Interrupter Interrupter
 
-	// SessionStarter routes an inbound interactive `new_session` control frame
-	// to the supervised claude as a /clear, starting a fresh session (#831).
-	// Optional: nil ⇒ new_session is inert (no /clear) — the foreground /
-	// unwired case. Production wires *supervisor.Supervisor.
+	// SessionStarter starts a fresh session in the conversation an inbound
+	// interactive `new_session` control frame names (#831, #2099) — or, when the
+	// frame names none, in the one the daemon's cursor points at. Optional: nil ⇒
+	// new_session is inert — the foreground / unwired case. Production wires
+	// cmd/pyry's activeSessionStarter, which owns the shape check and the registry
+	// resolution this package cannot perform.
 	SessionStarter SessionStarter
 
 	// QueueRemover drops a queued message named by an inbound dequeue_message

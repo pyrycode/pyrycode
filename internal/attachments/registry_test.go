@@ -68,7 +68,6 @@ var packageSentinels = []error{
 	ErrInvalidID,
 	ErrNotContained,
 	ErrWriteFailed,
-	ErrNoConversation,
 	ErrNotFound,
 }
 

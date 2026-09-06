@@ -1370,6 +1370,14 @@ const (
 // OTHER user/text block still surfaces, and that remains the real change worth
 // seeing.
 //
+// AMENDED 2026-09-06 (#2087): the 2026-07-30 amendment's "exactly one user/text
+// string is now dropped" is spent. A whole CLASS of user/text block is dropped
+// now, keyed on a line-level flag rather than on any string — see
+// harnessNoOutputNudge's own 2026-09-06 entry for the trigger, the measurement
+// and what stays surfaced. The row above is left unedited: it is an accurate
+// record of what #1247 shipped, and this pointer is what keeps it from being read
+// as the current rule.
+//
 // A real-claude test asserts a normal turn produces zero unrecognized events, so
 // this list going stale fails the pre-ship gate rather than reaching a client.
 var ignoredLineTypes = map[string]bool{
@@ -1406,6 +1414,91 @@ var ignoredLineTypes = map[string]bool{
 // a prompt echo should claude ever start echoing on this surface, in silence. A
 // SECOND confirmed payload, with a measurement behind it, is what promotes this
 // constant to a set with a pin test — not before.
+//
+// AMENDED 2026-09-06 (#2087): a second DISTINCT harness payload arrived, and it
+// did NOT promote this constant to a set — it made the string the wrong axis to
+// match on. This constant is unchanged and still the narrowest possible match;
+// what changed is that it is no longer the ONLY trigger of the drop in emitUser.
+// Everything above stands as written.
+//
+// Not to be confused with the second confirmed OCCURRENCE the paragraph above
+// asks for, which #1260 supplied in 2026-08-02 by re-capturing these same bytes
+// byte-exact. That was a second sighting of one payload and would have justified
+// a set of strings; this is a second KIND of payload, and it is why the set was
+// never the right answer.
+//
+// THE NEW PAYLOAD IS A SKILL BODY. Invoking a skill makes claude's harness
+// inject the skill's whole instruction file as a user/text block. Observed twice
+// in one session on 2026-09-04 on Opus 5: a vault skill at 18681 chars and the
+// bundled claude-api skill at 87244 chars, each landing in the operator's chat as
+// one "Unrecognized message" row cut at the daemon's payload cap. Matching THAT
+// by string is impossible in principle — the body is a different document per
+// skill and dwarfs any pin — which is what makes the class, not the wording, the
+// thing to match. The prediction three paragraphs up ("the same would go for any
+// future harness-injected prose") is what came true.
+//
+// SO THE MATCH IS THE LINE-LEVEL FLAG: userLine.IsSynthetic, still gated on block
+// type "text". Keying on the flag rather than on any body is what keeps a
+// genuinely new user/text block reaching the unrecognized lane, which is the
+// property a body match would have destroyed.
+//
+// Why the 2026-07-27 census missed this and is not wrong: it drove three turns
+// each on haiku and the default model with one turn per run CALLING TOOLS. Tool
+// calls were exercised; skill invocations were not.
+//
+// PROVENANCE, and it is thinner on one hop than on the rest:
+//
+//   - The flag's spelling on THIS surface is pinned by committed capture bytes —
+//     the one `user` record of dropped_lines_v2.1.220.json carries top-level
+//     `"isSynthetic": true` and no isMeta key, and the 2.1.239 sidecar capture
+//     agrees. TestParser_CapturedSyntheticUserLinePinsTheWireSpelling replays
+//     those bytes inside `make check`, with the text swapped for a non-nudge
+//     probe so that it is the FLAG arm being proven and not this constant.
+//   - THIS CONSTANT'S OWN LINE IS FLAGGED TOO, which is not obvious and is easy
+//     to get backwards: the captured nudge record carries `"isSynthetic": true`,
+//     so on today's claude a nudge trips the FLAG arm and the string comparison
+//     beside it is never reached. The constant is kept anyway, and deliberately —
+//     AC3's case is a claude that STOPS stamping the flag, where it becomes the
+//     only thing standing between the nudge and the operator's chat. Two
+//     consequences worth having in writing. A hermetic row, not a live run, is
+//     what can prove that arm, and one pins it (flag absent + byte-exact nudge →
+//     zero events). And no content-free `trigger` attribute at the drop site
+//     could tell a nudge from a skill body, because both arrive flagged — that
+//     idea is unavailable on the merits, quite apart from the rule against a
+//     third attribute.
+//   - That the flag also lands on a SKILL line is an INFERENCE, not a
+//     measurement: no capture of one exists. Measured 2026-09-06 against the
+//     operator's local ~/.claude/projects corpus, which narrows it to a single
+//     hop — on the JSONL TRANSCRIPT surface the nudge line reads `isMeta: true`
+//     (1 of 1) and skill lines read `isMeta: true` (249 of 249), against zero
+//     truthy isSynthetic anywhere in that corpus. So transcript-isMeta maps to
+//     stdout-isSynthetic for the nudge, and skill lines sit in the same
+//     transcript class as the nudge. What remains unmeasured is that final
+//     surface hop for a skill line specifically.
+//   - FIRST LIVE OBSERVATION, 2026-09-06 02:17 on claude 2.1.259, --model haiku,
+//     the real-claude gate: a turn that invoked a test-authored skill produced
+//     ZERO unrecognized_message frames and exactly one drop record from the site
+//     below. Before this change the same turn surfaced the body. So the arm fires
+//     on a live skill turn — but that run could not yet say WHICH trigger fired,
+//     because the nudge is flagged too (bullet above) and its witness was the
+//     shared drop record alone. TestInteractiveStreamSkillInvocationIsSilent now
+//     also requires a reply token that exists only inside the skill body, which is
+//     what makes the next green run read on the skill line specifically. Treat the
+//     hop as strongly evidenced and not yet closed.
+//   - The failure direction is the safe one and costs nothing: if the hop is
+//     wrong the flag arm never fires and the Unrecognized row for skills stays
+//     exactly as it is today. A fallback matcher on the harness-fixed prefix
+//     "Base directory for this skill: " is deliberately NOT shipped — it would be
+//     a defence for a failure mode nobody has observed. If the live gate shows
+//     the flag absent on a skill line, that fallback is a follow-up with a
+//     measurement behind it, and this paragraph is where the failed inference
+//     gets recorded.
+//
+// NOT COVERED, and deliberately: /compact. The same arm would cover a compact
+// summary the day claude stamps one, with no second matcher and no further work,
+// but that it IS stamped is unproven — the same corpus carries zero
+// "isCompactSummary":true lines as of 2026-09-06. No second arm was written for
+// it, and none should be until one is observed.
 const harnessNoOutputNudge = "[Your previous response had no visible output. Please continue and produce a user-visible response.]"
 
 // Parser turns the child's stdout stream-json line stream into neutral
@@ -2151,28 +2244,47 @@ type streamBlock struct {
 	IsError   bool   `json:"is_error"`
 }
 
-// userToolResultLine carries the tool_use_result SIDECAR of one user line: the
-// structured outcome claude writes as a TOP-LEVEL field, a sibling of type and
-// message rather than something inside the message (#2024).
+// userLine carries the TOP-LEVEL fields of one user line that live outside
+// `message` — siblings of type and message rather than something inside the
+// message. Both of its fields are of that shape, which is why they share one
+// struct and one decode.
 //
 // Kept separate from streamLine for systemTaskStartedLine's reason — streamLine
-// is the line-level SEGMENTATION struct and stays at Type/Subtype/Message, and a
-// field belonging to one line type would blur that boundary. The line is decoded
+// is the line-level SEGMENTATION struct and stays at Type/Subtype/Message, and
+// fields belonging to one line type would blur that boundary. The line is decoded
 // a second time instead, which is systemTaskUpdatedLine.Patch's shape.
 //
-// THE KEY IS snake_case, AND THAT IS THE FINDING #2023 EXISTS TO HAVE BOUGHT.
-// The TRANSCRIPT (internal/agentrun/jsonl fixtures) spells this payload
-// `toolUseResult`. This package does not read the transcript — it parses
-// claude's stdout, spawned --output-format stream-json — and on that surface the
-// same payload is keyed `tool_use_result`. A decoder keyed on the camelCase name
-// is DEAD CODE here, and no hermetic test built from transcript-lifted fixtures
-// can catch it: the fixture would carry the same wrong key and agree with it.
-// #2023's first live run searched only the camelCase name and reported
-// "sidecar-absent" — literally true, materially the inverse of the truth; the
-// re-run recorded a spelling census of {"tool_use_result": 2} against zero
-// camelCase on claude 2.1.239. THE RENAME STOPS AT THE ENVELOPE: every key
-// INSIDE the sidecar stays camelCase (see sidecarFile). "Correcting" those to
-// match this one is the second way to write a decoder that never fires.
+// ONE decode, not two: emitUser reads both fields, and a user line routinely
+// carries a whole file's contents in its tool_result, so a second full pass over
+// it to fetch a bool would double that scan for nothing.
+//
+// THE ENVELOPE IS MIXED-CASE, and reading it as uniformly one or the other is the
+// way to write a decoder that never fires. The captured line spells it
+// `parent_tool_use_id`, `session_id`, `tool_use_result` … and `isSynthetic`. Per
+// field:
+//
+//   - ToolUseResult IS snake_case, AND THAT IS THE FINDING #2023 EXISTS TO HAVE
+//     BOUGHT. The TRANSCRIPT (internal/agentrun/jsonl fixtures) spells this
+//     payload `toolUseResult`. This package does not read the transcript — it
+//     parses claude's stdout, spawned --output-format stream-json — and on that
+//     surface the same payload is keyed `tool_use_result`. A decoder keyed on the
+//     camelCase name is DEAD CODE here, and no hermetic test built from
+//     transcript-lifted fixtures can catch it: the fixture would carry the same
+//     wrong key and agree with it. #2023's first live run searched only the
+//     camelCase name and reported "sidecar-absent" — literally true, materially
+//     the inverse of the truth; the re-run recorded a spelling census of
+//     {"tool_use_result": 2} against zero camelCase on claude 2.1.239. THE RENAME
+//     STOPS AT THE ENVELOPE: every key INSIDE the sidecar stays camelCase (see
+//     sidecarFile). "Correcting" those to match this one is the second way to
+//     write a decoder that never fires.
+//
+//   - IsSynthetic is camelCase, so #2023's finding does NOT generalise to the
+//     whole envelope: `is_synthetic` is dead code here, and so is the transcript's
+//     name for the same class of line, `isMeta`. The spelling below is pinned
+//     against committed capture bytes inside `make check` — see
+//     TestParser_CapturedSyntheticUserLinePinsTheWireSpelling — for the same
+//     reason #2023 needed a live run: a hermetic fixture written from a guess
+//     agrees with the guess.
 //
 // json.RawMessage accepts ANY valid JSON value — object, string, number, null —
 // which is required, not merely convenient: one captured teardown carries the
@@ -2180,8 +2292,14 @@ type streamBlock struct {
 // objection to a second json.Unmarshal ("it would add a second undecodable
 // outcome to classify") does not transfer, because consumeLine has already
 // decoded this line once and a RawMessage target cannot fail.
-type userToolResultLine struct {
+type userLine struct {
 	ToolUseResult json.RawMessage `json:"tool_use_result"`
+
+	// IsSynthetic marks a line claude's HARNESS authored rather than the person
+	// or the model. Read by VALUE, not by presence: an absent key and an explicit
+	// false both mean "surface it", which is the safe default and the direction a
+	// presence-only decode would get backwards.
+	IsSynthetic bool `json:"isSynthetic"`
 }
 
 // jsonKey is a presence-only decode target: a *jsonKey field is non-nil exactly
@@ -2320,7 +2438,7 @@ const (
 // numLines is a JSON number of arbitrary precision; a count that does not decode
 // as a fixed-width whole number — 4.5, "40", a value past int64 — fails the
 // decode and sends nothing. Note the camelCase: the envelope rename stops at
-// userToolResultLine.
+// userLine.ToolUseResult.
 type sidecarFile struct {
 	NumLines   *int64 `json:"numLines"`
 	TotalLines *int64 `json:"totalLines"`
@@ -4569,12 +4687,15 @@ func (p *Parser) decodeBlock(raw json.RawMessage) (streamBlock, bool) {
 }
 
 // emitUser maps one user message's tool_result blocks to ToolUpdate. A nil
-// message emits nothing; any non-tool_result block emits an Unrecognized, with
-// the single exception of the harness nudge, which is dropped in silence.
+// message emits nothing; any non-tool_result block emits an Unrecognized, save
+// for harness-authored TEXT blocks, which are dropped in silence — see the guard
+// below for the two triggers.
 //
-// It takes the RAW LINE BYTES as well as the message because the tool_use_result
-// sidecar is a sibling of `message` on the LINE, not a field inside it, so this
-// type-switch call site is the only place the two can meet (#2024).
+// It takes the RAW LINE BYTES as well as the message because both of the
+// top-level fields it reads — the tool_use_result sidecar (#2024) and the
+// synthetic flag (#2087) — are siblings of `message` on the LINE rather than
+// fields inside it, so this type-switch call site is the only place they can meet
+// the blocks.
 // consumeLine's rate_limit_event arm, which hands emitRateLimit(line) the same
 // way, is the in-file precedent.
 func (p *Parser) emitUser(msg *streamMessage, line []byte) {
@@ -4590,12 +4711,15 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 	//
 	// Composed FIRST and gated on being non-empty, so the ~95% of lines with no
 	// count never pay for the block-count pre-pass.
-	var utl userToolResultLine
+	var ul userLine
 	// The error is dropped, not classified: the line has already decoded once in
 	// consumeLine, and a json.RawMessage target accepts any valid JSON value, so
 	// there is no second undecodable outcome to report. See toolResultDetail.
-	_ = json.Unmarshal(line, &utl)
-	detail := toolResultDetail(utl.ToolUseResult)
+	// The IsSynthetic bool adds no failure mode either — a non-boolean value fails
+	// the whole decode, ul stays zero, and the block surfaces, which is the safe
+	// direction.
+	_ = json.Unmarshal(line, &ul)
+	detail := toolResultDetail(ul.ToolUseResult)
 	if detail != "" && countToolResultBlocks(msg) != 1 {
 		detail = ""
 	}
@@ -4604,15 +4728,31 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 		if !ok {
 			continue
 		}
-		if block.Type == "text" && block.Text == harnessNoOutputNudge {
-			// The one known harness payload (see harnessNoOutputNudge for the
-			// capture and why it is suppressed rather than mapped). `continue`, not
-			// `return`: the suppression is scoped to this BLOCK, so a tool_result
-			// sharing the message still maps. Requiring type "text" is what keeps
-			// the guard unreachable from tool output — a tool_result's payload
-			// decodes into Content, never into Text — so tripping it takes control
-			// of the block's type, not just of a string. Logged content-free: site
-			// and type only, exactly like the known-ignored line drop above.
+		if block.Type == "text" && (ul.IsSynthetic || block.Text == harnessNoOutputNudge) {
+			// Harness-authored prose, dropped in silence — see harnessNoOutputNudge
+			// for the captures, the census, and why the author being neither the
+			// person nor the model makes this a suppression rather than a mapping.
+			//
+			// TWO INDEPENDENT TRIGGERS, deliberately OR'd rather than one subsuming
+			// the other. The line-level flag (#2087) covers the whole class,
+			// skill invocations included, and is the only shape that can: a skill
+			// body varies per skill and ran to 87244 chars in one observed case, so
+			// no string match could ever pin it. The nudge constant stays as its own
+			// guard so a claude version that stops stamping the flag does not
+			// resurrect the row the constant was added to remove.
+			//
+			// `continue`, not `return`: the suppression is scoped to this BLOCK, so
+			// a tool_result sharing the message still maps, with its sidecar detail
+			// intact. Requiring type "text" is what keeps BOTH triggers unreachable
+			// from tool output — a tool_result's payload decodes into Content, never
+			// into Text — so tripping either takes control of the block's type, not
+			// just of a string; and it is what keeps a genuinely new BLOCK TYPE
+			// surfacing even on a flagged line, which is the alarm worth raising.
+			// Logged content-free: site and type only, exactly like the
+			// known-ignored line drop above. No third attribute naming which trigger
+			// fired — the drop path is one careless attr away from writing a whole
+			// skill body into the daemon's logs, which is the disclosure this arm
+			// exists to close.
 			p.log.Debug("streamsup: dropping known harness user block",
 				"site", string(turnevent.UnrecognizedUserBlock),
 				"type", block.Type)
@@ -4621,9 +4761,16 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 		if block.Type != "tool_result" {
 			// The measurement found user messages carry tool_result blocks and
 			// nothing else — notably NOT a text echo of the delivered prompt, which
-			// the agent-run surface does emit. So a user/text block reaching here
-			// (i.e. every one but the harness nudge caught above) would be a genuine
-			// change, and gets surfaced rather than dropped.
+			// the agent-run surface does emit. So a block reaching here would be a
+			// genuine change, and gets surfaced rather than dropped.
+			//
+			// WHAT REACHES HERE, stated as of #2087 rather than as of the guard
+			// above's first version: every block of an UNKNOWN type, flagged line or
+			// not — a new block shape is the alarm this arm exists to raise and the
+			// flag must not blanket it — plus every user/TEXT block on an UNFLAGGED
+			// line that is not byte-exactly the nudge. What no longer reaches here is
+			// the whole harness-authored text class, which the guard above now takes
+			// as one; before #2087 that was the single nudge string.
 			p.emitUnrecognized(turnevent.UnrecognizedUserBlock, block.Type, raw)
 			continue
 		}

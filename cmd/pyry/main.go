@@ -1024,6 +1024,7 @@ func runSupervisor(args []string) error {
 				return sess.Runner(), id, true
 			},
 			rotate: pool.RotateForNewSession,
+			log:    logger,
 		},
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
@@ -1174,17 +1175,50 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 // string, keeping internal/relay/handlers free of an internal/sessions import)
 // and owns the cmd-layer validation of the phone-requested spawn workdir:
 // resolveSpawnDir confines + trust-marks a set spawnDir before it reaches
-// Pool.CreateIn, which uses the resolved realpath verbatim (#685). A rejected
+// Pool.Mint, which uses the resolved realpath verbatim (#685). A rejected
 // spawnDir wraps handlers.ErrSpawnDirRejected and short-circuits before any
 // mint. The precedent for this type-narrowing seam is poolResolver above.
+//
+// It mints WITHOUT spawning (#2085). The conversation's session is still bound
+// and persisted at create_conversation, exactly as before; only the child is
+// deferred, to the first message on that conversation — where the drain's
+// boundSession.Activate brings it up on the same lazy path an idle-evicted
+// conversation already takes. That is what lets a model, an effort or a
+// permission mode chosen before the first message be simply what the child
+// launches with, including one cleared back to claude's own default, which
+// cannot be expressed in-band at all.
+//
+// SECURITY: the deferral widens the validated-then-spawn window from
+// milliseconds to "whenever the operator sends". The decision, recorded in this
+// ticket's spec, is to ACCEPT it rather than re-validate at the spawn site.
+// resolveSpawnDir returns trustMark's own realpath and that value is frozen onto
+// the session at build time — no phone-influenced state is re-read between the
+// check and the chdir, so the phone gains nothing from the wait. Winning the
+// window means replacing an ancestor of an already-resolved realpath under the
+// operator's $HOME, which needs the $HOME write access the confinement exists to
+// protect and claude itself already holds. This is a widening of the residual
+// TOCTOU that conversation-session-binding.md already records as accepted, not a
+// new class of exposure. It differs from the #1487 revive path — which DOES
+// re-run resolveSpawnDir at its own spawn site — because that path re-reads a
+// raw, persisted conv.Cwd from a mutable file across a daemon restart, so its
+// stored value is unvalidated bytes from a previous process lifetime.
 type sessionMinter struct{ p *sessions.Pool }
 
-func (m sessionMinter) Create(ctx context.Context, label, spawnDir string) (string, error) {
+// Create satisfies handlers.SessionCreator. The ctx is discarded because neither
+// half of this can observe one: resolveSpawnDir takes no context.Context, and
+// Pool.Mint is ctx-free by contract because it cannot spawn. The parameter stays
+// for the seam's shape, which the handler shares with its cancellable siblings.
+//
+// The honest consequence is that the handler's mint budget cannot interrupt this
+// — a wedged filesystem blocks in a syscall regardless of any deadline. See
+// handlers.createConversationMintTimeout, which records the same thing rather
+// than claiming a protection it no longer provides.
+func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, error) {
 	resolved, err := resolveSpawnDir(spawnDir)
 	if err != nil {
 		return "", err
 	}
-	id, err := m.p.CreateIn(ctx, label, resolved)
+	id, err := m.p.Mint(label, resolved)
 	return string(id), err
 }
 
@@ -1391,12 +1425,14 @@ func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, co
 }
 
 // activeInterrupter satisfies relay.Interrupter by routing an inbound interrupt to
-// the runner bound to the ACTIVE conversation — replacing the former
-// Interrupter: w.sup wiring that mis-delivered every interrupt to the bootstrap
-// supervisor regardless of which conversation's turn was running (#1121). The two
-// seams are injected (not raw *Pool/*Registry) so the AC2 test can drive the
-// composition with fakes; production wires currentConv: active.CurrentConversation
-// and resolveRunner over resolveBoundRunner(convReg, pool, …).
+// the runner bound to the conversation the frame NAMES (#2103), falling back to the
+// ACTIVE conversation when it names none — replacing the former Interrupter: w.sup
+// wiring that mis-delivered every interrupt to the bootstrap supervisor regardless
+// of which conversation's turn was running (#1121). The two seams are injected (not
+// raw *Pool/*Registry) so active_interrupter_test.go can drive the composition with
+// fakes; production wires currentConv: active.CurrentConversation and resolveRunner
+// over resolveBoundRunner(convReg, pool, …), and #2103 changed neither field, only
+// how SendEsc picks the id it passes.
 type activeInterrupter struct {
 	currentConv   func() string
 	resolveRunner func(convID string) (sessions.Runner, bool)
@@ -1419,14 +1455,39 @@ func (a activeInterrupter) logger() *slog.Logger {
 	return a.log
 }
 
-// SendEsc interrupts the active conversation's bound runner. It keeps the relay
-// seam's method name (relay.Interrupter.SendEsc) even though the actuation is a
-// per-runner interrupt, not literally an Esc — the seam doc already abstracts
-// SendEsc as "claude's own interrupt" (#1121 seam decision), so the whole
-// internal/relay package (including its interrupt tests) stays untouched. Every
-// ambiguous state (no active conversation, unbound/dangling binding) is inert
-// (nil), never actuating the wrong child; a live runner's no-child error
-// propagates for handleInterrupt to Warn-log and tolerate (best-effort contract).
+// SendEsc interrupts the runner bound to the conversation the frame NAMES, or —
+// when it names none — the one the daemon's cursor points at (#1121, widened by
+// #2103). It keeps the relay seam's method name (relay.Interrupter.SendEsc) even
+// though the actuation is a per-runner interrupt, not literally an Esc — the seam
+// doc already abstracts SendEsc as "claude's own interrupt" (#1121 seam decision),
+// so renaming would churn the whole internal/relay package for no behavioural gain.
+//
+// conversationID is UNTRUSTED: it is the string a paired client put on the wire,
+// and internal/relay forwards it unjudged because it can neither shape-check nor
+// resolve it (relay.Interrupter's own doc block states that division). This method
+// is the trust boundary, and the order below is what discharges it.
+//
+// The empty-string branch runs BEFORE conversations.ValidID, not after:
+// ValidID("") is false by that function's own doc, so reversing the two would
+// refuse every un-upgraded client's bare frame — the only shape interrupt had from
+// #707 until #2103 — and silently break backward compatibility. From there every
+// ambiguous state (no active conversation, a non-canonical named id, an
+// unknown/unbound binding) is inert (nil), never actuating the wrong child; the
+// actuation's own error propagates for handleInterrupt to Warn-log and tolerate
+// (best-effort contract).
+//
+// THERE IS DELIBERATELY NO LIVENESS PROBE, and this is where #2103 parts from its
+// twin rather than by oversight. activeSessionStarter.StartNewSession needs
+// `named && State().ChildPID == 0` because RestartFresh on a childless runner
+// rekeys the pool, persists sessions.json, rebinds the conversation and broadcasts
+// a session_transition — observable damage with no session to show for it. This
+// actuator has no such hazard: streamsup.WriteInterrupt checks its writer for nil
+// FIRST and returns ErrNoLiveChild having written nothing, so a conversation with
+// no live child is inert by construction on the named and cursor paths alike.
+// Adding the probe would introduce a refusal the bare path does not have today,
+// which is the pre-#2103 behaviour AC-2 exists to preserve. Generalises: a
+// blocker's late fix is not automatically the twin's requirement — trace the twin's
+// actuation to its own write site before copying a guard across.
 // EVERY arm records which one it took, at Info so the records are visible at the
 // daemon's default level (#1192, #1193) — the inert ones, the actuation, and a
 // bound runner exposing no interrupt method at all. Combined with handleInterrupt's
@@ -1438,18 +1499,42 @@ func (a activeInterrupter) logger() *slog.Logger {
 // are single small writes and no such hang has been observed. The records identify
 // the CONVERSATION: resolveBoundRunner never surfaces the bound session id to this
 // caller.
-func (a activeInterrupter) SendEsc() error {
-	convID := a.currentConv()
-	if convID == "" {
-		// No conversation id to carry — the record's information is its existence:
-		// the frame reached SendEsc and nothing was active.
-		a.logger().Info("relay: v2 interrupt inert; no active conversation",
-			"event", "v2.interrupt.no_active_conv")
+//
+// The cursor is never WRITTEN here, and on a named frame it is not even READ; only
+// sessionRouter.Route stamps it. Interrupting a named conversation therefore leaves
+// the active conversation exactly where it was.
+func (a activeInterrupter) SendEsc(conversationID string) error {
+	convID := conversationID
+	switch {
+	case convID == "":
+		// Nothing named: the pre-#2103 path, verbatim. The cursor's own id is
+		// daemon-authored and is deliberately NOT shape-checked — doing so would
+		// change behaviour on the path this branch exists to preserve.
+		convID = a.currentConv()
+		if convID == "" {
+			// No conversation id to carry — the record's information is its existence:
+			// the frame reached SendEsc and nothing was active.
+			a.logger().Info("relay: v2 interrupt inert; no active conversation",
+				"event", "v2.interrupt.no_active_conv")
+			return nil
+		}
+	case !conversations.ValidID(convID):
+		// The ONE arm where an arbitrary client-chosen string reaches a log call, so
+		// the ONE that needs boundedConvID: every arm below logs an id that has
+		// passed ValidID and is provably 36 bytes. Refused before the registry is
+		// touched, so a non-canonical string never becomes a lookup key.
+		a.logger().Info("relay: v2 interrupt inert; named conversation id is not canonical",
+			"event", "v2.interrupt.invalid_conv_id",
+			"conversation_id", boundedConvID(convID))
 		return nil
 	}
 	r, ok := a.resolveRunner(convID)
 	if !ok {
-		a.logger().Info("relay: v2 interrupt inert; active conversation has no bound runner",
+		// One record for the unknown id and the known-but-unbound one alike:
+		// resolveBoundRunner refuses both identically, so this caller structurally
+		// cannot distinguish them — which is also what keeps the frame from
+		// answering "does this conversation exist?" to a client that gets no reply.
+		a.logger().Info("relay: v2 interrupt inert; conversation has no bound runner",
 			"event", "v2.interrupt.no_bound_runner",
 			"conversation_id", convID)
 		return nil
@@ -1672,37 +1757,173 @@ func beginRotationOrNoop(r sessions.Runner) (abort func()) {
 }
 
 // activeSessionStarter satisfies relay.SessionStarter by routing an inbound
-// new_session frame to the runner bound to the ACTIVE conversation — replacing
-// the former SessionStarter: w.sup wiring that mis-delivered every new_session to
-// the bootstrap supervisor regardless of which conversation the remote client was
-// in (the #1121 interrupt shape, applied to new_session). The seams are injected
-// (not raw *Pool/*Registry) so the AC2 test can drive the composition with fakes;
-// production wires currentConv: active.CurrentConversation, resolveBound over
-// resolveBoundSession, and rotate: pool.RotateForNewSession.
+// new_session frame to the runner bound to the conversation the FRAME NAMES, or —
+// when it names none — to the ACTIVE conversation's. It replaced the former
+// SessionStarter: w.sup wiring that mis-delivered every new_session to the
+// bootstrap supervisor regardless of which conversation the remote client was in
+// (the #1121 interrupt shape, applied to new_session), and #2099 closed the
+// remaining half of that same defect: the cursor is stamped only by a successful
+// route, so pressing New session on a chat before sending anything to it restarted
+// whichever chat was last routed. The seams are injected (not raw *Pool/*Registry)
+// so the composition test can drive the arms with fakes; production wires
+// currentConv: active.CurrentConversation, resolveBound over resolveBoundSession,
+// and rotate: pool.RotateForNewSession.
+//
+// This type is the TRUST BOUNDARY for the client-named id: internal/relay imports
+// neither internal/conversations nor internal/sessions, so it hands the string over
+// unvalidated and every check lives here.
 type activeSessionStarter struct {
 	currentConv  func() string
 	resolveBound func(convID string) (runner sessions.Runner, oldID sessions.SessionID, ok bool)
 	rotate       func(oldID sessions.SessionID) (sessions.SessionID, error)
+
+	// log records which arm an inbound new_session took (#2099). Optional: nil
+	// falls back to slog.Default() via logger(), mirroring activeInterrupter.
+	log *slog.Logger
 }
 
-// StartNewSession starts a fresh session in the active conversation's bound
-// runner. Order mirrors activeInterrupter.SendEsc and is load-bearing: no active
-// conversation → inert; unbound/dangling binding → inert (resolveBound's
-// CurrentSessionID == "" guard is the #678 isolation enforcement — an unbound
-// conversation NEVER resolves to the bootstrap session Pool.Lookup("") returns).
-// Otherwise dispatch by runner type. Every ambiguous state is inert (nil); a live
-// runner or rotate error propagates for handleNewSession to Warn-log and tolerate
-// (best-effort contract). No /clear keystroke is sent on the stream arm.
-func (a activeSessionStarter) StartNewSession() error {
-	convID := a.currentConv()
-	if convID == "" {
+// logger returns a's logger, falling back to slog.Default() when unset.
+// activeSessionStarter is a constructor-less bag of injected seams built as a
+// named-field literal, so an omitted field is a reachable state — and a nil
+// *slog.Logger panics on first use, which on this remotely-driven relay path
+// would be a latent crash on a rarely-hit inert arm. Falling back to the default
+// logger (not a discard handler) keeps an unwired literal's record visible.
+func (a activeSessionStarter) logger() *slog.Logger {
+	if a.log == nil {
+		return slog.Default()
+	}
+	return a.log
+}
+
+// StartNewSession starts a fresh session in conversationID's bound runner, or in
+// the active conversation's when conversationID is empty.
+//
+// THE ORDER OF THE FIRST TWO BRANCHES IS THE DESIGN. The empty-string check comes
+// BEFORE the shape check because conversations.ValidID returns false for the empty
+// string (its own doc says so): reversed, every un-upgraded client's bare frame —
+// the shape new_session had from #831 until #2099 — would fail validation and go
+// inert, silently breaking the compatibility this ticket promises.
+//
+// After that, order mirrors activeInterrupter.SendEsc and every ambiguous state is
+// inert (nil, no rotation, no respawn, no reply, and never a fall-through to the
+// bootstrap session): no conversation to act on → inert; a named id that is not a
+// canonical conversation id → inert without ever reaching the registry;
+// unbound/dangling binding → inert, resolveBound's CurrentSessionID == "" guard
+// being the #678 isolation enforcement; a runner that cannot restart → inert; a
+// NAMED conversation with no live child → inert. Only a rotate error propagates,
+// for handleNewSession to Warn-log and tolerate (best-effort contract).
+//
+// THAT LAST ARM IS NAMED-ONLY, and the asymmetry is deliberate rather than an
+// oversight. AC-4 requires a named conversation with no live child to be inert, and
+// AC-3 requires the bare frame to behave EXACTLY as before #2099 — where an evicted
+// cursor conversation rotates and comes back up under the fresh id. Applying the
+// liveness guard to both would satisfy one at the cost of the other, so it is
+// applied to the path this ticket introduces and withheld from the path it promises
+// not to disturb.
+//
+// Every arm records the id it refused, at DEBUG because the id is client-supplied —
+// the posture handleDequeueMessage already takes for its own client-named
+// conversation_id, and deliberately NOT activeInterrupter's Info, which records a
+// daemon-authored arm identity rather than a remote string. The two registry
+// refusals share ONE record: resolveBoundSession refuses the unknown and the
+// unbound identically, so this caller structurally cannot distinguish them, which
+// is also what keeps the frame from answering "does this conversation exist?".
+//
+// The cursor is never WRITTEN here; only sessionRouter.Route stamps it. Rotating a
+// named conversation therefore leaves the active conversation where it was.
+func (a activeSessionStarter) StartNewSession(conversationID string) error {
+	convID := conversationID
+	named := conversationID != ""
+	switch {
+	case convID == "":
+		// Nothing named: the pre-#2099 path, verbatim. The cursor's own id is
+		// daemon-authored and is deliberately NOT shape-checked — doing so would
+		// change behaviour on the path this branch exists to preserve.
+		convID = a.currentConv()
+		if convID == "" {
+			// No id to carry — the record's information is its existence: the frame
+			// reached here and nothing was active.
+			a.logger().Debug("relay: v2 new_session inert; no active conversation",
+				"event", "v2.new_session.no_active_conv")
+			return nil
+		}
+	case !conversations.ValidID(convID):
+		a.logger().Debug("relay: v2 new_session inert; named conversation id is not canonical",
+			"event", "v2.new_session.invalid_conv_id",
+			"conversation_id", boundedConvID(convID))
 		return nil
 	}
+
 	runner, oldID, ok := a.resolveBound(convID)
 	if !ok {
+		a.logger().Debug("relay: v2 new_session inert; conversation has no bound session",
+			"event", "v2.new_session.no_bound_session",
+			"conversation_id", convID)
+		return nil
+	}
+	// The rotation capability is probed HERE as well as inside startFreshRunner,
+	// which is deliberate rather than an oversight: this is the arm AC-4 asks to be
+	// recorded, and startFreshRunner cannot report it — it returns nil both for "no
+	// arm" and for a clean rotation. Its own assertion stays where it is because
+	// that assertion is what keeps the #1330 gate arming below the inert return, and
+	// because dispatch_arms_test.go and inbound_deliver_rotation_test.go drive it
+	// directly. This mirrors activeInterrupter, which records its armNone arm the
+	// same way.
+	if _, canRestart := runner.(interface{ RestartFresh(string) }); !canRestart {
+		a.logger().Debug("relay: v2 new_session inert; bound runner cannot restart",
+			"event", "v2.new_session.no_restart",
+			"conversation_id", convID)
+		return nil
+	}
+	// AC-4's fourth row, and the ONE arm the capability probe above does not already
+	// cover — which is exactly how it was first shipped broken. The probe asks what
+	// the runner CAN do; production's answer is always yes, because the sole
+	// implementation is streamRunner, which exposes RestartFresh unconditionally and
+	// is assigned at mint time. A conversation created but never messaged therefore
+	// reaches this line with a real runner whose child has never spawned (#2085
+	// defers the spawn to the first message), and rotating it would rekey the pool,
+	// persist sessions.json, rebind the conversation and broadcast a
+	// session_transition telling every client to render a delimiter for a chat that
+	// has never had a turn. RestartFresh itself would spawn nothing, so the rotation
+	// would be pure observable damage with no session to show for it.
+	//
+	// State().ChildPID is the liveness signal rather than Phase because it is the one
+	// the field's own doc defines that way ("PID of the running child, or 0 when
+	// none") — an unstarted, backing-off, evicted or stopped runner all report 0, and
+	// all four are states where there is nothing to restart fresh. Racing a spawn
+	// that has started but not yet published its pid reads 0 too and refuses; that is
+	// the same fail-safe direction the whole reject set takes, and the frame is
+	// re-sendable.
+	if named && runner.State().ChildPID == 0 {
+		a.logger().Debug("relay: v2 new_session inert; named conversation has no live child",
+			"event", "v2.new_session.no_live_child",
+			"conversation_id", convID)
 		return nil
 	}
 	return startFreshRunner(runner, oldID, a.rotate)
+}
+
+// maxLoggedConvID bounds how much of a REFUSED conversation id reaches a log
+// record. Only the invalid-shape arm needs it: every other arm logs a string that
+// has already passed conversations.ValidID, so it is provably 36 bytes. That arm is
+// the one place an arbitrary client-chosen string reaches a log call, and it is
+// bounded upstream only by the application-envelope cap — kilobytes per frame, and
+// a paired client may send frames freely. 64 is generously above a canonical id's
+// 36 so a near-miss (a stray character, a wrong-cased id) still prints whole and
+// stays diagnosable.
+const maxLoggedConvID = 64
+
+// boundedConvID renders an untrusted conversation id for a log record: unchanged
+// when it is already short, and otherwise a COPIED prefix carrying an elision
+// marker. The copy is load-bearing — a bare s[:n] would share the decoded frame's
+// backing array, so a buffered log record would pin the whole payload allocation.
+// The marker matters too: without it a truncated id reads as a complete one, and a
+// reader would chase a conversation that was never named.
+func boundedConvID(s string) string {
+	if len(s) <= maxLoggedConvID {
+		return s
+	}
+	return strings.Clone(s[:maxLoggedConvID]) + "…(truncated)"
 }
 
 // inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted

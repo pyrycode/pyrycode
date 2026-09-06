@@ -7,33 +7,13 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
-// ErrNoConversation reports that the daemon could resolve no conversation to
-// file a completed upload under, so the upload is refused rather than filed
-// anywhere. Receive raises it BARE, and callers distinguish it with errors.Is
-// rather than by comparing error strings.
-//
-// It is deliberately a distinct sentinel from ErrInvalidID, which is what
-// EnsureDir would answer for the empty conversation id: that one says an
-// identifier is malformed, and reporting a daemon that has simply routed nowhere
-// yet as a malformed identifier tells a client its own upload was at fault. The
-// retryability also inverts, the same argument that keeps ErrTooManyUploads
-// separate from ErrUploadTooLarge — this refusal clears by itself the moment the
-// daemon is on a conversation, where a malformed id never clears.
-//
-// It carries no discard semantics: like storage.go's three sentinels and unlike
-// accumulator.go's six, there is no accumulator state left to latch or drop by
-// the time it can be raised — Deliver has already released the entry and
-// assembled the bytes.
-//
-// WHICH WIRE CODE IT MAPS TO IS #1897's, and no candidate is named here.
-var ErrNoConversation = errors.New("attachments: no conversation to file this attachment under")
-
 // Intake drives one decoded attachment chunk from admission to stored bytes: the
 // package's composite entry point, and the one thing the wire layer calls. Every
 // primitive it sequences is exported beside it, but the ORDER is not obvious and
-// three steps of it are decisions rather than sequencing taste — the fork, the
-// three-way answer, and the conversation — so this type owns them in one place
-// rather than leaving them to each caller.
+// two steps of it are decisions rather than sequencing taste — the fork and the
+// three-way answer — so this type owns them in one place rather than leaving them
+// to each caller. The destination conversation is NOT one of those decisions: it
+// arrives on Receive already decided and already validated (#2143).
 //
 // ONE PER DAEMON. maxInFlightUploads is a daemon-wide entry-count ceiling, so a
 // second Intake beside the first would be a second budget of the same size and
@@ -42,10 +22,10 @@ var ErrNoConversation = errors.New("attachments: no conversation to file this at
 // one in would publish a way to have two.
 //
 // It maps nothing to the wire. Turning the sentinels it hands back into
-// attachment.* codes, declaring the seam interface this type satisfies, and
-// building the production conversation resolver are all #1897's, which is also
-// this package's first production caller. Nothing outside this package calls
-// Intake today.
+// attachment.* codes and declaring the seam interface this type satisfies are
+// both #1897's, which is also this package's first production caller. Validating
+// the destination conversation before it reaches Receive is #2143's, and it is
+// the CALLER's obligation rather than this type's — see Receive.
 //
 // It holds no lock of its own and spawns no goroutine, so it has no shutdown
 // path; the Registry's mutex stays a leaf beneath it (see Receive).
@@ -57,42 +37,28 @@ type Intake struct {
 	// once. EnsureDir resolves it per completing chunk, which is where every
 	// containment guarantee lives; nothing here builds a path.
 	instanceDir string
-
-	// conversation answers the conversation the daemon is currently on, comma-ok.
-	// It is a CONSTRUCTION-TIME dependency and never a parameter, which is how
-	// the security property docs/protocol-mobile.md § Attachments rests on —
-	// attachment_chunk carries no conversation_id, so a client cannot steer bytes
-	// into another conversation's directory — is discharged STRUCTURALLY here:
-	// there is no conversation on Receive's signature for a frame's field to
-	// reach, on any path.
-	//
-	// A nil resolver is treated as resolving nothing, so every completing chunk
-	// is refused with ErrNoConversation. Fail-closed rather than a constructor
-	// error, matching the daemon-is-on-no-conversation case it is
-	// indistinguishable from at this layer.
-	conversation func() (conversations.ConversationID, bool)
 }
 
-// NewIntake builds the driver over instanceDir, resolving the destination
-// conversation through conversation.
+// NewIntake builds the driver over instanceDir.
 //
-// conversation is read ONCE PER COMPLETING CHUNK and never at admission, because
-// Registry has nowhere to stash a per-transfer conversation id and adding one is
-// a different slice. Two consequences follow and are accepted rather than
-// mitigated: a phone that switches conversations mid-upload files its attachment
-// under the NEW one, and an upload begun while the daemon is on no conversation
-// is refused only once its last chunk arrives — after every byte has been
-// transmitted.
+// IT TAKES NO CONVERSATION, and that is the whole of #2143 at this constructor.
+// Until then it held a resolver over the daemon's follow-active cursor and the
+// destination was whatever that cursor said when a transfer completed. The shape
+// was published as a security property — attachment_chunk carried no
+// conversation_id, so a client could not steer bytes into another conversation's
+// directory — and what the omission actually bought was the absence of a field
+// rather than isolation between conversations. It cost two misfiles: an
+// attachment added before a conversation's first message could never be stored at
+// all, because only a successful send_message route stamps that cursor; and a
+// client that sent in A, sent in B and returned to A filed its bytes under B.
 //
-// It must not block, must not call back into this Intake, and must be safe for
-// concurrent use — the same three constraints newRegistryWithClock states for
-// its clock, for the same reason: it is a caller-supplied function this package
-// invokes on the frame path.
-func NewIntake(instanceDir string, conversation func() (conversations.ConversationID, bool)) *Intake {
+// The destination is a Receive PARAMETER now, validated by the caller against the
+// daemon's own registry — the same confinement the retrieval leg already used,
+// and the reason a paired client naming a conversation gains nothing by it.
+func NewIntake(instanceDir string) *Intake {
 	return &Intake{
-		reg:          NewRegistry(),
-		instanceDir:  instanceDir,
-		conversation: conversation,
+		reg:         NewRegistry(),
+		instanceDir: instanceDir,
 	}
 }
 
@@ -102,7 +68,7 @@ func NewIntake(instanceDir string, conversation func() (conversations.Conversati
 //   - ("", false, nil) — the chunk was accepted and the transfer wants more. This
 //     is what MOST chunks of a healthy upload get, and it is NOT a refusal.
 //   - (attachment_id, true, nil) — the completing chunk's verified bytes are on
-//     the host, filed under the conversation the daemon resolved for itself.
+//     the host, filed under the conversation the caller named.
 //   - ("", false, err) — refused. err is some layer's own sentinel.
 //
 // So err != nil is the caller's whole refusal test and stored separates the other
@@ -136,7 +102,7 @@ func NewIntake(instanceDir string, conversation func() (conversations.Conversati
 // transfers, which is the sequencing constraint the package overview states.
 //
 // NOTHING HERE WRAPS, ANNOTATES OR REINTERPRETS A REFUSAL. Every error out of
-// this method is another function's verbatim, or ErrNoConversation bare, so
+// this method is another function's verbatim, so
 // errors.Is reaches ErrInvalidDeclaration, ErrUploadTooLarge, ErrTooManyUploads,
 // the six accumulator sentinels, ErrInvalidID, ErrNotContained and ErrWriteFailed
 // unchanged, and the numbers each one wrapped survive with them.
@@ -152,11 +118,37 @@ func NewIntake(instanceDir string, conversation func() (conversations.Conversati
 // already returned the slot, so nothing leaks, and the restarted transfer
 // completes only if the client re-sends every chunk.
 //
-// NO CONVERSATION IS READ FROM THE FRAME ON ANY PATH. The destination comes from
-// the construction-time resolver, and when it resolves nothing the upload is
-// refused with ErrNoConversation rather than filed anywhere — never by handing ""
-// to EnsureDir, which would answer ErrInvalidID and report the daemon's own
-// unrouted state as the client's malformed identifier.
+// THE DESTINATION IS conversationID, AND ITS VALIDATION IS A PRECONDITION, AND IT
+// IS THE CALLER'S — the contract V2SessionConfig.HistoryPage states in the same
+// words for the same reason. conversationID MUST already have passed the daemon's
+// KnownConversation membership check, because it becomes a path component below
+// this method; handleAttachmentChunk is the caller that discharges it, on EVERY
+// chunk rather than only the completing one, so a transfer naming an unusable
+// conversation dies on its first frame instead of after every byte has crossed
+// the wire. Nothing is re-validated here.
+//
+// EnsureDir's conversations.ValidID check is the remaining fail-closed backstop
+// and NOT the gate: it refuses the empty id and any non-canonical one with
+// ErrInvalidID before it touches the filesystem, so a caller that skips the
+// membership check still cannot escape the instance directory — but it CAN file
+// bytes under a canonical id the daemon does not host, which is why the
+// precondition is a contract and not merely advice. That check was belt-only
+// while the id came from the daemon's own cursor; from #2143 the value is
+// client-authored and the check is load-bearing.
+//
+// conversationID is a STRING and not a conversations.ConversationID, which is the
+// seam's typing rather than an oversight: internal/relay does not import
+// internal/conversations — only internal/relay/handlers does — and
+// KnownConversation is primitive-typed on purpose to keep it that way. Converting
+// to the typed id is this package's side of the seam, at the EnsureDir call below.
+//
+// It is read on the COMPLETING CHUNK ONLY, because Registry has nowhere to stash
+// a per-transfer conversation id and adding one is a different slice. One
+// consequence follows and is accepted rather than mitigated: a phone that
+// switches conversations mid-upload files its attachment under the NEW one — now
+// a registry-validated conversation rather than whatever a cursor happened to
+// say, so it is a misfile a client can inflict on itself and never an escape.
+// #2146 refuses the switch by recording the destination at admission.
 //
 // A refusal on the completion half arrives AFTER the transfer is over: Deliver
 // released the entry and the bytes assembled cleanly, so no slot leaks and the
@@ -198,7 +190,7 @@ func NewIntake(instanceDir string, conversation func() (conversations.Conversati
 // It TAKES NO LOCK. The Registry takes its own for each call, and none is held
 // across EnsureDir or Store, so the mutex stays a leaf at the first call site to
 // put filesystem I/O on the same path as it.
-func (i *Intake) Receive(connID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error) {
+func (i *Intake) Receive(connID, conversationID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error) {
 	if _, held := i.reg.Lookup(connID, chunk.AttachmentID); !held {
 		// The declaration comes off THIS chunk, which every chunk of one
 		// transfer repeats. Nothing reads chunk.Index here.
@@ -216,11 +208,8 @@ func (i *Intake) Receive(connID string, chunk protocol.AttachmentChunkPayload) (
 		return "", false, err
 	}
 
-	convID, ok := i.resolveConversation()
-	if !ok {
-		return "", false, ErrNoConversation
-	}
-	dir, err := EnsureDir(i.instanceDir, convID, chunk.AttachmentID)
+	// The caller's already-validated destination, typed on this side of the seam.
+	dir, err := EnsureDir(i.instanceDir, conversations.ConversationID(conversationID), chunk.AttachmentID)
 	if err != nil {
 		return "", false, err
 	}
@@ -246,26 +235,4 @@ func (i *Intake) Receive(connID string, chunk protocol.AttachmentChunkPayload) (
 // and cancelling mid-store would need a context this seam does not have.
 func (i *Intake) ReleaseConn(connID string) {
 	i.reg.ReleaseConn(connID)
-}
-
-// resolveConversation answers the destination conversation comma-ok, collapsing
-// the three ways there can be none — no resolver wired, a resolver answering
-// false, and a resolver answering the empty id — into the single false this
-// method's one caller refuses on.
-//
-// The empty id is refused HERE rather than deferred to EnsureDir's shape check,
-// which is the same fail-closed posture boundSessionIDForActive takes for the
-// unbound conversation: Pool.Lookup("") would answer the bootstrap session, so an
-// empty cursor must be rejected explicitly instead of falling through to a
-// default. The parallel is exact — "" is a value with a wrong meaning downstream,
-// not merely an invalid one.
-func (i *Intake) resolveConversation() (conversations.ConversationID, bool) {
-	if i.conversation == nil {
-		return "", false
-	}
-	convID, ok := i.conversation()
-	if !ok || convID == "" {
-		return "", false
-	}
-	return convID, true
 }

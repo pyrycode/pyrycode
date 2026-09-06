@@ -1,7 +1,7 @@
 # Sentinels and discard semantics
 
 Nine exported sentinels, `errors.New("attachments: …")` house style, in
-three families plus three non-discarding outliers. Six discard the transfer
+three families plus two non-discarding outliers. Six discard the transfer
 (latched on first refusal — every later `Add` and `Assemble` returns the
 identical wrapped error, and the held chunk bytes are dropped at the moment
 of refusal so a poisoned accumulator holds no memory past that point).
@@ -19,7 +19,6 @@ resumable answer a later chunk can turn into bytes.
 | `ErrTooManyUploads` (#1796) | resource | n/a — refused before any `Accumulator` exists, by `Registry`'s admission gate rather than `Add`/`Assemble` |
 | `ErrIncomplete` | — | no |
 | `ErrUnknownUpload` (#1784) | — | n/a — no `Accumulator` is looked up for the pair; refused by `Registry.Deliver` itself before either `Add` or `Assemble` runs |
-| `ErrNoConversation` (#1896) | — | n/a — raised by `Intake.Receive` after `Deliver` has already released the entry and assembled the bytes; there is no accumulator state left to latch or drop |
 
 `ErrUploadTooLarge` is the one sentinel not scoped to `accumulator.go`'s var
 block, whose opening sentence reads "Sentinel errors returned by `Add` and
@@ -37,11 +36,16 @@ both integrity sentinels answer `CodeAttachmentIntegrityFailed`.
 `ErrUploadTooLarge` is one-to-one — `CodeAttachmentTooLarge` — and permanent
 for that file, in contrast to `ErrTooManyUploads`'s
 `CodeAttachmentTooManyUploads` (#1796), which is marked transient because it
-clears once other uploads finish. `ErrNoConversation` (#1896) is unmapped as
-of this writing — no candidate wire code is named for it yet, and clearing
-it is the same shape as `ErrTooManyUploads`: routing to a conversation is
-exactly the thing that makes it clear. The mapping itself is still #1897's
-to make. Distinguishing
+clears once other uploads finish. `ErrNoConversation` (#1896) never got a
+dedicated mapping and was deleted by #2143 along with the resolver that
+raised it: the destination now arrives as a caller-validated `Receive`
+parameter, so this package no longer has a "resolved no conversation" case to
+raise a sentinel for at all. The refusal moved one layer up, into
+`internal/relay`'s `KnownConversation` gate ahead of this package, which
+answers the already-published `attachment.invalid_chunk` rather than mint a
+replacement here — see [Chunk intake driver](attachments-package-intake-driver.md)
+§ "The conversation is resolved once, on the completing chunk only".
+Distinguishing
 sentinel from sentinel is wanted in-process, for this package's own tests and
 for the daemon's logs, not on the wire — a single corrupt transfer must still
 resolve to exactly one wire code, which is why `reject` (the shared latch

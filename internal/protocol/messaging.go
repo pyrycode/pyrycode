@@ -88,9 +88,11 @@ const MaxAttachmentIDsPerMessage = 32
 // THE ELEMENTS ARE NOT A CAPABILITY. What keeps the field safe is CONFINEMENT: a
 // named id resolves only under the message's OWN conversation, the one the
 // authenticated v2 session is already on, decided daemon-side from session
-// context and never client-asserted. That is the property AttachmentChunkPayload's
-// deliberately absent conversation_id establishes for the upload leg, and it is
-// what stops "name any id, get its bytes into your prompt". Do NOT argue
+// context and never client-asserted. That is what stops "name any id, get its
+// bytes into your prompt", and it is a property of THIS field's resolution — not
+// one borrowed from a sibling frame. This block used to anchor it to
+// AttachmentChunkPayload's deliberately absent conversation_id; that frame carries
+// one since #2142, so the anchor is gone while the property is untouched. Do NOT argue
 // UUIDv4-therefore-unguessable anywhere on this field: the family's published
 // stance is that the id is not secret, not unguessable and never the only thing
 // between a caller and a file, so an entropy claim would quietly promote it to
@@ -373,6 +375,50 @@ type QueueStatePayload struct {
 type DequeueMessagePayload struct {
 	ConversationID string `json:"conversation_id"`
 	QueuedMsgID    uint64 `json:"queued_msg_id"`
+}
+
+// NewSessionPayload is the body of an Envelope whose Type == TypeNewSession
+// (docs/protocol-mobile.md § New session). Phone → binary direction.
+//
+// This is an inbound v2 *control* envelope, structurally like
+// DequeueMessagePayload: the v2 session manager intercepts it at dispatchAppFrame
+// before dispatch.Route, and there is NO dispatch.Route handler — resolving
+// ConversationID and rotating that conversation's session is the handler's (#2099)
+// job. Unlike its siblings the whole payload is OPTIONAL: the frame carried none
+// at all until #2099, so an un-upgraded client sends a bare envelope and MUST keep
+// working.
+//
+// ConversationID is untrusted phone input and is a validated LOOKUP KEY, never
+// authorization and never a path component — the rule docs/protocol-mobile.md
+// already publishes for request_attachment and, since #2142, for attachment_chunk.
+// Absent, empty, or a body that does not decode at all are ONE value and one
+// meaning: rotate the conversation the daemon's own cursor points at, which is
+// the pre-#2099 behaviour verbatim. omitempty keeps that the shape a client with
+// nothing to name actually emits, so the wire has one canonical bare form.
+type NewSessionPayload struct {
+	ConversationID string `json:"conversation_id,omitempty"`
+}
+
+// InterruptPayload is the body of an Envelope whose Type == TypeInterrupt
+// (docs/protocol-mobile.md § Interrupt (v2)). Phone → binary direction.
+//
+// This is an inbound v2 *control* envelope, structurally identical to
+// NewSessionPayload: the v2 session manager intercepts it at dispatchAppFrame
+// before dispatch.Route, and there is NO dispatch.Route handler — resolving
+// ConversationID and stopping that conversation's running turn is the handler's
+// (#2103) job. Like new_session before #2099 the whole payload is OPTIONAL: the
+// frame carried none at all until #2103, so an un-upgraded client sends a bare
+// envelope and MUST keep working.
+//
+// ConversationID is untrusted phone input and is a validated LOOKUP KEY, never
+// authorization and never a path component — the rule docs/protocol-mobile.md
+// already publishes for request_attachment, attachment_chunk and new_session.
+// Absent, empty, or a body that does not decode at all are ONE value and one
+// meaning: interrupt the conversation the daemon's own cursor points at, which is
+// the pre-#2103 behaviour verbatim. omitempty keeps that the shape a client with
+// nothing to name actually emits, so the wire has one canonical bare form.
+type InterruptPayload struct {
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 // SessionErrorPayload is the body of an Envelope whose Type ==

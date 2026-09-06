@@ -18,13 +18,15 @@ import (
 type fakeSessionStarter struct {
 	mu         sync.Mutex
 	startCalls int
+	convIDs    []string
 	err        error
 }
 
-func (f *fakeSessionStarter) StartNewSession() error {
+func (f *fakeSessionStarter) StartNewSession(conversationID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.startCalls++
+	f.convIDs = append(f.convIDs, conversationID)
 	return f.err
 }
 
@@ -32,6 +34,15 @@ func (f *fakeSessionStarter) startCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.startCalls
+}
+
+// startedConvIDs returns the ids handed to StartNewSession, in call order. The
+// relay is a courier for this string — it validates nothing and rewrites nothing —
+// so what the seam received IS the whole of the relay-side contract (#2099).
+func (f *fakeSessionStarter) startedConvIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.convIDs...)
 }
 
 // TestV2Session_NewSession_RoutesClearByCapability drives an inbound `new_session`
@@ -154,5 +165,131 @@ func TestV2Session_NewSession_StartErrorTolerated(t *testing.T) {
 
 	if got := fake.startCount(); got != 1 {
 		t.Errorf("startCalls = %d, want 1 (attempted despite error)", got)
+	}
+}
+
+// --- #2099 new_session names the conversation it restarts ---
+
+// TestV2Session_NewSession_HandsNamedConversationToSeam is the relay half of
+// #2099: whatever conversation_id the frame carries reaches SessionStarter
+// verbatim, and every shape that means "nothing named" reaches it as the empty
+// string. The relay deliberately does NO validation — internal/relay imports
+// neither internal/conversations nor internal/sessions, so the shape check and the
+// registry lookup live in cmd/pyry. That makes "what the seam received" the entire
+// relay-side contract, and an id the relay rewrote or dropped is the only way this
+// half can fail.
+//
+// The hostile shapes are here on purpose: a body that is not an object at all, and
+// an id that is not a UUID. Both must arrive at the seam unchanged (or as "" when
+// they do not decode) rather than being sanitised in transit — sanitising here
+// would move the trust boundary into a package that cannot see the registry.
+func TestV2Session_NewSession_HandsNamedConversationToSeam(t *testing.T) {
+	t.Parallel()
+
+	const namedConv = "22222222-2222-4222-8222-222222222222"
+
+	cases := []struct {
+		name    string
+		payload []byte
+		want    string
+	}{
+		{"named conversation reaches the seam verbatim",
+			mustMarshal(t, protocol.NewSessionPayload{ConversationID: namedConv}), namedConv},
+		{"absent payload is the cursor path",
+			nil, ""},
+		{"empty object is the cursor path",
+			[]byte(`{}`), ""},
+		{"explicit empty string is the cursor path",
+			[]byte(`{"conversation_id":""}`), ""},
+		// Wrong-typed rather than truncated: Envelope.Payload is a json.RawMessage,
+		// so a syntactically broken body cannot be marshalled into a frame by this
+		// harness at all. A well-formed body whose field has the wrong type is the
+		// reachable undecodable shape, and it exercises the same tolerated-error arm.
+		{"undecodable body is the cursor path, not a dropped frame",
+			[]byte(`{"conversation_id":7}`), ""},
+		{"body that is not an object is the cursor path",
+			[]byte(`["` + namedConv + `"]`), ""},
+		{"a non-UUID id is NOT sanitised by the relay",
+			[]byte(`{"conversation_id":"../../etc/passwd"}`), "../../etc/passwd"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, respPub := genV2Keypair(t)
+			fake := &fakeSessionStarter{}
+			frames := make(chan protocol.RoutingEnvelope, 8)
+			rec := &v2Recorder{}
+			mgr, stop := startManager(t, V2SessionConfig{
+				Frames:         frames,
+				Outbound:       rec.outbound,
+				StaticPriv:     respPriv,
+				Devices:        v2PairedRegistry(t, v2TestToken),
+				ServerID:       v2TestServerID,
+				Logger:         silentLogger(),
+				SessionStarter: fake,
+			})
+			t.Cleanup(stop)
+
+			send, _ := openModalConn(t, mgr, frames, rec, respPub, "c-int", []string{protocol.CapabilityInteractive})
+			frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+				Type:    protocol.TypeNewSession,
+				TS:      time.Now().UTC(),
+				Payload: tc.payload,
+			})
+
+			// Barrier: Frames is one FIFO drained by the single Run goroutine, so once
+			// this conn is open the new_session above has been fully handled.
+			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+
+			got := fake.startedConvIDs()
+			if len(got) != 1 {
+				t.Fatalf("StartNewSession calls = %d (%q), want exactly 1 — a payload shape must never "+
+					"suppress the call, only change the id it carries", len(got), got)
+			}
+			if got[0] != tc.want {
+				t.Errorf("StartNewSession(%q), want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestV2Session_NewSession_NamedConversationStillCapabilityGated pins that the
+// capability gate keeps running BEFORE the decode. Naming a conversation is not a
+// way around the gate: a non-interactive conn's new_session stays inert whether it
+// names one or not, and the manager parses none of its bytes.
+func TestV2Session_NewSession_NamedConversationStillCapabilityGated(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	fake := &fakeSessionStarter{}
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:         frames,
+		Outbound:       rec.outbound,
+		StaticPriv:     respPriv,
+		Devices:        v2PairedRegistry(t, v2TestToken),
+		ServerID:       v2TestServerID,
+		Logger:         silentLogger(),
+		SessionStarter: fake,
+	})
+	t.Cleanup(stop)
+
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, "c-plain", nil)
+	frames <- sealAppFrameConn(t, send, "c-plain", protocol.Envelope{
+		Type: protocol.TypeNewSession,
+		TS:   time.Now().UTC(),
+		Payload: mustMarshal(t, protocol.NewSessionPayload{
+			ConversationID: "22222222-2222-4222-8222-222222222222",
+		}),
+	})
+
+	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+
+	if got := fake.startedConvIDs(); len(got) != 0 {
+		t.Errorf("StartNewSession calls = %q, want none: naming a conversation must not bypass the "+
+			"interactive capability gate", got)
 	}
 }
