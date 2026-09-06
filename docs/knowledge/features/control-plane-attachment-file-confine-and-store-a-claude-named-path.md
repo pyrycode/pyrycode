@@ -5,10 +5,10 @@
 earlier attachment path component was daemon-minted or sanitised from a client-declared
 string (see [attachments-package.md](attachments-package.md)); this one names a real path
 and reads it, so it is the family's first verb that must *confine*, not just *sanitise*.
-It ships live but inert (the #1104 `mcp.approve` shape — see below). #2168 shipped the MCP
+It shipped live but inert (the #1104 `mcp.approve` shape — see below); #2168 shipped the MCP
 tool that calls it, `pyry mcp-files` ([pyry-mcp-files-command.md](pyry-mcp-files-command.md)),
-itself still inert until the sibling #2169 puts a session id on a real claude child's
-environment. The daemon maps the caller's session to its conversation, confines the path to that
+and #2169 wired that tool onto a real claude child, so this verb now has a live caller. The
+daemon maps the caller's session to its conversation, confines the path to that
 conversation's recorded `Cwd`, and stores the bytes through the existing
 `attachments.EnsureDir` / `Store` primitives with a daemon-minted id — no new storage
 primitive was needed.
@@ -119,7 +119,9 @@ absolute and confined, which holds under either resolution.
 ## See also
 
 - [pyry-mcp-files-command.md](pyry-mcp-files-command.md) — `pyry mcp-files`, the `send_file`
-  MCP tool (#2168) that calls this verb; still shipped inert pending #2169's environment wiring.
+  MCP tool (#2168) that calls this verb, registered on the interactive spawn by #2169. A `/clear`
+  rotation still makes this verb refuse for a live child (see that document's identity section) —
+  fail-closed, not a misfile, and not something this verb's own confinement logic can see.
 - [control-plane.md § Approve](control-plane.md) — the `mcp.approve` precedent this verb's
   dependency-injection and fail-closed shapes both draw from.
 - [attachments-package.md](attachments-package.md) — `EnsureDir`, `Store`, `ResolvePath`,

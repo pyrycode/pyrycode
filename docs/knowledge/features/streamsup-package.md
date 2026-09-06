@@ -15,7 +15,8 @@ type Config struct {
     Args           []string      // pass-through argv (e.g. --model <m>); New clones it
     Stdout         io.Writer     // optional; nil → child stdout discarded (/dev/null)
     Stderr         io.Writer     // optional; nil → discarded
-    Env            []string      // optional; appended to os.Environ() in the child
+    Env            []string      // optional; appended to os.Environ() in the child; nil in production
+    SessionIDEnvVar string      // optional; name bound per-spawn to that spawn's live session id
     Logger         *slog.Logger  // optional; nil → slog.Default()
     BackoffInitial time.Duration // zero → 500ms
     BackoffMax     time.Duration // zero → 30s

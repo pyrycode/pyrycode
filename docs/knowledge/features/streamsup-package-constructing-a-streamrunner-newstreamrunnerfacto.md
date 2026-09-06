@@ -1,12 +1,14 @@
 # Constructing a `streamRunner` — `newStreamRunnerFactory` (#1109, extended #1098, #1168)
 
-`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath
+`cmd/pyry/streamsup_runner.go` also holds `newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath
 string) sessions.RunnerFactory` — returns exactly the `sessions.RunnerFactory` signature (above); #1109
 delivered the constructor (as the bare `streamRunnerFactory` func, the first `streamsup.New` caller
 tree-wide), #1098 turned it into this `sink`-capturing constructor so the Parser it installs has somewhere
-to send turnevents, and #1168 added the `mcpApprovePath` param to inject the permission-approval flags.
+to send turnevents, #1168 added the param (then `mcpApprovePath`) to inject the permission-approval flags,
+and #2169 renamed it `mcpServersPath` once the document it names carries a second server (`pyry_files`,
+[pyry-mcp-files-command.md](pyry-mcp-files-command.md)) alongside `pyry_approve`.
 Body of the returned closure: `scfg := mapStreamsupConfig(cfg)`; `scfg.Args =
-withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)`; `tag :=
+withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass)`; `tag :=
 newStreamSessionTag(cfg.SessionID)` (#1133 — the live handle both fan-in lanes read); `parser, held :=
 newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)` (#1840, below); `scfg.Stdout = parser`;
 `scfg.OnChildExit = sink.exitForTag(tag.ID)`; `scfg.OnSessionRotate = tag.Rotate` — see [Session rotation
@@ -15,9 +17,9 @@ minted here, ahead of both halves, rather than threaded through either signature
 on error, `fmt.Errorf("cmd/pyry: stream runner: %w", err)` and a genuine nil `sessions.Runner`; on success,
 `streamRunner{r: r, models: held}`.
 
-**`withApprovalArgs(args []string, mcpApprovePath, storedMode string, operatorBypass bool) []string`
+**`withApprovalArgs(args []string, mcpServersPath, storedMode string, operatorBypass bool) []string`
 (#1168, extended #2043, #2065)** is the interactive-stream twin of `agent_run.go`'s non-yolo
-`permissionArgs` wiring (#1106) — the first live consumer of `permissionArgs`/`writeMCPApproveConfig`
+`permissionArgs` wiring (#1106) — the first live consumer of `permissionArgs`/`writeMCPServersConfig`
 on the interactive path. Through #2043 it read `--dangerously-skip-permissions` off `args` as the
 single deterministic per-spawn yolo signal, because that flag's presence or absence *was* the
 posture. **#2065 makes the flag unconditional** (`sessions.claudeSettingsArgs` appends it to every
@@ -56,8 +58,8 @@ package's own tests exercises the shape (`namesPermissionMode`/`dropPermissionMo
 
 Runs inside the shared factory closure, so it covers **both** the bootstrap runner
 and per-conversation runners — a per-conversation stream session cannot silently bypass the approval
-gate. `mcpApprovePath` is the daemon-global `--mcp-config` file `runSupervisor` writes once at startup
-via `writeMCPApproveConfig` (gated on `cfg.InteractiveRunner == "stream-json"`, fail-closed on write
+gate. `mcpServersPath` is the daemon-global `--mcp-config` file `runSupervisor` writes once at startup
+via `writeMCPServersConfig` (gated on `cfg.InteractiveRunner == "stream-json"`, fail-closed on write
 error, removed at shutdown); on the `""`/`"pty"` path the factory is never built, so the PTY interactive
 argv is untouched. See [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md),
 [codebase/1168.md](../codebase/1168.md) and
@@ -92,10 +94,11 @@ sites per #1108) always surfaces as an error rather than silently degrading the 
 `pyry attach` drives) to the PTY path.
 
 **`mapStreamsupConfig(cfg supervisor.Config) streamsup.Config`** is the fully-inspectable mapper and
-the primary tested surface — unchanged by #1098, extended by **#1631**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
+the primary tested surface — unchanged by #1098, extended by **#1631** and **#2169**. Field mapping: `ClaudeBin`/`WorkDir`/`SessionID`/
 `Logger`/`BackoffInitial`/`BackoffMax`/`BackoffReset` copy verbatim; `ClaudeArgs → Args` (streamsup's argv
 field has a different name) through `stripSessionIDFlags`; `ClaudeSessionsDir` is derived per runner from
-`WorkDir` (below); `Stdout`/`Stderr`/`Env` stay nil **inside the
+`WorkDir` (below); `SessionIDEnvVar` is set to the constant `envSessionID` (`pyry_files`'s
+`PYRY_SESSION_ID`, [pyry-mcp-files-command.md](pyry-mcp-files-command.md)); `Stdout`/`Stderr`/`Env` stay nil **inside the
 mapper** (`Stdout` is filled one layer up, in `newStreamRunnerFactory`'s closure — keeping the mapper's
 `Stdout == nil` assertion untouched; `Stderr`/`Env` have no `supervisor.Config` analogue). The
 seven PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConversation`,
@@ -103,6 +106,17 @@ seven PTY-only fields (`ResumeLast`, `ResolveSessionID`, `Bridge`, `ValidateConv
 the list even now that a sessions *directory* crosses this seam: streamsup still owns its own id-flag
 inversion (`useCreateForm`) and decides the flag from the directory itself; no resolver callback crosses,
 and no directory scan happens on either side.
+
+**Why `SessionIDEnvVar` (a name) and not `Env` (a value) — #2169's MUST FIX.** The mapper runs once per
+runner *construction*, and `cfg.SessionID` is that construction-time seed — it does not move when
+`RestartFresh` rotates the runner's live id. A first cut composed `Env: []string{envSessionID + "=" +
+cfg.SessionID}` here directly; every child spawned after a `new_session` rotation then carried the
+*retired* id on its environment while its argv (built fresh each spawn from the live id) carried the
+current one, and `attachment.file` refused for the rest of that session's life. The fix keeps the mapper
+construction-time-only by design and pushes the per-spawn composition down to where a live id actually
+exists — see [`buildArgs`/`spawnEnv`](streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md) and
+[pyry-mcp-files-command.md](pyry-mcp-files-command.md) § "Session id" for the full shape and for the one
+gap the environment can never close (a `/clear` rotation without a respawn).
 
 **`streamClaudeSessionsDir(workdir string) string` (#1631) arms `useCreateForm` on the production path.**
 Three arms: `workdir == ""` → `""` (unreachable at both pool sites, both carry a confined realpath, but
