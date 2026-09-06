@@ -63,6 +63,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/update"
 )
 
 // --- discovery ------------------------------------------------------------------
@@ -130,13 +132,23 @@ func initControlControlArmID(t *testing.T) string {
 // them — assertRegressionFixture's idiom, so one run names every broken fixture
 // rather than the first.
 //
-// WHICH VERSION TO COMPARE WHEN SEVERAL ARE PRESENT: none. The run fails. The
-// alternative — compare the newest — was declined because these tokens have no
-// total order without a semver parser, and a wrong order silently compares the
-// stale set, which is the one outcome worse than a red. The writer derives the
-// filename from the version, so a re-capture at the same version overwrites in
-// place and never reaches that branch; one at a new version leaves a stale set
-// whose deletion is the fix, and the message says so.
+// WHICH VERSION TO COMPARE WHEN SEVERAL ARE PRESENT: the newest, and #2131 is
+// why that answer changed. It used to be "none, the run fails", declined on the
+// ground that these tokens have no total order without a semver parser and that
+// a wrong order silently compares the stale set — the one outcome worse than a
+// red. Only the first clause was ever a property of the tokens: this repo HAS
+// that parser in update.CompareVersions, and ordering numerically rather than
+// lexically is what closes the second. What "none" cost was a red on EVERY full
+// e2e-realclaude run on a host whose claude has moved past the committed
+// captures, misattributed to whichever branch was under test — the sibling
+// capture probe writes a set at the live version beside the committed one,
+// nothing commits it, and a discarded worktree means it is back next run.
+//
+// initControlSelectArmGroup is that rule, and its own doc carries the reasoning
+// the old failure message asked to have recorded. Two of its branches are why
+// this is safe rather than merely convenient: an unorderable token fails the run
+// instead of being dropped, and an incomplete newest group fails instead of
+// falling back to an older complete one.
 func initControlDiscoverArms(t *testing.T) (string, map[string]*initControlFixtureRecord) {
 	t.Helper()
 
@@ -206,38 +218,302 @@ func initControlDiscoverArms(t *testing.T) (string, map[string]*initControlFixtu
 		byArm[rec.Arm] = rec
 	}
 
-	versions := make([]string, 0, len(byVersion))
-	for v := range byVersion {
-		versions = append(versions, v)
-	}
-	sort.Strings(versions)
-
-	if len(versions) > 1 {
-		problems = append(problems, fmt.Sprintf("the glob matched captures of %d claude versions %v; "+
-			"comparing an arm from one version against a control from another is not a comparison, "+
-			"and picking one needs an order these tokens do not have — delete the stale set, or "+
-			"teach this test which to compare and say why", len(versions), versions))
-	}
-
 	// "Exactly once" needs no second branch: every key here is a declared arm, and
 	// two files with the same (version, arm) would have to share the base name the
 	// check above pins them to, which one directory listing cannot produce. Presence
-	// is therefore the whole property.
+	// is therefore the whole property, and initControlSelectArmGroup asserts it on
+	// the group it selected.
+	//
+	// GATED ON A CLEAN PER-FILE PASS, exactly as the completeness check it absorbed
+	// was: a fixture whose decode or name-bind failed leaves a group of unknown
+	// shape, and choosing a winner out of what remains would report a verdict off a
+	// set this run cannot vouch for.
+	var selected string
+	var ignored []string
 	if len(problems) == 0 {
-		for _, arm := range initControlArms {
-			if _, ok := byVersion[versions[0]][arm.id]; !ok {
-				problems = append(problems, fmt.Sprintf("claude %s has no capture of arm %q; an arm "+
-					"the run cannot compare must be named rather than dropped out of the comparison "+
-					"silently", versions[0], arm.id))
-			}
-		}
+		var selectionProblems []string
+		selected, ignored, selectionProblems = initControlSelectArmGroup(byVersion)
+		problems = append(problems, selectionProblems...)
 	}
 
 	if len(problems) > 0 {
 		t.Fatalf("#1764: discovery over %s found %d problem(s):\n  %s",
 			initControlArmFixtureGlob, len(problems), strings.Join(problems, "\n  "))
 	}
-	return versions[0], byVersion[versions[0]]
+
+	// Both halves on every run rather than only when something was ignored: a
+	// one-group run that says so is what makes the two-group line legible the first
+	// time a host's claude upgrade produces one.
+	t.Logf("#2131: %s matched %d claude version group(s); comparing %s, ignoring %v",
+		initControlArmFixtureGlob, len(byVersion), selected, ignored)
+	return selected, byVersion[selected]
+}
+
+// --- the version-group selection ----------------------------------------------------
+
+// initControlSelectArmGroup picks the version group to compare: the HIGHEST
+// claude version present, under update.CompareVersions' numeric ordering. It
+// returns that version, the versions it ignored to get there, and the problems
+// that make any selection impossible.
+//
+// PURE OVER THE ALREADY-GROUPED MAP, which is the design rather than a
+// preference. It reads the map's keys and each inner map's arm keys and never a
+// record's contents, so the table below reaches every branch from arm-id lists
+// with nil records — no glob, no read, and above all no write into testdata/.
+// This file's finOfflineExecBans entry keeps every write name banned and must go
+// on doing so; a selection reachable only through the glob would have needed a
+// fixture on disk per row.
+//
+// PROBLEMS RATHER THAN AN ERROR, accumulated: initControlDiscoverArms joins them
+// into its one t.Fatalf, so one run names every unorderable token and every
+// missing arm rather than the first.
+//
+// A SELECTION IS RETURNED ONLY WHEN problems IS EMPTY, and the two short-circuits
+// that enforce it are not symmetric. The first is obvious — a set holding a token
+// nothing can order was never ordered. The second is the load-bearing one: an
+// incomplete winner does NOT fall back to an older complete group, because an
+// incomplete newest set means the capture run in this same suite went wrong, and
+// comparing the older set instead would report a fresh-looking verdict off stale
+// bytes.
+func initControlSelectArmGroup(byVersion map[string]map[string]*initControlFixtureRecord) (selected string, ignored []string, problems []string) {
+	if len(byVersion) == 0 {
+		return "", nil, []string{"no fixture decoded into a version group, so there is nothing to " +
+			"select between; totality guard — a caller reaching here has already lost the " +
+			"information this selection reads"}
+	}
+
+	// Sorted for a deterministic REPORTING order, which is emphatically not the
+	// ranking: a string sort puts 2.1.239 below 2.1.99, and that gap is the whole
+	// reason the loop below asks a parser instead of asking this slice.
+	versions := make([]string, 0, len(byVersion))
+	for v := range byVersion {
+		versions = append(versions, v)
+	}
+	sort.Strings(versions)
+
+	for _, v := range versions {
+		// Ordered against the incumbent, or against ITSELF when there is none. Both
+		// calls parse v, so the single error branch below covers "does not parse" and
+		// "cannot be ordered against the incumbent" alike — and both are reachable:
+		// the self-comparison when the lowest-sorting token is the bad one, the other
+		// when any later token is.
+		against := selected
+		if against == "" {
+			against = v
+		}
+		cmp, err := update.CompareVersions(v, against)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("claude version token %q does not parse as a "+
+				"version (%v); versionSlug admits 2_1_220 and permission_protocol alike as name "+
+				"segments, so an unorderable token names a fixture that looks like every other one "+
+				"— it fails the run here rather than being silently dropped, ignored, or "+
+				"string-sorted into a rank it does not have", v, err))
+			continue
+		}
+		switch {
+		case selected == "" || cmp == update.Newer:
+			selected = v
+		case cmp == update.Same:
+			problems = append(problems, fmt.Sprintf("claude version tokens %q and %q are different "+
+				"names that order EQUAL: CompareVersions tolerates a leading \"v\" and strips a "+
+				"-/+ suffix before parsing, so neither is the newer one and picking either would "+
+				"compare an arbitrary one of two coherent sets — the defect this selection exists "+
+				"to close, wearing a different token", v, selected))
+		}
+	}
+	if len(problems) > 0 {
+		return "", nil, problems
+	}
+
+	for _, arm := range initControlArms {
+		if _, ok := byVersion[selected][arm.id]; !ok {
+			problems = append(problems, fmt.Sprintf("claude %s is the newest captured version and has "+
+				"no capture of arm %q; an incomplete newest set means the capture run in this same "+
+				"suite went wrong, and falling back to an older complete group would report a "+
+				"fresh-looking verdict off stale bytes", selected, arm.id))
+		}
+	}
+	if len(problems) > 0 {
+		return "", nil, problems
+	}
+
+	for _, v := range versions {
+		if v != selected {
+			ignored = append(ignored, v)
+		}
+	}
+	return selected, ignored, nil
+}
+
+// TestInitControlSelectArmGroup_PicksTheNewestCompleteGroupOrSaysWhyNot is #2131's
+// lock: every branch of the selection rule, over inputs built in memory.
+//
+// IT REACHES NO DISK. Rows are arm-id lists rather than fixtures and the records
+// are nil, because the selection never reads one — which is what lets the
+// malformed-token and incomplete-group rows exist at all. Either one written as a
+// real capture would mean writing into the package's committed testdata/, and
+// this file's finOfflineExecBans entry bans every name that could.
+//
+// ARM IDS COME FROM initControlArms, never from literals, for
+// initControlControlArmID's reason: a row asserting a hard-coded
+// "control_no_request" would keep passing against a renamed vocabulary while the
+// comparison it guards compared nothing.
+func TestInitControlSelectArmGroup_PicksTheNewestCompleteGroupOrSaysWhyNot(t *testing.T) {
+	t.Parallel()
+
+	all := make([]string, 0, len(initControlArms))
+	for _, arm := range initControlArms {
+		all = append(all, arm.id)
+	}
+	if len(all) < 2 {
+		t.Fatalf("#2131: initControlArms declares %d arm(s); the incomplete-group rows below drop one "+
+			"and need at least two before they assert anything", len(all))
+	}
+	dropped := all[len(all)-1]
+
+	// Nil records on purpose: a selection that dereferenced one would be reading a
+	// record's contents, which is precisely what it must not do.
+	group := func(arms ...string) map[string]*initControlFixtureRecord {
+		out := make(map[string]*initControlFixtureRecord, len(arms))
+		for _, a := range arms {
+			out[a] = nil
+		}
+		return out
+	}
+
+	tests := []struct {
+		name         string
+		byVersion    map[string]map[string]*initControlFixtureRecord
+		wantSelected string
+		wantIgnored  []string
+		wantProblems int
+		wantMentions []string
+	}{
+		{
+			name:         "one complete group is selected and nothing is ignored",
+			byVersion:    map[string]map[string]*initControlFixtureRecord{"2.1.239": group(all...)},
+			wantSelected: "2.1.239",
+		},
+		{
+			name: "two complete groups: the newer is compared and the older is named as ignored",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"2.1.239": group(all...),
+				"2.1.259": group(all...),
+			},
+			wantSelected: "2.1.259",
+			wantIgnored:  []string{"2.1.239"},
+		},
+		{
+			// The row a string sort gets wrong: "2.1.239" < "2.1.99" lexically.
+			name: "the ordering is numeric rather than lexical, so 2.1.239 beats 2.1.99",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"2.1.99":  group(all...),
+				"2.1.239": group(all...),
+			},
+			wantSelected: "2.1.239",
+			wantIgnored:  []string{"2.1.99"},
+		},
+		{
+			name: "three complete groups: the newest is compared, the rest ignored in listing order",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"2.1.99":  group(all...),
+				"2.1.239": group(all...),
+				"2.1.259": group(all...),
+			},
+			wantSelected: "2.1.259",
+			wantIgnored:  []string{"2.1.239", "2.1.99"},
+		},
+		{
+			name: "an unparseable token beside a good one fails the run and is named",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"2.1.239":             group(all...),
+				"permission_protocol": group(all...),
+			},
+			wantProblems: 1,
+			wantMentions: []string{"permission_protocol"},
+		},
+		{
+			name:         "a versionSlug-shaped underscore token is not a version",
+			byVersion:    map[string]map[string]*initControlFixtureRecord{"2_1_220": group(all...)},
+			wantProblems: 1,
+			wantMentions: []string{"2_1_220"},
+		},
+		{
+			name: "every token unparseable: all of them are named, not only the first",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"permission_protocol": group(all...),
+				"set_permission_mode": group(all...),
+			},
+			wantProblems: 2,
+			wantMentions: []string{"permission_protocol", "set_permission_mode"},
+		},
+		{
+			name: "two different names that order equal fail rather than one of them winning",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"2.1.239":  group(all...),
+				"v2.1.239": group(all...),
+			},
+			wantProblems: 1,
+			wantMentions: []string{"v2.1.239", "order EQUAL"},
+		},
+		{
+			// AC 4 whole: wantSelected "" is the no-fallback half — the older group is
+			// complete and is still not compared.
+			name: "an incomplete newest group fails and does not fall back to the older complete one",
+			byVersion: map[string]map[string]*initControlFixtureRecord{
+				"2.1.239": group(all...),
+				"2.1.259": group(all[:len(all)-1]...),
+			},
+			wantProblems: 1,
+			wantMentions: []string{"2.1.259", dropped},
+		},
+		{
+			name:         "an incomplete group missing several arms names every one of them",
+			byVersion:    map[string]map[string]*initControlFixtureRecord{"2.1.259": group(all[0])},
+			wantProblems: len(all) - 1,
+			wantMentions: all[1:],
+		},
+		{
+			name:         "an empty group map is a totality guard rather than a panic",
+			byVersion:    map[string]map[string]*initControlFixtureRecord{},
+			wantProblems: 1,
+			wantMentions: []string{"nothing to select between"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			selected, ignored, problems := initControlSelectArmGroup(tc.byVersion)
+
+			if selected != tc.wantSelected {
+				t.Errorf("#2131: selected %q, want %q", selected, tc.wantSelected)
+			}
+			if !reflect.DeepEqual(ignored, tc.wantIgnored) {
+				t.Errorf("#2131: ignored %v, want %v; the ignored list is what the run reports it did "+
+					"NOT compare, so a wrong one misdescribes the verdict", ignored, tc.wantIgnored)
+			}
+			if len(problems) != tc.wantProblems {
+				t.Errorf("#2131: %d problem(s), want %d:\n  %s", len(problems), tc.wantProblems,
+					strings.Join(problems, "\n  "))
+			}
+
+			joined := strings.Join(problems, "\n")
+			for _, want := range tc.wantMentions {
+				// strings.Contains(s, "") is true for every s, including the empty one, so
+				// an empty mention would assert nothing while reading as a check.
+				if want == "" {
+					t.Fatalf("#2131: an empty mention is satisfied by any problem list at all")
+				}
+				if !strings.Contains(joined, want) {
+					t.Errorf("#2131: no problem mentions %q; a rejection that does not name what it "+
+						"rejected leaves the operator to guess which capture to delete:\n  %s",
+						want, joined)
+				}
+			}
+		})
+	}
 }
 
 // --- the per-turn read ------------------------------------------------------------
