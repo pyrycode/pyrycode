@@ -1425,12 +1425,14 @@ func resolveBoundRunner(convReg *conversations.Registry, pool *sessions.Pool, co
 }
 
 // activeInterrupter satisfies relay.Interrupter by routing an inbound interrupt to
-// the runner bound to the ACTIVE conversation — replacing the former
-// Interrupter: w.sup wiring that mis-delivered every interrupt to the bootstrap
-// supervisor regardless of which conversation's turn was running (#1121). The two
-// seams are injected (not raw *Pool/*Registry) so the AC2 test can drive the
-// composition with fakes; production wires currentConv: active.CurrentConversation
-// and resolveRunner over resolveBoundRunner(convReg, pool, …).
+// the runner bound to the conversation the frame NAMES (#2103), falling back to the
+// ACTIVE conversation when it names none — replacing the former Interrupter: w.sup
+// wiring that mis-delivered every interrupt to the bootstrap supervisor regardless
+// of which conversation's turn was running (#1121). The two seams are injected (not
+// raw *Pool/*Registry) so active_interrupter_test.go can drive the composition with
+// fakes; production wires currentConv: active.CurrentConversation and resolveRunner
+// over resolveBoundRunner(convReg, pool, …), and #2103 changed neither field, only
+// how SendEsc picks the id it passes.
 type activeInterrupter struct {
 	currentConv   func() string
 	resolveRunner func(convID string) (sessions.Runner, bool)
@@ -1453,14 +1455,39 @@ func (a activeInterrupter) logger() *slog.Logger {
 	return a.log
 }
 
-// SendEsc interrupts the active conversation's bound runner. It keeps the relay
-// seam's method name (relay.Interrupter.SendEsc) even though the actuation is a
-// per-runner interrupt, not literally an Esc — the seam doc already abstracts
-// SendEsc as "claude's own interrupt" (#1121 seam decision), so the whole
-// internal/relay package (including its interrupt tests) stays untouched. Every
-// ambiguous state (no active conversation, unbound/dangling binding) is inert
-// (nil), never actuating the wrong child; a live runner's no-child error
-// propagates for handleInterrupt to Warn-log and tolerate (best-effort contract).
+// SendEsc interrupts the runner bound to the conversation the frame NAMES, or —
+// when it names none — the one the daemon's cursor points at (#1121, widened by
+// #2103). It keeps the relay seam's method name (relay.Interrupter.SendEsc) even
+// though the actuation is a per-runner interrupt, not literally an Esc — the seam
+// doc already abstracts SendEsc as "claude's own interrupt" (#1121 seam decision),
+// so renaming would churn the whole internal/relay package for no behavioural gain.
+//
+// conversationID is UNTRUSTED: it is the string a paired client put on the wire,
+// and internal/relay forwards it unjudged because it can neither shape-check nor
+// resolve it (relay.Interrupter's own doc block states that division). This method
+// is the trust boundary, and the order below is what discharges it.
+//
+// The empty-string branch runs BEFORE conversations.ValidID, not after:
+// ValidID("") is false by that function's own doc, so reversing the two would
+// refuse every un-upgraded client's bare frame — the only shape interrupt had from
+// #707 until #2103 — and silently break backward compatibility. From there every
+// ambiguous state (no active conversation, a non-canonical named id, an
+// unknown/unbound binding) is inert (nil), never actuating the wrong child; the
+// actuation's own error propagates for handleInterrupt to Warn-log and tolerate
+// (best-effort contract).
+//
+// THERE IS DELIBERATELY NO LIVENESS PROBE, and this is where #2103 parts from its
+// twin rather than by oversight. activeSessionStarter.StartNewSession needs
+// `named && State().ChildPID == 0` because RestartFresh on a childless runner
+// rekeys the pool, persists sessions.json, rebinds the conversation and broadcasts
+// a session_transition — observable damage with no session to show for it. This
+// actuator has no such hazard: streamsup.WriteInterrupt checks its writer for nil
+// FIRST and returns ErrNoLiveChild having written nothing, so a conversation with
+// no live child is inert by construction on the named and cursor paths alike.
+// Adding the probe would introduce a refusal the bare path does not have today,
+// which is the pre-#2103 behaviour AC-2 exists to preserve. Generalises: a
+// blocker's late fix is not automatically the twin's requirement — trace the twin's
+// actuation to its own write site before copying a guard across.
 // EVERY arm records which one it took, at Info so the records are visible at the
 // daemon's default level (#1192, #1193) — the inert ones, the actuation, and a
 // bound runner exposing no interrupt method at all. Combined with handleInterrupt's
@@ -1472,18 +1499,42 @@ func (a activeInterrupter) logger() *slog.Logger {
 // are single small writes and no such hang has been observed. The records identify
 // the CONVERSATION: resolveBoundRunner never surfaces the bound session id to this
 // caller.
-func (a activeInterrupter) SendEsc() error {
-	convID := a.currentConv()
-	if convID == "" {
-		// No conversation id to carry — the record's information is its existence:
-		// the frame reached SendEsc and nothing was active.
-		a.logger().Info("relay: v2 interrupt inert; no active conversation",
-			"event", "v2.interrupt.no_active_conv")
+//
+// The cursor is never WRITTEN here, and on a named frame it is not even READ; only
+// sessionRouter.Route stamps it. Interrupting a named conversation therefore leaves
+// the active conversation exactly where it was.
+func (a activeInterrupter) SendEsc(conversationID string) error {
+	convID := conversationID
+	switch {
+	case convID == "":
+		// Nothing named: the pre-#2103 path, verbatim. The cursor's own id is
+		// daemon-authored and is deliberately NOT shape-checked — doing so would
+		// change behaviour on the path this branch exists to preserve.
+		convID = a.currentConv()
+		if convID == "" {
+			// No conversation id to carry — the record's information is its existence:
+			// the frame reached SendEsc and nothing was active.
+			a.logger().Info("relay: v2 interrupt inert; no active conversation",
+				"event", "v2.interrupt.no_active_conv")
+			return nil
+		}
+	case !conversations.ValidID(convID):
+		// The ONE arm where an arbitrary client-chosen string reaches a log call, so
+		// the ONE that needs boundedConvID: every arm below logs an id that has
+		// passed ValidID and is provably 36 bytes. Refused before the registry is
+		// touched, so a non-canonical string never becomes a lookup key.
+		a.logger().Info("relay: v2 interrupt inert; named conversation id is not canonical",
+			"event", "v2.interrupt.invalid_conv_id",
+			"conversation_id", boundedConvID(convID))
 		return nil
 	}
 	r, ok := a.resolveRunner(convID)
 	if !ok {
-		a.logger().Info("relay: v2 interrupt inert; active conversation has no bound runner",
+		// One record for the unknown id and the known-but-unbound one alike:
+		// resolveBoundRunner refuses both identically, so this caller structurally
+		// cannot distinguish them — which is also what keeps the frame from
+		// answering "does this conversation exist?" to a client that gets no reply.
+		a.logger().Info("relay: v2 interrupt inert; conversation has no bound runner",
 			"event", "v2.interrupt.no_bound_runner",
 			"conversation_id", convID)
 		return nil

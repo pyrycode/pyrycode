@@ -544,19 +544,28 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 	}
 }
 
-// handleInterrupt routes an inbound `interrupt` control frame to the supervised
-// claude as one Esc — the remote equivalent of pressing Esc at the local
-// terminal (#707). The frame carries no payload, so there is nothing to decode;
-// there is no reply and no broadcast (fire-and-forget). Intercepted in
+// handleInterrupt stops the running turn in the conversation an inbound
+// `interrupt` control frame names (#707, #2103) — the remote equivalent of
+// pressing Esc at the local terminal. There is no reply and no broadcast
+// (fire-and-forget): the client observes the stop through the existing
+// turn_end{StopReason:"cancelled"} marker for that conversation. Intercepted in
 // dispatchAppFrame before dispatch.Route, like handleModalCancel, and runs on the
 // manager's single Run dispatch goroutine — so the s.interactive read is lock-free
 // under the package's single-owner invariant.
 //
-// The signature takes only s (no ctx, no env): the frame has no payload to decode
-// and the handler does no cancellable work — an intentional deviation from the
-// (ctx, s, env) sibling handlers.
+// The signature takes (s, env) — no ctx — mirroring handleNewSession and
+// handleDequeueMessage: there is a payload to decode but no cancellable work. It
+// took only s until #2103, when the frame stopped being bare.
 //
-// Order is load-bearing — the capability gate comes first:
+// This handler is a COURIER for conversation_id and validates nothing. It cannot:
+// internal/relay imports neither internal/conversations nor internal/sessions, so
+// it can neither shape-check the id nor resolve it against the registry. Both live
+// behind the Interrupter seam in cmd/pyry, which is the only place that can see
+// both. Sanitising the string here would move the trust boundary into a package
+// that cannot tell a valid id from an invalid one.
+//
+// Order is load-bearing — the capability gate comes first, and the decode comes
+// after it so a non-interactive conn's bytes are never parsed at all:
 //  1. A non-interactive conn's interrupt is inert (no Esc) and records
 //     v2.interrupt.non_interactive. This is the new
 //     inbound capability gate (#707): existing inbound controls gate outbound
@@ -569,11 +578,21 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 //     warrant a helper abstraction (CODING-STYLE: over-DRY).
 //  2. A nil Interrupter (foreground / pre-wire) makes the frame inert, mirroring
 //     handleModalCancel's nil-resolver guard.
-//  3. SendEsc is best-effort: an error (no live session / mid-teardown) is
-//     Warn-logged with the supervisor sentinel + conn_id and tolerated — there is
-//     nothing to roll back and no reply is owed. NEVER log payload bytes (there
-//     are none) or the rendered screen. The actuation records which arm it
-//     dispatched to on the cmd/pyry side (v2.interrupt.dispatched, or
+//  3. The payload is decoded tolerantly. A decode failure leaves the zero value,
+//     whose empty ConversationID IS the pre-#2103 cursor path — so a malformed
+//     body degrades to the old behaviour rather than dropping the frame, and
+//     mobile's current bare frame keeps working. The decode error and the payload
+//     bytes are NEVER echoed back to the phone or into a log (encoding/json can
+//     quote attacker bytes into its error string) — the never-echo discipline of
+//     handleNewSession / handleDequeueMessage. An absent payload takes the same
+//     path: Unmarshal(nil, …) errors and the zero value stands.
+//  4. SendEsc is best-effort: an error (unknown conversation, no live child,
+//     mid-teardown) is Warn-logged with the sentinel + conn_id and tolerated —
+//     there is nothing to roll back and no reply is owed. NEVER log payload bytes
+//     or the rendered screen. The conversation_id is NOT logged here; it is
+//     client-supplied and unbounded until the seam's shape check has run, and the
+//     seam records it there under its own bound. The actuation records which arm
+//     it dispatched to on the cmd/pyry side (v2.interrupt.dispatched, or
 //     v2.interrupt.no_actuator for a bound runner exposing no interrupt method),
 //     keyed by conversation id where this handler's records are keyed by conn_id
 //     (#1193).
@@ -587,7 +606,7 @@ func (m *V2SessionManager) reconcileQueues(ctx context.Context, s *V2Session) {
 // is load-bearing rather than weaselly — the step-2 arm records at Debug, which is
 // invisible at the daemon's default LevelInfo (raised only by -pyry-verbose), but
 // production always wires the Interrupter.
-func (m *V2SessionManager) handleInterrupt(s *V2Session) {
+func (m *V2SessionManager) handleInterrupt(s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
 		// Inert, no Esc (the AC-2 negative path). conn_id is the only identifier
 		// this record carries: s.peerStatic is identity-bearing and MUST NOT be
@@ -604,7 +623,12 @@ func (m *V2SessionManager) handleInterrupt(s *V2Session) {
 			"conn_id", s.connID)
 		return
 	}
-	if err := m.cfg.Interrupter.SendEsc(); err != nil {
+	var p protocol.InterruptPayload
+	// A decode failure is tolerated: it leaves the zero value, whose empty
+	// ConversationID is the cursor path. Never echoed back to the phone or logged.
+	_ = json.Unmarshal(env.Payload, &p)
+
+	if err := m.cfg.Interrupter.SendEsc(p.ConversationID); err != nil {
 		m.cfg.Logger.Warn("relay: v2 interrupt keystroke failed",
 			"event", "v2.interrupt.keystroke_err",
 			"conn_id", s.connID,

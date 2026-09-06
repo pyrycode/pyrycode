@@ -399,6 +399,28 @@ type NewSessionPayload struct {
 	ConversationID string `json:"conversation_id,omitempty"`
 }
 
+// InterruptPayload is the body of an Envelope whose Type == TypeInterrupt
+// (docs/protocol-mobile.md § Interrupt (v2)). Phone → binary direction.
+//
+// This is an inbound v2 *control* envelope, structurally identical to
+// NewSessionPayload: the v2 session manager intercepts it at dispatchAppFrame
+// before dispatch.Route, and there is NO dispatch.Route handler — resolving
+// ConversationID and stopping that conversation's running turn is the handler's
+// (#2103) job. Like new_session before #2099 the whole payload is OPTIONAL: the
+// frame carried none at all until #2103, so an un-upgraded client sends a bare
+// envelope and MUST keep working.
+//
+// ConversationID is untrusted phone input and is a validated LOOKUP KEY, never
+// authorization and never a path component — the rule docs/protocol-mobile.md
+// already publishes for request_attachment, attachment_chunk and new_session.
+// Absent, empty, or a body that does not decode at all are ONE value and one
+// meaning: interrupt the conversation the daemon's own cursor points at, which is
+// the pre-#2103 behaviour verbatim. omitempty keeps that the shape a client with
+// nothing to name actually emits, so the wire has one canonical bare form.
+type InterruptPayload struct {
+	ConversationID string `json:"conversation_id,omitempty"`
+}
+
 // SessionErrorPayload is the body of an Envelope whose Type ==
 // TypeSessionError (docs/protocol-mobile.md § Error codes). Binary → phone
 // direction; the unsolicited, conversation-scoped frame the daemon emits when

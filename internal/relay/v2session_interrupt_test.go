@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -13,19 +14,22 @@ import (
 // --- #707 inbound interrupt → Esc routing fixtures ---
 
 // fakeInterrupter is a relay-side test double for Interrupter: it counts SendEsc
-// calls and returns an injectable error. The mutex guards the cross-goroutine
-// access (the Run goroutine writes via SendEsc, the test goroutine reads via
-// escCount), mirroring fakeModalResolver.
+// calls, records the conversation id each was handed (#2103), and returns an
+// injectable error. The mutex guards the cross-goroutine access (the Run goroutine
+// writes via SendEsc, the test goroutine reads via escCount / conversationIDs),
+// mirroring fakeModalResolver.
 type fakeInterrupter struct {
 	mu       sync.Mutex
 	escCalls int
+	convIDs  []string
 	err      error
 }
 
-func (f *fakeInterrupter) SendEsc() error {
+func (f *fakeInterrupter) SendEsc(conversationID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.escCalls++
+	f.convIDs = append(f.convIDs, conversationID)
 	return f.err
 }
 
@@ -33,6 +37,14 @@ func (f *fakeInterrupter) escCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.escCalls
+}
+
+// conversationIDs returns a copy of the ids SendEsc was handed, in call order.
+// The copy matters: the caller reads it while the Run goroutine may still append.
+func (f *fakeInterrupter) conversationIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.convIDs...)
 }
 
 // TestV2Session_Interrupt_RoutesEscByCapability drives an inbound `interrupt`
@@ -205,5 +217,124 @@ func TestV2Session_Interrupt_SendEscErrorTolerated(t *testing.T) {
 
 	if got := fake.escCount(); got != 1 {
 		t.Errorf("escCalls = %d, want 1 (attempted despite error)", got)
+	}
+}
+
+// TestV2Session_Interrupt_ForwardsConversationID is #2103's handler-level pin: the
+// string the frame names is what reaches the seam, VERBATIM and unjudged. The
+// handler is a courier — internal/relay imports neither internal/conversations nor
+// internal/sessions, so it can neither shape-check the id nor resolve it, and every
+// check lives behind the seam in cmd/pyry. Sanitising here would move the trust
+// boundary into the package least able to enforce it, so a malformed id must arrive
+// at the seam unchanged rather than be scrubbed on the way.
+//
+// The three "nothing named" wire shapes collapse onto the SAME empty string, which
+// is the compatibility promise AC-2 makes: mobile's current bare frame, an explicit
+// empty field, and a body that does not decode at all all take the pre-#2103 cursor
+// path. A decode failure is deliberately tolerated rather than dropping the frame —
+// the zero value IS that path.
+//
+// The barrier conn is what makes each row's single-call assertion sound: Frames is
+// one FIFO drained by the one Run goroutine, so the interrupt is fully handled
+// before the barrier opens.
+func TestV2Session_Interrupt_ForwardsConversationID(t *testing.T) {
+	t.Parallel()
+
+	const namedConvID = "33333333-3333-4333-8333-333333333333"
+
+	cases := []struct {
+		name    string
+		payload json.RawMessage
+		want    string
+	}{
+		{"named conversation reaches the seam", json.RawMessage(`{"conversation_id":"` + namedConvID + `"}`), namedConvID},
+		{"absent payload is the cursor path", nil, ""},
+		{"absent field is the cursor path", json.RawMessage(`{}`), ""},
+		{"explicit empty field is the cursor path", json.RawMessage(`{"conversation_id":""}`), ""},
+		{"undecodable body is the cursor path", json.RawMessage(`["not-an-object"]`), ""},
+		{
+			// Unjudged means unjudged: an id no registry could hold still crosses the
+			// seam unchanged, because this package has no basis for a verdict on it.
+			"malformed id crosses unscrubbed",
+			json.RawMessage(`{"conversation_id":"../../etc/passwd"}`),
+			"../../etc/passwd",
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			respPriv, respPub := genV2Keypair(t)
+			fake := &fakeInterrupter{}
+			frames := make(chan protocol.RoutingEnvelope, 8)
+			rec := &v2Recorder{}
+			mgr, stop := startManager(t, V2SessionConfig{
+				Frames:      frames,
+				Outbound:    rec.outbound,
+				StaticPriv:  respPriv,
+				Devices:     v2PairedRegistry(t, v2TestToken),
+				ServerID:    v2TestServerID,
+				Logger:      silentLogger(),
+				Interrupter: fake,
+			})
+			t.Cleanup(stop)
+
+			send, _ := openModalConn(t, mgr, frames, rec, respPub, "c-int", []string{protocol.CapabilityInteractive})
+			frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+				Type:    protocol.TypeInterrupt,
+				TS:      time.Now().UTC(),
+				Payload: tc.payload,
+			})
+
+			openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+
+			got := fake.conversationIDs()
+			if len(got) != 1 {
+				t.Fatalf("SendEsc called %d times, want exactly 1: %q", len(got), got)
+			}
+			if got[0] != tc.want {
+				t.Errorf("SendEsc conversation id = %q, want %q", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// TestV2Session_Interrupt_NonInteractiveNeverDecodes proves the capability gate
+// runs BEFORE the decode, so a non-interactive conn's payload bytes are never
+// parsed at all — and that naming a conversation is not a way around the gate.
+// The assertion is on the seam rather than on the decode because the decode has no
+// observable of its own; a handler that decoded first and gated second would still
+// reach zero SendEsc calls, so this test is paired with the ordering stated in
+// handleInterrupt's own doc rather than standing alone.
+func TestV2Session_Interrupt_NonInteractiveNeverDecodes(t *testing.T) {
+	t.Parallel()
+
+	respPriv, respPub := genV2Keypair(t)
+	fake := &fakeInterrupter{}
+	frames := make(chan protocol.RoutingEnvelope, 8)
+	rec := &v2Recorder{}
+	mgr, stop := startManager(t, V2SessionConfig{
+		Frames:      frames,
+		Outbound:    rec.outbound,
+		StaticPriv:  respPriv,
+		Devices:     v2PairedRegistry(t, v2TestToken),
+		ServerID:    v2TestServerID,
+		Logger:      silentLogger(),
+		Interrupter: fake,
+	})
+	t.Cleanup(stop)
+
+	send, _ := openModalConn(t, mgr, frames, rec, respPub, "c-int", nil)
+	frames <- sealAppFrameConn(t, send, "c-int", protocol.Envelope{
+		Type:    protocol.TypeInterrupt,
+		TS:      time.Now().UTC(),
+		Payload: json.RawMessage(`{"conversation_id":"33333333-3333-4333-8333-333333333333"}`),
+	})
+
+	openModalConn(t, mgr, frames, rec, respPub, "c-barrier", []string{protocol.CapabilityInteractive})
+
+	if got := fake.escCount(); got != 0 {
+		t.Errorf("escCalls = %d, want 0: naming a conversation must not bypass the interactive gate", got)
 	}
 }

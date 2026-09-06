@@ -31,21 +31,29 @@ type ScreenSnapshotter interface {
     ScreenSnapshot() (text string, live bool) // live==false (text "") ⇒ no child attached
 }
 
-// Interrupter delivers a single Esc to the supervised claude — the remote
-// equivalent of a local Esc, claude's own interrupt (#707). *supervisor.Supervisor
-// satisfies it via the sealed SendEsc (#726), so the supervisor needs no new
-// method; declared in the consumer (beside ScreenSnapshotter) so internal/relay
-// imports neither internal/supervisor nor tui-driver. Named for its relay-domain
-// role even though the method keeps the sealed surface's name.
-type Interrupter interface{ SendEsc() error }
+// Interrupter delivers a single Esc to a conversation's supervised claude — the
+// remote equivalent of a local Esc, claude's own interrupt (#707; widened with an
+// optional conversationID #2103). Since #1121 production wires cmd/pyry's
+// activeInterrupter, not *supervisor.Supervisor directly, which resolves the
+// named (or, if empty, the active) conversation's bound runner; declared in the
+// consumer (beside ScreenSnapshotter) so internal/relay imports neither
+// internal/supervisor, internal/streamsup, internal/conversations, nor
+// internal/sessions. Named for its relay-domain role even though the method
+// keeps the sealed surface's name. An empty conversationID is not an error — it
+// is the pre-#2103 cursor path — and the string is untrusted: an implementation
+// must shape-check before any use and must not let it become a path component.
+type Interrupter interface{ SendEsc(conversationID string) error }
 
-// SessionStarter drives the supervised claude's /clear — the remote equivalent
-// of a local /clear, starting a fresh session (#831). *supervisor.Supervisor
-// satisfies it via the sealed StartNewSession (#830), so the supervisor needs no
-// new method; declared in the consumer (beside Interrupter) so internal/relay
-// imports neither internal/supervisor nor tui-driver. Named for its relay-domain
-// role even though the method keeps the sealed surface's name.
-type SessionStarter interface{ StartNewSession() error }
+// SessionStarter drives a conversation's supervised claude through a fresh
+// session — the remote equivalent of a local /clear (#831; widened with an
+// optional conversationID #2099). Since #1125 production wires cmd/pyry's
+// activeSessionStarter, not *supervisor.Supervisor directly, which resolves the
+// named (or, if empty, the active) conversation's bound runner; declared in the
+// consumer (beside Interrupter) so internal/relay imports neither
+// internal/supervisor, internal/streamsup, internal/conversations, nor
+// internal/sessions. Named for its relay-domain role even though the method
+// keeps the sealed surface's name. Same untrusted-string contract as Interrupter.
+type SessionStarter interface{ StartNewSession(conversationID string) error }
 
 // QueueRemover drops a not-yet-drained queued message from a conversation's
 // inbound backlog by id (#723). *msgqueue.Queue satisfies it via the existing
@@ -115,8 +123,8 @@ type V2SessionConfig struct {
     OutstandingModals func() []protocol.ModalShownPayload // optional (#877); nil ⇒ no connect-time modal reconcile — byte-identical to pre-#877. Production wires modalbridge.Registry.Snapshot.
     OutstandingQueues func() []protocol.QueueStatePayload // optional (#878); nil ⇒ no connect-time queue reconcile — byte-identical to pre-#878. Production wires the cmd/pyry outstandingQueues adapter over *msgqueue.Queue.SnapshotAll.
     RetainedModelLists func() []protocol.ModelListPayload // optional (#1863); nil ⇒ no connect-time model-list reconcile — byte-identical to pre-#1863. Production wires the cmd/pyry retainedModelLists adapter (#1867) over resolveBoundModelList (#1857).
-    Interrupter       Interrupter                      // optional (#707); nil ⇒ interrupt is inert (no Esc) — foreground/unwired. Production wires *supervisor.Supervisor.
-    SessionStarter    SessionStarter                   // optional (#831); nil ⇒ new_session is inert (no /clear) — foreground/unwired. Production wires *supervisor.Supervisor.
+    Interrupter       Interrupter                      // optional (#707); nil ⇒ interrupt is inert (no Esc) — foreground/unwired. Production wires cmd/pyry's activeInterrupter (since #1121).
+    SessionStarter    SessionStarter                   // optional (#831); nil ⇒ new_session is inert (no /clear) — foreground/unwired. Production wires cmd/pyry's activeSessionStarter (since #1125).
     QueueRemover      QueueRemover                     // optional (#723); nil ⇒ dequeue_message is inert (no Remove) — foreground/unwired. Production wires the concrete *msgqueue.Queue.
     AttachmentResolve func(conversationID, attachmentID string) (path string, ok bool) // optional (#2054); nil ⇒ request_attachment is inert (consumed, no decode, no reply) — foreground/unwired. Comma-ok, not an error: one false covers an unknown id, a non-canonical id and an id resolving outside the conversation's directory alike, so the seam cannot leak which sub-case fired. Discharges NO registry check — handleRequestAttachment validates conversation membership via KnownConversation before either id reaches this seam. The only sanctioned implementation wraps attachments.ResolvePath; a path from anywhere else has no containment guarantee and, for a non-regular file, wedges the conn's appFrameWorker (os.ReadFile blocks forever on a FIFO). Production wires cmd/pyry's existing attachmentResolve closure (already built for handlers.SendMessage).
 }

@@ -857,3 +857,117 @@ func TestNewSessionPayload_Malformed(t *testing.T) {
 		})
 	}
 }
+
+// interruptFixtureConvID is the conversation id interrupt.json names. Declared
+// once so the round-trip test and the absent/empty test cannot drift apart about
+// which fixture carries a value.
+const interruptFixtureConvID = "33333333-3333-4333-8333-333333333333"
+
+// TestInterruptPayload_RoundTrip pins the wire shape #2103 adds to interrupt: one
+// optional conversation_id naming the conversation whose turn to stop. The fixture
+// is committed rather than composed inline, matching the new_session precedent —
+// the wire form is the contract, so it lives in testdata where a client author can
+// read it.
+func TestInterruptPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "interrupt.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeInterrupt {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeInterrupt)
+	}
+
+	var payload InterruptPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != interruptFixtureConvID {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, interruptFixtureConvID)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestInterruptPayload_AbsentAndEmptyAreOneValue is the AC-2 pin at the wire level:
+// a bare payload and an explicit empty conversation_id decode to the SAME value, so
+// the daemon has exactly one "no conversation named" state to branch on and an
+// un-upgraded client's bare frame cannot land anywhere else.
+//
+// Only the bare fixture round-trips. omitempty NORMALISES an explicit "" back to {}
+// on re-marshal, so asserting a byte-stable round-trip on the empty-string fixture
+// would assert the opposite of the property this test exists for. The asymmetry is
+// the point: {} is the form the field has when nothing is named, and "" is a form
+// the wire tolerates on the way in and never emits.
+func TestInterruptPayload_AbsentAndEmptyAreOneValue(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		fixture   string
+		roundTrip bool
+	}{
+		{"absent-field", "interrupt_bare.json", true},
+		{"explicit-empty-string", "interrupt_empty_conversation.json", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := readFixture(t, tc.fixture)
+
+			var env Envelope
+			if err := json.Unmarshal(raw, &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			if env.Type != TypeInterrupt {
+				t.Errorf("Type: got %q, want %q", env.Type, TypeInterrupt)
+			}
+
+			var payload InterruptPayload
+			if err := json.Unmarshal(env.Payload, &payload); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if payload.ConversationID != "" {
+				t.Errorf("ConversationID: got %q, want the empty string", payload.ConversationID)
+			}
+			if tc.roundTrip {
+				roundTripEnvelope(t, env, payload, raw)
+			}
+		})
+	}
+}
+
+// TestInterruptPayload_ZeroValueMarshalsBare pins the omitempty half from the
+// producing side: a client with nothing to name emits {} rather than an explicit
+// empty string, so the bare fixture above is the form a correct client actually
+// sends and not merely one the daemon tolerates.
+func TestInterruptPayload_ZeroValueMarshalsBare(t *testing.T) {
+	b, err := json.Marshal(InterruptPayload{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if got := string(b); got != "{}" {
+		t.Errorf("Marshal(zero value) = %s, want {}", got)
+	}
+}
+
+// TestInterruptPayload_Malformed pins that a hostile or buggy body is a decode
+// error and never a panic. handleInterrupt discards that error deliberately (the
+// zero value IS the cursor path, which is what makes mobile's current bare frame
+// keep working), so this is the only place the error itself is asserted.
+func TestInterruptPayload_Malformed(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"conversation_id-as-number", `{"conversation_id":7}`},
+		{"conversation_id-as-object", `{"conversation_id":{"id":"x"}}`},
+		{"body-not-an-object", `["33333333-3333-4333-8333-333333333333"]`},
+		{"truncated", `{"conversation_id":`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var payload InterruptPayload
+			if err := json.Unmarshal([]byte(tc.raw), &payload); err == nil {
+				t.Errorf("Unmarshal(%s): got nil error, want non-nil", tc.raw)
+			}
+			if payload.ConversationID != "" {
+				t.Errorf("ConversationID after a failed decode: got %q, want the empty string "+
+					"(handleInterrupt relies on the zero value being the cursor path)", payload.ConversationID)
+			}
+		})
+	}
+}

@@ -743,15 +743,23 @@ const (
 // It is an inbound phone → binary *control* envelope the v2 session manager
 // intercepts at internal/relay/v2session.go's dispatchAppFrame before
 // internal/dispatch.Route (like TypeModalCancel / TypeDequeueMessage); there is
-// NO dispatch.Route handler for it. Unlike the modal frames it carries NO
-// payload — no conversation_id, no modal_id nonce, no answer_token, no
-// idempotency key: a bare control frame.
+// NO dispatch.Route handler for it. Since #2103 it carries an OPTIONAL
+// InterruptPayload naming the conversation whose turn to stop — still no
+// modal_id nonce, no answer_token and no idempotency key, and a replayed
+// interrupt simply stops the turn again (a no-op when none is running), so no
+// dedup is needed. An absent payload, an absent conversation_id, an empty one,
+// and a body that does not decode at all are ONE meaning: the conversation the
+// daemon's own cursor points at, the pre-#2103 behaviour an un-upgraded client
+// still gets.
 //
 // Trust posture: interrupt is gated on the negotiated `interactive` capability
-// (a non-interactive conn's interrupt is inert) and is exempt from the
-// per-device permission gate (#702) — interrupting one's own paired session is
-// a normal paired-phone action (ADR 025 § Security model), not a privileged
-// tool-permission decision.
+// (a non-interactive conn's interrupt is inert, whether it names a conversation
+// or not) and is exempt from the per-device permission gate (#702) —
+// interrupting one's own paired session is a normal paired-phone action
+// (ADR 025 § Security model), not a privileged tool-permission decision. Naming
+// a conversation is a validated lookup key and not a widening: a paired device
+// could already reach any conversation by routing a send_message to move the
+// shared cursor and then sending the bare frame.
 //
 // MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: a leak would
 // route this inbound control envelope to the handler chain. The drift detector
