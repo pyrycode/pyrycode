@@ -205,3 +205,23 @@ Each open question is resolved in Phase B and any design change it forces is rec
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — Phase B, open questions resolved
+
+**The e2e's transcript-planting question is resolved, and it resolved the other way than the plan's fallback expected.** The plan asked whether the daemon resolves transcripts from a directory the test can write into, and offered a degraded assertion if not. It can: `claudeSessionsDir` re-derives the daemon's directory from its `$HOME` and workdir, which #2107's spec already relies on for the same reason (stream-mode fakeclaude opens no transcript of its own). So the full AC 4 assertion ships — a planted usage-bearing transcript under the ANNOUNCED id read back as `used_tokens`, against a pre-reset session with none. The discriminating pair is a planted figure against a fresh zero, and the test asserts the zero explicitly *before* the turn so a post-reset figure is attributable.
+
+**The `turnBusyTracker` question stands as the plan answered it:** nothing to feed, because `turnMarkFor` answers `turnMarkNone` for the variant and `observe` is a no-op on it. No code was written for it.
+
+### 2026-09-06 — one design change during implementation
+
+**A new sentinel, `sessions.ErrSessionIDTaken`, is exported alongside `AdoptAnnouncedID`.** The plan's Design already specified the collision refusal (added by the security review before the plan was committed) but left its error unnamed. It is a distinct sentinel rather than a reuse of `ErrSessionNotFound` because the follower's caller must be able to tell "nothing to rotate" — the ordinary watcher-race outcome, logged at Debug — from "rotating would have swallowed a live session", which is a genuine failure and logged at Warn. One sentinel for both would have buried the second under the first's noise, which is the exact failure the split log levels exist to avoid.
+
+### 2026-09-06 — evidence recorded
+
+Each behavioural claim was checked against a mutant rather than only asserted:
+
+- Removing `sessionResetFollower`'s tag rotation reddens six unit tests plus the drain-integration test.
+- Removing either equal-id guard (the follower's, the pool's) reddens exactly the AC 3 test that owns it, and only that one.
+- Making the whole follower inert reddens the e2e on its "exactly one `session_transition`" assertion — which also establishes that the rotation watcher does **not** silently satisfy this spec on its own, the vacuity risk the planted transcript's CREATE event raised. `go test -overlay` is not usable for this e2e: the harness builds and spawns the real `pyry` binary, which the overlay never reaches, so the mutation was applied in-tree and reverted.
