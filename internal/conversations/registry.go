@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // registryFile is the on-disk envelope for ~/.pyry/conversations.json. The
@@ -19,13 +20,31 @@ type registryFile struct {
 	Conversations []Conversation `json:"conversations"`
 }
 
-// Sentinel errors returned by Promote. Callers (CLI, wire-protocol layer)
-// distinguish refusal cases via errors.Is and map to user-facing codes.
+// MaxSystemPromptBytes bounds Conversation.SystemPrompt, inclusive: a value of
+// exactly this many bytes is accepted. Bytes rather than runes, because both the
+// registry file and the wire frame that carries the value are byte-budgeted.
+//
+// The value has to fit inside a v2 application envelope (capped at 65519 bytes,
+// docs/protocol-mobile.md § Application-envelope size cap) with room to spare
+// for the rest of a payload, and this is far above any hand-written channel
+// instruction. It is deliberately not an argv constraint — the prompt reaches
+// claude through a file, never as a command-line value.
+const MaxSystemPromptBytes = 8192
+
+// Sentinel errors returned by Promote and SetSystemPrompt. Callers (CLI,
+// wire-protocol layer) distinguish refusal cases via errors.Is and map to
+// user-facing codes.
+//
+// Every sentinel is static and returned naked: no refusal path interpolates the
+// rejected value, its length, or the conversation id, so a caller's log or wire
+// reply cannot pick up a fragment of an operator's prompt from an error.
 var (
 	ErrConversationNotFound        = errors.New("conversations: conversation not found")
 	ErrConversationAlreadyPromoted = errors.New("conversations: conversation already promoted")
 	ErrPromotionNameInUse          = errors.New("conversations: promotion name already in use")
 	ErrPromotionNameEmpty          = errors.New("conversations: promotion name is empty")
+	ErrSystemPromptTooLong         = errors.New("conversations: system prompt exceeds the maximum byte length")
+	ErrSystemPromptInvalidUTF8     = errors.New("conversations: system prompt is not valid UTF-8")
 )
 
 // Registry is the in-memory conversation list, guarded by a mutex. Construct
@@ -292,6 +311,72 @@ func (r *Registry) SetArchived(id ConversationID, archived bool) bool {
 		}
 	}
 	return false
+}
+
+// SetSystemPrompt sets the operator-set system prompt of the conversation whose
+// ID equals id. It sets exactly one field — SystemPrompt — so id, cwd, name,
+// promoted/archived state, and session binding are structurally untouched, the
+// same guarantee SetArchived gives for its own field.
+//
+// The *string argument spans all three prompt states through one validated
+// door, mirroring SetArchived's single argument that both sets and clears:
+//
+//   - nil          → the conversation returns to "no prompt" (the default).
+//   - non-nil ""   → the explicitly-empty state.
+//   - non-nil text → stored verbatim after validation.
+//
+// Refusals, each a static exported sentinel:
+//
+//   - ErrSystemPromptTooLong     — *prompt exceeds MaxSystemPromptBytes.
+//   - ErrSystemPromptInvalidUTF8 — *prompt is not valid UTF-8.
+//   - ErrConversationNotFound    — id is not present in the registry.
+//
+// On any refusal no field of any record is modified. Value validation runs
+// before the lock (it reads only the caller's value), so the refusal ordering is
+// value-first then identity — the same ordering Promote uses, where the empty-name
+// check likewise precedes the not-found scan. Length is checked before UTF-8
+// validity so a hostile oversize value is rejected in O(1) rather than after a
+// full validity scan; a value that is both over-length and invalid therefore
+// returns ErrSystemPromptTooLong.
+//
+// Invalid UTF-8 is refused rather than sanitized because encoding/json
+// substitutes U+FFFD on marshal: such a value would not survive Save → Load
+// unchanged, and the substitution can grow it past the bound after admission.
+// Refusing at the door is what keeps "stored verbatim" and "round-trips
+// unchanged" simultaneously true.
+//
+// The pointee is copied into a fresh local before its address is taken, so the
+// stored pointer never aliases a caller-held variable — the same defensive idiom
+// Promote uses for Name. Get and List keep copying records shallowly and sharing
+// the stored pointer, exactly as they already do for Name.
+//
+// SetSystemPrompt does NOT call Save — disk persistence is the caller's concern,
+// matching the Create / Update / Promote / Delete / RebindSession / SetArchived
+// convention. It takes no logger, and nothing in this package logs a record
+// field, so the value cannot leave the registry file by way of a log line.
+func (r *Registry) SetSystemPrompt(id ConversationID, prompt *string) error {
+	if prompt != nil {
+		if len(*prompt) > MaxSystemPromptBytes {
+			return ErrSystemPromptTooLong
+		}
+		if !utf8.ValidString(*prompt) {
+			return ErrSystemPromptInvalidUTF8
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.conversations {
+		if r.conversations[i].ID == id {
+			if prompt == nil {
+				r.conversations[i].SystemPrompt = nil
+				return nil
+			}
+			p := *prompt
+			r.conversations[i].SystemPrompt = &p
+			return nil
+		}
+	}
+	return ErrConversationNotFound
 }
 
 // Promote flips the conversation with id to promoted state and sets its
