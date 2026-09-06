@@ -45,6 +45,16 @@ import (
 //     that left it waiting drew no frame at all;
 //   - AC-4 covered by the standard gate — the e2e build tag is part of make check.
 //
+// WHAT THIS RUN CANNOT ALSO ASSERT is that the stored bytes are RESOLVABLE — that a
+// following send_message naming this attachment is accepted rather than refused
+// attachment.not_found. Not because the property does not belong beside AC-2 but
+// because AC-3's quiet window ends by running fakephone's receive deadline out, and
+// ReceiveBytes closes the conn on timeout, so nothing can be sent afterwards. #2144
+// proves it on its own conn in
+// relay_v2_attachment_destination_test.go's TestRelayV2_AttachmentUploadOnNeverMessagedConversationResolves,
+// which rebuilds this run's precondition — bound, never routed — with a single-chunk
+// transfer and makes the ack its whole subject.
+//
 // THE CHUNKS ARE SENT IN REVERSE INDEX ORDER, index 1 then index 0, and that is
 // the one non-obvious decision here. It costs nothing and makes two assertions
 // non-vacuous that are otherwise unfalsifiable:
