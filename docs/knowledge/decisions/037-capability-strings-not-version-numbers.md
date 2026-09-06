@@ -60,8 +60,12 @@ machinery, only a new constant and one slice element.
 ## Consequences
 
 - A cross-repo wire feature that ships without a capability string leaves its
-  clients unable to tell which daemon they are talking to — as #1979 did.
-  Adding the string is part of shipping the feature, not a follow-up.
+  clients unable to tell which daemon they are talking to — as #1979 did, and
+  as #2124/#2125's on-demand model list did a second time, at a real cost:
+  pyrycode-desktop#1169 burned three rework cycles because a stale daemon and
+  a broken feature both present identically to a client as "nothing to show."
+  #2172 paid that debt late. Adding the string is part of shipping the
+  feature, not a follow-up.
 - The capability set is a cross-repo contract compared against a literal
   outside this module, so — unlike an ordinary internal constant — it gets its
   own spec-match drift detector once a wire feature needs one to be trusted;
@@ -72,7 +76,11 @@ machinery, only a new constant and one slice element.
   otherwise self-consistent and green.
 - `negotiateCapabilities` is O(k·n) in the size of the supported set k; at
   k=2 a linear scan is the right call, but the next capability added is a
-  reasonable point to reconsider a set lookup if k keeps growing.
+  reasonable point to reconsider a set lookup if k keeps growing. #2172 asked
+  the question at k=3 and answered no — a `map[string]struct{}` would cost a
+  package-level allocation and an init-order dependency to save three string
+  comparisons on a once-per-connection path, and would lose the ordering
+  guarantee both handshake test tables' `slices.Equal` depend on.
 - Whether a new capability string also becomes a gate (like `interactive`) is
   decided per feature, not inherited from this convention — see the
   fragility note in
