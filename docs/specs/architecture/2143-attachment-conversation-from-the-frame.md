@@ -408,3 +408,55 @@ changelog entry; the existing dated entries stay untouched).
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — Open Question 1 resolved against the evidence (verifier rework, `rework-count:1`)
+
+Open Question 1 asked whether dropping the realclaude stamp turn costs a sentinel,
+and said to *"resolve during Phase B by confirming the turn that follows the upload
+drains through the same helper; if it does not, keep an alarm-bearing drain rather
+than the whole stamp turn."* **That confirmation was asserted rather than made**, and
+the replacement comment shipped the opposite of the truth: it claimed the standing
+`unrecognized_message` / `rate_limited` alarms were "still carried by the drain of
+that turn". The verifier found this and failed the PR on it. No production code was
+implicated.
+
+**The answer, measured.** The turn under test drains through `drainTurnText`, whose
+switch handles `TypeError`, `TypeModalShown`, `TypeToolUse`, `TypeAssistantDelta` and
+`TypeTurnState`, with no `default` — so it never carried either alarm and still does
+not. The alarms live in `drainForCompletedTurn`
+(`interactive_stream_liveness_test.go`), which this diff deleted from this file along
+with the stamp turn. The deleted comment said so itself: *"drainForCompletedTurn also
+carries the package's two standing alarms … so the stamp turn is a sentinel for
+free."* They watched the **stamp** turn — a throwaway prompt — never the turn this
+file asserts on.
+
+**Decision: correct the claim, do not re-arm `drainTurnText`.** Giving it the two arms
+would be new coverage on the turn under test rather than the restoration it resembles;
+this ticket's AC 5 keeps the two existing upload tests green and leaves new flow
+coverage to #2144, and no run has shown the alarms are wanted there. The comment now
+states this outright, because `interactive_change_workspace_test.go` documents
+inheriting these alarms as a package convention and a future reader would otherwise
+trust the sentence.
+
+**Also corrected in the same pass** — refusal diagnostics still attributing failures to
+the follow-active cursor this ticket removed, which would misdirect whoever reads a
+live-gate failure on this very ticket:
+
+- `awaitAttachmentStored`'s doc block and its refusal `t.Fatalf` (realclaude), and the
+  `TypeError` arm's comment in `TestRelayV2_AttachmentUploadMultiChunk` (fake daemon):
+  `storage_failed` now names the host write (`EnsureDir` / `Store`), and
+  `invalid_chunk` names its two causes — the declaration arithmetic **and** the new
+  destination gate, the cause this ticket makes reachable.
+- The two "the turn's pushes / the routed turn's tail" comments, whose producer this
+  diff removed.
+- Three further sites the verifier did not enumerate but which this diff falsified
+  identically, fixed rather than left for a second round: the envelope-id constants'
+  "the cursor-stamp turn takes 2" rationale, `drainTurnText`'s "the caller drained the
+  cursor-stamp turn through its own terminal idle", and `nextAttachReadEnvelope`'s "IT
+  IS THE RUN'S ONLY READER **after the cursor-stamp turn**".
+- `sendReqID` in the fake-daemon test is deleted; its only consumer was the removed
+  `send_message` block, and Go tolerates an unused const so nothing reddened.
+
+Two test files, no production change. The design in the body above is unchanged.

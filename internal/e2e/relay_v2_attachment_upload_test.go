@@ -78,7 +78,6 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 		attachmentID = "33333333-3333-4333-8333-333333333333"
 		filename     = "pyry-e2e-1898.bin"
 		mimeType     = "application/octet-stream"
-		sendReqID    = uint64(1898)
 		// The completing chunk is index 0, sent SECOND — so these two ids are what
 		// makes AC-1's in_reply_to discriminating.
 		chunk0EnvID = uint64(18980)
@@ -169,9 +168,14 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 			stored = env
 		case protocol.TypeError:
 			// The only errors reachable in this phase are attachment.* rejects, and
-			// the code IS the diagnostic: storage_failed points at the cursor,
-			// invalid_chunk at the declaration arithmetic, integrity_failed at the
-			// digest or the assembled length.
+			// the code IS the diagnostic. Since #2143 invalid_chunk carries TWO
+			// causes: the declaration arithmetic, or handleAttachmentChunk's
+			// destination gate refusing the conversation the chunks named — check
+			// seedBoundConversation first, since that is what makes knownConvID one
+			// the daemon hosts. storage_failed is the host write itself (EnsureDir or
+			// Store) and no longer says anything about the follow-active cursor, which
+			// this path stopped reading. integrity_failed is the digest or the
+			// assembled length.
 			var ep protocol.ErrorPayload
 			if err := json.Unmarshal(env.Payload, &ep); err != nil {
 				t.Fatalf("upload refused, and its error payload did not decode: %v", err)
@@ -179,9 +183,10 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 			t.Fatalf("upload refused with code %q (retryable=%v, in_reply_to=%v); wanted %q",
 				ep.Code, ep.Retryable, env.InReplyTo, protocol.TypeAttachmentStored)
 		}
-		// Anything else is the un-drained turn's own push (turn_state,
-		// assistant_delta). Classify after decrypt — which keeps the receive nonce
-		// in lockstep — and read on.
+		// Nothing else should be on the wire: no turn is routed in this run, so the
+		// turn_state / assistant_delta pushes that used to arrive here have no
+		// producer. Classify after decrypt anyway — which keeps the receive nonce in
+		// lockstep — and read on.
 	}
 
 	if stored.InReplyTo == nil || *stored.InReplyTo != chunk0EnvID {
