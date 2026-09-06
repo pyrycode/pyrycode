@@ -814,20 +814,24 @@ const (
 
 // Mobile Protocol v2 start-new-session control (#831, split from #824;
 // docs/protocol-mobile.md § New session). A paired phone sends new_session to
-// start a fresh session — the remote equivalent of typing `/clear` at the local
-// terminal. The daemon routes it to the supervised claude as a `/clear` via the
-// sealed supervisor StartNewSession seam (#830); the client observes the
-// resulting break through the EXISTING session_transition marker
-// (reason: "clear", #656/#657) — there is NO synchronous ack (fire-and-forget,
-// like interrupt). Unlike interrupt (→turnevent.Cancel) it maps to no neutral
-// turnevent command; it drives the supervisor seam directly.
+// start a fresh session in one conversation. On the stream path that is a kill
+// and respawn under a freshly minted session id, NOT a `/clear` keystroke — the
+// terminal-era framing this block used to carry described a supervisor that no
+// longer runs the interactive path. The client observes the break through the
+// EXISTING session_transition marker (reason: "clear", #656/#657) — there is NO
+// synchronous ack (fire-and-forget, like interrupt). Unlike interrupt
+// (→turnevent.Cancel) it maps to no neutral turnevent command; it drives the
+// SessionStarter seam directly.
 //
 // It is an inbound phone → binary *control* envelope the v2 session manager
 // intercepts at internal/relay/v2session.go's dispatchAppFrame before
 // internal/dispatch.Route (like TypeInterrupt / TypeRequestDebugBundle); there
-// is NO dispatch.Route handler for it. Unlike the modal frames it carries NO
-// payload — no conversation_id, no modal_id nonce, no answer_token, no
-// idempotency key: a bare control frame.
+// is NO dispatch.Route handler for it. It carries an OPTIONAL NewSessionPayload
+// naming the conversation to restart (#2099) — one field, no modal_id nonce, no
+// answer_token, no idempotency key. The payload is optional in full: the frame
+// was bare until #2099, and an absent payload, an absent conversation_id and an
+// undecodable body all mean "the conversation the daemon's cursor points at",
+// which is what keeps an un-upgraded client working.
 //
 // Trust posture: new_session is gated on the negotiated `interactive` capability
 // (a non-interactive conn's new_session is inert) and is exempt from the

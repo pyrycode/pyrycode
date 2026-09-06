@@ -612,34 +612,51 @@ func (m *V2SessionManager) handleInterrupt(s *V2Session) {
 	}
 }
 
-// handleNewSession routes an inbound `new_session` control frame to the
-// supervised claude as a /clear — the remote equivalent of typing `/clear` at
-// the local terminal, starting a fresh session (#831). The frame carries no
-// payload, so there is nothing to decode; there is no reply and no broadcast
-// (fire-and-forget) — the client observes the resulting break via the existing
-// session_transition marker (#656/#657). Intercepted in dispatchAppFrame before
+// handleNewSession starts a fresh session in the conversation an inbound
+// `new_session` control frame names (#831, #2099). On the stream path that is a
+// kill and respawn under a freshly minted session id, not a `/clear` keystroke.
+// There is no reply and no broadcast (fire-and-forget) — the client observes the
+// break via the existing session_transition marker (#656/#657), which carries the
+// ROTATED conversation's id because the emitter resolves it from the new session
+// id rather than from any cursor. Intercepted in dispatchAppFrame before
 // dispatch.Route, like handleInterrupt, and runs on the manager's single Run
-// dispatch goroutine — so the s.interactive read is lock-free under the
-// package's single-owner invariant.
+// dispatch goroutine — so the s.interactive read is lock-free under the package's
+// single-owner invariant.
 //
-// The signature takes only s (no ctx, no env): the frame has no payload to
-// decode and the handler does no cancellable work — the same intentional
-// deviation handleInterrupt established.
+// The signature takes (s, env) — no ctx — mirroring handleDequeueMessage: there
+// is a payload to decode but no cancellable work.
 //
-// Order is load-bearing — the capability gate comes first:
-//  1. A non-interactive conn's new_session is inert (no /clear). The inbound
-//     capability gate is the authorization, matching interrupt / dequeue_message
-//     — a one-line check, NOT a reusable inbound-gate abstraction (CODING-STYLE:
-//     over-DRY).
+// This handler is a COURIER for conversation_id and validates nothing. It cannot:
+// internal/relay imports neither internal/conversations nor internal/sessions, so
+// it can neither shape-check the id nor resolve it against the registry. Both live
+// behind the SessionStarter seam in cmd/pyry, which is the only place that can see
+// both. Sanitising the string here would move the trust boundary into a package
+// that cannot tell a valid id from an invalid one.
+//
+// Order is load-bearing — the capability gate comes first, and the decode comes
+// after it so a non-interactive conn's bytes are never parsed at all:
+//  1. A non-interactive conn's new_session is inert. The inbound capability gate
+//     is the authorization, matching interrupt / dequeue_message — a one-line
+//     check, NOT a reusable inbound-gate abstraction (CODING-STYLE: over-DRY).
+//     Naming a conversation is not a way around it.
 //  2. A nil SessionStarter (foreground / pre-wire) makes the frame inert,
 //     mirroring handleInterrupt's nil-seam guard.
-//  3. StartNewSession is best-effort: an error (no live session / mid-teardown)
-//     is Warn-logged with the supervisor sentinel + conn_id and tolerated —
-//     there is nothing to roll back and no reply is owed. NEVER log payload bytes
-//     (there are none) or the rendered screen.
-func (m *V2SessionManager) handleNewSession(s *V2Session) {
+//  3. The payload is decoded tolerantly. A decode failure leaves the zero value,
+//     whose empty ConversationID IS the pre-#2099 cursor path — so a malformed
+//     body degrades to the old behaviour rather than dropping the frame. The
+//     decode error and the payload bytes are NEVER echoed back to the phone or
+//     into a log (encoding/json can quote attacker bytes into its error string) —
+//     the never-echo discipline of handleDequeueMessage / handleRequestSnapshot.
+//     An absent payload takes the same path: Unmarshal(nil, …) errors and the zero
+//     value stands.
+//  4. StartNewSession is best-effort: an error (unknown conversation, no live
+//     session, mid-teardown) is Warn-logged with the conn_id and tolerated —
+//     there is nothing to roll back and no reply is owed. The conversation_id is
+//     NOT logged here; it is client-supplied and unbounded until the seam's shape
+//     check has run, and the seam records it there under its own bound.
+func (m *V2SessionManager) handleNewSession(s *V2Session, env protocol.Envelope) {
 	if !s.interactive {
-		return // non-interactive conn: inert, no /clear (the AC-4 negative path)
+		return // non-interactive conn: inert, no rotation (the AC-4 negative path)
 	}
 	if m.cfg.SessionStarter == nil {
 		m.cfg.Logger.Debug("relay: v2 new_session inert; no session starter wired",
@@ -647,8 +664,13 @@ func (m *V2SessionManager) handleNewSession(s *V2Session) {
 			"conn_id", s.connID)
 		return
 	}
-	if err := m.cfg.SessionStarter.StartNewSession(); err != nil {
-		m.cfg.Logger.Warn("relay: v2 new_session keystroke failed",
+	var p protocol.NewSessionPayload
+	// A decode failure is tolerated: it leaves the zero value, whose empty
+	// ConversationID is the cursor path. Never echoed back to the phone or logged.
+	_ = json.Unmarshal(env.Payload, &p)
+
+	if err := m.cfg.SessionStarter.StartNewSession(p.ConversationID); err != nil {
+		m.cfg.Logger.Warn("relay: v2 new_session start failed",
 			"event", "v2.new_session.keystroke_err",
 			"conn_id", s.connID,
 			"err", err)

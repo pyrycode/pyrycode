@@ -1024,6 +1024,7 @@ func runSupervisor(args []string) error {
 				return sess.Runner(), id, true
 			},
 			rotate: pool.RotateForNewSession,
+			log:    logger,
 		},
 		claudeSessionsDir: claudeSessionsDir,
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
@@ -1705,37 +1706,139 @@ func beginRotationOrNoop(r sessions.Runner) (abort func()) {
 }
 
 // activeSessionStarter satisfies relay.SessionStarter by routing an inbound
-// new_session frame to the runner bound to the ACTIVE conversation — replacing
-// the former SessionStarter: w.sup wiring that mis-delivered every new_session to
-// the bootstrap supervisor regardless of which conversation the remote client was
-// in (the #1121 interrupt shape, applied to new_session). The seams are injected
-// (not raw *Pool/*Registry) so the AC2 test can drive the composition with fakes;
-// production wires currentConv: active.CurrentConversation, resolveBound over
-// resolveBoundSession, and rotate: pool.RotateForNewSession.
+// new_session frame to the runner bound to the conversation the FRAME NAMES, or —
+// when it names none — to the ACTIVE conversation's. It replaced the former
+// SessionStarter: w.sup wiring that mis-delivered every new_session to the
+// bootstrap supervisor regardless of which conversation the remote client was in
+// (the #1121 interrupt shape, applied to new_session), and #2099 closed the
+// remaining half of that same defect: the cursor is stamped only by a successful
+// route, so pressing New session on a chat before sending anything to it restarted
+// whichever chat was last routed. The seams are injected (not raw *Pool/*Registry)
+// so the composition test can drive the arms with fakes; production wires
+// currentConv: active.CurrentConversation, resolveBound over resolveBoundSession,
+// and rotate: pool.RotateForNewSession.
+//
+// This type is the TRUST BOUNDARY for the client-named id: internal/relay imports
+// neither internal/conversations nor internal/sessions, so it hands the string over
+// unvalidated and every check lives here.
 type activeSessionStarter struct {
 	currentConv  func() string
 	resolveBound func(convID string) (runner sessions.Runner, oldID sessions.SessionID, ok bool)
 	rotate       func(oldID sessions.SessionID) (sessions.SessionID, error)
+
+	// log records which arm an inbound new_session took (#2099). Optional: nil
+	// falls back to slog.Default() via logger(), mirroring activeInterrupter.
+	log *slog.Logger
 }
 
-// StartNewSession starts a fresh session in the active conversation's bound
-// runner. Order mirrors activeInterrupter.SendEsc and is load-bearing: no active
-// conversation → inert; unbound/dangling binding → inert (resolveBound's
-// CurrentSessionID == "" guard is the #678 isolation enforcement — an unbound
-// conversation NEVER resolves to the bootstrap session Pool.Lookup("") returns).
-// Otherwise dispatch by runner type. Every ambiguous state is inert (nil); a live
-// runner or rotate error propagates for handleNewSession to Warn-log and tolerate
-// (best-effort contract). No /clear keystroke is sent on the stream arm.
-func (a activeSessionStarter) StartNewSession() error {
-	convID := a.currentConv()
-	if convID == "" {
+// logger returns a's logger, falling back to slog.Default() when unset.
+// activeSessionStarter is a constructor-less bag of injected seams built as a
+// named-field literal, so an omitted field is a reachable state — and a nil
+// *slog.Logger panics on first use, which on this remotely-driven relay path
+// would be a latent crash on a rarely-hit inert arm. Falling back to the default
+// logger (not a discard handler) keeps an unwired literal's record visible.
+func (a activeSessionStarter) logger() *slog.Logger {
+	if a.log == nil {
+		return slog.Default()
+	}
+	return a.log
+}
+
+// StartNewSession starts a fresh session in conversationID's bound runner, or in
+// the active conversation's when conversationID is empty.
+//
+// THE ORDER OF THE FIRST TWO BRANCHES IS THE DESIGN. The empty-string check comes
+// BEFORE the shape check because conversations.ValidID returns false for the empty
+// string (its own doc says so): reversed, every un-upgraded client's bare frame —
+// the shape new_session had from #831 until #2099 — would fail validation and go
+// inert, silently breaking the compatibility this ticket promises.
+//
+// After that, order mirrors activeInterrupter.SendEsc and every ambiguous state is
+// inert (nil, no rotation, no respawn, no reply, and never a fall-through to the
+// bootstrap session): no conversation to act on → inert; a named id that is not a
+// canonical conversation id → inert without ever reaching the registry;
+// unbound/dangling binding → inert, resolveBound's CurrentSessionID == "" guard
+// being the #678 isolation enforcement; a runner that cannot restart → inert. Only
+// a rotate error propagates, for handleNewSession to Warn-log and tolerate
+// (best-effort contract).
+//
+// Every arm records the id it refused, at DEBUG because the id is client-supplied —
+// the posture handleDequeueMessage already takes for its own client-named
+// conversation_id, and deliberately NOT activeInterrupter's Info, which records a
+// daemon-authored arm identity rather than a remote string. The two registry
+// refusals share ONE record: resolveBoundSession refuses the unknown and the
+// unbound identically, so this caller structurally cannot distinguish them, which
+// is also what keeps the frame from answering "does this conversation exist?".
+//
+// The cursor is never WRITTEN here; only sessionRouter.Route stamps it. Rotating a
+// named conversation therefore leaves the active conversation where it was.
+func (a activeSessionStarter) StartNewSession(conversationID string) error {
+	convID := conversationID
+	switch {
+	case convID == "":
+		// Nothing named: the pre-#2099 path, verbatim. The cursor's own id is
+		// daemon-authored and is deliberately NOT shape-checked — doing so would
+		// change behaviour on the path this branch exists to preserve.
+		convID = a.currentConv()
+		if convID == "" {
+			// No id to carry — the record's information is its existence: the frame
+			// reached here and nothing was active.
+			a.logger().Debug("relay: v2 new_session inert; no active conversation",
+				"event", "v2.new_session.no_active_conv")
+			return nil
+		}
+	case !conversations.ValidID(convID):
+		a.logger().Debug("relay: v2 new_session inert; named conversation id is not canonical",
+			"event", "v2.new_session.invalid_conv_id",
+			"conversation_id", boundedConvID(convID))
 		return nil
 	}
+
 	runner, oldID, ok := a.resolveBound(convID)
 	if !ok {
+		a.logger().Debug("relay: v2 new_session inert; conversation has no bound session",
+			"event", "v2.new_session.no_bound_session",
+			"conversation_id", convID)
+		return nil
+	}
+	// The rotation capability is probed HERE as well as inside startFreshRunner,
+	// which is deliberate rather than an oversight: this is the arm AC-4 asks to be
+	// recorded, and startFreshRunner cannot report it — it returns nil both for "no
+	// arm" and for a clean rotation. Its own assertion stays where it is because
+	// that assertion is what keeps the #1330 gate arming below the inert return, and
+	// because dispatch_arms_test.go and inbound_deliver_rotation_test.go drive it
+	// directly. This mirrors activeInterrupter, which records its armNone arm the
+	// same way.
+	if _, canRestart := runner.(interface{ RestartFresh(string) }); !canRestart {
+		a.logger().Debug("relay: v2 new_session inert; bound runner cannot restart",
+			"event", "v2.new_session.no_restart",
+			"conversation_id", convID)
 		return nil
 	}
 	return startFreshRunner(runner, oldID, a.rotate)
+}
+
+// maxLoggedConvID bounds how much of a REFUSED conversation id reaches a log
+// record. Only the invalid-shape arm needs it: every other arm logs a string that
+// has already passed conversations.ValidID, so it is provably 36 bytes. That arm is
+// the one place an arbitrary client-chosen string reaches a log call, and it is
+// bounded upstream only by the application-envelope cap — kilobytes per frame, and
+// a paired client may send frames freely. 64 is generously above a canonical id's
+// 36 so a near-miss (a stray character, a wrong-cased id) still prints whole and
+// stays diagnosable.
+const maxLoggedConvID = 64
+
+// boundedConvID renders an untrusted conversation id for a log record: unchanged
+// when it is already short, and otherwise a COPIED prefix carrying an elision
+// marker. The copy is load-bearing — a bare s[:n] would share the decoded frame's
+// backing array, so a buffered log record would pin the whole payload allocation.
+// The marker matters too: without it a truncated id reads as a complete one, and a
+// reader would chase a conversation that was never named.
+func boundedConvID(s string) string {
+	if len(s) <= maxLoggedConvID {
+		return s
+	}
+	return strings.Clone(s[:maxLoggedConvID]) + "…(truncated)"
 }
 
 // inboundActivateTimeout caps the drain's per-attempt wait for an idle-evicted
