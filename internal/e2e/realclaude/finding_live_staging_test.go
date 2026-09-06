@@ -4,8 +4,12 @@ package realclaude
 
 // The declarations one live `pyry agent-run` probe stages a turn from — the run's
 // FIFO name, the prompt that asks claude for the hold command, the staged command
-// literal itself and the run's TWO env deltas, one per runner path — plus an
-// offline trap on each.
+// literal itself and the run's two env deltas — plus an offline trap on each.
+//
+// The two deltas were once one per runner path. #1348 deleted the terminal-driving
+// runner and made the variable that chose between them a no-op, so the deltas are
+// now identical in effect and each has its own live caller. Collapsing them is a
+// follow-up refactor, not done here.
 //
 // This file reaches no verdict about pyry and takes no measurement. It ships
 // declarations and their traps: no live run, no pyry spawn, no real claude, no ps
@@ -49,13 +53,14 @@ package realclaude
 //   - t.TempDir() — yields an operator filesystem path, for the recorded reason at
 //     `finOutcomeHoldCommand`. The fixture path below is a synthetic
 //     const instead.
-//   - os.Getenv, os.Environ, os.Setenv — the only environment READ is the one
-//     inside reachRunnerPathFromEnv, and the
-//     only WRITES are the one t.Setenv each hostile-ambient trap needs. THIS BAN
-//     IS A CREDENTIAL GUARD, not tidiness: the two runner traps are the only tests
-//     in this family whose SUBJECT is the ambient environment, so they are where a
-//     debugging session is most tempted to dump it — and this rig's process
-//     environment carries CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
+//   - os.Getenv, os.Environ, os.Setenv — nothing here reads or writes the process
+//     environment at all any more. Until #1348 two traps in this file set an
+//     ambient PYRY_USE_STREAMJSON to prove each delta named its own runner; that
+//     variable now selects nothing and those traps were retired on 2026-08-16, so
+//     the last environment write in this file went with them. THIS BAN IS A
+//     CREDENTIAL GUARD, not tidiness: this rig's process environment carries
+//     CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY, and a debugging session that
+//     dumps the environment here would put both in a log.
 //
 // There is no ps flag to get wrong because there is no ps: no -E, no -Eww, no BSD
 // `eww`. Those flags dump CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY.
@@ -458,182 +463,54 @@ func TestFinLiveStageFIFONameIsDisjointFromEveryShippedName(t *testing.T) {
 	}
 }
 
-// TestFinLiveStageEnvDeltaNamesTheRunner is AC3: the delta is the #1223 trigger
-// plus an explicit PYRY_USE_STREAMJSON, and the env-side runner reading it feeds
-// is a reading of THIS RIG rather than of the operator's shell.
+// TestFinLiveStageDeltasCarryTheTrigger is what survives of the two runner-naming
+// traps #1348 made vacuous, and it keeps the half of them that can still fail.
 //
-// t.Setenv mutates process-global state, so this test must never be marked
-// t.Parallel(). Go's runtime already refuses that pairing, which makes it
-// deterministic rather than advisory — the note is here so nobody adds the call
-// back.
-func TestFinLiveStageEnvDeltaNamesTheRunner(t *testing.T) {
-	// The single environment write this file makes. WITHOUT IT THE CLAIM BELOW IS
-	// VACUOUS: no test in this package t.Setenvs PYRY_USE_STREAMJSON (the
-	// PYRY_USE_STREAMJSON=1 at `probeRows` is a spawned
-	// row's CHILD env, not the test process's), so wherever the variable is unset
-	// the claim passes identically with an EMPTY delta. The nearest shipped
-	// precedent, TestFinRecordRunnerAgreement, argues this independence in its
-	// failure message and never sets the ambient, so it does not prove it —
-	// it is deliberately not copied as-is. That the variable is not always unset
-	// is the point: `reachRunnerPathFromEnv` records it exported
-	// in an operator's shell on 2026-07-25, where it silently invalidated a #1223
-	// gate.
-	t.Setenv("PYRY_USE_STREAMJSON", "1")
-
-	// CONTROL FIRST. With a nil delta the ambient reaches the helper, so the
-	// claim below is non-vacuous BY CONSTRUCTION rather than by argument.
-	if got := finRecordRunnerLabel(reachRunnerPathFromEnv(nil)); got != "streamrunner" {
-		t.Fatalf("control: got %q from a nil delta under PYRY_USE_STREAMJSON=1, want "+
-			"streamrunner — the hostile ambient is what makes the claim below a reading "+
-			"of the delta rather than of whatever the operator's shell happened to export", got)
-	}
-
-	// THE CLAIM. Compared like with like: reachRunnerPathFromEnv returns the FULL
-	// reading "ptyrunner (interactive TUI, the agent-run default)"
-	// (`reachRunnerPathFromEnv`), and the bare label comes from the shipped
-	// finRecordRunnerLabel, which truncates at " (". Comparing the raw return to
-	// "ptyrunner" would be red against a correct implementation, and growing a
-	// second truncator here would be duplicate machinery.
-	if got := finRecordRunnerLabel(reachRunnerPathFromEnv(finLiveStageEnvDelta())); got != "ptyrunner" {
-		t.Errorf("got %q, want ptyrunner: the delta names PYRY_USE_STREAMJSON explicitly "+
-			"precisely so the downstream env-side runner reading cannot be a reading of "+
-			"the operator's shell", got)
-	}
-
-	// Composition, asserted against the shipped IDENTIFIERS rather than re-typed
-	// strings, so an edit to either sibling goes red here pointing at the shared
-	// assumption instead of drifting apart silently. The delta's own entries are
-	// this file's literals and are deliberately not a concatenation of the two:
-	// composing them would make this rig's environment follow two other tickets'
-	// edits.
-	delta := finLiveStageEnvDelta()
-	for _, want := range reachEnvDelta {
-		if !finLiveStageDeltaHas(delta, want) {
-			t.Errorf("the delta does not carry reachEnvDelta's %q: that is the settled "+
-				"#1223 trigger, and without it the auto-background trigger never fires", want)
-		}
-	}
-	for _, want := range finRecordEnvDelta() {
-		if !finLiveStageDeltaHas(delta, want) {
-			t.Errorf("the delta does not carry finRecordEnvDelta's %q: naming it explicitly "+
-				"is what keeps the env-side runner reading off the operator's shell", want)
-		}
-	}
-
-	// The "and nothing else" clause, which has a named failure mode rather than
-	// being tidiness: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 added here would
-	// SUPPRESS the very trigger the rig depends on — measured in #1223 as
-	// `Exit code 143 / Command timed out after 5s`, is_error: true, command dead
-	// — and the run would report %s, one more burned turn.
-	if len(delta) != 2 {
-		t.Errorf("the delta has %d entry(ies) %v, want exactly 2: a third that suppressed "+
-			"the trigger would make every run report %s",
-			len(delta), delta, finOutcomeTriggerDidNotFire)
-	}
-}
-
-// TestFinLiveStageStreamEnvDeltaNamesTheRunner is #1349's counterpart to the trap
-// above: the stream delta's env-side runner reading is streamrunner, and it STAYS
-// streamrunner when the ambient environment says otherwise.
+// WHAT WAS REMOVED AND WHY. Until 2026-08-16 pyry chose between a terminal-driving
+// runner and the stream-json runner on PYRY_USE_STREAMJSON, and the two traps that
+// used to live here asserted that each staging delta named the runner it intended.
+// #1348 deleted the terminal runner and made the variable a no-op that nothing
+// reads. Those assertions then compared a test-local string formatter against
+// itself: they could not fail, and they ran green on every pass while proving
+// nothing. Deleted rather than repaired, because the distinction they existed to
+// police no longer exists.
 //
-// A SIBLING, NEVER A COPY, and the two are red against each other BY CONSTRUCTION
-// because BOTH the ambient AND the expected labels flip. The shipped trap sets
-// PYRY_USE_STREAMJSON=1 and wants control=streamrunner, claim=ptyrunner; this one
-// sets 0 and wants control=ptyrunner, claim=streamrunner. Any half-copy between
-// the two contradicts itself on the very first assertion. That redness is
-// DESIGNED — a future edit that "aligns" the two has broken the pair, not fixed
-// it. The containment assertions invert the same way: the shipped trap requires
-// finRecordEnvDelta()'s entries to be PRESENT, this one requires them ABSENT.
+// WHAT IS KEPT, and it is not tidiness. Both deltas must still carry the settled
+// #1223 auto-background trigger, and each must carry that and nothing else. The
+// named failure mode is live on the surviving path: a third entry of
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 would SUPPRESS the very trigger the rig
+// depends on, measured in #1223 as `Exit code 143 / Command timed out after 5s`
+// with the command dead, and every run would then report a did-not-fire outcome
+// and burn a turn. That guard is runner-agnostic and outlived the runner.
 //
-// t.Setenv mutates process-global state, so this test must never be marked
-// t.Parallel(). Go's runtime already refuses that pairing, which makes it
-// deterministic rather than advisory — the note is here so nobody adds the call
-// back.
-func TestFinLiveStageStreamEnvDeltaNamesTheRunner(t *testing.T) {
-	// The hostile ambient — and WHAT IT BUYS IS NOT THE SHIPPED TRAP'S ARGUMENT.
-	// THE TRUTHINESS RULE IS ONE-SIDED: only the exact string "1" is truthy
-	// (`reachRunnerPathFromEnv`, matching cmd/pyry/`runAgentRun`),
-	// and every other value falls through to ptyrunner exactly as unset does. So
-	// an ambient of "0" is INDISTINGUISHABLE FROM UNSET here.
-	//
-	//	EXCLUDES: an EFFECTIVE ambient of 1. Under one, the nil-delta control below
-	//	reads streamrunner and goes red BEFORE the claim can be satisfied by the
-	//	environment rather than by the delta. That is the vacuity that matters, and
-	//	it is the one observed live: PYRY_USE_STREAMJSON was found exported in an
-	//	operator's shell on 2026-07-25, where it silently invalidated a #1223 gate
-	//	(`reachRunnerPathFromEnv`).
-	//
-	//	CANNOT ESTABLISH: non-vacuity BY CONSTRUCTION. The control passes
-	//	identically if this t.Setenv never ran. The shipped trap in
-	//	TestFinLiveStageEnvDeltaNamesTheRunner gets construction only because ITS
-	//	ambient is the NON-DEFAULT value; that
-	//	argument does not transfer to an ambient of 0 and MUST NOT BE COPIED
-	//	ACROSS. Copying it would ship a false statement of what this test proves.
-	t.Setenv("PYRY_USE_STREAMJSON", "0")
-
-	// CONTROL FIRST, and fatal: every assertion below is uninterpretable if the
-	// helper reads streamrunner from the environment on its own.
-	if got := finRecordRunnerLabel(reachRunnerPathFromEnv(nil)); got != "ptyrunner" {
-		t.Fatalf("control: got %q from a nil delta under PYRY_USE_STREAMJSON=0, want "+
-			"ptyrunner — an effective ambient of 1 would satisfy the claim below from the "+
-			"operator's shell rather than from the delta. This control does NOT establish "+
-			"non-vacuity by construction: an ambient of 0 is indistinguishable from unset", got)
-	}
-
-	// THE CLAIM, and it pins the entry BY ITSELF rather than needing a separate
-	// containment assertion: reachRunnerPathFromEnv starts from the ambient (0
-	// here, so false) and the LAST PYRY_USE_STREAMJSON= entry wins, so a
-	// streamrunner reading under this ambient is only possible if the delta names
-	// the variable with exactly the value 1 and nothing later contradicts it. An
-	// empty delta, an absent key, a =0 entry and a =true entry all read ptyrunner
-	// here.
-	//
-	// Compared like with like: the helper returns the FULL reading "streamrunner
-	// (headless stream-json)" (`reachRunnerPathFromEnv`) and the bare label comes
-	// from the shipped finRecordRunnerLabel, which truncates at " (". Comparing
-	// the raw return to "streamrunner" would be red against a correct
-	// implementation, and growing a second truncator here would be duplicate
-	// machinery.
-	if got := finRecordRunnerLabel(reachRunnerPathFromEnv(finLiveStageStreamEnvDelta())); got != "streamrunner" {
-		t.Errorf("got %q, want streamrunner: the delta names PYRY_USE_STREAMJSON=1 explicitly "+
-			"precisely so the downstream env-side runner reading cannot be a reading of "+
-			"the operator's shell", got)
-	}
-
-	delta := finLiveStageStreamEnvDelta()
-
-	// THE TRIGGER SURVIVES THE FLIP. Asserted against the shipped identifier
-	// rather than a re-typed string, so an edit to reachEnvDelta goes red here
-	// pointing at the shared assumption instead of drifting apart silently.
-	for _, want := range reachEnvDelta {
-		if !finLiveStageDeltaHas(delta, want) {
-			t.Errorf("the stream delta does not carry reachEnvDelta's %q: that is the settled "+
-				"#1223 trigger, and without it the auto-background trigger never fires", want)
-		}
-	}
-
-	// THE TWO DELTAS DISAGREE, EXACTLY. finLiveStageDeltaHas is an exact KEY=VALUE
-	// match (see its doc), which is what makes this bite: a prefix test would
-	// accept either value and this assertion would be vacuous. It is what turns an
-	// accidental copy of finLiveStageEnvDelta() into a red run.
-	for _, notWanted := range finRecordEnvDelta() {
-		if finLiveStageDeltaHas(delta, notWanted) {
-			t.Errorf("the stream delta carries finRecordEnvDelta's %q: that is the ptyrunner "+
-				"selector, and this delta exists to name the opposite one — the two are "+
-				"independent literal sets so that an edit to either cannot change the other",
-				notWanted)
-		}
-	}
-
-	// The "and nothing else" clause, with the same named failure mode the shipped
-	// trap records: CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 added here would
-	// SUPPRESS the very trigger the rig depends on — measured in #1223 as
-	// `Exit code 143 / Command timed out after 5s`, is_error: true, command dead —
-	// and the run would report %s, one more burned turn.
-	if len(delta) != 2 {
-		t.Errorf("the stream delta has %d entry(ies) %v, want exactly 2: a third that suppressed "+
-			"the trigger would make every run report %s",
-			len(delta), delta, finOutcomeTriggerDidNotFire)
+// The two deltas are now identical in effect, since their only difference was the
+// dead selector. Collapsing them into one is a follow-up refactor with live
+// callers to update, deliberately not done here: this change removes assertions
+// that cannot fail and changes nothing that runs.
+func TestFinLiveStageDeltasCarryTheTrigger(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		delta []string
+	}{
+		{"pty-era delta", finLiveStageEnvDelta()},
+		{"stream delta", finLiveStageStreamEnvDelta()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Asserted against the shipped identifier rather than a re-typed
+			// string, so an edit to reachEnvDelta goes red here pointing at the
+			// shared assumption instead of drifting apart silently.
+			for _, want := range reachEnvDelta {
+				if !finLiveStageDeltaHas(tc.delta, want) {
+					t.Errorf("the delta does not carry reachEnvDelta's %q: that is the settled "+
+						"#1223 trigger, and without it the auto-background trigger never fires", want)
+				}
+			}
+			if len(tc.delta) != 2 {
+				t.Errorf("the delta has %d entry(ies) %v, want exactly 2: a third that suppressed "+
+					"the trigger would make every run report %s",
+					len(tc.delta), tc.delta, finOutcomeTriggerDidNotFire)
+			}
+		})
 	}
 }
 
