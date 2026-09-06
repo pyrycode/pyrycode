@@ -35,7 +35,7 @@ forge a turn boundary:
 | Line `type` | Emits |
 |---|---|
 | `assistant` | one event per content block, in order: `text`→`TextChunk`, `thinking`→`ThoughtChunk`, `tool_use`→`ToolStart` |
-| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other block surfaces as `Unrecognized{Site: user_block}` **except one exact 100-byte payload** (#1247, below), dropped in silence |
+| `user` | one `ToolUpdate` per `tool_result` block (status from `is_error`, content from the string/array union); every other `text` block surfaces as `Unrecognized{Site: user_block}` **except** one on a line carrying claude's harness-synthetic flag, or one byte-exact match to `harnessNoOutputNudge` (#1247, #2087, below) — both dropped in silence; a block of any other type still surfaces regardless of the flag |
 | `result` | exactly one `TurnEnd` — **the turn boundary**; `Reason` is `resultTurnEndReason(subtype)` (#1120): `error_during_execution` → `TurnEndReasonCancelled`, everything else (including no/unknown `subtype`) → `TurnEndReasonEndTurn` |
 | `system` (unmapped subtypes) | nothing — the **known-ignored** tier, Debug-logged by type only, never content |
 | `system/task_started` | one `BackgroundTaskStarted` (#1380, below) |
@@ -109,3 +109,42 @@ as a follow-up rather than bundled into #1260, which was scoped to capture and r
 measurement behind it. The real-claude suite's shared `drainForCompletedTurn` fails on **any**
 unrecognized frame, so every stream spec is a sentinel: it goes red the day claude adds a message type,
 in the pre-ship gate rather than in front of a user.
+
+**AMENDED 2026-09-06 (#2087).** A second, independent trigger — not the promised set-of-strings
+promotion (#1260, above; still undone) — was added to the same block-level tier. Loading a skill makes
+claude's harness inject the **skill's full body** as a `user`/`text` line, observed 2026-09-04 at 18681
+and 87244 chars, Opus 5; the 2026-07-27 census never caught it because none of its six turns invoked a
+skill. Matching the body is impossible (it varies per skill), so the new arm matches the *line*, not the
+block: the line-level boolean claude's harness stamps, decoded as a second top-level field alongside the
+tool-result sidecar (`userToolResultLine` renamed `userLine` to reflect it), rather than a second scan
+over a payload that routinely carries whole file contents. `emitUser`'s guard is now `ul.IsSynthetic ||
+block.Text == harnessNoOutputNudge`, still gated on `block.Type == "text"` and still `continue` not
+`return`, so a sibling `tool_result` on a flagged line keeps mapping and a block of an unrecognized type
+still alarms even when flagged.
+
+Two things this surfaced that the next reader would otherwise get backwards:
+
+- **Two surfaces, two spellings, and the grep-able one is the wrong one — the same trap as
+  `tool_use_result`/`toolUseResult` (#2023, above), approached from the other direction.** claude's
+  stdout spells the flag `isSynthetic`; the JSONL transcript under `~/.claude/projects` spells the same
+  class of line `isMeta` and never carries `isSynthetic`. A decoder keyed on the name that greps easily
+  (the transcript's) compiles, decodes nothing, and never fires. Whether a *skill* line carries
+  `isSynthetic` on the stdout surface specifically (as opposed to the harness-nudge line, which is
+  pinned by committed capture bytes) was an inference until the 2026-09-05 live gate confirmed it on
+  claude 2.1.259 — a turn with zero `unrecognized_message` frames, exactly one drop record, and a reply
+  exactly as long as the skill instructed.
+- **The older byte-exact-nudge arm is currently unreachable on the live surface, and that is by design,
+  not a bug to fix.** The one `user` record in `dropped_lines_v2.1.220.json` — the nudge line itself —
+  already carries `isSynthetic: true`, so the flag arm always fires first and the string comparison
+  beside it is never reached on any claude version observed so far. It stays as an independent `||` arm
+  anyway: the case it guards against is a *future* claude that stops stamping the flag but still emits
+  the nudge, and only a hermetic test can pin that (a live run can't distinguish "the flag arm fired"
+  from "the string arm fired" when both are true of the same line). This also means a content-free
+  `trigger` attribute at the drop site was considered and rejected — on every observed line it would
+  report the same value for a skill body and for the nudge, so it cannot discriminate the one thing a
+  non-vacuity witness needs it for.
+
+One effect worth recording because it's easy to undervalue next to the chat-clutter framing: the skill
+body no longer reaches a paired phone at all. Before this, `Unrecognized.Raw` carried it (capped, but up
+to `maxUnrecognizedRaw`) over the relay to any client rendering the frame; after, it leaves the process
+nowhere — not on the wire, not in a log.

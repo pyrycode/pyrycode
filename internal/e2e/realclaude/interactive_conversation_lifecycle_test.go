@@ -24,20 +24,21 @@ package realclaude
 // daemon's reply envelope for that verb (renamed label; archived flag set then
 // cleared; deleted id) and, for delete, the on-disk conversations registry no
 // longer holding the row. Liveness (AC #3) is proven by streaming a non-empty
-// assistant_delta for the conversation while it is bound to the live session;
+// assistant_delta for the conversation on the session the create bound to it;
 // claude's words are never asserted (substrate-guard safe).
 //
 // Ordering rationale (do not reorder without cause). The metadata verbs
-// (rename/archive/unarchive) run against a QUIESCENT wire — after create the
-// per-conversation claude session is spawned but idle, so no assistant_delta
-// stream is in flight and their drains are fast and non-flaky. The liveness
-// send_message is inserted between unarchive and delete deliberately: only the
-// delete drain then has to skip the tail of the in-flight liveness turn before it
-// reaches conversation_deleted, isolating the "drain past a live stream"
-// complexity to exactly one step. Proving liveness after the archive round-trip
-// is also strictly stronger — it shows archiving/unarchiving did not tear down
-// the live session (archive/unarchive touch only the registry is_archived flag,
-// never CurrentSessionID, and idle-timeout is 0 in spawnBootstrapDaemon).
+// (rename/archive/unarchive) run against a QUIESCENT wire, so their drains are
+// fast and non-flaky: no assistant_delta stream is in flight, and since #2085 no
+// claude is even running yet — the create binds the session but defers the child
+// to the first message. The liveness send_message is inserted between unarchive
+// and delete deliberately: only the delete drain then has to skip the tail of the
+// in-flight liveness turn before it reaches conversation_deleted, isolating the
+// "drain past a live stream" complexity to exactly one step. Running it after the
+// archive round-trip proves the row those verbs rewrote is still routable — they
+// touch only the registry is_archived flag, never CurrentSessionID. It no longer
+// proves a RUNNING child survived them, because there is none to survive; see the
+// note at the liveness step for why that witness is not bought back.
 //
 // Like #854/#997 this is a standing liveness gate in preship, not a
 // deterministic RED/GREEN oracle for a specific bug — the fake tier owns the
@@ -70,9 +71,11 @@ func TestInteractiveConversationLifecycle(t *testing.T) {
 	// on the nonce's echo.
 	nonce := time.Now().UnixNano()
 
-	// create — the handler mints + binds + persists a live session before
-	// replying, so convID is live by the time the helper returns (helper asserts
-	// the id is non-empty).
+	// create — the handler mints + binds + persists the dedicated session before
+	// replying, so convID is bound by the time the helper returns (helper asserts
+	// the id is non-empty). Since #2085 that session has NO claude yet; the
+	// liveness turn below is this conversation's first message and is what brings
+	// the child up.
 	convID := createConversationViaPhone(t, h.phone, h.initSend, h.initRecv, 2, nil)
 
 	// rename — the reply's ConversationUpdatedPayload.Name reflects the new label.
@@ -118,10 +121,22 @@ func TestInteractiveConversationLifecycle(t *testing.T) {
 		}
 	})
 
-	// liveness — a send_message turn on the still-live conversation must stream a
-	// non-empty assistant_delta (AC #3). Proving this AFTER the archive round-trip
-	// shows the live session survived it. perTurnReplyBudget matches #997's first
-	// cold-turn budget.
+	// liveness — a send_message turn on the conversation must stream a non-empty
+	// assistant_delta (AC #3). Placed AFTER the archive round-trip, it shows the
+	// row those three verbs rewrote is still routable end-to-end: the binding they
+	// preserved resolves, and a turn on it reaches claude and streams back.
+	//
+	// Read the claim as exactly that, and no more. Until #2085 the session was
+	// already running when archive landed, so this also witnessed a LIVE child
+	// surviving the round-trip; now the child comes up on this very turn, and that
+	// half is no longer proven here. It is not proven anywhere else either —
+	// deliberately: archive/unarchive is a registry-metadata flip that never
+	// reaches the pool (see TestRelayV2_Archive, which drives it against a seeded
+	// row with no session at all), so there is no path by which it could tear a
+	// child down, and buying the witness back would cost a second live claude turn
+	// in preship. What this turn gains in exchange is a real-claude witness of the
+	// deferred first-message spawn itself. perTurnReplyBudget matches #997's first
+	// cold-turn budget and already covers that spawn.
 	sealSendMessage(t, h.phone, h.initSend, 6, convID, "m-1",
 		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
 	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)

@@ -27,10 +27,13 @@ const msgCreateConversationServerError = "server error creating conversation"
 
 // msgCreateConversationMintFailed is the user-facing message emitted in the
 // server.binary_offline error payload when minting the conversation's dedicated
-// session (creator.Create) fails — e.g. the pool is not running, the activate
-// budget elapses, or the registry save inside the pool fails. Retryable so the
-// phone re-issues and gets a fresh conversation + session; the wrapped error is
-// logged but never echoed.
+// session (creator.Create) fails — e.g. the pool is not running or the registry
+// save inside the pool fails. Retryable so the phone re-issues and gets a fresh
+// conversation + session; the wrapped error is logged but never echoed. A
+// failure to START claude no longer surfaces here (#2085): the child comes up on
+// the conversation's first message, so a spawn failure is the msgqueue drain's
+// retry-and-give-up path, exactly as it already is for an idle-evicted
+// conversation being woken.
 const msgCreateConversationMintFailed = "could not start conversation session"
 
 // msgCreateConversationCwdRejected is the user-facing message emitted in the
@@ -51,13 +54,24 @@ const msgCreateConversationCwdRejected = "conversation working directory not all
 var ErrSpawnDirRejected = errors.New("conversation spawn directory rejected")
 
 // createConversationMintTimeout caps the per-handler wait for creator.Create to
-// mint, supervise, and activate the conversation's dedicated session. Pool
-// activation blocks until claude's PTY is ready or ctx-cancel, so an unbounded
-// ctx would pin the handler goroutine on a wedged spawn — in the v2 relay that
-// is the conn's app-frame worker (#965), so an unbounded wait would stall this
-// conn's subsequent frames; the bound turns it into a retryable
-// server.binary_offline. Matches sendMessageActivateTimeout and
-// internal/control's session-create budget. A tuning knob, not a contract.
+// mint and supervise the conversation's dedicated session.
+//
+// Be clear about what it buys today: nothing. It bounded a spawn — Pool
+// activation blocked until claude's PTY came up — and since #2085 there is no
+// spawn here. The one production SessionCreator (sessionMinter) now discards the
+// ctx outright, because neither half of what it does can observe one:
+// resolveSpawnDir takes no context.Context and Pool.Mint is ctx-free by design,
+// and a deadline does not interrupt a blocking filesystem syscall. So a wedged
+// disk pins the conn's app-frame worker (#965) with this budget exactly as it
+// would without it. Do not read protection into it that is not there; if a real
+// bound on that wedge is ever wanted it has to be built at the syscall, not
+// here.
+//
+// It is kept only as the ctx-honouring contract SessionCreator advertises: the
+// interface takes a context.Context, so an implementation that respects one
+// (a future minter that talks to something remote, say) gets a bound rather than
+// inheriting the conn's. Matches internal/control's session-create budget.
+// A tuning knob, not a contract.
 const createConversationMintTimeout = 30 * time.Second
 
 // ConversationCreator is the minimal write surface this handler consumes from
@@ -69,11 +83,13 @@ type ConversationCreator interface {
 }
 
 // SessionCreator is the minimal session-mint surface this handler consumes from
-// the sessions pool: mint, supervise, and activate one dedicated claude session
-// whose claude spawns in spawnDir, returning the session id. It is adapted at
-// the cmd/pyry boundary (sessionMinter) rather than satisfying *sessions.Pool
-// directly — keeping handlers/ free of internal/sessions imports, mirroring
-// TurnWriter.
+// the sessions pool: mint and supervise one dedicated claude session that will
+// spawn in spawnDir, returning the session id. It does NOT start the child
+// (#2085) — that happens on the conversation's first message, so that every
+// per-session setting chosen before it is simply what the child launches with.
+// It is adapted at the cmd/pyry boundary (sessionMinter) rather than satisfying
+// *sessions.Pool directly — keeping handlers/ free of internal/sessions imports,
+// mirroring TurnWriter.
 //
 // spawnDir == "" → the daemon's shared trusted workdir (default, unchanged). A
 // non-empty spawnDir is the phone's *requested* working directory (the raw,
@@ -98,10 +114,14 @@ type SessionCreator interface {
 // defaultCwd is the absolute cwd recorded when the payload's cwd is null; logger
 // is the daemon's slog logger.
 //
-// SECURITY: this handler is a spawn-consumer — it mints a per-conversation claude
-// session via creator.Create, which now spawns in the conversation's own
-// (phone-influenced) Cwd rather than the daemon's shared workdir (#685, reversing
-// the prior deferral). The phone's raw requested Cwd is forwarded verbatim as
+// SECURITY: this handler feeds the spawn path — it mints a per-conversation
+// claude session via creator.Create, whose child will later spawn in the
+// conversation's own (phone-influenced) Cwd rather than the daemon's shared
+// workdir (#685, reversing the prior deferral). Since #2085 the mint no longer
+// starts that child; the validation below is unchanged and still runs here, at
+// mint time, and the accepted consequence of the wider validated-then-spawn
+// window is recorded on sessionMinter.
+// The phone's raw requested Cwd is forwarded verbatim as
 // creator.Create's spawnDir; this handler does NO path handling and stays free of
 // internal/sessions / cmd-layer imports. The cmd-layer adapter (sessionMinter →
 // resolveSpawnDir) is the sole validator: it canonicalises + confines the Cwd to
@@ -158,11 +178,16 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 
 		// Mint and bind a dedicated claude session for this conversation before
 		// recording the row, so AC#1 holds: the persisted row points at a session
-		// that exists in the pool. The label is the server-minted conversation id
-		// (a session↔conversation breadcrumb in the session registry); it never
-		// reaches claude's argv — buildSession uses only the SessionID for
-		// --session-id. The 30s budget turns a wedged spawn into a retryable reply
-		// rather than pinning the conn's app-frame worker (#965) indefinitely.
+		// that exists in the pool. The bind stays EAGER (#2085 defers only the
+		// spawn): set_session_settings is keyed on session_id and
+		// request_session_settings answers all-zero for an empty CurrentSessionID,
+		// so a conversation with no id yet could not be configured before its first
+		// message — which is the whole point of deferring the spawn. The label is
+		// the server-minted conversation id (a session↔conversation breadcrumb in
+		// the session registry); it never reaches claude's argv — buildSession uses
+		// only the SessionID for --session-id. The 30s budget binds only a
+		// SessionCreator that honours a ctx, which the production one no longer
+		// does — see createConversationMintTimeout for why it is inert here.
 		mintCtx, cancel := context.WithTimeout(ctx, createConversationMintTimeout)
 		sessionID, err := creator.Create(mintCtx, string(id), spawnDir)
 		cancel()
@@ -179,10 +204,13 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 					"err", err)
 				return replyError(ctx, c, env, protocol.CodeProtocolMalformed, msgCreateConversationCwdRejected, false)
 			}
-			// Any other mint failure (pool not running, activate timeout, save
-			// failure, ctx deadline, transient trust-mark write error) is
-			// retryable. Returning before reg.Create leaves no half-bound orphan
-			// row, and the phone retries onto a fresh conversation + session.
+			// Any other mint failure (pool not running, save failure, transient
+			// trust-mark write error) is retryable. Returning before reg.Create
+			// leaves no half-bound orphan row, and the phone retries onto a fresh
+			// conversation + session. A mintCtx deadline is not in that list any
+			// more: the production minter discards the ctx, so only a
+			// ctx-honouring SessionCreator could return one — the arm stays a
+			// catch-all rather than an enumeration.
 			logger.Warn("relay: create_conversation session mint failed",
 				"event", "create_conversation.session_mint_failed",
 				"conn_id", c.ConnID(),

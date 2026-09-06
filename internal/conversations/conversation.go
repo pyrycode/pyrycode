@@ -84,6 +84,26 @@ type Conversation struct {
 	// omitempty for consistency with IsPromoted: their contracts are opposite.
 	IsArchived bool `json:"is_archived,omitempty"`
 
+	// SystemPrompt is the operator-set system prompt this conversation carries,
+	// so two conversations on the same repository can be told to behave
+	// differently. A pointer for the same reason as Name: nil is "absent" (no
+	// prompt — the default), a non-nil pointer to "" is "explicitly empty". A
+	// plain string with omitempty cannot express that split; both states would
+	// serialize away and both would decode to "".
+	//
+	// omitempty carries the same contract as IsArchived's, for the same reason:
+	// "an absent key decodes as no prompt, with no migration step." omitempty on
+	// a pointer tests the pointer, not the pointee, so a nil prompt omits the key
+	// while a non-nil pointer to "" still emits "system_prompt": "" — which is
+	// what keeps the two states distinguishable on disk. A registry whose rows
+	// all hold nil is therefore byte-identical to its pre-#2149 form.
+	//
+	// Written only by Registry.SetSystemPrompt, which bounds the value at
+	// MaxSystemPromptBytes and refuses invalid UTF-8; nothing mints the
+	// explicitly-empty state today. Read by the spawn path and the read-back
+	// verb (#2150, #2152).
+	SystemPrompt *string `json:"system_prompt,omitempty"`
+
 	// LastUsedAt is bumped whenever the conversation has user activity.
 	// Used by "recently active" sorts and by the auto-archive predicate
 	// (#219). Always present.

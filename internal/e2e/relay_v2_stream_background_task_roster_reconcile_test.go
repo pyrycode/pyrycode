@@ -45,9 +45,9 @@ import (
 // CONVERSATION registry, and the pool's bootstrap session has no conversation record at
 // all. A daemon that has minted nothing therefore retains nothing this path can see, and
 // a test built on the bootstrap child alone would wait out its whole deadline for a
-// frame that is correctly never sent. An over-the-wire create_conversation is a spawning
-// Pool.Activate, so it both mints the record and produces the child whose mid-turn
-// roster line is retained.
+// frame that is correctly never sent. An over-the-wire create_conversation mints the
+// record; since #2085 it does NOT spawn, so the FIRST TURN below is what produces the
+// child whose mid-turn roster line is retained.
 //
 // WHY THE EMPTY-REGISTRY ARM CANNOT FLAKE, argued rather than assumed, because a stray
 // roster on that conn would redden AC 4 for a reason having nothing to do with the seam.
@@ -298,7 +298,7 @@ func driveLateConnectBackgroundTaskRoster(t *testing.T) lateRosterObservation {
 		env, ok := nextEnvA(createDeadline)
 		if !ok {
 			t.Fatalf("no conversation_created within 15s (background_task_roster on the minter: %d) — the "+
-				"minted stream-json session never came up. The mint is a spawning Pool.Activate, so suspect "+
+				"conversation was never minted. Since #2085 the mint does not spawn, so suspect "+
 				"the child rather than the reconcile seam", obs.rostersOnMinter)
 		}
 		switch env.Type {

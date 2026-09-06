@@ -1287,3 +1287,411 @@ func TestRegistry_Save_ActiveOmitsArchivedKey(t *testing.T) {
 		t.Errorf("Save→Load→Save not byte-identical:\n first = %s\nsecond = %s", first, second)
 	}
 }
+
+// #2149 AC2/AC5: the setter stores a valid prompt verbatim, touches exactly one
+// field, and does not alias the caller's pointer.
+func TestRegistry_SetSystemPrompt_HitStoresVerbatim(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{
+		ID:               id,
+		Name:             strPtr("general"),
+		Cwd:              "/home/user/project",
+		CurrentSessionID: "sess-current",
+		SessionHistory:   []string{"sess-old"},
+		IsPromoted:       true,
+		IsArchived:       true,
+		LastUsedAt:       when,
+	})
+
+	const prompt = "Answer in Finnish.\nBe terse — ä ö å 🐍"
+	in := prompt
+	if err := r.SetSystemPrompt(id, &in); err != nil {
+		t.Fatalf("SetSystemPrompt: %v", err)
+	}
+
+	got, found := r.Get(id)
+	if !found {
+		t.Fatal("Get after SetSystemPrompt: not found")
+	}
+	if got.SystemPrompt == nil {
+		t.Fatal("SystemPrompt = nil, want a stored value")
+	}
+	if *got.SystemPrompt != prompt {
+		t.Errorf("SystemPrompt = %q, want %q (stored verbatim)", *got.SystemPrompt, prompt)
+	}
+	// The stored pointer is a fresh local, never the caller's variable.
+	if got.SystemPrompt == &in {
+		t.Error("SystemPrompt aliases the caller's pointer, want a fresh copy")
+	}
+
+	// Every other field is untouched (the single-field guarantee).
+	if got.Name == nil || *got.Name != "general" {
+		t.Errorf("Name = %v, want pointer to %q (untouched)", got.Name, "general")
+	}
+	if got.Cwd != "/home/user/project" {
+		t.Errorf("Cwd = %q, want unchanged", got.Cwd)
+	}
+	if got.CurrentSessionID != "sess-current" {
+		t.Errorf("CurrentSessionID = %q, want unchanged", got.CurrentSessionID)
+	}
+	if len(got.SessionHistory) != 1 || got.SessionHistory[0] != "sess-old" {
+		t.Errorf("SessionHistory = %v, want [sess-old] (untouched)", got.SessionHistory)
+	}
+	if !got.IsPromoted {
+		t.Error("IsPromoted = false, want true (untouched)")
+	}
+	if !got.IsArchived {
+		t.Error("IsArchived = false, want true (untouched)")
+	}
+	if !got.LastUsedAt.Equal(when) {
+		t.Errorf("LastUsedAt = %v, want %v (untouched)", got.LastUsedAt, when)
+	}
+}
+
+// #2149 AC2/AC5: each refusal is a distinct static sentinel, leaves every record
+// untouched, and carries no fragment of the rejected value. The two combined
+// rows pin the documented refusal ordering: length is the O(1) gate and wins.
+func TestRegistry_SetSystemPrompt_Refusals(t *testing.T) {
+	t.Parallel()
+	const present ConversationID = "11111111-2222-4333-8444-555555555555"
+	const absent ConversationID = "22222222-2222-4333-8444-555555555555"
+	const marker = "MARKER_K3M9P2X7"
+
+	tooLong := marker + strings.Repeat("a", MaxSystemPromptBytes+1-len(marker))
+	badUTF8 := marker + "\xff\xfe"
+	tooLongAndBad := badUTF8 + strings.Repeat("a", MaxSystemPromptBytes+1-len(badUTF8))
+
+	tests := []struct {
+		name    string
+		id      ConversationID
+		prompt  string
+		wantErr error
+	}{
+		{name: "too-long-by-one-byte", id: present, prompt: tooLong, wantErr: ErrSystemPromptTooLong},
+		{name: "invalid-utf8", id: present, prompt: badUTF8, wantErr: ErrSystemPromptInvalidUTF8},
+		{name: "unknown-id", id: absent, prompt: marker + " valid", wantErr: ErrConversationNotFound},
+		{name: "too-long-and-invalid-utf8", id: present, prompt: tooLongAndBad, wantErr: ErrSystemPromptTooLong},
+		{name: "unknown-id-and-too-long", id: absent, prompt: tooLong, wantErr: ErrSystemPromptTooLong},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+			r := &Registry{}
+			r.Create(Conversation{
+				ID:         present,
+				Name:       strPtr("general"),
+				Cwd:        "/home/user/project",
+				IsPromoted: true,
+				LastUsedAt: when,
+			})
+
+			p := tc.prompt
+			err := r.SetSystemPrompt(tc.id, &p)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("SetSystemPrompt err = %v, want %v", err, tc.wantErr)
+			}
+			// AC5: the sentinel carries no fragment of the value.
+			if strings.Contains(err.Error(), marker) {
+				t.Errorf("error text leaks the rejected value: %q", err.Error())
+			}
+
+			// Every record is untouched.
+			got, found := r.Get(present)
+			if !found {
+				t.Fatal("seeded row missing after a refusal")
+			}
+			if got.SystemPrompt != nil {
+				t.Errorf("SystemPrompt = %v, want nil (refusal must not store)", got.SystemPrompt)
+			}
+			if got.Name == nil || *got.Name != "general" || got.Cwd != "/home/user/project" || !got.IsPromoted {
+				t.Errorf("seeded row mutated by a refusal: %+v", got)
+			}
+			if !got.LastUsedAt.Equal(when) {
+				t.Errorf("LastUsedAt = %v, want %v (untouched)", got.LastUsedAt, when)
+			}
+		})
+	}
+}
+
+// #2149 AC2: the bound is inclusive and counted in bytes, not runes.
+func TestRegistry_SetSystemPrompt_BoundaryIsBytes(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+
+	// "ä" is two bytes: 4096 of them are exactly at the bound, 4097 are over it
+	// while being far below the bound in runes.
+	tests := []struct {
+		name    string
+		prompt  string
+		wantErr error
+	}{
+		{name: "exactly-max-ascii", prompt: strings.Repeat("a", MaxSystemPromptBytes)},
+		{name: "one-byte-over-ascii", prompt: strings.Repeat("a", MaxSystemPromptBytes+1), wantErr: ErrSystemPromptTooLong},
+		{name: "exactly-max-two-byte-runes", prompt: strings.Repeat("ä", MaxSystemPromptBytes/2)},
+		{name: "over-max-two-byte-runes", prompt: strings.Repeat("ä", MaxSystemPromptBytes/2+1), wantErr: ErrSystemPromptTooLong},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			r.Create(Conversation{ID: id, Cwd: "/x"})
+
+			p := tc.prompt
+			err := r.SetSystemPrompt(id, &p)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("SetSystemPrompt(%d bytes) = %v, want nil", len(p), err)
+				}
+				got, _ := r.Get(id)
+				if got.SystemPrompt == nil || *got.SystemPrompt != tc.prompt {
+					t.Errorf("stored value differs from the %d-byte input", len(p))
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("SetSystemPrompt(%d bytes) err = %v, want %v", len(p), err, tc.wantErr)
+			}
+			got, _ := r.Get(id)
+			if got.SystemPrompt != nil {
+				t.Error("SystemPrompt stored despite a refusal")
+			}
+		})
+	}
+}
+
+// #2149 AC1/AC2: a nil argument returns the row to "none" without value
+// validation, but still refuses an unknown id; a pointer to "" stores the
+// explicitly-empty state.
+func TestRegistry_SetSystemPrompt_ClearAndExplicitlyEmpty(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	const absent ConversationID = "22222222-2222-4333-8444-555555555555"
+
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x"})
+
+	p := "be terse"
+	if err := r.SetSystemPrompt(id, &p); err != nil {
+		t.Fatalf("SetSystemPrompt(value): %v", err)
+	}
+	if err := r.SetSystemPrompt(id, nil); err != nil {
+		t.Fatalf("SetSystemPrompt(nil): %v", err)
+	}
+	got, _ := r.Get(id)
+	if got.SystemPrompt != nil {
+		t.Errorf("SystemPrompt = %v, want nil after clearing", got.SystemPrompt)
+	}
+
+	empty := ""
+	if err := r.SetSystemPrompt(id, &empty); err != nil {
+		t.Fatalf("SetSystemPrompt(\"\"): %v", err)
+	}
+	got, _ = r.Get(id)
+	if got.SystemPrompt == nil {
+		t.Fatal("SystemPrompt = nil, want a non-nil pointer to \"\" (explicitly empty)")
+	}
+	if *got.SystemPrompt != "" {
+		t.Errorf("SystemPrompt = %q, want \"\"", *got.SystemPrompt)
+	}
+
+	// Clearing an unknown id is still a refusal: the nil path skips value
+	// validation, not the identity check.
+	if err := r.SetSystemPrompt(absent, nil); !errors.Is(err, ErrConversationNotFound) {
+		t.Errorf("SetSystemPrompt(absent, nil) err = %v, want ErrConversationNotFound", err)
+	}
+}
+
+// #2149 AC3: every prompt state survives Save → Load unchanged, including one
+// carrying newlines and non-ASCII text, and the three states stay
+// distinguishable on disk.
+func TestRegistry_SetSystemPrompt_RoundTrip(t *testing.T) {
+	t.Parallel()
+	const noneID ConversationID = "11111111-2222-4333-8444-555555555555"
+	const emptyID ConversationID = "22222222-2222-4333-8444-555555555555"
+	const setID ConversationID = "33333333-2222-4333-8444-555555555555"
+	const prompt = "Vastaa suomeksi.\n\nOle ytimekäs — ä ö å 🐍\ttab"
+	when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+
+	r := &Registry{}
+	r.Create(Conversation{ID: noneID, Cwd: "/a", LastUsedAt: when})
+	r.Create(Conversation{ID: emptyID, Cwd: "/b", SystemPrompt: strPtr(""), LastUsedAt: when.Add(time.Second)})
+	r.Create(Conversation{ID: setID, Cwd: "/c", LastUsedAt: when.Add(2 * time.Second)})
+	p := prompt
+	if err := r.SetSystemPrompt(setID, &p); err != nil {
+		t.Fatalf("SetSystemPrompt: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	// Exactly two of the three rows carry the key on disk.
+	if n := strings.Count(string(raw), `"system_prompt"`); n != 2 {
+		t.Errorf("system_prompt key count = %d, want 2 (none omits it):\n%s", n, raw)
+	}
+	if !strings.Contains(string(raw), `"system_prompt": ""`) {
+		t.Errorf("explicitly-empty row did not serialize an empty system_prompt:\n%s", raw)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	gotNone, ok := back.Get(noneID)
+	if !ok {
+		t.Fatal("none row missing after reload")
+	}
+	if gotNone.SystemPrompt != nil {
+		t.Errorf("none row reloaded with %v, want nil", gotNone.SystemPrompt)
+	}
+	gotEmpty, ok := back.Get(emptyID)
+	if !ok {
+		t.Fatal("explicitly-empty row missing after reload")
+	}
+	if gotEmpty.SystemPrompt == nil || *gotEmpty.SystemPrompt != "" {
+		t.Errorf("explicitly-empty row reloaded as %v, want a non-nil pointer to \"\"", gotEmpty.SystemPrompt)
+	}
+	gotSet, ok := back.Get(setID)
+	if !ok {
+		t.Fatal("prompt row missing after reload")
+	}
+	if gotSet.SystemPrompt == nil || *gotSet.SystemPrompt != prompt {
+		t.Errorf("prompt row reloaded as %v, want %q unchanged", gotSet.SystemPrompt, prompt)
+	}
+}
+
+// #2149 AC4: a registry whose rows all hold no prompt serializes with no
+// system_prompt key, so it is byte-identical to its pre-#2149 form, and
+// Save→Load→Save is a fixed point.
+func TestRegistry_Save_NoPromptOmitsKey(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-09-04T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/a", LastUsedAt: when})
+	r.Create(Conversation{ID: "22222222-2222-4333-8444-555555555555", Cwd: "/b", LastUsedAt: when.Add(time.Second)})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read after save: %v", err)
+	}
+	if strings.Contains(string(first), "system_prompt") {
+		t.Errorf("all-none registry serialized a system_prompt key:\n%s", first)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	path2 := filepath.Join(t.TempDir(), "conversations.json")
+	if err := back.Save(path2); err != nil {
+		t.Fatalf("re-Save: %v", err)
+	}
+	second, err := os.ReadFile(path2)
+	if err != nil {
+		t.Fatalf("read after re-save: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("Save→Load→Save not byte-identical:\n first = %s\nsecond = %s", first, second)
+	}
+}
+
+// #2149 AC4: a pre-existing on-disk row without a system_prompt key decodes as
+// "no prompt", with no migration step.
+func TestRegistry_Load_AbsentPromptKeyDecodesNone(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":false,"last_used_at":"2026-09-04T12:34:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := r.Get("11111111-2222-4333-8444-555555555555")
+	if !ok {
+		t.Fatal("legacy row missing after Load")
+	}
+	if got.SystemPrompt != nil {
+		t.Errorf("absent system_prompt key decoded as %v, want nil", got.SystemPrompt)
+	}
+}
+
+// #2149: SetSystemPrompt does not persist implicitly — the Create / Update /
+// Promote / SetArchived convention.
+func TestRegistry_SetSystemPrompt_DoesNotPersist(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	p := "be terse"
+	if err := r.SetSystemPrompt(id, &p); err != nil {
+		t.Fatalf("SetSystemPrompt: %v", err)
+	}
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := back.Get(id)
+	if !ok {
+		t.Fatal("row missing after reload")
+	}
+	if got.SystemPrompt != nil {
+		t.Errorf("on-disk SystemPrompt = %v, want nil (SetSystemPrompt must not Save)", got.SystemPrompt)
+	}
+}
+
+// #2149 AC5: a refused value reaches no file — not the pre-existing registry,
+// not the one written after the refusal.
+func TestRegistry_SetSystemPrompt_RefusedValueNeverReachesDisk(t *testing.T) {
+	t.Parallel()
+	const id ConversationID = "11111111-2222-4333-8444-555555555555"
+	const marker = "MARKER_K3M9P2X7"
+	r := &Registry{}
+	r.Create(Conversation{ID: id, Cwd: "/x", LastUsedAt: mustParseTime(t, "2026-09-04T12:34:56.789Z")})
+
+	dir := t.TempDir()
+	before := filepath.Join(dir, "before.json")
+	if err := r.Save(before); err != nil {
+		t.Fatalf("Save before: %v", err)
+	}
+
+	p := marker + strings.Repeat("a", MaxSystemPromptBytes+1-len(marker))
+	if err := r.SetSystemPrompt(id, &p); !errors.Is(err, ErrSystemPromptTooLong) {
+		t.Fatalf("SetSystemPrompt err = %v, want ErrSystemPromptTooLong", err)
+	}
+
+	after := filepath.Join(dir, "after.json")
+	if err := r.Save(after); err != nil {
+		t.Fatalf("Save after: %v", err)
+	}
+	for _, path := range []string{before, after} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(data), marker) {
+			t.Errorf("%s contains a fragment of the refused value", filepath.Base(path))
+		}
+	}
+}

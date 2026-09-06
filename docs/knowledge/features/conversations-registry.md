@@ -11,6 +11,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Deletion primitive (#237):** `(*Registry).Delete(id) bool` removes a single entry by ID under the registry lock; consumed by the auto-archive sweep ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)). #217 explicitly deferred deletion until a real consumer surfaced; #220's sweep is that consumer.
 - **Rotation-rebind primitive (#739):** `(*Registry).RebindSession(oldID, newID string) bool` re-points the conversation bound to `oldID` at `newID` and appends `oldID` to `SessionHistory`, under the registry lock; consumed by the pool's `/clear` rotation path so the conversation↔session binding stays current beyond the first rotation ([`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation*). The first production caller to **write** `SessionHistory`.
 - **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — but no longer independent of it: since #1488 `ShouldArchive` reads `IsArchived` and the sweep skips archived rows, so a manual archive is durable until the user unarchives. Called by the `archive_conversation`/`unarchive_conversation` wire verbs (#881), the sole production caller. See [codebase/880.md](../codebase/880.md), [codebase/881.md](../codebase/881.md).
+- **Bounded system-prompt primitive (#2149):** `(*Registry).SetSystemPrompt(id ConversationID, prompt *string) error` validates and sets `Conversation.SystemPrompt` under the registry lock; `MaxSystemPromptBytes = 8192` (inclusive) and two sentinels (`ErrSystemPromptTooLong`, `ErrSystemPromptInvalidUTF8`) join `ErrConversationNotFound` as the refusal set. Store-only slice: nothing reads or writes the field over the wire yet (#2150 reads it at spawn, #2151 sets it over the wire, #2152 reads it back).
 
 ## Surface
 
@@ -32,7 +33,11 @@ var (
     ErrConversationAlreadyPromoted = errors.New("conversations: conversation already promoted")
     ErrPromotionNameInUse          = errors.New("conversations: promotion name already in use")
     ErrPromotionNameEmpty          = errors.New("conversations: promotion name is empty")
+    ErrSystemPromptTooLong         = errors.New("conversations: system prompt exceeds the maximum byte length")
+    ErrSystemPromptInvalidUTF8     = errors.New("conversations: system prompt is not valid UTF-8")
 )
+
+const MaxSystemPromptBytes = 8192 // inclusive
 
 func Load(path string) (*Registry, error)
 func (r *Registry) Save(path string) error
@@ -44,6 +49,7 @@ func (r *Registry) Delete(id ConversationID) bool
 func (r *Registry) Promote(id ConversationID, name string) error
 func (r *Registry) RebindSession(oldID, newID string) bool
 func (r *Registry) SetArchived(id ConversationID, archived bool) bool
+func (r *Registry) SetSystemPrompt(id ConversationID, prompt *string) error
 ```
 
 `Registry` holds the in-memory conversation slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk) or directly via `&Registry{}` (zero value is the empty registry — documented). Methods are safe for concurrent use.
@@ -85,6 +91,10 @@ The `ConversationID` doc-comment in `conversation.go` (#216) deferred the genera
 `is_archived` (#880) is omitted from this example because it's `omitempty` and this row is active
 — it only appears, as `"is_archived": true`, on a row the user has manually archived. See
 *Durable archive flag (`IsArchived`, #880)* below.
+
+`system_prompt` (#2149) is likewise omitted here — this row holds no prompt. It appears as
+`"system_prompt": ""` on an explicitly-emptied row and `"system_prompt": "<text>"` on an
+operator-set one; see § `SetSystemPrompt` above.
 
 Envelope shape (`{"conversations": [...]}`), not a bare top-level array. Reserves room for future top-level fields (schema version, archive cursor) without breaking jq pipelines or stdlib decoder discipline. Same future-proofing rationale as the sessions and devices registries.
 
@@ -258,6 +268,58 @@ handler (`internal/relay/handlers.ArchiveConversation`) is the sole caller, flip
 then re-reading via `Get` for the reply snapshot (deliberately not folded into a single `Update`
 closure — see [codebase/881.md](../codebase/881.md)). See [codebase/880.md](../codebase/880.md).
 
+### `SetSystemPrompt(id ConversationID, prompt *string) error` (#2149)
+
+Validates then sets the durable per-conversation system prompt: locate the entry whose `ID`
+matches, assign `SystemPrompt`, return `nil`. On any refusal the registry is left untouched.
+Scan and mutation are one critical section under `r.mu` — same no-TOCTOU posture as
+`Update`/`Promote`/`RebindSession`/`SetArchived`. No implicit `Save`.
+
+- **One `*string` arg spans all three states, including "clear."** `nil` returns the row to
+  "no prompt"; a non-nil pointer (including one to `""`) stores its pointee after
+  validation. This is deliberate, not just convenient: the ticket's premise is that every
+  wire verb goes through one validated door, which is only true if the *clear* path goes
+  through it too. A `prompt string` signature would leave `Update` — documented as
+  deliberately unvalidated — as the only way back to "no prompt," pushing a whole verb
+  outside the validated boundary. `SetArchived`'s single `bool` that both sets and clears is
+  the same idea one type up.
+- **Validation runs before the lock, value-first then identity** — length, then UTF-8
+  validity, then the not-found scan, mirroring `Promote`'s empty-name-before-not-found
+  order. Length first is an O(1) gate: checking UTF-8 validity first would force a full scan
+  of an arbitrarily large hostile input before rejecting it for size. A value that is both
+  over-length and invalid UTF-8 therefore returns `ErrSystemPromptTooLong`, pinned by a test
+  row so a future reorder of the two checks can't silently change the sentinel a caller maps
+  to a wire code.
+- **Invalid UTF-8 is refused, not sanitized, because `encoding/json` substitutes U+FFFD on
+  marshal.** That substitution can *grow* a value past its accepted length after it was
+  already admitted — a measured 12-byte invalid input persists as 16 bytes — which would
+  break the round-trip guarantee (a stored value must survive `Save` → `Load` unchanged) for
+  any value near the bound. Any future byte-bounded string field in this package that also
+  promises round-trip fidelity needs the same UTF-8 gate for the same reason; the two
+  guarantees are incompatible without it.
+- **The 8192-byte bound is sized against the wire envelope, not against the raw string.**
+  `docs/protocol-mobile.md` § *Application-envelope size cap* puts the frame ceiling at
+  65519 bytes, but `encoding/json`'s HTML-escaping (`<`, `>`, `&`, U+2028, U+2029) costs up
+  to six bytes per escaped rune — a hostile all-`<` prompt at the bound serializes to
+  roughly 49 KB, not 8192. That still leaves headroom in a single-prompt payload, so the
+  bound holds today, but the "room to spare" reasoning was checked against the unescaped
+  byte count and does not automatically survive a future payload that carries more than one
+  prompt-sized field, or a `list_conversations`-style reply that embeds several. Re-derive
+  the escaped-worst-case arithmetic before reusing this bound in a list-shaped payload.
+- **Pointer ownership.** The implementation copies the pointee into a fresh local before
+  taking its address, so the stored pointer never aliases a caller-held variable — the same
+  defensive idiom `Promote` uses for `Name`. `Get` and `List` keep copying records shallowly
+  and sharing the stored pointer, exactly as they already do for `Name`.
+- **No implicit `Save`, no logger, nothing logged.** Matches `Create`/`Update`/`Promote`/
+  `Delete`/`RebindSession`/`SetArchived`. All three refusal sentinels are static and
+  returned naked — none interpolates the value, its length, or the conversation id — and the
+  package's one logging site (`sweep_loop.go` → `sweepOnce`) logs a count and a `Save`
+  error, never a record field. A refused value therefore cannot reach a log line or a wire
+  error message through this path.
+
+Store-only as of #2149: no getter, no wire verb, no CLI binding. `Get`/`List` are the read
+path the sibling slices (#2150, #2152) use.
+
 ### `Promote(id ConversationID, name string) error`
 
 In-memory primitive that turns a discussion into a named channel: flips `IsPromoted` to `true` and sets `Name` to a non-nil pointer to `name`. Validation, the uniqueness scan, and the two-field mutation all run under `r.mu`; on any refusal the registry is left untouched. Persistence is the caller's job — `Promote` does not call `Save`, matching the `Create` / `Update` convention.
@@ -309,6 +371,7 @@ New (no devices counterpart):
 - `TestRegistry_SetArchived_RoundTrip` (#880, AC2) — an archived and an active conversation both survive `Save` → `Load` with their flag intact.
 - `TestRegistry_Load_AbsentArchivedKeyDecodesActive` (#880, AC1) — hand-written registry JSON with the `is_archived` key omitted from a row decodes that row's `IsArchived == false`, no migration invoked.
 - `TestRegistry_Save_ActiveOmitsArchivedKey` (#880, AC1) — an all-active registry's `Save` output contains no `is_archived` substring; `Save → Load → Save` is byte-identical (the byte-stable reload discipline extended to the new field).
+- `TestRegistry_SetSystemPrompt_*` (#2149) — `_HitStoresVerbatim` (byte-equal stored value, every other field untouched, stored pointer not the caller's pointer); `_Refusals` (table: over-length, invalid UTF-8, unknown id, and the two combined-refusal ordering rows pinning length-first; each row also asserts `err.Error()` carries no fragment of a marked input — AC5); `_BoundaryIsBytes` (exactly `MaxSystemPromptBytes` accepted, one more refused, 4096 vs 4097 two-byte runes — pins bytes-not-runes); `_ClearAndExplicitlyEmpty` (nil clears, `strPtr("")` stores non-nil-empty, nil on an unknown id still refuses); `_RoundTrip` (none / explicitly-empty / newlines-and-non-ASCII survive `Save` → `Load`); `_DoesNotPersist` (mirrors `_Promote_DoesNotPersist`); `_RefusedValueNeverReachesDisk` (a refused marked value appears in neither file's bytes — AC5). Plus `TestRegistry_Save_NoPromptOmitsKey` and `TestRegistry_Load_AbsentPromptKeyDecodesNone` (AC4, mirroring the `IsArchived` pair) and `TestConversation_SystemPromptThreeStates` in `conversation_test.go` (AC1, the type-level round trip).
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -326,6 +389,7 @@ New (no devices counterpart):
 - **Auto-archive predicate + sweep.** #219, #220.
 - **Migration from existing `Session` registry.** TBD ticket once Conversations is proven on disk; Phase 1/2 sessions stay untouched.
 - **Shared atomic-write helper across `devices` and `conversations`.** Issue tech note explicitly forbids; revisit only if real divergence cost surfaces.
+- **Reading, wiring, or wire-exposing `SystemPrompt`.** #2149 lands storage only. #2150 reads it at spawn, #2151 sets it over the wire, #2152 reads it back. `Registry.Update` remains the unvalidated escape hatch for it, exactly as for every other field.
 
 ## Related
 
@@ -339,8 +403,10 @@ New (no devices counterpart):
 - [codebase/739.md](../codebase/739.md) — per-ticket note for the `RebindSession` write primitive + the pool-side rotation/eviction wiring.
 - [codebase/868.md](../codebase/868.md) — per-ticket note for the `saveMu` fix (dedicated save mutex closes the cross-`Save` lost-update race).
 - [codebase/880.md](../codebase/880.md) — per-ticket note for `SetArchived` + `ListFilter.IsArchived` + the `list_conversations` read surfacing.
+- `docs/protocol-mobile.md` § *Application-envelope size cap* — the 65519-byte frame ceiling `MaxSystemPromptBytes` is sized against; read it alongside the HTML-escaping arithmetic in § `SetSystemPrompt` above before reusing the bound elsewhere.
 - [`features/conversations-auto-archive.md`](conversations-auto-archive.md) — the `Sweep`/`ShouldArchive` hard-delete auto-archive; `SetArchived` (#880) is a distinct soft-archive mechanism, not a variant of it, but the hard-delete sweep now honours it — `ShouldArchive` exempts `IsArchived` rows (#1488).
 - `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec for the CRUD foundation.
 - `docs/specs/architecture/218-conversations-promotion-api.md` — architect's spec for `Promote`.
 - `docs/specs/architecture/739-conversation-session-binding-rotation.md` — architect's spec for `RebindSession` + the rotation rebind.
 - `docs/specs/architecture/880-durable-archived-state.md` — architect's spec for `SetArchived` + `ListFilter.IsArchived` + the read-surface projection.
+- `docs/specs/architecture/2149-conversation-system-prompt.md` — architect's spec for `SystemPrompt` + `SetSystemPrompt`.
