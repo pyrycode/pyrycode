@@ -61,16 +61,16 @@ import (
 // weaker than debug_bundle_chunk's strict seq, which is the neighbouring rule a
 // reader would wrongly copy.
 //
-// THE DAEMON MUST BE ON A CONVERSATION FIRST, or the upload is refused after
-// every byte has been sent. attachments.Intake resolves the conversation once per
-// COMPLETING chunk over the follow-active cursor; before any route that cursor is
-// empty and the completing chunk answers ErrNoConversation, which the dispatch arm
-// maps to attachment.storage_failed — a success-shaped stream that stores nothing.
-// So the run drives one send_message first. Its ACK IS THE WHOLE PRECONDITION:
-// handlers.SendMessage calls sessionRouter.Route, which stamps the cursor on the
-// successful-route path, and only then enqueues and acks. The turn is deliberately
-// NOT drained — that is TestRelayV2_StreamSendMessageDrainsTurn's subject, costs
-// ~20s of deadline, and proves nothing asserted here.
+// NO TURN IS ROUTED FIRST, and that absence is #2143's whole point. Until then
+// attachments.Intake resolved the destination over the follow-active cursor, which
+// only a successful send_message route stamps, so this run had to drive one send
+// and wait for its ack before a single chunk could be stored. The chunks name their
+// conversation now, so the upload stands alone — which is the operator flow that
+// was impossible before: attaching to a conversation nobody has messaged yet.
+//
+// seedBoundConversation below STAYS, and it is a different precondition: it makes
+// the conversation one the daemon HOSTS, which is what handleAttachmentChunk's
+// KnownConversation gate requires. Membership, not routing.
 func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 	const (
 		initialUUID  = "11111111-1111-4111-8111-111111111111"
@@ -129,55 +129,18 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 	t.Cleanup(func() { _ = phone.Close() })
 	send, recv := driveHandshakeToOpenDaemonInteractive(t, phone, pubKey, payload.Token)
 
-	// ── Precondition: route one turn so the follow-active cursor is non-empty ──
-	sendEnv, err := json.Marshal(protocol.Envelope{
-		ID:   sendReqID,
-		Type: protocol.TypeSendMessage,
-		TS:   time.Now().UTC(),
-		Payload: mustJSON(t, protocol.SendMessagePayload{
-			ConversationID: knownConvID,
-			MessageID:      "u-1898",
-			Text:           "e2e-1898-user:route\n",
-		}),
-	})
-	if err != nil {
-		t.Fatalf("marshal send_message envelope: %v", err)
-	}
-	sendCipher, err := send.Encrypt(sendEnv)
-	if err != nil {
-		t.Fatalf("seal send_message envelope: %v", err)
-	}
-	sendNoiseMsg(t, phone, sendCipher)
-
-	ackDeadline := time.Now().Add(15 * time.Second)
-	var acked bool
-	for !acked {
-		env, ok := nextAttachmentEnvelope(t, phone, recv, ackDeadline)
-		if !ok {
-			t.Fatal("the daemon never acked the send_message, so the active-conversation cursor was " +
-				"never stamped; every chunk would transmit and the completing one would be refused " +
-				"attachment.storage_failed (attachments.ErrNoConversation)")
-		}
-		if env.Type != protocol.TypeAck {
-			continue // the turn's own pushes race the ack; classify and read on
-		}
-		if env.InReplyTo == nil || *env.InReplyTo != sendReqID {
-			t.Errorf("ack in_reply_to = %v, want pointer to %d", env.InReplyTo, sendReqID)
-		}
-		acked = true
-	}
-
 	// ── The transfer: the non-completing chunk, a barrier, then the completer ──
 	declare := func(index int) protocol.AttachmentChunkPayload {
 		return protocol.AttachmentChunkPayload{
-			AttachmentID: attachmentID,
-			Index:        index,
-			TotalChunks:  len(chunks),
-			Filename:     filename,
-			MimeType:     mimeType,
-			Size:         int64(len(file)),
-			SHA256:       digest,
-			Data:         chunks[index],
+			ConversationID: knownConvID,
+			AttachmentID:   attachmentID,
+			Index:          index,
+			TotalChunks:    len(chunks),
+			Filename:       filename,
+			MimeType:       mimeType,
+			Size:           int64(len(file)),
+			SHA256:         digest,
+			Data:           chunks[index],
 		}
 	}
 
@@ -235,15 +198,12 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 			storedPayload.AttachmentID, attachmentID)
 	}
 
-	// ── AC-2: the bytes are on the host, under the conversation the daemon routed to ──
+	// ── AC-2: the bytes are on the host, under the conversation the chunks NAMED ──
 	//
-	// The path is built from knownConvID — the conversation this run ROUTED to. The
-	// frame has carried a conversation_id since #2142, and this run leaves it unset,
-	// so what is pinned here is that PUBLISHING the field changed no behaviour:
-	// attachments.Intake still resolves the destination through its construction-time
-	// resolver, with no conversation on Receive's signature for a frame's field to
-	// reach. #2143 is what makes the field decide anything, and this assertion is the
-	// before-picture it will have to move.
+	// The path is built from knownConvID — the conversation every chunk of this
+	// transfer carried, and the only thing that could have put the bytes there,
+	// since no turn was ever routed and the follow-active cursor is empty for the
+	// whole run. Before #2143 that emptiness refused the completing chunk outright.
 	dir := filepath.Join(home, ".pyry", "test", "conversations", knownConvID, "attachments", attachmentID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

@@ -98,18 +98,13 @@ var (
 // it" is false for an expired transfer, where resending ALL frames succeeds — and
 // that clause is the row's rationale, not the contract it states.
 //
-// ErrNoConversation → attachment.storage_failed, where every clause of the
-// published row is true of it: a VERIFIED attachment (Deliver returned assembled,
-// digest-checked bytes) COULD NOT BE WRITTEN TO THE HOST (there is no destination
-// to file it under), the message is STATIC so the daemon's routing state stays off
-// the wire, and RETRYABLE AFTER A BACKOFF is right — it clears the moment the
-// daemon routes to a conversation, and hot-looping the re-upload of an
-// already-transmitted file is what that row forbids. Sharing the code with
-// ErrInvalidID does not collapse what that sentinel's doc block argued for: its
-// objection is to routing an unrouted daemon through EnsureDir("") and telling a
-// client its OWN id was malformed, and attachment.storage_failed says neither
-// "your id is malformed" nor "the daemon is unrouted" — it says the host could not
-// file it, back off.
+// NO ARM ANSWERS A BAD DESTINATION, and that is #2143 rather than an omission.
+// attachments.ErrNoConversation is gone with the follow-active resolver that
+// raised it: the destination is validated by handleAttachmentChunk before the
+// seam, so a refusal for it never reaches this map. Its old mapping to
+// attachment.storage_failed had argued that a VERIFIED attachment could not be
+// written to the host — true of an unrouted daemon, false of a conversation the
+// client named badly, where nothing is verified yet and the host is not at fault.
 //
 // AN ERROR MATCHING NO ARM IS STILL ANSWERED, never dropped: storage_failed is the
 // honest generic for a daemon-side condition of unknown cause, and it is retryable
@@ -131,8 +126,8 @@ func attachmentRejectFor(err error) attachmentReject {
 	case errors.Is(err, attachments.ErrTooManyUploads):
 		return rejectTooManyUploads
 	default:
-		// ErrInvalidID, ErrNotContained, ErrWriteFailed, ErrNoConversation, and
-		// anything this switch has not learned about.
+		// ErrInvalidID, ErrNotContained, ErrWriteFailed, and anything this switch
+		// has not learned about.
 		return rejectStorageFailed
 	}
 }
@@ -163,7 +158,29 @@ func attachmentRejectFor(err error) attachmentReject {
 //     unusable. NOTHING about the failure is echoed or logged — encoding/json
 //     quotes offending input into its error string and those bytes are
 //     remote-authored.
-//  3. Receive's THREE-WAY answer, in the order that makes the middle one
+//  3. THE DESTINATION IS GATED BEFORE THE SEAM, and the ordering copies
+//     handleRequestAttachment's steps 3-5: an absent conversation_id, then one
+//     the daemon does not host, each refused before a byte is admitted. The
+//     empty check runs FIRST even though the membership check would answer false
+//     for "" anyway — it separates "absent" from "unknown" in the daemon's own
+//     log without resting on how a registry lookup treats the empty string, and
+//     a nil KnownConversation is fail-closed either way.
+//
+//     ON EVERY CHUNK, not only the completing one. attachments.Intake reads the
+//     destination once per completing chunk, but the gate is here and this
+//     handler runs per frame, so a transfer naming an unusable conversation dies
+//     on its FIRST — the cost the intake's own doc block used to accept out loud,
+//     where every byte crossed the wire before the refusal.
+//
+//     KnownConversation and NOT a session router. A router additionally refuses a
+//     known conversation with NO BOUND SESSION, which is precisely the
+//     never-messaged conversation this path exists for: an attachment added
+//     before a conversation's first message. A pure membership check accepts it.
+//
+//     THERE IS NO FALLBACK TO THE FOLLOW-ACTIVE CURSOR on any arm. The protocol
+//     has one rule — the bytes land where the client said — and a fallback would
+//     restore the silent misfile #2143 removed.
+//  4. Receive's THREE-WAY answer, in the order that makes the middle one
 //     unmissable: refuse on err != nil, answer attachment_stored on stored, and
 //     otherwise reply NOTHING. That last branch is what most chunks of a healthy
 //     upload take. attachments.ErrIncomplete never arrives here — Receive is the
@@ -180,7 +197,11 @@ func attachmentRejectFor(err error) attachmentReject {
 // never the bytes, and never a raw filename") and docs/protocol-mobile.md
 // § Attachments adds the declared digest, so the loggable set here is the union's
 // complement: conn id, attachment id, index and total may be logged; bytes,
-// filename, digest and host path never. The error out of Receive is NEVER logged
+// filename, digest and host path never. THE CONVERSATION ID IS NOT LOGGED ON ANY
+// ARM, matching handleRequestAttachment: this handler validates its membership,
+// not its shape, and § Attachments makes shape validation the precondition for
+// logging a client-supplied string. The two gate arms are separable in the log by
+// their daemon-authored reason instead. The error out of Receive is NEVER logged
 // on any arm — not just never replied — because EnsureDir's and Store's refusals
 // wrap host paths and the daemon's own conversation id, and a log line carrying a
 // host path is banned as squarely as a wire message carrying one. The mapped code
@@ -230,7 +251,24 @@ func (m *V2SessionManager) handleAttachmentChunk(ctx context.Context, s *V2Sessi
 		return
 	}
 
-	attachmentID, stored, err := m.cfg.AttachmentIntake.Receive(s.connID, chunk)
+	if chunk.ConversationID == "" {
+		// Step 3, first arm. The conversation id is NOT logged — there is
+		// nothing to log, and naming the field would only invite the next arm
+		// to log a value that has not passed the gate.
+		m.rejectAttachmentChunk(ctx, s, env.ID, chunk, "conversation id is absent or empty")
+		return
+	}
+	if m.cfg.KnownConversation == nil || !m.cfg.KnownConversation(chunk.ConversationID) {
+		// Step 3, second arm. Unknown and foreign are ONE answer here as well as
+		// on the wire: the daemon cannot tell them apart either, and a code that
+		// could would make the upload leg the conversation-existence oracle the
+		// retrieval leg deliberately closes.
+		m.rejectAttachmentChunk(ctx, s, env.ID, chunk, "conversation is not one this daemon hosts")
+		return
+	}
+
+	// The destination has passed the gate, so it satisfies Receive's precondition.
+	attachmentID, stored, err := m.cfg.AttachmentIntake.Receive(s.connID, chunk.ConversationID, chunk)
 	if err != nil {
 		rej := attachmentRejectFor(err)
 		m.cfg.Logger.Warn("relay: v2 attachment_chunk refused",
@@ -273,6 +311,48 @@ func (m *V2SessionManager) handleAttachmentChunk(ctx context.Context, s *V2Sessi
 		"attachment_id", attachmentID,
 		"total_chunks", chunk.TotalChunks)
 	m.attachmentReply(ctx, s, env.ID, protocol.TypeAttachmentStored, payload)
+}
+
+// rejectAttachmentChunk records one destination refusal and answers it, so the log
+// line and the wire frame cannot drift apart into two edits — rejectAttachmentRequest's
+// shape, on the upload leg.
+//
+// reason is a DAEMON-AUTHORED CONSTANT chosen by the call site and never derived
+// from the frame. It is what makes the merged causes separable in the daemon's own
+// logs while staying identical on the wire: indistinguishable to a client,
+// diagnosable to an operator.
+//
+// EVERY ARM ANSWERS attachment.invalid_chunk, and the choice is deliberate on both
+// halves. Not a new code: docs/protocol-mobile.md § Error codes declares the
+// vocabulary in one place so implementations answer from it, and minting one here
+// would need a codes.go constant plus a published row — a protocol-publication
+// slice. Not attachment.storage_failed either: that row says a VERIFIED attachment
+// could not be written to the host, and at this point nothing is verified, nothing
+// has been written and the host is not what failed. invalid_chunk's published class
+// — an attachment_chunk's framing claims cannot be placed — is where a destination
+// the daemon cannot place the chunk against belongs, and its published
+// retryable:false is the correct advice rather than merely tolerable: the same
+// frames reproduce the refusal, and the repair is to name a conversation the daemon
+// hosts.
+//
+// The attachment id is logged where non-empty, which this handler already does on
+// its other arms and whose bound the header names — slog's TextHandler escapes
+// control bytes, so an escape-bearing id cannot forge log structure. The
+// conversation id is logged on NO arm; it has not passed the gate.
+func (m *V2SessionManager) rejectAttachmentChunk(ctx context.Context, s *V2Session, inReplyTo uint64, chunk protocol.AttachmentChunkPayload, reason string) {
+	attrs := []any{
+		"event", "v2.attachment.chunk.refused",
+		"conn_id", s.connID,
+		"code", rejectInvalidChunk.code,
+		"reason", reason,
+		"index", chunk.Index,
+		"total_chunks", chunk.TotalChunks,
+	}
+	if chunk.AttachmentID != "" {
+		attrs = append(attrs, "attachment_id", chunk.AttachmentID)
+	}
+	m.cfg.Logger.Warn("relay: v2 attachment_chunk refused", attrs...)
+	m.attachmentReplyError(ctx, s, inReplyTo, rejectInvalidChunk)
 }
 
 // attachmentReplyError answers one refusal with a single TypeError envelope

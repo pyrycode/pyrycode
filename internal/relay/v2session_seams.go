@@ -294,7 +294,22 @@ type AttachmentIntake interface {
 	// Receive routes one decoded chunk of one conn's upload. See the type doc
 	// for the three-way answer; connID is the registry key that keeps distinct
 	// conns' transfers separate.
-	Receive(connID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error)
+	//
+	// PRECONDITION, AND IT IS THE CALLER'S: conversationID MUST already have
+	// passed KnownConversation. attachments.EnsureDir's own block states it —
+	// the id becomes a path component below this seam — and
+	// handleAttachmentChunk is the caller that discharges it, on EVERY chunk
+	// rather than only the completing one, so a transfer naming an unusable
+	// conversation is refused on its FIRST frame. Identical in wording and in
+	// reason to HistoryPage's precondition below.
+	//
+	// It is a STRING and not a conversations.ConversationID on purpose: this
+	// package does not import internal/conversations — only
+	// internal/relay/handlers does — and KnownConversation is primitive-typed
+	// to keep it that way. Declaring the seam with the typed id would add the
+	// very import the seam's own docs argue against, so the conversion belongs
+	// on the implementing package's side.
+	Receive(connID, conversationID string, chunk protocol.AttachmentChunkPayload) (attachmentID string, stored bool, err error)
 
 	// ReleaseConn drops every upload still in flight for one conn, returning the
 	// daemon-wide capacity they held without waiting for the idle window. A

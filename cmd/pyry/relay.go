@@ -672,23 +672,15 @@ func startRelayV2(
 	// beside modalReg / questionReg for the same reason those are: the manager
 	// config below needs it, and it must exist before the manager does.
 	//
-	// The conversation resolver is an adapter over the EXISTING follow-active
-	// cursor — the same one modalResolver.activeConv reads — not new state.
-	// attachments.NewIntake reads it once per COMPLETING chunk and never at
-	// admission, and the empty-cursor check is what makes comma-ok honest at this
-	// seam: Intake refuses the empty id itself, but a resolver answering
-	// ("", true) would be lying to a contract it does not own.
-	// boundSessionIDForActive is the precedent for adapting this cursor.
-	attachmentIntake := attachments.NewIntake(
-		resolveInstanceDirPath(w.instanceName),
-		func() (conversations.ConversationID, bool) {
-			id := w.active.CurrentConversation()
-			if id == "" {
-				return "", false
-			}
-			return conversations.ConversationID(id), true
-		},
-	)
+	// IT TAKES NO CONVERSATION RESOLVER since #2143. It held one over the
+	// follow-active cursor — the same one modalResolver.activeConv reads — and
+	// that cursor is stamped only by a successful send_message route, so an
+	// attachment added before a conversation's first message could never be
+	// stored and one added after a switch was filed under the wrong conversation.
+	// The destination arrives per transfer off attachment_chunk instead, gated by
+	// the KnownConversation membership check this same config already wires
+	// below, which is what discharges Receive's caller-side precondition.
+	attachmentIntake := attachments.NewIntake(resolveInstanceDirPath(w.instanceName))
 
 	// Attachment resolver seam for send_message (#2038): the READ half of the
 	// upload leg above, over the same instance directory the intake writes into.

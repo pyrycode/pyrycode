@@ -317,7 +317,8 @@ const attachmentSHA256HexLen = 64
 // #1897 and #2053 outbound. Until then a frame violating them exceeds the cap and
 // the transport drops it. FOUR FIELDS UNDER THREE CONSTANTS since #2142, because
 // MaxAttachmentIDBytes budgets both ids; conversation_id is the field #1741
-// predates, so nothing inbound reads its bound at all until #2143.
+// predates, so nothing inbound reads its bound at all — #2143 gates that field on
+// registry membership, which is not a length check.
 //
 // Neither the Logf nor the failure message prints the marshalled bytes — lengths
 // only, as the tool_use precedent does. A 64 KB dump is unreadable in CI, and

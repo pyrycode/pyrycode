@@ -165,25 +165,17 @@ func TestInteractiveStreamAttachmentRead(t *testing.T) {
 	token := mintAttachmentToken(t)
 	file, digest := writeTokenFile(t, token)
 
-	// ── Precondition: route one turn so the follow-active cursor is non-empty ──
-	//
-	// attachments.Intake resolves the conversation once per COMPLETING chunk over
-	// that cursor; before any route it is empty, the completing chunk answers
-	// ErrNoConversation, and the dispatch arm maps it to attachment.storage_failed —
-	// a success-shaped stream that stores nothing. handlers.SendMessage stamps the
-	// cursor inside Route, on the successful-route path, before it enqueues.
-	//
-	// DRAINED TO TERMINAL IDLE rather than left running, unlike #1898's fake-daemon
-	// counterpart: with a real claude an undrained turn's frames interleave with
-	// everything after, and drainTurnText below would then have to tell this turn's
-	// deltas from the one under test. drainForCompletedTurn also carries the
-	// package's two standing alarms — unrecognized_message and rate_limited — so the
-	// stamp turn is a sentinel for free.
-	sealSendMessage(t, h.phone, h.initSend, 2, attachReadConvID, "m-stamp",
-		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForCompletedTurn(t, h.phone, h.initRecv, attachReadConvID, perTurnReplyBudget)
-
 	// ── The upload: one chunk, then the reply that says the bytes are on the host ──
+	//
+	// NO TURN IS ROUTED FIRST since #2143. This run used to drive a whole stamp turn
+	// against a real claude — a live prompt and its full drain — for no reason but to
+	// stamp the follow-active cursor attachments.Intake read the destination from;
+	// before any route that cursor is empty, the completing chunk answered
+	// ErrNoConversation, and the dispatch arm mapped it to attachment.storage_failed:
+	// a success-shaped stream that stored nothing. The chunk names its conversation
+	// now, so the upload stands alone and the live budget goes to the turn under
+	// test. The standing alarms — unrecognized_message and rate_limited — are still
+	// carried by the drain of that turn.
 	uploadSingleChunk(t, h, attachReadChunkEnvID, file, digest)
 	awaitAttachmentStored(t, h, attachReadChunkEnvID, 30*time.Second)
 	requireStoredAttachment(t, h.home)
@@ -284,10 +276,13 @@ func writeTokenFile(t *testing.T, token string) (file []byte, digest string) {
 // receiver's own division-then-remainder form, never (size + bound - 1) / bound,
 // which wraps.
 //
-// attachment_chunk carries no conversation_id, by design: the bytes land in the
-// conversation the authenticated v2 session is already on. That is why the caller
-// routes a turn first, and it is also why nothing a client sends could steer these
-// bytes into another conversation's directory.
+// attachment_chunk NAMES its conversation (#2142), and since #2143 the daemon files
+// the bytes under exactly that one — validated against its own registry before the
+// id becomes a path component, never trusted as sent. That is why this caller no
+// longer routes a turn first: the destination is on the frame rather than in a
+// cursor only a successful send_message stamps. Naming a conversation is not
+// authorization; confinement is the registry check plus attachments.EnsureDir
+// refusing an escaping directory, and it did not move.
 func uploadSingleChunk(t *testing.T, h *perConvHarness, envID uint64, file []byte, digest string) {
 	t.Helper()
 	totalChunks := len(file) / protocol.MaxAttachmentChunkBytes
@@ -305,14 +300,15 @@ func uploadSingleChunk(t *testing.T, h *perConvHarness, envID uint64, file []byt
 		Type: protocol.TypeAttachmentChunk,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.AttachmentChunkPayload{
-			AttachmentID: attachReadAttachmentID,
-			Index:        0,
-			TotalChunks:  totalChunks,
-			Filename:     attachReadFilename,
-			MimeType:     "text/plain",
-			Size:         int64(len(file)),
-			SHA256:       digest,
-			Data:         file,
+			ConversationID: attachReadConvID,
+			AttachmentID:   attachReadAttachmentID,
+			Index:          0,
+			TotalChunks:    totalChunks,
+			Filename:       attachReadFilename,
+			MimeType:       "text/plain",
+			Size:           int64(len(file)),
+			SHA256:         digest,
+			Data:           file,
 		}),
 	})
 }

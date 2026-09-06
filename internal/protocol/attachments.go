@@ -10,8 +10,9 @@ package protocol
 // conversation id safe as a path component is the canonical-shape check, not this
 // ceiling — attachments.EnsureDir already runs one on both components it joins and
 // records that MaxAttachmentIDBytes "is not the defence and does not need to be
-// consulted". What #2143 adds is not that check but the registry validation in
-// front of it, and the wiring that lets this field reach either.
+// consulted". What #2143 added is not that check but the registry validation in
+// front of it, and the wiring that lets this field reach either; this ceiling is
+// read on no inbound path even now.
 //
 // FOUR FIELDS ARE BOUNDED BY THREE CONSTANTS, since MaxAttachmentIDBytes budgets
 // both id-shaped fields (#2142). Count the constants here and the fields in the
@@ -154,7 +155,9 @@ const (
 //     IT BECOMES A PATH COMPONENT, never a value trusted as sent, and NAMING A
 //     CONVERSATION IS NOT AUTHORIZATION — RequestAttachmentPayload's block
 //     carries that rule in full and this field adopts it rather than restating
-//     it. Nothing enforces it yet; #2143 does, and until then the field is inert.
+//     it. #2143 is what enforces it: handleAttachmentChunk gates the id through
+//     the daemon's KnownConversation membership check on EVERY chunk, before the
+//     intake and before attachments.EnsureDir joins it into a path.
 //   - AttachmentID identifies the attachment this chunk belongs to. Every chunk
 //     of one transfer repeats it: it is the key an in-flight upload accumulates
 //     under (#1741) and the identifier that later resolves to a path on the host
@@ -228,14 +231,15 @@ const (
 // escaping directory — and that does not move. Naming a conversation is not
 // authorization, here as there.
 //
-// The retrieval verb's own conversation_id still does something this one will not
-// until #2143: it selects which conversation's file to read, where this field is
-// inert. RequestAttachmentPayload's block records that contrast from the other
-// side.
+// The retrieval verb's own conversation_id and this one now do the same kind of
+// work: that one selects which conversation's file to read, this one decides which
+// conversation an upload is filed under (#2143). Both are lookup keys validated
+// against the daemon's registry before they reach a path join, under the one rule.
+// RequestAttachmentPayload's block records what is left of the contrast.
 //
 // SECURITY: on the INBOUND leg every field is an unverified CLAIM, not a fact —
-// ConversationID included, and it is the claim with the largest blast radius once
-// #2143 acts on it, since it decides WHERE the bytes land. OUTBOUND every field
+// ConversationID included, and it is the claim with the largest blast radius since
+// #2143 acted on it, because it decides WHERE the bytes land. OUTBOUND every field
 // but one is daemon-authored (ConversationID trivially so: the daemon emits it
 // empty), and none of the content
 // metadata is a stored client string echoed back verbatim — nothing a client
@@ -458,8 +462,8 @@ type AttachmentStoredPayload struct {
 // elsewhere" argument this block used to rest on was reversed, because the property
 // it bought was the absence of a field rather than isolation between conversations.
 // What survives is a difference in what the two ids DO: this one selects which
-// conversation's file to read and is acted on today, while the chunk's is inert
-// until #2143 wires it into intake. Both are the same kind of value under the same
+// conversation's file to read, while the chunk's decides which conversation an
+// upload is filed under (#2143). Both are the same kind of value under the same
 // rule, and the rule is the paragraph below.
 //
 // THE CONVERSATION ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED AS SENT, and this is
