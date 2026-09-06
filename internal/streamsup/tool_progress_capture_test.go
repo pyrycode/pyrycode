@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -24,14 +25,29 @@ import (
 // package's Go files rather than to its testdata. Reading it from here is what
 // keeps the proof inside `make check` instead of behind an opt-in gate that SKIPS
 // (exit 0) with no claude login, where a green suite would be no evidence at all.
-const toolProgressCapturePath = "../e2e/realclaude/testdata/tool_progress_v2.1.259.json"
+const toolProgressCapturePath = "../e2e/realclaude/testdata/tool_progress_v" +
+	toolProgressCaptureVersion + ".json"
+
+// toolProgressCaptureVersion is the claude release the committed capture was
+// taken from, and it is spliced into the path above rather than repeated, so the
+// filename cannot drift from the version this reader enforces.
+//
+// The record carries the observed `claude --version` and the check below compares
+// the two. Without it the version lives in the FILENAME ALONE — a string nothing
+// reads — and a capture taken at a different claude could be committed under this
+// name, silently turning the marker census into a measurement of some other
+// release. The producing side refuses the same mismatch (tpcapRecord's
+// fixtureWorthy), so a version bump is a loud instruction to re-capture and repin
+// rather than a fixture that quietly says the wrong thing.
+const toolProgressCaptureVersion = "2.1.259"
 
 // toolProgressCapture is the slice of the record's shape this reader needs.
 // payload is a JSON STRING holding the whole line (payload_encoding says so per
 // frame), not a nested object, so the bytes go to the parser as-is.
 type toolProgressCapture struct {
-	IsCapture bool `json:"is_capture"`
-	Frames    []struct {
+	IsCapture     bool   `json:"is_capture"`
+	ClaudeVersion string `json:"claude_version"`
+	Frames        []struct {
 		Type            string `json:"type"`
 		PayloadEncoding string `json:"payload_encoding"`
 		Payload         string `json:"payload"`
@@ -91,10 +107,10 @@ func capturedToolProgressLines(t *testing.T) [][]byte {
 		// branch in the same commit that lands the fixture.
 		t.Skipf("SKIPPED WITH NOTHING PROVEN — %s does not exist, so the tool_progress "+
 			"marker set has NOT been checked against a single byte claude sent.\n"+
-			"This is #2089's unfinished half, not a tolerated absence. Produce it with:\n"+
-			"  PYRY_PROBE_TOOL_PROGRESS_CAPTURE=1 go test -tags e2e_realclaude -timeout 15m -v \\\n"+
-			"    -run '^TestRealClaude_ToolProgressCapture$' ./internal/e2e/realclaude/\n"+
-			"then commit the record it writes to this path and DELETE this skip branch. "+
+			"This is #2089's unfinished half, not a tolerated absence. It needs a claude login "+
+			"and nothing else: TestRealClaude_ToolProgressCapture arms itself while this file is "+
+			"absent, so `make e2e-realclaude` on an authenticated machine writes it here. Then "+
+			"`git add` it and DELETE this skip branch.\n"+
 			"Until then, a decoder keyed on a field name claude does not send would never "+
 			"fire and nothing here would notice", toolProgressCapturePath)
 	}
@@ -109,6 +125,17 @@ func capturedToolProgressLines(t *testing.T) [][]byte {
 		t.Fatalf("%s: is_capture is false — this file must be a genuine claude capture, "+
 			"never a hand-written payload; a guessed line matches markers claude does not send",
 			toolProgressCapturePath)
+	}
+	// `claude --version` prints "<version> (Claude Code)", so the comparison is on
+	// the leading token; an "<unavailable: ...>" version fails it too, which is
+	// correct — a capture that could not read the version it was taken at cannot
+	// vouch for the release its filename claims.
+	if got, _, _ := strings.Cut(capture.ClaudeVersion, " "); got != toolProgressCaptureVersion {
+		t.Fatalf("%s: claude_version is %q, want %q — the filename pins the release this "+
+			"capture measures, so a record from a different claude must not be read under it. "+
+			"Re-capture at the pinned version, or bump toolProgressCaptureVersion and the census "+
+			"in consumeToolProgress's docblock together",
+			toolProgressCapturePath, capture.ClaudeVersion, toolProgressCaptureVersion)
 	}
 	var found [][]byte
 	for i, frame := range capture.Frames {

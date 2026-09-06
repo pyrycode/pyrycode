@@ -34,10 +34,21 @@ package realclaude
 //
 // # Running it
 //
+// `make e2e-realclaude` on an authenticated machine, and nothing else. Unlike its
+// seven sibling probes this one is gated on the FIXTURE'S ABSENCE rather than on
+// an env var, so the live gate the ticket is labelled for is what produces the
+// evidence; it disarms as soon as the fixture exists. The gate comment in
+// TestRealClaude_ToolProgressCapture argues that break.
+//
+// To force a re-capture at a new claude version, over an existing fixture:
+//
 //	PYRY_PROBE_TOOL_PROGRESS_CAPTURE=1 go test -tags e2e_realclaude -timeout 15m -v \
 //	  -run '^TestRealClaude_ToolProgressCapture$' ./internal/e2e/realclaude/
 //
-// A skip is the normal `make e2e-realclaude` outcome and carries no signal.
+// A skip still carries no signal about pyry's behaviour — but read WHICH skip:
+// "fixture already exists" is the steady state, while a skip from
+// WithWorktreeAuthenticated means the machine has no claude login and the
+// evidence was not produced.
 
 import (
 	"context"
@@ -48,14 +59,27 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/streamsup"
 )
 
-// tpcapEnableEnv gates the live capture; it costs one claude turn plus the sleep.
+// tpcapEnableEnv FORCES a re-capture when the fixture already exists. It is not
+// the gate — see the gate comment in TestRealClaude_ToolProgressCapture for why
+// this probe arms itself instead of waiting to be asked.
 const tpcapEnableEnv = "PYRY_PROBE_TOOL_PROGRESS_CAPTURE"
+
+// tpcapFixturePath is where a good capture LANDS, in-repo, ready to `git add`.
+// The streamsup-side reader (capturedToolProgressLines) names the same file
+// through its own package constant and enforces the same version pin from the
+// other end; the two are deliberately not shared, because that reader takes no
+// path parameter by design.
+const (
+	tpcapFixtureVersion = "2.1.259"
+	tpcapFixturePath    = "testdata/tool_progress_v" + tpcapFixtureVersion + ".json"
+)
 
 // Every file-local identifier takes the tpcap prefix, for the reason #1260's
 // header gives: siblings add files to this package concurrently and a
@@ -196,6 +220,43 @@ func (rec *tpcapRecord) set(outcome, format string, args ...any) {
 	rec.OutcomeDetail = fmt.Sprintf(format, args...)
 }
 
+// fixtureWorthy answers whether this record may be promoted to tpcapFixturePath,
+// and names the reason when it may not.
+//
+// Only a capture that satisfies AC3 in full becomes the fixture. Every rejection
+// below is a case where the record is still valuable EVIDENCE — it is written to
+// the artifact dir either way, and the AC3 fatals print its counts — but would be
+// a lie as the committed proof: a vacuous capture makes every assertion built on
+// it pass without reading a byte claude sent, and a capture holding an unmarked
+// frame is the finding this ticket routes back rather than a fixture to ship.
+//
+// The version arm is the producing half of the pin the streamsup reader enforces
+// (toolProgressCaptureVersion). `claude --version` prints "<version> (Claude
+// Code)", so the comparison is on the leading token. Refusing to write under the
+// wrong name turns a claude upgrade into an instruction to repin, instead of a
+// file whose census silently describes a different release.
+func (rec *tpcapRecord) fixtureWorthy() (string, bool) {
+	if rec.Outcome != tpcapFired {
+		return fmt.Sprintf("outcome=%s", rec.Outcome), false
+	}
+	if rec.FrameCount == 0 {
+		return "zero tool_progress frames — a vacuous fixture proves nothing", false
+	}
+	if rec.UnmarkedFrames > 0 {
+		return fmt.Sprintf("%d frame(s) carried none of the three markers — the marker set is "+
+			"insufficient and that is a finding to route back", rec.UnmarkedFrames), false
+	}
+	if rec.FramesReaching > 0 {
+		return fmt.Sprintf("%d frame(s) still reach the unrecognized lane", rec.FramesReaching), false
+	}
+	if got, _, _ := strings.Cut(rec.ClaudeVersion, " "); got != tpcapFixtureVersion {
+		return fmt.Sprintf("claude_version %q is not the %s pinned in the fixture name — repin "+
+			"tpcapFixtureVersion and toolProgressCaptureVersion together, then re-run",
+			got, tpcapFixtureVersion), false
+	}
+	return "", true
+}
+
 // tpcapPrompt stages the one turn. The nonce is carried so dropcapRedactor's
 // prompt_nonce class has something to substitute, and the wording forbids
 // backgrounding explicitly: a backgrounded call returns immediately and produces
@@ -219,15 +280,33 @@ func tpcapPrompt(nonce int64) string {
 // scanner is built after the auth helper and the skipped classes are recorded in
 // the record and logged.
 func TestRealClaude_ToolProgressCapture(t *testing.T) {
-	if os.Getenv(tpcapEnableEnv) != "1" {
-		t.Skipf("#2089 tool_progress capture: skipped because %s != 1.\n"+
-			"This is an EVIDENCE CAPTURE, not a regression gate — a skip here is the normal "+
-			"`make e2e-realclaude` outcome and carries no signal about pyry's behaviour. It costs "+
-			"one live claude turn holding a %ds foreground Bash call.\n"+
-			"Run it explicitly:\n"+
+	// THE GATE IS THE FIXTURE'S ABSENCE, AND THAT IS A DELIBERATE BREAK FROM THE
+	// SEVEN SIBLING PROBES IN THIS PACKAGE.
+	//
+	// Each of those is env-gated unconditionally and writes to a tempdir for a
+	// human to carry into the repo by hand. That shape is right for a one-off
+	// instrument and wrong for this one. #2089's fixture is an ACCEPTANCE
+	// CRITERION — three of the ticket's four ACs turn on it — and the ticket
+	// carries needs-real-claude precisely so the live gate produces it. Under the
+	// sibling shape `make e2e-realclaude` never sets the variable, so the probe
+	// skips on the ENV check before it ever reaches the credential check, the live
+	// gate passes vacuously, and the fixture never lands. That is CLAUDE.md
+	// § Testing's #1763 failure exactly: a green gate and a spent budget look
+	// identical whether the bytes landed or not.
+	//
+	// So the probe ARMS ITSELF while the fixture is absent and DISARMS once it
+	// exists. On an authenticated machine the first `make e2e-realclaude` produces
+	// it and every run after costs nothing; on this machine it still skips, but at
+	// the CREDENTIAL check, which is the honest reason. The env var survives as a
+	// FORCE, for re-capturing at a new claude version.
+	force := os.Getenv(tpcapEnableEnv) == "1"
+	if _, err := os.Stat(tpcapFixturePath); err == nil && !force {
+		t.Skipf("#2089 tool_progress capture: the fixture %s already exists, so there is "+
+			"nothing to capture and this costs no claude turn.\n"+
+			"Force a re-capture (a new claude version, or a suspected shape change) with:\n"+
 			"  %s=1 go test -tags e2e_realclaude -timeout 15m -v \\\n"+
 			"    -run '^TestRealClaude_ToolProgressCapture$' ./internal/e2e/realclaude/",
-			tpcapEnableEnv, tpcapSleepSeconds, tpcapEnableEnv)
+			tpcapFixturePath, tpcapEnableEnv)
 	}
 
 	claudeBin := resolveClaudeBin(t)
@@ -507,6 +586,74 @@ func tpcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 		"reaching_lane=%d scan_not_applied=%v\n  record: %s\n  %s",
 		rec.Outcome, rec.TerminatedOn, rec.LinesCaptured, rec.FrameCount, rec.MarkerCensus,
 		rec.UnmarkedFrames, rec.FramesReaching, notApplied, red.str(path), red.str(rec.OutcomeDetail))
+
+	// The same deny-scanned bytes, promoted in-repo so the run that produced them
+	// is the run that lands them. Writing the fixture here rather than leaving it
+	// in the tempdir is the point of this probe's self-arming gate: a capture that
+	// still needs a human to copy a file is a capture #1763 says will not land.
+	if reason, ok := rec.fixtureWorthy(); !ok {
+		t.Logf("#2089: NOT promoted to %s — %s. The record above is the evidence; read it, "+
+			"then re-run or route the finding back", tpcapFixturePath, reason)
+		return
+	}
+	if err := os.WriteFile(tpcapFixturePath, append(blob, '\n'), 0o600); err != nil {
+		t.Errorf("#2089: write fixture %s: %v", tpcapFixturePath, red.str(err.Error()))
+		return
+	}
+	t.Logf("#2089: FIXTURE WRITTEN to %s (%d frames, census %v).\n"+
+		"  Commit it — `git add %s` — and delete capturedToolProgressLines' fs.ErrNotExist "+
+		"skip branch in the same commit, then replace consumeToolProgress's NOT YET MEASURED "+
+		"docblock entry with the census above. An uncommitted capture is a capture that did "+
+		"not happen", tpcapFixturePath, rec.FrameCount, rec.MarkerCensus, tpcapFixturePath)
+}
+
+// TestTpcapFixtureWorthyRefusesEveryBadCapture runs offline. fixtureWorthy is the
+// only thing standing between a live run and a committed fixture, and each arm
+// below is a capture that would look green from outside — the record is written,
+// the deny-scan passed, the log is cheerful — while proving nothing or proving
+// something about the wrong claude.
+func TestTpcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
+	t.Parallel()
+	good := func() *tpcapRecord {
+		return &tpcapRecord{
+			Outcome:       tpcapFired,
+			ClaudeVersion: tpcapFixtureVersion + " (Claude Code)",
+			FrameCount:    3,
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*tpcapRecord)
+		want   bool
+	}{
+		{"a good capture is promoted", func(*tpcapRecord) {}, true},
+		{"bare version string, no suffix", func(r *tpcapRecord) { r.ClaudeVersion = tpcapFixtureVersion }, true},
+		{"never fired", func(r *tpcapRecord) { r.Outcome = tpcapDidNotFire }, false},
+		{"instrument broken", func(r *tpcapRecord) { r.Outcome = tpcapInstrumentBroken }, false},
+		{"vacuous: zero frames", func(r *tpcapRecord) { r.FrameCount = 0 }, false},
+		{"an unmarked frame is a finding, not a fixture", func(r *tpcapRecord) { r.UnmarkedFrames = 1 }, false},
+		{"a frame still reaching the lane", func(r *tpcapRecord) { r.FramesReaching = 1 }, false},
+		{"a different claude release", func(r *tpcapRecord) { r.ClaudeVersion = "2.1.260 (Claude Code)" }, false},
+		{"version unreadable", func(r *tpcapRecord) { r.ClaudeVersion = "<unavailable: exec failed>" }, false},
+		{"version absent", func(r *tpcapRecord) { r.ClaudeVersion = "" }, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := good()
+			tc.mutate(rec)
+			reason, ok := rec.fixtureWorthy()
+			if ok != tc.want {
+				t.Errorf("fixtureWorthy() ok = %v, want %v (reason %q)", ok, tc.want, reason)
+			}
+			if !ok && reason == "" {
+				t.Error("fixtureWorthy() refused without naming a reason; the log line would say nothing")
+			}
+			if ok && reason != "" {
+				t.Errorf("fixtureWorthy() promoted but named reason %q", reason)
+			}
+		})
+	}
 }
 
 // TestTpcapBashTimeoutOutlastsTheSleep runs offline. A BASH_DEFAULT_TIMEOUT_MS

@@ -461,3 +461,69 @@ commit the record it writes to
 branch, and replace the docblock's NOT YET MEASURED entry with the census. The
 probe fatals on a capture with zero frames and on any frame carrying none of the
 three markers, so it cannot land a vacuous fixture or hide the open question.
+
+### 2026-09-06 (rework 1) — the live gate is now what lands the fixture
+
+**Driven by** the verifier's second-pass review on PR #2139: one MUST FIX (the
+marker set has never met a byte claude sent) and one NIT (`claude_version`
+unread). The credential is unchanged — re-verified at the top of this leg, and
+the keychain's `claudeAiOauth.accessToken` is still length 0 with `expiresAt: 0`,
+no `~/.claude/.credentials.json`, neither env var set — so the fixture still
+could not be produced here. What follows is the credential-INDEPENDENT half, and
+it is the half that decides whether the fixture ever lands at all.
+
+**Supersedes the previous entry's "To close it" recipe.** That recipe asked a
+human to run a command and copy a file. The recipe is now: log in, run
+`make e2e-realclaude`, `git add` what it wrote.
+
+**1. The probe arms itself on the fixture's absence, not on an env var
+(`TestRealClaude_ToolProgressCapture`).** § The capture followed the house shape
+of the seven sibling probes in that package — an unconditional `PYRY_PROBE_*`
+gate plus an `os.MkdirTemp` artifact dir. The verifier's first pass found what
+that costs here and the second pass correctly demoted it from a builder defect to
+a routing fact: `make e2e-realclaude` never sets the variable, so the live gate
+this ticket is *labelled for* skips on the ENV check before reaching the
+credential check, passes vacuously, and the fixture never lands. Convention was
+right for a one-off instrument and wrong for an acceptance criterion.
+
+So the gate is now the fixture's absence: the probe runs while the file is
+missing and disarms once it exists. The env var survives as a FORCE, for
+re-capturing at a new claude version. The recurring-token objection to arming a
+live probe is answered by the disarm — the cost is one turn, once, and zero on
+every run after. Verified on this machine: the probe now reaches
+`WithWorktreeAuthenticated` and skips there, naming the missing credential, which
+is the honest reason rather than an env var nobody set.
+
+**2. A good capture is promoted in-repo; a bad one never is (`fixtureWorthy`).**
+The record still goes to the tempdir as diagnostics, but a capture satisfying AC3
+in full is now also written to
+`internal/e2e/realclaude/testdata/tool_progress_v2.1.259.json` by the run that
+produced it, with a log line saying to commit it. The four refusals — never
+fired, zero frames, any unmarked frame, any frame still reaching the lane — are
+exactly the AC3 fatals, so the promotion cannot disagree with them. #1763 is the
+precedent: a capture that still needs a human to copy a file is a capture that
+does not land.
+
+**3. The version pin is enforced from both ends (the NIT).**
+`toolProgressCaptureVersion` is spliced into the reader's path constant so the
+filename cannot drift from the version it checks, and the reader now fatals when
+the record's `claude_version` names a different release. `fixtureWorthy` refuses
+to *write* under a mismatched name for the same reason. A claude upgrade is
+therefore a loud instruction to re-capture and repin, not a fixture whose census
+quietly describes some other release.
+
+**What is still open.** AC2's proof half, AC3 and AC4 remain unmet, and no agent
+on this machine can meet them: `claude` re-authentication is an operator action.
+The `NOT YET MEASURED` docblock and the reader's `fs.ErrNotExist` skip branch
+therefore both stay, and both still say they are to be deleted in the commit that
+lands the fixture. What changed is that the deletion is now the only manual step
+left — the bytes arrive on their own the first time the live gate runs
+authenticated.
+
+**Verified this leg:** `gofmt` clean; `go vet ./...` and `go vet -tags
+e2e_realclaude ./internal/e2e/realclaude/` both clean (the tagged package is
+invisible to `make check`, so it is compiled explicitly); `go test -race
+./internal/streamsup/...` green; the ten `fixtureWorthy` cases green. The
+reader's provenance guards were exercised by standing a synthetic fixture at the
+pinned path and confirming each one fatals — wrong release, unreadable version,
+`is_capture: false` — then deleting it; the tree is clean of it.
