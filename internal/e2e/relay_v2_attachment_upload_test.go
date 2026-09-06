@@ -237,10 +237,13 @@ func TestRelayV2_AttachmentUploadMultiChunk(t *testing.T) {
 
 	// ── AC-2: the bytes are on the host, under the conversation the daemon routed to ──
 	//
-	// The path is built from knownConvID — the conversation this run ROUTED to, which
-	// the frame never names. attachment_chunk carries no conversation_id at all, so
-	// this also pins that a client cannot steer bytes into another conversation's
-	// directory: there is no field to steer with.
+	// The path is built from knownConvID — the conversation this run ROUTED to. The
+	// frame has carried a conversation_id since #2142, and this run leaves it unset,
+	// so what is pinned here is that PUBLISHING the field changed no behaviour:
+	// attachments.Intake still resolves the destination through its construction-time
+	// resolver, with no conversation on Receive's signature for a frame's field to
+	// reach. #2143 is what makes the field decide anything, and this assertion is the
+	// before-picture it will have to move.
 	dir := filepath.Join(home, ".pyry", "test", "conversations", knownConvID, "attachments", attachmentID)
 	entries, err := os.ReadDir(dir)
 	if err != nil {

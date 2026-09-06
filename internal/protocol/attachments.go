@@ -4,9 +4,20 @@ package protocol
 // below). All four are producer-side CONTRACTS WITH NO VALIDATOR in this
 // package — the same posture the payload type itself ships with. Inbound
 // enforcement is #1741's, outbound is #1897's and #2053's; nothing here checks
-// anything, so a reader must not mistake a declared bound for a checked one.
+// anything, so a reader must not mistake a declared bound for a checked one, and
+// that warning binds hardest on ConversationID (#2142), whose bound #1741 predates
+// entirely. Its budget line below is arithmetic and nothing more. What makes a
+// conversation id safe as a path component is the canonical-shape check, not this
+// ceiling — attachments.EnsureDir already runs one on both components it joins and
+// records that MaxAttachmentIDBytes "is not the defence and does not need to be
+// consulted". What #2143 adds is not that check but the registry validation in
+// front of it, and the wiring that lets this field reach either.
 //
-// The three metadata bounds count BYTES (len(s)), not runes. The escape ceiling
+// FOUR FIELDS ARE BOUNDED BY THREE CONSTANTS, since MaxAttachmentIDBytes budgets
+// both id-shaped fields (#2142). Count the constants here and the fields in the
+// arithmetic below; the two numbers differ on purpose.
+//
+// The metadata bounds count BYTES (len(s)), not runes. The escape ceiling
 // the arithmetic below rests on composes directly on bytes — a one-byte input
 // costs at most six on the wire, while a multi-byte rune is emitted raw at four
 // bytes or fewer, so six-per-input-byte is the ceiling either way — and a
@@ -32,17 +43,24 @@ const (
 	// multiplier out for a bounded text field, with a measured worst case).
 	//
 	//	envelope wrapper, every optional key present      194
-	//	payload braces, keys, quotes, colons, commas      104
+	//	payload braces, keys, quotes, colons, commas      125
 	//	index + total_chunks + size, 3 × 20                60
 	//	sha256, 64 × 6                                    384
 	//	attachment_id, MaxAttachmentIDBytes × 6           384
+	//	conversation_id, MaxAttachmentIDBytes × 6         384
 	//	filename, MaxAttachmentFilenameBytes × 6         1530
 	//	mime_type, MaxAttachmentMimeTypeBytes × 6        1530
-	//	                                        fixed    4186
+	//	                                        fixed    4591
 	//	data at the bound, 4 × ceil(45000 / 3)          60000
-	//	                                        frame   64186   (1333 B spare)
+	//	                                        frame   64591   (928 B spare)
 	//
-	// The ceiling is floor((65519 − 4186) / 4) × 3 = 45999. 45000 sits below it
+	// The structural row moved from 104 to 125 when #2142 added the ninth key, and
+	// that 21 bytes is the part an arithmetic-by-analogy misses: a key costs its
+	// own length (15) plus two quotes, a colon, a separating comma and the value's
+	// two quotes, not only the value's bound. Adding a field to this frame moves
+	// TWO rows.
+	//
+	// The ceiling is floor((65519 − 4591) / 4) × 3 = 45696. 45000 sits below it
 	// and is a multiple of 3, so base64 lands on exactly 60000 bytes with no
 	// padding and the table is checkable by eye. The invariant is ENFORCED by
 	// TestAttachmentChunkPayload_FitV2EnvelopeCap, which measures the real total
@@ -79,7 +97,11 @@ const (
 	// the units and enforces nothing itself.
 	MaxAttachmentChunkBytes = 45000
 
-	// MaxAttachmentIDBytes bounds AttachmentID. It is a CEILING FOR THE CAP
+	// MaxAttachmentIDBytes bounds BOTH id-shaped fields on this frame —
+	// AttachmentID, and ConversationID since #2142, which obeys the same shape and
+	// so gets no second constant of its own; RequestAttachmentPayload's block
+	// records why minting one would enforce nothing while inviting the very
+	// misreading the next paragraph warns about. It is a CEILING FOR THE CAP
 	// ARITHMETIC, not the canonical shape, and the shape is no longer open:
 	// attachments.EnsureDir picked conversations.ValidID's 36-character UUIDv4
 	// form — the precedent AttachmentChunkPayload's doc had named — and #1895
@@ -123,6 +145,16 @@ const (
 //
 // Field contracts, which are the whole surface the blocked slices code against:
 //
+//   - ConversationID names the conversation the bytes belong to, and is
+//     MEANINGFUL ON THE UPLOAD LEG ONLY (#2142). Outbound it is emitted empty and
+//     a receiver ignores it: a retrieval chunk is correlated by InReplyTo to a
+//     RequestAttachmentPayload that already named the conversation, which is the
+//     same reason AttachmentStoredPayload and HistoryPagePayload carry none.
+//     Inbound it is a LOOKUP KEY VALIDATED AGAINST THE DAEMON'S REGISTRY BEFORE
+//     IT BECOMES A PATH COMPONENT, never a value trusted as sent, and NAMING A
+//     CONVERSATION IS NOT AUTHORIZATION — RequestAttachmentPayload's block
+//     carries that rule in full and this field adopts it rather than restating
+//     it. Nothing enforces it yet; #2143 does, and until then the field is inert.
 //   - AttachmentID identifies the attachment this chunk belongs to. Every chunk
 //     of one transfer repeats it: it is the key an in-flight upload accumulates
 //     under (#1741) and the identifier that later resolves to a path on the host
@@ -178,18 +210,34 @@ const (
 // association. TotalChunks rather than Total because Size sits on the same
 // struct, and a bare "total" beside a "size" reads as a byte count.
 //
-// There is NO conversation_id, and the omission is a security property rather
-// than an oversight — the reasoning TypeRequestDebugBundle records: no field an
-// attacker could use to select another session's data. An upload lands in the
-// conversation the authenticated v2 session is already on, decided daemon-side
-// by #1744 from session context, so a client cannot steer bytes into another
-// conversation's directory by naming one. Retrieval's request verb does name a
-// conversation — RequestAttachmentPayload below, declared by #2052 — but that is
-// a different frame, and validating the id it names against the daemon's registry
-// is #2054's problem.
+// THE FRAME CARRIES A conversation_id SINCE #2142, and the omission it replaces
+// was published as a security property for four tickets. That argument — an
+// upload lands in the conversation the authenticated v2 session is already on, so
+// naming one could only let a client steer bytes elsewhere — is reversed here
+// rather than qualified, because what it bought was never isolation between
+// conversations. It was the absence of a field, and it cost two misfiles: an
+// attachment added before a conversation's first message could not be stored at
+// all (the follow-active cursor is stamped only by a successful send_message
+// route, so on a never-messaged conversation it is empty), and a client that
+// sent in A, sent in B and returned to A filed its bytes under B.
 //
-// SECURITY: on the INBOUND leg every field is an unverified CLAIM, not a fact.
-// OUTBOUND every field but one is daemon-authored, and none of the content
+// The trust level is unchanged by publishing it. A paired client can already name
+// any conversation on SendMessagePayload and can already fetch any conversation's
+// file with RequestAttachmentPayload; what bounds a paired but hostile client is
+// CONFINEMENT — the registry validation and attachments.EnsureDir refusing an
+// escaping directory — and that does not move. Naming a conversation is not
+// authorization, here as there.
+//
+// The retrieval verb's own conversation_id still does something this one will not
+// until #2143: it selects which conversation's file to read, where this field is
+// inert. RequestAttachmentPayload's block records that contrast from the other
+// side.
+//
+// SECURITY: on the INBOUND leg every field is an unverified CLAIM, not a fact —
+// ConversationID included, and it is the claim with the largest blast radius once
+// #2143 acts on it, since it decides WHERE the bytes land. OUTBOUND every field
+// but one is daemon-authored (ConversationID trivially so: the daemon emits it
+// empty), and none of the content
 // metadata is a stored client string echoed back verbatim — nothing a client
 // declares is kept,
 // so the daemon derives what it did not store. That improves their PROVENANCE,
@@ -273,6 +321,19 @@ const (
 // way — a case-insensitive or prefix comparison is a hole, and a comparison that
 // rejects an uppercase-sending client is an availability bug.
 type AttachmentChunkPayload struct {
+	// ConversationID names the conversation the bytes belong to. Meaningful on
+	// the UPLOAD leg only; the retrieval leg emits it empty and a receiver
+	// ignores it. A lookup key validated against the daemon's registry before it
+	// becomes a path component, never a value trusted as sent, and naming a
+	// conversation is not authorization. CONTAINMENT IS THAT VALIDATION AND NEVER
+	// THE 64-BYTE CEILING — MaxAttachmentIDBytes budgets this field for the
+	// envelope arithmetic and describes no shape, the same distinction its own
+	// block draws for AttachmentID. Its canonical shape is conversations.ValidID's
+	// lowercase UUIDv4, and like AttachmentID it is LOGGABLE ONLY AFTER THAT SHAPE
+	// IS VALIDATED. First, matching RequestAttachmentPayload and
+	// AttachmentOfferedPayload, whose fixtures' key order this frame's now shares.
+	ConversationID string `json:"conversation_id"`
+
 	AttachmentID string `json:"attachment_id"` // the transfer this chunk belongs to; repeated on every chunk
 	Index        int    `json:"index"`         // 0-based position in [0, TotalChunks); decides where the bytes land
 	TotalChunks  int    `json:"total_chunks"`  // chunk count for the whole attachment, >= 1, identical on every chunk
@@ -331,9 +392,12 @@ type AttachmentChunkPayload struct {
 //     the client already knows the name it sent. Keeping it out also keeps this frame clear of the NEVER LOGGED rule
 //     AttachmentChunkPayload puts on Filename, SHA256 and Data: this payload
 //     carries none of the three and is safe to log whole.
-//   - No conversation_id, for AttachmentChunkPayload's reason: the upload landed
-//     in the conversation the authenticated v2 session is already on, and a client
-//     holding the transfer already knows it.
+//   - No conversation_id. The ABSENCE is unchanged by #2142 giving
+//     AttachmentChunkPayload one; the reason it used to borrow is not. A client
+//     holding the transfer already knows the conversation — it named one on every
+//     chunk of the upload — so echoing it back confirms nothing, which is the same
+//     ground the size / sha256 / total_chunks bullet below stands on. This frame
+//     was never the one that could steer anything.
 //   - No size, sha256 or total_chunks. The client sent all three and they were
 //     checked against the assembled bytes before this frame can be emitted;
 //     echoing them back confirms nothing a client could act on.
@@ -389,11 +453,14 @@ type AttachmentStoredPayload struct {
 // TestRequestAttachmentPayload_WireKeys pins the key set so this is checked rather
 // than reviewed.
 //
-// WHY THERE IS A conversation_id HERE when AttachmentChunkPayload deliberately has
-// none: an upload lands in the conversation the authenticated v2 session is already
-// on, so naming one there would only let a client steer bytes into another
-// conversation's directory; a retrieval has to be able to say which conversation's
-// file it wants. § Attachments committed to that asymmetry before this type existed.
+// THE ASYMMETRY WITH AttachmentChunkPayload IS NARROWER THAN IT WAS. That frame
+// carries a conversation_id too since #2142 — the "an upload could only steer bytes
+// elsewhere" argument this block used to rest on was reversed, because the property
+// it bought was the absence of a field rather than isolation between conversations.
+// What survives is a difference in what the two ids DO: this one selects which
+// conversation's file to read and is acted on today, while the chunk's is inert
+// until #2143 wires it into intake. Both are the same kind of value under the same
+// rule, and the rule is the paragraph below.
 //
 // THE CONVERSATION ID IS A LOOKUP KEY, NEVER A VALUE TRUSTED AS SENT, and this is
 // the security property the whole frame rests on. It is validated against the

@@ -279,6 +279,50 @@ touched; `go vet ./...` does not reach it either.
 Each is resolved in Phase B; anything that changes the design above is recorded under
 `## Revisions`.
 
+## Revisions
+
+### 2026-09-06 — implementation
+
+- **A thirteenth site, found by the gate rather than by either list.** `internal/relay`'s
+  `TestAttachmentEnvelopes_AllNineFieldsAndCorrelation` (named `...AllEightFields...` before
+  this ticket) asserts an exact payload key count on the outbound retrieval frames, and it
+  reddened with "9 keys, want exactly 8" the moment the field landed. Neither the ticket's site
+  list nor this plan's § The site list is longer than the ticket's had it, because it holds a
+  *count* and not the reversed argument, so neither the `steer bytes` grep nor the
+  `conversation_id` sweep of `internal/protocol/` could see it. Its redness is also the
+  producer-side confirmation of AC-2: the outbound literal in `v2attachmentstream.go` is keyed,
+  so `StreamAttachment` emits the new key at its zero value with **no edit to that file** — the
+  `.go` producer is unchanged as planned; only its test moved. The rewrite adds the key to the
+  list, moves the count to nine, and adds an assertion that the emitted value is `""` — because
+  "a producer emits nothing here" is exactly the claim a keyed literal satisfies by accident and
+  a positional one would break silently. **The generalisable form: a sweep for a reversed
+  argument finds the prose that argues it and misses the tests that count it.** Compile the
+  dependent packages, do not only grep them.
+- **A fourteenth, in the same shape:** `TestAttachmentChunkPayload_FitV2EnvelopeCap`'s header
+  said "the three metadata bounds this fills to". Four fields now fill to three constants. Green
+  either way, which is the same AC-3 hazard one paragraph up from it.
+- **The mutant claim, measured in both states rather than predicted** (the package overview
+  records that the two can disagree). As committed, all nine `,omitempty` mutants redden
+  `TestAttachmentChunkPayload_ZeroValue_RoundTrip`; `index` also reddens the upload fixture and
+  `conversation_id` also reddens the *retrieval* fixture — the second key ever to earn
+  directional coverage, and it earns it because AC-2 commits it empty on that leg. Regenerate
+  the fixtures under the mutant and only the zero test's byte guard stays red. Both runs used a
+  `go test -overlay` scratch copy; no worktree writes.
+- **The measurement confirmed the table rather than the reverse.**
+  `TestAttachmentChunkPayload_FitV2EnvelopeCap` logs 64591 B against the recomputed table's
+  64591, 98.6% of the cap, 928 B spare. `MaxAttachmentChunkBytes` does not move.
+- **One stale sentence dropped rather than carried forward.** § Application message types'
+  `attachment_chunk` row ended "Nothing emits, accepts or enforces it yet", which #1897 and
+  #2053 had already falsified before this ticket. AC-4 required amending that row; the amendment
+  replaced the sentence instead of preserving a false claim beside a true one. Neighbouring rows
+  carry the same staleness and were left alone — out of scope.
+
+**Open questions, resolved.** All three landed as the plan proposed and none changed the design:
+(1) the retrieval leg's empty value publishes a meaning and no obligation; (2) the bounds
+sentence became four bounds `64 / 64 / 255 / 255` under three constants, confirmed against the
+measured total before it was written; (3) `RequestAttachmentPayload`'s asymmetry block survives,
+restated — the retrieval id selects a file today, the chunk's is inert until #2143.
+
 ## Security review
 
 **Verdict:** PASS (second pass; the first failed on a MUST FIX, and § Published safety
