@@ -416,3 +416,39 @@ entry.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — Phase B
+
+**No design change.** The implementation landed as specified; this entry records the Open Questions'
+resolutions and the evidence gathered for the review's SHOULD FIX items.
+
+**Open questions, resolved:**
+
+1. `printHelp` does take the verb — added beside the existing `pyry mcp-approve` block, matching its
+   wrapping and naming `PYRY_SESSION_ID` so the environment contract is discoverable from `--help`.
+2. `startApprovePeer`'s name is not a problem. It, `replyPeer` and `hangUpPeer` are peer/transport
+   shapes rather than approve semantics, so the new tests reuse them; a comment at the top of
+   `mcp_files_test.go` records why the name still says "approve" and that renaming a helper with a
+   live caller in another file is out of scope. `driveMCP` was the one helper that could **not** be
+   reused — it is typed to `*approveServer` — so this file carries its own `driveFilesMCP` rather
+   than generalising a permission-bridge test helper.
+3. `shortTempDir`'s prefix is irrelevant; it exists only to keep the socket path under the macOS
+   `sun_path` limit.
+
+**Both logging SHOULD FIX items landed**, and one is behaviourally pinned:
+`TestMCPFiles_LogsCarryNoRequestBytes` drives all six branches and asserts stderr carries neither the
+host path, the filename, the session id, nor the socket path. `call.Name` is never logged either —
+`refuse` takes only a fixed stage word. The third SHOULD FIX, the description's wording, is pinned by
+`TestMCPFiles_ToolsList` asserting the description names the workspace rule and carries the bound
+derived from `maxAttachFileBytes`.
+
+**Mutation evidence** (run over `go test -overlay`, no worktree writes), confirming the three
+load-bearing rows fail for the intended reason rather than passing vacuously:
+
+| Mutant | Died on |
+|---|---|
+| `sendFileArgs` replaced by `control.AttachFilePayload` as the unmarshal target, overwrite dropped | `TestMCPFiles_SessionIDNeverFromToolInput` (forwarded `SessionID` became the caller's) **and** `TestMCPFiles_HandOverRoundTrip` — two independent witnesses |
+| the `s.sessionID == ""` guard deleted | `TestMCPFiles_NoSessionIdentity_RefusesWithoutDialling`, on **both** the text and the connection count |
+| the daemon's sentence prefixed with `"send_file failed: "` | `TestMCPFiles_DaemonRefusalVerbatim` |
