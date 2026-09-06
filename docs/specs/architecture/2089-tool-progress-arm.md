@@ -619,3 +619,89 @@ commit that lands the fixture.
 green for `./internal/streamsup/...` and for the tagged package's offline
 `TestTpcap*` set (three tests, 19 cases). The live probe still skips on this
 machine at `WithWorktreeAuthenticated`, naming the missing credential.
+
+### 2026-09-06 (rework 3) — the capture landed, and the instrument's own test killed the suite
+
+**Driven by** the dispatcher's real-claude gate, which FAILED as *"a suite-level
+failure with no failing test"*: 939 executed, **939 passed, 0 failed**, wall clock
+1203.3 s against `-timeout 20m`. That arithmetic is the whole diagnosis — the test
+binary died on the go-test deadline, and a suite that dies mid-run reports nothing
+about anything after it.
+
+**The capture SUCCEEDED on that run.** `TestRealClaude_ToolProgressCapture` passed
+in 379.9 s having recorded `outcome=fired … fg_call=true held=75.0s captured=21
+frames=12 census=map[heartbeat:12] unmarked=0 reaching_lane=0`. The rework-2
+staging did exactly what it was rebuilt to do: claude's `cat` opened the FIFO, the
+rig held the call open past two ticks, and twelve heartbeats arrived.
+
+**The bytes survived their worktree, and that was not luck.** The gate merges into
+a detached worktree it then removes, so the promoted `testdata/` fixture went out
+with it — #1763's failure exactly. What survived is the record in the artifact
+dir, because § The capture chose `os.MkdirTemp` over `t.TempDir` *"so the operator
+can commit it"*. Those are the same deny-scanned bytes `tpcapWriteRecord` promotes
+(one `os.WriteFile` of the same `blob`), so the fixture committed this leg is the
+gate run's own output, not a reconstruction. **AC2's proof half, AC3 and AC4 are
+now met**: `TestParser_ToolProgressCapturedFramesAreSilent` runs inside `make
+check` over 12 real frames, 12 of which it independently decodes as
+`heartbeat:true`.
+
+**What actually hung, and why an offline test could kill a live gate.** The
+unfinished-test list names `TestTpcapHoldFIFO/release returns when no reader ever
+arrives` alone. Its `release` was parked on a bare `<-done` waiting for a write
+goroutine still blocked in `open(O_WRONLY)`: the wakeup is a transient
+`O_RDONLY|O_NONBLOCK` open-and-close, which Linux latches (`r_counter`) but the
+BSD/XNU shape can miss by re-testing `readers == 0` after the wakeup. The subtest
+itself was bounded and did `t.Fatal` at 10 s — and then **`t.Cleanup`'s second
+`release` blocked inside `sync.Once.Do`, which waits for the first call to
+return.** So the bound the test had was undone by the one the helper lacked. This
+is the finding the verifier's fourth pass raised as SHOULD FIX, one lap before it
+cost a 20-minute gate run.
+
+Three changes, all in `tpcapHoldFIFO`: the read end is **held open until the write
+goroutine exits** rather than closed immediately, which removes the race on both
+kernel shapes; the wait is **bounded** at `probeFIFOReleaseDeadline` and
+`t.Errorf`s past it, so a wakeup that still fails reports rather than hangs; and
+the goroutine's `os.OpenFile` error is **kept and reported** instead of swallowed,
+since an instrument fault otherwise records as `foreground_call_observed: false`
+and reads as "claude never ran the command". `TestTpcapHoldFIFO`'s no-reader case
+now waits `tpcapNoReaderReleaseBudget` (5 s), deliberately under the backstop, so
+it tests the wakeup working rather than the backstop firing.
+
+**A shape-discrimination claim, checked and withdrawn before it was written.** The
+captured frames carry `session_id` and `uuid`, which the guarded emitter's literal
+sets and the yield-twin's does not — an inviting way to say which emitter feeds
+this surface. It is false: the twin's wrapper is
+`Ot=(Ne)=>({...Ne,session_id:So,uuid:"uuid" in Ne?Ne.uuid:Qy()})`, so both
+emitters put byte-identical heartbeat frames on the wire, key order included. The
+docblock says so rather than claiming the discrimination.
+
+**Open question 1 is narrowed, not closed, and the census says which.** Zero of
+the 12 frames were marker-less, but two explanations fit equally and this capture
+separates neither: the guarded emitter may be the feed (`CLAUDE_CODE_REMOTE` and
+`CLAUDE_CODE_CONTAINER_ID` are both unset here), **or** the engine event was never
+raised at all — it is pushed per chunk the shell generator yields, carrying
+`output`/`totalLines`/`totalBytes`, and the staged `cat <fifo>` produces no output
+until EOF. Settling it needs a different staging: a command with incremental
+output, or a run with `CLAUDE_CODE_CONTAINER_ID` set. Recorded as narrowed in
+`consumeToolProgress`'s dated census, which replaces the `NOT YET MEASURED`
+heading with a `MEASURED 2026-09-06` one; the reader's `fs.ErrNotExist` skip
+branch is deleted, as both site comments said it would be.
+
+**The remaining NIT, taken.** `fixtureWorthy` now refuses to promote a record
+holding a `base64` frame — `dropcapMakeEntry`'s encoding for a line that is not
+valid UTF-8, whose empty payload `capturedToolProgressLines` fatals on. It was the
+one shape the producing side would write and the consuming side would refuse, and
+landing it would have reddened `make check` for every unrelated ticket.
+
+**The #2140 note in the rework-2 entry is stale and needs no action.** #2140 was
+closed `NOT_PLANNED`; the initialize-control fix landed as #2131 (`cfcad851`),
+which reached this branch through the `3b0c18d3` merge from `main`.
+
+**Verified this leg:** `gofmt` clean on both touched files; `go vet ./...` and
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/` clean; `go test -race
+./internal/streamsup/...` green with the capture assertion now non-vacuous (12
+frames); `go test -race -tags e2e_realclaude -count=10 -run '^TestTpcap'` green,
+and `-count=100` on `TestTpcapHoldFIFO` alone green in 20.8 s. The live probe now
+skips as steady state — *"the fixture already exists, so there is nothing to
+capture and this costs no claude turn"* — so the next gate run spends no claude
+turn on it.

@@ -156,6 +156,11 @@ const (
 	// "the foreground call never started", which is a measurement rather than a
 	// flake.
 	tpcapRendezvousWait = 90 * time.Second
+	// How long TestTpcapHoldFIFO gives release() to return with no reader present.
+	// Kept well under probeFIFOReleaseDeadline, which is release's own backstop:
+	// the offline test must fail on a wakeup that does not take, not wait for the
+	// backstop that merely stops it hanging.
+	tpcapNoReaderReleaseBudget = 5 * time.Second
 )
 
 const (
@@ -323,6 +328,19 @@ func (rec *tpcapRecord) fixtureWorthy() (string, bool) {
 			"tpcapFixtureVersion and toolProgressCaptureVersion together, then re-run",
 			got, tpcapFixtureVersion), false
 	}
+	// The consumer refuses any encoding but json-string, and dropcapMakeEntry emits
+	// base64 with an EMPTY payload for a frame that is not valid UTF-8. Promoting
+	// one would land a fixture that reddens `make check` for every unrelated
+	// ticket. Vanishingly unlikely for a type whose fields are identifiers and
+	// counters — which is why this is a refusal to promote rather than an AC3
+	// fatal: the record still holds the frame as evidence that it happened at all.
+	for i, f := range rec.Frames {
+		if f.PayloadEncoding != dropcapEncodingJSONString {
+			return fmt.Sprintf("frame %d is encoded %q, and capturedToolProgressLines reads only %q "+
+				"— a non-UTF-8 frame carries no readable payload, so a fixture holding one would "+
+				"fail the assertion it exists to feed", i, f.PayloadEncoding, dropcapEncodingJSONString), false
+		}
+	}
 	return "", true
 }
 
@@ -450,6 +468,14 @@ func tpcapPrompt(fifoPath string, nonce int64) string {
 //
 // release is idempotent and also runs from t.Cleanup, so a fatal between the
 // rendezvous and the hold expiring still lets `cat` exit and the child reap.
+//
+// RELEASE IS BOUNDED AND REPORTS THE OPEN ERROR, WHICH IS THE 2026-09-06 REVISION
+// AND NOT POLISH. The first draft copied holdProbeFIFO without the bound its
+// source puts on exactly this wait, and swallowed the goroutine's open error. The
+// live gate then hung here: `internal/e2e/realclaude` failed at the 20-minute
+// go-test timeout with 939 tests passed and none failed, which is the shape of a
+// suite-level crash rather than of a capture that found nothing. Both halves are
+// restored below.
 func tpcapHoldFIFO(t *testing.T, path string) (rendezvous <-chan struct{}, release func()) {
 	t.Helper()
 	if err := syscall.Mkfifo(path, 0o600); err != nil {
@@ -460,6 +486,7 @@ func tpcapHoldFIFO(t *testing.T, path string) (rendezvous <-chan struct{}, relea
 		arrived  = make(chan struct{})
 		released = make(chan struct{})
 		done     = make(chan struct{})
+		openErr  error // read only after done closes, which orders it
 		once     sync.Once
 	)
 	go func() {
@@ -467,6 +494,11 @@ func tpcapHoldFIFO(t *testing.T, path string) (rendezvous <-chan struct{}, relea
 		// Blocks until a reader opens the FIFO — this IS the rendezvous.
 		f, err := os.OpenFile(path, os.O_WRONLY, 0)
 		if err != nil {
+			// KEPT, not swallowed, which is holdProbeFIFO's behaviour. An
+			// instrument fault here is otherwise recorded as
+			// foreground_call_observed:false and reads as "claude never opened the
+			// FIFO" — the rig blaming the model for its own failure.
+			openErr = err
 			return
 		}
 		close(arrived)
@@ -482,14 +514,35 @@ func tpcapHoldFIFO(t *testing.T, path string) (rendezvous <-chan struct{}, relea
 				// The write end is open; the goroutine closes it, and that EOF is
 				// what finally lets `cat` exit.
 			default:
-				// No reader ever arrived, so the goroutine is parked in open().
-				// Opening the read end non-blockingly unblocks it. Harmless once
-				// the rendezvous has fired: only the last writer closing sends EOF.
+				// No reader ever arrived, so the goroutine is parked in
+				// open(O_WRONLY). Opening the read end unblocks it — and the fd is
+				// HELD until the goroutine has returned rather than closed at once.
+				// A transient open-then-close is not enough everywhere: Linux
+				// latches the reader-open (r_counter) and wakes the blocked writer,
+				// while the BSD/XNU shape re-tests readers==0 after the wakeup and
+				// parks again. Holding it open satisfies both. Harmless once the
+				// rendezvous has fired: only the LAST writer closing sends EOF.
 				if rf, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
-					_ = rf.Close()
+					defer rf.Close()
 				}
 			}
-			<-done
+			// Bounded, as holdProbeFIFO bounds the same wait. Blocking forever here
+			// hangs `make e2e-realclaude` to the go-test timeout instead of
+			// reporting that claude never ran the command, and a suite that dies
+			// mid-run reports nothing about any test after it.
+			select {
+			case <-done:
+				if openErr != nil {
+					t.Errorf("#2089: the FIFO write end never opened: %v. This is an INSTRUMENT "+
+						"fault, not evidence about claude: read it before the record's "+
+						"foreground_call_observed, which reads false for this and for a turn that "+
+						"never ran the command", openErr)
+				}
+			case <-time.After(probeFIFOReleaseDeadline):
+				t.Errorf("#2089: the FIFO hold goroutine did not exit within %s of the release; the "+
+					"write end may still be open and claude's `cat` may never see EOF",
+					probeFIFOReleaseDeadline)
+			}
 		})
 	}
 	t.Cleanup(release)
@@ -870,10 +923,14 @@ func tpcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 		return
 	}
 	t.Logf("#2089: FIXTURE WRITTEN to %s (%d frames, census %v).\n"+
-		"  Commit it — `git add %s` — and delete capturedToolProgressLines' fs.ErrNotExist "+
-		"skip branch in the same commit, then replace consumeToolProgress's NOT YET MEASURED "+
-		"docblock entry with the census above. An uncommitted capture is a capture that did "+
-		"not happen", tpcapFixturePath, rec.FrameCount, rec.MarkerCensus, tpcapFixturePath)
+		"  Commit it — `git add %s` — and update consumeToolProgress's dated census to the "+
+		"marker counts above; a capture that lands without its census leaves the docblock "+
+		"describing a different measurement. An uncommitted capture is a capture that did not "+
+		"happen (#1763).\n"+
+		"  A run reaching this line at all means the fixture was absent or %s=1 forced a "+
+		"re-capture, so this is a NEW claude release or a suspected shape change: re-read the "+
+		"census before trusting the old one", tpcapFixturePath, rec.FrameCount, rec.MarkerCensus,
+		tpcapFixturePath, tpcapEnableEnv)
 }
 
 // TestTpcapFixtureWorthyRefusesEveryBadCapture runs offline. fixtureWorthy is the
@@ -884,10 +941,15 @@ func tpcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 func TestTpcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 	t.Parallel()
 	good := func() *tpcapRecord {
+		frames := make([]tpcapFrame, 3)
+		for i := range frames {
+			frames[i] = tpcapFrame{Index: i, Type: "tool_progress", PayloadEncoding: dropcapEncodingJSONString}
+		}
 		return &tpcapRecord{
 			Outcome:       tpcapFired,
 			ClaudeVersion: tpcapFixtureVersion + " (Claude Code)",
-			FrameCount:    3,
+			FrameCount:    len(frames),
+			Frames:        frames,
 		}
 	}
 	tests := []struct {
@@ -905,6 +967,14 @@ func TestTpcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 		{"a different claude release", func(r *tpcapRecord) { r.ClaudeVersion = "2.1.260 (Claude Code)" }, false},
 		{"version unreadable", func(r *tpcapRecord) { r.ClaudeVersion = "<unavailable: exec failed>" }, false},
 		{"version absent", func(r *tpcapRecord) { r.ClaudeVersion = "" }, false},
+		{
+			// The one shape this side would otherwise promote and the reading side
+			// refuses: a frame that was not valid UTF-8 is recorded base64 with an
+			// empty payload, and capturedToolProgressLines fatals on the encoding.
+			"a base64 frame the consumer cannot read",
+			func(r *tpcapRecord) { r.Frames[1].PayloadEncoding = dropcapEncodingBase64 },
+			false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1030,11 +1100,20 @@ func TestTpcapHoldFIFO(t *testing.T) {
 			defer close(done)
 			release()
 		}()
+		// Deliberately WELL UNDER probeFIFOReleaseDeadline. release now bounds its
+		// own wait, so a broken wakeup would eventually return anyway — with a
+		// t.Errorf, after a 10 s stall the live gate pays on every capture. Waiting
+		// less than the deadline is what keeps this a test of the wakeup working
+		// rather than of the backstop firing.
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatal("release blocked with no reader present: the live gate would hang here rather " +
-				"than reporting that claude never ran the command")
+		case <-time.After(tpcapNoReaderReleaseBudget):
+			t.Fatalf("release did not return within %s with no reader present. The write goroutine "+
+				"is parked in open(O_WRONLY) and the wakeup did not take: a transient read-open is "+
+				"not enough on the BSD/XNU shape, which re-tests readers==0 after the wakeup, so the "+
+				"read fd must stay open until the goroutine exits. Unfixed, the live gate hangs to "+
+				"the go-test timeout instead of reporting that claude never ran the command — which "+
+				"is how #2089's 2026-09-06 gate run died", tpcapNoReaderReleaseBudget)
 		}
 	})
 }

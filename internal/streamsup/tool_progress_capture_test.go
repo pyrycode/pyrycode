@@ -2,8 +2,6 @@ package streamsup
 
 import (
 	"encoding/json"
-	"errors"
-	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -73,15 +71,11 @@ type toolProgressCapture struct {
 // be: none of the three can decode another's record shape, and reaching for the
 // wrong one yields zero values rather than a failure.
 //
-// Every failure is t.Fatalf — with ONE temporary exception, the missing-file
-// branch below, which is #2089's unfinished half and carries its own argument.
-// The sentence the sibling readers state absolutely ("never a skip: the capture
-// is committed, so a missing record is a broken premise rather than an
-// unavailable resource") becomes true of this reader the moment the fixture
-// lands, and the branch is written to be deleted in that same commit. It is
-// narrowed to fs.ErrNotExist alone precisely so it cannot broaden into the
-// tolerated kind: a fixture that exists but is malformed, vacuous or foreign
-// still fatals.
+// EVERY FAILURE HERE IS t.Fatalf, NEVER A SKIP, and the sibling readers' sentence
+// now holds of this one too: the capture is committed, so a missing record is a
+// broken premise rather than an unavailable resource. An earlier revision carried
+// one fs.ErrNotExist skip while the fixture was still unproduced; it was deleted
+// in the commit that landed the fixture, which is what its own comment said to do.
 //
 // Zero frames fatals here, so no caller can loop over an empty slice and pass
 // vacuously — AC3's non-vacuity rule held at the reader, one level below every
@@ -89,31 +83,6 @@ type toolProgressCapture struct {
 func capturedToolProgressLines(t *testing.T) [][]byte {
 	t.Helper()
 	raw, err := os.ReadFile(toolProgressCapturePath)
-	if errors.Is(err, fs.ErrNotExist) {
-		// THE ONE SKIP IN THIS FILE, AND IT IS A HOLE, NOT A DESIGN.
-		//
-		// The fixture does not exist yet. #2089 shipped the arm and this assertion
-		// without it because the machine that built them had an EXPIRED, unrefreshable
-		// claude OAuth session — `claude -p` answers "OAuth session expired and could
-		// not be refreshed", so TestRealClaude_ToolProgressCapture skipped and no
-		// bytes were produced. That is a blocked credential, not a design decision,
-		// and it is the reason consumeToolProgress's docblock says NOT YET MEASURED.
-		//
-		// A skip is chosen over a red build only because the alternative reddens
-		// `make check` for every unrelated ticket. It is deliberately NOT the
-		// tolerated kind: the message below is written to be impossible to read as a
-		// pass, and this branch is narrowed to ErrNotExist alone so a fixture that
-		// exists but is malformed, vacuous or foreign still fatals. Delete this
-		// branch in the same commit that lands the fixture.
-		t.Skipf("SKIPPED WITH NOTHING PROVEN — %s does not exist, so the tool_progress "+
-			"marker set has NOT been checked against a single byte claude sent.\n"+
-			"This is #2089's unfinished half, not a tolerated absence. It needs a claude login "+
-			"and nothing else: TestRealClaude_ToolProgressCapture arms itself while this file is "+
-			"absent, so `make e2e-realclaude` on an authenticated machine writes it here. Then "+
-			"`git add` it and DELETE this skip branch.\n"+
-			"Until then, a decoder keyed on a field name claude does not send would never "+
-			"fire and nothing here would notice", toolProgressCapturePath)
-	}
 	if err != nil {
 		t.Fatalf("reading capture %s: %v", toolProgressCapturePath, err)
 	}

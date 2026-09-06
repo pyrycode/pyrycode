@@ -3034,44 +3034,52 @@ type toolProgressMarkers struct {
 // way, and for the same reason: a suppression's match is the thing to be strict
 // about.
 //
-// # NOT YET MEASURED — attempted 2026-09-06, claude 2.1.259
+// # MEASURED 2026-09-06 — claude 2.1.259, model haiku, one live turn
 //
-// THE MARKER SET BELOW IS DERIVED FROM THE 2.1.259 BINARY'S DECLARED SCHEMA AND
-// ITS FOUR EMIT SITES, NOT FROM A CAPTURE OF THIS SURFACE. That distinction is
-// the whole of what this entry records, and it is stated in the
-// CORRECTED/AMENDED style ignoredLineTypes uses so the next reader inherits the
-// gap rather than the confidence:
+// The capture is internal/e2e/realclaude/testdata/tool_progress_v2.1.259.json,
+// recorded upstream of the parser by TestRealClaude_ToolProgressCapture: a
+// foreground Bash call (`cat` on a rig-held FIFO) held open across a 379 s turn,
+// 21 lines on the wire, 12 of them tool_progress. Stated in the CORRECTED/AMENDED
+// style ignoredLineTypes uses, and a variety measured ABSENT is recorded as
+// absent rather than quietly added to the matched set:
 //
-//   - heartbeat — the emit site reads `…,elapsed_time_seconds:…,heartbeat:!0}`, so
-//     the field is on the wire and not merely a log discriminator. UNCONFIRMED on
-//     this surface: the live probe that would confirm it could not run (see
-//     below), and the report's pasted frame is a hand-elided one showing neither
-//     `heartbeat` nor `elapsed_time_seconds`.
-//   - subagent retry — every agent_api_retry frame sets subagent_type, resolved
-//     and unresolved alike. Not reachable from a foreground Bash call at all, so
-//     no single-turn capture would have observed it either.
-//   - repl call — same, and same reason.
-//   - bash/powershell progress, the residual marker-less shape — THE OPEN
-//     QUESTION, and it is still open. One of the two emit sites is guarded by
-//     `if(!CLAUDE_CODE_REMOTE && !CLAUDE_CODE_CONTAINER_ID) break;` and throttled;
-//     the other, which logs `[engine] yield-twin tool_progress`, has neither
-//     guard nor throttle. Which one feeds --output-format stream-json stdout is
-//     NOT established by reading the binary. If it is the un-gated one, frames of
-//     that shape reach this surface, carry none of the three markers, and this
-//     ticket's symptom is only partly fixed.
+//   - heartbeat — OBSERVED, 12/12 frames. Every one carries `"heartbeat":true`
+//     and an `elapsed_time_seconds` stepping 30, 60 … 360, which is the wire-level
+//     confirmation of the `setInterval` at 30 000 ms behind it: the first tick
+//     lands at t+30 s, so a call that leaves the foreground sooner produces
+//     nothing whatever the marker set says. tool_use_id carries the reported
+//     `-heartbeat-N` suffix and is still deliberately not matched.
+//   - subagent retry — ABSENT, and the absence is a property of the staging, not
+//     of the surface: agent_api_retry is not reachable from a foreground Bash
+//     call at all, so no single-turn capture of this shape could observe it.
+//     subagent_type is on the declared schema and set by both the resolved and
+//     unresolved emits; the marker is UNEXERCISED, not confirmed.
+//   - repl call — ABSENT, same reason, same status.
+//   - bash/powershell progress, the residual marker-less shape — NOT OBSERVED,
+//     and open question 1 is NARROWED rather than closed. Zero of the 12 frames
+//     carried none of the three markers, but two sufficient explanations fit that
+//     equally and this capture cannot separate them. (a) The two emit sites differ
+//     for this variety alone: one is behind
+//     `if(!CLAUDE_CODE_REMOTE && !CLAUDE_CODE_CONTAINER_ID) break;` plus a
+//     throttle, the other — logging `[engine] yield-twin tool_progress` — has
+//     neither, and neither variable was set on this surface. The frames cannot
+//     say which emitter fed them: the yield-twin wrapper appends session_id and a
+//     uuid to every frame it yields, so the two heartbeat literals reach the wire
+//     byte-identical, key order included. (b) The engine event is raised per chunk
+//     the shell generator yields, carrying output/totalLines/totalBytes — and the
+//     staged `cat <fifo>` produces no output at all until EOF, so the event may
+//     simply never have been raised. Settling it needs a different staging: a
+//     command with incremental output, or a run with CLAUDE_CODE_CONTAINER_ID set.
 //
-// The failure direction is the safe one, which is why this arm ships ahead of its
-// measurement: an unmeasured variety FALLS THROUGH to the unrecognized lane, so
-// it stays visible as the row it is today rather than being swallowed. Nothing
-// here claims a variety is absent; the marker-less shape is unhandled ON PURPOSE.
+// The failure direction is the safe one, which is why the unexercised markers and
+// the unresolved question are tolerable here: an unmatched frame FALLS THROUGH to
+// the unrecognized lane, so a variety nobody measured stays visible as the row it
+// is today rather than being swallowed. The marker-less shape is unhandled ON
+// PURPOSE.
 //
-// internal/e2e/realclaude's TestRealClaude_ToolProgressCapture is the instrument
-// that closes this, and TestParser_ToolProgressCapturedFramesAreSilent is the
-// assertion waiting for its fixture. Both are written and neither has run against
-// live claude: this machine's OAuth session is expired and unrefreshable
-// (`claude -p` returns "OAuth session expired and could not be refreshed"), so
-// the capture is blocked on a credential rather than on code. Run the probe and
-// commit the fixture before treating any line above as measured.
+// TestParser_ToolProgressCapturedFramesAreSilent walks that capture through this
+// arm inside `make check`, which is what stops a decoder keyed on a spelling
+// claude does not use from never firing in silence.
 func (p *Parser) consumeToolProgress(line []byte) bool {
 	var m toolProgressMarkers
 	// The error is not a branch. consumeLine has already decoded this line into
