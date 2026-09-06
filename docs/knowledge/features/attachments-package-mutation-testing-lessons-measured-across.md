@@ -1,4 +1,4 @@
-# Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, #1796, and #2037)
+# Mutation-testing lessons (measured across #1769, #1770, #1772, #1787, #1795, #1796, #2037, and #2146)
 
 This package's sole-redness claims are measured with `go test -overlay`
 (mutants applied via an absolute-path JSON manifest, no worktree write), not
@@ -223,6 +223,22 @@ surfaced:
   Having already named the by-construction trap once in a spec is not
   evidence the rest of that spec is safe from it — every by-construction
   sentence needs its own mutant, not just the one already flagged as risky.
+- **A mutant that still refuses, only late, is the one that measures a
+  placement invariant rather than a presence one** (#2146, the third package
+  ticket to pay for the by-construction trap after #1796 and #1880 above).
+  Deleting `lookupAndStamp`'s destination comparison entirely reddens four
+  tests and mostly proves the check exists; moving the *same* comparison
+  below the stamp-and-store keeps the sentinel identical, keeps every reply
+  the client sees identical, and reddens exactly one assertion — the fake-
+  clock-driven claim that a refused chunk leaves `lastChunkAt` at whatever
+  the last *delivered* chunk left it. That is the difference between "this
+  code refuses a mismatch" (arguable from reading it) and "this code refuses
+  a mismatch *before* it can be used to renew an idle-timeout slot"
+  (measurable only by moving the refusal one statement later and watching
+  which single test notices). A second sole-red mutant in the same slice —
+  reap moved below the comparison — pins the ordering the other direction:
+  an idle-expired pair answers the miss, not the mismatch, so the client
+  isn't blamed for a destination nothing is left to disagree with.
 - **A sweep-and-delete mutant's red set is a property of each fixture's
   cardinality, not of which AC the test's name cites** (#1817). The spec
   predicted `ReleaseConn`'s stop-after-first-delete mutant (`return`

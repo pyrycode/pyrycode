@@ -1,4 +1,4 @@
-# Inbound `attachment_chunk` (#1897) — `AttachmentIntake` seam
+# Inbound `attachment_chunk` (#1897, #2146) — `AttachmentIntake` seam
 
 `attachment_chunk` is a v2 **control** envelope (phone → binary), intercepted
 in `dispatchAppFrame`'s discriminator switch **before** `dispatch.Route` — the
@@ -52,9 +52,21 @@ being dropped.
 `ErrNoConversation`'s mapping did not survive #2143. The sentinel and the
 cursor resolver that raised it are both gone — see
 [Chunk intake driver](attachments-package-intake-driver.md) § "The
-conversation is resolved once, on the completing chunk only" — and its
+destination is fixed by the transfer's first delivered chunk" — and its
 condition is refused one step earlier, in this handler, before `Receive` is
 even called.
+
+**#2146 answered a third bad-destination case without touching this
+handler.** `attachmentRejectFor`'s two arms above refuse before the seam —
+an absent id, and one naming a conversation this daemon does not host. A
+transfer already admitted under one conversation whose *later* chunk names a
+different, equally valid one cannot be caught here: the gate runs once per
+chunk and both ids pass it. That case is caught one layer down, inside
+`Registry.lookupAndStamp`, and answers `ErrConversationMismatch` through the
+same existing `attachment.invalid_chunk` arm as the two above — no arm was
+added and no code was minted, so the wire is unable to tell the three causes
+apart, which is the posture #2143 chose so the upload leg is not a
+conversation-existence oracle.
 
 ## The conversation gate runs before the seam, on every chunk
 
