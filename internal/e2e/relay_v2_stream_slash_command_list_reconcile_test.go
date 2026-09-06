@@ -46,9 +46,10 @@ import (
 // handlers.CreateConversation is what writes CurrentSessionID. A daemon that has minted
 // nothing therefore retains nothing this path can see, and a test built on the bootstrap
 // child alone would wait out its whole deadline for a frame that is correctly never
-// sent. An over-the-wire create_conversation is a spawning Pool.Activate, so it both
-// mints the record and produces the child whose initialize reply is retained. That same
-// pre-mint state is what the empty-registry conn below asserts against.
+// sent. An over-the-wire create_conversation mints the record; since #2085 it does NOT
+// spawn, so the FIRST TURN below is what produces the child whose initialize reply is
+// retained. That same pre-mint state is what the empty-registry conn below asserts
+// against.
 //
 // WHAT THIS TEST IS EVIDENCE OF, AND WHAT IT IS NOT — three non-claims, because each is
 // easy to misread off a green run:
@@ -262,8 +263,8 @@ func driveLateConnectSlashCommandList(t *testing.T) lateSlashCommandListObservat
 		env, ok := nextEnvA(createDeadline)
 		if !ok {
 			t.Fatalf("no conversation_created within 15s (slash_command_list on the minter: %d) — the minted "+
-				"stream-json session never came up. The mint is a spawning Pool.Activate, so suspect the "+
-				"child rather than the reconcile seam", obs.listsOnMinter)
+				"conversation was never minted. Since #2085 the mint does not spawn, so suspect the create "+
+				"handler rather than the child — the child comes up on the turn driven below", obs.listsOnMinter)
 		}
 		switch env.Type {
 		case protocol.TypeError:

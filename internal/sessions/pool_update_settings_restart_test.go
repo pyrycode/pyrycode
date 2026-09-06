@@ -110,6 +110,13 @@ func doneAppears(t *testing.T, dir string, timeout time.Duration) bool {
 // mintEvicted builds + registers + supervises a minted session WITHOUT
 // activating it, so it sits in stateEvicted with no live child — the state the
 // evicted-session carve-out (§ Design) exercises.
+//
+// It is Pool.Mint's sequence by hand, and cannot delegate to it: Mint takes the
+// operator's configured mintSettings, while these tests need to plant a specific
+// model/effort to update away from. Keep the two in step — in particular this
+// deliberately does NOT prime the rotation skip-set, matching Mint since #2085
+// moved that prime to Pool.Activate. That is the one step that has already drifted
+// once, and a helper that primed early would hide a regression in the real one.
 func mintEvicted(t *testing.T, pool *Pool, spawnDir string, settings SessionSettings) SessionID {
 	t.Helper()
 	id, err := NewID()
@@ -127,7 +134,6 @@ func mintEvicted(t *testing.T, pool *Pool, spawnDir string, settings SessionSett
 		t.Fatalf("saveLocked: %v", err)
 	}
 	pool.mu.Unlock()
-	pool.RegisterAllocatedUUID(id)
 	if err := pool.supervise(sess); err != nil {
 		t.Fatalf("supervise: %v", err)
 	}
