@@ -88,9 +88,11 @@ const MaxAttachmentIDsPerMessage = 32
 // THE ELEMENTS ARE NOT A CAPABILITY. What keeps the field safe is CONFINEMENT: a
 // named id resolves only under the message's OWN conversation, the one the
 // authenticated v2 session is already on, decided daemon-side from session
-// context and never client-asserted. That is the property AttachmentChunkPayload's
-// deliberately absent conversation_id establishes for the upload leg, and it is
-// what stops "name any id, get its bytes into your prompt". Do NOT argue
+// context and never client-asserted. That is what stops "name any id, get its
+// bytes into your prompt", and it is a property of THIS field's resolution — not
+// one borrowed from a sibling frame. This block used to anchor it to
+// AttachmentChunkPayload's deliberately absent conversation_id; that frame carries
+// one since #2142, so the anchor is gone while the property is untouched. Do NOT argue
 // UUIDv4-therefore-unguessable anywhere on this field: the family's published
 // stance is that the id is not secret, not unguessable and never the only thing
 // between a caller and a file, so an entropy claim would quietly promote it to

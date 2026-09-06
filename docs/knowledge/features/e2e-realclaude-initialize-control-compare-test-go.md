@@ -9,9 +9,20 @@
   unreachable — decodes each match through `initControlFixtureRecord`,
   binds each base name to `initControlArmFixtureName(rec.ClaudeVersion,
   rec.Arm)` by string equality (never a `filepath.Join` on a
-  fixture-supplied value), groups by `ClaudeVersion` and fails on anything
-  but exactly one group, and requires every id in `initControlArms` present
-  exactly once. The literal `_` after the version segment is the entire
+  fixture-supplied value), groups by `ClaudeVersion`, and — since #2131 —
+  hands the grouped map to `initControlSelectArmGroup`, which picks the
+  highest version under `update.CompareVersions`' numeric ordering rather
+  than refusing outright when the glob matches more than one group. A
+  routine `claude` upgrade on the gate host leaves the committed capture
+  beside a freshly written one; comparing the newest rather than refusing
+  is what keeps that from reddening every full `make e2e-realclaude` run.
+  Selection still refuses to guess: a token `update.CompareVersions` can't
+  parse, two distinct names that order `Same` (it tolerates a leading `v`
+  and strips a `-`/`+` suffix, so `2.1.239`, `v2.1.239` and
+  `2.1.239-beta.1` are three group keys with no ranking between them), or
+  a selected group missing an id `initControlArms` declares all fail the
+  run by name, with no fallback to an older complete group. The literal
+  `_` after the version segment is the entire
   exclusion: `filepath.Match` needs one, #1688's legacy
   `initialize_control_v2.1.239.json` has none, and nothing mints an
   unarmed name any more.
@@ -82,7 +93,28 @@
     name, so the presence check alone is the entire "exactly once"
     property — a dedicated duplicate-detection branch would have been a
     return site nothing on disk can reach.
+  - **`update.CompareVersions` returns `Same` for two names that are
+    different files (#2131).** It tolerates a leading `v` and strips a
+    `-`/`+` suffix before parsing, so `2.1.239`, `v2.1.239` and
+    `2.1.239-beta.1` are three distinct fixture-group keys it ranks as
+    equal. A plain highest-wins loop over this comparator picks an
+    arbitrary one of two coherent sets — the two-version defect wearing a
+    different token — so any "pick the newest" rule built on it needs its
+    own tie branch rather than trusting strict ordering to cover every
+    pair.
+  - **The capture-then-compare ordering here is a `t.Parallel()`
+    consequence, not luck (#2131).** The capture probe
+    (`TestRealClaude_InitializeControl_SendPointArms`) never calls
+    `t.Parallel()` and writes its three arms in sequential subtests; the
+    comparison test does call it, so Go pauses it until the package's
+    whole sequential pass finishes, and a half-written group is never
+    reachable by construction. That is also why the two-version fixture
+    conflict this file's selection logic now resolves reproduced on
+    *every* full run rather than intermittently — a symptom worth reading
+    as "deterministic ordering, not a race" before chasing one.
 
   Zero production files touched. See
   `docs/specs/architecture/1764-initialize-arm-comparison.md` for the full
-  design and security review.
+  design and security review, and
+  `docs/specs/architecture/2131-initialize-control-arm-group-selection.md`
+  for the version-selection rule added on top of it.

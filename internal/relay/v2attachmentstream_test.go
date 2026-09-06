@@ -205,12 +205,23 @@ func TestAttachmentEnvelopes_ZeroByteFile(t *testing.T) {
 	}
 }
 
-// TestAttachmentEnvelopes_AllEightFieldsAndCorrelation pins AC#1's "all eight
-// published fields, each correlated by in_reply_to". The correlation assertion
-// is the one that distinguishes this stream from bundleEnvelopes, which leaves
-// InReplyTo nil on every frame it builds — so the bundle stream is the wrong
-// thing to copy here, and this is the test that says so.
-func TestAttachmentEnvelopes_AllEightFieldsAndCorrelation(t *testing.T) {
+// TestAttachmentEnvelopes_AllNineFieldsAndCorrelation pins #2053's AC#1, "all
+// published fields, each correlated by in_reply_to" — nine of them since #2142
+// added conversation_id. The correlation assertion is the one that distinguishes
+// this stream from bundleEnvelopes, which leaves InReplyTo nil on every frame it
+// builds — so the bundle stream is the wrong thing to copy here, and this is the
+// test that says so.
+//
+// THE EMPTY conversation_id IS THE PRODUCER-SIDE HALF of #2142's contract, and it
+// belongs here rather than only in internal/protocol's committed fixture. The
+// field is meaningful on the upload leg only; retrieval emits it empty because
+// in_reply_to already correlates the chunk to a request that named the
+// conversation. attachmentEnvelopes needed no edit to satisfy that — its payload
+// literal is keyed, so a new field arrives at its zero value — and an assertion
+// that a producer emits nothing is exactly the kind that a keyed literal makes
+// true by accident and a positional one would break silently. So it is asserted,
+// not assumed.
+func TestAttachmentEnvelopes_AllNineFieldsAndCorrelation(t *testing.T) {
 	t.Parallel()
 	blob := patternBlob(protocol.MaxAttachmentChunkBytes + 7) // 2 chunks
 	envs := streamOf(t, blob)
@@ -225,19 +236,23 @@ func TestAttachmentEnvelopes_AllEightFieldsAndCorrelation(t *testing.T) {
 		if e.EventID != nil {
 			t.Errorf("frame %d: EventID must stay nil so the replay dedup guard is inert", i)
 		}
-		// All eight keys present on every chunk: no field carries omitempty, so
-		// a decoder may rely on all eight in both directions.
+		// All nine keys present on every chunk: no field carries omitempty, so
+		// a decoder may rely on all nine in both directions.
 		var keys map[string]json.RawMessage
 		if err := json.Unmarshal(e.Payload, &keys); err != nil {
 			t.Fatalf("frame %d: decode payload keys: %v", i, err)
 		}
-		for _, k := range []string{"attachment_id", "index", "total_chunks", "filename", "mime_type", "size", "sha256", "data"} {
+		for _, k := range []string{"conversation_id", "attachment_id", "index", "total_chunks", "filename", "mime_type", "size", "sha256", "data"} {
 			if _, ok := keys[k]; !ok {
 				t.Errorf("frame %d: payload is missing the %q key", i, k)
 			}
 		}
-		if len(keys) != 8 {
-			t.Errorf("frame %d: payload carries %d keys, want exactly 8", i, len(keys))
+		if len(keys) != 9 {
+			t.Errorf("frame %d: payload carries %d keys, want exactly 9", i, len(keys))
+		}
+		if got := string(keys["conversation_id"]); got != `""` {
+			t.Errorf("frame %d: conversation_id = %s, want an empty string — the retrieval leg emits it empty "+
+				"and a receiver ignores it (in_reply_to already names the conversation)", i, got)
 		}
 	}
 

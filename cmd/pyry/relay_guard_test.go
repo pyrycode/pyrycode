@@ -169,6 +169,22 @@ var excludedTypes = map[string]string{
 	// frame has no inbound leg at all, so no entry ever moves to inboundTypes.
 	"TypeAttachmentStored": "reply",
 
+	// outbound push — the v2 attachment announcement (#2082), the frame that
+	// tells a client a file exists on the host for a conversation. Filed beside
+	// its outbound sibling above rather than in the anonymous "push" block,
+	// because the ONE difference between the two entries is the whole
+	// classification: attachment_stored is a "reply" since correlation rides the
+	// envelope's in_reply_to, and this one is a "push" since NOTHING SOLICITS IT
+	// — there is no request envelope for in_reply_to to name. Correlation is the
+	// payload's conversation_id and nothing else, TypeModalShown's shape.
+	//
+	// Mandatory from the moment the constant exists rather than from the moment
+	// something emits it (the producer is #2083): Assertion #3 reports an
+	// unclassified constant, not an unemitted one. Like attachment_stored and
+	// unlike TypeRequestAttachment, this frame has no inbound leg at all, so the
+	// entry is permanent and never moves to inboundTypes.
+	"TypeAttachmentOffered": "push",
+
 	// outbound reply — one backward step of a conversation-history walk (#2113),
 	// the answer to the request_history below. Filed on the same rule as its
 	// neighbours: correlation rides the envelope's in_reply_to, which is literally

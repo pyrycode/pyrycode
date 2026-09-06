@@ -113,11 +113,19 @@ func TestInteractivePerConversationLiveness_WorkspaceFolder(t *testing.T) {
 	drainForAssistantReply(t, h.phone, h.initRecv, convID, 1, perTurnReplyBudget)
 }
 
-// TestInteractivePerConversationLiveness_ActiveSwitch is case 3: two live
+// TestInteractivePerConversationLiveness_ActiveSwitch is case 3: two
 // per-conversation conversations, driven turn A then turn B. Each reply must stream
 // to its OWN conversation id — drainForAssistantReply only returns on a non-empty
 // assistant_delta whose conversation_id matches, so a reply mis-bound to the other
 // conversation would time out. This is the follow-active switch under real load.
+//
+// Since #2085 the two creates spawn nothing, so each conversation's claude comes
+// up on its own turn and the switch lands on a child that is starting rather than
+// one already warm. Liveness is unaffected — both turns still have to stream to
+// their own id. The timing note in the Scope block above only gets more true: a
+// cold spawn lengthens the gap before the transcript appears, so the producer
+// wins the re-subscribe race by an even wider margin, and this gate remains a
+// standing liveness gate rather than a #996 oracle.
 func TestInteractivePerConversationLiveness_ActiveSwitch(t *testing.T) {
 	h := startPerConversationHarness(t)
 	nonce := time.Now().UnixNano()
@@ -208,11 +216,15 @@ func startPerConversationHarness(t *testing.T) *perConvHarness {
 // createConversationViaPhone seals a create_conversation with the given cwd (nil
 // ⇒ server default = the daemon workdir), drains to the conversation_created reply
 // (correlated by InReplyTo), and returns the server-minted conversation id. The
-// reply is sent after the handler mints + binds + persists the dedicated session,
-// so the conversation is live by the time it returns. Transcribed from
-// internal/e2e/per_conversation_eviction_test.go (which cannot be imported: the
-// e2e and e2e_realclaude build tags are disjoint). The budget is generous because
-// the mint+activate spawn waits on a real claude PTY, not fakeclaude.
+// reply is sent after the handler mints + binds + persists the dedicated session
+// — so the conversation exists and its session id is bound by the time this
+// returns, but since #2085 NO claude is running for it: the child comes up on the
+// conversation's first message. Every caller in this package sends one, so each
+// case's own send_message is what spawns, and its drain is what waits on the
+// cold PTY. Transcribed from internal/e2e/per_conversation_eviction_test.go
+// (which cannot be imported: the e2e and e2e_realclaude build tags are
+// disjoint). The 60s budget is now slack for a loaded host rather than a spawn
+// allowance.
 func createConversationViaPhone(t *testing.T, phone *fakephone.Client, initSend, initRecv *noise.CipherState, reqID uint64, cwd *string) string {
 	t.Helper()
 	sealEnvelope(t, phone, initSend, protocol.Envelope{

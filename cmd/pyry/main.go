@@ -1174,17 +1174,50 @@ func (r poolResolver) ResolveID(arg string) (sessions.SessionID, error) {
 // string, keeping internal/relay/handlers free of an internal/sessions import)
 // and owns the cmd-layer validation of the phone-requested spawn workdir:
 // resolveSpawnDir confines + trust-marks a set spawnDir before it reaches
-// Pool.CreateIn, which uses the resolved realpath verbatim (#685). A rejected
+// Pool.Mint, which uses the resolved realpath verbatim (#685). A rejected
 // spawnDir wraps handlers.ErrSpawnDirRejected and short-circuits before any
 // mint. The precedent for this type-narrowing seam is poolResolver above.
+//
+// It mints WITHOUT spawning (#2085). The conversation's session is still bound
+// and persisted at create_conversation, exactly as before; only the child is
+// deferred, to the first message on that conversation — where the drain's
+// boundSession.Activate brings it up on the same lazy path an idle-evicted
+// conversation already takes. That is what lets a model, an effort or a
+// permission mode chosen before the first message be simply what the child
+// launches with, including one cleared back to claude's own default, which
+// cannot be expressed in-band at all.
+//
+// SECURITY: the deferral widens the validated-then-spawn window from
+// milliseconds to "whenever the operator sends". The decision, recorded in this
+// ticket's spec, is to ACCEPT it rather than re-validate at the spawn site.
+// resolveSpawnDir returns trustMark's own realpath and that value is frozen onto
+// the session at build time — no phone-influenced state is re-read between the
+// check and the chdir, so the phone gains nothing from the wait. Winning the
+// window means replacing an ancestor of an already-resolved realpath under the
+// operator's $HOME, which needs the $HOME write access the confinement exists to
+// protect and claude itself already holds. This is a widening of the residual
+// TOCTOU that conversation-session-binding.md already records as accepted, not a
+// new class of exposure. It differs from the #1487 revive path — which DOES
+// re-run resolveSpawnDir at its own spawn site — because that path re-reads a
+// raw, persisted conv.Cwd from a mutable file across a daemon restart, so its
+// stored value is unvalidated bytes from a previous process lifetime.
 type sessionMinter struct{ p *sessions.Pool }
 
-func (m sessionMinter) Create(ctx context.Context, label, spawnDir string) (string, error) {
+// Create satisfies handlers.SessionCreator. The ctx is discarded because neither
+// half of this can observe one: resolveSpawnDir takes no context.Context, and
+// Pool.Mint is ctx-free by contract because it cannot spawn. The parameter stays
+// for the seam's shape, which the handler shares with its cancellable siblings.
+//
+// The honest consequence is that the handler's mint budget cannot interrupt this
+// — a wedged filesystem blocks in a syscall regardless of any deadline. See
+// handlers.createConversationMintTimeout, which records the same thing rather
+// than claiming a protection it no longer provides.
+func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string, error) {
 	resolved, err := resolveSpawnDir(spawnDir)
 	if err != nil {
 		return "", err
 	}
-	id, err := m.p.CreateIn(ctx, label, resolved)
+	id, err := m.p.Mint(label, resolved)
 	return string(id), err
 }
 

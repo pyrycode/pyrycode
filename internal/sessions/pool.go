@@ -1633,9 +1633,16 @@ func (p *Pool) Ready() <-chan struct{} {
 // active anyway — see ctx-cancellation note below).
 //
 // Sequence: NewID → build *Session in stateEvicted → register under p.mu and
-// persist (rollback the in-memory entry on save failure) → register the UUID
-// in the rotation skip-set → schedule sess.Run on Pool.Run's errgroup via
-// supervise → call Pool.Activate (cap-aware) to wake the lifecycle goroutine.
+// persist (rollback the in-memory entry on save failure) → schedule sess.Run on
+// Pool.Run's errgroup via supervise → call Pool.Activate (cap-aware) to wake the
+// lifecycle goroutine. Everything up to and including supervise is Pool.Mint;
+// this is that plus the Activate.
+//
+// The rotation skip-set is primed inside that final Activate, not here. It sat
+// between the persist and the supervise until #2085 gave the pool a mint that
+// defers its spawn indefinitely, at which point the entry's allocatedTTL could
+// expire before the child ever opened the transcript — so the prime moved to be
+// adjacent to the spawn it protects. See Pool.Activate.
 //
 // We persist BEFORE activating: a save failure with claude already running
 // would leave an unsupervised orphan whose JSONL has no on-disk record. A
@@ -1663,8 +1670,63 @@ func (p *Pool) Create(ctx context.Context, label string) (SessionID, error) {
 // time via the supervisor's existing chdir-failure path, not here.
 //
 // Otherwise identical to Create: see its docstring for the full create
-// sequence, concurrency, and error semantics.
+// sequence, concurrency, and error semantics. The register-and-supervise half
+// lives in Mint; this is that plus the cap-aware Activate, and the split is
+// what lets the relay's per-conversation mint defer the spawn to the first
+// message while the control plane's `sessions new` verb keeps bringing its
+// session up (#2085).
 func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID, error) {
+	id, err := p.Mint(label, spawnDir)
+	if err != nil {
+		return id, err
+	}
+	if err := p.Activate(ctx, id); err != nil {
+		return id, err
+	}
+	return id, nil
+}
+
+// Mint registers a fresh session — mint an id, build it, persist it, schedule
+// its lifecycle goroutine — WITHOUT spawning claude. The returned session is in
+// the evicted state with its goroutine parked on the activate signal, which is
+// byte-for-byte the shape an idle-evicted session has, so the child comes up on
+// the caller's first Pool.Activate through the existing lazy-respawn path. It
+// adds no lifecycle path; it only stops one step short of Create's.
+//
+// The absent context.Context is the API signal for that, as it is on Revive:
+// Mint does no blocking work and cannot spawn.
+//
+// It exists because create_conversation must bind a session id to a fresh
+// conversation without starting a process for a discussion nobody has spoken in
+// — and, the load-bearing half, so that every per-session setting chosen before
+// the first message is simply what the child launches with, instead of an
+// in-band correction applied to an already-running child (#2085). The rotation
+// skip-set is deliberately NOT primed here: its entry expires after
+// allocatedTTL, so a spawn deferred past that window needs the prime at the
+// spawn, which is where Pool.Activate now does it.
+//
+// spawnDir is the per-session spawn working directory, used verbatim and NOT
+// validated, canonicalised, or trust-checked by the pool — callers supply a
+// pre-resolved, $HOME-confined realpath, exactly as CreateIn, GetOrCreateIn and
+// Revive require (#685/#696). spawnDir == "" spawns in the shared template
+// workdir. SECURITY: it is a phone-influenced workspace path, so it must never
+// be logged (the #741 precedent for session ids and conversation ids); nothing
+// here logs, and nothing added here should.
+//
+// A minted session carries mintSettings — the operator's configured model and
+// effort, never the bypass (#1575). That is the one thing separating it from
+// Revive, which inherits nothing.
+//
+// Returns:
+//   - id, nil — registered, persisted, and scheduled
+//   - "", err — the failure was at or before the persist; nothing is on disk and
+//     nothing in memory changed
+//   - id, ErrPoolNotRunning — the registry entry IS on disk but no lifecycle
+//     goroutine was scheduled (fix and retry by calling Run + Activate)
+//
+// Concurrency: safe for concurrent use. Each call serialises through Pool.mu
+// briefly (registration + persist), then supervises off-lock.
+func (p *Pool) Mint(label, spawnDir string) (SessionID, error) {
 	id, err := NewID()
 	if err != nil {
 		return "", fmt.Errorf("sessions: create id: %w", err)
@@ -1679,7 +1741,7 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 	}
 
 	// Persist before activating: if saveLocked fails, roll the in-memory
-	// registration back so a retry sees a clean slate. See docstring
+	// registration back so a retry sees a clean slate. See Create's docstring
 	// rationale ("save failure with claude running would leave an
 	// unsupervised orphan").
 	p.mu.Lock()
@@ -1697,16 +1759,7 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 	}
 	p.mu.Unlock()
 
-	// Prime the rotation watcher's skip-set BEFORE the lifecycle goroutine
-	// can spawn claude — claude opening the JSONL would otherwise look like
-	// a /clear rotation. allocatedTTL (30s) is well clear of the sub-second
-	// spawn path.
-	p.RegisterAllocatedUUID(id)
-
 	if err := p.supervise(sess); err != nil {
-		return id, err
-	}
-	if err := p.Activate(ctx, id); err != nil {
 		return id, err
 	}
 	return id, nil
@@ -1982,11 +2035,35 @@ func (p *Pool) persist() error {
 // active, lastActiveAt is bumped (LRU touch) and the call returns. Otherwise,
 // when activating one more would exceed the cap, the LRU peer is evicted via
 // Session.Evict before this Activate proceeds.
+//
+// This is also where the rotation watcher's skip-set is primed, because this is
+// the pool's single spawn entry and the prime has to be adjacent to the spawn it
+// protects. claude opening <id>.jsonl looks like a /clear rotation to the
+// watcher, and the skip-set entry expires after allocatedTTL — so priming at
+// mint time only works while the spawn follows within milliseconds. Since #2085
+// a per-conversation session is minted at create_conversation and spawned
+// whenever the operator sends the first message, arbitrarily later, and the
+// prime had to move with the spawn. RotateForNewSession states the same
+// invariant for the direct-rotate path, including the ordering: the
+// registration completes before the spawn it protects.
+//
+// Re-priming is harmless and deliberate rather than merely tolerated. It can
+// only ever skip a CREATE of the activated id's OWN transcript — a /clear mints
+// a different UUID, which is never in the set — and IsAllocated consumes on
+// first hit while pruneAllocatedLocked drops the rest at TTL, so a redundant
+// entry (a no-op activate, a reactivation after eviction) costs one map slot for
+// at most allocatedTTL.
+//
+// Lock discipline: RegisterAllocatedUUID takes and releases p.mu (write) before
+// p.capMu is acquired below — the documented capMu → mu → lcMu order is not
+// inverted, because no goroutine ever holds p.mu while acquiring p.capMu. The
+// Lookup above already takes and releases p.mu.RLock in this same position.
 func (p *Pool) Activate(ctx context.Context, id SessionID) error {
 	sess, err := p.Lookup(id)
 	if err != nil {
 		return err
 	}
+	p.RegisterAllocatedUUID(id)
 	if p.activeCap <= 0 {
 		return sess.Activate(ctx)
 	}
