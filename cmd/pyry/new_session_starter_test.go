@@ -151,34 +151,34 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 		wantEvent    string
 	}{
 		{
-			name:      "no cursor and nothing named",
-			cursor:    "", named: "", boundConv: starterConvA, runner: &restartFreshRunner{},
+			name:   "no cursor and nothing named",
+			cursor: "", named: "", boundConv: starterConvA, runner: &restartFreshRunner{},
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.no_active_conv",
 		},
 		{
-			name:      "named id is not a UUID",
-			cursor:    starterConvA, named: "not-a-uuid", boundConv: starterConvB, runner: &restartFreshRunner{},
+			name:   "named id is not a UUID",
+			cursor: starterConvA, named: "not-a-uuid", boundConv: starterConvB, runner: &restartFreshRunner{},
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
 		{
 			// The traversal shape the security review named: it must die at the shape
 			// check, before anything could treat it as a lookup key or a path.
-			name:      "named id is a traversal attempt",
-			cursor:    starterConvA, named: "../../etc/passwd", boundConv: starterConvB, runner: &restartFreshRunner{},
+			name:   "named id is a traversal attempt",
+			cursor: starterConvA, named: "../../etc/passwd", boundConv: starterConvB, runner: &restartFreshRunner{},
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
 		{
-			name:      "named id is a UUID with the wrong version nibble",
-			cursor:    starterConvA, named: "bbbbbbbb-bbbb-1bbb-8bbb-bbbbbbbbbbbb", boundConv: starterConvB, runner: &restartFreshRunner{},
+			name:   "named id is a UUID with the wrong version nibble",
+			cursor: starterConvA, named: "bbbbbbbb-bbbb-1bbb-8bbb-bbbbbbbbbbbb", boundConv: starterConvB, runner: &restartFreshRunner{},
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
 		{
-			name:      "named id is uppercase",
-			cursor:    starterConvA, named: strings.ToUpper(starterConvB), boundConv: starterConvB, runner: &restartFreshRunner{},
+			name:   "named id is uppercase",
+			cursor: starterConvA, named: strings.ToUpper(starterConvB), boundConv: starterConvB, runner: &restartFreshRunner{},
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
@@ -188,14 +188,14 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 			// the bootstrap session Pool.Lookup("") would return (#678). That
 			// non-distinction is also what denies a paired-but-hostile client an
 			// existence oracle over conversation ids.
-			name:      "named id is well-shaped but unknown or unbound",
-			cursor:    starterConvA, named: starterConvB, boundConv: starterConvA, runner: &restartFreshRunner{},
+			name:   "named id is well-shaped but unknown or unbound",
+			cursor: starterConvA, named: starterConvB, boundConv: starterConvA, runner: &restartFreshRunner{},
 			wantResolved: 1,
 			wantEvent:    "v2.new_session.no_bound_session",
 		},
 		{
-			name:      "named conversation has no live child",
-			cursor:    starterConvA, named: starterConvB, boundConv: starterConvB, runner: baseRunner{},
+			name:   "named conversation has no live child",
+			cursor: starterConvA, named: starterConvB, boundConv: starterConvB, runner: baseRunner{},
 			wantResolved: 1,
 			wantEvent:    "v2.new_session.no_restart",
 		},

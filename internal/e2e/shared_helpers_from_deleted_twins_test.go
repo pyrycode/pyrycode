@@ -41,3 +41,27 @@ func sendNewSessionFrame(t *testing.T, phone *fakephone.Client, cs *noise.Cipher
 	}
 	sendNoiseMsg(t, phone, cipher)
 }
+
+// sendNewSessionFrameFor is sendNewSessionFrame carrying a conversation_id (#2099):
+// the frame names the conversation to restart instead of leaving the daemon to pick
+// its cursor's. Kept beside its bare twin rather than folded into it — the bare form
+// is the shape an un-upgraded client sends, and it stays exercised as itself.
+func sendNewSessionFrameFor(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, reqID uint64, conversationID string) {
+	t.Helper()
+	env, err := json.Marshal(protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeNewSession,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.NewSessionPayload{
+			ConversationID: conversationID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal new_session envelope: %v", err)
+	}
+	cipher, err := cs.Encrypt(env)
+	if err != nil {
+		t.Fatalf("seal new_session envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, cipher)
+}

@@ -216,3 +216,14 @@ Both are resolved in Phase B and any design consequence is recorded under `## Re
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — Phase B
+
+The design shipped as planned. Both Open Questions resolved without changing it; two implementation details are recorded because they cost a cycle each and would cost the next reader the same.
+
+1. **Open question 2 — no drift detector keyed on the prose.** `internal/protocol`'s full suite is green with `TypeNewSession`'s doc block corrected; the constant's string is unchanged and it stays in `v2OnlyTypes`, so the partition test never noticed.
+2. **Open question 1 — not separately probed, and it could not change anything.** Whether `Session.Runner()` returns a nil interface or a runner without `RestartFresh` for a created-but-unmessaged conversation, the capability probe is inert either way; `TestActiveSessionStarter_InertArms` pins the arm deterministically with an injected `baseRunner`. The question does not arise in the e2e case at all, because M3 sends a message to B specifically to bring its child up — a conversation with no live child would make that test vacuous, which is the trap the ticket flagged.
+3. **The relay table's "truncated body" row became a wrong-typed one.** `Envelope.Payload` is a `json.RawMessage`, so a syntactically broken body cannot be marshalled into a frame by the test harness at all — `json.Marshal` rejects it before it reaches the wire. A well-formed body whose `conversation_id` is a number is the reachable undecodable shape and exercises the same tolerated-error arm.
+4. **The e2e case was verified against a mutant, and the first two attempts at that verification were themselves wrong.** With `StartNewSession`'s named id forced to `""` the test fails at M5 naming the defect exactly ("the rotation landed on conversation A, the CURSOR's conversation"). Getting there took two false greens worth recording: `go test -overlay` does **not** reach this suite, because the harness shells out to its own `go build` for the `pyry` binary and the overlay applies only to the test package's compilation; and even with the source edited in place, `go test` served a **cached** pass, because nothing the cache tracks had changed — the daemon is a subprocess. `-count=1` plus an in-place edit is the only combination that actually re-runs the daemon under a mutation.
