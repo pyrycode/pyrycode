@@ -291,6 +291,43 @@ func Approve(ctx context.Context, socketPath string, req ApprovePayload) (*Appro
 	return resp.Approve, nil
 }
 
+// AttachFile asks the daemon to file the host file at req.Path under the
+// conversation bound to req.SessionID, and returns the minted attachment id.
+//
+// Built on request, NOT requestPatient: this is a bounded round trip — a
+// confinement check, a file read and a write — not a wait on a human, which is
+// the one thing requestPatient exists for. It is therefore bounded by the
+// ctx's deadline or DialTimeout when it carries none, like every other verb
+// here; a caller filing a large file should pass a ctx whose deadline suits
+// it rather than reaching for the patient helper, whose contract (a wait ended
+// only by cancellation, disconnect or an answer) is wrong for this verb.
+//
+// Shipped beside the verb rather than left to its consumers: #2165's
+// subcommand and #2166's e2e both dial this, and without it each would write
+// its own framing of the same exchange.
+//
+// Any error — dial/transport/decode, a server-side Response.Error, or an empty
+// result — is returned verbatim. No typed-sentinel mapping is warranted: the
+// server's refusals are deliberately static prose for claude to act on, not
+// tokens for a caller to branch on, which is why no ErrorCode accompanies
+// them.
+//
+// The returned id is safe to log. Nothing in req is: Path is a host path whose
+// leaf is a filename docs/protocol-mobile.md § Attachments bans logging.
+func AttachFile(ctx context.Context, socketPath string, req AttachFilePayload) (*AttachFileResult, error) {
+	resp, err := request(ctx, socketPath, Request{Verb: VerbAttachFile, AttachFile: &req})
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, errors.New(resp.Error)
+	}
+	if resp.AttachFile == nil {
+		return nil, errors.New("control: empty attachment.file response")
+	}
+	return resp.AttachFile, nil
+}
+
 // request sends one Request and reads one Response over a fresh connection,
 // bounded by the ctx's deadline or DialTimeout when it carries none. Used by
 // every client verb except Approve — all of them sub-second round-trips, whose

@@ -417,3 +417,45 @@ Verification is § B2's touched scope — `go test -race ./internal/control/... 
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — Phase B: open questions resolved, one residual added
+
+**Open question 1 — `agentrun.ResolveWorkdir` on a file leaf: resolved, no departure.**
+`canonicalCase` walks components and `ReadDir`s the accumulated *prefix*, so a leaf file
+component is folded against its parent directory exactly as a leaf directory is. The
+function is path-shaped, not directory-shaped, and its name is the only thing that is
+workdir-specific. Used for both root and target as planned; no fallback needed.
+
+**Open question 2 — `syscall.O_NOFOLLOW` / `O_NONBLOCK`: resolved, both kept.** Measured on
+darwin (`O_NOFOLLOW=256`, `O_NONBLOCK=4`) rather than assumed; both are also defined on
+linux, and CLAUDE.md scopes the project to those two platforms. Both flags ship.
+
+**Open question 3 — the workspace root itself: resolved, no branch added.** Step 9's
+regular-file check refuses it as a directory. The table's directory row covers it; no tenth
+row and no separate branch.
+
+**New finding, accepted rather than fixed — [Error messages] the refusal reasons are an
+existence oracle for paths outside the workspace.** `EvalSymlinks` runs before the
+containment test, so a path outside the tree that *exists* answers "outside this
+conversation's workspace" while one that does not answers "no readable file at that path".
+Collapsing the two was considered and declined: it costs the actionability AC-1 asks for,
+and the ordering cannot be reversed because resolving the path is what makes the
+containment test sound in the first place. **Accepted because it is not a new capability
+tier:** the caller is claude, which already reads the filesystem directly with its own
+tools, and the control socket's 0600 mode already bounds every other peer to the same user.
+Recorded here rather than left to be rediscovered by a reader who notices the asymmetry.
+
+**Guards verified by mutation rather than by inspection**, since a confinement test that
+passes for the wrong reason is the failure mode that matters here. Each mutation was run
+through `go test -overlay` with no worktree writes:
+
+- `handleAttachFile`'s empty-`sessionID` clause removed → the guard case reddens on all
+  three of its assertions, including "the attacher was never reached".
+- `withinDir` swapped for a naive prefix compare → **only** the prefix-sibling row reddens,
+  which is both the #118/#221 shape and evidence that the other eight rows are testing
+  something other than containment-by-prefix.
+- The `os.SameFile` check removed → the swap test serves the decoy's bytes verbatim. The
+  swap is a real `os.Rename` of a pre-existing file between the check and the read, so the
+  proof is deterministic rather than raced.

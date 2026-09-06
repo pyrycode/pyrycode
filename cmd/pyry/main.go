@@ -1088,6 +1088,22 @@ func runSupervisor(args []string) error {
 	// disabled (no URL) — SetApprovalSurfacer(nil) leaves mcp.approve modal-less,
 	// the pre-#1080 behaviour.
 	ctrl.SetApprovalSurfacer(approvalSurface)
+	// Install the attachment.file destination (#2164) in the same
+	// between-NewServer-and-Serve window, over the SAME registry and pool every
+	// other conversation-keyed seam above resolves against. Wired here rather
+	// than left nil because this slice OWNS this dependency: #1104's precedent is
+	// that a verb installs the dependency it owns (SetApprovalRegistry) and
+	// leaves its sibling's nil (the surfacer, until #1080). What ships inert is
+	// the verb's CALLER — the MCP tool claude invokes is #2165 — not the verb.
+	//
+	// The liveness adapter is deliberately one line and deliberately discards
+	// the *sessions.Session: whether the named session is live is the entire
+	// question, and handing the attacher a session it has no use for would widen
+	// the seam for nothing.
+	ctrl.SetFileAttacher(fileAttacher(convReg, func(id sessions.SessionID) error {
+		_, err := pool.Lookup(id)
+		return err
+	}, resolveInstanceDirPath(*name), logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
