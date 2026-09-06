@@ -1137,6 +1137,70 @@ const (
 	TypeRequestAttachment = "request_attachment" // phone → binary, inbound v2 control (switch-intercepted — #2054)
 )
 
+// Mobile Protocol v2 ATTACHMENT ANNOUNCEMENT (#2082; docs/protocol-mobile.md
+// § Attachments publishes it). The frame that tells a client a file exists on the
+// host for a conversation. Its payload is AttachmentOfferedPayload
+// (attachments.go).
+//
+// THE DEFECT IT CLOSES: a client could only ever name a file IT MINTED ITSELF.
+// Upload lands and is answered (TypeAttachmentStored), a message declares which
+// attachments it carries (SendMessagePayload.AttachmentIDs), and retrieval works
+// end to end (TypeRequestAttachment) — but every one of those needs an
+// attachment_id the client already holds, so nothing on the wire ever handed a
+// client an id it did not mint. A file claude produced reached a client as
+// nothing at all (pyrycode-desktop#1028).
+//
+// WIDENING TypeMessage WOULD NOT HAVE WORKED, and it is the obvious move. That
+// frame is not pushed to an attached client at all: its one producer builds a
+// MessagePayload for the durable conversation-history log (#2115), the live
+// assistant reply on the v2 interactive lane is a stream of TypeAssistantDelta
+// closed by TypeTurnEnd, and a client learns a stored message only by asking with
+// TypeRequestHistory. So widening it would announce nothing at the moment a file
+// appears, and would also change a record shape history-page decoders already
+// read.
+//
+// THE NAME follows the past-participle form of TypeAttachmentStored rather than
+// inventing an idiom, and is fixed here rather than left to the producer for
+// TypeRequestAttachment's reason: a wire type string IS the contract, the desktop
+// client writes its decoder against the published name, and a name chosen twice is
+// a name chosen wrong once. "OFFERED" RATHER THAN "SENT" IS LOAD-BEARING — no
+// bytes ride this frame. A client that wants them asks with TypeRequestAttachment
+// and gets TypeAttachmentChunk back.
+//
+// IT IS A PUSH AND NOT A REPLY, which is ONE decision expressed in three places
+// that must agree: this block, the docs/protocol-mobile.md § Application message
+// types row, and cmd/pyry/relay_guard_test.go's excludedTypes entry. Nothing
+// solicits it, so there is no request envelope for the envelope's InReplyTo to
+// name — the whole difference from TypeAttachmentStored, which is outbound-only
+// too but correlates to the chunk whose arrival completed the transfer.
+// TypeModalShown is the nearest analogue on this count and on correlation: it has
+// the same origin (an MCP tool call from claude, arriving over the control socket
+// and broadcast to attached clients from the control-server handler goroutine) and
+// its payload likewise carries a conversation id and no turn id.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: an old
+// (v1) phone never receives this frame, and IsKnownAppType rejecting it with
+// ErrUnknownType is also the structural bar against a v1 client SENDING one into
+// dispatch.Route and asserting that a file exists on the host that does not.
+// Filing it in inboundTypes is impossible anyway — Assertion #1 requires an
+// inbound type to be wired into cmd/pyry/relay.go's Handlers map or
+// internal/relay/v2session.go's dispatchAppFrame, and this slice ships no
+// dispatch. Two drift detectors classify it, both mandatory from the moment the
+// constant exists rather than from the moment something emits it: the partition in
+// internal/protocol/compat_test.go (this lives in v2OnlyTypes), and excludedTypes
+// as a push. Unlike TypeRequestAttachment's entry, which had to move to
+// inboundTypes the moment #2054 landed its case, this frame has NO INBOUND LEG AT
+// ALL, so its entry is permanent and never moves.
+//
+// The declaring ticket (#2082) is wire vocabulary and publication only — no
+// producer, no consumer, no validator. #2083 emits it, and is also where the file
+// itself comes from; whether it records the offer into the conversation-history
+// log is that slice's call. Same declare-then-emit sequencing as #1752→#1897,
+// #1895→#1897 and #2052→#2054.
+const (
+	TypeAttachmentOffered = "attachment_offered" // binary → phone, unsolicited push: a file exists on the host for this conversation
+)
+
 // Mobile Protocol v2 CONVERSATION-HISTORY REQUEST VERB (#2113, split from #2091;
 // docs/protocol-mobile.md § Conversation history publishes it). The frame a client
 // sends to ask for entries older than the ones it already has. Its payload is

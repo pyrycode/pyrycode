@@ -138,6 +138,12 @@ func TestIsKnownAppType(t *testing.T) {
 		// an attachment_stored frame into dispatch.Route and assert that bytes it
 		// never uploaded are stored.
 		{"attachment_stored-rejected", TypeAttachmentStored, false, ErrUnknownType},
+		// the v2-only attachment announcement: outbound binary → phone like the
+		// upload reply above, so an old phone never receives it. Rejection keeps it
+		// off the inbound path too, and here that half carries its own weight — a
+		// phone must never be able to send an attachment_offered frame into
+		// dispatch.Route and assert that a file exists on the host that does not.
+		{"attachment_offered-rejected", TypeAttachmentOffered, false, ErrUnknownType},
 		// the v2-only clarifying-question batch: an outbound binary → phone report
 		// an old phone never receives, so IsKnownAppType must reject it. Rejection
 		// is also what keeps the type off the inbound path — a phone must never be
@@ -276,6 +282,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeAttachmentChunk: true,
 	// v2 attachment upload success reply.
 	TypeAttachmentStored: true,
+	// v2 attachment announcement (outbound push).
+	TypeAttachmentOffered: true,
 	// v2 clarifying-question batch.
 	TypeQuestionShown: true,
 	// v2 clarifying-question dismissal.
@@ -365,6 +373,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeAttachmentChunk,
 		// v2 attachment upload success reply.
 		TypeAttachmentStored,
+		// v2 attachment announcement (outbound push).
+		TypeAttachmentOffered,
 		// v2 clarifying-question batch.
 		TypeQuestionShown,
 		// v2 clarifying-question dismissal.
