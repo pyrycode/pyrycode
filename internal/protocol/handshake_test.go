@@ -255,10 +255,12 @@ func TestCapability_Constants_MatchSpec(t *testing.T) {
 	got := map[string]string{
 		"CapabilityInteractive": CapabilityInteractive,
 		"CapabilityQuestion":    CapabilityQuestion,
+		"CapabilityModelList":   CapabilityModelList,
 	}
 	want := map[string]string{
 		"CapabilityInteractive": "interactive",
 		"CapabilityQuestion":    "question",
+		"CapabilityModelList":   "model_list",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("capability constant count: got %d, want %d", len(got), len(want))

@@ -73,11 +73,18 @@ type InnerFrameV2Decoded struct {
 // protocol.CapabilityQuestion (#2020), the first member a client can be granted
 // while remaining non-interactive; reducing it to a len() > 0 test would hand a
 // question-only client the whole interactive stream.
+// protocol.CapabilityModelList (#2172) is the second such member and is pinned
+// by its own row for that reason rather than riding the question one.
+//
+// New members are APPENDED, never inserted. negotiateCapabilities emits in this
+// slice's order and both of its test tables compare with slices.Equal, so the
+// position of an existing member is what every row's expectation is written
+// against; inserting ahead of one silently rewrites all of them.
 //
 // Read-only after package init and read on the manager's Run goroutine; it is a
 // var only because a slice cannot be const. Nothing may assign to it or to its
 // backing array at runtime.
-var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}
+var supportedV2Capabilities = []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}
 
 // negotiateCapabilities returns the phone's advertised set ∩
 // supportedV2Capabilities, in supported-set order. It iterates the supported

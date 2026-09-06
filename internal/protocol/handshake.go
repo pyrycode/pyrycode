@@ -29,6 +29,30 @@ const CapabilityInteractive = "interactive"
 // consumer, internal/relay, not here.
 const CapabilityQuestion = "question"
 
+// CapabilityModelList is the wire vocabulary string a client advertises in its
+// hello.payload.capabilities to say it can ask for a conversation's model menu
+// and render the answer, and that the daemon echoes in
+// hello_ack.payload.capabilities when it supports them
+// (docs/protocol-mobile.md § Capability negotiation). It detects the #2124 +
+// #2125 pair as one unit: #2124's daemon-wide retained-vocabulary fallback and
+// #2125's TypeRequestModelList verb. Neither is separately useful — the
+// fallback with no verb gives a client no way to ask, and the verb with no
+// fallback has nothing to answer for a conversation whose bound session has
+// spawned no child — so one string covers both. A daemon built before them
+// drops it in the intersection, which is the stale-daemon signal a cross-repo
+// test needs when a commit sha gives it no ordering.
+//
+// Detection only — this string grants no access. The verb gates on
+// CapabilityInteractive alone, exactly as it did before this string existed, so
+// a client advertising only this one is negotiated as non-interactive and
+// reaches none of it; and a client advertising interactive without this string
+// is answered exactly as before. Gating on it would cut off pyrycode-mobile,
+// which advertises interactive only (ADR 037 makes gating a per-feature
+// decision, not a default).
+// Like its neighbours this is pure vocabulary; the trust decision lives in the
+// consumer, internal/relay, not here.
+const CapabilityModelList = "model_list"
+
 // HelloServerPayload is the body of a "hello" envelope sent by the binary
 // after WS upgrade (docs/protocol-mobile.md § Message types). Role is
 // always "server".

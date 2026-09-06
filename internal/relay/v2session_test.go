@@ -4369,6 +4369,15 @@ func TestNegotiateCapabilities(t *testing.T) {
 		{"question granted", []string{protocol.CapabilityQuestion}, []string{protocol.CapabilityQuestion}},
 		{"both granted", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}},
 		{"both granted, advertised in reverse", []string{protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion}},
+		// #2172's third supported member, appended after CapabilityQuestion. The
+		// last two rows advertise all three in supported order and in reverse and
+		// expect the same output, so they fail both if model_list is missing from
+		// the supported set and if it is inserted anywhere but the end — the
+		// slices.Equal is order-sensitive and the emit order is the supported-set
+		// order, not the client's.
+		{"model list granted", []string{protocol.CapabilityModelList}, []string{protocol.CapabilityModelList}},
+		{"all three granted", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}},
+		{"all three granted, advertised in reverse", []string{protocol.CapabilityModelList, protocol.CapabilityQuestion, protocol.CapabilityInteractive}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}},
 	}
 
 	for _, tc := range tests {
@@ -4416,6 +4425,14 @@ func TestV2Session_Handshake_CapabilityNegotiation(t *testing.T) {
 		// It is also the first state in which the ack carries a capabilities key
 		// on a non-interactive conn, so assertion (b) below is correctly skipped.
 		{"question alone grants no interactive", []string{protocol.CapabilityQuestion}, []string{protocol.CapabilityQuestion}, false},
+		{"advertise all three", []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}, []string{protocol.CapabilityInteractive, protocol.CapabilityQuestion, protocol.CapabilityModelList}, true},
+		// #2172 AC#2, the direct analogue of the question row above: model_list is
+		// the second member grantable to a client that stays non-interactive. It
+		// reddens if anyone ever reduces the flag derivation in handleNoiseInit
+		// from a slices.Contains against CapabilityInteractive to a
+		// len(negotiated) > 0 test, which would hand this client the whole
+		// interactive stream on the strength of a detection-only string.
+		{"model list alone grants no interactive", []string{protocol.CapabilityModelList}, []string{protocol.CapabilityModelList}, false},
 	}
 
 	for _, tc := range tests {
