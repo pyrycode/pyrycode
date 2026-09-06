@@ -496,3 +496,39 @@ that rests on them.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — implementation
+
+Three departures from the plan as committed. None changes a contract; each
+sharpens a claim the plan stated too strongly or too loosely.
+
+1. **"The decline path writes no Debug record" was wrong as written, and the
+   corrected claim is narrower.** A declined reset produces exactly ONE record —
+   `emitUnrecognized`'s own content-free `streamsup: unrecognized payload` — because
+   the arm falls through to it. What the arm must not add is a SECOND, weaker record
+   of the same fact, and `emitConversationReset` contains no log call on any path.
+   The design decision is unchanged (no drop-reason vocabulary); only the
+   observable it is asserted through moved. `TestParser_ConversationResetDeclineAddsNoDropRecord`
+   pins the corrected form: exactly one record, it is `emitUnrecognized`'s, and no
+   attr on it carries the id.
+
+2. **The security review's SHOULD FIX is discharged, and mechanically rather than
+   by care.** Every hostile row in
+   `TestParser_ConversationResetDeclinesReachTheUnrecognizedLane` carries the value
+   the decode must yield, and the loop re-decodes each row's payload and fails if it
+   does not come back intact — so a fixture that quietly became malformed cannot
+   pass the test by failing at `json.Unmarshal` and landing on the same decline
+   path. The numeric-id row is the single row exempted, because failing the decode
+   is what it is for.
+
+3. **One test beyond the plan's list.**
+   `TestInteractiveTurnEmitterV2_ConversationResetEmitsNoFrame` asserts the other
+   half of the variant's contract on the interactive lane: no frame pushed and no
+   turn opened. The plan covered the diagnostic (AC4) and the classification (AC5)
+   but not the "deliberately unhandled" behaviour that sits between them, which is
+   the property a future `Handle` arm would silently break.
+
+Open questions 1–3 were resolved in the plan as written and none reopened during
+implementation.

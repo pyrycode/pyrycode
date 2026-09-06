@@ -1362,6 +1362,62 @@ type ApiRetry struct {
 // bridge-injected conversation id.
 type Compacting struct{ Active bool }
 
+// ConversationReset reports that claude reset the conversation and mounted a
+// fresh transcript under a new id. It maps claude's top-level
+// `conversation_reset` line (#2134) — the announcement claude writes on its own
+// stdout when a `/clear`, a plan-mode exit, or a fresh-session flow runs.
+//
+// It opens and closes no turn, exactly as ModelAnnounced does not: an
+// announcement that a conversation was replaced is not a boundary inside one.
+//
+// IT CARRIES CLAUDE'S OWN IDENTITY ON PURPOSE, and that INVERTS the rule every
+// sibling here follows — stated rather than left implicit, because a reader
+// applying the family rule would delete the only field on the struct.
+// BackgroundTaskStarted's doc and streamsup's systemTaskStartedLine both omit
+// claude's session_id precisely because claude's session identity is NOT the
+// daemon's conversation identity. Here that identity IS the payload: following
+// claude to the transcript it just mounted is the entire reason the event
+// exists. Like every variant here it still carries no conversation identity of
+// the DAEMON's — the bridge injects that.
+//
+// This variant deliberately has no consumer arm on the interactive lane
+// (cmd/pyry's interactiveTurnEmitterV2.Handle) and no wire shape
+// (turnbridge.MapEvent drops it): the boundary a client draws comes from the
+// session_transition frame, not from this event. #2135 is the consumer.
+type ConversationReset struct {
+	// NewConversationID is the id claude says it mounted the fresh transcript
+	// under — a canonical lowercase UUID stem, VERBATIM per ModelAnnounced.Model's
+	// rule: no lowercasing, no trimming, no re-formatting.
+	//
+	// CANONICAL BY CONSTRUCTION, AND NEVER EMPTY. The producer
+	// (streamsup's emitConversationReset) runs the value through
+	// transcript.ValidStem BEFORE constructing this event and emits nothing when
+	// it fails, so a consumer holds a 36-character lowercase hex-and-hyphen stem
+	// or holds no event at all. That gate is what lets a downstream resolver of
+	// <dir>/<id>.jsonl treat the value as a filename component without re-deriving
+	// the question — the alphabet excludes every path metacharacter, so traversal
+	// cannot survive it. Validating in the producer is also the only option: this
+	// package is standard-library-only (TestImportBoundary_StdlibOnly), so the
+	// predicate cannot be imported here.
+	//
+	// NO CAP AND NO Truncated REPORT — a first for a claude-derived string in this
+	// package, and the gate is the reason rather than an oversight. ValidStem is an
+	// anchored full match at a FIXED length of 36 over a 17-character alphabet,
+	// which is a strictly stronger bound than the producer's truncateField gives
+	// any sibling field. A Truncated bool beside a fixed-length field would be
+	// permanently false, which is what ModelAnnounced.Truncated's own doc argues
+	// against carrying.
+	//
+	// WELL-FORMED IS NOT AUTHENTIC, and the distinction is load-bearing for the
+	// consumer. The gate proves the id is SHAPED like a session stem; it does not
+	// prove claude was entitled to name this one. A buggy or compromised claude can
+	// announce any well-formed stem, including another session's. That is the same
+	// trust the daemon already extends to claude for session ids, so the gate adds
+	// protection without adding authority — a consumer that re-keys on this must
+	// own the authorization question itself.
+	NewConversationID string
+}
+
 // UnrecognizedSite names WHERE in the stream-json line mapping a payload was
 // found that the parser has no mapping for. String-backed so the producer's call
 // site is enum-safe and the value crosses the wire unchanged.
@@ -1449,6 +1505,7 @@ func (SlashCommandList) isTurnEvent()      {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
+func (ConversationReset) isTurnEvent()     {}
 func (Unrecognized) isTurnEvent()          {}
 
 var (
@@ -1467,5 +1524,6 @@ var (
 	_ Event = Stall{}
 	_ Event = ApiRetry{}
 	_ Event = Compacting{}
+	_ Event = ConversationReset{}
 	_ Event = Unrecognized{}
 )
