@@ -831,7 +831,7 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			m.handleInterrupt(s)
 			return
 		case protocol.TypeNewSession:
-			m.handleNewSession(s)
+			m.handleNewSession(s, probeEnv)
 			return
 		case protocol.TypeDequeueMessage:
 			m.handleDequeueMessage(s, probeEnv)

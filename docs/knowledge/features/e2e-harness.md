@@ -363,6 +363,17 @@ the two sides are seeded from two independently-chosen values, not two copies
 of one constant — pin the values the real channels are observed to disagree on,
 the way #2118's rider key and transcript id now do.
 
+**Editing the source in place still needs `-count=1` against a daemon-spawning
+suite (#2099).** `-overlay` isn't the only way a mutant fails to reach the
+spawned binary: even with `cmd/pyry`'s source edited directly on disk, a
+plain re-run of `go test -tags=e2e ./internal/e2e/...` can serve a **cached**
+pass, because nothing the Go test cache tracks — the test package's own
+sources and build inputs — changed. The daemon runs as a subprocess spawned by
+`ensurePyryBuilt`'s `go build`, which is invisible to that cache key. Verifying
+a fix this way (rather than via `PYRY_E2E_BIN`, above) needs the in-place edit
+**and** `-count=1` together; either alone can read as a mutant that never
+landed when it actually never ran.
+
 **A test-local `t.Setenv("HOME", …)` must come after `ensurePyryBuilt`/
 `ensureFakeClaudeBuilt`, not before (#1631).** Both are `sync.Once`-guarded, so
 whichever caller runs first performs the actual `go build`; every later call

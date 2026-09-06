@@ -377,6 +377,28 @@ type DequeueMessagePayload struct {
 	QueuedMsgID    uint64 `json:"queued_msg_id"`
 }
 
+// NewSessionPayload is the body of an Envelope whose Type == TypeNewSession
+// (docs/protocol-mobile.md § New session). Phone → binary direction.
+//
+// This is an inbound v2 *control* envelope, structurally like
+// DequeueMessagePayload: the v2 session manager intercepts it at dispatchAppFrame
+// before dispatch.Route, and there is NO dispatch.Route handler — resolving
+// ConversationID and rotating that conversation's session is the handler's (#2099)
+// job. Unlike its siblings the whole payload is OPTIONAL: the frame carried none
+// at all until #2099, so an un-upgraded client sends a bare envelope and MUST keep
+// working.
+//
+// ConversationID is untrusted phone input and is a validated LOOKUP KEY, never
+// authorization and never a path component — the rule docs/protocol-mobile.md
+// already publishes for request_attachment and, since #2142, for attachment_chunk.
+// Absent, empty, or a body that does not decode at all are ONE value and one
+// meaning: rotate the conversation the daemon's own cursor points at, which is
+// the pre-#2099 behaviour verbatim. omitempty keeps that the shape a client with
+// nothing to name actually emits, so the wire has one canonical bare form.
+type NewSessionPayload struct {
+	ConversationID string `json:"conversation_id,omitempty"`
+}
+
 // SessionErrorPayload is the body of an Envelope whose Type ==
 // TypeSessionError (docs/protocol-mobile.md § Error codes). Binary → phone
 // direction; the unsolicited, conversation-scoped frame the daemon emits when
