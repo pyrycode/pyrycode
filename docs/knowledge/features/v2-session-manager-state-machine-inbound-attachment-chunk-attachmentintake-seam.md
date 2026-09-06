@@ -14,7 +14,7 @@ relay (spec-stage security review, verdict PASS).
 
 ## The three-way answer is not a two-way answer
 
-`AttachmentIntake.Receive(connID, chunk) (attachmentID string, stored bool, err error)`
+`AttachmentIntake.Receive(connID, conversationID string, chunk) (attachmentID string, stored bool, err error)`
 is `attachments.Intake.Receive` (see
 [Chunk intake driver](attachments-package-intake-driver.md)) behind a
 consumer-declared seam, alongside `ReleaseConn`. The trap `Receive`'s own doc
@@ -34,20 +34,50 @@ for why a payload nesting a slice (`AttachmentChunkPayload`'s `data`) can't
 safely reuse that idiom, and for the type-mismatch-not-garbled-bytes shape any
 fixture for this class of failure has to take.
 
-## The sentinel → wire-code map picked two open codes
+## The sentinel → wire-code map picked one open code, then #2143 retired it
 
-Ten of the twelve reachable `attachments` sentinels were already committed to
-a `attachment.*` code by earlier doc blocks; this ticket picked the last two,
+\#1897 picked the two sentinel→code mappings left open by earlier doc blocks,
 both by folding into the existing seven rather than minting new vocabulary:
 `ErrUnknownUpload` → `attachment.invalid_chunk` (a transfer that expired or
 was released, not a malformed chunk, but the closest existing class — "no
-transfer to place this chunk against"), `ErrNoConversation` →
+transfer to place this chunk against"), and `ErrNoConversation` →
 `attachment.storage_failed` (a verified upload with nowhere to file it,
 clears the moment the daemon routes to a conversation). See
 [Error codes § the seven `attachment.*` codes](protocol-package-constants-codes-go-error-codes-21.md)
-for the full retryability reasoning — it generalizes past this ticket and is
-recorded there, not duplicated here. No code answers no arm: an unmapped error
-still gets `attachment.storage_failed` rather than being dropped.
+for `ErrUnknownUpload`'s full retryability reasoning — it generalizes past
+this ticket and is recorded there, not duplicated here. No code answers no
+arm: an unmapped error still gets `attachment.storage_failed` rather than
+being dropped.
+
+`ErrNoConversation`'s mapping did not survive #2143. The sentinel and the
+cursor resolver that raised it are both gone — see
+[Chunk intake driver](attachments-package-intake-driver.md) § "The
+conversation is resolved once, on the completing chunk only" — and its
+condition is refused one step earlier, in this handler, before `Receive` is
+even called.
+
+## The conversation gate runs before the seam, on every chunk
+
+`handleAttachmentChunk` gates `chunk.ConversationID` in two ordered steps
+before it reaches `AttachmentIntake.Receive`, copying
+`handleRequestAttachment`'s ordering and its two-reasons-behind-one-code
+shape: empty (`""`) is refused first, then a non-empty id is checked against
+`KnownConversation`. Both arms answer the same wire code,
+`attachment.invalid_chunk` — not `attachment.storage_failed`, whose published
+row means a *verified* attachment could not be written to the host, which is
+not true of a chunk refused before verification has even started. The two
+causes are distinguished only in the daemon's own log, by a daemon-authored
+`reason` string chosen at the call site; there is no third arm that falls
+back to the follow-active cursor.
+
+Because the gate lives in the handler rather than in `Intake`, it runs once
+per **chunk**, not once per transfer — a transfer naming an unusable
+conversation is refused on its first chunk, before any upload slot is
+consumed and before any byte is admitted, rather than after every byte has
+crossed the wire and the completing chunk finally reaches `EnsureDir`. The
+conversation id is not logged on either refusal arm, matching
+`handleRequestAttachment`: it has not passed the gate, so it is not yet
+treated as safe to log.
 
 ## Teardown releases what the worker might still be holding
 

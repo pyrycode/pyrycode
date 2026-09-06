@@ -352,16 +352,24 @@ var ErrNotFound = errors.New("attachments: no stored attachment for this convers
 // path cannot be re-derived from the id without reading the directory back.
 //
 // PRECONDITION, and it carries the whole security property: conversationID MUST
-// be the conversation the authenticated session is already on, never one a
-// client asserted. This function cannot check that, and a caller that gets it
-// wrong defeats every check below — the pair then genuinely does resolve inside
-// the conversation it named. docs/protocol-mobile.md § Naming a message's
-// attachments is explicit that confinement to the message's own conversation —
-// not attachment_id's shape, and not its randomness — is what keeps an
-// identifier that document repeatedly calls NOT a capability from becoming one.
-// It is also why attachment_chunk carries no conversation_id at all. Intake
-// reaches its own conversation through a resolver callback rather than off the
-// wire, which is the shape to copy.
+// already have been validated against the daemon's own registry — a lookup key,
+// never a value trusted as sent. This function cannot check that, and a caller
+// that gets it wrong defeats every check below — the pair then genuinely does
+// resolve inside the conversation it named. docs/protocol-mobile.md § Naming a
+// message's attachments is explicit that confinement to the message's own
+// conversation — not attachment_id's shape, and not its randomness — is what
+// keeps an identifier that document repeatedly calls NOT a capability from
+// becoming one.
+//
+// BOTH LEGS DISCHARGE IT THE SAME WAY, and that is newer than it reads.
+// handleRequestAttachment always passed a CLIENT-ASSERTED id that
+// KnownConversation had validated; the upload leg reached its conversation
+// through a follow-active resolver instead, and this block used to name that
+// asymmetry as the shape to copy. #2143 removed it: attachment_chunk carries a
+// conversation_id (#2142), handleAttachmentChunk gates it through the same
+// membership check, and Intake.Receive takes the validated destination as a
+// per-transfer argument. So the rule is one rule — validated by the caller, on
+// both legs — rather than a rule and an exception.
 //
 // IT CREATES NOTHING, and that is the shape of the function rather than a guard
 // inside it: where EnsureDir creates the anchor before resolving it, this one

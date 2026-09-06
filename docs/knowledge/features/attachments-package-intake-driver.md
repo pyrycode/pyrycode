@@ -7,13 +7,15 @@ sentinels to map rather than four primitives to order itself. It was the
 package's first production caller (see § "In-flight upload registry" and
 the top-level overview) before it had one of its own: #1897 declared the
 `AttachmentIntake` seam interface `Receive`/`ReleaseConn` satisfy, built the
-production conversation resolver, and wired `internal/relay`'s
+production conversation resolver (retired by #2143 — see § "The conversation
+is resolved once, on the completing chunk only" below), and wired `internal/relay`'s
 `appFrameWorker` as this package's first caller from *outside* it — see
 [Inbound `attachment_chunk`](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md).
 It also picked the two open sentinel→code mappings this package's doc blocks
-left for it, `ErrUnknownUpload` and `ErrNoConversation` below — see
+left for it: `ErrUnknownUpload` below, and `ErrNoConversation`, deleted by
+\#2143 along with the resolver that raised it — see
 [Error codes § the seven `attachment.*` codes](protocol-package-constants-codes-go-error-codes-21.md)
-for the choices and their retryability rationale.
+for `ErrUnknownUpload`'s retryability rationale.
 
 `Intake` **owns** its `Registry` rather than taking one, and that ownership
 is a security property, not an ergonomics choice: `maxInFlightUploads` is a
@@ -61,32 +63,56 @@ each layer's own sentinel.
 
 ## The conversation is resolved once, on the completing chunk only
 
-`Registry` has nowhere to stash a per-transfer conversation id, and adding
-one is a different slice — so `Receive` cannot resolve a conversation at
-admission even if it wanted to. The forced consequence, accepted rather
-than mitigated: a phone that switches conversations mid-upload files its
-attachment under the *new* one, and an upload begun while the daemon is on
-no conversation is refused only once its **last** chunk arrives, after
-every byte has already been transmitted. Both are stated in `Intake`'s doc
-block rather than engineered around.
+`Registry` has nowhere to stash a per-transfer conversation id, so `Receive`
+still only *consumes* the conversation on the completing chunk, when it calls
+`EnsureDir`/`Store` — unchanged since #1896. What #2143 changed is where that
+value comes from and when it is validated.
 
-The resolver is a **construction-time** dependency (`func() (conversations.ConversationID, bool)`), never a `Receive` parameter — which is what lets
-the security property `docs/protocol-mobile.md` § Attachments states
-(`attachment_chunk` carries no `conversation_id`, so a client cannot steer
-bytes into another conversation) hold **structurally**: there is no
-conversation field on `Receive`'s signature for a frame's value to reach,
-on any path, rather than a runtime check that could be skipped by a future
-edit.
+Through #2142, `Receive` took no conversation argument at all: `NewIntake`
+closed over a construction-time resolver (`func() (conversations.ConversationID,
+bool)`) reading the daemon's follow-active cursor, and the doc block argued
+this made the security property `docs/protocol-mobile.md` § Attachments states
+(a client cannot steer bytes into another conversation, because
+`attachment_chunk` carries no `conversation_id`) hold structurally rather than
+by a runtime check. A resolver answering `!ok`, one answering `("", true)`, and
+a `nil` resolver all collapsed into one sentinel, `ErrNoConversation`, rather
+than reaching `EnsureDir` as `""` — which would have told a client its *own*
+attachment id was malformed when the real fault was that the daemon had routed
+to no conversation. That resolver could only name a conversation a
+`send_message` had already routed to, so an attachment added before a
+conversation's first message could never be stored, and *send in A, send in B,
+return to A and attach* silently filed the bytes under B — #2143 exists to fix
+both.
 
-A resolver answering `!ok`, a resolver answering `("", true)`, and a `nil`
-resolver are collapsed into the same refusal (`ErrNoConversation`), not
-handed to `EnsureDir` as `""`. `EnsureDir("")` would answer `ErrInvalidID`
-— telling a client its *own* attachment id was malformed when the actual
-fault is that the daemon has routed to no conversation at all.
-`ErrNoConversation` is a distinct sentinel from `ErrInvalidID` for exactly
-the reason `ErrTooManyUploads` is distinct from `ErrUploadTooLarge`:
-retryability inverts. A malformed id never clears by itself; a daemon that
-is on no conversation clears the moment it routes to one.
+\#2143 deleted the resolver, `ErrNoConversation`, and the `conversation` field
+together — there is no other producer of that sentinel left to re-scope.
+`Receive` now takes `conversationID string` as a per-transfer parameter and
+validates none of it itself: that precondition belongs to the caller, in
+exactly the words `V2SessionConfig.HistoryPage` already uses for its own
+caller. `internal/relay`'s `handleAttachmentChunk` discharges it by gating
+every `attachment_chunk` through the `KnownConversation` membership seam
+**before** the frame reaches this package (see
+[Inbound `attachment_chunk`](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md))
+— run once per chunk rather than once per transfer, so a transfer naming an
+unusable conversation is refused on its first chunk instead of after every
+byte has crossed the wire. `KnownConversation` is a pure membership check,
+which matters here specifically: a session router additionally refuses a
+known conversation with no bound session, and a never-messaged conversation
+is exactly the case this ticket exists to accept.
+
+The one consequence #2143 deliberately left standing: since the destination
+is still only *consumed* on the completing chunk, a phone that switches
+conversations mid-upload still files under the *new* one — now
+registry-validated rather than cursor-read. Closing that needs the registry
+to record a destination at admission, which is #2146's.
+
+**`EnsureDir`'s `conversations.ValidID` check moved from belt to backstop.**
+Before #2143 the conversation id it validated always came from the daemon's
+own trusted cursor, so the check was defense in depth. Since #2143 it is the
+client-asserted id off the wire, one layer below the `KnownConversation`
+gate — so it is now the deterministic barrier standing between a remote
+string and a path component if that gate is ever removed or miswired, not a
+redundant second opinion on a value the daemon already trusted.
 
 **Two conns sharing one `attachment_id` in one conversation collide
 last-writer-wins, atomically** — see § "Writing attachment bytes" above for

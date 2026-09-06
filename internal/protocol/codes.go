@@ -1089,8 +1089,9 @@ const (
 // upload could only steer bytes elsewhere by naming a conversation — is reversed
 // there rather than qualified here. Publishing that field changed no trust level,
 // for the reason the rest of this paragraph gives, and it left the two ids doing
-// different work: this one selects which conversation's file to read, the chunk's is
-// inert until #2143. The safety was never in the id's shape or its randomness in
+// different work: this one selects which conversation's file to read, the chunk's
+// decides which conversation an upload is filed under (#2143). The safety was never
+// in the id's shape or its randomness in
 // either case — it is CONFINEMENT: the id is
 // a lookup key validated against the daemon's own registry before it reaches a path
 // join, never a value trusted as sent, and naming a conversation is not

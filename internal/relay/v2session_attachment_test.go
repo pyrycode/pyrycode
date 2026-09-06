@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,12 +27,19 @@ import (
 // assert is wrong about it).
 const (
 	atTestAttachmentID = "0f1a2b3c-4d5e-4f60-8a9b-1897cafe0001" // loggable; canonical UUIDv4
-	atTestFilename     = "ZZ1897FILENAMEZZ.bin"                 // NEVER logged, never replied
-	atTestDigest       = "ZZ1897DIGESTZZ"                       // NEVER logged, never replied
-	atTestData         = "ZZ1897CHUNKBYTESZZ"                   // NEVER logged, never replied
-	atTestHostPath     = "/var/ZZ1897HOSTPATHZZ/attachments"    // NEVER logged, never replied
-	atTestConnB        = "conn-1897-b"
-	atTestChunkEnvID   = 8971
+	// The conversation the fake daemon hosts, and one it does not. Both are
+	// canonical UUIDv4s so the shape check downstream cannot be what separates
+	// them — only registry membership can, which is the seam #2143 gates on. The
+	// foreign one carries a scan sentinel because it must appear in NO log line:
+	// unlike the attachment id, a conversation id is never shape-validated here.
+	atTestConvID        = "0f1a2b3c-4d5e-4f60-8a9b-2143cafe0001"
+	atTestForeignConvID = "0f1a2b3c-4d5e-4f60-8a9b-2143beef0002"
+	atTestFilename      = "ZZ1897FILENAMEZZ.bin"              // NEVER logged, never replied
+	atTestDigest        = "ZZ1897DIGESTZZ"                    // NEVER logged, never replied
+	atTestData          = "ZZ1897CHUNKBYTESZZ"                // NEVER logged, never replied
+	atTestHostPath      = "/var/ZZ1897HOSTPATHZZ/attachments" // NEVER logged, never replied
+	atTestConnB         = "conn-1897-b"
+	atTestChunkEnvID    = 8971
 )
 
 // attachmentCall captures one AttachmentIntake.Receive call. The whole decoded
@@ -39,7 +47,11 @@ const (
 // crossed intact instead of proving only that something crossed.
 type attachmentCall struct {
 	connID string
-	chunk  protocol.AttachmentChunkPayload
+	// conversationID is what the HANDLER passed, recorded separately from the
+	// chunk it came off so a row can prove the gate handed the seam the frame's
+	// own destination rather than some other value it had to hand.
+	conversationID string
+	chunk          protocol.AttachmentChunkPayload
 }
 
 // fakeAttachmentIntake is a relay-side test double for AttachmentIntake. It
@@ -60,9 +72,9 @@ type fakeAttachmentIntake struct {
 	block <-chan struct{}
 }
 
-func (f *fakeAttachmentIntake) Receive(connID string, chunk protocol.AttachmentChunkPayload) (string, bool, error) {
+func (f *fakeAttachmentIntake) Receive(connID, conversationID string, chunk protocol.AttachmentChunkPayload) (string, bool, error) {
 	f.mu.Lock()
-	f.calls = append(f.calls, attachmentCall{connID: connID, chunk: chunk})
+	f.calls = append(f.calls, attachmentCall{connID: connID, conversationID: conversationID, chunk: chunk})
 	block, storedID, stored, err := f.block, f.storedID, f.stored, f.err
 	f.mu.Unlock()
 	if block != nil {
@@ -106,19 +118,29 @@ func (f *fakeAttachmentIntake) callCount() int {
 // the conn's appFrameWorker rather than by calling the handler directly.
 func startAttachmentConn(t *testing.T, intake AttachmentIntake) (*V2SessionManager, chan protocol.RoutingEnvelope, *noise.CipherState, *noise.CipherState, *v2Recorder, *syncLogBuffer, func()) {
 	t.Helper()
+	return startAttachmentConnKnowing(t, intake, func(id string) bool { return id == atTestConvID })
+}
+
+// startAttachmentConnKnowing is startAttachmentConn with the membership seam under
+// the test's control, which is what the #2143 gate rows need: production wires a
+// conversations.Registry lookup here, and the two postures worth driving are "this
+// one conversation is hosted" and "the seam is not wired at all".
+func startAttachmentConnKnowing(t *testing.T, intake AttachmentIntake, known func(string) bool) (*V2SessionManager, chan protocol.RoutingEnvelope, *noise.CipherState, *noise.CipherState, *v2Recorder, *syncLogBuffer, func()) {
+	t.Helper()
 	respPriv, respPub := genV2Keypair(t)
 	reg := v2PairedRegistry(t, v2TestToken)
 	logger, logBuf := bufferLogger()
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:           frames,
-		Outbound:         rec.outbound,
-		StaticPriv:       respPriv,
-		Devices:          reg,
-		ServerID:         v2TestServerID,
-		Logger:           logger,
-		AttachmentIntake: intake,
+		Frames:            frames,
+		Outbound:          rec.outbound,
+		StaticPriv:        respPriv,
+		Devices:           reg,
+		ServerID:          v2TestServerID,
+		Logger:            logger,
+		AttachmentIntake:  intake,
+		KnownConversation: known,
 	})
 	t.Cleanup(stop)
 	send, recv := openModalConn(t, mgr, frames, rec, respPub, v2TestConnID, []string{protocol.CapabilityInteractive})
@@ -129,15 +151,22 @@ func startAttachmentConn(t *testing.T, intake AttachmentIntake) (*V2SessionManag
 // never-log strings, so every log scan in this file runs against a frame that
 // actually contained them.
 func chunkPayload(index, total int) string {
+	return chunkPayloadIn(atTestConvID, index, total)
+}
+
+// chunkPayloadIn is chunkPayload with the destination under the caller's control,
+// for the rows that drive a conversation the daemon does not host.
+func chunkPayloadIn(conversationID string, index, total int) string {
 	p, err := json.Marshal(protocol.AttachmentChunkPayload{
-		AttachmentID: atTestAttachmentID,
-		Index:        index,
-		TotalChunks:  total,
-		Filename:     atTestFilename,
-		MimeType:     "application/octet-stream",
-		Size:         int64(len(atTestData)),
-		SHA256:       atTestDigest,
-		Data:         []byte(atTestData),
+		ConversationID: conversationID,
+		AttachmentID:   atTestAttachmentID,
+		Index:          index,
+		TotalChunks:    total,
+		Filename:       atTestFilename,
+		MimeType:       "application/octet-stream",
+		Size:           int64(len(atTestData)),
+		SHA256:         atTestDigest,
+		Data:           []byte(atTestData),
 	})
 	if err != nil {
 		panic(err) // closed struct of strings/ints; cannot fail
@@ -294,7 +323,6 @@ func TestV2Session_AttachmentChunk_SentinelsMapToWireCodes(t *testing.T) {
 		{"invalid id", attachments.ErrInvalidID, rejectStorageFailed},
 		{"not contained", attachments.ErrNotContained, rejectStorageFailed},
 		{"write failed", attachments.ErrWriteFailed, rejectStorageFailed},
-		{"#1897 picks: no conversation", attachments.ErrNoConversation, rejectStorageFailed},
 		// Answered rather than dropped: a future sentinel this switch has not
 		// learned about is exactly when a silent drop would be worst.
 		{"unmapped error", errors.New("some future sentinel"), rejectStorageFailed},
@@ -390,6 +418,132 @@ func TestV2Session_AttachmentChunk_DecodeFailure_Rejected(t *testing.T) {
 		if strings.Contains(logBuf.String(), banned) {
 			t.Errorf("decode-failure log carries %q; it must carry neither the payload nor a partial id", banned)
 		}
+	}
+}
+
+// TestV2Session_AttachmentChunk_UnusableConversation_RefusedBeforeTheSeam is
+// #2143's gate. Empty, foreign and unwired-seam all answer the SAME published
+// upload code, and none of them reaches the intake.
+//
+// THE BINDING ASSERTION IS THE CALL COUNT. A build that validated after Receive —
+// or that fell back to the follow-active cursor on a miss — would still emit a
+// reject and still pass an assertion that only read the reply, while having filed
+// the bytes somewhere. Zero calls is what makes this a gate.
+//
+// THE CODE IS NOT storage_failed, and asserting the negative is the point: that
+// row is published for a VERIFIED attachment the host could not write, and
+// answering it here would keep the upload leg blaming the host for a claim the
+// client got wrong. One code across all three rows is also deliberate — two would
+// make the upload leg the conversation-existence oracle the retrieval leg closes.
+func TestV2Session_AttachmentChunk_UnusableConversation_RefusedBeforeTheSeam(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// known is the membership seam. A nil one is the unwired posture, which
+		// must fail CLOSED rather than waving every conversation through.
+		known      func(string) bool
+		payload    string
+		wantReason string
+	}{
+		{
+			name:       "conversation id is absent",
+			known:      func(id string) bool { return id == atTestConvID },
+			payload:    chunkPayloadIn("", 0, 1),
+			wantReason: "conversation id is absent or empty",
+		},
+		{
+			name:       "conversation is not one this daemon hosts",
+			known:      func(id string) bool { return id == atTestConvID },
+			payload:    chunkPayloadIn(atTestForeignConvID, 0, 1),
+			wantReason: "conversation is not one this daemon hosts",
+		},
+		{
+			// Fail-closed: a daemon that wired no membership seam hosts nothing
+			// this handler can prove, so it files nothing.
+			name:       "membership seam is unwired",
+			known:      nil,
+			payload:    chunkPayload(0, 1),
+			wantReason: "conversation is not one this daemon hosts",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			intake := &fakeAttachmentIntake{}
+			_, frames, send, recv, rec, logBuf, _ := startAttachmentConnKnowing(t, intake, tt.known)
+
+			sendChunkFrame(t, frames, send, atTestChunkEnvID, tt.payload)
+			reply := soleReply(t, rec, recv)
+
+			if n := intake.callCount(); n != 0 {
+				t.Errorf("Receive called %d times for an unusable destination, want 0: "+
+					"the refusal must precede the seam, not follow it", n)
+			}
+			got := decodeErrorPayload(t, reply)
+			if got.Code != protocol.CodeAttachmentInvalidChunk {
+				t.Errorf("code = %q, want %q", got.Code, protocol.CodeAttachmentInvalidChunk)
+			}
+			if got.Code == protocol.CodeAttachmentStorageFailed {
+				t.Errorf("code = %q: nothing was verified and nothing was written, so the host "+
+					"is not what failed", got.Code)
+			}
+			if got.Retryable {
+				t.Errorf("retryable = true, want false: the same frames reproduce this refusal")
+			}
+			if got.Message != msgAttachmentInvalidChunk {
+				t.Errorf("message = %q, want the static %q", got.Message, msgAttachmentInvalidChunk)
+			}
+			if reply.InReplyTo == nil || *reply.InReplyTo != atTestChunkEnvID {
+				t.Errorf("in_reply_to = %v, want %d", reply.InReplyTo, atTestChunkEnvID)
+			}
+
+			// One wire code, three daemon-authored reasons: indistinguishable to
+			// a client, diagnosable to an operator.
+			waitForLogContains(t, logBuf, "reason="+strconv.Quote(tt.wantReason))
+			// The conversation id is never shape-validated here, so it appears in
+			// no record on any arm — the log-injection shape § Attachments
+			// forbids. atTestConvID is excluded: the unwired row legitimately
+			// carries a hosted id nothing rejected it for.
+			if strings.Contains(logBuf.String(), atTestForeignConvID) {
+				t.Errorf("refusal log names the requested conversation id, which this handler "+
+					"validates for membership and never for shape: %q", logBuf.String())
+			}
+		})
+	}
+}
+
+// TestV2Session_AttachmentChunk_HandsTheSeamTheNamedConversation is the gate's
+// positive half, and it is what stops the rows above from passing under a build
+// that simply refuses everything. The destination the seam receives is read off
+// the RECORDED CALL rather than off the chunk it came with, so a handler that
+// passed some other conversation — the follow-active cursor, say — reddens here
+// even though the frame that crossed is intact.
+func TestV2Session_AttachmentChunk_HandsTheSeamTheNamedConversation(t *testing.T) {
+	t.Parallel()
+
+	intake := &fakeAttachmentIntake{storedID: atTestAttachmentID, stored: true}
+	_, frames, send, recv, rec, _, _ := startAttachmentConn(t, intake)
+
+	sendChunkFrame(t, frames, send, atTestChunkEnvID, chunkPayload(0, 1))
+	if got := soleReply(t, rec, recv); got.Type != protocol.TypeAttachmentStored {
+		t.Fatalf("reply type = %q, want %q", got.Type, protocol.TypeAttachmentStored)
+	}
+
+	calls := intake.callSnapshot()
+	if len(calls) != 1 {
+		t.Fatalf("Receive called %d times, want 1", len(calls))
+	}
+	if calls[0].conversationID != atTestConvID {
+		t.Errorf("Receive conversationID = %q, want %q (the id the frame named)",
+			calls[0].conversationID, atTestConvID)
+	}
+	if calls[0].chunk.ConversationID != atTestConvID {
+		t.Errorf("the chunk crossed with conversation_id %q, want %q",
+			calls[0].chunk.ConversationID, atTestConvID)
 	}
 }
 
@@ -581,13 +735,14 @@ func TestV2Session_AttachmentChunk_RunsOffRun(t *testing.T) {
 	frames := make(chan protocol.RoutingEnvelope, 8)
 	rec := &v2Recorder{}
 	mgr, stop := startManager(t, V2SessionConfig{
-		Frames:           frames,
-		Outbound:         rec.outbound,
-		StaticPriv:       respPriv,
-		Devices:          reg,
-		ServerID:         v2TestServerID,
-		Logger:           logger,
-		AttachmentIntake: intake,
+		Frames:            frames,
+		Outbound:          rec.outbound,
+		StaticPriv:        respPriv,
+		Devices:           reg,
+		ServerID:          v2TestServerID,
+		Logger:            logger,
+		AttachmentIntake:  intake,
+		KnownConversation: func(id string) bool { return id == atTestConvID },
 	})
 	t.Cleanup(stop)
 

@@ -14,9 +14,17 @@ below: `EnsureDir` has no accumulator state to latch or discard, so the
 discard-semantics table doesn't apply to it.
 
 Both ids are validated against `conversations.ValidID` before any filesystem
-call — `attachment_id` is client-chosen and its 64-byte wire ceiling is
-explicitly not a defence, so containment comes entirely from the resolution
-check, never from the id being hard to guess. The check itself is
+call. `attachment_id` has always been client-chosen, and its 64-byte wire
+ceiling is explicitly not a defence, so containment comes entirely from the
+resolution check, never from the id being hard to guess. Since #2143 the
+conversation id is client-asserted too: before that ticket it only ever
+carried the daemon's own trusted follow-active cursor value, so this half of
+the check was belt-and-suspenders; it now carries whatever `internal/relay`'s
+`KnownConversation` gate validated one layer up (see
+[Chunk intake driver](attachments-package-intake-driver.md) § "The
+conversation is resolved once, on the completing chunk only"), so if that
+gate is ever removed or miswired this check is what stands between a remote
+string and a path component. The check itself is
 `candidate == want` (full-path equality against a destination built textually
 beneath the `EvalSymlinks`-resolved instance directory), not a
 `filepath.Rel`-style "is it under the root" test — equality is what refuses a
@@ -77,15 +85,22 @@ both of those to `rejectStorageFailed`, and a retrieval dispatch site sharing
 either mapping would answer the wrong wire code for a lookup refusal.
 
 **The precondition this function cannot check is the one that matters most.**
-`conversationID` must be the conversation the authenticated session is
-already on, never one a client asserted — every containment step still
-passes for a client-supplied conversation id, because the pair genuinely
-resolves inside the conversation it names. `docs/protocol-mobile.md` § Naming
-a message's attachments is explicit that confinement to the message's own
-conversation, not `attachment_id`'s shape or randomness, is what keeps it
-from becoming a capability; `Intake`'s resolver-callback shape (see § "Chunk
-intake driver" in the package overview) is the pattern a caller should copy
-rather than taking a conversation id off the wire directly.
+`conversationID` must have already passed `KnownConversation` in the
+caller — `handleRequestAttachment` for retrieval, and since #2143
+`handleAttachmentChunk` for upload — never trusted because of *where* it
+came from. Before #2143 this paragraph read "must be the conversation the
+authenticated session is already on, never one a client asserted": true of
+`EnsureDir`'s cursor-driven caller at the time, but already false of
+`handleRequestAttachment`, which has always passed a client-asserted,
+gate-validated id. #2143 made both callers converge on one discipline — a
+per-transfer, caller-validated string, never one read off the daemon's own
+routing state — so the precondition is now the same on both legs.
+`docs/protocol-mobile.md` § Naming a message's attachments is explicit that
+confinement to the message's own conversation, not `attachment_id`'s shape or
+randomness, is what keeps it from becoming a capability; `KnownConversation`
+plus this function's containment check is what delivers that for both
+retrieval and upload (see [Chunk intake driver](attachments-package-intake-driver.md)
+for the upload side).
 
 - **A containment fixture that leaves the escaped target empty can pass for
   the wrong reason.** The sibling-conversation symlink row — the one row that

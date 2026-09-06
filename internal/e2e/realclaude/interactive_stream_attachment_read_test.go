@@ -144,9 +144,10 @@ const attachReadFilename = "pyrycode-2039-token.txt"
 const attachReadTokenBytes = 12
 
 // The two request-envelope ids the run needs to correlate replies on. The
-// cursor-stamp turn takes 2, so these start at 3; the attachment_stored reply names
-// attachReadChunkEnvID in its in_reply_to, and the message's ack names
-// attachReadSendEnvID.
+// attachment_stored reply names attachReadChunkEnvID in its in_reply_to, and the
+// message's ack names attachReadSendEnvID. They keep the values they held when a
+// cursor-stamp turn still occupied 2: an envelope id is only a correlation handle,
+// so the gap costs nothing and renumbering would churn the file for no assertion.
 const (
 	attachReadChunkEnvID uint64 = 3
 	attachReadSendEnvID  uint64 = 4
@@ -165,25 +166,25 @@ func TestInteractiveStreamAttachmentRead(t *testing.T) {
 	token := mintAttachmentToken(t)
 	file, digest := writeTokenFile(t, token)
 
-	// ── Precondition: route one turn so the follow-active cursor is non-empty ──
-	//
-	// attachments.Intake resolves the conversation once per COMPLETING chunk over
-	// that cursor; before any route it is empty, the completing chunk answers
-	// ErrNoConversation, and the dispatch arm maps it to attachment.storage_failed —
-	// a success-shaped stream that stores nothing. handlers.SendMessage stamps the
-	// cursor inside Route, on the successful-route path, before it enqueues.
-	//
-	// DRAINED TO TERMINAL IDLE rather than left running, unlike #1898's fake-daemon
-	// counterpart: with a real claude an undrained turn's frames interleave with
-	// everything after, and drainTurnText below would then have to tell this turn's
-	// deltas from the one under test. drainForCompletedTurn also carries the
-	// package's two standing alarms — unrecognized_message and rate_limited — so the
-	// stamp turn is a sentinel for free.
-	sealSendMessage(t, h.phone, h.initSend, 2, attachReadConvID, "m-stamp",
-		fmt.Sprintf("Reply with a single short word. run=%d", nonce))
-	drainForCompletedTurn(t, h.phone, h.initRecv, attachReadConvID, perTurnReplyBudget)
-
 	// ── The upload: one chunk, then the reply that says the bytes are on the host ──
+	//
+	// NO TURN IS ROUTED FIRST since #2143. This run used to drive a whole stamp turn
+	// against a real claude — a live prompt and its full drain — for no reason but to
+	// stamp the follow-active cursor attachments.Intake read the destination from;
+	// before any route that cursor is empty, the completing chunk answered
+	// ErrNoConversation, and the dispatch arm mapped it to attachment.storage_failed:
+	// a success-shaped stream that stored nothing. The chunk names its conversation
+	// now, so the upload stands alone and the live budget goes to the turn under test.
+	//
+	// THE TWO STANDING ALARMS WENT WITH IT, and that is deliberate rather than an
+	// oversight. drainForCompletedTurn owns the package's unrecognized_message and
+	// rate_limited arms, and the stamp turn inherited them for free — but it was the
+	// STAMP turn they watched. The turn this file actually asserts on drains through
+	// drainTurnText below, which never carried either arm and still does not. So what
+	// went away is a sentinel over a throwaway prompt, not coverage of anything under
+	// test. Re-arming drainTurnText would be NEW coverage dressed as a restoration,
+	// and no run has yet shown it is wanted; interactive_stream_liveness_test.go
+	// stays the package's owner of both alarms.
 	uploadSingleChunk(t, h, attachReadChunkEnvID, file, digest)
 	awaitAttachmentStored(t, h, attachReadChunkEnvID, 30*time.Second)
 	requireStoredAttachment(t, h.home)
@@ -284,10 +285,13 @@ func writeTokenFile(t *testing.T, token string) (file []byte, digest string) {
 // receiver's own division-then-remainder form, never (size + bound - 1) / bound,
 // which wraps.
 //
-// attachment_chunk carries no conversation_id, by design: the bytes land in the
-// conversation the authenticated v2 session is already on. That is why the caller
-// routes a turn first, and it is also why nothing a client sends could steer these
-// bytes into another conversation's directory.
+// attachment_chunk NAMES its conversation (#2142), and since #2143 the daemon files
+// the bytes under exactly that one — validated against its own registry before the
+// id becomes a path component, never trusted as sent. That is why this caller no
+// longer routes a turn first: the destination is on the frame rather than in a
+// cursor only a successful send_message stamps. Naming a conversation is not
+// authorization; confinement is the registry check plus attachments.EnsureDir
+// refusing an escaping directory, and it did not move.
 func uploadSingleChunk(t *testing.T, h *perConvHarness, envID uint64, file []byte, digest string) {
 	t.Helper()
 	totalChunks := len(file) / protocol.MaxAttachmentChunkBytes
@@ -305,14 +309,15 @@ func uploadSingleChunk(t *testing.T, h *perConvHarness, envID uint64, file []byt
 		Type: protocol.TypeAttachmentChunk,
 		TS:   time.Now().UTC(),
 		Payload: mustJSON(t, protocol.AttachmentChunkPayload{
-			AttachmentID: attachReadAttachmentID,
-			Index:        0,
-			TotalChunks:  totalChunks,
-			Filename:     attachReadFilename,
-			MimeType:     "text/plain",
-			Size:         int64(len(file)),
-			SHA256:       digest,
-			Data:         file,
+			ConversationID: attachReadConvID,
+			AttachmentID:   attachReadAttachmentID,
+			Index:          0,
+			TotalChunks:    totalChunks,
+			Filename:       attachReadFilename,
+			MimeType:       "text/plain",
+			Size:           int64(len(file)),
+			SHA256:         digest,
+			Data:           file,
 		}),
 	})
 }
@@ -322,10 +327,13 @@ func uploadSingleChunk(t *testing.T, h *perConvHarness, envID uint64, file []byt
 //
 // It is a local drain rather than drainForReply because drainForReply skips a
 // TypeError silently and would report a bare timeout on the most diagnostic frame in
-// the run. Here the refusal CODE is the whole diagnostic: storage_failed points at
-// the follow-active cursor (the caller's routed turn never stamped it),
-// invalid_chunk at the declaration arithmetic, integrity_failed at the digest or the
-// assembled length.
+// the run. Here the refusal CODE is the whole diagnostic, and since #2143 it reads:
+// invalid_chunk is EITHER the declaration arithmetic OR handleAttachmentChunk's
+// destination gate — the conversation named on the chunk is empty, unknown, or not
+// one this daemon hosts — and that second cause is the one this ticket newly makes
+// reachable, so check it first; storage_failed is the host write itself (EnsureDir or
+// Store) and no longer says anything about the follow-active cursor, which this path
+// stopped reading; integrity_failed is the digest or the assembled length.
 func awaitAttachmentStored(t *testing.T, h *perConvHarness, envID uint64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -354,12 +362,15 @@ func awaitAttachmentStored(t *testing.T, h *perConvHarness, envID uint64, timeou
 			if err := json.Unmarshal(env.Payload, &ep); err != nil {
 				t.Fatalf("the upload was refused and its error payload did not decode: %v", err)
 			}
-			t.Fatalf("the upload was refused with code %q (retryable=%v); storage_failed points at the "+
-				"follow-active cursor, invalid_chunk at the declaration arithmetic, integrity_failed "+
-				"at the digest", ep.Code, ep.Retryable)
+			t.Fatalf("the upload was refused with code %q (retryable=%v); invalid_chunk is either the "+
+				"declaration arithmetic or the destination gate — the conversation this chunk named "+
+				"is empty, unknown, or not one the daemon hosts, so check seedBoundConversation — "+
+				"storage_failed is the host write (EnsureDir or Store), integrity_failed the digest",
+				ep.Code, ep.Retryable)
 		}
-		// Anything else is the routed turn's tail — classify after decrypt, which
-		// keeps the receive nonce in lockstep, and read on.
+		// Nothing else should be on the wire: no turn is routed before this upload, so
+		// the routed turn's tail that used to arrive here has no producer. Classify
+		// after decrypt anyway, which keeps the receive nonce in lockstep, and read on.
 	}
 }
 
@@ -407,10 +418,10 @@ func requireStoredAttachment(t *testing.T, home string) {
 // the text, so it proves liveness and could never see a token that arrives in the
 // third delta. Widening it would change what fourteen callers assert.
 //
-// IDLE IS ONLY TERMINAL ONCE A DELTA HAS BEEN SEEN. The caller drained the
-// cursor-stamp turn through its own terminal idle, so no earlier idle should be left
-// on the wire — but accepting one unconditionally would turn a stale frame into an
-// empty accumulation and a token failure that blamed claude for a wire bug. Gating on
+// IDLE IS ONLY TERMINAL ONCE A DELTA HAS BEEN SEEN. Since #2143 no turn runs ahead
+// of this one at all, so no earlier idle should be on the wire — but accepting one
+// unconditionally would turn any stray frame into an empty accumulation and a token
+// failure that blamed claude for a wire bug. Gating on
 // sawDelta makes the deadline message name which milestone was missed instead, the
 // same split drainForCompletedTurn makes.
 //
@@ -505,7 +516,8 @@ func drainTurnText(t *testing.T, h *perConvHarness, convID string, timeout time.
 // nextAttachReadEnvelope reads and decrypts the next daemon→phone application
 // envelope, answering ok=false once deadline passes.
 //
-// IT IS THE RUN'S ONLY READER after the cursor-stamp turn. Each decrypt advances the
+// IT IS THE RUN'S ONLY READER, and since #2143 that holds for the whole run rather
+// than only after a cursor-stamp turn. Each decrypt advances the
 // receive CipherState exactly once, so every frame must be taken in arrival order; a
 // second concurrent reader desynchronises the sequential receive nonce into a decrypt
 // failure that reads like a daemon bug. It answers rather than Fatals on a timeout,

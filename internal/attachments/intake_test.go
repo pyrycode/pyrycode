@@ -32,21 +32,18 @@ const (
 	heldD = "held-d"
 )
 
-// fixedConversation is the resolver a daemon sitting on one conversation would
-// supply. #1897 builds the production one from activeConversation.
-func fixedConversation(id conversations.ConversationID) func() (conversations.ConversationID, bool) {
-	return func() (conversations.ConversationID, bool) { return id, true }
-}
-
 // newTestIntake returns an Intake over a fresh instance directory alongside that
 // directory's EvalSymlinks-resolved form, which is what every want path here is
 // built from — resolvedInstanceDir's own doc records why the raw t.TempDir()
 // value cannot be.
-func newTestIntake(t *testing.T, conversation func() (conversations.ConversationID, bool)) (*Intake, string) {
+//
+// It takes no conversation: since #2143 the destination is a Receive argument, so
+// there is nothing about it to fix at construction.
+func newTestIntake(t *testing.T) (*Intake, string) {
 	t.Helper()
 
 	instanceDir, root := resolvedInstanceDir(t)
-	return NewIntake(instanceDir, conversation), root
+	return NewIntake(instanceDir), root
 }
 
 // uploadChunk builds one chunk of a transfer of testFixture: the whole
@@ -137,15 +134,15 @@ func assertNoBannedStrings(t *testing.T, err error, chunk protocol.AttachmentChu
 func TestIntake_FirstChunkOfAnyIndex_GoesThroughAdmission(t *testing.T) {
 	t.Parallel()
 
-	intake, root := newTestIntake(t, fixedConversation(convA))
+	intake, root := newTestIntake(t)
 
-	id, stored, err := intake.Receive(testConnA, boundUploadChunk(aid1, 5))
+	id, stored, err := intake.Receive(testConnA, string(convA), boundUploadChunk(aid1, 5))
 	assertAccepted(t, id, stored, err)
 	if got := intake.reg.count(); got != 1 {
 		t.Fatalf("registry holds %d entries after the first chunk, want 1", got)
 	}
 
-	id, stored, err = intake.Receive(testConnA, boundUploadChunk(aid1, 0))
+	id, stored, err = intake.Receive(testConnA, string(convA), boundUploadChunk(aid1, 0))
 	assertAccepted(t, id, stored, err)
 	if got := intake.reg.count(); got != 1 {
 		t.Errorf("registry holds %d entries after the second chunk, want 1: the pair was admitted twice", got)
@@ -156,44 +153,46 @@ func TestIntake_FirstChunkOfAnyIndex_GoesThroughAdmission(t *testing.T) {
 	assertEmptyDir(t, root)
 }
 
-// TestIntake_CompletingChunk_StoresUnderTheResolvedConversation is AC 3. The two
-// rows drive the IDENTICAL chunk through two intakes whose resolvers answer
-// different conversations: the destination follows the daemon's resolver, and
-// there is no field on the frame it could have followed instead. One row alone
-// would pass under a build that hardcoded a conversation.
-func TestIntake_CompletingChunk_StoresUnderTheResolvedConversation(t *testing.T) {
+// TestIntake_CompletingChunk_StoresUnderTheConversationTheCallerNamed is #2143's
+// core claim. ONE intake takes the IDENTICAL chunk twice, naming a different
+// conversation each time, and each upload lands in that conversation's own
+// directory.
+//
+// One intake rather than two is what makes it discriminating. The shape it
+// replaces built a second intake per row around a second construction-time
+// resolver, which could not tell a per-transfer destination from a per-daemon
+// one; this one reddens against a build that captured the first conversation it
+// saw, or that read a destination from anywhere but the argument.
+func TestIntake_CompletingChunk_StoresUnderTheConversationTheCallerNamed(t *testing.T) {
 	t.Parallel()
 
+	intake, root := newTestIntake(t)
+
 	for _, conv := range []conversations.ConversationID{convA, convB} {
-		t.Run(string(conv), func(t *testing.T) {
-			t.Parallel()
+		id, stored, err := intake.Receive(testConnA, string(conv), completeChunk(aid1))
+		if err != nil {
+			t.Fatalf("Receive(%q) error = %v, want nil", conv, err)
+		}
+		if !stored || id != aid1 {
+			t.Errorf("Receive(%q) = (%q, %t), want (%q, true)", conv, id, stored, aid1)
+		}
 
-			intake, root := newTestIntake(t, fixedConversation(conv))
+		dir := wantDir(root, conv, aid1)
+		assertDirEntries(t, dir, testFilename)
+		got, err := os.ReadFile(filepath.Join(dir, testFilename))
+		if err != nil {
+			t.Fatalf("read stored attachment under %q: %v", conv, err)
+		}
+		if !bytes.Equal(got, testFixture) {
+			t.Errorf("stored bytes under %q = %q, want %q", conv, got, testFixture)
+		}
 
-			id, stored, err := intake.Receive(testConnA, completeChunk(aid1))
-			if err != nil {
-				t.Fatalf("Receive() error = %v, want nil", err)
-			}
-			if !stored || id != aid1 {
-				t.Errorf("Receive() = (%q, %t), want (%q, true)", id, stored, aid1)
-			}
-
-			dir := wantDir(root, conv, aid1)
-			assertDirEntries(t, dir, testFilename)
-			got, err := os.ReadFile(filepath.Join(dir, testFilename))
-			if err != nil {
-				t.Fatalf("read stored attachment: %v", err)
-			}
-			if !bytes.Equal(got, testFixture) {
-				t.Errorf("stored bytes = %q, want %q", got, testFixture)
-			}
-
-			// The completing chunk gives the slot back, so a stored upload holds
-			// no capacity.
-			if n := intake.reg.count(); n != 0 {
-				t.Errorf("registry holds %d entries after a completed upload, want 0", n)
-			}
-		})
+		// The completing chunk gives the slot back, so a stored upload holds no
+		// capacity — and the next iteration admits a fresh transfer under the
+		// same pair rather than reaching a latched accumulator.
+		if n := intake.reg.count(); n != 0 {
+			t.Fatalf("registry holds %d entries after completing under %q, want 0", n, conv)
+		}
 	}
 }
 
@@ -227,17 +226,23 @@ func TestIntake_Refusals_ComeBackAsTheirOwnSentinel(t *testing.T) {
 		// for the wrong reason.
 		before []protocol.AttachmentChunkPayload
 		chunk  protocol.AttachmentChunkPayload
-		want   error
+		// conversation is the destination the caller names, spelled on EVERY row
+		// rather than defaulted, because two rows below turn on it being a
+		// hostile value and a zero value would then read as an omission.
+		conversation string
+		want         error
 	}{
 		{
-			name:  "declaration is inadmissible",
-			chunk: inadmissible,
-			want:  ErrInvalidDeclaration,
+			name:         "declaration is inadmissible",
+			chunk:        inadmissible,
+			conversation: string(convA),
+			want:         ErrInvalidDeclaration,
 		},
 		{
-			name:  "declared size is over the per-upload bound",
-			chunk: oversized,
-			want:  ErrUploadTooLarge,
+			name:         "declared size is over the per-upload bound",
+			chunk:        oversized,
+			conversation: string(convA),
+			want:         ErrUploadTooLarge,
 		},
 		{
 			name: "too many uploads in flight",
@@ -247,27 +252,53 @@ func TestIntake_Refusals_ComeBackAsTheirOwnSentinel(t *testing.T) {
 				boundUploadChunk(heldC, 0),
 				boundUploadChunk(heldD, 0),
 			},
-			chunk: completeChunk(aid1),
-			want:  ErrTooManyUploads,
+			chunk:        completeChunk(aid1),
+			conversation: string(convA),
+			want:         ErrTooManyUploads,
 		},
 		{
-			name:   "framing refusal on a later chunk",
-			before: []protocol.AttachmentChunkPayload{boundUploadChunk(aid1, 0)},
-			chunk:  boundUploadChunk(aid1, 0),
-			want:   ErrDuplicateIndex,
+			name:         "framing refusal on a later chunk",
+			before:       []protocol.AttachmentChunkPayload{boundUploadChunk(aid1, 0)},
+			chunk:        boundUploadChunk(aid1, 0),
+			conversation: string(convA),
+			want:         ErrDuplicateIndex,
 		},
 		{
-			name:  "integrity refusal on the completing chunk",
-			chunk: integrity,
-			want:  ErrDigestMismatch,
+			name:         "integrity refusal on the completing chunk",
+			chunk:        integrity,
+			conversation: string(convA),
+			want:         ErrDigestMismatch,
 		},
 		{
 			// Nothing checks the id's shape at admission, so a non-canonical one
 			// is accepted, transmitted whole, and refused only when the
 			// completing chunk reaches EnsureDir. #1897 owns the earlier check.
-			name:  "attachment id is not of canonical shape",
-			chunk: completeChunk(heldA),
-			want:  ErrInvalidID,
+			name:         "attachment id is not of canonical shape",
+			chunk:        completeChunk(heldA),
+			conversation: string(convA),
+			want:         ErrInvalidID,
+		},
+		{
+			// #2143's backstop, at the layer where the value became
+			// client-authored. The caller is contracted to have run
+			// KnownConversation, and EnsureDir's conversations.ValidID check is
+			// what stands behind a caller that did not: the empty id is refused
+			// before the filesystem is touched.
+			name:         "conversation id is empty",
+			chunk:        completeChunk(aid1),
+			conversation: "",
+			want:         ErrInvalidID,
+		},
+		{
+			// The same backstop against the shape that would matter: a
+			// traversal-bearing conversation id never reaches a path join,
+			// because EnsureDir validates BOTH components before it resolves
+			// anything. A build that relaxed that check to a non-empty test
+			// reddens here.
+			name:         "conversation id is traversal-shaped",
+			chunk:        completeChunk(aid1),
+			conversation: "../../../../etc",
+			want:         ErrInvalidID,
 		},
 	}
 
@@ -275,9 +306,9 @@ func TestIntake_Refusals_ComeBackAsTheirOwnSentinel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			intake, root := newTestIntake(t, fixedConversation(convA))
+			intake, root := newTestIntake(t)
 			for i, chunk := range tt.before {
-				id, stored, err := intake.Receive(testConnA, chunk)
+				id, stored, err := intake.Receive(testConnA, string(convA), chunk)
 				if err != nil {
 					t.Fatalf("setup chunk %d: Receive() error = %v, want nil", i, err)
 				}
@@ -286,7 +317,7 @@ func TestIntake_Refusals_ComeBackAsTheirOwnSentinel(t *testing.T) {
 				}
 			}
 
-			id, stored, err := intake.Receive(testConnA, tt.chunk)
+			id, stored, err := intake.Receive(testConnA, tt.conversation, tt.chunk)
 			if !errors.Is(err, tt.want) {
 				t.Fatalf("Receive() error = %v, want errors.Is(err, %v)", err, tt.want)
 			}
@@ -308,9 +339,9 @@ func TestIntake_Refusals_ComeBackAsTheirOwnSentinel(t *testing.T) {
 func TestIntake_CompletedTransfer_IsFullyReleased(t *testing.T) {
 	t.Parallel()
 
-	intake, root := newTestIntake(t, fixedConversation(convA))
+	intake, root := newTestIntake(t)
 
-	if _, stored, err := intake.Receive(testConnA, completeChunk(aid1)); err != nil || !stored {
+	if _, stored, err := intake.Receive(testConnA, string(convA), completeChunk(aid1)); err != nil || !stored {
 		t.Fatalf("first Receive() = (_, %t, %v), want (_, true, nil)", stored, err)
 	}
 	if n := intake.reg.count(); n != 0 {
@@ -319,7 +350,7 @@ func TestIntake_CompletedTransfer_IsFullyReleased(t *testing.T) {
 
 	// The same pair, re-uploaded the way a phone that lost its reply would: a
 	// fresh transfer, admitted again, stored again.
-	id, stored, err := intake.Receive(testConnA, completeChunk(aid1))
+	id, stored, err := intake.Receive(testConnA, string(convA), completeChunk(aid1))
 	if err != nil {
 		t.Fatalf("re-upload: Receive() error = %v, want nil", err)
 	}
@@ -329,84 +360,20 @@ func TestIntake_CompletedTransfer_IsFullyReleased(t *testing.T) {
 	assertDirEntries(t, wantDir(root, convA, aid1), testFilename)
 }
 
-// TestIntake_NoConversation_RefusesTheCompletingChunk is AC 3's second half. All
-// three ways the daemon can be on no conversation answer ErrNoConversation and
-// NOT ErrInvalidID: handing "" to EnsureDir would report a daemon that has
-// routed nowhere as a malformed identifier, which is the mutant the second
-// assertion exists to catch.
-func TestIntake_NoConversation_RefusesTheCompletingChunk(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		conversation func() (conversations.ConversationID, bool)
-	}{
-		{"resolver answers false", func() (conversations.ConversationID, bool) { return convA, false }},
-		{"resolver answers the empty id", func() (conversations.ConversationID, bool) { return "", true }},
-		{"no resolver was wired", nil},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			intake, root := newTestIntake(t, tt.conversation)
-
-			chunk := completeChunk(aid1)
-			id, stored, err := intake.Receive(testConnA, chunk)
-			if !errors.Is(err, ErrNoConversation) {
-				t.Fatalf("Receive() error = %v, want errors.Is(err, ErrNoConversation)", err)
-			}
-			if errors.Is(err, ErrInvalidID) {
-				t.Errorf("Receive() error = %v, want no ErrInvalidID: an unrouted daemon is not a malformed id", err)
-			}
-			if stored || id != "" {
-				t.Errorf("Receive() = (%q, %t), want (\"\", false)", id, stored)
-			}
-			assertNoBannedStrings(t, err, chunk)
-
-			// Refused rather than filed anywhere, and the slot came back with
-			// the transfer that ended.
-			assertEmptyDir(t, root)
-			if n := intake.reg.count(); n != 0 {
-				t.Errorf("registry holds %d entries, want 0", n)
-			}
-		})
-	}
-}
-
-// TestIntake_ErrNoConversationIsDistinct asserts the new sentinel is
-// distinguishable from every sentinel this package already publishes — a claim
-// over the SET, asserted over packageSentinels rather than over a hand-picked
-// near miss, the shape TestRegistry_DeliverUnheldPair_RefusesAndCreatesNothing
-// established.
-func TestIntake_ErrNoConversationIsDistinct(t *testing.T) {
-	t.Parallel()
-
-	for _, other := range packageSentinels {
-		if other == ErrNoConversation {
-			continue
-		}
-		if errors.Is(ErrNoConversation, other) || errors.Is(other, ErrNoConversation) {
-			t.Errorf("ErrNoConversation and %v are not distinguishable", other)
-		}
-	}
-}
-
 // TestIntake_ReleaseConn_ReturnsTheCapacityTheConnHeld is AC 4. A dropped phone
 // holds no capacity: the fifth pair is refused while the conn holds four, and
 // admitted once the conn is gone.
 func TestIntake_ReleaseConn_ReturnsTheCapacityTheConnHeld(t *testing.T) {
 	t.Parallel()
 
-	intake, _ := newTestIntake(t, fixedConversation(convA))
+	intake, _ := newTestIntake(t)
 
 	for _, id := range []string{heldA, heldB, heldC, heldD} {
-		if _, _, err := intake.Receive(testConnA, boundUploadChunk(id, 0)); err != nil {
+		if _, _, err := intake.Receive(testConnA, string(convA), boundUploadChunk(id, 0)); err != nil {
 			t.Fatalf("Receive(%q) error = %v, want nil", id, err)
 		}
 	}
-	if _, _, err := intake.Receive(testConnA, completeChunk(aid1)); !errors.Is(err, ErrTooManyUploads) {
+	if _, _, err := intake.Receive(testConnA, string(convA), completeChunk(aid1)); !errors.Is(err, ErrTooManyUploads) {
 		t.Fatalf("Receive() at the bound error = %v, want errors.Is(err, ErrTooManyUploads)", err)
 	}
 
@@ -414,7 +381,7 @@ func TestIntake_ReleaseConn_ReturnsTheCapacityTheConnHeld(t *testing.T) {
 	if n := intake.reg.count(); n != 0 {
 		t.Fatalf("registry holds %d entries after ReleaseConn, want 0", n)
 	}
-	if _, _, err := intake.Receive(testConnA, boundUploadChunk(aid2, 0)); err != nil {
+	if _, _, err := intake.Receive(testConnA, string(convA), boundUploadChunk(aid2, 0)); err != nil {
 		t.Errorf("Receive() after ReleaseConn error = %v, want nil: the capacity did not come back", err)
 	}
 }
@@ -426,12 +393,12 @@ func TestIntake_ReleaseConn_ReturnsTheCapacityTheConnHeld(t *testing.T) {
 func TestIntake_ReleaseConn_LeavesAnotherConnsUploadsInFlight(t *testing.T) {
 	t.Parallel()
 
-	intake, _ := newTestIntake(t, fixedConversation(convA))
+	intake, _ := newTestIntake(t)
 
-	if _, _, err := intake.Receive(testConnA, boundUploadChunk(heldA, 0)); err != nil {
+	if _, _, err := intake.Receive(testConnA, string(convA), boundUploadChunk(heldA, 0)); err != nil {
 		t.Fatalf("Receive(conn A) error = %v, want nil", err)
 	}
-	if _, _, err := intake.Receive(testConnB, boundUploadChunk(heldB, 0)); err != nil {
+	if _, _, err := intake.Receive(testConnB, string(convA), boundUploadChunk(heldB, 0)); err != nil {
 		t.Fatalf("Receive(conn B) error = %v, want nil", err)
 	}
 
@@ -441,7 +408,7 @@ func TestIntake_ReleaseConn_LeavesAnotherConnsUploadsInFlight(t *testing.T) {
 	}
 	// Conn B's transfer is still in flight, which only the routing half can
 	// answer: a second chunk at index 0 reaches the live accumulator.
-	if _, _, err := intake.Receive(testConnB, boundUploadChunk(heldB, 0)); !errors.Is(err, ErrDuplicateIndex) {
+	if _, _, err := intake.Receive(testConnB, string(convA), boundUploadChunk(heldB, 0)); !errors.Is(err, ErrDuplicateIndex) {
 		t.Errorf("conn B second chunk error = %v, want errors.Is(err, ErrDuplicateIndex)", err)
 	}
 }
