@@ -43,6 +43,7 @@ Canonical shape (#217): UUIDv4, 36 chars, lowercase hex, dashes at positions 8/1
 | `SessionHistory` | `[]string` | `session_history,omitempty` | no — empty/nil omitted |
 | `IsPromoted` | `bool` | `is_promoted` | yes — `false` = discussion, `true` = channel |
 | `IsArchived` | `bool` | `is_archived,omitempty` | no — absent key decodes as active (#880) |
+| `SystemPrompt` | `*string` | `system_prompt,omitempty` | no — pointer distinguishes nil ("no prompt", the default) from `""` ("explicitly empty"); operator-set text is the third state (#2149) |
 | `LastUsedAt` | `time.Time` | `last_used_at` | yes — bumped on user activity |
 
 `Name`, `CurrentSessionID`, `SessionHistory` carry `,omitempty` so unpromoted/unnamed conversations and conversations with no session bound serialize without those keys. `IsPromoted`, `Cwd`, `ID`, `LastUsedAt` do **not** use `omitempty` — they must always appear, even at zero value. The `IsPromoted: false` default ("discussion") must be explicit on disk.
@@ -56,6 +57,21 @@ pre-#880 form. Don't "fix" this to drop `omitempty` for consistency with `IsProm
 fields' product contracts are opposite by design. See
 [`features/conversations-registry.md`](conversations-registry.md) § `SetArchived` for the mutator
 that flips it, and [codebase/880.md](../codebase/880.md).
+
+**`SystemPrompt` (#2149) reuses `Name`'s tri-state mechanism, not just its shape.** The
+mechanism is that `omitempty` on a `*string` tests the pointer, not the pointee: a nil
+pointer omits the key, but a non-nil pointer to `""` still emits `"system_prompt": ""`. A
+plain `string` with `omitempty` cannot express the split — both states serialize away and
+both decode to `""`. This is why an all-nil registry stays byte-identical to its
+pre-#2149 form while still leaving room for an explicitly-empty state on disk.
+
+The field's doc comment says it is "written only by `Registry.SetSystemPrompt`" — read
+that as "the only *validated* writer," not "the only writer." `Registry.Update` can set
+`SystemPrompt` to anything, unchecked, exactly as it already can `Name` and `IsPromoted`
+(§ `Update` in [`features/conversations-registry.md`](conversations-registry.md)). A
+value reached through `Get` is guaranteed ≤ `MaxSystemPromptBytes` and valid UTF-8 only
+if every writer in practice goes through `SetSystemPrompt` — the type does not enforce
+this.
 
 ## Decisions
 
@@ -98,7 +114,7 @@ None. Pure value type — no goroutines, no channels, no mutexes. Safe to copy b
 
 ## Related
 
-- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` / `SetArchived` (#217, #880); the on-disk persistence layer for this type.
+- [`features/conversations-registry.md`](conversations-registry.md) — `Registry` + `Load` / `Save` / `Create` / `Get` / `List` / `Update` / `SetArchived` / `SetSystemPrompt` (#217, #880, #2149); the on-disk persistence layer for this type.
 - [codebase/880.md](../codebase/880.md) — per-ticket note for the `IsArchived` field + its `omitempty` asymmetry with `IsPromoted`.
 - [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) — `Registry.Update` runs the caller's callback under the registry lock.
 - [`internal/sessions`](sessions-package.md) — the existing `Session` model. Lives alongside `internal/conversations`; not coupled.
