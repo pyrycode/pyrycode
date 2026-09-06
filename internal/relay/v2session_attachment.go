@@ -98,13 +98,30 @@ var (
 // it" is false for an expired transfer, where resending ALL frames succeeds — and
 // that clause is the row's rationale, not the contract it states.
 //
-// NO ARM ANSWERS A BAD DESTINATION, and that is #2143 rather than an omission.
-// attachments.ErrNoConversation is gone with the follow-active resolver that
-// raised it: the destination is validated by handleAttachmentChunk before the
-// seam, so a refusal for it never reaches this map. Its old mapping to
-// attachment.storage_failed had argued that a VERIFIED attachment could not be
-// written to the host — true of an unrouted daemon, false of a conversation the
-// client named badly, where nothing is verified yet and the host is not at fault.
+// NO ARM ANSWERS AN UNUSABLE DESTINATION, and that is #2143 rather than an
+// omission. attachments.ErrNoConversation is gone with the follow-active
+// resolver that raised it: an absent conversation_id, and one naming a
+// conversation this daemon does not host, are both refused by
+// handleAttachmentChunk BEFORE the seam, so a refusal for either never reaches
+// this map. Its old mapping to attachment.storage_failed had argued that a
+// VERIFIED attachment could not be written to the host — true of an unrouted
+// daemon, false of a conversation the client named badly, where nothing is
+// verified yet and the host is not at fault.
+//
+// ONE ARM DOES ANSWER A DESTINATION, and it is a different question:
+// ErrConversationMismatch → attachment.invalid_chunk (#2146). Both ids in that
+// refusal have already passed the gate above, so what it reports is that a
+// transfer's declaration and this chunk disagree — a consistency fault, not a
+// containment one. It folds into the EXISTING code deliberately: #2143 answers
+// every bad-destination case with invalid_chunk, and giving a mismatch its own
+// code would split one client-visible class across two, letting a client
+// distinguish "not a conversation I host" from "not the one this transfer
+// started under" — the oracle the merged answer exists to deny. invalid_chunk's
+// published class already covers it, since a chunk that cannot be placed against
+// the transfer it names is exactly what this is, and its retryable:false is
+// correct rather than merely tolerable: resending the same chunk against the
+// same live transfer reproduces the refusal, and the repair is to name the
+// conversation the transfer was admitted under.
 //
 // AN ERROR MATCHING NO ARM IS STILL ANSWERED, never dropped: storage_failed is the
 // honest generic for a daemon-side condition of unknown cause, and it is retryable
@@ -116,7 +133,8 @@ func attachmentRejectFor(err error) attachmentReject {
 		errors.Is(err, attachments.ErrTotalChunksMismatch),
 		errors.Is(err, attachments.ErrIndexOutOfRange),
 		errors.Is(err, attachments.ErrDuplicateIndex),
-		errors.Is(err, attachments.ErrUnknownUpload):
+		errors.Is(err, attachments.ErrUnknownUpload),
+		errors.Is(err, attachments.ErrConversationMismatch):
 		return rejectInvalidChunk
 	case errors.Is(err, attachments.ErrSizeMismatch),
 		errors.Is(err, attachments.ErrDigestMismatch):
@@ -148,6 +166,7 @@ func attachmentRejectFor(err error) attachmentReject {
 //     longer draws dispatch.Route's unknown-type reply. Mirrors
 //     handleQuestionAnswer's nil guard and buys the same property: an unwired
 //     daemon performs zero parsing of remote-authored bytes.
+//
 //  2. A PAYLOAD DECODE FAILURE IS REJECTED, NOT TOLERATED. The modal handlers'
 //     `_ = json.Unmarshal(...)` idiom is unsafe here for the reason #1984 states:
 //     encoding/json populates the fields it read BEFORE the one that failed, and
@@ -158,6 +177,7 @@ func attachmentRejectFor(err error) attachmentReject {
 //     unusable. NOTHING about the failure is echoed or logged — encoding/json
 //     quotes offending input into its error string and those bytes are
 //     remote-authored.
+//
 //  3. THE DESTINATION IS GATED BEFORE THE SEAM, and the ordering copies
 //     handleRequestAttachment's steps 3-5: an absent conversation_id, then one
 //     the daemon does not host, each refused before a byte is admitted. The
@@ -180,6 +200,7 @@ func attachmentRejectFor(err error) attachmentReject {
 //     THERE IS NO FALLBACK TO THE FOLLOW-ACTIVE CURSOR on any arm. The protocol
 //     has one rule — the bytes land where the client said — and a fallback would
 //     restore the silent misfile #2143 removed.
+//
 //  4. Receive's THREE-WAY answer, in the order that makes the middle one
 //     unmissable: refuse on err != nil, answer attachment_stored on stored, and
 //     otherwise reply NOTHING. That last branch is what most chunks of a healthy

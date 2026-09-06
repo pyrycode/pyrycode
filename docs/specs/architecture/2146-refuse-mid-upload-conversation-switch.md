@@ -196,3 +196,31 @@ Within every line. Nearest analogue #2142 landed 653.
 **Date:** 2026-09-06
 </content>
 </invoke>
+
+## Revisions
+
+### 2026-09-06 — `Receive` stamps the validated destination onto the chunk it delivers
+
+**What changed.** § Design closed with "`Receive` still builds the path from its `conversationID` parameter while the registry latches and compares `chunk.ConversationID`. They are one value: the sole production caller passes the chunk's own field verbatim." Implementation added one line to `Receive` — `chunk.ConversationID = conversationID`, on the frame's own copy, ahead of the `Deliver` call — so the latched value and the value `EnsureDir` resolves are **the same value by construction** rather than by agreement between a caller and a callee.
+
+**What drove it.** Two things, one of which the plan could not have known.
+
+1. The plan's own § Security review raised this as a [Trust boundaries] SHOULD FIX: nothing stopped a later reader treating the latched id as a path input, and the three-link chain proving the compared value *is* the filed value ran through a caller contract rather than through code.
+2. Writing the tests falsified the plan's factual premise. `uploadChunk` and `boundUploadChunk` in `intake_test.go` leave `ConversationID` **zero** and pass the destination as the argument only — so under the planned design every existing intake test would have latched `""`, matched `""`, and exercised a shape the wire never produces. The mismatch would have been unreachable at the `Intake` layer without a fixture that production does not resemble.
+
+**The new contract.** The destination is `Receive`'s argument, full stop; the chunk's own field is decoration by the time the registry sees it. A caller that passed an argument disagreeing with the chunk gets its **argument** honoured — which is what `Receive`'s doc block has said since #2143 ("THE DESTINATION IS conversationID, AND ITS VALIDATION IS A PRECONDITION, AND IT IS THE CALLER'S") — rather than a refusal for a caller bug that no production path can produce.
+
+**What it bought in tests.** `TestIntake_ReceiveMismatchedConversation_RefusesAndStoresNothing` now drives the mismatch exactly as the wire does — two `Receive` calls differing in their `conversationID` argument, which is what `handleAttachmentChunk` produces when a phone switches conversations mid-upload — instead of through a hand-built chunk. The registry-level tests still set the field directly, since `Deliver` is the layer where it is read.
+
+**Open questions, resolved.** (1) The mismatch gets **no `reason` log field**; it arrives through `attachmentRejectFor` alongside eleven other sentinels, none of which carries one, and adding one is the move that would tempt a later edit to name a conversation id in it. (2) The `registry.go` sweep found `Lookup`'s "it is THAT method's bool — not this one — that becomes … `ErrUnknownUpload`" still true, which is why `lookupAndStamp` keeps its bool alongside the new error return.
+
+### Mutants, measured
+
+Run with `go test -overlay`, unfiltered, output `grep -a`'d, and checked for `build failed` / `declared and not used` before each verdict.
+
+| # | Mutant | Predicted | Measured |
+|---|---|---|---|
+| 1 | Comparison moved **below** the stamp-and-store (still refuses, but stamps first) | Test 1's stamp clause | **Sole red** — `TestRegistry_DeliverMismatchedConversation_RefusesAndKeepsTheIncumbent`. The by-construction claim is measured, not argued. |
+| 2 | Comparison deleted | Tests 1, 2, 4, 5 | Red on exactly those. **Measured as the pre-change RED run** rather than as a separate overlay: the code before this slice *is* that mutant, and it failed for the right reason — the mismatching chunk came back `ErrIncomplete`, i.e. delivered. |
+| 3 | Latch made unconditional (every chunk overwrites the destination) | Tests 1, 4 | Red on tests 1, 2 and 4. Superset — test 2 also drives a mismatch to obtain the sentinel it checks distinctness of, per #1784's "predict from what each test executes, not from what it is named after". |
+| 4 | Reap moved **below** the comparison | Test 3 alone | **Sole red** — `TestRegistry_DeliverMismatchedConversation_UnderAnExpiredPair_IsUnknownUpload`. |

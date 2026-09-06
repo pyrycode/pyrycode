@@ -142,13 +142,38 @@ func NewIntake(instanceDir string) *Intake {
 // KnownConversation is primitive-typed on purpose to keep it that way. Converting
 // to the typed id is this package's side of the seam, at the EnsureDir call below.
 //
-// It is read on the COMPLETING CHUNK ONLY, because Registry has nowhere to stash
-// a per-transfer conversation id and adding one is a different slice. One
-// consequence follows and is accepted rather than mitigated: a phone that
-// switches conversations mid-upload files its attachment under the NEW one — now
-// a registry-validated conversation rather than whatever a cursor happened to
-// say, so it is a misfile a client can inflict on itself and never an escape.
-// #2146 refuses the switch by recording the destination at admission.
+// IT IS FIXED BY THE TRANSFER'S FIRST CHUNK AND NO LATER CHUNK MAY MOVE IT
+// (#2146). The registry latches the destination on the first chunk it delivers
+// and compares every later one against it, so a phone that switches
+// conversations mid-upload is REFUSED with ErrConversationMismatch rather than
+// having its attachment filed under whichever conversation its completing chunk
+// happened to name. Until then the id was read on the completing chunk only, and
+// a transfer declared against A could complete against B.
+//
+// The refusal costs the client ONE CHUNK AND NOT THE TRANSFER: the incumbent
+// keeps its accumulator, its entry and its idle stamp, so a client that goes
+// back to naming the original conversation resumes where it was. That posture is
+// Admit's own for a repeat whose declaration disagrees with the live transfer,
+// and the stamp half of it is load-bearing rather than tidy — a refusal that
+// stamped would let a client hold a slot open indefinitely by spamming
+// mismatching chunks.
+//
+// THE LATCHED VALUE AND THE DIRECTORY THE BYTES LAND IN ARE ONE VALUE BY
+// CONSTRUCTION, and the line below is what makes it so rather than a caller
+// obligation: conversationID — the argument, already validated — is stamped onto
+// the local copy of the chunk handed to the registry, so what the transfer
+// latches is exactly what EnsureDir resolves. The chunk arrives carrying the
+// client's own conversation_id in that field and the two agree at the one
+// production call site, but agreeing is not the same as being the same value,
+// and a check guarding a value that is not the one becoming a path component
+// would guard nothing. The assignment touches only this frame's copy; chunk is a
+// value parameter.
+//
+// It is NOT the destination that is compared against the registry's membership
+// list a second time — that is the caller's, discharged per chunk, and this
+// check is a CONSISTENCY one between two ids that have both already passed it.
+// Two valid conversations disagreeing is what it detects; #2143 owns the
+// boundary and EnsureDir owns confinement.
 //
 // A refusal on the completion half arrives AFTER the transfer is over: Deliver
 // released the entry and the bytes assembled cleanly, so no slot leaks and the
@@ -198,6 +223,11 @@ func (i *Intake) Receive(connID, conversationID string, chunk protocol.Attachmen
 			return "", false, err
 		}
 	}
+
+	// The caller's validated destination, stamped onto this frame's own copy so
+	// the transfer latches exactly what EnsureDir resolves below. See the doc
+	// block: agreeing with chunk.ConversationID is not the same as being it.
+	chunk.ConversationID = conversationID
 
 	// The same chunk, looked back up: never the accumulator Admit just returned.
 	data, err := i.reg.Deliver(connID, chunk)

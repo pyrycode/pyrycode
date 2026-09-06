@@ -32,10 +32,30 @@ type uploadKey struct {
 	attachmentID string
 }
 
-// entry is one in-flight upload: the pair's accumulator TOGETHER WITH the time
-// a chunk last arrived for it. lastChunkAt is set when the pair is admitted and
-// moved forward by every chunk Deliver routes to it, and by NOTHING ELSE — not a
-// Lookup, not a diagnostic, not a repeat admission under a pair already held.
+// entry is one in-flight upload: the pair's accumulator, the time a chunk last
+// arrived for it, and the conversation the transfer was admitted under.
+// lastChunkAt is set when the pair is admitted and moved forward by every chunk
+// Deliver routes to it, and by NOTHING ELSE — not a Lookup, not a diagnostic,
+// not a repeat admission under a pair already held, and NOT a chunk refused for
+// naming another conversation.
+//
+// conversationID IS A COMPARISON WITNESS AND NEVER A PATH INPUT (#2146). It is
+// latched by the transfer's FIRST DELIVERED CHUNK and compared against every
+// later one in lookupAndStamp; nothing here builds a path from it and nothing
+// should start. Intake.Receive files under the destination its CALLER hands it,
+// validated on the chunk that carries it, and the two agree because Receive
+// stamps that argument onto the chunk it delivers — see its doc block. A later
+// change that filed bytes under this field instead would be filing under an id
+// validated on an EARLIER chunk, so a conversation dropped from the registry
+// mid-upload would be written to rather than refused.
+//
+// THE EMPTY STRING MEANS NOT YET LATCHED, and no real destination can collide
+// with that reading. An entry is un-latched only between its Admit and the
+// Deliver that follows it inside one Receive call, and an empty destination is
+// unreachable on the production path twice over: the caller's gate refuses an
+// absent conversation_id before the seam, and EnsureDir's conversations.ValidID
+// refuses "" with ErrInvalidID regardless, so empty bytes can never be stored. A
+// second boolean field would encode a state the production path cannot enter.
 //
 // The field is named for the event and not "last activity", because the name is
 // the guard rail: "activity" invites a later reader to stamp on a look-up, and a
@@ -49,14 +69,15 @@ type uploadKey struct {
 // insertLocked and insert and a local in Admit and Deliver, so a package-level
 // type by that name would be shadowed at the very store site that needs it.
 type entry struct {
-	acc         *Accumulator
-	lastChunkAt time.Time
+	acc            *Accumulator
+	lastChunkAt    time.Time
+	conversationID string
 }
 
 // Registry holds the attachment uploads currently in flight, one entry per
-// conn-and-attachment_id pair — that pair's *Accumulator together with the time
-// a chunk last arrived for it — and SYNCHRONISES ITSELF rather than documenting
-// a caller obligation the way Accumulator does.
+// conn-and-attachment_id pair — that pair's *Accumulator, the time a chunk last
+// arrived for it, and the conversation it was admitted under — and SYNCHRONISES
+// ITSELF rather than documenting a caller obligation the way Accumulator does.
 //
 // The map's value is a struct held BY VALUE rather than a *entry. A pointer
 // would let any in-package caller keep the entry after a look-up returned and
@@ -466,19 +487,63 @@ func (r *Registry) Lookup(connID, attachmentID string) (*Accumulator, bool) {
 	return u.acc, ok
 }
 
-// lookupAndStamp answers the pair's accumulator comma-ok and, ON A HIT, moves
-// that entry's lastChunkAt to the clock's reading — a chunk has arrived for it.
-// ON A MISS IT STORES NOTHING, which is what keeps Deliver's "nothing is stored"
-// contract true on the unknown-pair path. It takes mu for its whole body and
-// calls no other method that takes it, so the read, the stamp and the store are
-// one critical section.
+// lookupAndStamp answers the pair's accumulator and, ON A HIT THE CHUNK BELONGS
+// TO, latches or re-checks the transfer's destination and moves that entry's
+// lastChunkAt to the clock's reading — a chunk has arrived for it. Three
+// outcomes:
 //
-// The re-store is what a by-value map entry costs and what it buys: the stamp
-// cannot be moved from outside a locked body, which is the property Registry's
-// type doc rests the never-read-off-lock claim on.
+//   - (nil, false, nil) — no transfer under the pair. NOTHING IS STORED, which is
+//     what keeps Deliver's "nothing is stored" contract true on that path.
+//   - (nil, false, ErrConversationMismatch) — a transfer is in flight and this
+//     chunk names a different conversation than it was admitted under. NOTHING IS
+//     STORED HERE EITHER: the incumbent is left exactly as it was, its idle stamp
+//     included.
+//   - (acc, true, nil) — the chunk belongs to the transfer. The destination is
+//     latched if this is the first delivered chunk, and the stamp moves.
+//
+// ok answers IS THERE A TRANSFER and err answers IS THIS CHUNK ADMISSIBLE TO IT,
+// which is why both are returned rather than folded into one error. Folding
+// would move ErrUnknownUpload's construction into this body and falsify two
+// landed claims for no gain: Lookup's doc rests the sentinel on THIS method's
+// bool, and Deliver's says it raises that sentinel bare.
+//
+// IT TAKES THE CHUNK rather than the ids beside each other, which is Deliver's
+// own argued posture inherited rather than re-derived: three adjacent strings at
+// a call site are silently transposable, and a transposed pair would compare one
+// transfer's destination while routing another transfer's bytes. One struct in
+// play forecloses that structurally.
+//
+// THE COMPARISON SITS AHEAD OF THE STAMP AND THAT IS THE WHOLE PLACEMENT.
+// lastChunkAt is reapExpiredLocked's only input, so a comparison below the store
+// would let a client renew a slot indefinitely by spamming mismatching chunks —
+// re-opening at this layer the slot-exhaustion path uploadIdleTimeout closes,
+// which is a resource-exhaustion bug and not a cosmetic one. It also sits BELOW
+// the reap, so an idle-expired pair answers the miss rather than the mismatch:
+// the transfer is over, and "no such transfer" is the honest answer rather than
+// a verdict on a destination nothing is left to disagree with.
+//
+// THE LATCH IS THE FIRST DELIVERED CHUNK'S and never a later one's. Receive
+// calls Deliver unconditionally, including immediately after a successful Admit,
+// so the admitting chunk fixes the destination and no chunk after it may move
+// it. An empty stored value means not yet latched — see entry's doc for why no
+// real destination can collide with that reading.
+//
+// It takes mu for its whole body and calls no other method that takes it, so the
+// reap, the read, the comparison, the latch, the stamp and the store are ONE
+// critical section. A comparison under one acquisition and a delivery under
+// another is the split-lock shape this type's doc rejects for the capacity gate,
+// and it must not be introduced here.
+//
+// The re-store is what a by-value map entry costs and what it buys: neither the
+// stamp nor the destination can be moved from outside a locked body, which is
+// the property Registry's type doc rests the never-read-off-lock claim on.
+//
+// THERE IS NO FORMAT STRING IN THIS BODY. The mismatch answers a bare sentinel:
+// both conversation ids are client-authored, and naming either in an error would
+// carry it into every log line that records the refusal.
 //
 // Its callers are Deliver and this package's tests.
-func (r *Registry) lookupAndStamp(connID, attachmentID string) (*Accumulator, bool) {
+func (r *Registry) lookupAndStamp(connID string, chunk protocol.AttachmentChunkPayload) (*Accumulator, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// AHEAD OF THE MAP READ, which is the whole of the placement: a reap that
@@ -487,14 +552,22 @@ func (r *Registry) lookupAndStamp(connID, attachmentID string) (*Accumulator, bo
 	// INSIDE the acquisition this body already holds, which is what keeps
 	// Deliver's "AT MOST TWO acquisitions per delivered chunk" true.
 	r.reapExpiredLocked()
-	key := uploadKey{connID: connID, attachmentID: attachmentID}
+	key := uploadKey{connID: connID, attachmentID: chunk.AttachmentID}
 	u, ok := r.uploads[key]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
+	// BEFORE THE STAMP AND BEFORE THE STORE, so a refused chunk leaves the
+	// incumbent untouched and cannot renew its slot. Returning here also leaves
+	// the accumulator unfed and the entry undeleted, which is what makes the
+	// refusal cost the client one chunk rather than the transfer.
+	if u.conversationID != "" && u.conversationID != chunk.ConversationID {
+		return nil, false, ErrConversationMismatch
+	}
+	u.conversationID = chunk.ConversationID
 	u.lastChunkAt = r.now()
 	r.uploads[key] = u
-	return u.acc, true
+	return u.acc, true, nil
 }
 
 // lastChunkAt is when a chunk last arrived for the pair, comma-ok: the clock's
@@ -670,6 +743,37 @@ func (r *Registry) ReleaseConn(connID string) {
 // here would publish a mapping this package deliberately does not own.
 var ErrUnknownUpload = errors.New("attachments: no upload in flight for this conn and attachment_id")
 
+// ErrConversationMismatch reports a chunk naming a different conversation than
+// the transfer in flight for its pair was admitted under — a phone that switched
+// conversations mid-upload. lookupAndStamp is the one place that raises it, BARE
+// rather than wrapped, and callers distinguish it with errors.Is.
+//
+// IT IS A CONSISTENCY REFUSAL AND NOT A CONTAINMENT ONE, and reading it as the
+// latter would be a mistake with consequences: both ids have already passed the
+// caller's membership check, EnsureDir still refuses anything escaping its root,
+// and naming a conversation was never authorization — the rule
+// protocol.RequestAttachmentPayload's block carries in full. What it detects is
+// that a transfer's DECLARATION and its OUTCOME can otherwise disagree, so the
+// bytes end up where the client attached them or nowhere.
+//
+// It lives here beside its raiser rather than in either package-wide var block,
+// for ErrUnknownUpload's own reasons: accumulator.go's opens "returned by Add and
+// Assemble" and this one is returned by neither, and admission.go's three all
+// refuse a DECLARATION at admission, where this one refuses a chunk against a
+// declaration already latched.
+//
+// ErrUnknownUpload is the near miss and the two are not interchangeable: that
+// one says there is no transfer under the pair at all, this one says there is one
+// and this chunk does not belong to its destination. An idle-expired pair
+// answers ErrUnknownUpload rather than this, because the reap runs ahead of the
+// comparison — see lookupAndStamp.
+//
+// WHICH WIRE CODE IT MAPS TO IS #1897's map, and it needs no new one: #2143
+// already answers every bad-destination case with attachment.invalid_chunk, and
+// answering a mismatch differently would split one client-visible class across
+// two codes.
+var ErrConversationMismatch = errors.New("attachments: chunk names a different conversation than the transfer in flight was admitted under")
+
 // Deliver routes one chunk to the transfer in flight for its pair and answers
 // the transfer's assembled bytes once they are complete and verified. It is the
 // counterpart to Admit: Admit takes the slot, this gives it back, so
@@ -680,9 +784,15 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 //
 // The steps, in the order the body runs them:
 //
-//  1. look the pair up AND STAMP IT — a chunk has arrived for it. On a miss,
-//     ErrUnknownUpload and NOTHING IS STORED: lookupAndStamp creates no entry
-//     and stamps none, and neither does this path.
+//  1. look the pair up, CHECK THE CHUNK AGAINST THE TRANSFER'S DESTINATION AND
+//     STAMP IT — a chunk has arrived for it. On a miss, ErrUnknownUpload and
+//     NOTHING IS STORED: lookupAndStamp creates no entry and stamps none, and
+//     neither does this path. On a chunk naming a different conversation than
+//     the transfer was admitted under, ErrConversationMismatch verbatim and
+//     NOTHING IS STORED EITHER — the incumbent keeps its accumulator, its entry
+//     and its idle stamp. That refusal returns HERE, ahead of step 2, so the
+//     accumulator is never fed and the pair is never released; it is the only
+//     refusing outcome in this method that leaves the transfer alive.
 //  2. feed the accumulator off-lock. On ANY non-nil answer from Add, release the
 //     pair and return that error verbatim.
 //  3. assemble. Keep the entry when — and ONLY when — the answer is
@@ -722,10 +832,13 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 //
 // It TAKES mu AT NO POINT. lookupAndStamp and Release each take it for their own
 // whole body and the accumulator is fed between them with the lock released, so
-// AT MOST TWO acquisitions per delivered chunk — one on a miss and one when
-// Assemble answers ErrIncomplete, since neither releases; two on every path that
-// does release, which is any non-nil answer from Add, an integrity mismatch, and
-// the completing chunk. Never three: nothing on this path calls Admit. mu stays
+// AT MOST TWO acquisitions per delivered chunk — one on a miss, one on a
+// destination mismatch and one when Assemble answers ErrIncomplete, since none
+// of the three releases; two on every path that does release, which is any
+// non-nil answer from Add, an integrity mismatch, and the completing chunk.
+// Never three: nothing on this path calls Admit, and the destination check runs
+// INSIDE lookupAndStamp's own acquisition rather than as a locked method beside
+// it — a separate compare would make three, and mu is not reentrant. mu stays
 // a LEAF — never held across Add
 // or Assemble, which is the rule Registry's type doc states and which this
 // method must not be the first to break. The gap between the look-up and the
@@ -769,7 +882,12 @@ var ErrUnknownUpload = errors.New("attachments: no upload in flight for this con
 // ErrUnknownUpload, the honest answer for a transfer that has been reaped. The
 // window is uploadIdleTimeout, measured from the last chunk this method routed.
 func (r *Registry) Deliver(connID string, chunk protocol.AttachmentChunkPayload) ([]byte, error) {
-	upload, ok := r.lookupAndStamp(connID, chunk.AttachmentID)
+	upload, ok, err := r.lookupAndStamp(connID, chunk)
+	if err != nil {
+		// The destination mismatch, verbatim. NOTHING was fed and NOTHING is
+		// released: this is the one refusing outcome that keeps the transfer.
+		return nil, err
+	}
 	if !ok {
 		return nil, ErrUnknownUpload
 	}
