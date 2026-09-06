@@ -22,28 +22,50 @@ package realclaude
 //
 // THE NON-VACUITY PROBLEM, and how it is solved. A turn in which claude never
 // invoked the skill also produces zero unrecognized_message frames, so the drain's
-// silence alone would read as a pass on a run that proved nothing. Two candidate
-// witnesses were rejected before the one below:
+// silence alone would read as a pass on a run that proved nothing. NEITHER
+// available witness closes that on its own, and this test asserts BOTH:
 //
-//   - A token echoed in the reply. claude can obtain a token from a skill file by
-//     READING it, which delivers the body as a tool_result and exercises none of
-//     this. The witness would be satisfied by the path that is not under test.
-//   - A file the skill tells claude to write. Same weakness, plus it would require
-//     the test-authored skill to carry tool directives, and this file writes an
-//     instruction document that a live claude executes with
-//     --dangerously-skip-permissions. The body is deliberately inert.
+//   - The daemon's own Debug record for the drop proves a harness-authored
+//     user/text block reached streamsup.emitUser and was suppressed. It does NOT
+//     prove the block was a skill body. The drop site is shared by both triggers,
+//     and — the part that is easy to get wrong — the harness NUDGE is itself
+//     stamped with the flag on this surface (dropped_lines_v2.1.220.json's one
+//     `user` record is the nudge, and it carries `"isSynthetic": true`). So a
+//     nudge fires the FLAG arm here, not the constant arm, and no content-free
+//     `trigger` attribute at the drop site could ever tell the two apart. That is
+//     why the discriminator is not logged: it could not work, quite apart from the
+//     standing rule against a third attribute.
+//   - skillReplyToken in the reply proves claude obtained content that exists
+//     ONLY inside the skill file. It does NOT prove the harness injected it: the
+//     prompt withholds the skill's path, but a determined search could still find
+//     and Read the file, which delivers the body as a tool_result and exercises
+//     none of this.
 //
-// The witness used instead is the daemon's OWN Debug record for the drop. It is
-// reachable only when a user/text block on a flagged line actually arrived at
-// emitUser and the new arm fired — which is the whole claim — and it is
-// unforgeable by a compliant-but-skill-less turn. That is why the daemon is
-// spawned with spawnBootstrapDaemonVerbose: at LevelInfo the record is not
-// emitted and the witness would be absent on a healthy run.
+// TOGETHER they are the proof, and the drain's silence is the third leg. The
+// skill provably loaded; a harness-authored user/text block provably arrived and
+// was dropped; and zero unrecognized_message frames left the daemon. Had the
+// skill's own line NOT been suppressed, its body would have surfaced on that
+// third leg and the drain would have failed — which is precisely what this turn
+// did before the fix. Forging the set would take a no-visible-output response to
+// summon a nudge AND a visible reply carrying the token, which are contradictory.
 //
-// It goes red the day claude stops stamping the flag on a skill line, which is the
-// one hop in streamsup.harnessNoOutputNudge's #2087 provenance that no committed
-// capture pins. Red does NOT mean the daemon broke: it means the inference expired
-// and the prefix fallback that docblock names becomes a real ticket.
+// A third candidate was rejected outright: a file the skill tells claude to write.
+// Same weakness as the token alone, plus it would require the test-authored skill
+// to carry tool directives, and this file writes an instruction document that a
+// live claude executes with --dangerously-skip-permissions. The body is
+// deliberately inert, and the assertion that would have needed a side effect is
+// the one that would have needed a permissive skill.
+//
+// The daemon is spawned with spawnBootstrapDaemonVerbose because at LevelInfo the
+// drop record is not emitted at all and that leg of the witness would be absent on
+// a healthy run.
+//
+// The drop-record leg goes red the day claude stops stamping the flag on a skill
+// line, which is the one hop in streamsup.harnessNoOutputNudge's #2087 provenance
+// that no committed capture pins. Red does NOT mean the daemon broke: it means the
+// inference expired and the prefix fallback that docblock names becomes a real
+// ticket. The token leg is what tells that apart from claude simply ignoring the
+// skill — read which of the two failed.
 
 import (
 	"context"
@@ -60,8 +82,11 @@ import (
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
 )
 
-// Fixed identifiers for the seeded state, distinct from every sibling in this
-// package (same package — the files must not redeclare).
+// Fixed identifiers for the seeded state. The Go names are distinct from every
+// sibling's — same package, so the files must not redeclare — but the VALUES are
+// deliberately not: they are the same UUIDs streamBootstrapUUID/streamConvID use,
+// which interactive_per_conversation_liveness_test.go already reuses too. Each
+// test seeds its own temp HOME, so the values share nothing at runtime.
 const (
 	skillBootstrapUUID = "88888888-8888-4888-8888-888888888888"
 	skillConvID        = "66666666-6666-4666-8666-666666666666"
@@ -77,6 +102,16 @@ const skillName = "pyry-probe"
 // body below tells claude never to repeat it so a hit cannot be claude's own
 // words either.
 const skillBodyMarker = "pyry-2087-skill-body-marker-do-not-repeat"
+
+// skillReplyToken is the word the skill body tells claude to reply with, and the
+// second leg of the non-vacuity witness. It exists ONLY inside the skill file: the
+// prompt never names it, and it is deliberately not a word a model would reach for
+// unprompted, so a reply carrying it is a reply from a claude that read the body.
+//
+// Distinct from skillBodyMarker on purpose, and the two pull in opposite
+// directions: the marker must never appear anywhere (it is the content-free
+// needle), and this token must appear in the reply. One string could not be both.
+const skillReplyToken = "pyry-2087-ack"
 
 // skillDropMsg is the Debug message streamsup's drop site emits, as a LITERAL —
 // the same rule streamsup's own harnessNudgeDropMsg states. A witness built from
@@ -111,8 +146,8 @@ func writeProbeSkill(t *testing.T, home string) {
 		"daemon's stream when a skill is loaded. It asks for nothing that touches the\n" +
 		"filesystem, the network, or any tool.\n\n" +
 		"Internal identifier: " + skillBodyMarker + "\n\n" +
-		"When this skill is invoked, reply with the single word `ready` and nothing\n" +
-		"else. Never repeat the internal identifier above in your reply.\n"
+		"When this skill is invoked, reply with the single word " + skillReplyToken + " and\n" +
+		"nothing else. Never repeat the internal identifier above in your reply.\n"
 	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
 		t.Fatalf("realclaude: write SKILL.md: %v", err)
 	}
@@ -187,32 +222,48 @@ func TestInteractiveStreamSkillInvocationIsSilent(t *testing.T) {
 	// The zero-unrecognized assertion is inside this drain: it fails on the FIRST
 	// unrecognized_message frame, naming the offending site, type and raw payload.
 	// Before #2087 a skill turn failed here with an 87 KB user_block payload.
-	drainForCompletedTurn(t, phone, initRecv, skillConvID, 180*time.Second)
+	reply := drainForCompletedTurn(t, phone, initRecv, skillConvID, 180*time.Second)
 
 	daemonLog := d.stderr.String()
 
-	// THE WITNESS. Without it the drain's silence is satisfied by a turn in which
-	// claude ignored the skill entirely, and this test would pass while proving
-	// nothing. The record is emitted only from the drop site in streamsup.emitUser,
-	// so its presence means a user/text block on a flagged line reached the parser
-	// and the arm fired.
-	if !strings.Contains(daemonLog, skillDropMsg) {
-		t.Fatalf("the daemon never logged %q, so no harness-authored user/text block reached "+
-			"streamsup.emitUser on this turn. The drain's zero-unrecognized pass is therefore "+
-			"VACUOUS, not a proof. Three readings, in order of likelihood:\n"+
-			"  1. claude did not invoke the %s skill at all (read the reply in the daemon log "+
-			"above — an unhelpful reply on --model haiku is the common cause, and the fix is "+
-			"the prompt, not this assertion);\n"+
-			"  2. claude invoked it but no longer stamps the line-level synthetic flag — the ONE "+
-			"hop in streamsup.harnessNoOutputNudge's #2087 provenance that no committed capture "+
-			"pins. That is the inference expiring, and the prefix fallback that docblock names "+
-			"becomes a real ticket;\n"+
-			"  3. the daemon is not logging at Debug, which would mean this test stopped using "+
-			"spawnBootstrapDaemonVerbose.",
-			skillDropMsg, skillName)
+	// WITNESS LEG 1 — the skill actually loaded. The token lives only inside the
+	// body written above, and the prompt withholds both the token and the file's
+	// path, so a reply carrying it came from a claude that read the body. Asserted
+	// FIRST because it is the leg that separates "claude ignored the skill" from
+	// "the daemon stopped suppressing", and those need different fixes.
+	if !strings.Contains(reply, skillReplyToken) {
+		t.Fatalf("the reply for %q never carried %q, so there is no evidence claude loaded the "+
+			"%s skill on this turn, and the drain's zero-unrecognized pass is VACUOUS rather "+
+			"than a proof.\nreply: %q\n\n"+
+			"The likely cause is model compliance, not the daemon: --model haiku was asked to "+
+			"use a skill and reply with one word. Tighten the PROMPT or the skill's description, "+
+			"not this assertion — an assertion loosened here is one that can no longer tell a "+
+			"working suppression from an absent skill.",
+			skillConvID, skillReplyToken, skillName, reply)
 	}
-	t.Logf("#2087: the daemon dropped a harness-authored user/text block and emitted zero "+
-		"unrecognized_message frames — a %s invocation leaves no row in the chat", skillName)
+
+	// WITNESS LEG 2 — a harness-authored user/text block reached the parser and was
+	// dropped. Emitted only from the drop site in streamsup.emitUser, so its absence
+	// means nothing was suppressed at all. Leg 1 having passed, the skill body is
+	// what arrived: had the skill's line NOT been suppressed the drain above would
+	// already have failed on its body, and had no such line arrived this record
+	// would be missing.
+	if !strings.Contains(daemonLog, skillDropMsg) {
+		t.Fatalf("claude loaded the %s skill (leg 1 passed) but the daemon never logged %q, so "+
+			"nothing was suppressed at streamsup.emitUser on this turn. Two readings:\n"+
+			"  1. claude no longer stamps the line-level synthetic flag on a skill line — the "+
+			"ONE hop in streamsup.harnessNoOutputNudge's #2087 provenance that no committed "+
+			"capture pins. That is the inference expiring, and the prefix fallback that docblock "+
+			"names becomes a real ticket. Note the drain passed, so the body did not surface "+
+			"either: check whether the skill still reaches the stream as a user/text block at "+
+			"all before writing that ticket;\n"+
+			"  2. the daemon is not logging at Debug, which would mean this test stopped using "+
+			"spawnBootstrapDaemonVerbose.",
+			skillName, skillDropMsg)
+	}
+	t.Logf("#2087: claude loaded the %s skill (reply carried %q), the daemon dropped a "+
+		"harness-authored user/text block, and zero unrecognized_message frames left the "+
+		"daemon — the invocation leaves no row in the chat", skillName, skillReplyToken)
 
 	// AC1's content-free rule, proved on the live surface rather than only against
 	// a synthesised line. A skill body is operator-authored instruction, up to tens

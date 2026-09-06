@@ -212,9 +212,20 @@ const warnRateLimitStatus = "allowed_warning"
 // delta; turn_states are ignored until sawDelta. On the deadline, a milestone-
 // specific t.Fatalf names the likely cause (a UUID mismatch between the two seeds
 // drops every event and hangs the drain).
-func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) {
+//
+// IT RETURNS THE DRIVING CONVERSATION'S REPLY TEXT, concatenated across deltas,
+// for callers that need one (#2087). The drain itself still asserts nothing about
+// content — the paragraph above holds, and adding a content assertion here would
+// impose it on all nine callers. What a returned string buys is a caller-local
+// assertion for the case where the turn's SHAPE is not enough: #2087 needs to
+// know that claude actually loaded a skill, and only a token that exists solely
+// inside the skill body can say so. Returning a value rather than taking a sink
+// keeps every existing call site compiling unchanged, since a Go call used as a
+// statement may discard results.
+func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, convID string, timeout time.Duration) string {
 	t.Helper()
 	sawDelta := false
+	var reply strings.Builder
 	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
@@ -343,16 +354,20 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 				"tells those apart.",
 				p.Status, p.LimitType, p.ResetsAt, p.TruncatedFields, p.ConversationID)
 		case protocol.TypeAssistantDelta:
-			if sawDelta {
-				continue
-			}
 			var p protocol.AssistantDeltaPayload
 			if err := json.Unmarshal(env.Payload, &p); err != nil {
 				t.Fatalf("decode assistant_delta payload: %v", err)
 			}
+			if p.ConversationID != convID {
+				continue
+			}
+			// Every delta is accumulated, not just the first: a reply arrives in
+			// pieces and a caller's token can land in any of them. M1 below still
+			// fires exactly once, on the first non-empty one.
+			reply.WriteString(p.Text)
 			// M1: liveness — a non-empty streamed delta for the driving conv. No
 			// content/echo assertion (real claude's words are non-deterministic).
-			if p.ConversationID == convID && strings.TrimSpace(p.Text) != "" {
+			if !sawDelta && strings.TrimSpace(p.Text) != "" {
 				sawDelta = true
 				t.Logf("M1: non-empty assistant_delta (seq=%d, %d bytes) for %q", p.Seq, len(p.Text), convID)
 			}
@@ -367,7 +382,7 @@ func drainForCompletedTurn(t *testing.T, phone *fakephone.Client, cs *noise.Ciph
 			// M2: after the delta, the terminal idle state closes the turn.
 			if st.State == "idle" && st.ConversationID == convID {
 				t.Logf("M2: terminal turn_state{idle} for %q — the turn closed", convID)
-				return
+				return reply.String()
 			}
 		}
 	}

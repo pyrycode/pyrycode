@@ -1454,6 +1454,18 @@ var ignoredLineTypes = map[string]bool{
 //     agrees. TestParser_CapturedSyntheticUserLinePinsTheWireSpelling replays
 //     those bytes inside `make check`, with the text swapped for a non-nudge
 //     probe so that it is the FLAG arm being proven and not this constant.
+//   - THIS CONSTANT'S OWN LINE IS FLAGGED TOO, which is not obvious and is easy
+//     to get backwards: the captured nudge record carries `"isSynthetic": true`,
+//     so on today's claude a nudge trips the FLAG arm and the string comparison
+//     beside it is never reached. The constant is kept anyway, and deliberately —
+//     AC3's case is a claude that STOPS stamping the flag, where it becomes the
+//     only thing standing between the nudge and the operator's chat. Two
+//     consequences worth having in writing. A hermetic row, not a live run, is
+//     what can prove that arm, and one pins it (flag absent + byte-exact nudge →
+//     zero events). And no content-free `trigger` attribute at the drop site
+//     could tell a nudge from a skill body, because both arrive flagged — that
+//     idea is unavailable on the merits, quite apart from the rule against a
+//     third attribute.
 //   - That the flag also lands on a SKILL line is an INFERENCE, not a
 //     measurement: no capture of one exists. Measured 2026-09-06 against the
 //     operator's local ~/.claude/projects corpus, which narrows it to a single
@@ -1463,6 +1475,16 @@ var ignoredLineTypes = map[string]bool{
 //     stdout-isSynthetic for the nudge, and skill lines sit in the same
 //     transcript class as the nudge. What remains unmeasured is that final
 //     surface hop for a skill line specifically.
+//   - FIRST LIVE OBSERVATION, 2026-09-06 02:17 on claude 2.1.259, --model haiku,
+//     the real-claude gate: a turn that invoked a test-authored skill produced
+//     ZERO unrecognized_message frames and exactly one drop record from the site
+//     below. Before this change the same turn surfaced the body. So the arm fires
+//     on a live skill turn — but that run could not yet say WHICH trigger fired,
+//     because the nudge is flagged too (bullet above) and its witness was the
+//     shared drop record alone. TestInteractiveStreamSkillInvocationIsSilent now
+//     also requires a reply token that exists only inside the skill body, which is
+//     what makes the next green run read on the skill line specifically. Treat the
+//     hop as strongly evidenced and not yet closed.
 //   - The failure direction is the safe one and costs nothing: if the hop is
 //     wrong the flag arm never fires and the Unrecognized row for skills stays
 //     exactly as it is today. A fallback matcher on the harness-fixed prefix
@@ -4568,9 +4590,16 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 		if block.Type != "tool_result" {
 			// The measurement found user messages carry tool_result blocks and
 			// nothing else — notably NOT a text echo of the delivered prompt, which
-			// the agent-run surface does emit. So a user/text block reaching here
-			// (i.e. every one but the harness nudge caught above) would be a genuine
-			// change, and gets surfaced rather than dropped.
+			// the agent-run surface does emit. So a block reaching here would be a
+			// genuine change, and gets surfaced rather than dropped.
+			//
+			// WHAT REACHES HERE, stated as of #2087 rather than as of the guard
+			// above's first version: every block of an UNKNOWN type, flagged line or
+			// not — a new block shape is the alarm this arm exists to raise and the
+			// flag must not blanket it — plus every user/TEXT block on an UNFLAGGED
+			// line that is not byte-exactly the nudge. What no longer reaches here is
+			// the whole harness-authored text class, which the guard above now takes
+			// as one; before #2087 that was the single nudge string.
 			p.emitUnrecognized(turnevent.UnrecognizedUserBlock, block.Type, raw)
 			continue
 		}
