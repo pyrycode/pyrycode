@@ -667,3 +667,141 @@ func TestPool_TransitionObserver_RaceConcurrentFires(t *testing.T) {
 		t.Errorf("eviction signals = %d, want 1", evictions)
 	}
 }
+
+// TestPool_AdoptAnnouncedID_RekeysAndFiresOneClear pins #2135's AC 1 pool half: an
+// announced reset to a different id re-keys the entry and fires exactly one
+// ReasonClear transition naming both ids.
+func TestPool_AdoptAnnouncedID_RekeysAndFiresOneClear(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	oldID := pool.Default().ID()
+	newID := SessionID("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0")
+
+	if err := pool.AdoptAnnouncedID(oldID, newID); err != nil {
+		t.Fatalf("AdoptAnnouncedID: %v", err)
+	}
+	if got := pool.Default().ID(); got != newID {
+		t.Errorf("session id = %q after adoption, want the announced %q", got, newID)
+	}
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("fired %d transitions, want exactly 1: %+v", len(got), got)
+	}
+	if got[0].Reason != ReasonClear || got[0].PreviousID != oldID || got[0].NewID != newID {
+		t.Errorf("transition = %+v, want {%q → %q, %q}", got[0], oldID, newID, ReasonClear)
+	}
+	if got[0].OccurredAt.IsZero() {
+		t.Errorf("transition OccurredAt is zero, want a stamp")
+	}
+}
+
+// TestPool_AdoptAnnouncedID_EqualIDChangesNothing pins AC 3's pool half, and it is
+// the one assertion here that onRotate would FAIL: RotateID checks membership before
+// it no-ops on equal ids, so onRotate's unconditional notify draws a spurious
+// delimiter for a session announcing the id it already has. This entry point must
+// not repeat that.
+func TestPool_AdoptAnnouncedID_EqualIDChangesNothing(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	id := pool.Default().ID()
+	if err := pool.AdoptAnnouncedID(id, id); err != nil {
+		t.Fatalf("AdoptAnnouncedID(x, x) = %v, want nil", err)
+	}
+	if got := pool.Default().ID(); got != id {
+		t.Errorf("session id = %q, want the unchanged %q", got, id)
+	}
+	if n := rec.len(); n != 0 {
+		t.Errorf("fired %d transitions on an equal-id announcement, want 0 — a spurious delimiter", n)
+	}
+}
+
+// TestPool_AdoptAnnouncedID_UnknownOldID is the rotation watcher's path when it wins
+// the race to the same rotation: it already re-keyed, so oldID is gone. Refusing here
+// with no transition is what keeps "exactly one session_transition per reset"
+// structural rather than merely likely.
+func TestPool_AdoptAnnouncedID_UnknownOldID(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	absent := SessionID("99999999-9999-4999-8999-999999999999")
+	newID := SessionID("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0")
+	if err := pool.AdoptAnnouncedID(absent, newID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("AdoptAnnouncedID on an absent old id = %v, want ErrSessionNotFound", err)
+	}
+	if n := rec.len(); n != 0 {
+		t.Errorf("fired %d transitions on a refused adoption, want 0", n)
+	}
+}
+
+// TestPool_AdoptAnnouncedID_RefusesATakenID is the security assertion. newID crosses
+// a trust boundary this package did not have before #2135: one line on the supervised
+// child's stdout now reaches rekeyLocked, which moves a map entry WITHOUT checking
+// what is already at the destination. Adopting an id that names another live session
+// would overwrite that session's entry and silently swallow it, so the destination is
+// refused — inside the same p.mu hold as the mutation, because a check outside it is
+// a TOCTOU.
+func TestPool_AdoptAnnouncedID_RefusesATakenID(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+	rec := &transitionRecorder{}
+	pool.SetTransitionObserver(rec.observe)
+
+	oldID := pool.Default().ID()
+	taken := SessionID("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0")
+	// Occupy the destination key. The value is immaterial to a map-collision refusal
+	// — what is asserted below is that neither key moved.
+	pool.mu.Lock()
+	pool.sessions[taken] = pool.sessions[oldID]
+	pool.mu.Unlock()
+
+	if err := pool.AdoptAnnouncedID(oldID, taken); !errors.Is(err, ErrSessionIDTaken) {
+		t.Fatalf("AdoptAnnouncedID onto a live id = %v, want ErrSessionIDTaken", err)
+	}
+	pool.mu.Lock()
+	_, oldStillThere := pool.sessions[oldID]
+	_, takenStillThere := pool.sessions[taken]
+	pool.mu.Unlock()
+	if !oldStillThere || !takenStillThere {
+		t.Errorf("after the refusal old present = %v, taken present = %v; want both true — "+
+			"a refused adoption must not have swallowed either entry", oldStillThere, takenStillThere)
+	}
+	if n := rec.len(); n != 0 {
+		t.Errorf("fired %d transitions on a refused adoption, want 0", n)
+	}
+}
+
+// TestPool_AdoptAnnouncedID_RebindsTheOwningConversation pins the mechanism behind
+// AC 4: the conversation-keyed run-configuration reply resolves the context window
+// from the conversation's CURRENT bound session, so the re-key is only useful if the
+// binding follows it. notifyTransition drives the rebind ahead of the observer
+// fan-out; this asserts that the announced-reset path reaches it.
+func TestPool_AdoptAnnouncedID_RebindsTheOwningConversation(t *testing.T) {
+	t.Parallel()
+	pool := helperPool(t, false)
+
+	oldID := pool.Default().ID()
+	newID := SessionID("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0")
+
+	const convID conversations.ConversationID = "11111111-2222-4333-8444-555555555555"
+	reg, _ := seedBoundConvRegistry(t, pool, convID, oldID)
+
+	if err := pool.AdoptAnnouncedID(oldID, newID); err != nil {
+		t.Fatalf("AdoptAnnouncedID: %v", err)
+	}
+	got, ok := reg.Get(convID)
+	if !ok {
+		t.Fatalf("conversation %q vanished from the registry", convID)
+	}
+	if got.CurrentSessionID != string(newID) {
+		t.Errorf("conversation bound to %q after the announced reset, want the announced %q",
+			got.CurrentSessionID, newID)
+	}
+}

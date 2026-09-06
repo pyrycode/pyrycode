@@ -135,8 +135,15 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 // tagged with an id the conversation was no longer bound to and the drain's
 // active-session gate dropped all of them until the daemon restarted.
 //
-// It is written through streamsup.Config.OnSessionRotate, which the runner fires
-// from RestartFresh, and read once per event by sinkForTag / exitForTag.
+// It has TWO writers since #2135, and is read once per event by sinkForTag /
+// exitForTag. The first is streamsup.Config.OnSessionRotate, which the runner
+// fires from RestartFresh — the daemon-DRIVEN rotation, where a child is replaced.
+// The second is sessionResetFollower, which moves the tag when claude announces a
+// reset of its own: no child is replaced there and RestartFresh is never reached,
+// so a tag written only through the first writer would go stale on every in-process
+// /clear. This sentence used to name OnSessionRotate as the only writer and is
+// corrected here, in the change that falsified it, because nothing reddens when a
+// comment goes stale.
 //
 // ATOMIC, NOT A MUTEX, and that is a design decision rather than a micro-
 // optimisation. The reader is claude's stdout forwarder goroutine on the per-event
