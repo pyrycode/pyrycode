@@ -236,3 +236,32 @@ check and a row-count check both. The test's row loop also asserts every row aft
 the rider's synthetic id prefix and that no id repeats — the one addition this spec made beyond its
 own plan, and the one that actually backs the acceptance criterion's "with its tasks … intact"
 clause rather than a payload that merely has the right shape and length.
+
+### `relay_v2_attachment_destination_test.go` — three attachment-destination flows (#2144)
+
+Proves the property #2143 shipped — the bytes land where the client named the
+conversation, not where the follow-active cursor points — over a real Noise
+session: a never-messaged conversation's stored attachment resolves for a
+following `send_message` (the ack is the assertion, since `resolveAttachments`
+only acks when `ResolvePath` found the bytes under the named conversation); an
+A-B-A misfile with the cursor left on B; and an unknown conversation refused
+before any byte is admitted. It needs its own `StartStreamInteractiveWithRelay`
+call rather than riding `relay_v2_attachment_upload_test.go`'s transfer — that
+test's own quiet-window AC deliberately runs a receive deadline out to prove an
+absence, which is the conn-killing trade-off [fakephone-harness.md § Library
+trade-off](fakephone-harness.md) already documents, so nothing durable is left
+on that conn to extend afterward.
+
+**A subtree sweep for "nothing here" cannot tell a correct negative from a
+broken walker.** Asserting "no attachment file under B" is satisfied
+identically by a correct daemon, a mistyped root, a walker that silently
+swallows an error, or a B directory that never existed — none of those are
+distinguishable from outside. `attachmentFilesUnder` instead sweeps the whole
+`conversations/` tree once; the A-B-A flow asserts the single hit it finds
+sits under A (the positive hit is the walker's own liveness proof, so "nothing
+under B" follows a fortiori), and the unknown-conversation flow — which has no
+legitimate hit anywhere — asserts the walk's own visited-file count is
+non-zero, so "found nothing" stays a claim about a directory that was actually
+walked rather than one the sweep never reached. Any e2e negative shaped as
+"this specific subtree is empty" should restate as "the whole tree's one hit
+is elsewhere" or "N files visited, 0 matched" instead.
