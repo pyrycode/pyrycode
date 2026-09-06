@@ -1,7 +1,7 @@
 # Sentinels and discard semantics
 
-Nine exported sentinels, `errors.New("attachments: …")` house style, in
-three families plus two non-discarding outliers. Six discard the transfer
+Ten exported sentinels, `errors.New("attachments: …")` house style, in
+three families plus three non-discarding outliers. Six discard the transfer
 (latched on first refusal — every later `Add` and `Assemble` returns the
 identical wrapped error, and the held chunk bytes are dropped at the moment
 of refusal so a poisoned accumulator holds no memory past that point).
@@ -19,6 +19,7 @@ resumable answer a later chunk can turn into bytes.
 | `ErrTooManyUploads` (#1796) | resource | n/a — refused before any `Accumulator` exists, by `Registry`'s admission gate rather than `Add`/`Assemble` |
 | `ErrIncomplete` | — | no |
 | `ErrUnknownUpload` (#1784) | — | n/a — no `Accumulator` is looked up for the pair; refused by `Registry.Deliver` itself before either `Add` or `Assemble` runs |
+| `ErrConversationMismatch` (#2146) | — | n/a — the pair's `Accumulator` exists and is untouched; refused by `lookupAndStamp` before the stamp, so the entry (idle stamp included) is left exactly as it was |
 
 `ErrUploadTooLarge` is the one sentinel not scoped to `accumulator.go`'s var
 block, whose opening sentence reads "Sentinel errors returned by `Add` and
@@ -44,7 +45,13 @@ raise a sentinel for at all. The refusal moved one layer up, into
 `internal/relay`'s `KnownConversation` gate ahead of this package, which
 answers the already-published `attachment.invalid_chunk` rather than mint a
 replacement here — see [Chunk intake driver](attachments-package-intake-driver.md)
-§ "The conversation is resolved once, on the completing chunk only".
+§ "The destination is fixed by the transfer's first delivered chunk".
+`ErrConversationMismatch` (#2146) took the same posture for the mismatch case
+that ticket left standing: it joins the same `attachment.invalid_chunk` arm
+rather than mint a wire code of its own, since a client-visible "your chunk
+was refused for a destination reason" is one class whether the cause is an
+absent id, an unhosted one, or a switched one, and splitting it across codes
+would turn the upload leg into a conversation-existence oracle.
 Distinguishing
 sentinel from sentinel is wanted in-process, for this package's own tests and
 for the daemon's logs, not on the wire — a single corrupt transfer must still

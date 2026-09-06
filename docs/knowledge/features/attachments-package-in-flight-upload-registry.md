@@ -1,8 +1,9 @@
-# In-flight upload registry (#1787, #1788, #1795, #1796, #1880, #1881, #1817)
+# In-flight upload registry (#1787, #1788, #1795, #1796, #1880, #1881, #1817, #2146)
 
 `Registry` (`registry.go`) gives `Accumulator` somewhere to live between
 chunks: a map from `uploadKey{connID, attachmentID}` to an
-`entry{acc *Accumulator, lastChunkAt time.Time}`, held **by value** so the
+`entry{acc *Accumulator, lastChunkAt time.Time, conversationID string}`
+(the third field is #2146's — see below), held **by value** so the
 stamp can only move by storing into the map under `mu` — an unexported
 `insertLocked` core, a thin lock-taking `insert` wrapper kept for tests,
 comma-ok `Lookup`, an unexported stamping `lookupAndStamp`, `Release`, its
@@ -34,6 +35,29 @@ a hit it moves `lastChunkAt` forward and returns the accumulator, on a miss it
 stores nothing. **`Lookup` itself stays a pure read and deliberately does not
 stamp** — a look-up that moved the activity time would let a diagnostic or #1897's dispatch-site read keep a dead upload alive indefinitely, the exact
 exhaustion path this family is closing.
+
+**#2146 gave `lookupAndStamp` a third outcome.** Through #2143 the
+destination conversation was still only *read* on the completing chunk (see
+[Chunk intake driver](attachments-package-intake-driver.md) § "The
+destination is fixed by the transfer's first delivered chunk"), so a
+transfer declared against conversation A could complete against B — both
+ids valid, both registry-checked, just disagreeing. `entry.conversationID`
+now latches whatever the **first delivered chunk** named, and every later
+chunk is compared against it before the stamp-and-store: agreement (or an
+unlatched `""`) proceeds as before, disagreement answers
+`ErrConversationMismatch` and leaves the entry **untouched — lastChunkAt
+included**. That untouched-stamp clause is the one placement decision that
+matters: `lastChunkAt` is `reapExpiredLocked`'s only input, so a comparison
+placed *after* the stamp would let a client renew a slot indefinitely by
+spamming mismatching chunks, reopening the exact exhaustion path
+`uploadIdleTimeout` closes. The comparison also runs *below* the reap, so an
+idle-expired pair answers the existing `ErrUnknownUpload` rather than being
+blamed for a destination nothing is left to disagree with. The empty string
+means "not yet latched" and is not a fourth field: it is unreachable as a
+*real* destination on the production path twice over (the handler refuses an
+empty `conversation_id` ahead of the seam, and `EnsureDir`'s `ValidID` refuses
+`""` regardless), so a `bool` alongside it would encode a state nothing can
+enter.
 
 **#1881 landed the policy that reads the stamp: `uploadIdleTimeout` (15
 minutes, `admission.go`) and the unexported `reapExpiredLocked`.** The reap is
@@ -136,8 +160,10 @@ attachment_id}` pair up and stamps it, feeds the chunk to the accumulator's
 except `ErrIncomplete`, which is the one answer that keeps it. A miss refuses
 with `ErrUnknownUpload` (below) and creates nothing. **At most two
 acquisitions of `mu` per delivered chunk, never three:** one
-(`lookupAndStamp`) on a miss or an `ErrIncomplete` outcome, two
-(`lookupAndStamp` then `Release`) on every releasing path. This corrects the
+(`lookupAndStamp`) on a miss, on a destination mismatch (#2146 — the refusal
+returns before `Add` ever runs, so no `Release` follows), or on an
+`ErrIncomplete` outcome; two (`lookupAndStamp` then `Release`) on every
+releasing path. This corrects the
 doc's own prior "three separate acquisitions" claim, which #1880 re-derived
 and found was never true of any single delivered chunk — its likely origin
 was counting `Admit` + `Lookup` + `Release` across a whole single-chunk

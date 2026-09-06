@@ -316,6 +316,12 @@ func TestV2Session_AttachmentChunk_SentinelsMapToWireCodes(t *testing.T) {
 		{"index out of range", attachments.ErrIndexOutOfRange, rejectInvalidChunk},
 		{"duplicate index", attachments.ErrDuplicateIndex, rejectInvalidChunk},
 		{"#1897 picks: expired transfer", attachments.ErrUnknownUpload, rejectInvalidChunk},
+		// #2146 picks: a chunk naming a different conversation than its transfer
+		// was admitted under. It joins the EXISTING arm rather than minting a
+		// code, because #2143's two destination refusals already answer
+		// invalid_chunk — a mismatch answered differently would split one
+		// client-visible class across two codes.
+		{"#2146 picks: mid-upload conversation switch", attachments.ErrConversationMismatch, rejectInvalidChunk},
 		{"size mismatch", attachments.ErrSizeMismatch, rejectIntegrityFailed},
 		{"digest mismatch", attachments.ErrDigestMismatch, rejectIntegrityFailed},
 		{"upload too large", attachments.ErrUploadTooLarge, rejectTooLarge},

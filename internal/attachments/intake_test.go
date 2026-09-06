@@ -412,3 +412,50 @@ func TestIntake_ReleaseConn_LeavesAnotherConnsUploadsInFlight(t *testing.T) {
 		t.Errorf("conn B second chunk error = %v, want errors.Is(err, ErrDuplicateIndex)", err)
 	}
 }
+
+// TestIntake_ReceiveMismatchedConversation_RefusesAndStoresNothing is #2146 at
+// the composite entry point, driven exactly as the wire drives it: the caller
+// names the destination per chunk — handleAttachmentChunk gates it on every
+// frame — so a phone that switches conversations mid-upload reaches Receive with
+// a DIFFERENT argument on a later chunk of a transfer already in flight.
+//
+// It is the seam-level half of AC 2's "stores no bytes". The refusal must arrive
+// before EnsureDir and Store rather than merely instead of them, so the
+// assertion is over the instance directory as a whole: NEITHER conversation has
+// a directory, not just the one the switch named. A refusal that ran after
+// EnsureDir would leave conversation B's directory behind holding no file, which
+// reads as success to anything that lists directories.
+//
+// The sentinel travels out VERBATIM — Receive wraps, annotates and reinterprets
+// nothing and interprets only ErrIncomplete — so errors.Is reaches it here
+// exactly as it does at the registry.
+func TestIntake_ReceiveMismatchedConversation_RefusesAndStoresNothing(t *testing.T) {
+	t.Parallel()
+
+	intake, root := newTestIntake(t)
+
+	// The admitting chunk fixes the destination on the transfer.
+	if _, stored, err := intake.Receive(testConnA, string(convA), boundUploadChunk(aid1, 0)); err != nil || stored {
+		t.Fatalf("Receive of the admitting chunk = (_, %t, %v), want (_, false, nil)", stored, err)
+	}
+
+	id, stored, err := intake.Receive(testConnA, string(convB), boundUploadChunk(aid1, 1))
+	if !errors.Is(err, ErrConversationMismatch) {
+		t.Fatalf("Receive of a later chunk under %q: error = %v, want errors.Is(err, %v)", convB, err, ErrConversationMismatch)
+	}
+	if id != "" || stored {
+		t.Errorf("Receive() = (%q, %t) on a refusal, want (\"\", false)", id, stored)
+	}
+
+	for _, conv := range []conversations.ConversationID{convA, convB} {
+		if _, err := os.Stat(filepath.Join(root, string(conv))); !os.IsNotExist(err) {
+			t.Errorf("os.Stat of the %q directory after a mismatch refusal: err = %v, want it never created", conv, err)
+		}
+	}
+
+	// The transfer is still in flight — nothing dropped — so the switch cost the
+	// client nothing but the one refused chunk.
+	if n := intake.reg.count(); n != 1 {
+		t.Errorf("registry holds %d entries after a mismatch refusal, want the incumbent's 1", n)
+	}
+}

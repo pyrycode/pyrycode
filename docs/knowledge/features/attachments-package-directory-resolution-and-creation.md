@@ -22,7 +22,7 @@ carried the daemon's own trusted follow-active cursor value, so this half of
 the check was belt-and-suspenders; it now carries whatever `internal/relay`'s
 `KnownConversation` gate validated one layer up (see
 [Chunk intake driver](attachments-package-intake-driver.md) § "The
-conversation is resolved once, on the completing chunk only"), so if that
+destination is fixed by the transfer's first delivered chunk"), so if that
 gate is ever removed or miswired this check is what stands between a remote
 string and a path component. The check itself is
 `candidate == want` (full-path equality against a destination built textually

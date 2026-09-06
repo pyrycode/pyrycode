@@ -48,13 +48,18 @@ func withAttachmentID(chunk protocol.AttachmentChunkPayload, attachmentID string
 	return chunk
 }
 
-// packageSentinels names every sentinel this package exports — accumulator.go's
-// var block, admission.go's three and storage.go's three. AC 5 asks that the
-// unknown-pair refusal be distinct from every existing sentinel, which is a
-// claim over a SET and is asserted over that set rather than over a sample of
-// it: three hand-picked near misses would leave the quantifier unproved while
-// looking like coverage. A sentinel added later and not listed here weakens the
-// claim silently, which is the one maintenance cost this shape carries.
+// packageSentinels names every sentinel this package exports EXCEPT
+// ErrUnknownUpload — accumulator.go's var block, admission.go's three,
+// storage.go's three, and registry.go's mismatch. The one omission is
+// deliberate: ErrUnknownUpload is the SUBJECT of the distinctness claim below,
+// and a subject listed among the things it must differ from asserts nothing.
+//
+// A distinctness claim is a claim over a SET and is asserted over that set
+// rather than over a sample of it: hand-picked near misses would leave the
+// quantifier unproved while looking like coverage. A sentinel added later and
+// not listed here weakens every such claim silently, which is the one
+// maintenance cost this shape carries — #2146 is the ticket that paid it, and a
+// test whose own subject is a member skips that member explicitly.
 var packageSentinels = []error{
 	ErrTotalChunksMismatch,
 	ErrIndexOutOfRange,
@@ -69,6 +74,7 @@ var packageSentinels = []error{
 	ErrNotContained,
 	ErrWriteFailed,
 	ErrNotFound,
+	ErrConversationMismatch,
 }
 
 // The concurrency tests below coordinate with channels rather than sync
@@ -1755,5 +1761,163 @@ func TestRegistry_ReleaseConn_ReturnsEverySlotItHeld(t *testing.T) {
 		if _, ok := r.Lookup(testConnB, attachmentID); !ok {
 			t.Errorf("Lookup(%q, %q) after %q's slots were refilled reported the upload absent", testConnB, attachmentID, testConnA)
 		}
+	}
+}
+
+// destinedChunk is chunk i of the bound transfer carrying BOTH ids Deliver reads
+// off it: the attachment_id that keys the pair and the conversation_id that
+// fixes the destination. The existing fixtures leave both zero deliberately —
+// testChunk's own doc states that absence is its statement that Add reads
+// neither — so the mismatch tests need a fixture that fills them, and filling
+// them in one helper keeps the two ids from being transposed at a call site.
+func destinedChunk(i int, conversationID string) protocol.AttachmentChunkPayload {
+	chunk := withAttachmentID(boundChunk(i), testAttachmentID)
+	chunk.ConversationID = conversationID
+	return chunk
+}
+
+// TestRegistry_DeliverMismatchedConversation_RefusesAndKeepsTheIncumbent is
+// #2146's AC 1 and AC 2 together, and it mirrors
+// TestRegistry_AdmitRefusedRepeatUnderAHeldPair_KeepsTheIncumbent: a chunk whose
+// declaration disagrees with the live transfer is a client error worth naming,
+// so it answers its own sentinel and the incumbent is left untouched.
+//
+// THE STAMP CLAUSE IS THE POINT AND NOT A NICETY. lastChunkAt is
+// reapExpiredLocked's only input, so a comparison placed AFTER the stamp lets a
+// client hold a slot open indefinitely by spamming mismatching chunks —
+// re-opening the exact path uploadIdleTimeout closes. That is a
+// resource-exhaustion bug rather than a cosmetic one, and it is the sole red for
+// the mutant that moves the comparison below the store. The clock is advanced
+// between the two deliveries so a stamp that DID move is distinguishable from
+// one that did not; without the advance the assertion passes either way.
+//
+// THE NOTHING-STORED CLAUSE IS BEHAVIOURAL rather than an inspection of private
+// state: the refused chunk's index is re-delivered afterwards under the latched
+// conversation and must be ACCEPTED. Had the refusal fed the accumulator, that
+// re-delivery would answer ErrDuplicateIndex — and because Deliver releases the
+// pair on any Add refusal, the transfer would be gone rather than merely
+// diagnosed.
+func TestRegistry_DeliverMismatchedConversation_RefusesAndKeepsTheIncumbent(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+
+	// The admitting chunk fixes the destination.
+	clk.advance(time.Minute)
+	if _, err := r.Deliver(testConnA, destinedChunk(0, convA)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of chunk 0 under %q: error = %v, want one wrapping %v", convA, err, ErrIncomplete)
+	}
+	latched, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt after the admitting chunk reported absent, want present")
+	}
+
+	// The phone switches conversations mid-upload.
+	clk.advance(time.Minute)
+	data, err := r.Deliver(testConnA, destinedChunk(1, convB))
+	if !errors.Is(err, ErrConversationMismatch) {
+		t.Fatalf("Deliver of chunk 1 under %q: error = %v, want one wrapping %v", convB, err, ErrConversationMismatch)
+	}
+	if data != nil {
+		t.Errorf("Deliver returned %d bytes for a refused chunk, want nil", len(data))
+	}
+
+	// The incumbent is untouched — its idle stamp included.
+	stamp, ok := r.lastChunkAt(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("lastChunkAt after a mismatch refusal reported absent, want the incumbent still held")
+	}
+	if !stamp.Equal(latched) {
+		t.Errorf("a mismatching chunk moved lastChunkAt to %v, want it left at the last delivered chunk's reading %v", stamp, latched)
+	}
+	if n := r.count(); n != 1 {
+		t.Errorf("count() after a mismatch refusal = %d, want 1", n)
+	}
+
+	// Nothing was fed and nothing was released: the refused index is still free,
+	// and the transfer still assembles to its fixture.
+	if _, err := r.Deliver(testConnA, destinedChunk(1, convA)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("re-delivering the refused index under %q: error = %v, want one wrapping %v", convA, err, ErrIncomplete)
+	}
+	upload, ok := r.Lookup(testConnA, testAttachmentID)
+	if !ok {
+		t.Fatalf("Lookup after a mismatch refusal reported the pair absent, want it held")
+	}
+	for i := 2; i < testBoundTotal; i++ {
+		if err := upload.Add(boundChunk(i)); err != nil {
+			t.Fatalf("feeding the transfer in flight chunk %d: %v", i, err)
+		}
+	}
+	assembled, err := upload.Assemble()
+	if err != nil {
+		t.Fatalf("Assemble() after a mismatch refusal: %v", err)
+	}
+	if !bytes.Equal(assembled, testBoundFixture) {
+		t.Errorf("Assemble() returned %d bytes that differ from the fixture, want its %d bytes", len(assembled), len(testBoundFixture))
+	}
+}
+
+// TestRegistry_DeliverMismatchedConversation_IsDistinctFromEverySentinel asserts
+// the claim over the SET rather than over a sample of it, exactly as the
+// unknown-pair refusal does: hand-picked near misses would leave the quantifier
+// unproved while reading as coverage. ErrConversationMismatch is itself appended
+// to packageSentinels in the same edit, so the two claims stay symmetric.
+func TestRegistry_DeliverMismatchedConversation_IsDistinctFromEverySentinel(t *testing.T) {
+	t.Parallel()
+
+	r := NewRegistry()
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+	if _, err := r.Deliver(testConnA, destinedChunk(0, convA)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of the admitting chunk: error = %v, want one wrapping %v", err, ErrIncomplete)
+	}
+
+	_, err := r.Deliver(testConnA, destinedChunk(1, convB))
+	if !errors.Is(err, ErrConversationMismatch) {
+		t.Fatalf("Deliver under a second conversation: error = %v, want one wrapping %v", err, ErrConversationMismatch)
+	}
+	for _, sentinel := range packageSentinels {
+		if sentinel == ErrConversationMismatch {
+			continue
+		}
+		if errors.Is(err, sentinel) {
+			t.Errorf("the mismatch refusal also wraps %v, want a sentinel distinct from every other one", sentinel)
+		}
+	}
+}
+
+// TestRegistry_DeliverMismatchedConversation_UnderAnExpiredPair_IsUnknownUpload
+// pins the reap AHEAD of the comparison. An idle-expired transfer is over, so
+// the honest answer is that there is no transfer to disagree with — not that
+// this chunk named the wrong conversation. It is the sole red for a comparison
+// hoisted above reapExpiredLocked, which would blame a chunk for a destination
+// belonging to a transfer the window had already ended.
+func TestRegistry_DeliverMismatchedConversation_UnderAnExpiredPair_IsUnknownUpload(t *testing.T) {
+	t.Parallel()
+
+	clk := &fakeClock{t: testClockStart}
+	r := newRegistryWithClock(clk.now)
+
+	if _, err := r.Admit(testConnA, testAttachmentID, testBoundTotal, maxUploadBytes, testBoundFixtureDigest); err != nil {
+		t.Fatalf("Admit of the bound declaration: %v", err)
+	}
+	if _, err := r.Deliver(testConnA, destinedChunk(0, convA)); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("Deliver of the admitting chunk: error = %v, want one wrapping %v", err, ErrIncomplete)
+	}
+
+	// Strictly past the window, so the entry is reaped by this delivery's own head.
+	clk.advance(uploadIdleTimeout + time.Nanosecond)
+
+	if _, err := r.Deliver(testConnA, destinedChunk(1, convB)); !errors.Is(err, ErrUnknownUpload) {
+		t.Errorf("Deliver of a mismatching chunk under an expired pair: error = %v, want one wrapping %v", err, ErrUnknownUpload)
+	}
+	if n := r.count(); n != 0 {
+		t.Errorf("count() after the expired pair was reaped = %d, want 0", n)
 	}
 }

@@ -1,4 +1,4 @@
-# Chunk intake driver (#1896)
+# Chunk intake driver (#1896, #2146)
 
 `Intake` (`intake.go`) is this package's composite entry point: one type
 sequencing `Admit`, `Deliver`, `EnsureDir` and `Store` behind two methods,
@@ -7,8 +7,8 @@ sentinels to map rather than four primitives to order itself. It was the
 package's first production caller (see § "In-flight upload registry" and
 the top-level overview) before it had one of its own: #1897 declared the
 `AttachmentIntake` seam interface `Receive`/`ReleaseConn` satisfy, built the
-production conversation resolver (retired by #2143 — see § "The conversation
-is resolved once, on the completing chunk only" below), and wired `internal/relay`'s
+production conversation resolver (retired by #2143 — see § "The destination
+is fixed by the transfer's first delivered chunk" below), and wired `internal/relay`'s
 `appFrameWorker` as this package's first caller from *outside* it — see
 [Inbound `attachment_chunk`](v2-session-manager-state-machine-inbound-attachment-chunk-attachmentintake-seam.md).
 It also picked the two open sentinel→code mappings this package's doc blocks
@@ -61,12 +61,12 @@ particular sentinel to decide what to emit. Every other refusal crosses
 `Receive` untouched — no `%w`, no annotation — so `errors.Is` still reaches
 each layer's own sentinel.
 
-## The conversation is resolved once, on the completing chunk only
+## The destination is fixed by the transfer's first delivered chunk
 
-`Registry` has nowhere to stash a per-transfer conversation id, so `Receive`
-still only *consumes* the conversation on the completing chunk, when it calls
-`EnsureDir`/`Store` — unchanged since #1896. What #2143 changed is where that
-value comes from and when it is validated.
+`Receive` still only *files* the bytes on the completing chunk, when it calls
+`EnsureDir`/`Store` — unchanged since #1896. What has changed across #2143 and
+\#2146 is where the destination value comes from, when it is validated, and
+whether a transfer may change its mind about it mid-upload.
 
 Through #2142, `Receive` took no conversation argument at all: `NewIntake`
 closed over a construction-time resolver (`func() (conversations.ConversationID,
@@ -100,11 +100,41 @@ which matters here specifically: a session router additionally refuses a
 known conversation with no bound session, and a never-messaged conversation
 is exactly the case this ticket exists to accept.
 
-The one consequence #2143 deliberately left standing: since the destination
-is still only *consumed* on the completing chunk, a phone that switches
-conversations mid-upload still files under the *new* one — now
-registry-validated rather than cursor-read. Closing that needs the registry
-to record a destination at admission, which is #2146's.
+The one consequence #2143 deliberately left standing — a phone that switches
+conversations mid-upload still filed under the *new* one, now
+registry-validated rather than cursor-read — is what #2146 closed. The
+registry's `entry` (see § "In-flight upload registry") now latches whichever
+conversation the transfer's **first delivered chunk** named, and
+`lookupAndStamp` compares every later chunk against that latch rather than
+letting the completing chunk simply overwrite it: a mismatch answers
+`ErrConversationMismatch`, one chunk is refused, and the transfer is left
+exactly where it was — nothing latched, nothing stamped, nothing dropped.
+`Receive`'s own doc block states this as "fixed by the transfer's first chunk
+and no later chunk may move it," which is the property this section used to
+say did not hold.
+
+**Writing the test found a premise the plan couldn't see from reading code
+alone.** The design planned to latch and compare `chunk.ConversationID` —
+the wire field, which has carried the destination since #2142. But this
+package's own intake fixtures (`uploadChunk`, `boundUploadChunk` in
+`intake_test.go`) build that field **zero** and pass the destination as
+`Receive`'s `conversationID` argument instead, because that argument is what
+production actually threads through (`handleAttachmentChunk` passes the
+gated id as the parameter, not by mutating the frame). Comparing the chunk
+field as planned would have made every existing intake fixture latch `""`,
+match `""`, and pass — proving nothing, since production never produces that
+shape. The fix folded into `Receive` itself: it stamps its own validated
+`conversationID` argument onto the local copy of the chunk it hands to
+`Deliver`, one line, ahead of the call — so the value the registry latches
+and the value `EnsureDir` resolves are the same **by construction**, not by
+an agreement between one caller and one callee that a future caller could
+break. The registry-level tests in `registry_test.go` still set
+`chunk.ConversationID` directly, since `Deliver` is the layer that actually
+reads it; the intake-level test drives the mismatch the way the wire does —
+two `Receive` calls differing in their *argument*, not in a hand-built
+chunk. A fixture that fills every field but leaves the one field a plan
+means to key off at zero is worth reading for what it omits, not just what
+it sets.
 
 **`EnsureDir`'s `conversations.ValidID` check moved from belt to backstop.**
 Before #2143 the conversation id it validated always came from the daemon's
