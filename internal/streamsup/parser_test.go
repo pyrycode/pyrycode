@@ -9025,3 +9025,314 @@ func TestParser_SidecarShapesAreConfined(t *testing.T) {
 		})
 	}
 }
+
+// --- #2134: conversation_reset -------------------------------------------------
+
+// conversationResetIDFixture is the canonical stem the #2134 rows announce. It is
+// a RECONSTRUCTED value, not a captured one, and the distinction is recorded
+// because it is weaker than what the ModelAnnounced rows rest on: the parent
+// ticket's capture (claude 2.1.259, observed 2026-09-04) elides both id values
+// (`c43fbe8d-…`, `a2a0b27a-…`), and a tree-wide grep finds no capture file holding
+// a conversation_reset line. So the SHAPE below is claude's and the VALUE is ours.
+// Live confirmation is #2138's job.
+//
+// The digits are chosen to be conspicuous — a descending nibble run no log
+// message, message name or sibling fixture in this package contains — so a
+// contains-sweep for a leak cannot pass by colliding with unrelated text.
+const conversationResetIDFixture = "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"
+
+// unrecognizedPayloadMsgFixture is emitUnrecognized's Debug message, as a literal
+// for harnessNudgeDropMsg's reason. #2134's decline rows select on it: the arm
+// adds NO record of its own, so this is the only one a declined reset may produce.
+const unrecognizedPayloadMsgFixture = "streamsup: unrecognized payload"
+
+// conversationResetLineFixture builds a conversation_reset line from the two keys
+// the parent ticket's capture shows, inventing no field structure. `uuid` rides
+// along precisely because nothing reads it: carrying it proves the decode ignores
+// an undeclared sibling key rather than merely never meeting one.
+//
+// The ABSENT-key case is a different input and is written as a raw line at its
+// call site rather than bent into this helper, for modelInitLineFixture's reason:
+// both are asserted, so neither may be expressible only as the other.
+func conversationResetLineFixture(t *testing.T, newID string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"type":                "conversation_reset",
+		"new_conversation_id": newID,
+		"uuid":                "a2a0b27a-1111-4222-8333-444455556666",
+	})
+	if err != nil {
+		t.Fatalf("marshalling conversation_reset fixture: %v", err)
+	}
+	return string(b)
+}
+
+// TestParser_ConversationResetMapsFromTheAnnouncement is AC1. A canonical
+// new_conversation_id becomes exactly ONE turnevent.ConversationReset carrying it,
+// and the line produces NO Unrecognized — the noise row this ticket removes.
+//
+// Both halves are asserted, and over the WHOLE slice rather than element 0.
+// "exactly one event and it is the right one" and "no noise row" are two claims,
+// and AC1 makes both: a future arm that emitted the reset AND fell through would
+// satisfy a first-element check while re-introducing the defect.
+func TestParser_ConversationResetMapsFromTheAnnouncement(t *testing.T) {
+	t.Parallel()
+
+	got := collectEvents(conversationResetLineFixture(t, conversationResetIDFixture))
+
+	if len(got) != 1 {
+		t.Fatalf("event count: got %d, want 1 — %#v", len(got), got)
+	}
+	want := turnevent.ConversationReset{NewConversationID: conversationResetIDFixture}
+	if !reflect.DeepEqual(got[0], want) {
+		t.Errorf("event: got %#v, want %#v", got[0], want)
+	}
+	for i, ev := range got {
+		if un, ok := ev.(turnevent.Unrecognized); ok {
+			t.Errorf("event %d is an Unrecognized (%+v); removing that row for this type is the ticket", i, un)
+		}
+	}
+}
+
+// TestParser_ConversationResetCarriesTheIDVerbatim is the half of AC1 the single
+// fixture above cannot prove. A producer that lowercased, trimmed, re-hyphenated
+// or otherwise re-formatted the id would keep that test green, because its one
+// value is already in the form such a transform produces. These rows vary the
+// value inside the canonical set so any normalisation reddens.
+func TestParser_ConversationResetCarriesTheIDVerbatim(t *testing.T) {
+	t.Parallel()
+
+	for _, id := range []string{
+		conversationResetIDFixture,
+		"00000000-0000-0000-0000-000000000000",
+		"ffffffff-ffff-ffff-ffff-ffffffffffff",
+		"deadbeef-cafe-4bad-8f00-0123456789ab",
+	} {
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			got := collectEvents(conversationResetLineFixture(t, id))
+			if len(got) != 1 {
+				t.Fatalf("event count: got %d, want 1 — %#v", len(got), got)
+			}
+			ev, ok := got[0].(turnevent.ConversationReset)
+			if !ok {
+				t.Fatalf("event type: got %T, want turnevent.ConversationReset", got[0])
+			}
+			if ev.NewConversationID != id {
+				t.Errorf("NewConversationID: got %q, want %q byte-for-byte", ev.NewConversationID, id)
+			}
+		})
+	}
+}
+
+// TestParser_ConversationResetDeclinesReachTheUnrecognizedLane is AC2. A reset the
+// daemon cannot act on produces NO reset event and reaches the unrecognized lane
+// instead — deliberately declining the guarantee rate_limit_event and
+// control_response each hold ("emitUnrecognized unreachable BY MATCHING"), because
+// an announcement the parser silently swallows is the defect being fixed.
+//
+// THE ROWS SPLIT INTO TWO GROUPS AND THE SPLIT IS ASSERTED, not just described.
+// byPredicate rows must be well-formed JSON strings so the DECODE SUCCEEDS and
+// transcript.ValidStem is what rejects them; the loop re-decodes each one and
+// requires the hostile value to come back intact, because a row written carelessly
+// as a malformed payload would fail at json.Unmarshal instead, land on the very
+// same decline path, pass green, and prove nothing about the gate. The numeric row
+// is the ONE that is supposed to fail the decode.
+//
+// The traversal- and injection-shaped rows are the security review's, and the
+// newline one is the sharpest: some regexp dialects let `$` match before a
+// trailing newline, which would hand a downstream <dir>/<id>.jsonl resolver a path
+// with an embedded line break. Go's `$` is \z semantics, so it does not — pinned
+// here rather than trusted.
+func TestParser_ConversationResetDeclinesReachTheUnrecognizedLane(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		line        string
+		byPredicate string // the value the decode must yield before the gate rejects it
+		why         string
+	}{
+		{
+			name: "key absent", line: `{"type":"conversation_reset","uuid":"a2a0b27a-1111-4222-8333-444455556666"}`,
+			why: "absent, present-but-empty and a line carrying no such key are answered identically, " +
+				"which is what makes a plain-string decode target sufficient",
+		},
+		{
+			name: "present but empty", line: conversationResetLineFixture(t, ""), byPredicate: "",
+			why: "an event carrying an empty id would assert `claude mounted a new transcript` while naming none",
+		},
+		{
+			name: "uppercase hex", line: conversationResetLineFixture(t, "0F1E2D3C-4B5A-4978-8796-A5B4C3D2E1F0"),
+			byPredicate: "0F1E2D3C-4B5A-4978-8796-A5B4C3D2E1F0",
+			why:         "ValidStem is lowercase-only; repairing the case here would be inventing rather than reporting",
+		},
+		{
+			name: "one char short", line: conversationResetLineFixture(t, "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f"),
+			byPredicate: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f",
+			why:         "the pattern is a fixed-length full match, so a near-miss is a miss",
+		},
+		{
+			name: "one char long", line: conversationResetLineFixture(t, conversationResetIDFixture+"0"),
+			byPredicate: conversationResetIDFixture + "0",
+			why:         "anchored at both ends: a canonical stem with anything appended is not one",
+		},
+		{
+			name: "hyphens misplaced", line: conversationResetLineFixture(t, "0f1e2d3c4-b5a-4978-8796-a5b4c3d2e1f0"),
+			byPredicate: "0f1e2d3c4-b5a-4978-8796-a5b4c3d2e1f0",
+			why:         "group lengths are part of the shape, not decoration",
+		},
+		{
+			name: "non-hex character", line: conversationResetLineFixture(t, "0g1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"),
+			byPredicate: "0g1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0",
+			why:         "the alphabet is [0-9a-f] and a hyphen, and nothing else",
+		},
+		{
+			name: "path traversal", line: conversationResetLineFixture(t, "../../etc/passwd"),
+			byPredicate: "../../etc/passwd",
+			why: "SECURITY: downstream resolves <dir>/<id>.jsonl, and the gate's alphabet excludes " +
+				"the separator and the dot by construction",
+		},
+		{
+			name: "stem with a separator", line: conversationResetLineFixture(t, "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e/f0"),
+			byPredicate: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e/f0",
+			why:         "SECURITY: a right-length, right-looking value carrying one separator is the near-miss that matters",
+		},
+		{
+			name: "stem with a dot", line: conversationResetLineFixture(t, "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e.f0"),
+			byPredicate: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e.f0",
+			why:         "SECURITY: the dot is the other half of a traversal and is excluded the same way",
+		},
+		{
+			name: "trailing newline", line: conversationResetLineFixture(t, conversationResetIDFixture+"\n"),
+			byPredicate: conversationResetIDFixture + "\n",
+			why: "SECURITY: Go's `$` is \\z, not Perl's before-final-newline — a canonical stem with a " +
+				"newline glued on must NOT pass, or a resolver downstream receives a path with a line break",
+		},
+		{
+			name: "newline then a path", line: conversationResetLineFixture(t, conversationResetIDFixture+"\n../../etc/passwd"),
+			byPredicate: conversationResetIDFixture + "\n../../etc/passwd",
+			why:         "SECURITY: the trailing-newline row's exploit form, pinned beside it",
+		},
+		{
+			name: "id is not a string", line: `{"type":"conversation_reset","new_conversation_id":21342134}`,
+			why: "the ONE row that fails the whole decode rather than the gate; a numeric id is not a " +
+				"canonical stem either, so it takes the same decline path",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Non-vacuity: prove the DECODE succeeds on the rows that are meant to be
+			// rejected by the predicate, so a fixture that quietly became malformed
+			// cannot pass this test for the wrong reason.
+			if tt.byPredicate != "" || tt.name == "present but empty" {
+				var probe struct {
+					ID string `json:"new_conversation_id"`
+				}
+				if err := json.Unmarshal([]byte(tt.line), &probe); err != nil {
+					t.Fatalf("row is meant to be rejected by ValidStem, but its payload does not decode: %v", err)
+				}
+				if probe.ID != tt.byPredicate {
+					t.Fatalf("row's decoded id: got %q, want %q — the fixture no longer carries the hostile value",
+						probe.ID, tt.byPredicate)
+				}
+			}
+
+			got := collectEvents(tt.line)
+
+			for i, ev := range got {
+				if cr, ok := ev.(turnevent.ConversationReset); ok {
+					t.Fatalf("event %d is a ConversationReset carrying %q, want none (%s)", i, cr.NewConversationID, tt.why)
+				}
+			}
+			if len(got) != 1 {
+				t.Fatalf("event count: got %d, want 1 Unrecognized (%s) — %#v", len(got), tt.why, got)
+			}
+			un, ok := got[0].(turnevent.Unrecognized)
+			if !ok {
+				t.Fatalf("event[0] = %T, want turnevent.Unrecognized (%s)", got[0], tt.why)
+			}
+			if un.Site != turnevent.UnrecognizedLineType {
+				t.Errorf("Unrecognized.Site: got %q, want %q", un.Site, turnevent.UnrecognizedLineType)
+			}
+			if un.Kind != "conversation_reset" {
+				t.Errorf("Unrecognized.Kind: got %q, want %q", un.Kind, "conversation_reset")
+			}
+		})
+	}
+}
+
+// TestParser_ConversationResetDeclineAddsNoDropRecord pins the logging half of
+// AC2, and the claim is narrower than "the decline is silent": the line DOES
+// produce exactly one record, emitUnrecognized's own content-free one. What the
+// arm must not add is a SECOND, weaker record of the same fact.
+//
+// That DIVERGES from every sibling arm and the divergence is the decision being
+// pinned. emitRateLimit logs a reason keyword per rung and emitModelAnnounced logs
+// its undecodable drop because those arms CONSUME their declines, so a Debug is
+// the only trace they can leave. Here the decline is SURFACED to a client as an
+// Unrecognized carrying the offending bytes — strictly more visible than a Debug
+// the production daemon does not print — so a drop-reason vocabulary would be
+// redundant by construction.
+//
+// The attrs are then swept for the id. emitUnrecognized reports `bytes` and
+// `truncated`, never the raw line, and the EVENT is where the bytes travel; this
+// is the one place a future edit would most plausibly break that.
+func TestParser_ConversationResetDeclineAddsNoDropRecord(t *testing.T) {
+	t.Parallel()
+
+	const hostile = "../../etc/" + conversationResetIDFixture
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	if _, err := p.Write([]byte(conversationResetLineFixture(t, hostile) + "\n")); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+
+	all := rec.all()
+	if len(all) != 1 {
+		t.Fatalf("records: got %d, want exactly 1 (emitUnrecognized's) — the arm adds none of its own: %+v",
+			len(all), all)
+	}
+	if all[0].msg != unrecognizedPayloadMsgFixture {
+		t.Errorf("record message: got %q, want %q", all[0].msg, unrecognizedPayloadMsgFixture)
+	}
+	if generic := rec.withMessage(genericDropMsgFixture); len(generic) != 0 {
+		t.Errorf("the line reached consumeLine's generic drop (%d record(s)): %+v", len(generic), generic)
+	}
+	for key, value := range all[0].attrs {
+		if strings.Contains(value, hostile) || strings.Contains(value, conversationResetIDFixture) {
+			t.Errorf("claude's id leaked into log attr %q = %q", key, value)
+		}
+	}
+}
+
+// TestParser_ConversationResetNeighbourTypeStillRingsTheBell is AC3, scoped to the
+// regression the new arm makes possible. The general property — an unmapped,
+// unlisted top-level type reaches the unrecognized lane — is already covered; what
+// is new is that a case label one edit away from `conversation_reset` must not be
+// widened into it. A prefix, a suffix and the plural each stay unrecognized.
+func TestParser_ConversationResetNeighbourTypeStillRingsTheBell(t *testing.T) {
+	t.Parallel()
+
+	for _, typ := range []string{"conversation_resets", "conversation_reset_v2", "pre_conversation_reset", "conversation"} {
+		t.Run(typ, func(t *testing.T) {
+			t.Parallel()
+			line := `{"type":"` + typ + `","new_conversation_id":"` + conversationResetIDFixture + `"}`
+			got := collectEvents(line)
+			if len(got) != 1 {
+				t.Fatalf("event count: got %d, want 1 Unrecognized — %#v", len(got), got)
+			}
+			un, ok := got[0].(turnevent.Unrecognized)
+			if !ok {
+				t.Fatalf("event[0] = %T, want turnevent.Unrecognized — the arm matched a neighbouring type", got[0])
+			}
+			if un.Kind != typ {
+				t.Errorf("Unrecognized.Kind: got %q, want %q", un.Kind, typ)
+			}
+		})
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pyrycode/pyrycode/internal/transcript"
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
@@ -1879,6 +1880,25 @@ type systemInitLine struct {
 	Model string `json:"model"`
 }
 
+// conversationResetLine is the decoded payload of one top-level
+// conversation_reset line. Kept separate from streamLine for
+// systemTaskStartedLine's reason, and the field set is exactly what the parent
+// ticket's capture shows minus what nothing reads.
+//
+// `uuid` is DELIBERATELY ABSENT — the one other key the captured shape carries.
+// Nothing in the daemon reads it, and a field never declared cannot reach a log
+// or an event: systemInitLine's argument for its own twenty-one omissions,
+// applied here to the only omission available.
+//
+// A non-string new_conversation_id fails the whole decode and takes
+// emitConversationReset's decline path, exactly as systemInitLine.Model does for
+// emitModelAnnounced — and that is the ONLY reachable undecodable case, because
+// consumeLine has already decoded this line into streamLine, so malformed JSON
+// never reaches that function at all.
+type conversationResetLine struct {
+	NewConversationID string `json:"new_conversation_id"`
+}
+
 // controlResponseLine is the decoded payload of one top-level control_response
 // line. Kept separate from streamLine for systemTaskStartedLine's reason, and it
 // is the family's first DOUBLE-nested target: the outer `response` is claude's
@@ -2879,6 +2899,33 @@ func (p *Parser) consumeLine(line []byte) {
 		// case in source order, and a fallthrough would also run the
 		// ignoredLineTypes test below — a test this type must never pass.
 		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
+	case "conversation_reset":
+		// claude announcing that it replaced the conversation and mounted a fresh
+		// transcript (#2134) — what desktop's Reset session produces, since it sends
+		// the literal text `/clear` and claude runs a slash-prefixed message as a
+		// command. Without this arm every reset put an unrecognized_message row in the
+		// operator's chat: the operator asks for a reset and gets a noise row for it.
+		//
+		// Its own arm rather than an ignoredLineTypes member, for #1404's, #1500's and
+		// #2089's reasons verbatim — that list is documented as top-level types only
+		// and as MEASURED, and the 2026-07-27 census never ran /clear, so it could not
+		// have seen this type. There is a second reason here the precedents do not
+		// have: membership would ALSO swallow the announcement in silence, and that is
+		// the defect being fixed rather than a cost being tolerated.
+		//
+		// A MATCHER, and unlike its two nearest precedents it does NOT hold
+		// "emitUnrecognized unreachable BY MATCHING". A reset whose id the daemon
+		// cannot act on falls through here ON PURPOSE and still rings the bell. See
+		// emitConversationReset's doc for why that is the weaker guarantee taken
+		// deliberately, and why an unconditional consume would look like a tidy-up
+		// while restoring the original defect.
+		if p.emitConversationReset(line) {
+			return
+		}
+		// Written out rather than reached by `fallthrough`, for the arm above's
+		// reason: default is not the next case in source order, and a fallthrough
+		// would also run the ignoredLineTypes test below.
+		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	default:
 		if ignoredLineTypes[sl.Type] {
 			// The subtype match lives INSIDE this branch, which is what keeps
@@ -3636,6 +3683,82 @@ func (p *Parser) emitModelAnnounced(line []byte) bool {
 		// doc for why repairing it would be inventing rather than reporting.
 		Model:     model,
 		Truncated: truncated,
+	})
+	return true
+}
+
+// emitConversationReset decodes one top-level conversation_reset line and emits AT
+// MOST ONE turnevent.ConversationReset, reporting whether it CONSUMED the line
+// (#2134). claude writes this announcement on its own stdout when a /clear, a
+// plan-mode exit, or a fresh-session flow replaces the conversation, naming the id
+// it mounted the fresh transcript under.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, per
+// streamLine's stated property: control shapes are read from the top level only
+// and nested content is never re-scanned. That is what stops a tool result whose
+// text is literally `{"type":"conversation_reset","new_conversation_id":"…"}` from
+// announcing a reset the session never had; the decode target reads only the
+// top-level key, so a nested one is invisible to it.
+//
+// THE ID IS VALIDATED HERE, AND THAT IS THE POINT OF THE ARM. The field is
+// daemon-external text that a consumer re-keys the session registry on and, one
+// hop further, resolves as <dir>/<id>.jsonl. Gating at the parser is what lets
+// every later consumer treat it as a canonical stem instead of re-deriving that
+// question, and transcript.ValidStem is the existing predicate rather than a local
+// regexp. The check cannot move into internal/turnevent — that package is
+// stdlib-only and TestImportBoundary_StdlibOnly enforces it — so validating BEFORE
+// construction is also what makes the emitted field canonical BY CONSTRUCTION.
+//
+// WELL-FORMED IS NOT AUTHENTIC. The gate proves the id is SHAPED like a session
+// stem; it does not prove claude was entitled to name this one, and a buggy or
+// compromised claude can announce any well-formed stem including another session's.
+// Said here as well as at the field because this is where a reader would otherwise
+// infer that a validated id is a trusted one.
+//
+// THIS ARM DELIBERATELY DOES NOT TAKE THE NEIGHBOURS' STRONGER GUARANTEE, and the
+// next reader will want to "fix" that. emitRateLimit's and emitModelList's arms
+// each document that emitUnrecognized stays unreachable for their type BY MATCHING
+// rather than by list membership, and call it the stronger of the two. This one
+// declines it on purpose: a reset the daemon CANNOT ACT ON is routed to the
+// unrecognized lane, because an announcement the parser silently swallows is the
+// exact defect this ticket fixes. Making the consume unconditional would restore
+// that defect while looking like a tidy-up.
+//
+// consumeToolProgress is the SHAPE precedent, not the REASON precedent, and the
+// difference matters because copying one without the other turns two decisions
+// into a rule nobody can re-derive. That arm falls through because one VARIETY of
+// its type is unmeasured; this one falls through because one PAYLOAD is unusable.
+//
+// ONE DECLINE RULE, NO RUNGS, AND NO DROP-REASON VOCABULARY. Undecodable, absent,
+// present-but-empty, and non-canonical all return false and are answered
+// identically — emitRateLimit's formulation widened by one case. Nothing is logged
+// on any path, which DIVERGES from every sibling arm for a reason worth stating:
+// those arms CONSUME their declines, so a Debug is the only trace they can leave,
+// whereas here the decline is SURFACED as a turnevent.Unrecognized carrying the
+// offending bytes to a client — strictly more visible than a Debug the production
+// daemon does not print. A record beside it would be a second, weaker copy of the
+// same fact. The consequence is that this function has NO logging surface at all,
+// which is a stronger statement than choosing not to log the id.
+func (p *Parser) emitConversationReset(line []byte) bool {
+	var cr conversationResetLine
+	if err := json.Unmarshal(line, &cr); err != nil {
+		// The err is deliberately NOT logged, for emitModelAnnounced's sharpest
+		// reason: encoding/json QUOTES the offending input into its error text, so
+		// logging it would put claude's id in the daemon log through a channel no
+		// per-path attribute check can see. Nothing is logged here at all.
+		return false
+	}
+	// Absent, present-but-empty, and a value of any other shape all land here and
+	// are answered identically, which is what makes a plain-string decode target
+	// sufficient. ValidStem is an anchored full match, so it is the length cap too —
+	// a truncateField beside it would be dead code.
+	if !transcript.ValidStem(cr.NewConversationID) {
+		return false
+	}
+	p.emit(turnevent.ConversationReset{
+		// claude's value VERBATIM: no lowercasing, no trimming, no re-formatting. The
+		// gate above decided whether to carry it at all; nothing here repairs it.
+		NewConversationID: cr.NewConversationID,
 	})
 	return true
 }

@@ -86,6 +86,22 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
   is total — it says nothing about `cmd/pyry`'s `eventKind`
   (`interactive_turn_v2.go`), `interactiveTurnEmitterV2.Handle`, or
   `turnbridge.MapEvent`, none of which are exhaustiveness-checked by the build.
+  **A prose claim that counts variants against a total is only good for as long
+  as the total doesn't move, and nothing reddens when it does — #2134 is the
+  second time this has bitten.** `eventKind`'s `ModelAnnounced`/`SlashCommandList`
+  arms each carried a sentence generalizing from "no production producer emits a
+  variant without a `Handle` case", backed by a literal count ("17 of 18
+  implementations, the one without is `PermissionRequest`"). `ConversationReset`
+  is a variant `internal/streamsup` produces with a deliberately absent `Handle`
+  case — the point of its AC4, not an oversight — so both sentences went false
+  the moment it shipped, and being comments, neither test caught it. Corrected
+  in place (`CORRECTED 2026-09-06 (#2134):`, the same house style
+  `ignoredLineTypes` and `emitModelList` use) rather than rewritten, so the
+  falsified claim stays legible next to its correction. The count appeared
+  exactly once in the tree and the totality test carries no equivalent number,
+  so one grep for the digits found the whole blast radius — the reusable check
+  for the *next* variant that lands without a `Handle` case, rather than
+  re-deriving it from scratch.
   `SlashCommandList` (#1854) landed with all four walked by hand: `Handle`'s
   `default` arm is a live drop site for it (no `case` claims the variant),
   `eventKind` got a name-only arm, the totality row asserts the `turnMarkFor`
@@ -127,6 +143,7 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
 | `SlashCommandList` (#1854, produced #1877, published #2003) | `Commands []SlashCommand`, `DroppedCommands int` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877, entry-count bounded and its drop counted since #1826, reaching an interactive conn's wire since #2003 — see below |
 | `SlashCommand` (#1854, element type — not an `Event`, no marker) | `Name, ArgumentHint, Description string`, `Aliases, TruncatedFields []string` | one inventory entry, mirroring `protocol.SlashCommand`'s field order |
+| `ConversationReset` (#2134) | `NewConversationID string` | claude's top-level `conversation_reset` announcement — a `/clear`, a plan-mode exit, or a fresh-session flow — naming the id it mounted the fresh transcript under. Opens and closes no turn. **Canonical by construction, and that is why it carries no cap or `Truncated` field** — a first for a claude-derived string here: `streamsup`'s producer runs the value through `transcript.ValidStem` before constructing the event and emits nothing on failure, and `ValidStem`'s fixed-36-length anchored match already *is* the cap a `truncateField` would otherwise give it. **Carries claude's own identity on purpose, inverting the family rule** that omits it (`BackgroundTaskStarted`, `systemTaskStartedLine` — claude's session identity is not the daemon's conversation identity): here the identity *is* the entire payload, since following it to the transcript it just mounted is the reason the event exists. No `Handle` arm and no wire shape — see below |
 
 - **`SlashCommandList` / `SlashCommand` (#1854) were declared ahead of their
   producer; #1877 shipped the producer, and #2003 gave them a publisher.**

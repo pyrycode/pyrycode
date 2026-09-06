@@ -782,11 +782,25 @@ func eventKind(ev turnevent.Event) string {
 		// emits. Handle has an arm for 17 of turnevent.Event's 18 implementations,
 		// and the one without is PermissionRequest, which streamsup.Parser never
 		// produces (it is PTY/modalbridge-only, as
-		// TestTurnMarkFor_TotalOverEveryVariant states independently). The reachable
-		// eventKind call site left on this lane for THIS variant is the no-cursor
-		// drop, which returns before the type switch. Without the arm every eventKind
-		// site — here, acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go
-		// — would read kind=unknown for a variant the daemon does recognize.
+		// TestTurnMarkFor_TotalOverEveryVariant states independently).
+		//
+		// CORRECTED 2026-09-06 (#2134): both sentences above are FALSE now, and the
+		// paragraph is left standing rather than rewritten so what changed stays
+		// legible. ConversationReset is a variant internal/streamsup DOES produce and
+		// that deliberately has NO Handle case, so the `interactive_turn.unknown` Debug
+		// is a live AND reachable call site for a production-producer variant again —
+		// the first since #2003. The count is now 17 of 19 with TWO arms missing, and
+		// only one of them is PermissionRequest. What is unchanged is this arm's own
+		// claim about ITSELF: ModelAnnounced is still claimed by a Handle case, so the
+		// Debug is still not live for THIS variant, and the no-cursor drop is still the
+		// reachable eventKind site for it. Only the generalisation to "nothing the
+		// production producer emits" has expired.
+		//
+		// The reachable eventKind call site left on this lane for THIS variant is the
+		// no-cursor drop, which returns before the type switch. Without the arm every
+		// eventKind site — here, acp_turn_stream.go, stream_turn_busy.go,
+		// stream_turn_drain.go — would read kind=unknown for a variant the daemon does
+		// recognize.
 		return "model_announced"
 	case turnevent.ModelList:
 		// The variant NAME only, for the arms above's reason — and here the
@@ -825,6 +839,14 @@ func eventKind(ev turnevent.Event) string {
 		// emitted without a case, which is what lets the ModelAnnounced arm above
 		// generalise its own claim.
 		//
+		// CORRECTED 2026-09-06 (#2134): "the last" has expired, and with it the support
+		// this sentence lent the ModelAnnounced arm's generalisation — see that arm's
+		// own correction. ConversationReset is now a production-producer variant with
+		// no Handle case, deliberately, so SlashCommandList was the last such variant
+		// only until #2134. This arm's claim about ITSELF still holds: #2003 did claim
+		// the variant on this lane, and everything below about which sites stay
+		// reachable for it is unaffected.
+		//
 		// STILL LIVE FOR THIS VARIANT, and reachable rather than merely live, because
 		// a production producer emits it: the no-cursor drop, which returns before
 		// the type switch and takes the bootstrap child's report unconditionally,
@@ -841,6 +863,24 @@ func eventKind(ev turnevent.Event) string {
 		// strictly the stronger statement, so do not read the shortened enumeration
 		// above as a weakening.
 		return "slash_command_list"
+	case turnevent.ConversationReset:
+		// The variant NAME only, for the arms above's reason. NewConversationID is
+		// claude-authored and names a transcript on the operator's own disk; it is not
+		// returned here.
+		//
+		// THIS ARM IS THE INVERSE OF THE FIVE ABOVE, and the difference is the whole
+		// reason it exists. Each of those records that its variant is now claimed by a
+		// Handle case, so this file's `interactive_turn.unknown` Debug is no longer
+		// live for it. This variant has NO Handle case, deliberately (#2134): the
+		// boundary a client draws comes from the session_transition frame, so the
+		// event owes no wire shape, and turnbridge.MapEvent's default drops it. So the
+		// Debug in Handle's own default IS the reachable call site here — not the
+		// no-cursor drop, which the arms above have to fall back on — and without this
+		// arm it would read kind=unknown for a variant the daemon does recognize.
+		//
+		// Do not "fix" that by adding a Handle case. The Debug being reachable for
+		// this variant is the behaviour #2134's AC4 tests.
+		return "conversation_reset"
 	default:
 		return "unknown"
 	}

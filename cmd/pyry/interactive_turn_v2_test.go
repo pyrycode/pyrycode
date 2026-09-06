@@ -3265,3 +3265,103 @@ func TestInteractiveTurnEmitterV2_SlashCommandListMidTurnDoesNotDisturbOpenTurn(
 		t.Fatalf("slash_command_list disrupted seq: got %d,%d want 0,1", deltas[0].Seq, deltas[1].Seq)
 	}
 }
+
+// conversationResetFixture is #2134's conspicuous sentinel for the variant, and
+// it is constrained twice over rather than merely chosen. It must satisfy
+// transcript.ValidStem — the producer emits nothing otherwise — so unlike
+// modelAnnouncedFixture's ZZ-delimited word it cannot be an arbitrary string; and
+// it must share no substring with the captured log's own text, or the leak
+// assertion below passes for the wrong reason. A full 36-character hex stem
+// satisfies both: it is canonical, and no slog key, message, event name or kind
+// value on this lane contains it.
+//
+// Deliberately NOT testConvID: that id is the DAEMON's conversation identity in
+// these tests, and this event carries CLAUDE's. Reusing it would let a producer
+// that emitted the wrong one of the two pass unnoticed.
+const conversationResetFixture = "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"
+
+// TestInteractiveTurnEmitterV2_ConversationResetEventKindNamesTheVariant is
+// #2134's AC4, and it is the INVERSE of its five siblings in this file rather
+// than another copy of them. Each of those needs an EMPTY cursor to reach an
+// eventKind call site at all, because a live cursor means the Handle arm claims
+// the event before the type switch's default. This variant has no Handle arm, by
+// design, so the cursor here is LIVE and the event lands in Handle's own default
+// — which is the call site AC4 is actually about, and the first time since #2003
+// that Debug is reachable for a variant a production producer emits.
+//
+// The live cursor is therefore load-bearing in the opposite direction to the
+// ModelAnnounced test's empty one: swapping it for an empty cursor would still
+// produce a log naming the variant, via the no-cursor drop, and would stop testing
+// the thing that is new.
+func TestInteractiveTurnEmitterV2_ConversationResetEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr, for the rate-limited test's measured reason: a
+		// whole-log strings.Contains has a host-dependent source of digits to collide
+		// with otherwise — and this fixture is all digits and hex letters.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	cur := &stubCursor{}
+	cur.set(testConvID) // LIVE cursor: the unknown-event drop in Handle's default logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.ConversationReset{NewConversationID: conversationResetFixture})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG unknown-event drop log; got none")
+	}
+	// The drop this variant must take: Handle's default, not the no-cursor guard.
+	// Asserted because the cursor being live is what makes this test different from
+	// its siblings, and a regression that emptied it would otherwise stay green.
+	if !strings.Contains(logs, "interactive_turn.unknown") {
+		t.Errorf("want the unknown-event drop (interactive_turn.unknown), got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "kind=conversation_reset") {
+		t.Fatalf("log does not name the variant (want kind=conversation_reset):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for conversation_reset:\n%s", logs)
+	}
+	if strings.Contains(logs, conversationResetFixture) {
+		t.Fatalf("claude's new conversation id leaked into the kind log:\n%s", logs)
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ConversationResetEmitsNoFrame pins the other half
+// of the variant's contract on this lane: it is DELIBERATELY unhandled, so it must
+// emit nothing to a client and disturb no turn state. turnbridge.MapEvent's default
+// drops it because the boundary a client draws comes from the session_transition
+// frame, not from this event.
+//
+// The lifecycle answer is the one TestTurnMarkFor_TotalOverEveryVariant already
+// records — turnMarkNone, neither opener nor closer — checked here at the emitter
+// because a stray startTurnIfNeeded in a future Handle arm would wedge the OLD
+// conversation, whose turn end belongs to a transcript claude has stopped writing.
+func TestInteractiveTurnEmitterV2_ConversationResetEmitsNoFrame(t *testing.T) {
+	t.Parallel()
+
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.ConversationReset{NewConversationID: conversationResetFixture})
+
+	if got := len(bcast.pushes); got != 0 {
+		t.Fatalf("frames pushed: got %d, want 0 — the variant owes no wire shape: %+v", got, bcast.pushes)
+	}
+	if e.inTurn {
+		t.Error("a conversation_reset opened a turn; it is neither an opener nor a closer")
+	}
+}
