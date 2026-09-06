@@ -136,8 +136,15 @@ type Config struct {
 	// Stderr receives the child's stderr. Optional; nil discards it.
 	Stderr io.Writer
 
-	// Env is appended to os.Environ() in the child process. Optional; production
-	// leaves it nil. Tests use it to thread the fake-child wiring.
+	// Env is appended to os.Environ() in the child process. Optional; tests use it
+	// to thread the fake-child wiring.
+	//
+	// Production stopped leaving it nil at #2169: the interactive daemon's mapper
+	// puts the calling session's identity here, which the MCP server claude forks
+	// reads to name the destination of a handed-over file. A non-nil Env makes the
+	// spawn set cmd.Env explicitly instead of inheriting implicitly — the same set
+	// of variables either way, since an exec.Cmd with a nil Env already inherits the
+	// parent's environment.
 	Env []string
 
 	// Logger is used for lifecycle diagnostics. Optional; nil falls back to

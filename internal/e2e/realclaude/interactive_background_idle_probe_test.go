@@ -214,7 +214,7 @@ const bgIdleStructuralArgument = "turn_state{idle} reaches the wire from exactly
 // logs its choice, so the config value only echoes what the rig wrote. The one
 // non-authored artefact — the MCP-approve config `runSupervisor` writes iff
 // InteractiveRunner == "stream-json" — is created by os.CreateTemp("",
-// "pyry-mcp-approve-*.json") (cmd/pyry/`writeMCPApproveConfig`) in a SHARED $TMPDIR
+// "pyry-mcp-approve-*.json") (cmd/pyry/`writeMCPServersConfig`) in a SHARED $TMPDIR
 // where any other stream-json pyry on the operator's machine also has one; its
 // only discriminator is the embedded socket path, which perConvHarness does
 // not carry and which #1240 forbids adding. Reconstructing an attribution by

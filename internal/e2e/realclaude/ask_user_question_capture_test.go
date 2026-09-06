@@ -365,7 +365,7 @@ func TestRealClaude_AskUserQuestion_CapturesTheCall(t *testing.T) {
 		<-serverDone
 	})
 
-	// The mcp-config document, transcribed from renderMCPApproveConfig rather than
+	// The mcp-config document, transcribed from renderMCPServersConfig rather than
 	// called: that function lives in package main and is not importable here. Same
 	// two keys, same argv, and the pyry binary and socket are both absolute.
 	//

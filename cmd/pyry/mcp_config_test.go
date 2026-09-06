@@ -75,54 +75,100 @@ func TestApproveToolRef_DriftGuard(t *testing.T) {
 	}
 }
 
-// TestRenderMCPApproveConfig_Content asserts the generated config registers
-// exactly one pyry_approve server whose command forks the running pyry binary
-// as `pyry mcp-approve -pyry-socket <socket>` — the socket-targeting identity
-// that reaches the spawning daemon rather than a default-named instance.
-// (AC-3, AC-4.)
-func TestRenderMCPApproveConfig_Content(t *testing.T) {
+// TestRenderMCPServersConfig_Content asserts the generated config registers the
+// two servers claude is meant to see and no third: pyry_approve (#1106) and, since
+// #2169, pyry_files. Each forks the running pyry binary as
+// `pyry <subcommand> -pyry-socket <socket>` — the socket-targeting identity that
+// reaches the SPAWNING daemon rather than a default-named instance.
+//
+// Table-driven over the two entries rather than two straight-line blocks, so a
+// third registration added later cannot be given a weaker check than these two:
+// the row is the check. (#1106 AC-3/AC-4; #2169 AC-1.)
+func TestRenderMCPServersConfig_Content(t *testing.T) {
 	const (
 		pyryBin = "/opt/pyry"
 		socket  = "/home/u/.pyry/elli.sock"
 	)
-	b, err := renderMCPApproveConfig(pyryBin, socket)
+	b, err := renderMCPServersConfig(pyryBin, socket)
 	if err != nil {
-		t.Fatalf("renderMCPApproveConfig: %v", err)
+		t.Fatalf("renderMCPServersConfig: %v", err)
 	}
 
-	var cfg mcpApproveConfig
+	var cfg mcpServersConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		t.Fatalf("generated config is not well-formed JSON: %v\n%s", err, b)
 	}
-	if len(cfg.MCPServers) != 1 {
-		t.Fatalf("want exactly one server, got %d: %v", len(cfg.MCPServers), cfg.MCPServers)
-	}
-	spec, ok := cfg.MCPServers[mcpServerName]
-	if !ok {
-		t.Fatalf("config has no server keyed %q; keys: %v", mcpServerName, cfg.MCPServers)
-	}
-	if spec.Command != pyryBin {
-		t.Errorf("server command = %q, want %q", spec.Command, pyryBin)
-	}
-	wantArgs := []string{"mcp-approve", "-pyry-socket", socket}
-	if !slices.Equal(spec.Args, wantArgs) {
-		t.Fatalf("server args = %v, want %v", spec.Args, wantArgs)
-	}
 
-	// Explicit AC-4 pin: the socket-targeting flag is present and carries the
-	// exact spawning-daemon socket value.
-	if !nextValueEquals(spec.Args, "-pyry-socket", socket) {
-		t.Errorf("server args missing `-pyry-socket %s`: %v", socket, spec.Args)
+	// The server names come from the subcommands' own constants, never re-spelled
+	// here, for approveToolRef's reason: a rename there must move this expectation
+	// with it rather than leave a test asserting a name nothing advertises.
+	entries := []struct {
+		name       string
+		subcommand string
+	}{
+		{mcpServerName, "mcp-approve"},
+		{mcpFilesServerName, "mcp-files"},
 	}
-	if slices.Equal(spec.Args, []string{"mcp-approve"}) {
-		t.Errorf("bare `mcp-approve` (no socket) resolves to the default instance; must target %s", socket)
+	if len(cfg.MCPServers) != len(entries) {
+		t.Fatalf("want exactly %d servers, got %d: %v", len(entries), len(cfg.MCPServers), cfg.MCPServers)
+	}
+	for _, e := range entries {
+		t.Run(e.name, func(t *testing.T) {
+			spec, ok := cfg.MCPServers[e.name]
+			if !ok {
+				t.Fatalf("config has no server keyed %q; keys: %v", e.name, cfg.MCPServers)
+			}
+			if spec.Command != pyryBin {
+				t.Errorf("server command = %q, want %q", spec.Command, pyryBin)
+			}
+			wantArgs := []string{e.subcommand, "-pyry-socket", socket}
+			if !slices.Equal(spec.Args, wantArgs) {
+				t.Fatalf("server args = %v, want %v", spec.Args, wantArgs)
+			}
+
+			// Explicit pin: the socket-targeting flag is present and carries the
+			// exact spawning-daemon socket value.
+			if !nextValueEquals(spec.Args, "-pyry-socket", socket) {
+				t.Errorf("server args missing `-pyry-socket %s`: %v", socket, spec.Args)
+			}
+			if slices.Equal(spec.Args, []string{e.subcommand}) {
+				t.Errorf("bare `%s` (no socket) resolves to the default instance; must target %s", e.subcommand, socket)
+			}
+		})
 	}
 }
 
-// TestRenderMCPApproveConfig_FailClosed asserts the deterministic net behind
-// AC-4: an empty socket or binary path yields an error and nil bytes, never a
-// config that omits -pyry-socket or names an empty command.
-func TestRenderMCPApproveConfig_FailClosed(t *testing.T) {
+// TestFilesToolRef_DriftGuard is TestApproveToolRef_DriftGuard's sibling for the
+// send_file server, and it exists because the reference has no production
+// spelling to guard. approveToolRef is a package var because
+// --permission-prompt-tool needs the string; nothing in production needs
+// mcp__pyry_files__send_file, so the only place it is written down is the live
+// gate in internal/e2e/realclaude, which is a different package and must
+// transcribe the literal.
+//
+// This pins that literal against the two constants the server actually advertises
+// (mcpFilesServerName from the mcp-config entry, sendFileToolName from
+// filesServer.toolsList), so renaming either reddens HERE — in the cheap suite —
+// instead of silently in a live-claude run that costs real tokens to discover.
+// (#2169 AC-1.)
+func TestFilesToolRef_DriftGuard(t *testing.T) {
+	got := "mcp__" + mcpFilesServerName + "__" + sendFileToolName
+	if want := "mcp__pyry_files__send_file"; got != want {
+		t.Errorf("advertised send_file tool reference = %q, want %q — the live gate transcribes %q as a literal", got, want, want)
+	}
+}
+
+// TestRenderMCPServersConfig_FailClosed asserts the deterministic net behind
+// #1106's AC-4: an empty socket or binary path yields an error and nil bytes,
+// never a config that omits -pyry-socket or names an empty command.
+//
+// One render gates BOTH registrations, which is the whole reason #2169 added its
+// entry to this function instead of composing a second document: there is no
+// arrangement in which pyry_files is emitted with a bare argv (resolving to the
+// default-named instance = wrong daemon) while pyry_approve is not. Asserting nil
+// bytes is what covers both — a partial document is not one of the shapes this
+// can return. (#2169 AC-1.)
+func TestRenderMCPServersConfig_FailClosed(t *testing.T) {
 	tests := []struct {
 		name    string
 		pyryBin string
@@ -134,9 +180,9 @@ func TestRenderMCPApproveConfig_FailClosed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := renderMCPApproveConfig(tc.pyryBin, tc.socket)
+			b, err := renderMCPServersConfig(tc.pyryBin, tc.socket)
 			if err == nil {
-				t.Fatalf("renderMCPApproveConfig(%q, %q) = nil error; want fail-closed error", tc.pyryBin, tc.socket)
+				t.Fatalf("renderMCPServersConfig(%q, %q) = nil error; want fail-closed error", tc.pyryBin, tc.socket)
 			}
 			if b != nil {
 				t.Errorf("fail-closed path returned non-nil bytes: %s", b)
@@ -145,17 +191,17 @@ func TestRenderMCPApproveConfig_FailClosed(t *testing.T) {
 	}
 }
 
-// TestWriteMCPApproveConfig writes the config to a tmp file and asserts the
-// on-disk bytes equal renderMCPApproveConfig's output verbatim (no trailing
+// TestWriteMCPServersConfig writes the config to a tmp file and asserts the
+// on-disk bytes equal renderMCPServersConfig's output verbatim (no trailing
 // encoder newline divergence).
-func TestWriteMCPApproveConfig(t *testing.T) {
+func TestWriteMCPServersConfig(t *testing.T) {
 	const (
 		pyryBin = "/opt/pyry"
 		socket  = "/home/u/.pyry/elli.sock"
 	)
-	path, err := writeMCPApproveConfig(pyryBin, socket)
+	path, err := writeMCPServersConfig(pyryBin, socket)
 	if err != nil {
-		t.Fatalf("writeMCPApproveConfig: %v", err)
+		t.Fatalf("writeMCPServersConfig: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(path) })
 
@@ -163,21 +209,21 @@ func TestWriteMCPApproveConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read back config: %v", err)
 	}
-	want, err := renderMCPApproveConfig(pyryBin, socket)
+	want, err := renderMCPServersConfig(pyryBin, socket)
 	if err != nil {
-		t.Fatalf("renderMCPApproveConfig: %v", err)
+		t.Fatalf("renderMCPServersConfig: %v", err)
 	}
 	if !slices.Equal(onDisk, want) {
 		t.Errorf("on-disk config != rendered config\n disk = %s\n want = %s", onDisk, want)
 	}
 }
 
-// TestWriteMCPApproveConfig_FailClosed asserts the writer propagates
-// renderMCPApproveConfig's fail-closed error and creates no file.
-func TestWriteMCPApproveConfig_FailClosed(t *testing.T) {
-	path, err := writeMCPApproveConfig("/opt/pyry", "")
+// TestWriteMCPServersConfig_FailClosed asserts the writer propagates
+// renderMCPServersConfig's fail-closed error and creates no file.
+func TestWriteMCPServersConfig_FailClosed(t *testing.T) {
+	path, err := writeMCPServersConfig("/opt/pyry", "")
 	if err == nil {
-		t.Fatalf("writeMCPApproveConfig with empty socket = nil error; want fail-closed error")
+		t.Fatalf("writeMCPServersConfig with empty socket = nil error; want fail-closed error")
 	}
 	if path != "" {
 		t.Errorf("fail-closed path returned a leaked file path: %q", path)

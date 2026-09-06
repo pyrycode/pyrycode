@@ -472,8 +472,8 @@ func dropPermissionMode(args []string) []string {
 // stays nil HERE — the turnevent Parser that plugs into Stdout is a runtime
 // object installed one layer up in newStreamRunnerFactory (#1098), which is the
 // line the new field does not cross: it is a plain string derived from one
-// RunnerConfig field, not a live object. Stderr/Env have no supervisor.Config
-// analogue and stay nil.
+// RunnerConfig field, not a live object. Stderr has no supervisor.Config analogue
+// and stays nil; Env stopped being nil at #2169 (below).
 func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 	return streamsup.Config{
 		ClaudeBin: cfg.ClaudeBin,
@@ -505,6 +505,23 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 		// RunnerConfig field. It is what lets the runner tell a bypass the daemon
 		// composed, and may walk back, from one the operator handed it.
 		OperatorBypass: cfg.OperatorBypass,
+		// The calling session's identity, on the claude child's environment (#2169).
+		// streamsup appends this to os.Environ() at the spawn, so the pyry_files MCP
+		// server claude FORKS inherits it and forwards it as the attachment.file
+		// destination. It cannot ride the mcp-config argv instead: that document is
+		// daemon-global and byte-identical for every session (see mcpServersConfig).
+		//
+		// Set HERE for SpawnPermissionMode's reason verbatim — a plain string read off
+		// one RunnerConfig field, not a runtime object — which is also what makes
+		// "each spawn carries its OWN id" assertable on the returned struct with no
+		// scaffolding.
+		//
+		// Unconditional, including on an empty SessionID. #1108 guarantees non-empty
+		// at both pool sites, and an empty value is exactly as safe as an absent
+		// variable: os.Getenv returns "" for both, and filesServer.toolsCall refuses
+		// "" before it dials. A conditional would cost the mapper its totality and buy
+		// nothing. Freshly allocated per call, so no two runners share a backing array.
+		Env: []string{envSessionID + "=" + cfg.SessionID},
 	}
 }
 

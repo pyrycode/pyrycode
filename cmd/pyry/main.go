@@ -780,7 +780,7 @@ func runSupervisor(args []string) error {
 	// mcpApprovePath stays "".
 	var mcpApprovePath string
 	if selectsStreamRunner(cfg) {
-		mcpApprovePath, err = writeMCPApproveConfig(resolveExecutable(), socketPath)
+		mcpApprovePath, err = writeMCPServersConfig(resolveExecutable(), socketPath)
 		if err != nil {
 			return fmt.Errorf("write mcp-approve config: %w", err)
 		}
