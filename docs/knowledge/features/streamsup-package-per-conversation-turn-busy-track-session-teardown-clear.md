@@ -47,12 +47,17 @@ doesn't need the async escape hatch `WaitIdle` exists to provide for a slower co
 **The rotation edge #1201 flagged as this ticket's is unreachable, and the comment is corrected rather
 than defended with a guard.** The suspected hazard: because `conversationForSession` matches
 `SessionHistory`, a retired session's late `TurnEnd` could clear a turn its successor opened. It would
-require two distinct producer tags resolving to the same conversation at once, and the tree admits no such
-pair — a `/clear` re-keys **one** pool entry in place (same `Runner`, same process, same `Parser`), and the
-Parser's sink tag is fixed at **runner construction** (`cfg.SessionID`, `streamsup_runner.go:105`) while
-`RestartFresh` only rotates the runner's internal *spawn* id. Every id reachable via `SessionHistory`
-therefore belongs to the same runner that continues under the successor id, tagging its events identically
-either way. `SessionHistory`'s only production writer is `RebindSession`
+require two distinct producer tags resolving to the same conversation **at the same time**, and one runner
+has exactly one tag at any instant: a `/clear` re-keys **one** pool entry in place (same `Runner`, same
+process, same `Parser`), and a stream-mode `new_session` moves that single tag (`streamSessionTag`, which
+`newStreamRunnerFactory` binds to both fan-in lanes and `RestartFresh` rotates through
+`streamsup.Config.OnSessionRotate` — see [Session rotation
+notification](streamsup-package-session-rotation-notification-onsessionrotate.md)) from the old id to the
+new one rather than duplicating it. Every id reachable via `SessionHistory` therefore belongs to the same
+runner, which tags its events with whichever id it currently holds — never with two. #1133 replaced the
+premise this paragraph used to rest on, that the tag was frozen at runner construction; the conclusion is
+unaffected, because a moving tag is still one tag. `SessionHistory`'s only production writer is
+`RebindSession`
 (`internal/conversations/registry.go:241`), reached solely from `ReasonClear`
 (`internal/sessions/transition.go:59,78`) — so eviction can't supply a second producer either, being
 binding-neutral. One benign, non-bug case survives: between an eviction and the conversation's next

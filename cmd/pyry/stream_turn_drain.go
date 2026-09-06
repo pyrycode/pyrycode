@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
@@ -125,9 +126,78 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 	}
 }
 
-// sinkFor returns the per-Parser sink closure the factory hands to
-// streamsup.NewParser for the runner constructed with sessionID. Every path out
-// of it is a NON-BLOCKING send or an early return: the Parser runs on claude's
+// streamSessionTag is the LIVE session tag one stream runner's two fan-in lanes
+// read (#1133). It exists because the two ends of that tag have different
+// lifetimes: the Parser and the child-exit callback are bound once, at runner
+// construction, while the pool session the runner serves rotates under them on
+// every stream-mode new_session. Before this type the tag was the runner's
+// construction-time id captured in a closure, so a rotation left every later event
+// tagged with an id the conversation was no longer bound to and the drain's
+// active-session gate dropped all of them until the daemon restarted.
+//
+// It is written through streamsup.Config.OnSessionRotate, which the runner fires
+// from RestartFresh, and read once per event by sinkForTag / exitForTag.
+//
+// ATOMIC, NOT A MUTEX, and that is a design decision rather than a micro-
+// optimisation. The reader is claude's stdout forwarder goroutine on the per-event
+// path; the writer is the daemon's new_session dispatch, inside a runner method
+// whose own mutex is a documented LEAF (nothing under it may take another lock).
+// A mutex here would put a lock on both of those paths and create an ordering
+// question to keep answered; a single atomic word has no ordering to state.
+//
+// The tag can never hold "": an empty tag matches no bound session — the gate
+// compares against boundSessionIDForActive, which reports ok == false for an empty
+// CurrentSessionID, and no non-empty active can equal it — so an emptied tag would
+// black-hole that conversation's stream for the life of the runner. Rotate refuses
+// it here because the invariant belongs to this value; RestartFresh's own empty-id
+// refusal means production never reaches the guard.
+type streamSessionTag struct{ id atomic.Pointer[string] }
+
+// newStreamSessionTag returns a tag seeded with the runner's construction-time
+// session id — the value that used to be captured directly by the two lane
+// closures, so a tag that is never rotated behaves exactly as the frozen tag did.
+func newStreamSessionTag(sessionID string) *streamSessionTag {
+	t := &streamSessionTag{}
+	t.id.Store(&sessionID)
+	return t
+}
+
+// ID returns the session id envelopes produced right now must carry. Safe on any
+// goroutine; one atomic load, no allocation.
+func (t *streamSessionTag) ID() string { return *t.id.Load() }
+
+// Rotate moves the tag onto newID, ignoring "" per the type's invariant. It is the
+// method the factory installs as streamsup.Config.OnSessionRotate, so its
+// signature is that seam's — see that field for when the runner fires it and for
+// the two windows around the rotation.
+func (t *streamSessionTag) Rotate(newID string) {
+	if newID == "" {
+		return
+	}
+	t.id.Store(&newID)
+}
+
+// sinkFor returns the per-Parser sink closure for a runner whose session id never
+// changes — the frozen-tag form, kept for the tests and any future caller that has
+// a plain id rather than a live one. Production goes through sinkForTag: a stream
+// runner's session DOES rotate (#1133).
+//
+// It delegates rather than duplicating, so there is exactly one implementation of
+// the class-aware drop policy documented on sinkForTag.
+func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
+	return s.sinkForTag(func() string { return sessionID })
+}
+
+// exitFor is exitForTag's frozen-tag form, standing to it exactly as sinkFor
+// stands to sinkForTag and for the same reason.
+func (s *streamTurnSink) exitFor(sessionID string) func() {
+	return s.exitForTag(func() string { return sessionID })
+}
+
+// sinkForTag returns the per-Parser sink closure the factory hands to
+// streamsup.NewParser, tagging each envelope with whatever tag reports AT THE
+// MOMENT THE EVENT ARRIVES. Every path out of it is a NON-BLOCKING send or an
+// early return: the Parser runs on claude's
 // stdout forwarder goroutine, so a blocking send on a full channel would wedge
 // the child. The channel IS the queue and drops rather than blocks, mirroring the
 // emitter's owns-no-queue principle. It holds no lock (channel send only).
@@ -162,8 +232,14 @@ func newStreamTurnSink(buf int, logger *slog.Logger) *streamTurnSink {
 // droppable therefore takes at most one reserve slot per live runner — the term
 // streamTurnSinkCloseReserve is sized for — and can never block or admit
 // unboundedly.
-func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
+//
+// The tag is read ONCE, at the top, and that read is reused for the envelope and
+// for any drop record below it. A rotation racing this closure therefore moves the
+// whole event from one id to the other and can never split one event across two —
+// which is what keeps a drop diagnostic attributable to the envelope it describes.
+func (s *streamTurnSink) sinkForTag(tag func() string) func(turnevent.Event) {
 	return func(ev turnevent.Event) {
+		sessionID := tag()
 		if turnMarkFor(ev) == turnMarkClose {
 			select {
 			case s.ch <- streamTurnEnvelope{sessionID: sessionID, ev: ev}:
@@ -208,8 +284,10 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 	}
 }
 
-// exitFor returns the per-runner child-exit closure for the runner constructed
-// with sessionID. Its func() type is exactly that of streamsup's child-exit seam
+// exitForTag returns the per-runner child-exit closure, tagging its envelope with
+// whatever tag reports at the moment the child exits — the same live tag
+// sinkForTag reads, bound from the same value one line above it in the factory, so
+// the two lanes cannot rotate apart. Its func() type is exactly that of streamsup's child-exit seam
 // (a callback field on streamsup.Config), so the wiring binds it at the same
 // construction point as sinkFor — newStreamRunnerFactory (streamsup_runner.go,
 // #1210), one line below the sinkFor install — and the two lanes carry identical
@@ -249,8 +327,9 @@ func (s *streamTurnSink) sinkFor(sessionID string) func(turnevent.Event) {
 // than it saves and would obscure exactly the asymmetry above. #1496's closing
 // class does not change that — the two records still differ in message and field
 // set, this one omitting "kind" because there is no event to name.
-func (s *streamTurnSink) exitFor(sessionID string) func() {
+func (s *streamTurnSink) exitForTag(tag func() string) func() {
 	return func() {
+		sessionID := tag()
 		select {
 		case s.ch <- streamTurnEnvelope{sessionID: sessionID, exit: true}:
 		default:

@@ -187,6 +187,43 @@ type Config struct {
 	// that sink, not from this callback.
 	OnChildExit func()
 
+	// OnSessionRotate is called when RestartFresh ACCEPTS a rotation, with the id
+	// it rotated onto. Optional — nil-checked at the fire site and left nil by
+	// every construction path but one — and non-nil only on the interactive
+	// daemon's, where newStreamRunnerFactory uses it to move the turn-event sink's
+	// session tag off the id the runner was constructed with (#1133). Without it
+	// that tag stays frozen while the pool rebinds the conversation to the new id,
+	// and the drain's active-session gate drops every later event for that
+	// conversation until the daemon restarts.
+	//
+	// Exported for OnChildExit's reason: the consumer lives outside this package.
+	//
+	// CARDINALITY IS PER ACCEPTED ROTATION, not per RestartFresh call and not per
+	// spawn. RestartFresh's empty-id refusal returns ABOVE the fire site, so a
+	// consumer's tag can never be emptied by a call the runner itself declined —
+	// which matters because an empty tag matches no bound session and would black-
+	// hole that conversation's stream for the life of the runner. A respawn that
+	// merely re-uses the current id (Restart, or the backoff ladder) fires nothing:
+	// this is the ROTATION signal, not a spawn signal.
+	//
+	// It fires strictly BEFORE the outgoing child is torn down and therefore before
+	// the successor is spawned — above both the restart hint and the iteration
+	// cancel. That ordering is the point rather than an implementation detail: fired
+	// after the cancel, the Run loop could tear down and respawn concurrently, and
+	// the successor's first events would carry the id the rotation just replaced,
+	// which is the defect this seam exists to remove. The cost is the mirror window
+	// — the outgoing child's residual stdout, parsed after this returns, is seen by
+	// the consumer under the NEW id. For the sole consumer that is the same runner,
+	// conversation and client, so it is a fidelity bound rather than a disclosure
+	// one; see the plan's security review for the derivation.
+	//
+	// It runs synchronously on the CALLER's goroutine (whichever one called
+	// RestartFresh — the daemon's new_session dispatch) with NO Runner lock held, so
+	// it may call any Runner method. It must NOT block: the teardown of the outgoing
+	// child is stalled until it returns. It must not panic either — there is no
+	// recover here, matching OnChildExit and onSpawn.
+	OnSessionRotate func(newID string)
+
 	// RequestInitializeOnSpawn asks each spawned child, exactly once, to report
 	// what the session knows about itself — the model list and the slash-command
 	// list — by writing one initialize control_request onto its held-open stdin
@@ -1264,6 +1301,20 @@ func (r *Runner) RestartFresh(newID string) {
 	r.freshSeq++
 	cancel := r.iterCancel
 	r.restartMu.Unlock()
+
+	// Announce the rotation BELOW the unlock and ABOVE the teardown, and both
+	// halves of that placement are load-bearing. Below, because restartMu is a leaf
+	// — nothing under it may take another lock or do synchronous I/O — and this is
+	// an arbitrary consumer-supplied function, so firing it inside the section would
+	// make the leaf property depend on what the consumer installed. Above, because
+	// the cancel below starts a teardown the Run loop answers with a fresh spawn on
+	// its own goroutine: a callback fired after it races that spawn, and the loser
+	// is the successor child's first events, tagged with the id this rotation just
+	// replaced. See Config.OnSessionRotate for the window that ordering accepts in
+	// exchange.
+	if r.cfg.OnSessionRotate != nil {
+		r.cfg.OnSessionRotate(newID)
+	}
 
 	// Hint first, then kill, so Run's post-spawn drain observes the token even if
 	// the child exits the instant it is cancelled (identical ordering to Restart).
