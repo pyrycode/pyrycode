@@ -287,6 +287,8 @@ func runArgs(args []string) error {
 			return runAgentRun(os.Stdout, args[2:])
 		case "mcp-approve":
 			return runMCPApprove(args[2:])
+		case "mcp-files":
+			return runMCPFiles(args[2:])
 		// Verbs #1348 deleted. Duplicate constant cases are a compile error, so
 		// a future edit that tries to revive either one as a live verb fails the
 		// build rather than silently shadowing a working route.
@@ -2963,6 +2965,11 @@ Usage:
                                                   approval to the daemon
                                                   (spawned by claude via
                                                   --permission-prompt-tool)
+  pyry mcp-files [flags]                         serve the MCP send_file tool over
+                                                  stdio, filing a workspace file
+                                                  under the calling session's
+                                                  conversation (spawned by claude;
+                                                  reads PYRY_SESSION_ID)
   pyry version                                   print version
   pyry help                                      show this help
 
