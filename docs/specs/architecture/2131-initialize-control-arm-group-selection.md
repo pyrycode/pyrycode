@@ -259,3 +259,29 @@ form of the same property.
   to first-wins. Resolved as its own branch: `CompareVersions` strips a leading
   `v` and a pre-release suffix, so two distinct file-name groups really can
   order `Same`, and first-wins there is the original defect in new clothes.
+
+## Revisions
+
+### 2026-09-06 — the probe/compare ordering, checked rather than assumed
+
+The design above says "compare the newest group, the one the probe just
+captured" and the Concurrency model section says nothing is added. Both hold,
+but AC 1 rests on an ordering the plan asserted without checking: that the
+comparison never globs a half-written group while the capture probe is still
+writing its three arms one file at a time.
+
+Checked, and it holds by construction rather than by luck.
+`TestRealClaude_InitializeControl_SendPointArms` calls `t.Parallel()` nowhere,
+at any level — its own doc says so, and the three arms are sequential `t.Run`s
+that each leave their fixture on disk before returning. The comparison test does
+call `t.Parallel()`, so it is paused until the package's whole sequential pass
+has finished. The capture is therefore complete before the glob runs, and a
+partial group is not reachable.
+
+That also explains a property of the defect this ticket fixes: the two-version
+red reproduced on *every* full run rather than intermittently, which a genuine
+write/read race would not have done.
+
+No design change follows. The incomplete-group branch keeps its purpose — a
+capture run that genuinely went wrong, which is a different thing from one still
+in progress.
