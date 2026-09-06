@@ -156,8 +156,18 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 	if got.Stdout != nil {
 		t.Errorf("Stdout = %v, want nil (the #1098 Parser is installed in newStreamRunnerFactory, not the mapper)", got.Stdout)
 	}
-	if got.Stderr != nil || got.Env != nil {
-		t.Errorf("Stderr/Env = %v/%v, want nil (no sessions.RunnerConfig analogue)", got.Stderr, got.Env)
+	if got.Stderr != nil {
+		t.Errorf("Stderr = %v, want nil (no sessions.RunnerConfig analogue)", got.Stderr)
+	}
+	// Env stays nil at #2169 and the variable NAME crosses instead: the value has to
+	// be the spawn's LIVE id, and cfg.SessionID is the construction-time seed that
+	// does not mirror a rotation. A regression that composes a value here again puts
+	// a stale identity on every child spawned after a new_session rotation.
+	if got.Env != nil {
+		t.Errorf("Env = %q, want nil — a per-spawn identity must not be composed at construction time", got.Env)
+	}
+	if got.SessionIDEnvVar != envSessionID {
+		t.Errorf("SessionIDEnvVar = %q, want %q — the pyry_files server claude forks reads exactly this name", got.SessionIDEnvVar, envSessionID)
 	}
 	if !got.RequestInitializeOnSpawn {
 		t.Error("RequestInitializeOnSpawn = false, want true — the ask is the interactive daemon's policy and this mapper is the one place that sets it")
@@ -504,9 +514,80 @@ func TestWithApprovalArgs(t *testing.T) {
 	})
 }
 
+// TestWithApprovalArgs_BypassChildGetsNoFilesServer (#2169 AC-3) pins the stated
+// boundary: a child that KEEPS the bypass it launches with carries no pyry_files
+// server, because it carries no --mcp-config at all and --strict-mcp-config means
+// the document is the only place a server can come from.
+//
+// Named for the boundary rather than folded into TestWithApprovalArgs' two
+// bypass subtests, which assert the same flag's absence for a different claim —
+// that the approval GATE is absent because there is nothing to walk this child
+// back from. #2169 needs the boundary checked rather than incidental: if those
+// subtests are ever relaxed, or a third bypass row appears, this test still says
+// what the file-transfer feature is allowed to reach.
+//
+// The boundary is about the ARGS. Whether such a child also carries
+// PYRY_SESSION_ID on its environment is deliberately unasserted and deliberately
+// unconstrained — with no server registered, nothing forks the process that would
+// read it, and a bypass child can read any session id off the daemon's own
+// registry with one unmodalled command anyway.
+//
+// Registering pyry_files for these children means appending --mcp-config INSIDE
+// withApprovalArgs' staying-in-bypass arm, whose doc is an account of how
+// presence-of-flag reasoning inverted both of the daemon's permission fail-safes
+// at #2065. That is a permission-argv change, not a file-transfer one, and it is
+// a human call rather than something this family assumes.
+func TestWithApprovalArgs_BypassChildGetsNoFilesServer(t *testing.T) {
+	t.Parallel()
+
+	const (
+		path   = "/tmp/pyry-mcp-approve-xyz.json"
+		bypass = "--dangerously-skip-permissions"
+	)
+	for _, tc := range []struct {
+		name           string
+		args           []string
+		storedMode     string
+		operatorBypass bool
+	}{
+		{
+			name:       "a stored escalation",
+			args:       []string{"--model", "haiku", bypass, "--settings", "p"},
+			storedMode: sessions.PermissionModeBypass,
+		},
+		{
+			name:           "the operator's pass-through",
+			args:           []string{"--model", "haiku", "--settings", "p", bypass, "--permission-mode", "default"},
+			storedMode:     "default",
+			operatorBypass: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := withApprovalArgs(tc.args, path, tc.storedMode, tc.operatorBypass)
+
+			if slices.Contains(got, "--mcp-config") {
+				t.Errorf("args %q carry --mcp-config; a child keeping its bypass must be handed no "+
+					"mcp-config document, and pyry_files lives in exactly that document", got)
+			}
+			if slices.Contains(got, path) {
+				t.Errorf("args %q name the mcp-config document %q", got, path)
+			}
+			// The document path is the only route to the server, but assert the
+			// server name itself too: it is the claim the ticket makes, and it stays
+			// true of any future argv shape that names a server directly.
+			for _, a := range got {
+				if strings.Contains(a, mcpFilesServerName) {
+					t.Errorf("args %q name the %s server", got, mcpFilesServerName)
+				}
+			}
+		})
+	}
+}
+
 // TestStreamRunnerFactory_Construct drives the factory with the pool shapes and
 // asserts a live *streamsup.Runner comes back wrapped in the streamRunner adapter
-// (AC-1, AC-2 "constructs successfully at both sites"). A non-empty mcpApprovePath
+// (AC-1, AC-2 "constructs successfully at both sites"). A non-empty mcpServersPath
 // exercises the #1168 approval-arg injection seam; construction must succeed on
 // every shape — non-yolo (flags injected) and yolo (nothing injected) alike.
 // os.Args[0] is an absolute, resolvable path so exec.LookPath accepts it;
@@ -950,6 +1031,72 @@ func TestMapStreamsupConfig_CarriesOperatorBypass(t *testing.T) {
 		if got.SpawnPermissionMode != "default" {
 			t.Errorf("SpawnPermissionMode = %q, want %q — the posture must cross beside its provenance", got.SpawnPermissionMode, "default")
 		}
+	}
+}
+
+// TestMapStreamsupConfig_CarriesOwnSessionIdentity (#2169 AC-2) pins this seam's
+// half of the identity thread: each mapped config carries the session it IS and no
+// other, and it carries the NAME the child's environment binds that id to rather
+// than a value composed here.
+//
+// TWO sessions, not one, and that is the design of the test. A single-session
+// assertion is satisfied by a mapper that hardcodes a constant and ignores cfg —
+// exactly the failure that matters, since the destination `fileAttacher` derives is
+// read from this id. Cross-checking each config against the OTHER's id is what makes
+// "carries its own" a claim rather than a coincidence.
+//
+// The Env assertion is the rework's regression pin, not a tautology. Composing
+// `PYRY_SESSION_ID=<cfg.SessionID>` here is what the first implementation did, and
+// it went stale on the first rotation: cfg.SessionID is construction-fixed while the
+// runner's live id rotates under it. The composition now happens per spawn in
+// internal/streamsup, where TestRunner_BeginSpawn_EnvCarriesOwnLiveSessionID and
+// TestRunner_BeginSpawn_EnvTracksRotatedSessionID assert the value the child
+// actually receives.
+func TestMapStreamsupConfig_CarriesOwnSessionIdentity(t *testing.T) {
+	t.Parallel()
+
+	// Canonical UUIDv4s, the shape sessions.NewID mints and sessions.ValidID gates:
+	// the only values that reach this seam in production.
+	const (
+		idA = "11111111-1111-4111-8111-111111111111"
+		idB = "22222222-2222-4222-8222-222222222222"
+	)
+	base := func(id string) sessions.RunnerConfig {
+		return sessions.RunnerConfig{
+			ClaudeBin:      "/opt/claude",
+			WorkDir:        "/work",
+			SessionID:      id,
+			PermissionMode: "default",
+		}
+	}
+	gotA := mapStreamsupConfig(base(idA))
+	gotB := mapStreamsupConfig(base(idB))
+
+	for _, tc := range []struct {
+		name       string
+		got        streamsup.Config
+		own, other string
+	}{
+		{"session A", gotA, idA, idB},
+		{"session B", gotB, idB, idA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got.SessionID != tc.own {
+				t.Fatalf("SessionID = %q, want %q — this is the id streamsup seeds its live id from", tc.got.SessionID, tc.own)
+			}
+			// Named separately from the equality above so a mapper that later derived
+			// the id from something else still fails on the claim that matters: this
+			// child must not be able to name the other session.
+			if tc.got.SessionID == tc.other {
+				t.Errorf("config carries the OTHER session's identity: %q", tc.got.SessionID)
+			}
+			if tc.got.SessionIDEnvVar != envSessionID {
+				t.Errorf("SessionIDEnvVar = %q, want %q — the pyry_files server claude forks reads exactly this name", tc.got.SessionIDEnvVar, envSessionID)
+			}
+			if tc.got.Env != nil {
+				t.Errorf("Env = %q, want nil — an identity composed at construction time goes stale on the first rotation", tc.got.Env)
+			}
+		})
 	}
 }
 

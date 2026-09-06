@@ -289,22 +289,22 @@ func mapStreamState(s streamsup.State) sessions.State {
 // stream-json intent. The error surfaces through the pool's existing
 // "sessions: … supervisor: %w" wraps at both construction sites.
 //
-// mcpApprovePath is the daemon-global --mcp-config file written once at startup
+// mcpServersPath is the daemon-global --mcp-config file written once at startup
 // (runSupervisor, gated on stream-json). withApprovalArgs injects the #1106
 // permission-approval flags onto every non-yolo spawn's args (#1168) — this is
 // the sole stream-path-specific spawn-construction site and covers both the
 // bootstrap runner and per-conversation runners, so a per-conversation stream
 // session cannot silently bypass the approval gate. On the "" / "pty" path the
-// factory is never built, so mcpApprovePath is "" and unused there. The live
+// factory is never built, so mcpServersPath is "" and unused there. The live
 // wire is exercised end-to-end by TestInteractiveStreamModalResolution (#1154).
-func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) sessions.RunnerFactory {
+func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) sessions.RunnerFactory {
 	return func(cfg sessions.RunnerConfig) (sessions.Runner, error) {
 		scfg := mapStreamsupConfig(cfg)
 		// The posture and its provenance are BOTH read off cfg, never off scfg.Args:
 		// since #2065 every argv carries the escalation flag, so the assembled argv
 		// cannot say which children the daemon downgrades and which keep the bypass
 		// they launch with. See withApprovalArgs' doc for the derivation.
-		scfg.Args = withApprovalArgs(scfg.Args, mcpApprovePath, cfg.PermissionMode, cfg.OperatorBypass)
+		scfg.Args = withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass)
 		tag := newStreamSessionTag(cfg.SessionID)
 		parser, held := newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)
 		scfg.Stdout = parser
@@ -370,7 +370,7 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 //     of those rows and avoids a duplicate --dangerously-skip-permissions. Do NOT
 //     call permissionArgs(true, …) here — that would re-emit the flag already
 //     present.
-//   - otherwise → append permissionArgs(false, mcpApprovePath): the
+//   - otherwise → append permissionArgs(false, mcpServersPath): the
 //     --permission-prompt-tool / --mcp-config / --strict-mcp-config /
 //     --permission-mode default set that routes every non-allowlisted tool use
 //     through the daemon approval registry.
@@ -406,11 +406,11 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpApprovePath string) session
 //
 // The append runs on a clone so the caller's args (scfg.Args, freshly owned by
 // mapStreamsupConfig) is never aliased or mutated.
-func withApprovalArgs(args []string, mcpApprovePath, storedMode string, operatorBypass bool) []string {
+func withApprovalArgs(args []string, mcpServersPath, storedMode string, operatorBypass bool) []string {
 	if storedMode == sessions.PermissionModeBypass || operatorBypass {
 		return args
 	}
-	extra := permissionArgs(false, mcpApprovePath)
+	extra := permissionArgs(false, mcpServersPath)
 	if namesPermissionMode(args) {
 		extra = dropPermissionMode(extra)
 	}
@@ -472,8 +472,10 @@ func dropPermissionMode(args []string) []string {
 // stays nil HERE — the turnevent Parser that plugs into Stdout is a runtime
 // object installed one layer up in newStreamRunnerFactory (#1098), which is the
 // line the new field does not cross: it is a plain string derived from one
-// RunnerConfig field, not a live object. Stderr/Env have no supervisor.Config
-// analogue and stay nil.
+// RunnerConfig field, not a live object. Stderr and Env have no supervisor.Config
+// analogue and stay nil — the session identity #2169 puts on the claude child is a
+// per-SPAWN value, so what crosses here is SessionIDEnvVar, the variable's name,
+// and streamsup composes the binding at the spawn that knows the live id (below).
 func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 	return streamsup.Config{
 		ClaudeBin: cfg.ClaudeBin,
@@ -505,6 +507,27 @@ func mapStreamsupConfig(cfg sessions.RunnerConfig) streamsup.Config {
 		// RunnerConfig field. It is what lets the runner tell a bypass the daemon
 		// composed, and may walk back, from one the operator handed it.
 		OperatorBypass: cfg.OperatorBypass,
+		// The variable the claude child's environment binds to the calling session's
+		// identity (#2169). streamsup composes NAME=<live id> per spawn and appends it
+		// to os.Environ(), so the pyry_files MCP server claude FORKS inherits it and
+		// forwards it as the attachment.file destination. It cannot ride the mcp-config
+		// argv instead: that document is daemon-global and byte-identical for every
+		// session (see mcpServersConfig).
+		//
+		// The NAME crosses this seam and not the composed value, which is the rework
+		// #2169 took after review. The value has to be the LIVE id, and cfg.SessionID
+		// is the construction-time seed — Pool.New's own comment on the field says it
+		// does not mirror a /clear rotation — so composing NAME=<cfg.SessionID> here
+		// named the retired session on every child spawned after a new_session
+		// rotation, and the daemon refuses a retired id. streamsup.Config.SessionID
+		// still crosses (streamsup seeds its live id from it and re-injects the id
+		// flag); only the environment's value is deferred to the spawn that knows it.
+		//
+		// Set HERE for SpawnPermissionMode's reason verbatim — a plain constant, not a
+		// runtime object. The per-session identity itself is asserted one layer down,
+		// where it is composed: internal/streamsup → TestRunner_BeginSpawn_EnvCarries-
+		// OwnLiveSessionID and its rotation sibling.
+		SessionIDEnvVar: envSessionID,
 	}
 }
 

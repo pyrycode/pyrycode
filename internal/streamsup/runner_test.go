@@ -934,7 +934,7 @@ func TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript(t *testing.T) {
 		sessionID: testSessionID,
 	}
 
-	_, cancel, args, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, args, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 
 	if forceFirst {
@@ -950,6 +950,162 @@ func TestRunner_BeginSpawn_FirstSpawnResumesExistingTranscript(t *testing.T) {
 	}
 	if got := idFlagCount(args); got != 1 {
 		t.Errorf("first spawn carries %d id flags, want exactly 1:\n%v", got, args)
+	}
+}
+
+// testSessionEnvVar is a name the production daemon does not use, so a runner that
+// hardcoded PYRY_SESSION_ID instead of honouring Config.SessionIDEnvVar would fail
+// the tests below rather than pass them by coincidence.
+const testSessionEnvVar = "TEST_SESSION_ID"
+
+// TestSpawnEnv covers the composer's obligations either side of the happy path: an
+// unset name adds nothing at all, and the caller's Config.Env is never appended
+// INTO. The second is not hypothetical — Config.Env belongs to the caller and is
+// read by every spawn of the runner, so an in-place append into spare capacity is
+// a write one spawn could observe in another.
+func TestSpawnEnv(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unset name adds nothing", func(t *testing.T) {
+		if got := spawnEnv(nil, "", testSessionID); got != nil {
+			t.Errorf("spawnEnv(nil, \"\", …) = %q, want nil — an unset name must leave cmd.Env inheriting implicitly", got)
+		}
+		base := []string{"A=1"}
+		if got := spawnEnv(base, "", testSessionID); !slices.Equal(got, base) {
+			t.Errorf("spawnEnv(base, \"\", …) = %q, want %q unchanged", got, base)
+		}
+	})
+
+	t.Run("binds the id to the name", func(t *testing.T) {
+		want := []string{testSessionEnvVar + "=" + testSessionID}
+		if got := spawnEnv(nil, testSessionEnvVar, testSessionID); !slices.Equal(got, want) {
+			t.Errorf("spawnEnv = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("never appends into the caller's slice", func(t *testing.T) {
+		// Spare capacity is what makes this discriminating: append into a full slice
+		// reallocates and hides the aliasing, so the fixture hands the composer room
+		// to write in place if it is going to.
+		base := make([]string, 1, 4)
+		base[0] = "A=1"
+
+		first := spawnEnv(base, testSessionEnvVar, "id-one")
+		second := spawnEnv(base, testSessionEnvVar, "id-two")
+
+		if want := []string{"A=1", testSessionEnvVar + "=id-one"}; !slices.Equal(first, want) {
+			t.Errorf("the first spawn's env = %q, want %q — the second composition overwrote it", first, want)
+		}
+		if want := []string{"A=1", testSessionEnvVar + "=id-two"}; !slices.Equal(second, want) {
+			t.Errorf("the second spawn's env = %q, want %q", second, want)
+		}
+		if len(base) != 1 {
+			t.Errorf("the caller's slice grew to %q — the composer appended into it", base)
+		}
+	})
+}
+
+// TestRunner_BeginSpawn_EnvCarriesOwnLiveSessionID (#2169 AC-2) pins the identity
+// the daemon puts on a claude child: each spawn's environment names the session
+// THAT spawn is, and no other.
+//
+// TWO runners, not one, and that is the design of the test. A single-runner
+// assertion is satisfied by a composer that hardcodes a constant and ignores the
+// snapshot entirely — exactly the failure that matters here, since the pyry_files
+// MCP server claude forks reads this variable to name where a handed-over file is
+// filed, and an id naming the wrong live session misfiles it.
+//
+// Constructs the Runners directly (as TestRunner_BeginSpawn_FirstSpawnResumes-
+// ExistingTranscript does) so no child process is involved and the environment is
+// observed at the source that composes it.
+func TestRunner_BeginSpawn_EnvCarriesOwnLiveSessionID(t *testing.T) {
+	t.Parallel()
+
+	// Canonical UUIDv4s, the shape sessions.NewID mints and sessions.ValidID gates:
+	// the only values that reach this seam in production.
+	const (
+		idA = "11111111-1111-4111-8111-111111111111"
+		idB = "22222222-2222-4222-8222-222222222222"
+	)
+	newRunner := func(id string) *Runner {
+		return &Runner{
+			cfg:       Config{SessionID: id, SessionIDEnvVar: testSessionEnvVar},
+			log:       discardLogger(),
+			sessionID: id,
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		own, other string
+	}{
+		{"runner A", idA, idB},
+		{"runner B", idB, idA},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, cancel, _, env, _, _, _ := newRunner(tc.own).beginSpawn(context.Background(), true)
+			defer cancel()
+
+			want := []string{testSessionEnvVar + "=" + tc.own}
+			if !slices.Equal(env, want) {
+				t.Fatalf("env = %q, want %q", env, want)
+			}
+			// Named separately from the equality above so a future env carrying a
+			// second variable still fails on the claim that matters: this child must
+			// not be able to name the other session.
+			if slices.Contains(env, testSessionEnvVar+"="+tc.other) {
+				t.Errorf("env carries the OTHER session's identity: %q", env)
+			}
+		})
+	}
+}
+
+// TestRunner_BeginSpawn_EnvTracksRotatedSessionID is #2169's rework pin: the
+// identity on the child's environment is the id THAT SPAWN's argv carries, not the
+// construction-time seed.
+//
+// The seed is the defect. Config.SessionID is construction-fixed — the field's own
+// site in internal/sessions → Pool.New says it does not mirror a rotation — while
+// RestartFresh rotates r.sessionID and respawns. Composing the variable from the
+// seed one layer up left every successor child's environment naming the retired
+// session while its argv named the live one, and the daemon refuses a retired id,
+// so send_file failed closed from the first new_session onward for the rest of that
+// session's life.
+//
+// Asserting that the argv and the environment AGREE, rather than merely that the
+// environment changed, is what makes it a by-construction claim: both are derived
+// from the single id beginSpawn snapshots under restartMu.
+func TestRunner_BeginSpawn_EnvTracksRotatedSessionID(t *testing.T) {
+	t.Parallel()
+
+	const rotatedID = "33333333-3333-4333-8333-333333333333"
+	r := &Runner{
+		cfg:       Config{SessionID: testSessionID, SessionIDEnvVar: testSessionEnvVar},
+		log:       discardLogger(),
+		sessionID: testSessionID,
+		restartCh: make(chan struct{}, 1),
+	}
+
+	r.RestartFresh(rotatedID)
+
+	_, cancel, args, env, forceFirst, _, _ := r.beginSpawn(context.Background(), false)
+	defer cancel()
+
+	// Sanity on the fixture, not the claim: without a consumed rotation the rest of
+	// the test would be asserting against the seed and passing for the wrong reason.
+	if !forceFirst {
+		t.Fatal("beginSpawn reported no pending rotation after RestartFresh — the fixture never rotated")
+	}
+	if got := idFlagValue(args, "--session-id"); got != rotatedID {
+		t.Fatalf("argv --session-id = %q, want the rotated id %q:\n%v", got, rotatedID, args)
+	}
+
+	want := []string{testSessionEnvVar + "=" + rotatedID}
+	if !slices.Equal(env, want) {
+		t.Fatalf("env = %q, want %q — the environment names a different session than the argv does", env, want)
+	}
+	if slices.Contains(env, testSessionEnvVar+"="+testSessionID) {
+		t.Errorf("env still names the retired session %q, which the daemon refuses: %q", testSessionID, env)
 	}
 }
 
@@ -1265,7 +1421,7 @@ func TestRunner_RestartFresh_EmptyIDIsNoOp(t *testing.T) {
 
 	r.RestartFresh("")
 
-	_, cancel, args, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, args, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if forceFirst {
 		t.Errorf("beginSpawn forceFirst = true after RestartFresh(%q), want false (no-op held)", "")
@@ -1396,7 +1552,7 @@ func TestRunner_RestartFresh_OnSessionRotateFiresBeforeNextSpawnID(t *testing.T)
 			rotatedSessionID, seen)
 	}
 
-	_, cancel, args, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
+	_, cancel, args, _, forceFirst, _, _ := r.beginSpawn(context.Background(), true)
 	defer cancel()
 	if !forceFirst {
 		t.Error("beginSpawn forceFirst = false after RestartFresh, want true (the rotation was not the one consumed)")

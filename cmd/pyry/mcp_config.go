@@ -23,14 +23,16 @@ var approveToolRef = fmt.Sprintf("mcp__%s__%s", mcpServerName, approveToolName)
 //   - yolo == false → the --permission-prompt-tool + --mcp-config pair that
 //     routes every non-allowlisted tool use through the daemon approval
 //     registry, plus:
-//     --strict-mcp-config — claude loads ONLY the supplied server, ignoring any
-//     project/user .mcp.json that could add or shadow a fake pyry_approve
-//     server (non-negotiable; its omission silently defeats enforcement); and
+//     --strict-mcp-config — claude loads ONLY the supplied document's servers,
+//     ignoring any project/user .mcp.json that could add or shadow a fake
+//     pyry_approve server (non-negotiable; its omission silently defeats
+//     enforcement). It is also what makes the document the sole route by which
+//     pyry_files can reach a spawn (#2169); and
 //     --permission-mode default — the mode where the prompt tool is consulted
 //     (not bypassPermissions/acceptEdits/plan). No --dangerously-skip-permissions.
 //
 // In the non-YOLO branch mcpConfigPath must be the non-empty path of a config
-// written by writeMCPApproveConfig; the composed live flow (write → check err →
+// written by writeMCPServersConfig; the composed live flow (write → check err →
 // permissionArgs) guarantees that by construction.
 func permissionArgs(yolo bool, mcpConfigPath string) []string {
 	if yolo {
@@ -44,10 +46,15 @@ func permissionArgs(yolo bool, mcpConfigPath string) []string {
 	}
 }
 
-// mcpApproveConfig is the --mcp-config document claude reads: the top-level
-// {"mcpServers":{...}} shape claude's --mcp-config expects, carrying the single
-// pyry_approve stdio server registration.
-type mcpApproveConfig struct {
+// mcpServersConfig is the --mcp-config document claude reads: the top-level
+// {"mcpServers":{...}} shape claude's --mcp-config expects, carrying the
+// pyry_approve and pyry_files stdio server registrations.
+//
+// It is daemon-global — written once at startup, byte-identical for every
+// session, removed at shutdown — which is precisely why no entry's argv can name
+// a session. A per-spawn identity travels on the child's ENVIRONMENT instead; see
+// mapStreamsupConfig's Env field and envSessionID's doc.
+type mcpServersConfig struct {
 	MCPServers map[string]mcpServerSpec `json:"mcpServers"`
 }
 
@@ -58,29 +65,47 @@ type mcpServerSpec struct {
 	Args    []string `json:"args"`
 }
 
-// renderMCPApproveConfig builds the mcp-config bytes registering the pyry_approve
-// stdio server. The server command forks the running pyry binary as
-// `pyry mcp-approve -pyry-socket <socketPath>`, so the forwarder connects back
-// to the daemon that spawned claude rather than a default-named instance.
+// renderMCPServersConfig builds the mcp-config bytes registering the two stdio
+// servers claude is meant to see: pyry_approve, the permission bridge (#1106),
+// and pyry_files, the send_file tool (#2169). Each server command forks the
+// running pyry binary as `pyry <subcommand> -pyry-socket <socketPath>`, so both
+// forwarders connect back to the daemon that spawned claude rather than a
+// default-named instance.
 //
 // Fail-closed: an empty socketPath or pyryBin returns an error and nil bytes.
-// This function NEVER emits a bare ["mcp-approve"] (which would resolve to the
-// default-named instance's socket = wrong daemon = silent enforcement failure,
-// the AC-4 hazard) nor a config naming an empty command. It is the deterministic
-// net behind the caller-supplies-the-right-socket contract, not a mere
-// convention the caller is trusted to honour.
-func renderMCPApproveConfig(pyryBin, socketPath string) ([]byte, error) {
+// This function NEVER emits a bare ["mcp-approve"] / ["mcp-files"] (either would
+// resolve to the default-named instance's socket = wrong daemon = silent
+// enforcement failure, the #1106 AC-4 hazard) nor a config naming an empty
+// command. It is the deterministic net behind the caller-supplies-the-right-socket
+// contract, not a mere convention the caller is trusted to honour.
+//
+// pyry_files is a second ENTRY here rather than a second document, and that is
+// what extends both guards to it for free: there is no arrangement in which one
+// server is emitted with a bare argv while the other is not, because a refusal
+// returns nil bytes and no document at all.
+//
+// The server keys are the subcommands' own constants (mcpServerName from
+// mcp_approve.go, mcpFilesServerName from mcp_files.go), never re-spelled here,
+// for approveToolRef's reason: a rename there moves the registration with it
+// instead of leaving a document advertising a name nothing serves.
+func renderMCPServersConfig(pyryBin, socketPath string) ([]byte, error) {
 	if pyryBin == "" {
 		return nil, errors.New("mcp-approve config: empty pyry binary path")
 	}
 	if socketPath == "" {
 		return nil, errors.New("mcp-approve config: empty control socket path")
 	}
-	cfg := mcpApproveConfig{
+	cfg := mcpServersConfig{
 		MCPServers: map[string]mcpServerSpec{
 			mcpServerName: {
 				Command: pyryBin,
 				Args:    []string{"mcp-approve", "-pyry-socket", socketPath},
+			},
+			// The same client-flag pair mcp-approve takes, and no positionals —
+			// runMCPFiles' stated contract, written against here.
+			mcpFilesServerName: {
+				Command: pyryBin,
+				Args:    []string{"mcp-files", "-pyry-socket", socketPath},
 			},
 		},
 	}
@@ -93,17 +118,23 @@ func renderMCPApproveConfig(pyryBin, socketPath string) ([]byte, error) {
 	return b, nil
 }
 
-// writeMCPApproveConfig renders the pyry_approve mcp-config and writes it to a
-// per-spawn tmp file (os.CreateTemp "pyry-mcp-approve-*.json", mode 0600),
-// returning the path. Mirrors internal/agentrun/settings.writeSettings: on any
-// post-create failure the tmp file is removed before the error is returned, so
-// callers never see a leaked path on the error path.
+// writeMCPServersConfig renders the mcp-config and writes it to a per-spawn tmp
+// file (os.CreateTemp "pyry-mcp-approve-*.json", mode 0600), returning the path.
+// Mirrors internal/agentrun/settings.writeSettings: on any post-create failure the
+// tmp file is removed before the error is returned, so callers never see a leaked
+// path on the error path.
+//
+// The tmp-file prefix and the "mcp-approve config:" error prefix keep their
+// original spelling even though the document now carries two servers. The prefix
+// is an observable in a SHARED $TMPDIR that #1240's recorded runner attribution
+// reasons about, and the error prefix was chosen for grep-ability; renaming either
+// changes a value outside this file's reach for no gain here.
 //
 // The caller owns removal on the success path (defer os.Remove(path)) at the
 // live-spawn site; this helper registers no cleanup itself. The written bytes
-// are byte-identical to renderMCPApproveConfig's output (no trailing newline).
-func writeMCPApproveConfig(pyryBin, socketPath string) (string, error) {
-	b, err := renderMCPApproveConfig(pyryBin, socketPath)
+// are byte-identical to renderMCPServersConfig's output (no trailing newline).
+func writeMCPServersConfig(pyryBin, socketPath string) (string, error) {
+	b, err := renderMCPServersConfig(pyryBin, socketPath)
 	if err != nil {
 		return "", err
 	}

@@ -2,7 +2,7 @@
 
 The caller half of `attachment.file` ([control-plane.md § Attachment.file](control-plane.md), #2164): a stdio MCP server, `pyry_files`, exposing exactly one tool, `send_file`, that forwards a `tools/call` to the daemon via `control.AttachFile` and returns its outcome as the tool result. Forked from the running `pyry` binary the same way `pyry mcp-approve` is ([pyry-mcp-approve-command.md](pyry-mcp-approve-command.md)) — same `serveJSONRPCStdio` loop, same `initialize`/`tools/list`/`tools/call` trio, same fail-closed posture.
 
-Ships live but inert: nothing yet spawns this server, and until the sibling ticket **#2169** puts a session id on the claude child's environment, every call refuses. That is the intended state, the same "ships live but inert" shape #1104 used for `mcp.approve`.
+Shipped live but inert; **#2169** closed that gap. `renderMCPServersConfig` ([pyry-mcp-approve-command.md](pyry-mcp-approve-command.md)) registers `pyry_files` as a second entry alongside `pyry_approve` in the daemon's one `--mcp-config` document, and every non-bypass interactive spawn's environment carries `PYRY_SESSION_ID` bound to *that spawn's* live session id — see § "Session id" below for how the id stays live across a respawn, and what it still cannot track.
 
 ## A second server, not a second tool
 
@@ -16,7 +16,15 @@ Ships live but inert: nothing yet spawns this server, and until the sibling tick
 
 `filesServer` takes `sessionID` at construction (`newMCPFilesServer(socketPath, sessionID string, log)`); the single `os.Getenv(envSessionID)` lives in `runMCPFiles`, not in the constructor. This is the approve server's own pre-#1929 history repeating as a design constraint rather than a bug found fresh: an environment-reading constructor forces every test through `t.Setenv`, which bans `t.Parallel` — see [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) for the fuller account of that cost. Applying the lesson here means all of `mcp_files_test.go` runs parallel.
 
-An absent or empty `PYRY_SESSION_ID` does not abort startup — the server answers `initialize`/`tools/list` normally and refuses every `tools/call`. Exiting at startup would make claude report a broken MCP server; a per-call refusal is a sentence claude can read and (once #2169 lands) will never actually see, since the id will always be present by then.
+An absent or empty `PYRY_SESSION_ID` does not abort startup — the server answers `initialize`/`tools/list` normally and refuses every `tools/call`. Exiting at startup would make claude report a broken MCP server; a per-call refusal is a sentence claude can read.
+
+## Session id: a name crosses the mapper seam, the binding composes at spawn (#2169)
+
+The value this process reads off `PYRY_SESSION_ID` cannot be fixed at the daemon's `--mcp-config` document (that document is written once at startup and is byte-identical for every session) and cannot be fixed at `streamsup.Config` construction either — `cfg.SessionID` is the construction-time seed, and a `RestartFresh` rotation moves the runner's live id (`r.sessionID`) without changing that field. Composing `PYRY_SESSION_ID=<cfg.SessionID>` in the mapper (`mapStreamsupConfig`) shipped first and was the ticket's MUST FIX finding: every child spawned after a `new_session` rotation carried the retired id on its environment while its argv carried the live one, so `attachment.file` refused for the rest of that session's life.
+
+The fix moved the **name**, not the value, across the seam: `streamsup.Config.SessionIDEnvVar` names the variable (`mapStreamsupConfig` sets it to `envSessionID` and leaves `Config.Env` nil), and `Runner.beginSpawn` composes `NAME=<live id>` via the pure `spawnEnv` helper from the *same* snapshotted id `buildArgs` reads to build that spawn's argv — one `restartMu` acquisition, so the environment and the argv can never name two different sessions. See [`buildArgs` — the id-flag inversion](streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md) for the argv half this now agrees with.
+
+**What this still cannot track: a `/clear` rotation never respawns.** `/clear` reaches `Pool.onRotate` → `RotateID`, which re-keys the pool without restarting the child, so the *running* process keeps the environment variable it was exec'd with. A `send_file` call from that child refuses — fail-closed, the same shape as before, never a misfile — until that runner's next spawn. No environment-based design can close this: an exec'd process's environment is not writable from outside. Closing it means giving the forked server a way to *ask* the daemon which session it belongs to, rather than being *told* once at exec — the same child-authentication design the shell-path bypass below is left to.
 
 ## What is guarded locally vs. left to the daemon
 
@@ -52,12 +60,15 @@ Mutation evidence (run over `go test -overlay`, no worktree writes) for the thre
 | the `s.sessionID == ""` guard deleted | the no-session-identity test, on both the refusal text and the connection count |
 | the daemon's sentence prefixed with an added phrase | the daemon-refusal-verbatim test |
 
-## Out of scope (deferred to #2169)
+## Out of scope, still
 
-Registering this server on the interactive spawn (`--mcp-config`), writing `PYRY_SESSION_ID` onto the claude child, closing the shell-path bypass (nothing today stops `pyry mcp-files` being run directly with a hand-picked `PYRY_SESSION_ID`), and the live-claude proof. Until that lands, this server has no production caller and no session id ever reaches a real spawn's environment.
+**A child that stays in bypass gets no `pyry_files` at all.** `withApprovalArgs` returns a bypass spawn's args unchanged, so it carries no `--mcp-config` and sees no MCP server — `send_file` included. Deliberate, pinned by a test, and not revisited by #2169: mixing a permission-argv change into a file-transfer feature was judged the wrong trade for a posture nobody has asked to send a file from.
+
+**The shell-path bypass remains open.** Nothing stops `pyry mcp-files` being run directly with a hand-picked `PYRY_SESSION_ID` — the daemon bounds the damage (the id must name one of the operator's own live sessions; see `TestFileAttacher_DestinationIsCallerSession`) rather than defending against it. Closing it means authenticating the forked child to the daemon, which no ticket in this family has taken on.
 
 ## Related
 
-- [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the sibling subcommand this one's shape, transport, and environment-reading-constructor lesson are drawn from.
+- [pyry-mcp-approve-command.md](pyry-mcp-approve-command.md) — the sibling subcommand this one's shape, transport, and environment-reading-constructor lesson are drawn from, and the shared `--mcp-config` document both are registered in.
 - [control-plane-attachment-file-confine-and-store-a-claude-named-path.md](control-plane-attachment-file-confine-and-store-a-claude-named-path.md) — the daemon-side verb this forwards to: confinement, TOCTOU, and why its refusals are static sentences.
+- [streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md](streamsup-package-buildargs-the-id-flag-inversion-that-keeps.md) — `spawnEnv`/`beginSpawn`, composing this session id's binding from the same snapshot the child's argv is built from.
 - [control-plane.md](control-plane.md) § Attachment.file — the wire verb and `SetFileAttacher` seam.

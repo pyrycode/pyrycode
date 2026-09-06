@@ -136,9 +136,37 @@ type Config struct {
 	// Stderr receives the child's stderr. Optional; nil discards it.
 	Stderr io.Writer
 
-	// Env is appended to os.Environ() in the child process. Optional; production
-	// leaves it nil. Tests use it to thread the fake-child wiring.
+	// Env is appended to os.Environ() in the child process. Optional; tests use it
+	// to thread the fake-child wiring, and production leaves it nil — a value that
+	// varies per SPAWN cannot live on a construction-time field, which is why the
+	// session identity #2169 puts on the child rides SessionIDEnvVar instead.
+	//
+	// A non-empty child environment makes the spawn set cmd.Env explicitly instead
+	// of inheriting implicitly — the same set of variables either way, since an
+	// exec.Cmd with a nil Env already inherits the parent's environment.
 	Env []string
+
+	// SessionIDEnvVar names an environment variable each spawn binds to THAT
+	// spawn's live session id — the same id its argv carries as --session-id /
+	// --resume, composed in beginSpawn from the one snapshot buildArgs reads, so the
+	// environment and the argv can never name two different sessions. Empty (the
+	// default) binds nothing and leaves the child environment to Env alone.
+	//
+	// The NAME crosses this seam and not the value, and that is the whole point
+	// (#2169). The interactive daemon needs the LIVE id here: cfg.SessionID is the
+	// construction-time seed, RestartFresh rotates r.sessionID and respawns, so a
+	// value composed by the caller at construction would name the retired session
+	// for the entire life of every successor child. The consumer is the pyry_files
+	// MCP server claude FORKS, which inherits this environment and forwards the id
+	// as the destination of a handed-over file; the daemon refuses an id it has
+	// retired rather than misfiling, so a stale value fails closed and stays broken.
+	//
+	// A /clear rotation is deliberately NOT tracked: it re-keys the pool without
+	// respawning, so the running child keeps the environment it was exec'd with
+	// until its next spawn. That boundary is stated in #2169's plan under
+	// ## Revisions; closing it means reaching a live process's environment, which
+	// no operating system here permits.
+	SessionIDEnvVar string
 
 	// Logger is used for lifecycle diagnostics. Optional; nil falls back to
 	// slog.Default().
@@ -1385,8 +1413,15 @@ func (r *Runner) RestartFresh(newID string) {
 // spawnAndWait. It is a READ inside the section that already exists, not a second
 // acquisition, so the one-acquisition-per-spawn-setup charter holds — the same
 // treatment freshSeq gets above.
+//
+// env is this spawn's child environment, composed below the unlock from the SAME
+// snapshotted id the argv is built from (#2169). Composing it here rather than
+// letting spawnAndWait read a live id is what makes "the environment and the argv
+// name one session" true by construction: a second restartMu acquisition at spawn
+// time could land on the far side of a racing rotation and skew the two apart, and
+// would also break the one-acquisition charter above.
 func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
-	iterCtx context.Context, cancel context.CancelFunc, args []string,
+	iterCtx context.Context, cancel context.CancelFunc, args, env []string,
 	forceFirst bool, freshSeq uint64, spawnMode string,
 ) {
 	// Derived BEFORE the acquisition on purpose: context.WithCancel takes the
@@ -1405,7 +1440,8 @@ func (r *Runner) beginSpawn(ctx context.Context, firstRun bool) (
 	r.restartMu.Unlock()
 
 	args = buildArgs(base, useCreateForm(r.cfg.ClaudeSessionsDir, id, firstRun || forceFirst), id)
-	return iterCtx, cancel, args, forceFirst, freshSeq, spawnMode
+	env = spawnEnv(r.cfg.Env, r.cfg.SessionIDEnvVar, id)
+	return iterCtx, cancel, args, env, forceFirst, freshSeq, spawnMode
 }
 
 // liveSessionID snapshots the live session id under restartMu, for a diagnostic
@@ -1481,7 +1517,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		// with --session-id (a fresh transcript). firstRun's flip-back to false on a
 		// successful spawn (below) then makes the next respawn --resume the new id —
 		// see the started-gated flip.
-		iterCtx, cancel, args, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
+		iterCtx, cancel, args, env, forceFirst, freshSeq, spawnMode := r.beginSpawn(ctx, firstRun)
 		if forceFirst {
 			firstRun = true
 		}
@@ -1491,7 +1527,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.log.Info("spawning claude", "args", args, "workdir", r.workDir)
 
 		start := time.Now()
-		started, waitErr := r.spawnAndWait(iterCtx, args, freshSeq, spawnMode)
+		started, waitErr := r.spawnAndWait(iterCtx, args, env, freshSeq, spawnMode)
 		cancel()
 		r.clearIterCancel()
 		uptime := time.Since(start)
@@ -1567,13 +1603,18 @@ func (r *Runner) Run(ctx context.Context) error {
 // freshSeq is beginSpawn's setup-time snapshot, carried through untouched and
 // handed to setStdin as the rotation gate's release authorisation (#1482). Nothing
 // here reads or interprets it.
-func (r *Runner) spawnAndWait(ctx context.Context, args []string, freshSeq uint64, spawnMode string) (started bool, waitErr error) {
+//
+// env is beginSpawn's composed child environment — Config.Env plus, when
+// Config.SessionIDEnvVar is set, this spawn's live session id — and is likewise
+// carried through untouched. Empty leaves cmd.Env nil, which inherits the parent's
+// environment implicitly; the same set of variables either way.
+func (r *Runner) spawnAndWait(ctx context.Context, args, env []string, freshSeq uint64, spawnMode string) (started bool, waitErr error) {
 	cmd := exec.CommandContext(ctx, r.cfg.ClaudeBin, args...)
 	cmd.Dir = r.workDir
 	cmd.Stdout = r.cfg.Stdout
 	cmd.Stderr = r.cfg.Stderr
-	if r.cfg.Env != nil {
-		cmd.Env = append(os.Environ(), r.cfg.Env...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
 	}
 
 	// Reap-then-SIGTERM fires only on ctx cancel (operator teardown): claude
@@ -1875,4 +1916,24 @@ func buildArgs(base []string, create bool, sessionID string) []string {
 		return append(args, "--session-id", sessionID)
 	}
 	return append(args, "--resume", sessionID)
+}
+
+// spawnEnv composes one spawn's additions to os.Environ(): the caller's fixed
+// Config.Env, then Config.SessionIDEnvVar bound to the id THIS spawn is using —
+// beginSpawn's snapshot, the same value buildArgs just put in the argv. An empty
+// name binds nothing and returns base as it stands, so a runner that does not opt
+// in keeps inheriting the parent environment implicitly. Pure — no Runner state.
+//
+// It never appends INTO base: Config.Env belongs to the caller and every spawn of
+// this runner reads it, so an in-place append into spare capacity would be a write
+// one spawn could observe in another. The session variable goes LAST, so it wins
+// over a same-named entry in Config.Env under os/exec's documented last-duplicate-
+// wins rule — the fail-safe direction, since the runner's id is the live one.
+func spawnEnv(base []string, name, sessionID string) []string {
+	if name == "" {
+		return base
+	}
+	out := make([]string, 0, len(base)+1)
+	out = append(out, base...)
+	return append(out, name+"="+sessionID)
 }
