@@ -337,3 +337,65 @@ conversation is caught too. `attachmentFilesUnder` additionally returns
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — flow 1 became its own test; `fakephone` closes the conn on a receive timeout
+
+**What changed.** § Design had flow 1 appended as a final phase to
+`TestRelayV2_AttachmentUploadMultiChunk`. It is now its own test,
+`TestRelayV2_AttachmentUploadOnNeverMessagedConversationResolves`, in the new file
+beside the other two, driving its own single-chunk transfer into a
+`seedBoundConversation` row that no turn is routed into.
+
+**What drove it.** Measured, not reasoned: the first run failed at the send with
+`fakephone write: failed to write msg: use of closed network connection`.
+`fakephone.Client.ReceiveBytes` closes the conn when its deadline elapses, and
+#1898's AC-3 quiet window ends by deliberately running that deadline out to prove
+an absence — so by the time the appended phase ran, the conn was dead. No ordering
+inside that test fixes it: proving the absence is what kills the conn, and flow 1
+needs the conn alive afterwards.
+
+**What the new contract is.** The rebuilt precondition is a conversation that is
+*hosted and bound* (so the `KnownConversation` gate and `SessionRouter.Route` both
+pass) and *never routed* (so the follow-active cursor is empty for the whole
+transfer). That is what `seedBoundConversation` alone gives, and it is the same
+precondition #1898 establishes — reproduced in a few lines rather than shared.
+The ack is still the whole assertion.
+
+**What it cost and what it bought.** The upload half is now driven twice across the
+two files. That is the price of #1898's absence proof and is cheap: one single-chunk
+transfer. It buys a real gain the appended phase did not have — flow 1 no longer
+perturbs #1898's ordered observations at all, so its never-log scan keeps its
+snapshot without a placement argument, and `relay_v2_attachment_upload_test.go`
+takes only a doc-block pointer. The plan's flow-1 placement rationale (§ Design,
+"Placement is load-bearing") is superseded by this entry.
+
+### 2026-09-06 — Open questions resolved
+
+1. **Wire traffic from flow 2's two routed turns does not starve the attachment
+   reader.** Resolved green on the first run, as predicted: the shared
+   `awaitOutcome` loop skips `assistant_delta` / `turn_state` and reads on, and no
+   deadline needed lengthening. The 20s budget is slack for a loaded host, not a
+   measured requirement.
+2. **Flow 1's `send_message` does not need the bootstrap child live.** Resolved as
+   predicted — `resolveAttachments` runs before `EnqueueDelivery`, so the ack
+   arrives on accept-into-backlog whatever the child is doing.
+
+### 2026-09-06 — RED proof: `-overlay` alone cannot mutate an e2e daemon
+
+`go test -overlay` rebuilds only the *test* binary, and this tier drives `pyry` as a
+separate process, so the first mutant run passed against unmutated production code.
+The working shape is `go build -overlay=<mutant json> -o <bin> ./cmd/pyry` plus
+`PYRY_E2E_BIN=<bin> go test`, with a control run against an unmutated pre-built
+binary first — the methodology `docs/knowledge/features/e2e-harness-stream-interactive-harness-pattern-startstreamin.md`
+already records for #1845. Results:
+
+| Mutant | Flow 1 | Flow 2 | Flow 3 | #1898 |
+|---|---|---|---|---|
+| Control (unmutated, `PYRY_E2E_BIN`) | pass | pass | pass | pass |
+| Destination no longer read from the chunk | **RED** (`attachment.not_found`) | **RED** (single hit at the wrong conversation) | pass | **RED** |
+| `KnownConversation` arm never fires | pass | pass | **RED** (`attachment_stored` for an unhosted conversation) | pass |
+
+Each mutant reddens exactly the flows that own the behaviour it breaks and no
+others, so neither test is standing in for the other's proof.
