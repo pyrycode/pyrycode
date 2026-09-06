@@ -527,3 +527,95 @@ invisible to `make check`, so it is compiled explicitly); `go test -race
 reader's provenance guards were exercised by standing a synthetic fixture at the
 pinned path and confirming each one fatals — wrong release, unreadable version,
 `is_capture: false` — then deleting it; the tree is clean of it.
+
+### 2026-09-06 (rework 2) — the live gate ran, and the staging was what failed
+
+**Driven by** the dispatcher's real-claude gate, which FAILED with 2 of 922
+executed tests red. This entry supersedes both earlier entries' central premise:
+they said no agent on this machine could produce the fixture because `claude` was
+unauthenticated. **The gate has a credential** — its record shows
+`credential_scan_applied.CLAUDE_CODE_OAUTH_TOKEN: true`, i.e. the variable was
+set in the dispatcher's environment — and it spawned real claude 922 times. The
+probe did not skip. It ran, and it produced **zero `tool_progress` frames**.
+(`claude -p` from an agent session on this host still fails to authenticate, so
+the credential reaches the gate and not us; that asymmetry is why two legs
+concluded the opposite.)
+
+**What the run measured, and the instrument's real defect.** The turn ended in
+**9.11 s** having emitted 13 lines, none of them `tool_progress`. The staged call
+was `sleep 75` with `BASH_DEFAULT_TIMEOUT_MS=180000`, so a compliant foreground
+call would have taken at least 75 s. Something ended the turn early — and the
+record could not say what, because `tpcapCollect` keeps only `tool_progress`
+frames. Four causes fit the same evidence: claude never called Bash, it shortened
+the duration, it requested a short tool timeout, or it backgrounded the call. The
+zero-frame message advised *"raise `tpcapSleepSeconds`"*, which is very likely the
+wrong advice, and acting on it would have cost another 650-second gate run.
+
+**Two facts re-derived from the 2.1.259 binary while diagnosing it**, both of
+which the ticket body left open and neither of which needed a credential:
+
+- **The heartbeat is a `setInterval` at `var Cct=30000`.** The first tick lands at
+  t+30 s. Any call leaving the foreground sooner produces nothing, whatever the
+  marker set says. 75 s was correctly sized; the call simply never lasted.
+- **The `CLAUDE_CODE_REMOTE` / `CLAUDE_CODE_CONTAINER_ID` guard wraps only the
+  `bash_progress`/`powershell_progress` branch**, in both emitters. The heartbeat,
+  subagent-retry and repl-call arms sit outside it. So the marker set is confirmed
+  against the binary and is **not** env-gated — the arm as shipped is right, and
+  production code is unchanged this leg (0 lines).
+
+**The design departure, and it is a real one.** § The capture specified a prompted
+foreground `sleep`. That puts the duration in the *model's* hands. It is replaced
+by a rig-held FIFO:
+
+- `tpcapHoldFIFO` — `holdProbeFIFO` with the release exposed rather than pinned to
+  `t.Cleanup`, because this probe must let go mid-test so the turn can end. Its
+  rendezvous fires when claude's `cat` opens the FIFO, which is **positive
+  evidence that a foreground call started** — the signal the sleep staging had no
+  equivalent of. The command is `cat <fifo>` in `bgIdlePrompt`'s verbatim wording,
+  the shape already proven in this package to make claude run exactly one command
+  and block on it; added clauses forbid backgrounding and requesting a timeout
+  (a model-requested timeout beats both our env var and claude's 120 s default).
+- `stagingVerdict` turns the outcome into the three-way answer the first run
+  lacked: *the command never ran* / *it started but was cut short before the first
+  tick* / *it was held past the tick and nothing came*. **Only the third is
+  evidence about pyry's surface**; the first two are the rig failing to stage
+  anything, and the fatal now says so rather than pointing at the marker set.
+- The record gains a content-free census — `line_type_census`, `tool_calls`
+  (vendor tool names, redacted, no inputs), `tool_result_errors`, `turn_seconds`,
+  `foreground_call_observed`, `foreground_call_held_seconds` — so a run that fires
+  nothing still says what claude did instead.
+
+Offline coverage for all of it: `TestTpcapHoldFIFO` exercises the rendezvous, the
+still-blocked read, the EOF after release, and — the case worth having — that
+`release` returns when **no** reader ever arrives, since a block there would hang
+`make e2e-realclaude` rather than failing it. `TestTpcapHoldOutlastsTheHeartbeat‑
+Interval` pins hold ≥ 2 ticks, bash timeout > hold, and rendezvous wait ≥ hold.
+`TestTpcapStagingVerdictSeparatesRigFailureFromFinding` pins the one distinction a
+reader of a red gate acts on.
+
+**The other red test is not ours, and "passes on base" does not exonerate it.**
+`TestInitControlArms_CompareMeasurementArmsAgainstTheControlAtTheSameTurnIndex`
+failed because `testdata/initialize_control_v*_*.json` matched **two** claude
+versions, `2.1.239` and `2.1.259`. `origin/main` commits only the `2.1.239` set;
+the `2.1.259` files are written into the worktree *during the live run* by a
+sibling recorder that names its output after the running claude. This branch adds
+nothing under `testdata/` — its whole diff is the `tool_progress` files plus the
+spec. The gate's base re-run executed **exactly one test** (verified in the base
+log), so the sibling that writes the file never ran and the compare test passed on
+base; that pass is an artifact of the re-run's scope, not evidence about this
+branch. It reproduces on any full live gate run against claude 2.1.259. Filed
+separately and set as a blocker per § Scope Discipline — fixing it here would be
+an out-of-scope production edit in another ticket's area.
+
+**What is still open.** AC2's proof half, AC3 and AC4 remain unmet: no fixture has
+been captured. The difference from the previous leg is that the reason is no
+longer "no route produces this" but "the route ran once and the staging was
+wrong". The `NOT YET MEASURED` docblock and the reader's `fs.ErrNotExist` skip
+branch therefore both stay, and both still say they are to be deleted in the
+commit that lands the fixture.
+
+**Verified this leg:** `gofmt` clean on the touched file; `go vet ./...` and
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/` clean; `go test -race`
+green for `./internal/streamsup/...` and for the tagged package's offline
+`TestTpcap*` set (three tests, 19 cases). The live probe still skips on this
+machine at `WithWorktreeAuthenticated`, naming the missing credential.

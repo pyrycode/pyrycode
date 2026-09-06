@@ -9,11 +9,12 @@ package realclaude
 //
 // Two deltas, and each is structural rather than cosmetic:
 //
-//   - #1260 BACKGROUNDS its Bash call and caps it at BASH_DEFAULT_TIMEOUT_MS=5000,
-//     shorter than the heartbeat interval. Heartbeats are what a foreground call
-//     in flight produces, so this probe raises the cap well past the interval and
-//     asks for a plain foreground sleep. That is why the committed
-//     dropped_lines_v2.1.220.json holds no tool_progress line at all.
+//   - #1260 caps its Bash call at BASH_DEFAULT_TIMEOUT_MS=5000, shorter than the
+//     30 s heartbeat interval, so the call leaves the foreground before a tick can
+//     land. Heartbeats are what a foreground call still in flight produces, so
+//     this probe raises the cap well past the interval and holds the call open
+//     itself. That is why the committed dropped_lines_v2.1.220.json holds no
+//     tool_progress line at all.
 //   - #1260 records only lines the parser DROPPED (dropcapClassifyAll). A
 //     marker-less tool_progress frame emits an Unrecognized, so it is not dropped,
 //     so it would be filtered out of the record — and it is the single frame this
@@ -24,6 +25,38 @@ package realclaude
 // splitting and the `result` turn boundary), dropcapRedactor, dropcapScanner,
 // dropcapMakeEntry (payload encoding, base64 arm included), parseOne and
 // dropcapWaitForChild all live in dropped_line_capture_test.go.
+//
+// # What the first live run measured (2026-09-06, claude 2.1.259, haiku)
+//
+// Nothing about the surface — and the instrument could not say so. The staging
+// then asked claude for `sleep 75` in the foreground; the turn ended in 9.11 s
+// having emitted 13 lines and zero tool_progress frames, and the record kept only
+// tool_progress frames, so there was no way to tell whether claude had shortened
+// the sleep, requested a short tool timeout, backgrounded the call, or never run
+// it. The zero-frame message advised raising the sleep, which was very likely the
+// wrong advice.
+//
+// Two things changed as a result, and they are the reason this file looks the way
+// it does:
+//
+//   - The duration is the RIG's, not the model's. `cat <fifo>` blocks until
+//     tpcapHoldFIFO releases the write end, and the rendezvous is positive
+//     evidence that a foreground call actually started. stagingVerdict turns that
+//     into the three-way answer the first run lacked.
+//   - The record carries a content-free census of everything else on the wire
+//     (line_type_census, tool_calls, tool_result_errors), so a run that fires
+//     nothing still says what claude did instead.
+//
+// Two facts read out of the 2.1.259 binary while diagnosing that run, both of
+// which the ticket body had left open:
+//
+//   - The heartbeat is a setInterval at 30000 ms, so the FIRST tick lands at
+//     t+30s. A call that leaves the foreground sooner can never produce one.
+//   - The `CLAUDE_CODE_REMOTE`/`CLAUDE_CODE_CONTAINER_ID` guard wraps ONLY the
+//     bash_progress/powershell_progress branch, in both emitters. The heartbeat,
+//     subagent-retry and repl-call arms sit outside it, so they are not env-gated
+//     and this surface can receive them. The residual variety's reachability is
+//     still what unmarked_frames measures.
 //
 // # Redaction
 //
@@ -55,11 +88,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -87,16 +123,25 @@ const (
 const (
 	tpcapTicket         = "2089"
 	tpcapWorkdirName    = "tpcap-work"
+	tpcapFIFOName       = "tpcap-hold"
 	tpcapRecordName     = "tpcap-record.json"
 	tpcapArtifactPrefix = "pyry-2089-capture-*"
 	tpcapModel          = "haiku"
-	// Well past the reported ~30 s heartbeat interval, so the tool call cannot be
-	// cut short before claude emits one. #1260's 5000 is what makes its capture
-	// heartbeat-free.
+	// Well past the hold below, so the tool call cannot be cut short before claude
+	// emits a heartbeat. #1260's 5000 is what makes its capture heartbeat-free.
+	// Note this only raises the DEFAULT: claude's own default is 120000 (KTe in
+	// the 2.1.259 binary), and a timeout the MODEL requests wins over both, which
+	// is why the prompt forbids requesting one.
 	tpcapBashTimeoutMS = "180000"
-	// Long enough for at least two heartbeats at the reported interval, short
-	// enough to stay inside the turn budget with room for spawn and teardown.
-	tpcapSleepSeconds = 75
+	// Read out of the 2.1.259 binary, not from the report: the heartbeat is a
+	// setInterval at `var Cct=30000` whose first tick therefore lands at t+30s.
+	// Anything shorter than one tick cannot produce a frame no matter how well the
+	// staging behaves.
+	tpcapHeartbeatIntervalSeconds = 30
+	// Two full ticks plus slack. The rig holds the call open for exactly this
+	// long — see tpcapHoldFIFO for why the duration is the rig's decision and not
+	// the model's.
+	tpcapHoldSeconds = 75
 	// A fixed literal in a per-test temp $HOME, not a secret. Distinct from
 	// #1260's so a record can never be mistaken for the other probe's.
 	tpcapSessionID = "0b3f9c21-7d54-4e8a-8c16-2f9a4d7b6e05"
@@ -105,6 +150,12 @@ const (
 const (
 	tpcapTurnBudget  = 5 * time.Minute
 	tpcapRunExitWait = 30 * time.Second
+	tpcapHold        = tpcapHoldSeconds * time.Second
+	// How long to wait for claude's `cat` to open the FIFO. Generous: it covers
+	// model latency and the tool round-trip, and overrunning it is recorded as
+	// "the foreground call never started", which is a measurement rather than a
+	// flake.
+	tpcapRendezvousWait = 90 * time.Second
 )
 
 const (
@@ -152,8 +203,8 @@ const tpcapRedactionRationale = "Inherited whole from #1260 (see dropcapRedactio
 	"identifier or a counter (tool_use_id, parent_tool_use_id, task_id, uuid, session_id, tool_name, " +
 	"elapsed_time_seconds) EXCEPT ONE. repl_call.inner_tool_input is a tool's input verbatim. It is KEPT, " +
 	"because a redacted marker payload would not be evidence of the shape; the defence for it is the " +
-	"by-construction one above plus the deny-scan, and in this staging the only tool input is the rig's own " +
-	"sleep command. A capture staged against a real workspace would need more."
+	"by-construction one above plus the deny-scan, and in this staging the only tool input is a `cat` of " +
+	"the rig's own FIFO. A capture staged against a real workspace would need more."
 
 // tpcapFrame is one captured tool_progress line. The payload half is built by
 // dropcapMakeEntry so the base64 arm for invalid UTF-8 is shared rather than
@@ -193,6 +244,24 @@ type tpcapRecord struct {
 	Outcome       string `json:"outcome"`
 	OutcomeDetail string `json:"outcome_detail"`
 	TerminatedOn  string `json:"terminated_on"`
+
+	// The staging measurement, added 2026-09-06 after the first live run came
+	// back with zero frames and no way to tell WHY. Without these a did-not-fire
+	// record cannot distinguish "claude never ran the command" from "it ran but
+	// was cut short" from "it ran the whole window and this surface simply does
+	// not carry heartbeats" — and only the third is a finding about pyry.
+	ForegroundCallObserved bool    `json:"foreground_call_observed"`
+	ForegroundHeldSeconds  float64 `json:"foreground_call_held_seconds"`
+	TurnSeconds            float64 `json:"turn_seconds"`
+
+	// A content-free census of everything else on the wire: top-level types, the
+	// tool NAMES claude chose (a closed vendor set, no inputs), and how many tool
+	// results came back as errors. This is the half that says what claude did
+	// instead when the staging fails.
+	LineTypeCensus   map[string]int `json:"line_type_census"`
+	ToolCalls        []string       `json:"tool_calls"`
+	ToolResultErrors int            `json:"tool_result_errors"`
+	UndecodedLines   int            `json:"undecoded_lines"`
 
 	LinesCaptured  int            `json:"lines_captured"`
 	FrameCount     int            `json:"frame_count"`
@@ -257,16 +326,174 @@ func (rec *tpcapRecord) fixtureWorthy() (string, bool) {
 	return "", true
 }
 
+// stagingVerdict names WHICH of the three ways a zero-frame capture can happen
+// actually happened, and it is the field the 2026-09-06 live run wanted and did
+// not have: that run reported "zero frames out of 13 captured lines" and advised
+// raising the sleep, when the turn had ended in 9 s and the real question — did a
+// foreground Bash call ever run at all — was unanswerable from the record.
+//
+// Only the third case is evidence about pyry's surface. The first two are the rig
+// failing to stage the thing it meant to measure, and saying so plainly is what
+// stops the next reader from touching the marker set to fix a staging bug.
+func (rec *tpcapRecord) stagingVerdict() string {
+	switch {
+	case !rec.ForegroundCallObserved:
+		return fmt.Sprintf("claude never opened the FIFO within %s, so no foreground Bash call ever "+
+			"started. The staging failed BEFORE the surface was exercised — read tool_calls and "+
+			"line_type_census to see what claude did instead", tpcapRendezvousWait)
+	case rec.ForegroundHeldSeconds < tpcapHeartbeatIntervalSeconds:
+		return fmt.Sprintf("a foreground call started but the turn ended %.1fs later, short of the "+
+			"%ds heartbeat interval, so the first tick never came. claude backgrounded it or cut it "+
+			"short: the staging failed, not the surface",
+			rec.ForegroundHeldSeconds, tpcapHeartbeatIntervalSeconds)
+	default:
+		return fmt.Sprintf("a foreground Bash call was held open %.1fs, spanning %d heartbeat "+
+			"interval(s) of %ds, and NO tool_progress line arrived. The staging WORKED, so this is a "+
+			"finding about the surface — heartbeats do not reach --output-format stream-json stdout "+
+			"here — and it is to be routed back, not fixed by loosening the marker set",
+			rec.ForegroundHeldSeconds,
+			int(rec.ForegroundHeldSeconds)/tpcapHeartbeatIntervalSeconds,
+			tpcapHeartbeatIntervalSeconds)
+	}
+}
+
+// tpcapCensus counts what else was on the wire, content-free.
+//
+// Top-level types (with system subtypes, which is where a refusal or an error
+// announces itself), the tool NAMES claude chose, and how many tool results came
+// back as errors. Names are a closed vendor set rather than claude's prose, and
+// they still go through the redactor: an MCP tool's name embeds its server's.
+// Tool INPUTS are deliberately not collected — the names alone answer "did it
+// call Bash at all", which is the question, and the inputs would widen what a
+// did-not-fire record carries for no diagnostic gain.
+func tpcapCensus(lines []dropcapCaptured, red *dropcapRedactor) (
+	types map[string]int, toolCalls []string, resultErrors, undecoded int,
+) {
+	types = map[string]int{}
+	toolCalls = []string{}
+	for _, c := range lines {
+		if !c.Decoded {
+			undecoded++
+			continue
+		}
+		key := c.Type
+		if c.Subtype != "" {
+			key = c.Type + "/" + c.Subtype
+		}
+		types[key]++
+
+		// content is an array on assistant/user messages and a plain string on
+		// some user turns, so it is taken as RawMessage and array-decoded
+		// separately: a string content is a skip, not an error worth recording.
+		var msg struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(c.Raw, &msg); err != nil || len(msg.Message.Content) == 0 {
+			continue
+		}
+		var blocks []struct {
+			Type    string `json:"type"`
+			Name    string `json:"name"`
+			IsError bool   `json:"is_error"`
+		}
+		if err := json.Unmarshal(msg.Message.Content, &blocks); err != nil {
+			continue
+		}
+		for _, b := range blocks {
+			switch b.Type {
+			case "tool_use":
+				toolCalls = append(toolCalls, red.str(b.Name))
+			case "tool_result":
+				if b.IsError {
+					resultErrors++
+				}
+			}
+		}
+	}
+	return types, toolCalls, resultErrors, undecoded
+}
+
 // tpcapPrompt stages the one turn. The nonce is carried so dropcapRedactor's
-// prompt_nonce class has something to substitute, and the wording forbids
-// backgrounding explicitly: a backgrounded call returns immediately and produces
-// no heartbeat, which is exactly how #1260's capture came back empty of this type.
-func tpcapPrompt(nonce int64) string {
-	return fmt.Sprintf(
-		"Run exactly this command with the Bash tool, in the foreground: sleep %d. "+
-			"Do NOT background it, do not change the duration, and do not run anything else. "+
-			"Wait for it to finish, then reply with the single word done-%d.",
-		tpcapSleepSeconds, nonce)
+// prompt_nonce class has something to substitute.
+//
+// The command is `cat <fifo>` and NOT a sleep, which is the 2026-09-06 revision:
+// the first live run asked for `sleep 75`, got a turn that ended in 9 s, and the
+// record could not say whether claude had shortened the duration, requested a
+// short tool timeout, backgrounded the call or never run it at all. A sleep puts
+// the duration in the MODEL's hands. A FIFO read puts it in the rig's — `cat`
+// blocks until tpcapHoldFIFO releases the write end, and the rendezvous is
+// positive evidence that a foreground call actually started.
+//
+// The verbatim-command wording is bgIdlePrompt's, which is the shape already
+// proven in this package to make claude run exactly this command and block on it
+// (#1260 reuses it). Two clauses are added: run it in the FOREGROUND, since
+// #1260's own capture is heartbeat-free precisely because its call does not stay
+// there; and do not request a timeout, because a model-requested timeout beats
+// both BASH_DEFAULT_TIMEOUT_MS and claude's own 120 s default.
+func tpcapPrompt(fifoPath string, nonce int64) string {
+	return fmt.Sprintf("Use the Bash tool exactly once to run this command verbatim: cat %s. "+
+		"Run it in the foreground and wait for it to finish. Do not background it, do not pass a "+
+		"timeout, do not chain it with && or ;, do not add any flags or redirections, do not "+
+		"comment on it, and do nothing else. run=%d", fifoPath, nonce)
+}
+
+// tpcapHoldFIFO is holdProbeFIFO with the release exposed instead of pinned to
+// t.Cleanup, because this probe has to let go MID-TEST: the whole measurement is
+// how long a foreground Bash call stays open, and the turn cannot end until `cat`
+// gets its EOF.
+//
+// rendezvous closes when a reader opens the FIFO. That reader is claude's `cat`,
+// so the channel is the one unambiguous signal that a foreground tool call
+// started — the signal the sleep staging had no equivalent of.
+//
+// release is idempotent and also runs from t.Cleanup, so a fatal between the
+// rendezvous and the hold expiring still lets `cat` exit and the child reap.
+func tpcapHoldFIFO(t *testing.T, path string) (rendezvous <-chan struct{}, release func()) {
+	t.Helper()
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatalf("#2089: mkfifo %s: %v", path, err)
+	}
+
+	var (
+		arrived  = make(chan struct{})
+		released = make(chan struct{})
+		done     = make(chan struct{})
+		once     sync.Once
+	)
+	go func() {
+		defer close(done)
+		// Blocks until a reader opens the FIFO — this IS the rendezvous.
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		close(arrived)
+		<-released
+		_ = f.Close()
+	}()
+
+	release = func() {
+		once.Do(func() {
+			close(released)
+			select {
+			case <-arrived:
+				// The write end is open; the goroutine closes it, and that EOF is
+				// what finally lets `cat` exit.
+			default:
+				// No reader ever arrived, so the goroutine is parked in open().
+				// Opening the read end non-blockingly unblocks it. Harmless once
+				// the rendezvous has fired: only the last writer closing sends EOF.
+				if rf, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0); err == nil {
+					_ = rf.Close()
+				}
+			}
+			<-done
+		})
+	}
+	t.Cleanup(release)
+	return arrived, release
 }
 
 // TestRealClaude_ToolProgressCapture drives the turn and writes the record.
@@ -326,8 +553,9 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 		t.Fatalf("#2089: create workdir: %v", err)
 	}
 	nonce := time.Now().UnixNano()
+	fifoPath := filepath.Join(workdir, tpcapFIFOName)
 
-	red := newDropcapRedactor(home, artifactDir, workdir, "", tpcapSessionID, nonce)
+	red := newDropcapRedactor(home, artifactDir, workdir, fifoPath, tpcapSessionID, nonce)
 	scanner := newDropcapScanner(home, artifactDir, workdir)
 	t.Logf("#2089 capture artifacts: %s", red.str(artifactDir))
 
@@ -357,6 +585,11 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 	// MUST precede the runner: Config.Env stays nil so the child inherits this
 	// process's environment verbatim.
 	t.Setenv(dropcapBashTimeoutEnv, tpcapBashTimeoutMS)
+
+	// Before the runner, so the FIFO exists by the time claude reads the prompt,
+	// and so its release cleanup is registered BEFORE the runner's cancel and
+	// therefore runs AFTER it — #1260's ordering.
+	rendezvous, releaseFIFO := tpcapHoldFIFO(t, fifoPath)
 
 	recorder := newDropcapRecorder()
 	argvHandler, argv := newDropcapArgvHandler()
@@ -396,13 +629,40 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 		return
 	}
 
-	prompt := tpcapPrompt(nonce)
+	prompt := tpcapPrompt(fifoPath, nonce)
 	rec.Prompt = red.str(prompt)
+	turnStart := time.Now()
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		rec.set(tpcapInstrumentBroken, "writing the turn envelope failed, so no turn was ever "+
 			"driven: %v", red.str(err.Error()))
 		return
 	}
+
+	// Phase 1 — wait for claude's `cat` to open the FIFO. Nothing else in this rig
+	// opens it, so that open is unambiguous evidence that a foreground Bash call
+	// started. The turn ending first means the command never ran, and the line
+	// census below is what says what claude did instead.
+	select {
+	case <-rendezvous:
+		rec.ForegroundCallObserved = true
+	case <-recorder.resultSeen:
+	case <-time.After(tpcapRendezvousWait):
+	}
+
+	// Phase 2 — hold it open across at least two heartbeat ticks, then release so
+	// `cat` gets EOF and the turn can finish. A turn that ends DURING the hold was
+	// backgrounded or cut short; held_seconds is how far it got, and comparing it
+	// against one tick is what separates a staging failure from a finding about
+	// the surface.
+	if rec.ForegroundCallObserved {
+		heldFrom := time.Now()
+		select {
+		case <-time.After(tpcapHold):
+		case <-recorder.resultSeen:
+		}
+		rec.ForegroundHeldSeconds = time.Since(heldFrom).Seconds()
+	}
+	releaseFIFO()
 
 	select {
 	case <-recorder.resultSeen:
@@ -410,6 +670,7 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 	case <-time.After(tpcapTurnBudget):
 		rec.TerminatedOn = tpcapTerminatedBudget
 	}
+	rec.TurnSeconds = time.Since(turnStart).Seconds()
 
 	rec.SpawnShape = red.strs(argv())
 	lines, caps := recorder.snapshot()
@@ -420,6 +681,7 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 	rec.BlankLines = caps.BlankLines
 	rec.UnterminatedPartialLen = caps.UnterminatedPartial
 
+	rec.LineTypeCensus, rec.ToolCalls, rec.ToolResultErrors, rec.UndecodedLines = tpcapCensus(lines, red)
 	rec.Frames = tpcapCollect(t, lines, red)
 	rec.FrameCount = len(rec.Frames)
 	for _, f := range rec.Frames {
@@ -432,7 +694,7 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 		}
 	}
 	if rec.FrameCount == 0 {
-		rec.set(tpcapDidNotFire, "the turn produced no tool_progress line at all")
+		rec.set(tpcapDidNotFire, "the turn produced no tool_progress line at all; %s", rec.stagingVerdict())
 	} else {
 		rec.set(tpcapFired, "%d tool_progress frame(s), census %v", rec.FrameCount, rec.MarkerCensus)
 	}
@@ -443,10 +705,14 @@ func TestRealClaude_ToolProgressCapture(t *testing.T) {
 	// CI output is precisely the exposure the deny-scan exists to prevent.
 	if rec.FrameCount == 0 {
 		t.Fatalf("#2089: the turn recorded ZERO tool_progress frames out of %d captured lines "+
-			"(terminated_on=%s). A capture recording none is vacuous — every assertion built on it "+
-			"would pass without reading a byte claude sent. Raise tpcapSleepSeconds or re-check that "+
-			"the call ran in the foreground before touching the marker set",
-			rec.LinesCaptured, rec.TerminatedOn)
+			"(terminated_on=%s, turn=%.1fs). A capture recording none is vacuous — every assertion "+
+			"built on it would pass without reading a byte claude sent.\n"+
+			"  staging: %s\n"+
+			"  line types: %v; tools called: %v; tool_result errors: %d; undecoded: %d\n"+
+			"Read the staging line FIRST: only the last case is a finding about pyry's surface, and "+
+			"the other two are the rig failing to hold a foreground call open",
+			rec.LinesCaptured, rec.TerminatedOn, rec.TurnSeconds, rec.stagingVerdict(),
+			rec.LineTypeCensus, rec.ToolCalls, rec.ToolResultErrors, rec.UndecodedLines)
 	}
 	if rec.UnmarkedFrames > 0 {
 		t.Fatalf("#2089: %d of %d tool_progress frames carried NONE of the three markers "+
@@ -582,10 +848,13 @@ func tpcapWriteRecord(t *testing.T, dir string, red *dropcapRedactor, scanner dr
 		t.Errorf("#2089: write record %s: %v", red.str(path), err)
 		return
 	}
-	t.Logf("#2089 outcome=%s terminated_on=%s captured=%d frames=%d census=%v unmarked=%d "+
-		"reaching_lane=%d scan_not_applied=%v\n  record: %s\n  %s",
-		rec.Outcome, rec.TerminatedOn, rec.LinesCaptured, rec.FrameCount, rec.MarkerCensus,
-		rec.UnmarkedFrames, rec.FramesReaching, notApplied, red.str(path), red.str(rec.OutcomeDetail))
+	t.Logf("#2089 outcome=%s terminated_on=%s turn=%.1fs fg_call=%v held=%.1fs captured=%d "+
+		"frames=%d census=%v unmarked=%d reaching_lane=%d line_types=%v tools=%v tool_errors=%d "+
+		"scan_not_applied=%v\n  record: %s\n  %s",
+		rec.Outcome, rec.TerminatedOn, rec.TurnSeconds, rec.ForegroundCallObserved,
+		rec.ForegroundHeldSeconds, rec.LinesCaptured, rec.FrameCount, rec.MarkerCensus,
+		rec.UnmarkedFrames, rec.FramesReaching, rec.LineTypeCensus, rec.ToolCalls,
+		rec.ToolResultErrors, notApplied, red.str(path), red.str(rec.OutcomeDetail))
 
 	// The same deny-scanned bytes, promoted in-repo so the run that produced them
 	// is the run that lands them. Writing the fixture here rather than leaving it
@@ -656,21 +925,171 @@ func TestTpcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 	}
 }
 
-// TestTpcapBashTimeoutOutlastsTheSleep runs offline. A BASH_DEFAULT_TIMEOUT_MS
-// shorter than the staged sleep kills the tool call before the heartbeat
-// interval elapses, which is how #1260's capture came back with no frames of
-// this type — a failure that looks like "claude does not emit these" rather than
-// like a mis-set constant.
-func TestTpcapBashTimeoutOutlastsTheSleep(t *testing.T) {
+// TestTpcapHoldOutlastsTheHeartbeatInterval runs offline. Every constant it
+// checks is one whose mis-setting produces a capture that looks like "claude does
+// not emit these" while actually measuring the rig — which is how #1260's capture
+// came back with no frames of this type, and how #2089's own first live run
+// (2026-09-06) came back with none.
+func TestTpcapHoldOutlastsTheHeartbeatInterval(t *testing.T) {
 	t.Parallel()
+
+	// Two ticks, not one: a hold of exactly one interval races the tick it is
+	// waiting for, and a capture that sometimes records nothing is worse than one
+	// that never does.
+	if tpcapHoldSeconds < 2*tpcapHeartbeatIntervalSeconds {
+		t.Errorf("tpcapHoldSeconds = %d but the heartbeat interval is %d s: the rig would release "+
+			"the FIFO before two ticks could land, so a zero-frame capture would say nothing about "+
+			"whether claude emits them", tpcapHoldSeconds, tpcapHeartbeatIntervalSeconds)
+	}
+
+	// The tool call must not be timed out from under the hold. This only covers
+	// the DEFAULT; a model-requested timeout still wins, which is why tpcapPrompt
+	// forbids requesting one and why stagingVerdict reports the held duration
+	// rather than assuming it.
 	timeoutMS, err := strconv.Atoi(tpcapBashTimeoutMS)
 	if err != nil {
 		t.Fatalf("tpcapBashTimeoutMS = %q is not an integer: %v", tpcapBashTimeoutMS, err)
 	}
-	sleepMS := tpcapSleepSeconds * 1000
-	if timeoutMS <= sleepMS {
-		t.Errorf("tpcapBashTimeoutMS = %d ms but the staged sleep is %d s (%d ms): the tool call "+
-			"would be killed before it finishes and the capture would measure the timeout, not claude",
-			timeoutMS, tpcapSleepSeconds, sleepMS)
+	if timeoutMS <= tpcapHoldSeconds*1000 {
+		t.Errorf("tpcapBashTimeoutMS = %d ms but the rig holds the call open for %d s (%d ms): the "+
+			"call would be cut before the hold ends and the capture would measure the timeout, "+
+			"not claude", timeoutMS, tpcapHoldSeconds, tpcapHoldSeconds*1000)
+	}
+
+	// The rendezvous wait bounds how long claude has to START the call. Shorter
+	// than the hold and a slow-but-correct turn would be recorded as "never ran".
+	if tpcapRendezvousWait < tpcapHold {
+		t.Errorf("tpcapRendezvousWait = %s is shorter than the hold %s: a turn that merely started "+
+			"slowly would be recorded as one that never ran the command", tpcapRendezvousWait, tpcapHold)
+	}
+}
+
+// TestTpcapHoldFIFO runs offline and exercises the mechanism the whole capture
+// now rests on, with a plain os.File standing in for claude's `cat`.
+//
+// The second case is the one worth having: when NO reader ever arrives the write
+// goroutine is parked in open(O_WRONLY), and a release that simply waited for it
+// would block forever. In the live gate that is not a failed capture, it is a
+// hung `make e2e-realclaude` — strictly worse than the zero-frame run this
+// revision is fixing.
+func TestTpcapHoldFIFO(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a reader trips the rendezvous and EOF waits for the release", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), tpcapFIFOName)
+		rendezvous, release := tpcapHoldFIFO(t, path)
+
+		readDone := make(chan error, 1)
+		go func() {
+			f, err := os.Open(path) // the stand-in for claude's `cat`
+			if err != nil {
+				readDone <- err
+				return
+			}
+			defer f.Close()
+			_, err = io.ReadAll(f) // blocks until the write end closes
+			readDone <- err
+		}()
+
+		select {
+		case <-rendezvous:
+		case <-time.After(10 * time.Second):
+			t.Fatal("rendezvous never fired though a reader opened the FIFO; the live probe would " +
+				"record every good capture as one where the foreground call never started")
+		}
+
+		// The read must still be blocked: that block IS the held-open tool call.
+		select {
+		case err := <-readDone:
+			t.Fatalf("the reader finished before the release (err=%v); nothing would hold claude's "+
+				"Bash call open across a heartbeat tick", err)
+		case <-time.After(200 * time.Millisecond):
+		}
+
+		release()
+		select {
+		case err := <-readDone:
+			if err != nil {
+				t.Errorf("reader: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the reader never saw EOF after the release; the turn could never end")
+		}
+
+		release() // idempotent: t.Cleanup calls it again
+	})
+
+	t.Run("release returns when no reader ever arrives", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), tpcapFIFOName)
+		_, release := tpcapHoldFIFO(t, path)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			release()
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("release blocked with no reader present: the live gate would hang here rather " +
+				"than reporting that claude never ran the command")
+		}
+	})
+}
+
+// TestTpcapStagingVerdictSeparatesRigFailureFromFinding runs offline. The verdict
+// string is what a reader of a failed live gate acts on, and the one case that
+// must never be confused with the others is the third: a call held open across
+// the interval with no frame is evidence about claude's surface, while the first
+// two are the rig failing to stage anything at all.
+func TestTpcapStagingVerdictSeparatesRigFailureFromFinding(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rec         tpcapRecord
+		wantFinding bool
+	}{
+		{
+			name: "the command never ran",
+			rec:  tpcapRecord{ForegroundCallObserved: false},
+		},
+		{
+			name: "started but cut short before the first tick",
+			rec:  tpcapRecord{ForegroundCallObserved: true, ForegroundHeldSeconds: 9},
+		},
+		{
+			name: "held just under one interval",
+			rec: tpcapRecord{
+				ForegroundCallObserved: true,
+				ForegroundHeldSeconds:  tpcapHeartbeatIntervalSeconds - 0.1,
+			},
+		},
+		{
+			name: "held past the interval and still nothing came",
+			rec: tpcapRecord{
+				ForegroundCallObserved: true,
+				ForegroundHeldSeconds:  tpcapHoldSeconds,
+			},
+			wantFinding: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.rec.stagingVerdict()
+			if got == "" {
+				t.Fatal("stagingVerdict() is empty; the zero-frame fatal would name no cause")
+			}
+			isFinding := strings.Contains(got, "finding about the surface")
+			if isFinding != tc.wantFinding {
+				t.Errorf("stagingVerdict() reads as a surface finding = %v, want %v\n  got: %s",
+					isFinding, tc.wantFinding, got)
+			}
+			if !tc.wantFinding && !strings.Contains(got, "staging") {
+				t.Errorf("a rig failure must say so; got: %s", got)
+			}
+		})
 	}
 }
