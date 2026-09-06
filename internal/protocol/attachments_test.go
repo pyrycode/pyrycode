@@ -560,3 +560,125 @@ func TestAttachmentStoredPayload_ZeroValue_KeysPresent(t *testing.T) {
 		t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
 	}
 }
+
+// TestAttachmentOfferedPayload_RoundTrip pins the announcement frame's wire
+// bytes, and it is the ONLY test in this package that can catch a typo in the
+// wire STRING. All three registries in compat_test.go — TestIsKnownAppType's
+// cases, v2OnlyTypes and TestTypeConstants_V1V2Partition's list — key on the Go
+// symbol TypeAttachmentOffered and never re-derive the literal it holds, so
+// mutating "attachment_offered" moves consistently through all three and reddens
+// none of them. That was confirmed by mutant run on TypeAttachmentStored rather
+// than assumed.
+//
+// The two nil assertions are the frame's shape, not decoration. This is an
+// UNSOLICITED PUSH: nothing solicits it, so there is no request envelope for
+// in_reply_to to name — the difference from AttachmentStoredPayload, which is
+// outbound-only too but correlates to the chunk that completed the transfer.
+// Whether a producer stamps an event_id is #2083's call and not a property of the
+// declared shape, so the fixture omits it and this pins that the fixture does.
+//
+// The three payload values are PAIRWISE DISTINCT on purpose. roundTripEnvelope
+// compares canonical bytes, so a field-reordering mutant re-encodes identically
+// and passes green whenever the two swapped keys share a value.
+func TestAttachmentOfferedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "attachment_offered.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeAttachmentOffered {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeAttachmentOffered)
+	}
+	if env.InReplyTo != nil {
+		t.Errorf("InReplyTo: got pointer to %d, want nil — this frame is an unsolicited push, not a reply", *env.InReplyTo)
+	}
+	if env.EventID != nil {
+		t.Errorf("EventID: got pointer to %d, want nil — whether a producer stamps one is #2083's, not part of the declared shape", *env.EventID)
+	}
+
+	var payload AttachmentOfferedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if want := "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4"; payload.ConversationID != want {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, want)
+	}
+	if want := "b8e0c374-2f61-4a95-8d0e-5c37a91b6e28"; payload.AttachmentID != want {
+		t.Errorf("AttachmentID: got %q, want %q", payload.AttachmentID, want)
+	}
+	if want := "quarterly-summary.png"; payload.Filename != want {
+		t.Errorf("Filename: got %q, want %q", payload.Filename, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestAttachmentOfferedPayload_WireKeys pins the payload's COMPLETE set of wire
+// keys, so a later field cannot be added without this failing. It is the
+// machine-checked form of the frame's central omission — NO turn_id, the field a
+// reader reaches for first — rather than a property a reviewer has to notice: a
+// turn id, a message id or a mime type arriving as a field reddens here by
+// construction.
+//
+// It is load-bearing beyond the round trip above for the reason that round trip
+// cannot cover. An added field breaks the byte comparison there too, but only
+// until somebody regenerates the fixture; regenerate it under the same mutant and
+// the round trip goes green again while this stays red.
+//
+// The assertion is two-sided on purpose — every expected key present AND no
+// unexpected key — because a one-sided containment check is what lets an added
+// field through, and that is the whole mutant class this test exists for.
+func TestAttachmentOfferedPayload_WireKeys(t *testing.T) {
+	b, err := json.Marshal(AttachmentOfferedPayload{
+		ConversationID: "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
+		AttachmentID:   "b8e0c374-2f61-4a95-8d0e-5c37a91b6e28",
+		Filename:       "quarterly-summary.png",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal payload into key set: %v", err)
+	}
+
+	want := map[string]bool{"conversation_id": true, "attachment_id": true, "filename": true}
+	for k := range got {
+		if !want[k] {
+			t.Errorf("unexpected wire key %q: the payload's key set is fixed at %v, and this frame must carry no turn_id — no turn id is reachable from the lane it is emitted on", k, want)
+		}
+	}
+	for k := range want {
+		if _, ok := got[k]; !ok {
+			t.Errorf("missing wire key %q, got: %s", k, b)
+		}
+	}
+}
+
+// TestAttachmentOfferedPayload_ZeroValue_KeysPresent is the omitempty pin, and
+// the reason it exists separately from both tests above is that omitempty elides
+// a key only at its zero value: both of those marshal non-empty values, so an
+// omitempty added to any of the three fields leaves them entirely green —
+// including the key-set check, which would still see the keys it expects.
+//
+// A marshalled zero value rather than a second fixture, for
+// AttachmentStoredPayload's reason: the payload is flat, so one all-zero struct
+// reaches every key and the extra file a nested shape would need buys nothing.
+//
+// The zero value is also the frame AttachmentOfferedPayload's doc block warns
+// about. Every key is optional to encoding/json, so a truncated or hostile
+// payload decodes to exactly this — three empty strings, no error — which is why
+// the block requires a consumer to resolve nothing from them rather than joining
+// them into a path.
+func TestAttachmentOfferedPayload_ZeroValue_KeysPresent(t *testing.T) {
+	b, err := json.Marshal(AttachmentOfferedPayload{})
+	if err != nil {
+		t.Fatalf("marshal zero payload: %v", err)
+	}
+	for _, want := range []string{`"conversation_id":""`, `"attachment_id":""`, `"filename":""`} {
+		if !bytes.Contains(b, []byte(want)) {
+			t.Errorf("zero payload must carry %s explicitly, got: %s", want, b)
+		}
+	}
+}

@@ -476,6 +476,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`attachment_chunk`** | either | no | **New in v2.** One slice of one attachment's bytes, carrying the whole transfer's metadata on every chunk (#1752). The table's first genuinely bidirectional **payload** frame — `ack`/`error`/`rekey_request` above are also `either` but carry no application payload: upload rides this one phone → binary and retrieval rides it binary → phone, and declaring exactly one type is what stops the two legs drifting. Nothing emits, accepts or enforces it yet. See [Attachments](#attachments). |
 | **`attachment_stored`** | binary → phone | no | **New in v2.** The upload leg's **success reply** — the transfer completed, its claims were checked, and the bytes are stored under the `attachment_id` the client chose (#1895). Correlated by `in_reply_to`, which names the chunk **whose arrival completed the transfer** rather than the last one sent. Carries that one id and nothing else: no host path, no directory component, no stored filename. Nothing emits it yet (#1897). See [Attachments](#attachments). |
 | **`request_attachment`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a stored attachment, naming the conversation and the attachment and nothing else (#2052). The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent, and naming a conversation is **not authorization**. Correlation rides `in_reply_to`, so the payload carries **no request-id key**; the answer is a stream of [`attachment_chunk`](#attachment_chunk) frames, or `attachment.not_found` / `attachment.stream_aborted`. **Nothing answers it yet** — the handler is #2054 and the stream #2053. See [Attachments](#attachments). |
+| **`attachment_offered`** | binary → phone | no | **New in v2.** Outbound push — a file exists on the host for this conversation, naming it with an `attachment_id` **the client did not mint** (#2082). It closes the one gap the rest of this family leaves: every other attachment frame needs an id the client already holds, so a file `claude` produced reached a client as nothing at all. **No bytes ride it** — it announces, and a client fetches with [`request_attachment`](#request_attachment), which is what *offered* rather than *sent* carries. Correlation is `conversation_id` and nothing else (no `in_reply_to`, no `turn_id`), and it is **delivered to every attached client rather than routed to one**, scoped at the consumer exactly as [`modal_shown`](#modal_shown) is. Receiving it is **not a capability**: #2054 re-validates the id against the daemon's registry regardless. Its `filename` is **`claude`-authored** — the section's first such string, so [§ Security model](#security-model)'s threat 1 lands, flowing *out of* `claude` rather than into it. **Nothing emits it yet** (#2083). See [Attachments](#attachments). |
 | **`request_model_list`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for a conversation's model menu at any time, naming the conversation and nothing else (#2125). It closes the window the frame's two unsolicited paths leave open: a conversation created **after** the client connected misses both the live lane and the connect-time reconcile, so its model and effort controls stay blank with nothing to wait for. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`model_list`](#model_list) — the same frame, the same payload source, **no `event_id`** — or `conversation.not_found` / the retryable `model_list.unavailable`. Interactive-capability-gated: a conn without it gets nothing at all. See [Asking for a model list on demand](#asking-for-a-model-list-on-demand). |
 | **`request_history`** | phone → binary | no | **New in v2.** Inbound control — a paired client asks for entries older than the ones it has, naming the conversation, an opaque `cursor` and a `limit` (#2113). Scroll-back over the **daemon-owned on-disk log** (#2112), which is **not** the [Mode A](#reconnect--backfill-semantics) event-ring replay: that one is catch-up across a dropped connection and is empty after a restart. The `conversation_id` is a **lookup key validated against the daemon's registry**, not a value trusted as sent. Correlation rides `in_reply_to`, so there is **no request-id key**; the answer is one [`history_page`](#history_page). Answered by the daemon since **#2116**, on the addressed conn's app-frame worker rather than inline, so a page read off disk never stalls another conn's frames. See [Conversation history](#conversation-history-v2). |
 | **`history_page`** | binary → phone | no | **New in v2.** Outbound reply to a [`request_history`](#request_history), correlated by `in_reply_to` (#2113): one backward step of a walk — `entries` **newest-first**, an opaque `cursor` to ask again with, and `at_start`. **A walk terminates on `at_start`, never on an empty `entries`**, and a **short page is not an end-of-log signal** (the entry clamp bounds a count, not bytes). Each entry carries a durable per-conversation `id` — **not** an [`event_id`](#reconnect-replay--resync-consumer-647), which is the ring's per-process one — plus the stored frame's `type`, `payload` and `ts`, so a client re-reduces a page through its existing timeline reducer. Entries are **replayed content** and can be `claude`-authored, so [§ Security model](#security-model)'s threat 1 lands here. Emitted since **#2116**, and **shortened where needed to fit the [application-envelope cap](#application-envelope-size-cap)** — see [Page size](#page-size). See [Conversation history](#conversation-history-v2). |
@@ -1702,8 +1703,13 @@ reassembly and claim-checking are #1741, storage is #1743, the inbound dispatch
 is #1897, and retrieval is three slices — the request verb #2052, the outbound
 stream #2053, and the handler that joins them #2054.
 
-**The section now publishes every frame in the transfer.** The one thing it used
-to hold back — the **retrieval request verb** — is
+**The section publishes every frame in the transfer, and one frame that is not
+part of one.** It used to say the retrieval request verb was *the one thing* it
+held back; that stopped being true the moment a second gap opened, and
+[`attachment_offered`](#attachment_offered) below (#2082) closes it. That frame
+**announces** a file rather than moving one — it carries no bytes and starts no
+transfer — and it is the only thing in this section a client can learn about a
+file it did not upload itself. The retrieval request verb is
 [`request_attachment`](#request_attachment) below (#2052), so a client no longer
 has to guess at a verb no document named. **Nothing answers it yet**: the
 outbound stream that replies with the bytes has landed (#2053) but ships
@@ -2154,6 +2160,126 @@ here — the opposite of `send_message`'s `attachment_ids`, which does reach
   "payload": {
     "conversation_id": "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
     "attachment_id": "7c1d5e92-4a30-4b8f-9e21-6d4c3b0a8f55"
+  }
+}
+```
+
+#### `attachment_offered`
+
+Direction **binary → phone** (outbound v2 push; not in `v1TypeSet` — an old phone
+never receives one, and `IsKnownAppType` rejects it, which is also the structural
+bar against a phone *sending* one and asserting a file exists on the host that
+does not). Declared by **#2082**; **nothing emits it yet** — the producer is
+**#2083**, which is also where the file itself comes from.
+
+**A file exists on the host for this conversation.** Every other frame in this
+section needs an `attachment_id` the client already minted: upload rides
+[`attachment_chunk`](#attachment_chunk), completion comes back as
+[`attachment_stored`](#attachment_stored), a message names its files with
+`attachment_ids`, and retrieval starts with
+[`request_attachment`](#request_attachment). So a file **the assistant produced**
+had no way to reach a client at all. This is the frame that names one.
+
+**No bytes ride it.** It announces; it does not deliver. A client that wants the
+file asks with [`request_attachment`](#request_attachment) and receives
+[`attachment_chunk`](#attachment_chunk) frames. That is what the name carries —
+**offered**, not *sent* — and a reader looking for a `data` field here will not
+find one.
+
+**Correlation is `conversation_id` and nothing else**, following
+[`modal_shown`](#modal_shown), the frame with the same origin: a permission
+prompt also begins as an MCP tool call from `claude`, arrives over the control
+socket, and is broadcast from there. There is **no `in_reply_to`** — nothing
+solicits this frame, so there is no request envelope to name, which is the whole
+difference from `attachment_stored`.
+
+**There is no `turn_id`, and that is a property rather than an omission.** It is
+the field a reader reaches for first and it is **not reachable from this lane**:
+a turn id is private state on the interactive turn emitter, minted at turn start,
+and nothing on the control path references it. Publishing one would oblige the
+producer to build a seam nobody has asked for, or ship a field that is empty in
+practice. A client does not need it — a timeline already appends items carrying
+no turn id at all, its own user messages and session boundaries among them, in
+arrival order.
+
+**It is delivered to every attached client, not routed to one.** The daemon
+scopes nothing; **`conversation_id` is filtered on at the consumer**, exactly as
+`modal_shown` is. A decoder author who assumes the daemon routes this frame will
+build the wrong thing.
+
+**Provenance is per field**, and this is the one place this section cannot use
+`attachment_stored`'s blanket *daemon-asserted*:
+
+| Field | Type | Provenance | Meaning |
+|---|---|---|---|
+| `conversation_id` | string | daemon-asserted | The conversation the file belongs to, and the whole of this frame's correlation. A **scoping key the client filters on** — the daemon delivers to every attached client. |
+| `attachment_id` | string | daemon-asserted | The file, and the id to pass back in a [`request_attachment`](#request_attachment) to fetch the bytes. Obeys **[The `attachment_id` shape](#the-attachment_id-shape)** above — the same lowercase-UUIDv4 rule binding every id in this section — rather than a rule minted here. The **first id on this wire a client did not mint**. **Not a capability**: see below. |
+| `filename` | string | **`claude`-authored** | The file's name, for **display**. **Never a path or any part of one**, never evidence of what the bytes are, and never logged raw. At most 255 bytes — the same POSIX `NAME_MAX` ceiling [`attachment_chunk`](#attachment_chunk)'s `filename` publishes, not a second filename rule. |
+
+**All three fields are always present** (no `omitempty`), so a decoder may rely
+on all three. A truncated or hostile payload decodes to three empty strings
+rather than to an error, and none of the three is valid under any shape this
+section publishes — so a receiver resolves **nothing** from them, and in
+particular must not join an empty id into a path, where an empty component
+resolves to the conversation directory root rather than to an error.
+
+**Receiving this frame is not a capability.** The id is not secret and not
+unguessable, and **#2054 re-validates it against the daemon's own registry
+regardless of what was announced** — so an announcement grants nothing an
+unannounced id would not already have. What *is* new is that a client learns an
+id it did not mint, widening what it knows from *files I uploaded* to *files this
+conversation holds*. That is safe for a stated reason rather than an assumed one:
+every attached client is a paired device, **authorization is pairing** with no
+per-verb gate, so the disclosure reaches exactly the tier that could already ask.
+
+**`filename` is `claude`-authored, so [§ Security model](#security-model)'s
+threat 1 (prompt injection) lands on this frame** — and in the *inverse*
+direction from `send_message`'s `attachment_ids`. Those are client-authored and
+flow **into** `claude`; this one flows **out of** `claude` toward a client's
+render surface, which is [`question_shown`](#question_shown)'s direction. #2083
+takes the name from the model's own tool call. This is the **first frame in this
+section whose string originates from `claude`**: `attachment_stored` carries no
+client-authored and no `claude`-authored byte, and `request_attachment` becomes
+no prompt content.
+
+Every consumer obligation this section already states on `filename` therefore
+binds **unchanged** — a client **MUST** sanitise it before rendering, **MUST
+NOT** use it as a path or any part of one, and **MUST NOT** trust it as a
+description of the bytes — because *a sanitised filename is still
+attacker-shaped text*. Two consequences are worth naming, because a client can
+honour the letter and break the spirit of each:
+
+- **An extension is not evidence of content.** Choosing a viewer or a handler
+  from `.html` or `.svg` in this name is dispatching on a `claude`-authored
+  string — the hazard `mime_type`'s never-dispatch rule names one field over.
+- **This frame is not safe to log whole.** `attachment_stored` is, *because* it
+  carries no filename, and it is this frame's nearest sibling — so that verdict
+  is the one a reader carries over. `filename` is **never logged raw**, for the
+  two reasons this section already gives (a filename is often private in itself,
+  and a string in a line-oriented log is a log-injection shape), and here both are
+  **stronger**: nothing on this path strips control characters or terminal escape
+  sequences. The two ids stay loggable once their shape is validated.
+
+Whether the producer sanitises before announcing is **#2083's** to decide and
+changes none of the above. #2083 also owns the **enforcement** of both ceilings
+named here, since nothing checks either on the wire — and the `filename` bound is
+not cosmetic: unbounded, a `claude`-authored 100 KB name makes the **daemon's own
+outbound frame** exceed the [envelope cap](#application-envelope-size-cap) and be
+dropped.
+
+**No bound is published here beyond those two**, deliberately. The payload
+carries no count and no length field, so there is nothing to allocate from.
+Whether one turn may offer several files, and any limit on that, belongs to the
+producer and is learned by being rejected — the #1752 rule against publishing a
+figure ahead of the code that enforces it.
+
+```json
+{
+  "id": 1204, "type": "attachment_offered", "ts": "...",
+  "payload": {
+    "conversation_id": "9d4e7a21-8c05-4f3b-b6e2-1a7c9e30d5f4",
+    "attachment_id": "b8e0c374-2f61-4a95-8d0e-5c37a91b6e28",
+    "filename": "quarterly-summary.png"
   }
 }
 ```
@@ -2911,6 +3037,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-06`: **Published the frame that announces a host-produced attachment** (#2082) — `attachment_offered`, plus a `####` subsection under § Attachments and a row in § Application message types. **It closes the one gap the rest of the family leaves standing:** upload, its success reply, `attachment_ids` on a message and the whole retrieval leg all need an `attachment_id` **the client already minted**, so nothing on this wire ever handed a client an id it did not — and a file `claude` produced reached a client as nothing at all (pyrycode-desktop#1028, with #815 and #868 parked on it). **Vocabulary only — nothing emits it** (#2083 is the producer, and is also where the file itself comes from), the declare-then-implement sequencing #1752, #1895 and #2052 each used, and for the same reason: the wire type string **is** the contract, and a name chosen twice is a name chosen wrong once. **Two obvious moves were wrong, and both were re-derived rather than assumed.** Widening [`message`](#application-message-types) announces nothing at the moment a file appears — its one producer builds the record for the **durable history log** (#2115) rather than pushing it, the live assistant reply on the v2 interactive lane is a stream of `assistant_delta` closed by `turn_end`, and a client learns a stored `message` only by asking with `request_history` — and it would additionally change a record shape [`history_page`](#history_page) decoders already read. And there is **no list verb**, so a client cannot ask what a conversation holds either. **Four decisions a client cannot infer, settled here.** (1) **No bytes ride the frame**; it announces, and the client fetches with [`request_attachment`](#request_attachment) — which is what *offered* rather than *sent* is carrying, fixed in the name rather than left to the producer. (2) **Correlation is `conversation_id` and nothing else**, following [`modal_shown`](#modal_shown), the precedent with the same origin (an MCP tool call from `claude`, over the control socket, broadcast from the handler goroutine): there is no `in_reply_to`, since nothing solicits the frame, and **no `turn_id`** — the field a reader reaches for first, and one **not reachable from that lane**, since a turn id is private state on the interactive emitter minted at turn start. Publishing it would oblige the producer to build a seam nobody asked for or ship a field empty in practice, and the consumer does not need it: a timeline already appends items carrying no turn id, its own user messages and session boundaries among them. (3) The frame is **delivered to every attached client rather than routed to one**, scoped by `conversation_id` **at the consumer** — a decoder author would otherwise assume the daemon routes it. (4) **Receiving it is not a capability**: #2054 re-validates the id against the daemon's own registry regardless of what was announced, so an announcement grants nothing an unannounced id would not. What *is* new — a client learning an id it did not mint — is safe for a stated reason: every attached client is a paired device and **authorization is pairing**, so the disclosure reaches exactly the tier that could already ask. **The trust statement is written for this direction rather than borrowed from a sibling**, which is the correction most likely to change what a client builds. § Attachments says of each frame whether threat 1 lands: `attachment_stored` carries no client-authored and no `claude`-authored byte so it does not, `send_message`'s `attachment_ids` reach `claude` so it lands squarely, and `request_attachment` becomes no prompt content so it does not. **This is the section's first frame whose string originates from `claude`** — #2083 takes the name from the model's own tool call — so **threat 1 does land**, in the *inverse* direction: the string flows **out of** `claude` toward a render surface, [`question_shown`](#question_shown)'s direction rather than `send_message`'s. **Provenance is therefore per field**, § Question's rule and not `attachment_stored`'s blanket *daemon-asserted*: the two ids are daemon-asserted, `filename` is `claude`-authored, marked in the table rather than left to be inferred from the security paragraph — publishing it as daemon-asserted would hand a client trusted chrome, the trap `question_dismissed`'s `outcome` exists to avoid. Every existing consumer MUST on `filename` binds **unchanged** (sanitise before rendering, never a path or any part of one, never a description of the bytes), since *a sanitised filename is still attacker-shaped*, with **two consequences drawn out** because a client can honour the letter and break the spirit of each: **an extension is not evidence of content**, so picking a viewer from `.html` is dispatching on a `claude`-authored string; and **this frame is not safe to log whole**, the verdict a reader carries over from `attachment_stored`, which is safe *because* it carries no filename. **Neither field rule is newly minted**: `attachment_id` obeys the published [`attachment_id` shape](#the-attachment_id-shape) and `filename` the same 255-byte POSIX `NAME_MAX` ceiling `attachment_chunk` already publishes. **Beyond those two, no bound** — the payload carries no count and no length field, so there is nothing to allocate from, and whether one turn may offer several files belongs to the producer and is learned by being rejected (#1752's rule). Both ceilings are **documented, not checked**: `internal/protocol` enforces none by design, and the `filename` bound is not cosmetic — unbounded, a `claude`-authored 100 KB name makes the **daemon's own outbound frame** exceed the envelope cap and be dropped. **One stale sentence is corrected and no other:** this section claimed `request_attachment` was *"the one thing it used to hold back"*, which stopped being true when this gap opened. Its neighbours *"Nothing emits, accepts or enforces any of this yet"* and *"Nothing answers it yet"* went stale when #2053/#2054 landed for reasons unrelated to this frame and are deliberately left for whoever owns them. The dated entries below are historical and were left untouched.
 - `2026-09-05`: **A client can now ask for a conversation's model list at any time** (#2125) — the verb `request_model_list`, its handler, and the code `model_list.unavailable`, all in one slice. **It closes a hole this section stated in its own words and left standing on purpose.** § [`model_list`](#model_list) said there is *"no way to ask for one"* on demand between connects; #2124's entry below deliberately left that sentence alone as this ticket's to own, and it is now **replaced rather than reworded** — the clause it existed to state is false, so keeping it in any form would be keeping a description of a gap that has been filled. Its neighbour, *"must not block its model menu on the live frame"*, stays true and stays. **The defect is a window, not a loss**: the live lane emits once per child spawn to whoever is connected at that instant, the reconcile runs at handshake, and a conversation created **after** the client connected gets neither — so a freshly created chat's model and effort controls have nothing to render and nothing to wait for (pyrycode-desktop#1054). Deferring the spawn to the first message (#2085) makes that every new conversation. **The answer is this frame, unchanged.** No second reply type is minted and the payload is not re-derived: it is what the connect-time reconcile would send for that conversation — the same *source*, not the same fields copied — correlated by `in_reply_to` and carrying **no `event_id`**, so it never enters the replay ring and advances no client cursor. A client that already applies `model_list` by `conversation_id` needs no new handling for the reply. **A conversation with no bound session is answered too**, from the daemon-wide vocabulary #2124 published, which is the case the verb exists for. **A refusal is an `error` frame and never an empty `models` array** — the one rule this verb could not borrow from its shape precedent [`request_session_settings`](#session-settings-v2), whose all-zero reply is a real answer. Two codes, and the split is what a client branches on: the existing `conversation.not_found` (permanent — the daemon does not host it) and the new **retryable** `model_list.unavailable` (it does host it, and has no vocabulary yet). That second code **merges** "nothing retained" with "no source wired" deliberately, since distinguishing them would publish how the host is configured rather than anything about the request. **A conn that did not negotiate `interactive` gets nothing at all**, not even a signal that the named conversation exists. Nothing about the `model_list` wire shape, its field table, `dropped_models`, the live-lane delivery window, its three loss points, or the connect-time reconcile changed — this ticket adds a path and removes none.
 - `2026-09-05`: **The daemon answers `request_history`** (#2116) — the join that made the section below true rather than aspirational, and the point at which four `history.*` reject codes exist. § [Conversation history](#conversation-history-v2) had published the reject **conditions** with the verb and named this ticket the owner of their **codes**; they are now minted and listed in § [Error codes](#error-codes): `history.invalid_request`, `history.invalid_page_size`, `history.invalid_cursor` and the one retryable member, `history.unavailable`. **A published condition is answered by an EXISTING code**, deliberately: an unknown or non-canonically-shaped `conversation_id` is `conversation.not_found`, distinguishable from the cursor's answer — the opposite of the neighbouring [`request_attachment`](#request_attachment), whose merge exists to deny a path-existence oracle over a *second* id that this verb does not have. The **cursor's three causes stay merged** into one answer, and that merge is structural rather than a discipline: the daemon's log raises one sentinel for all three, so the handler cannot branch on what it must not distinguish. **Two things this ticket owed and settled.** § [Page size](#page-size) now publishes the **byte budgeting**, and the guarantee inside it is the one a client depends on without being able to check: a page that would exceed the [application-envelope cap](#application-envelope-size-cap) is **re-asked at a smaller size, never truncated**, because a page's `cursor` names the position before the *oldest entry it carries* — so truncating while keeping that cursor would silently skip exactly the dropped entries on the next ask. A walk therefore visits every entry exactly once **even when every page is shortened**, `at_start` is never set by the shortening, and a single entry too large for any page is sent anyway rather than stranding the walk. And § [Joining a page to the live stream](#joining-a-page-to-the-live-stream) names the **dedup key** — (`type`, `ts`) — with the reasoning for why the two obvious candidates fail: `id` is the durable log id and the live lane has only the ring's per-process `event_id`, which `session_transition` does not carry at all, while `turn_id` + `seq` covers only turn-scoped payloads and misses `turn_state`, `stall`, `api_retry`, `compacting` and `session_transition`. The pair works because the daemon mints one timestamp per logical event above the per-connection fan-out and gives it to the log entry and every envelope alike. One documentation decision rather than a code one: the log has **no delete**, so a conversation dropped from the registry keeps its log on disk while the membership gate makes it permanently unreachable — the fail-safe direction, an on-disk-only residue, and the durable form of the ring's #1502 gap.
 - `2026-09-05`: **Published the conversation-history request verb and its page reply** (#2113) — `request_history` / `history_page`, plus the new § [Conversation history](#conversation-history-v2) and two rows in § Application message types. This is the verb #2090 established did not exist: `last_seen_ts` drove nothing, and the entry above says so. It sits on the **daemon-owned on-disk log** #2112 landed (`internal/history`), so the shapes here mirror a landed implementation rather than anticipating one. **Vocabulary only — nothing answers it** (#2116 is the handler), which is why the section publishes reject *conditions* and names #2116 as the owner of their **codes**: no parallel reject vocabulary is minted ahead of the code that would send it, the precedent #2052 set. It is published ahead of its handler because **pyrycode-desktop#1088 and pyrycode-mobile#623 are parked on this section**, not on the daemon. **Four decisions a client cannot infer, settled here.** (1) `limit`'s **zero is meaningful** — sent as `0` or omitted, it asks the daemon to choose, and never means zero entries; `history.Store.Page` refuses a limit below 1, so an absent key reaching it literally would break every client that omits the field. (2) A **walk terminates on `at_start`, never on an empty `entries`** — a page filling *exactly* at the log's first entry reports `at_start` false with a usable cursor, and the call after it is the empty one; all three shapes are committed as fixtures rather than left to inference. (3) The clamp at `history.MaxPageEntries` (**4096**) bounds an entry **count, not bytes**, so a page may come back **shorter than asked** to fit the application-envelope cap — which is exactly why termination is `at_start` and a client must never read a short page as the start of the log. (4) The request **names a `conversation_id`** (a lookup key validated against the registry, not authorization) and the reply **does not echo one**, the shape `session_settings` already takes. **Two trust properties are stated rather than borrowed**, both places the neighbouring `request_attachment` section says the opposite of what is true here: the **cursor is not a secret and not a capability** — opacity is a convention, the encoding is reversible, and it is deliberately unsigned because a MAC would imply an authorization it does not carry — and a page's **entries are replayed content**, `claude`-authored for a stored assistant frame, so [§ Security model](#security-model)'s **threat 1 lands on `history_page`**. § Reconnect / Backfill semantics is amended in one paragraph to match: Mode A is unchanged and still carries no history, but "has no verb to ask for them" is no longer true — the verb exists, and nothing answers it yet.

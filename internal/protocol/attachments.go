@@ -470,3 +470,145 @@ type RequestAttachmentPayload struct {
 	// string is not a valid id under any published shape.
 	AttachmentID string `json:"attachment_id"`
 }
+
+// AttachmentOfferedPayload is the body of an Envelope whose Type ==
+// TypeAttachmentOffered (docs/protocol-mobile.md § Attachments, published by
+// #2082). The frame that tells a client a file exists on the host for a
+// conversation — the first thing on this wire to hand a client an
+// attachment_id IT DID NOT MINT. Wire vocabulary only — nothing constructs,
+// decodes or validates it here; #2083 emits it.
+//
+// ONE DIRECTION ONLY, binary → phone, so there is no leg on which these fields
+// mean something else. AttachmentChunkPayload rides both legs and nothing in it
+// reports which direction a value came from, which is why its SECURITY block has
+// to make a consumer decide trust from where the frame arrived. Here the
+// direction is fixed — but that does NOT make the payload uniformly trusted, and
+// the difference from AttachmentStoredPayload is the whole of the PROVENANCE
+// paragraph below.
+//
+// NO BYTES RIDE THIS FRAME. It announces; it does not deliver. A client that
+// wants the file asks with RequestAttachmentPayload (#2052) and receives
+// AttachmentChunkPayload frames (#2053). "Offered" rather than "sent" is the name
+// carrying that, and a reader who takes this frame for a delivery looks for a
+// data field that does not exist.
+//
+// CORRELATION IS ConversationID AND NOTHING ELSE, following ModalShownPayload —
+// the precedent with the same origin, since a permission prompt also begins as an
+// MCP tool call from claude, arrives over the control socket, and is broadcast to
+// attached clients from the control-server handler goroutine. There is no
+// InReplyTo either: nothing solicits this frame, so there is no request envelope
+// to name, which is the difference from AttachmentStoredPayload's outbound-but-
+// correlated shape.
+//
+// THERE IS NO turn_id, AND THE OMISSION IS A PROPERTY RATHER THAN AN OVERSIGHT.
+// It is the field a reader reaches for first and it is NOT REACHABLE FROM THAT
+// LANE: a turn id is private state on the interactive turn emitter, minted at
+// turn start, and nothing on the control path references it. Publishing one here
+// would either oblige the producer to build a seam nobody has asked for or ship a
+// field that is empty in practice. The consumer does not need it — a client
+// timeline already appends items carrying no turn id at all, its own user
+// messages and session boundaries among them, in arrival order.
+// TestAttachmentOfferedPayload_WireKeys pins the key set so this is checked
+// rather than reviewed.
+//
+// PROVENANCE IS PER FIELD, and copying AttachmentStoredPayload's blanket
+// "every field is daemon-asserted" across this shape would be false. The two ids
+// are daemon-asserted; FILENAME IS claude-AUTHORED. That is the same rule
+// QuestionShownPayload publishes for its four strings, and the same trap
+// QuestionDismissedPayload's outcome exists to avoid — a subprocess-authored
+// string published under a trusted provenance is rendered by a client as trusted
+// chrome.
+//
+// SO § Security model's THREAT 1 (PROMPT INJECTION) LANDS ON THIS FRAME, in the
+// INVERSE DIRECTION from SendMessagePayload's AttachmentIDs. Those are
+// client-authored and flow INTO claude; this one flows OUT OF claude toward a
+// client's render surface, which is QuestionShownPayload's direction. #2083 takes
+// the name from the model's own tool call. Every § Attachments obligation on
+// Filename therefore binds unchanged — SANITISE BEFORE RENDERING, NEVER USE AS A
+// PATH OR ANY PART OF ONE, NEVER TRUST AS A DESCRIPTION OF THE BYTES — since a
+// sanitised filename is still attacker-shaped text. Two consequences are worth
+// naming because a client can honour the letter and break the spirit: AN
+// EXTENSION IS NOT EVIDENCE OF CONTENT, so choosing a viewer or a handler from
+// ".html" or ".svg" here is dispatching on a claude-authored string, the hazard
+// MimeType's never-dispatch rule names one field over; and the name is not a
+// claim about what the bytes are. Whether the producer sanitises before
+// announcing is #2083's to decide and changes none of this.
+//
+// FILENAME IS NEVER LOGGED RAW, SO THIS FRAME IS NOT SAFE TO LOG WHOLE. The rule
+// is stated positively because the natural reading is the opposite one:
+// AttachmentStoredPayload is published as safe to log whole precisely BECAUSE it
+// carries no filename, and it is this frame's nearest sibling, so a reader
+// carries that verdict over and logs a subprocess-authored string verbatim.
+// AttachmentChunkPayload puts the rule on Filename for two independent reasons —
+// a filename is often private in itself, and a string in a line-oriented log is a
+// log-injection shape — and here BOTH ARE STRONGER: nothing on this path strips
+// control characters or terminal escape sequences. The two ids stay loggable once
+// their shape is validated, the family's existing rule.
+//
+// RECEIVING THIS FRAME IS NOT A CAPABILITY. The id is not secret and not
+// unguessable, and #2054 re-validates it against the daemon's own registry
+// regardless of what was announced, so an announcement grants nothing an
+// unannounced id would not already have. What is genuinely new is that a client
+// learns an id it did not mint, widening what it knows from "files I uploaded" to
+// "files this conversation holds" — safe for a stated reason rather than an
+// assumed one: the frame is DELIVERED TO EVERY ATTACHED CLIENT RATHER THAN ROUTED
+// TO ONE, scoped by ConversationID at the consumer exactly as ModalShownPayload
+// is, every attached client is a paired device, and § Attachments makes PAIRING
+// the authorization boundary with no per-verb gate. The disclosure is to exactly
+// the tier that could already ask.
+//
+// A HOSTILE OR TRUNCATED PAYLOAD DECODES TO THE ZERO VALUE, NOT TO AN ERROR,
+// since every key is optional to encoding/json — both siblings record the same
+// property. The result is three empty strings, none of which is valid under any
+// published shape, so a consumer must resolve NOTHING from them. The failure this
+// warns about is silent and specific, and RequestAttachmentPayload names it:
+// filepath.Join(dir, "") is dir, so a consumer that skips the shape check and
+// joins the zero value addresses the conversation directory root rather than
+// erroring.
+//
+// NO omitempty AND NO MarshalJSON. All three fields are always present in the one
+// direction this frame travels, so a decoder may rely on all three;
+// TestAttachmentOfferedPayload_ZeroValue_KeysPresent is the pin, and an omitempty
+// added later for tidiness would silently change the wire. There is no slice
+// field, so QuestionShownPayload.MarshalJSON's nil→[] backing-array argument does
+// not transfer — do not add one by analogy.
+//
+// NOTHING HERE ENFORCES ANY OF IT, the posture all three siblings ship with:
+// internal/protocol declares shapes and validates none. The two ceilings the
+// published section names are documented rather than checked — AttachmentID obeys
+// § Attachments' attachment_id shape (MaxAttachmentIDBytes is a ceiling for
+// attachment_chunk's envelope arithmetic and NOT that shape), and Filename is
+// bounded by MaxAttachmentFilenameBytes rather than by a second filename rule —
+// and enforcing them belongs to the producer and to each consumer. The producer's
+// half is not cosmetic: unbounded, a claude-authored 100 KB name makes the
+// DAEMON'S OWN outbound frame exceed the envelope cap and be dropped, the
+// self-inflicted availability bug MaxAttachmentFilenameBytes' block already
+// records for the retrieval leg.
+//
+// THE ALLOCATION HAZARD AttachmentChunkPayload WARNS ABOUT IS ABSENT BY SHAPE:
+// there is no count and no length field here, so NEVER ALLOCATE FROM A CLAIM has
+// nothing to bite on. Stated so the absence reads as a property of the shape
+// rather than as an omission. Whether one turn may offer several files, and any
+// limit on that, belongs to the producer and is learned by being rejected — the
+// #1752 rule against publishing a figure ahead of the code that enforces it.
+type AttachmentOfferedPayload struct {
+	// ConversationID names the conversation the file belongs to, and is the whole
+	// of this frame's correlation. Daemon-asserted; a client FILTERS on it, since
+	// the frame is delivered to every attached client rather than routed to one —
+	// ModalShownPayload.ConversationID's posture exactly.
+	ConversationID string `json:"conversation_id"`
+
+	// AttachmentID names the file, and is the id a client passes back in a
+	// RequestAttachmentPayload to fetch the bytes. Daemon-asserted, and the first
+	// id on this wire the client did not mint; it obeys § Attachments' published
+	// attachment_id shape. Not a capability, and receiving it grants nothing —
+	// #2054 re-validates it against the daemon's registry regardless.
+	AttachmentID string `json:"attachment_id"`
+
+	// Filename is the file's name for display, and it is claude-AUTHORED — the
+	// one field here that is not daemon-asserted, and the reason § Security
+	// model's threat 1 lands on this frame. Display text, NEVER a path or any part
+	// of one, never evidence of what the bytes are, and never logged raw. At most
+	// MaxAttachmentFilenameBytes, documented rather than checked here.
+	Filename string `json:"filename"`
+}
