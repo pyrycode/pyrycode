@@ -287,6 +287,8 @@ func runArgs(args []string) error {
 			return runAgentRun(os.Stdout, args[2:])
 		case "mcp-approve":
 			return runMCPApprove(args[2:])
+		case "mcp-files":
+			return runMCPFiles(args[2:])
 		// Verbs #1348 deleted. Duplicate constant cases are a compile error, so
 		// a future edit that tries to revive either one as a live verb fails the
 		// build rather than silently shadowing a working route.
@@ -1088,6 +1090,22 @@ func runSupervisor(args []string) error {
 	// disabled (no URL) — SetApprovalSurfacer(nil) leaves mcp.approve modal-less,
 	// the pre-#1080 behaviour.
 	ctrl.SetApprovalSurfacer(approvalSurface)
+	// Install the attachment.file destination (#2164) in the same
+	// between-NewServer-and-Serve window, over the SAME registry and pool every
+	// other conversation-keyed seam above resolves against. Wired here rather
+	// than left nil because this slice OWNS this dependency: #1104's precedent is
+	// that a verb installs the dependency it owns (SetApprovalRegistry) and
+	// leaves its sibling's nil (the surfacer, until #1080). What ships inert is
+	// the verb's CALLER — the MCP tool claude invokes is #2165 — not the verb.
+	//
+	// The liveness adapter is deliberately one line and deliberately discards
+	// the *sessions.Session: whether the named session is live is the entire
+	// question, and handing the attacher a session it has no use for would widen
+	// the seam for nothing.
+	ctrl.SetFileAttacher(fileAttacher(convReg, func(id sessions.SessionID) error {
+		_, err := pool.Lookup(id)
+		return err
+	}, resolveInstanceDirPath(*name), logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -2947,6 +2965,11 @@ Usage:
                                                   approval to the daemon
                                                   (spawned by claude via
                                                   --permission-prompt-tool)
+  pyry mcp-files [flags]                         serve the MCP send_file tool over
+                                                  stdio, filing a workspace file
+                                                  under the calling session's
+                                                  conversation (spawned by claude;
+                                                  reads PYRY_SESSION_ID)
   pyry version                                   print version
   pyry help                                      show this help
 

@@ -244,6 +244,30 @@ type Server struct {
 	// the completer still resolves, just without a phone prompt.
 	approvalSurfacer func(permbridge.Request) func()
 
+	// fileAttacher, when set, services VerbAttachFile: it maps the CALLING
+	// session to its conversation, confines the claude-named path to that
+	// conversation's recorded workspace, and files the bytes, answering with the
+	// minted attachment id. Installed Rekeyer-style via SetFileAttacher so
+	// NewServer's signature stays frozen across its call-site fan-out.
+	//
+	// A plain func rather than an interface, following approvalSurfacer rather
+	// than approvals: every dependency the work needs — the conversation
+	// registry, the session pool, the instance directory — lives at cmd/pyry's
+	// composition root, and so does withinDir, which is unexported in package
+	// main and unimportable here. This package therefore owns the wire and the
+	// guard order, and nothing else.
+	//
+	// Read once per request under s.mu, then the lock is RELEASED before the
+	// call — the same leaf-lock discipline handleApprove follows, and
+	// load-bearing here for a different reason: the call reads a file off disk
+	// and writes another, so holding s.mu across it would serialise every
+	// control verb behind one attachment.
+	//
+	// Nil is the state until the daemon composition wires it, and stays nil in
+	// v1/foreground — handleAttachFile then answers Response.Error rather than
+	// panicking, the state mcp.approve sat in until #1080.
+	fileAttacher func(sessionID, path string) (string, error)
+
 	// streamingWG tracks streaming-handler goroutines (currently: the
 	// per-attach detach watcher). Serve waits on it before returning so a
 	// caller blocked on Serve can be sure no per-conn goroutines are left.
@@ -363,6 +387,33 @@ func (s *Server) SetApprovalRegistry(reg *permbridge.Registry, timeout time.Dura
 func (s *Server) SetApprovalSurfacer(surface func(permbridge.Request) func()) {
 	s.mu.Lock()
 	s.approvalSurfacer = surface
+	s.mu.Unlock()
+}
+
+// SetFileAttacher installs the dependency that services VerbAttachFile: given
+// the calling session's id and a claude-named host path, it confines the path
+// to that session's conversation's recorded workspace, files the bytes, and
+// returns the minted attachment id. Safe to call from any goroutine;
+// canonically called once between NewServer and Serve as part of daemon
+// startup. Passing nil clears a previously-installed attacher (used by tests;
+// production startup installs once and never clears).
+//
+// Mirrors SetApprovalSurfacer so NewServer's signature stays frozen across its
+// call-site fan-out (see #451 split rationale). A nil attacher — never calling
+// this, or v1/foreground — leaves handleAttachFile replying "attachment.file:
+// no file attacher configured", the same nil-dependency-degrades-cleanly shape
+// as SetRekeyer and SetApprovalRegistry.
+//
+// The returned error's TEXT reaches the wire verbatim, so an implementation
+// must keep every refusal reason static: no host path, no filename, no
+// workspace and no session id. docs/protocol-mobile.md § Attachments bans
+// logging a filename for a privacy reason sanitising does not lift, and a host
+// path is worse. Reasons must still be actionable — claude acts on them by
+// writing the file into the workspace and calling again, which is what an
+// explicit tool call buys over a daemon-side sweep.
+func (s *Server) SetFileAttacher(attach func(sessionID, path string) (string, error)) {
+	s.mu.Lock()
+	s.fileAttacher = attach
 	s.mu.Unlock()
 }
 
@@ -593,6 +644,8 @@ func (s *Server) handle(conn net.Conn) {
 		// not hand off ownership — handle's deferred conn.Close still runs on
 		// return and reaps the watcher's reader.
 		s.handleApprove(conn, enc, req.Approve)
+	case VerbAttachFile:
+		s.handleAttachFile(conn, enc, req.AttachFile)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -870,6 +923,76 @@ const (
 	reasonApproveShutdown   = "daemon shutting down"
 	reasonApproveDuplicate  = "duplicate approval request"
 )
+
+// handleAttachFile serves a VerbAttachFile request: hand the calling session's
+// id and the claude-named path to the installed file attacher, and answer with
+// the minted attachment id or the attacher's refusal reason.
+//
+// Guard order mirrors handleApprove's — nil dependency BEFORE payload
+// validation — so a daemon that never wired the attacher answers the same way
+// whatever the request looks like, and a caller cannot use the shape of the
+// refusal to probe which dependencies a daemon has installed.
+//
+// Fail-closed in the literal sense the AC asks for: every branch below encodes
+// exactly one Response and returns, so a caller never hangs waiting for an
+// answer that was never written, and nothing dereferences payload before the
+// nil check. The attacher itself is total — it returns an id or an error,
+// never both empty — but a defensive empty-id branch is deliberately NOT
+// added: it would be the one branch no test could reach, and an attacher that
+// broke that contract should surface as a visibly empty id rather than as a
+// message this handler invented.
+//
+// The empty-SessionID refusal is not merely input hygiene. It is the wire half
+// of a two-sided guard whose other half lives in the attacher, because the
+// seam an empty id would otherwise reach — sessions.Pool.Lookup("") — resolves
+// to the BOOTSTRAP session with a nil error, and a conversation scan keyed on
+// CurrentSessionID would match an UNBOUND conversation. Either would file
+// claude's bytes under a conversation that never asked. Two guards rather than
+// one, deliberately: this one is a wire-shape check, and the attacher's is
+// what protects that seam from any future caller that does not come through
+// here.
+//
+// The conn write deadline is extended past the handshake window before the
+// call, exactly as handleSessionsNew does: the attacher reads a file off disk
+// and fsyncs another, which can outrun the 5s handshake bound on a loaded
+// system or a large file. sessionOpTimeout is not a budget on the attacher —
+// nothing here cancels it — only a backstop on a genuinely stuck response
+// write.
+//
+// The attacher's error text reaches Response.Error verbatim, which is only
+// safe because SetFileAttacher's contract obliges every reason to be static.
+// Nothing is logged on any path: a refusal's reason goes to the caller, which
+// is the only party that needs it, and the success line belongs to the
+// attacher, which is where the ids that are safe to log are minted.
+func (s *Server) handleAttachFile(conn net.Conn, enc *json.Encoder, payload *AttachFilePayload) {
+	s.mu.Lock()
+	attach := s.fileAttacher
+	s.mu.Unlock()
+
+	if attach == nil {
+		_ = enc.Encode(Response{Error: "attachment.file: no file attacher configured"})
+		return
+	}
+	if payload == nil || payload.SessionID == "" {
+		_ = enc.Encode(Response{Error: "attachment.file: missing sessionID"})
+		return
+	}
+	if payload.Path == "" {
+		_ = enc.Encode(Response{Error: "attachment.file: missing path"})
+		return
+	}
+
+	// Best-effort, like handleSessionsNew's: a SetDeadline error on a broken
+	// conn surfaces on the Encode below rather than needing its own branch.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
+
+	id, err := attach(payload.SessionID, payload.Path)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("attachment.file: %v", err)})
+		return
+	}
+	_ = enc.Encode(Response{AttachFile: &AttachFileResult{AttachmentID: id}})
+}
 
 // handleApprove serves a VerbMCPApprove request: register the forwarded
 // approval with the pending-approval registry, block until a verdict is
