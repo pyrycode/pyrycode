@@ -1,0 +1,260 @@
+{
+  "ticket": "2089",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-06T14:57:16+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape, identical to #1260's — see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for system/init. Nothing about the tool_progress family is known to depend on the approval flags; that is UNMEASURED, not ruled out.",
+  "env_delta": [
+    "BASH_DEFAULT_TIMEOUT_MS=180000"
+  ],
+  "workdir": "$WORKDIR",
+  "prompt": "Use the Bash tool exactly once to run this command verbatim: cat $FIFO. Run it in the foreground and wait for it to finish. Do not background it, do not pass a timeout, do not chain it with \u0026\u0026 or ;, do not add any flags or redirections, do not comment on it, and do nothing else. run=$NONCE",
+  "outcome": "fired",
+  "outcome_detail": "12 tool_progress frame(s), census map[heartbeat:12]",
+  "terminated_on": "budget",
+  "foreground_call_observed": true,
+  "foreground_call_held_seconds": 75.000225542,
+  "turn_seconds": 379.046186208,
+  "line_type_census": {
+    "assistant": 2,
+    "rate_limit_event": 1,
+    "system/init": 1,
+    "system/task_notification": 1,
+    "system/task_started": 1,
+    "system/thinking_tokens": 3,
+    "tool_progress": 12
+  },
+  "tool_calls": [
+    "Bash"
+  ],
+  "tool_result_errors": 0,
+  "undecoded_lines": 0,
+  "lines_captured": 21,
+  "frame_count": 12,
+  "frames": [
+    {
+      "index": 8,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 297,
+      "payload_len_bytes": 272,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-0\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":30,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"f465ffd0-461c-4bd1-a935-5bb47a4d1413\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 9,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 297,
+      "payload_len_bytes": 272,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-1\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":60,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"56ea4e0f-e7ea-4c3f-ad21-bfea4b61a544\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 11,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 297,
+      "payload_len_bytes": 272,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-2\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":90,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"9a6f1c65-0d04-4fd2-aaa1-488a8f50157c\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 12,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-3\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":120,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"10c16364-4cba-4762-8abd-f9e4f46a4048\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 13,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-4\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":150,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"97eec841-5703-43cc-82ce-13a607258c53\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 14,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-5\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":180,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"df8a4142-7668-429c-9d58-5ae22b43283e\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 15,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-6\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":210,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"78a7e7c3-e69e-499f-83fb-d6834351043f\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 16,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-7\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":240,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"ffa609ae-98e1-4d4a-a3f9-f51f8807a505\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 17,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-8\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":270,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"34eba2dc-1326-40e6-98a0-5a6f61dd6241\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 18,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 298,
+      "payload_len_bytes": 273,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-9\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":300,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"afc96896-bfce-41cc-9401-c9180340c105\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 19,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 299,
+      "payload_len_bytes": 274,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-10\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":330,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"aa436675-616d-44fe-9617-d42c2aa81f13\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    },
+    {
+      "index": 20,
+      "type": "tool_progress",
+      "payload_len_bytes_captured": 299,
+      "payload_len_bytes": 274,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"tool_progress\",\"tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG-heartbeat-11\",\"tool_name\":\"Bash\",\"parent_tool_use_id\":\"toolu_01V6TGAWoiykrgeJNzTqX1dG\",\"elapsed_time_seconds\":360,\"heartbeat\":true,\"session_id\":\"$SESSION_ID\",\"uuid\":\"d98d0ed5-b46f-43ef-971a-3da9d407700b\"}",
+      "events_emitted": 0,
+      "marker": "heartbeat",
+      "heartbeat": true,
+      "subagent_type": false,
+      "repl_call": false
+    }
+  ],
+  "marker_census": {
+    "heartbeat": 12
+  },
+  "unmarked_frames": 0,
+  "frames_reaching_unrecognized_lane": 0,
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "fifo_path",
+      "replacement": "$FIFO",
+      "count": 1
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 13
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 1
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir, a rig-authored prompt, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS TYPE SPECIFICALLY CAN CARRY, named so a person deciding whether to paste this record into a public issue is told rather than left to infer: every tool_progress field in the declared schema is an identifier or a counter (tool_use_id, parent_tool_use_id, task_id, uuid, session_id, tool_name, elapsed_time_seconds) EXCEPT ONE. repl_call.inner_tool_input is a tool's input verbatim. It is KEPT, because a redacted marker payload would not be evidence of the shape; the defence for it is the by-construction one above plus the deny-scan, and in this staging the only tool input is a `cat` of the rig's own FIFO. A capture staged against a real workspace would need more.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One turn, one spawn shape, one claude version, one model (haiku), one tool (Bash). Cross-version, cross-model and cross-tool stability are UNMEASURED. A variety absent from marker_census did not appear in THIS turn, which is not the same as claude never emitting it: the subagent-retry and repl-call varieties are not reachable from a foreground Bash call at all, so their absence here is a property of the staging rather than of the surface. The load-bearing measurement is the OTHER direction — unmarked_frames counts the residual bash/powershell-progress shape, whose presence on this surface was the ticket's open question.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}

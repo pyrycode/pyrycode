@@ -2845,6 +2845,40 @@ func (p *Parser) consumeLine(line []byte) {
 		// which rung a models or commands payload lands on is untouched by construction.
 		p.noteControlAck(line)
 		p.emitModelList(line)
+	case "tool_progress":
+		// claude's in-flight progress frames (#2089). A long-running Bash call
+		// emits one every few seconds, and without this arm every one of them put
+		// an unrecognized_message row in the operator's chat — the same
+		// spend-the-alarm-on-a-routine-event failure the control_response arm above
+		// describes, except this one fires on a timer for the length of every slow
+		// command rather than once per interrupt.
+		//
+		// Its own arm rather than an ignoredLineTypes member, for #1404's and
+		// #1500's reasons verbatim: that list is documented as top-level types only
+		// and as MEASURED, and emitUnrecognized stays unreachable BY MATCHING
+		// rather than by list membership — the stronger of the two guarantees.
+		//
+		// The difference from both precedents, and the reason the arm is a matcher
+		// instead of a consume-everything: this type has FOUR varieties and only
+		// three carry a positive marker. Putting the type on the list would
+		// consume the fourth in silence too, and that is the one variety nobody
+		// has measured on this surface. So a marker-less frame deliberately falls
+		// through here and still rings the bell.
+		//
+		// Suppression, not mapping. Hanging an elapsed count on the existing tool
+		// row is a daemon change plus a wire change plus two client changes, and
+		// is its own ticket; none of these frames carries news this surface
+		// renders. The vendor's three-field validation (string tool_name, string
+		// tool_use_id, finite elapsed_time_seconds) goes with that ticket, where it
+		// has a consumer — under suppression it would validate values no code
+		// reads.
+		if p.consumeToolProgress(line) {
+			return
+		}
+		// Written out rather than reached by `fallthrough`: default is not the next
+		// case in source order, and a fallthrough would also run the
+		// ignoredLineTypes test below — a test this type must never pass.
+		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	default:
 		if ignoredLineTypes[sl.Type] {
 			// The subtype match lives INSIDE this branch, which is what keeps
@@ -2926,6 +2960,151 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 	default:
 		return false
 	}
+}
+
+// toolProgressHeartbeatTrue is the ONE byte sequence the heartbeat marker
+// matches. Compared against a json.RawMessage, so this is a test on the value
+// claude actually put on the wire rather than on whatever a Go type would coerce
+// it to.
+var toolProgressHeartbeatTrue = []byte("true")
+
+// The marker names, as logged. A closed set of three, chosen by this package —
+// never a byte derived from claude's line, which is what keeps the drop site's
+// record content-free while still saying which variety fired.
+const (
+	toolProgressMarkerHeartbeat    = "heartbeat"
+	toolProgressMarkerSubagentType = "subagent_type"
+	toolProgressMarkerReplCall     = "repl_call"
+)
+
+// toolProgressMarkers carries the three WIRE FIELDS that identify a tool_progress
+// variety. Four internal engine events feed the one outbound type; three of them
+// set one of these, and the fourth — bash/powershell progress — is the residual
+// shape, identified only by the absence of all three.
+//
+// Kept separate from streamLine for userToolResultLine's reason: streamLine is
+// the line-level SEGMENTATION struct and stays at Type/Subtype/Message, so fields
+// belonging to one line type would blur that boundary. The line is decoded a
+// second time instead, which consumeLine already hands the raw bytes down for —
+// emitUser, emitRateLimit and decodeModelWindows all take them.
+//
+// THE MARKERS ARE FIELD NAMES, NOT CONTENT, AND NEITHER READS A tool_name. The
+// report's frame showed a `-heartbeat-N` suffix on tool_use_id and that suffix is
+// deliberately not matched: it is content, and a counter in an identifier is the
+// most fragile thing in the frame. The retry variety's tool_name is a minified
+// module constant this surface cannot pin, so subagent_type stands in for it —
+// every agent_api_retry frame sets it, resolved and unresolved alike, and no
+// other variety does. subagent_retry (set only on the unresolved one) is
+// therefore not read: it would widen the matched set without widening what is
+// caught.
+//
+// HEARTBEAT IS json.RawMessage RATHER THAN *bool, AND THAT IS LOAD-BEARING. A
+// *bool target turns `"heartbeat": "true"` into a whole-line UnmarshalTypeError;
+// encoding/json saves that error and keeps decoding, so the OTHER markers still
+// populate while the call reports failure, and the matcher is left choosing
+// between honouring the error (dropping a validly-marked frame to the lane) and
+// ignoring it (losing the type-strictness). A RawMessage cannot fail, and a byte
+// comparison against `true` is exactly the strict test wanted: "true", 1 and
+// false each produce different bytes and none of them matches.
+//
+// The other two are *jsonKey — presence decided without a byte of claude's value
+// reaching daemon state, and present-but-null distinguished from present, so a
+// null marker is not a marker.
+type toolProgressMarkers struct {
+	Heartbeat    json.RawMessage `json:"heartbeat"`
+	SubagentType *jsonKey        `json:"subagent_type"`
+	ReplCall     *jsonKey        `json:"repl_call"`
+}
+
+// consumeToolProgress reports whether this tool_progress line carried a known
+// marker, dropping it content-free when it did. emitSystemSubtype's shape and for
+// its reason: unlike emitRateLimit's void return, this arm has a real "did you
+// handle it?" to report back, because a marker-less frame must still reach the
+// unrecognized lane.
+//
+// The case arms are the ONE enumeration of the matched set, as they are in
+// emitSystemSubtype — adding a variety IS adding an arm.
+//
+// THIS IS A SILENCING PRIMITIVE, so the narrowness above is the whole safety
+// argument and not fussiness. Suppression can only WITHHOLD a row that carries no
+// content, never inject one, and that bound holds exactly while the marker set
+// stays narrow and type-strict. Loosening a marker — any truthy heartbeat, a
+// tool_name prefix, the id suffix — trades the bound away and starts swallowing
+// frames nobody measured. harnessNoOutputNudge argues its own tolerance the same
+// way, and for the same reason: a suppression's match is the thing to be strict
+// about.
+//
+// # MEASURED 2026-09-06 — claude 2.1.259, model haiku, one live turn
+//
+// The capture is internal/e2e/realclaude/testdata/tool_progress_v2.1.259.json,
+// recorded upstream of the parser by TestRealClaude_ToolProgressCapture: a
+// foreground Bash call (`cat` on a rig-held FIFO) held open across a 379 s turn,
+// 21 lines on the wire, 12 of them tool_progress. Stated in the CORRECTED/AMENDED
+// style ignoredLineTypes uses, and a variety measured ABSENT is recorded as
+// absent rather than quietly added to the matched set:
+//
+//   - heartbeat — OBSERVED, 12/12 frames. Every one carries `"heartbeat":true`
+//     and an `elapsed_time_seconds` stepping 30, 60 … 360, which is the wire-level
+//     confirmation of the `setInterval` at 30 000 ms behind it: the first tick
+//     lands at t+30 s, so a call that leaves the foreground sooner produces
+//     nothing whatever the marker set says. tool_use_id carries the reported
+//     `-heartbeat-N` suffix and is still deliberately not matched.
+//   - subagent retry — ABSENT, and the absence is a property of the staging, not
+//     of the surface: agent_api_retry is not reachable from a foreground Bash
+//     call at all, so no single-turn capture of this shape could observe it.
+//     subagent_type is on the declared schema and set by both the resolved and
+//     unresolved emits; the marker is UNEXERCISED, not confirmed.
+//   - repl call — ABSENT, same reason, same status.
+//   - bash/powershell progress, the residual marker-less shape — NOT OBSERVED,
+//     and open question 1 is NARROWED rather than closed. Zero of the 12 frames
+//     carried none of the three markers, but two sufficient explanations fit that
+//     equally and this capture cannot separate them. (a) The two emit sites differ
+//     for this variety alone: one is behind
+//     `if(!CLAUDE_CODE_REMOTE && !CLAUDE_CODE_CONTAINER_ID) break;` plus a
+//     throttle, the other — logging `[engine] yield-twin tool_progress` — has
+//     neither, and neither variable was set on this surface. The frames cannot
+//     say which emitter fed them: the yield-twin wrapper appends session_id and a
+//     uuid to every frame it yields, so the two heartbeat literals reach the wire
+//     byte-identical, key order included. (b) The engine event is raised per chunk
+//     the shell generator yields, carrying output/totalLines/totalBytes — and the
+//     staged `cat <fifo>` produces no output at all until EOF, so the event may
+//     simply never have been raised. Settling it needs a different staging: a
+//     command with incremental output, or a run with CLAUDE_CODE_CONTAINER_ID set.
+//
+// The failure direction is the safe one, which is why the unexercised markers and
+// the unresolved question are tolerable here: an unmatched frame FALLS THROUGH to
+// the unrecognized lane, so a variety nobody measured stays visible as the row it
+// is today rather than being swallowed. The marker-less shape is unhandled ON
+// PURPOSE.
+//
+// TestParser_ToolProgressCapturedFramesAreSilent walks that capture through this
+// arm inside `make check`, which is what stops a decoder keyed on a spelling
+// claude does not use from never firing in silence.
+func (p *Parser) consumeToolProgress(line []byte) bool {
+	var m toolProgressMarkers
+	// The error is not a branch. consumeLine has already decoded this line into
+	// streamLine, so it is well-formed JSON with an object at the top level;
+	// RawMessage accepts any value and jsonKey.UnmarshalJSON discards every one,
+	// so this cannot fail. An `if err != nil` arm here would be unreachable code —
+	// userToolResultLine states the same property for the same reason.
+	_ = json.Unmarshal(line, &m)
+
+	var marker string
+	switch {
+	case bytes.Equal(m.Heartbeat, toolProgressHeartbeatTrue):
+		marker = toolProgressMarkerHeartbeat
+	case m.SubagentType != nil:
+		marker = toolProgressMarkerSubagentType
+	case m.ReplCall != nil:
+		marker = toolProgressMarkerReplCall
+	default:
+		return false
+	}
+	// Type and marker only. Both are keywords from closed sets this package owns —
+	// the same class as the sl.Type the drop branch below logs — so no byte of the
+	// frame is recorded anywhere.
+	p.log.Debug("streamsup: dropping tool_progress", "type", "tool_progress", "marker", marker)
+	return true
 }
 
 // emitBackgroundTaskStarted decodes a system/task_started line and emits one
