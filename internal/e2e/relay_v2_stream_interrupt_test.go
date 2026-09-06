@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -323,4 +324,298 @@ func TestRelayV2_StreamInterruptStopsRunningTurn(t *testing.T) {
 		sawInterruptedEnd = true
 	}
 	t.Logf("M2: observed turn_end{StopReason:cancelled} for the minted conversation — the interrupt stopped the turn (AC2/AC3)")
+}
+
+// TestRelayV2_StreamInterruptNamedConversationStopsThatOne is #2103's fake-daemon
+// proof: with the daemon's current-conversation cursor parked on A, an interrupt
+// naming B stops B's turn and leaves A's running. Its bare-path sibling above stays
+// exactly as it was — that is the shape an un-upgraded client sends.
+//
+// THE SEND ORDER IS FORCED, not chosen. A conversation is mid-turn only after a
+// send, and the cursor is stamped only by a successful sessionRouter.Route, so the
+// conversation that must own the cursor has to be sent to LAST. It cannot be
+// re-stamped afterwards either: a second send to a conversation whose turn is in
+// flight blocks on streamTurnHoldTimeout, which is fifteen minutes. Hence B, then A.
+//
+//	M1  mint B         — create_conversation; since #2085 this binds B's session
+//	                     without spawning its child.
+//	M2  send to B      — B's child comes up, B's turn goes in flight, cursor = B.
+//	M3  send to A      — A's turn goes in flight and the cursor moves to A. This is
+//	                     the step that makes the test able to fail: with the cursor
+//	                     on A, a daemon that ignored the named id stops A.
+//	M4  interrupt B    — the frame under test.
+//
+// AC-4 ASKS FOR B's turn_end ON THE WIRE AND THAT FRAME CANNOT EXIST IN THIS STATE,
+// which is a fact about the daemon rather than about this test. startStreamTurnDrainV2
+// gates every turn event on the CURSOR conversation's bound session and drops the
+// rest; there is one shared interactiveTurnEmitterV2 over one global cursor, and
+// emitter.Handle sits below that gate. So with the cursor on A, B's TurnEnd is
+// dropped before it is ever shaped into an envelope — it has no conversation_id and
+// no StopReason to assert on, because it never becomes one. Making background
+// conversations' turn events reach the phone is a different ticket; this one must
+// not smuggle it in.
+//
+// The substitute is a trio, and each member covers the others' blind spot:
+//
+//	(a) v2.interrupt.dispatched carrying B's conversation id. Proves the frame
+//	    arrived, resolved B and dispatched to B's bound runner. Under the pre-#2103
+//	    daemon the identical record carries A's id, so the ID is the discriminator,
+//	    not the record's existence.
+//	(b) stream_turn.not_active with kind=turn_end and B's session id. This IS AC-4's
+//	    turn_end for B, observed at the one point the architecture lets it be seen.
+//	    It is not a proxy for the actuation: fakeclaude's interrupt mode emits no
+//	    result on a user turn, so the only possible source of a TurnEnd for B is its
+//	    response to the interrupt control_request — the same structural causality
+//	    the bare-path sibling above relies on.
+//	(c) no turn_end for A on the wire. A is the ACTIVE session, so a turn_end for A
+//	    would drain to the phone; under the defect the interrupt stops A and
+//	    turn_end{convA,cancelled} arrives. This is the live, on-the-wire form of
+//	    "A's turn is still in flight".
+//
+// (c) runs LAST because it is destructive: it ends on a receive that reaches its
+// deadline, and a timed-out fakephone receive takes the conn down with it (see
+// waitForLog's doc). Ordering it before the log assertions would report the
+// resulting death as an unrelated failure.
+func TestRelayV2_StreamInterruptNamedConversationStopsThatOne(t *testing.T) {
+	const (
+		initialUUID = "11111111-1111-4111-8111-111111111111" // bootstrap, bound to conversation A
+		convA       = "22222222-2222-4222-8222-222222222222"
+		textToB     = "e2e-2103-user:b\n"
+		needleToB   = "e2e-2103-user:b"
+		textToA     = "e2e-2103-user:a\n"
+		needleToA   = "e2e-2103-user:a"
+
+		createBReqID   = uint64(2103)
+		sendToBReqID   = uint64(2104)
+		sendToAReqID   = uint64(2105)
+		interruptReqID = uint64(2106)
+	)
+
+	testStart := time.Now()
+	elapsed := func() string { return time.Since(testStart).Round(time.Millisecond).String() }
+
+	home := shortHome(t)
+
+	rA := RunBareIn(t, home, "pair", "-pyry-name=test", "--name=phone-a")
+	if rA.ExitCode != 0 {
+		t.Fatalf("pyry pair phone-a exit=%d\nstdout:\n%s\nstderr:\n%s", rA.ExitCode, rA.Stdout, rA.Stderr)
+	}
+	payloadA := decodePairPayload(t, rA.Stdout)
+	pubKey, err := base64.StdEncoding.DecodeString(payloadA.ServerStaticPubkey)
+	if err != nil {
+		t.Fatalf("decode server static pubkey: %v", err)
+	}
+
+	// Bind conversation A to the bootstrap session before the daemon starts: the
+	// daemon loads conversations.json once at startup. Unlike the bare-path sibling
+	// this test needs A to be addressable by name, because A is the conversation the
+	// cursor must end up on.
+	seedBoundConversation(t, home, convA, initialUUID)
+
+	fr := fakerelay.New(relayTestLogger())
+	t.Cleanup(func() { _ = fr.Close() })
+
+	regPath := filepath.Join(home, ".pyry", "test", "sessions.json")
+
+	// PYRY_FAKE_CLAUDE_STREAM_INTERRUPT puts BOTH children in interrupt mode (it
+	// reaches them through the daemon's process env), which is what lets two turns
+	// be in flight at once: the fake answers a user turn with an assistant chunk and
+	// no result, so a turn ends only when an interrupt arrives.
+	h := StartStreamInteractiveWithRelay(t, home, initialUUID, fr.URL()+"/v2/server",
+		"PYRY_FAKE_CLAUDE_STREAM_INTERRUPT=1")
+	t.Cleanup(func() { h.Stop(t) })
+
+	serverID := readPersistedServerID(t, home)
+	waitBinaryHello(t, fr, serverID)
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	phoneA, err := fakephone.Dial(dialCtx, fr.URL(), serverID, payloadA.Token, "phone-a")
+	if err != nil {
+		t.Fatalf("phone A dial: %v", err)
+	}
+	t.Cleanup(func() { _ = phoneA.Close() })
+	sendA, recvA := driveHandshakeToOpenDaemonInteractive(t, phoneA, pubKey, payloadA.Token)
+
+	sealSend := func(env protocol.Envelope) {
+		t.Helper()
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatalf("marshal envelope: %v", err)
+		}
+		ciphertext, err := sendA.Encrypt(raw)
+		if err != nil {
+			t.Fatalf("seal envelope: %v", err)
+		}
+		sendNoiseMsg(t, phoneA, ciphertext)
+	}
+
+	// One reader for the whole test so the receive CipherState nonce stays in
+	// sequence; ok=false on deadline.
+	nextEnv := func(deadline time.Time) (protocol.Envelope, bool) {
+		t.Helper()
+		for {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return protocol.Envelope{}, false
+			}
+			raw, err := phoneA.ReceiveBytes(remaining)
+			if err != nil {
+				if errors.Is(err, fakephone.ErrReceiveTimeout) {
+					return protocol.Envelope{}, false
+				}
+				t.Fatalf("phone A receive: %v", err)
+			}
+			var inner protocol.InnerFrameV2
+			if err := json.Unmarshal(raw, &inner); err != nil {
+				t.Fatalf("phone A decode inner frame: %v", err)
+			}
+			if inner.Type != protocol.TypeNoiseMsg {
+				continue
+			}
+			return decryptInnerEnvelope(t, inner, recvA), true
+		}
+	}
+
+	// sendAndAwaitEcho drives one send_message and drains to the assistant_delta
+	// echoing it. The echo — not the ack — is what proves that conversation's child
+	// is live and serving, which is the precondition a vacuous pass would lack: an
+	// interrupt against a conversation with no running turn is inert by
+	// construction (streamsup.WriteInterrupt refuses a nil writer), so a test that
+	// interrupted a childless B would assert nothing.
+	sendAndAwaitEcho := func(milestone string, reqID uint64, convID, msgID, text, needle string) {
+		t.Helper()
+		sealSend(protocol.Envelope{
+			ID:   reqID,
+			Type: protocol.TypeSendMessage,
+			TS:   time.Now().UTC(),
+			Payload: mustJSON(t, protocol.SendMessagePayload{
+				ConversationID: convID,
+				MessageID:      msgID,
+				Text:           text,
+			}),
+		})
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			env, ok := nextEnv(deadline)
+			if !ok {
+				t.Fatalf("%s: never observed an assistant_delta echoing %q for conversation %s; that "+
+					"conversation's turn never went in flight, so the interrupt under test would be "+
+					"inert and this test vacuous", milestone, needle, convID)
+			}
+			if env.Type == protocol.TypeError {
+				t.Fatalf("%s: unexpected error envelope: %s", milestone, string(env.Payload))
+			}
+			if env.Type != protocol.TypeAssistantDelta {
+				continue
+			}
+			var d protocol.AssistantDeltaPayload
+			if err := json.Unmarshal(env.Payload, &d); err != nil {
+				t.Fatalf("%s: decode assistant_delta payload: %v", milestone, err)
+			}
+			if d.ConversationID == convID && strings.Contains(d.Text, needle) {
+				return
+			}
+		}
+	}
+
+	// --- M1: mint conversation B over the wire. All-null create_conversation
+	// (server defaults). Drain until conversation_created rather than assuming the
+	// next frame is it — the interactive session interleaves broadcasts.
+	sealSend(protocol.Envelope{
+		ID:      createBReqID,
+		Type:    protocol.TypeCreateConversation,
+		TS:      time.Now().UTC(),
+		Payload: mustJSON(t, protocol.CreateConversationPayload{}),
+	})
+	var convB string
+	createDeadline := time.Now().Add(15 * time.Second)
+	for convB == "" {
+		env, ok := nextEnv(createDeadline)
+		if !ok {
+			t.Fatal("M1: did not receive conversation_created before deadline")
+		}
+		if env.Type == protocol.TypeError {
+			t.Fatalf("M1: unexpected error envelope while awaiting conversation_created: %s", string(env.Payload))
+		}
+		if env.Type != protocol.TypeConversationCreated {
+			continue
+		}
+		var p protocol.ConversationCreatedPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			t.Fatalf("M1: decode conversation_created payload: %v", err)
+		}
+		if p.ID == "" {
+			t.Fatal("M1: conversation_created carried an empty id")
+		}
+		convB = p.ID
+	}
+	if convB == convA {
+		t.Fatalf("M1: the minted conversation id equals A's (%s); the test needs two distinct "+
+			"conversations or its whole premise collapses", convA)
+	}
+	t.Logf("[t=%s] M1: minted conversation B = %s", elapsed(), convB)
+
+	// --- M2: B's turn goes in flight (and the cursor lands on B for now).
+	sendAndAwaitEcho("M2", sendToBReqID, convB, "u-b1", textToB, needleToB)
+	t.Logf("[t=%s] M2: conversation B's turn is in flight", elapsed())
+
+	// --- M3: A's turn goes in flight AND the cursor moves to A. Both turns are now
+	// open, and the daemon's cursor points at the one the frame will NOT name.
+	sendAndAwaitEcho("M3", sendToAReqID, convA, "u-a1", textToA, needleToA)
+	t.Logf("[t=%s] M3: conversation A's turn is in flight and the cursor is on A — "+
+		"the named interrupt now has something to get wrong", elapsed())
+
+	// B's session id, for assertion (b). The pool labels a minted session with the
+	// conversation id that asked for it, so the label is the only handle a test has
+	// on a non-bootstrap session's id.
+	entryB, ok := readEntryByLabel(regPath, convB)
+	if !ok || entryB.ID == "" {
+		t.Fatalf("conversation B (%s) has no session entry; assertion (b) has nothing to match on\nfile:\n%s",
+			convB, mustReadFile(t, regPath))
+	}
+
+	// --- M4: the frame under test — an interrupt NAMING B while the cursor is on A.
+	sealSend(protocol.Envelope{
+		ID:      interruptReqID,
+		Type:    protocol.TypeInterrupt,
+		TS:      time.Now().UTC(),
+		Payload: mustJSON(t, protocol.InterruptPayload{ConversationID: convB}),
+	})
+
+	// (a) The daemon resolved the NAMED conversation, not the cursor's. Under the
+	// pre-#2103 daemon this same record carries convA, so the id is what discriminates.
+	waitForLogLineAll(t, h.Stderr, []string{"v2.interrupt.dispatched", convB}, 15*time.Second)
+	t.Logf("[t=%s] M4(a): the interrupt dispatched to conversation B's own bound runner", elapsed())
+
+	// (b) B's turn ended. The drain observes the TurnEnd and then drops it because
+	// B is not the cursor's conversation, which is the only place this frame is
+	// visible in this state — see the header. The fake emits no result on a user
+	// turn, so the interrupt is its only possible cause.
+	waitForLogLineAll(t, h.Stderr,
+		[]string{"stream_turn.not_active", "turn_end", entryB.ID}, 15*time.Second)
+	t.Logf("[t=%s] M4(b): conversation B's turn ended (session %s)", elapsed(), entryB.ID)
+
+	// (c) A's turn is still in flight. Destructive and therefore last: this loop
+	// ends on a receive that reaches its deadline, which takes the phone conn down.
+	settle := time.Now().Add(3 * time.Second)
+	for {
+		env, ok := nextEnv(settle)
+		if !ok {
+			break
+		}
+		if env.Type != protocol.TypeTurnEnd {
+			continue
+		}
+		var te protocol.TurnEndPayload
+		if err := json.Unmarshal(env.Payload, &te); err != nil {
+			t.Fatalf("M4(c): decode turn_end payload: %v", err)
+		}
+		if te.ConversationID == convA {
+			t.Fatalf("M4(c) (AC-1): conversation A's turn ended (StopReason %q) after an interrupt naming "+
+				"B (%s). A is the CURSOR's conversation and its turn must still be in flight: this is "+
+				"the #2103 defect.", te.StopReason, convB)
+		}
+	}
+	t.Logf("[t=%s] M4(c): no turn_end for conversation A — the cursor's turn is still in flight", elapsed())
 }
