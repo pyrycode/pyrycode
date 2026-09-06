@@ -667,11 +667,11 @@ func selectsStreamRunner(cfg config.Config) bool {
 // Validation lives here, not in config.Load, because the accepted set is defined
 // by the factory mapping — which the leaf config package cannot import
 // (streamsup). config.Load stays parse-only, matching DebugCapture.
-func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpApprovePath string) (sessions.RunnerFactory, *streamTurnSink, error) {
+func selectInteractiveRunner(cfg config.Config, logger *slog.Logger, mcpServersPath string) (sessions.RunnerFactory, *streamTurnSink, error) {
 	switch cfg.InteractiveRunner {
 	case "", "stream-json":
 		sink := newStreamTurnSink(0, logger)
-		return newStreamRunnerFactory(sink, mcpApprovePath), sink, nil
+		return newStreamRunnerFactory(sink, mcpServersPath), sink, nil
 	case "pty":
 		return nil, nil, fmt.Errorf(`interactive_runner "pty" was removed in #1348: the terminal-driving interactive runner no longer exists. Remove the key or set it to "stream-json"`)
 	default:
@@ -777,14 +777,14 @@ func runSupervisor(args []string) error {
 	// bootstrap-yolo): a yolo daemon can still mint non-yolo per-conversation
 	// sessions, so the config must exist; it is harmless and unreferenced when
 	// every spawn is yolo. The "" / "pty" path never builds the factory, so
-	// mcpApprovePath stays "".
-	var mcpApprovePath string
+	// mcpServersPath stays "".
+	var mcpServersPath string
 	if selectsStreamRunner(cfg) {
-		mcpApprovePath, err = writeMCPServersConfig(resolveExecutable(), socketPath)
+		mcpServersPath, err = writeMCPServersConfig(resolveExecutable(), socketPath)
 		if err != nil {
 			return fmt.Errorf("write mcp-approve config: %w", err)
 		}
-		defer func() { _ = os.Remove(mcpApprovePath) }()
+		defer func() { _ = os.Remove(mcpServersPath) }()
 	}
 	// Interactive-runner selection (#1081): pick the runner factory + its shared
 	// turn-event sink from config BEFORE the pool is built, so an invalid value
@@ -792,8 +792,8 @@ func runSupervisor(args []string) error {
 	// rollback path, leaving the sessions.Config and relayWiring literals below
 	// byte-identical to today. On "stream-json" the same sink instance is threaded
 	// two ways: RunnerFactory (below) and relayWiring.streamSink (the drain); the
-	// factory also carries mcpApprovePath to inject the approval-tool flags (#1168).
-	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpApprovePath)
+	// factory also carries mcpServersPath to inject the approval-tool flags (#1168).
+	runnerFactory, streamSink, err := selectInteractiveRunner(cfg, logger, mcpServersPath)
 	if err != nil {
 		return fmt.Errorf("interactive runner: %w", err)
 	}

@@ -891,6 +891,12 @@ func TestRealClaude_BypassApprovalArgv_Probe(t *testing.T) {
 	// called: that function lives in package main and is not importable here. Same
 	// two keys, same argv, and the pyry binary and socket are both absolute.
 	//
+	// It transcribes the pyry_approve entry ALONE, deliberately, where the daemon's
+	// own document has carried a second pyry_files entry since #2169: this probe
+	// asks what a bypass child's argv looks like, and a file-transfer server nothing
+	// here calls would change no assertion below while adding a process to every
+	// spawn.
+	//
 	// It goes in a t.TempDir() and NOT in the pinned HOME, which claude also reads
 	// for its own configuration. Mode 0600: the file is not secret, but it is an
 	// execution instruction claude obeys, and a world-writable one in a shared temp

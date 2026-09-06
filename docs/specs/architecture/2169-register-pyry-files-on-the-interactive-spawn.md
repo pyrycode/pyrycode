@@ -368,3 +368,73 @@ zero tests and still exits 0.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-06
+
+## Revisions
+
+### 2026-09-06 — the identity is composed per spawn, not per construction
+
+**Driven by:** the verifier's MUST FIX on PR #2171 — the id put on the child's environment went stale
+on a session-id rotation, and after that `send_file` refused for the rest of that session's life.
+
+**What was wrong.** § 2 above composed the variable in `mapStreamsupConfig` as
+`Env: []string{envSessionID + "=" + cfg.SessionID}`. `cfg.SessionID` is construction-fixed — the
+field's own construction-site comment in `internal/sessions` → `Pool.New` says it "does NOT mirror a
+/clear rotation" — and a process's environment is fixed at exec. So every child spawned after a
+rotation carried the retired id while its own argv carried the live one. `Pool.rekeyLocked` deletes the
+old key, so `fileAttacher`'s liveness adapter returns `ErrSessionNotFound` and every later call is
+refused. Fail-closed, never a misfile, but the ticket's central claim — *carry the calling session's
+identity* — held only until the first rotation. The plan never stated the condition, and the live gate
+could not see it: `TestInteractiveStreamSendFile` issues no `/clear`.
+
+**The new contract.** The variable's NAME crosses the mapper seam; the binding is composed at the
+spawn that knows the live id.
+
+- `streamsup.Config` gains `SessionIDEnvVar string` (the name; empty binds nothing) and
+  `Config.Env` goes back to what it was — a caller-fixed slice production leaves nil.
+- `beginSpawn` composes the child environment below its unlock, from the SAME snapshotted id
+  `buildArgs` reads, via the new pure `spawnEnv(base, name, sessionID)`. `spawnAndWait` takes that
+  composed `env` instead of reading `r.cfg.Env`. Both are one more value through signatures that
+  already carry `args`, `freshSeq` and `spawnMode` from the same snapshot, so the
+  one-acquisition-per-spawn-setup charter (#1481) is untouched — and reading a live id at spawn time
+  instead would have been a second acquisition that could land on the far side of a racing rotation
+  and skew the argv and the environment apart.
+- `mapStreamsupConfig` sets `SessionIDEnvVar: envSessionID` and leaves `Env` nil.
+
+The argv and the environment now name one session by construction rather than by agreement.
+
+**What this does NOT close, and cannot.** A `/clear` rotation re-keys the pool **without respawning**
+(`Pool.onRotate` → `RotateID`; no `RestartFresh`), so the live child keeps the environment it was
+exec'd with. `send_file` from that child refuses — fail-closed, the same shape as before — until that
+runner's next spawn. No environment-based design can close it: an exec'd process's environment is not
+writable from outside. Closing it means giving the forked server a way to ask the daemon "which session
+is this child?" rather than telling it, which is the same authentication design
+`docs/knowledge/features/pyry-mcp-files-command.md` § "Out of scope" already names as a human call, and
+is out of scope here. Two consequences worth stating plainly:
+
+- The claim this ticket ships is **the spawn's identity**, not the session's identity for all time.
+- The runner's `r.sessionID` is not updated by a `/clear` either, so a post-`/clear` crash-respawn
+  re-emits the retired id in both places. That is pre-existing behaviour of the rotation seam (the pool
+  observes the rotation; nothing pushes it into the runner), not something this ticket introduces, and
+  it stays fail-closed.
+
+**Tests.** AC-2's proof moves one layer down, to where the value is now composed, and gets stronger for
+it — it asserts what the child actually receives rather than what a struct field says:
+
+- `internal/streamsup` → `TestRunner_BeginSpawn_EnvCarriesOwnLiveSessionID` — two runners, each
+  spawn's environment carries its own id and not the other's (AC-2).
+- `internal/streamsup` → `TestRunner_BeginSpawn_EnvTracksRotatedSessionID` — after `RestartFresh`, the
+  environment and the argv both name the rotated id. This is the regression pin for the finding, and
+  it was RED on the wiring before the fix.
+- `internal/streamsup` → `TestSpawnEnv` — the composer's edges: an unset name binds nothing, and the
+  caller's `Config.Env` is never appended into (spare capacity supplied, so the aliasing is
+  observable).
+- `cmd/pyry` → `TestMapStreamsupConfig_CarriesOwnSessionIdentity` keeps its two-session shape on
+  `SessionID`, pins `SessionIDEnvVar`, and now asserts `Env == nil` — the direct regression pin against
+  composing a construction-time identity here again.
+
+**Also in this revision** (both verifier NITs): `mcpApprovePath` is renamed `mcpServersPath` in
+`runSupervisor`, `selectInteractiveRunner`, `newStreamRunnerFactory` and `withApprovalArgs`, joining
+§ 1's three renames — it names a document carrying two servers. And the transcribed mcp-config comment
+in `ask_user_question_capture_test.go` and `bypass_approval_argv_probe_test.go` now says the probe
+registers the approve server alone, deliberately, so a reader arriving from the renamed function is not
+left asking where `pyry_files` went.

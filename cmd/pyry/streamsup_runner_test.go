@@ -159,12 +159,15 @@ func TestMapStreamsupConfig_Bootstrap(t *testing.T) {
 	if got.Stderr != nil {
 		t.Errorf("Stderr = %v, want nil (no sessions.RunnerConfig analogue)", got.Stderr)
 	}
-	// Env stopped being nil at #2169: it carries the calling session's identity to
-	// the claude child, which is where the pyry_files MCP server claude forks reads
-	// it from. Exact slice equality — an Env carrying anything else would put a
-	// second variable on every interactive child, which nothing here asks for.
-	if want := []string{envSessionID + "=boot-uuid"}; !slices.Equal(got.Env, want) {
-		t.Errorf("Env = %q, want %q", got.Env, want)
+	// Env stays nil at #2169 and the variable NAME crosses instead: the value has to
+	// be the spawn's LIVE id, and cfg.SessionID is the construction-time seed that
+	// does not mirror a rotation. A regression that composes a value here again puts
+	// a stale identity on every child spawned after a new_session rotation.
+	if got.Env != nil {
+		t.Errorf("Env = %q, want nil — a per-spawn identity must not be composed at construction time", got.Env)
+	}
+	if got.SessionIDEnvVar != envSessionID {
+		t.Errorf("SessionIDEnvVar = %q, want %q — the pyry_files server claude forks reads exactly this name", got.SessionIDEnvVar, envSessionID)
 	}
 	if !got.RequestInitializeOnSpawn {
 		t.Error("RequestInitializeOnSpawn = false, want true — the ask is the interactive daemon's policy and this mapper is the one place that sets it")
@@ -584,7 +587,7 @@ func TestWithApprovalArgs_BypassChildGetsNoFilesServer(t *testing.T) {
 
 // TestStreamRunnerFactory_Construct drives the factory with the pool shapes and
 // asserts a live *streamsup.Runner comes back wrapped in the streamRunner adapter
-// (AC-1, AC-2 "constructs successfully at both sites"). A non-empty mcpApprovePath
+// (AC-1, AC-2 "constructs successfully at both sites"). A non-empty mcpServersPath
 // exercises the #1168 approval-arg injection seam; construction must succeed on
 // every shape — non-yolo (flags injected) and yolo (nothing injected) alike.
 // os.Args[0] is an absolute, resolvable path so exec.LookPath accepts it;
@@ -1031,21 +1034,24 @@ func TestMapStreamsupConfig_CarriesOperatorBypass(t *testing.T) {
 	}
 }
 
-// TestMapStreamsupConfig_CarriesOwnSessionIdentity (#2169 AC-2): each spawn's
-// environment names the session that spawn IS, and no other.
+// TestMapStreamsupConfig_CarriesOwnSessionIdentity (#2169 AC-2) pins this seam's
+// half of the identity thread: each mapped config carries the session it IS and no
+// other, and it carries the NAME the child's environment binds that id to rather
+// than a value composed here.
 //
-// TWO sessions, not one, and that is the whole design of the test. A single-session
-// assertion is satisfied by a mapper that hardcodes a constant, ignores cfg and
-// composes the same variable for every child — which is exactly the failure that
-// matters here, since the destination `fileAttacher` derives is read from this id.
-// Composing both configs from the same mapper and cross-checking each against the
-// OTHER's id is what makes "carries its own" a claim rather than a coincidence.
+// TWO sessions, not one, and that is the design of the test. A single-session
+// assertion is satisfied by a mapper that hardcodes a constant and ignores cfg —
+// exactly the failure that matters, since the destination `fileAttacher` derives is
+// read from this id. Cross-checking each config against the OTHER's id is what makes
+// "carries its own" a claim rather than a coincidence.
 //
-// Asserted on the mapper's returned struct rather than through the factory because
-// streamsup.Config is not observable from the runner newStreamRunnerFactory returns;
-// setting the field in the pure mapper (its own dividing line — a plain string off
-// one RunnerConfig field, like ClaudeSessionsDir and SpawnPermissionMode) is what
-// keeps this assertable with no new scaffolding.
+// The Env assertion is the rework's regression pin, not a tautology. Composing
+// `PYRY_SESSION_ID=<cfg.SessionID>` here is what the first implementation did, and
+// it went stale on the first rotation: cfg.SessionID is construction-fixed while the
+// runner's live id rotates under it. The composition now happens per spawn in
+// internal/streamsup, where TestRunner_BeginSpawn_EnvCarriesOwnLiveSessionID and
+// TestRunner_BeginSpawn_EnvTracksRotatedSessionID assert the value the child
+// actually receives.
 func TestMapStreamsupConfig_CarriesOwnSessionIdentity(t *testing.T) {
 	t.Parallel()
 
@@ -1067,33 +1073,30 @@ func TestMapStreamsupConfig_CarriesOwnSessionIdentity(t *testing.T) {
 	gotB := mapStreamsupConfig(base(idB))
 
 	for _, tc := range []struct {
-		name  string
-		got   []string
-		own   string
-		other string
+		name       string
+		got        streamsup.Config
+		own, other string
 	}{
-		{"session A", gotA.Env, idA, idB},
-		{"session B", gotB.Env, idB, idA},
+		{"session A", gotA, idA, idB},
+		{"session B", gotB, idB, idA},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			want := []string{envSessionID + "=" + tc.own}
-			if !slices.Equal(tc.got, want) {
-				t.Fatalf("Env = %q, want %q", tc.got, want)
+			if tc.got.SessionID != tc.own {
+				t.Fatalf("SessionID = %q, want %q — this is the id streamsup seeds its live id from", tc.got.SessionID, tc.own)
 			}
-			// Named separately from the equality above so a future Env carrying a
-			// second variable still fails on the claim that matters: this child must
-			// not be able to name the other session.
-			if slices.Contains(tc.got, envSessionID+"="+tc.other) {
-				t.Errorf("Env carries the OTHER session's identity: %q", tc.got)
+			// Named separately from the equality above so a mapper that later derived
+			// the id from something else still fails on the claim that matters: this
+			// child must not be able to name the other session.
+			if tc.got.SessionID == tc.other {
+				t.Errorf("config carries the OTHER session's identity: %q", tc.got.SessionID)
+			}
+			if tc.got.SessionIDEnvVar != envSessionID {
+				t.Errorf("SessionIDEnvVar = %q, want %q — the pyry_files server claude forks reads exactly this name", tc.got.SessionIDEnvVar, envSessionID)
+			}
+			if tc.got.Env != nil {
+				t.Errorf("Env = %q, want nil — an identity composed at construction time goes stale on the first rotation", tc.got.Env)
 			}
 		})
-	}
-
-	// The two configs must not share a backing array either: Env is appended to
-	// os.Environ() per spawn, and a shared slice would let one runner's later append
-	// be observed by the other.
-	if len(gotA.Env) > 0 && len(gotB.Env) > 0 && &gotA.Env[0] == &gotB.Env[0] {
-		t.Error("both mapped configs share one Env backing array; each mapper call must allocate its own")
 	}
 }
 
