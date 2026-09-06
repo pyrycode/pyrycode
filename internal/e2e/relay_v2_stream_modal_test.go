@@ -563,7 +563,9 @@ func TestRelayV2_StreamModalPermissionRoundTrip(t *testing.T) {
 // record this gates on only proves anything if a single record carries both the
 // deny vocabulary and the caller's own modal_id.
 //
-// It lives here rather than beside waitForLog because it has exactly one caller.
+// It lives here rather than beside waitForLog for its first caller's sake; #2099's
+// no-live-child refusal is the second, and gates on a single record carrying both
+// the inert-arm event and the conversation id the client named.
 func waitForLogLineAll(t *testing.T, buf *safeBuffer, subs []string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

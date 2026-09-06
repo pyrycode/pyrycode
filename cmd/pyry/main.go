@@ -1758,9 +1758,17 @@ func (a activeSessionStarter) logger() *slog.Logger {
 // bootstrap session): no conversation to act on → inert; a named id that is not a
 // canonical conversation id → inert without ever reaching the registry;
 // unbound/dangling binding → inert, resolveBound's CurrentSessionID == "" guard
-// being the #678 isolation enforcement; a runner that cannot restart → inert. Only
-// a rotate error propagates, for handleNewSession to Warn-log and tolerate
-// (best-effort contract).
+// being the #678 isolation enforcement; a runner that cannot restart → inert; a
+// NAMED conversation with no live child → inert. Only a rotate error propagates,
+// for handleNewSession to Warn-log and tolerate (best-effort contract).
+//
+// THAT LAST ARM IS NAMED-ONLY, and the asymmetry is deliberate rather than an
+// oversight. AC-4 requires a named conversation with no live child to be inert, and
+// AC-3 requires the bare frame to behave EXACTLY as before #2099 — where an evicted
+// cursor conversation rotates and comes back up under the fresh id. Applying the
+// liveness guard to both would satisfy one at the cost of the other, so it is
+// applied to the path this ticket introduces and withheld from the path it promises
+// not to disturb.
 //
 // Every arm records the id it refused, at DEBUG because the id is client-supplied —
 // the posture handleDequeueMessage already takes for its own client-named
@@ -1774,6 +1782,7 @@ func (a activeSessionStarter) logger() *slog.Logger {
 // named conversation therefore leaves the active conversation where it was.
 func (a activeSessionStarter) StartNewSession(conversationID string) error {
 	convID := conversationID
+	named := conversationID != ""
 	switch {
 	case convID == "":
 		// Nothing named: the pre-#2099 path, verbatim. The cursor's own id is
@@ -1812,6 +1821,31 @@ func (a activeSessionStarter) StartNewSession(conversationID string) error {
 	if _, canRestart := runner.(interface{ RestartFresh(string) }); !canRestart {
 		a.logger().Debug("relay: v2 new_session inert; bound runner cannot restart",
 			"event", "v2.new_session.no_restart",
+			"conversation_id", convID)
+		return nil
+	}
+	// AC-4's fourth row, and the ONE arm the capability probe above does not already
+	// cover — which is exactly how it was first shipped broken. The probe asks what
+	// the runner CAN do; production's answer is always yes, because the sole
+	// implementation is streamRunner, which exposes RestartFresh unconditionally and
+	// is assigned at mint time. A conversation created but never messaged therefore
+	// reaches this line with a real runner whose child has never spawned (#2085
+	// defers the spawn to the first message), and rotating it would rekey the pool,
+	// persist sessions.json, rebind the conversation and broadcast a
+	// session_transition telling every client to render a delimiter for a chat that
+	// has never had a turn. RestartFresh itself would spawn nothing, so the rotation
+	// would be pure observable damage with no session to show for it.
+	//
+	// State().ChildPID is the liveness signal rather than Phase because it is the one
+	// the field's own doc defines that way ("PID of the running child, or 0 when
+	// none") — an unstarted, backing-off, evicted or stopped runner all report 0, and
+	// all four are states where there is nothing to restart fresh. Racing a spawn
+	// that has started but not yet published its pid reads 0 too and refuses; that is
+	// the same fail-safe direction the whole reject set takes, and the frame is
+	// re-sendable.
+	if named && runner.State().ChildPID == 0 {
+		a.logger().Debug("relay: v2 new_session inert; named conversation has no live child",
+			"event", "v2.new_session.no_live_child",
 			"conversation_id", convID)
 		return nil
 	}

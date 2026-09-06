@@ -29,18 +29,47 @@ const (
 	starterConvB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" // the conversation the frame names
 )
 
+// starterLiveChildPID is the pid a runner reports when its child is up. Any
+// non-zero value serves; a memorable one makes a State() that leaked the zero value
+// obvious in a failure message.
+const starterLiveChildPID = 4242
+
 // restartFreshRunner is the minimal runner startFreshRunner recognises: it exposes
 // RestartFresh and nothing else, so it takes the rotate-and-respawn arm. It records
 // the id it was respawned under, which is what proves the rotation reached the
 // runner rather than merely being computed.
+//
+// childPID IS THE PRODUCTION SHAPE and the reason this double exists in two
+// configurations rather than one. #2099 first shipped with AC-4's no-live-child row
+// injecting a runner that lacked RestartFresh entirely — a shape production never
+// produces for a bound conversation, since the sole implementation (streamRunner)
+// exposes the method unconditionally and the pool assigns it at mint time. The row
+// greened on the capability arm and the real arm was never exercised, which is what
+// let a created-but-unmessaged conversation rotate. A faithful double therefore
+// offers RestartFresh ALWAYS and carries liveness in the state, exactly as
+// streamRunner does: zero until its Run loop publishes a spawned child's pid.
 type restartFreshRunner struct {
 	baseRunner
+	childPID int
 	restarts []string
+}
+
+func (r *restartFreshRunner) State() sessions.State {
+	if r.childPID == 0 {
+		// The unstarted runner's own snapshot: streamsup.Runner.State reports the
+		// zero value until Run is entered, and Run is not entered until Activate.
+		return sessions.State{}
+	}
+	return sessions.State{Phase: sessions.PhaseRunning, ChildPID: r.childPID}
 }
 
 func (r *restartFreshRunner) RestartFresh(sessionID string) {
 	r.restarts = append(r.restarts, sessionID)
 }
+
+// liveRunner is a bound conversation whose child is up — the only shape a named
+// new_session may rotate.
+func liveRunner() *restartFreshRunner { return &restartFreshRunner{childPID: starterLiveChildPID} }
 
 // starterProbe captures what each seam was asked, so a test can assert on the
 // QUESTION rather than only on the answer. Which id reached resolveBound is the
@@ -87,7 +116,7 @@ func (p *starterProbe) newStarter(cursor, boundConv string, runner sessions.Runn
 func TestActiveSessionStarter_NamedConversationRotatesThatOne(t *testing.T) {
 	t.Parallel()
 
-	runner := &restartFreshRunner{}
+	runner := liveRunner()
 	p := &starterProbe{}
 	s := p.newStarter(starterConvA, starterConvB, runner, nil)
 
@@ -109,6 +138,13 @@ func TestActiveSessionStarter_NamedConversationRotatesThatOne(t *testing.T) {
 
 // TestActiveSessionStarter_UnnamedFollowsTheCursor is AC-3 at the composition
 // level: an un-upgraded client's bare frame behaves exactly as before #2099.
+//
+// The runner deliberately reports NO LIVE CHILD, which is what makes this the pin
+// for the liveness guard's named-only asymmetry rather than a plain happy path. The
+// same runner under a NAMED frame is inert (see the no-live-child row below); under
+// a bare frame it must still rotate, because before #2099 an evicted cursor
+// conversation rotated and came back up under the fresh id, and AC-3 promises that
+// path is untouched. A guard applied to both arms would redden exactly here.
 func TestActiveSessionStarter_UnnamedFollowsTheCursor(t *testing.T) {
 	t.Parallel()
 
@@ -152,13 +188,13 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 	}{
 		{
 			name:   "no cursor and nothing named",
-			cursor: "", named: "", boundConv: starterConvA, runner: &restartFreshRunner{},
+			cursor: "", named: "", boundConv: starterConvA, runner: liveRunner(),
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.no_active_conv",
 		},
 		{
 			name:   "named id is not a UUID",
-			cursor: starterConvA, named: "not-a-uuid", boundConv: starterConvB, runner: &restartFreshRunner{},
+			cursor: starterConvA, named: "not-a-uuid", boundConv: starterConvB, runner: liveRunner(),
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
@@ -166,19 +202,19 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 			// The traversal shape the security review named: it must die at the shape
 			// check, before anything could treat it as a lookup key or a path.
 			name:   "named id is a traversal attempt",
-			cursor: starterConvA, named: "../../etc/passwd", boundConv: starterConvB, runner: &restartFreshRunner{},
+			cursor: starterConvA, named: "../../etc/passwd", boundConv: starterConvB, runner: liveRunner(),
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
 		{
 			name:   "named id is a UUID with the wrong version nibble",
-			cursor: starterConvA, named: "bbbbbbbb-bbbb-1bbb-8bbb-bbbbbbbbbbbb", boundConv: starterConvB, runner: &restartFreshRunner{},
+			cursor: starterConvA, named: "bbbbbbbb-bbbb-1bbb-8bbb-bbbbbbbbbbbb", boundConv: starterConvB, runner: liveRunner(),
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
 		{
 			name:   "named id is uppercase",
-			cursor: starterConvA, named: strings.ToUpper(starterConvB), boundConv: starterConvB, runner: &restartFreshRunner{},
+			cursor: starterConvA, named: strings.ToUpper(starterConvB), boundConv: starterConvB, runner: liveRunner(),
 			wantResolved: 0,
 			wantEvent:    "v2.new_session.invalid_conv_id",
 		},
@@ -189,15 +225,34 @@ func TestActiveSessionStarter_InertArms(t *testing.T) {
 			// non-distinction is also what denies a paired-but-hostile client an
 			// existence oracle over conversation ids.
 			name:   "named id is well-shaped but unknown or unbound",
-			cursor: starterConvA, named: starterConvB, boundConv: starterConvA, runner: &restartFreshRunner{},
+			cursor: starterConvA, named: starterConvB, boundConv: starterConvA, runner: liveRunner(),
 			wantResolved: 1,
 			wantEvent:    "v2.new_session.no_bound_session",
 		},
 		{
-			name:   "named conversation has no live child",
+			// The CAPABILITY arm: a runner that does not expose RestartFresh at all.
+			// Production has no such runner behind a bound conversation — streamRunner
+			// exposes it unconditionally — so this row guards startFreshRunner's own
+			// inert return rather than AC-4's fourth case. It is NOT the no-live-child
+			// row, and conflating the two is precisely how that case shipped broken.
+			name:   "bound runner does not expose RestartFresh",
 			cursor: starterConvA, named: starterConvB, boundConv: starterConvB, runner: baseRunner{},
 			wantResolved: 1,
 			wantEvent:    "v2.new_session.no_restart",
+		},
+		{
+			// AC-4's fourth row, in the shape production actually produces: a real
+			// runner — RestartFresh and all — whose child has never spawned, which since
+			// #2085 is the natural state of a conversation created but never messaged.
+			// Rotating it rekeys the pool, persists sessions.json, rebinds the
+			// conversation and broadcasts a session_transition for a chat that has never
+			// had a turn, while RestartFresh spawns nothing. wantResolved is 1 and
+			// rotatedFrom must stay empty: the refusal lands AFTER the registry resolves
+			// it (the conversation is genuinely known and bound) and BEFORE any rotation.
+			name:   "named conversation is bound but has no live child",
+			cursor: starterConvA, named: starterConvB, boundConv: starterConvB, runner: &restartFreshRunner{},
+			wantResolved: 1,
+			wantEvent:    "v2.new_session.no_live_child",
 		},
 	}
 	for _, tc := range cases {
@@ -276,7 +331,7 @@ func TestActiveSessionStarter_RotateErrorPropagates(t *testing.T) {
 
 	wantErr := errors.New("session vanished between resolve and rotate")
 	p := &starterProbe{}
-	s := p.newStarter(starterConvA, starterConvB, &restartFreshRunner{}, wantErr)
+	s := p.newStarter(starterConvA, starterConvB, liveRunner(), wantErr)
 
 	if err := s.StartNewSession(starterConvB); !errors.Is(err, wantErr) {
 		t.Fatalf("StartNewSession = %v, want %v", err, wantErr)

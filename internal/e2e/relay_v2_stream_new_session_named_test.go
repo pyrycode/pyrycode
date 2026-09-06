@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakephone"
 	"github.com/pyrycode/pyrycode/internal/e2e/internal/fakerelay"
+	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
@@ -24,16 +26,24 @@ import (
 // THE SEQUENCE IS THE TEST, and each step exists to defeat a way this could pass
 // while broken:
 //
-//	M1  send to A          — A's child is live and the cursor is stamped to A.
-//	M2  create B           — since #2085 create_conversation binds B's session but
-//	                         does NOT spawn its child.
-//	M3  send to B          — brings B's child up. Without it B would be bound with
-//	                         no live child, the named rotation would be inert, and
-//	                         every assertion below would pass vacuously.
-//	M4  send to A again    — moves the cursor BACK to A. Without it the cursor is
-//	                         already on B and a daemon that ignored the named id
-//	                         would rotate B anyway, which is the defect passing.
-//	M5  new_session for B  — the frame under test.
+//	M1   send to A          — A's child is live and the cursor is stamped to A.
+//	M2   create B           — since #2085 create_conversation binds B's session but
+//	                          does NOT spawn its child.
+//	M2.5 new_session for B  — AC-4's fourth row: the frame under test, sent while B
+//	                          has no live child. Must be inert.
+//	M3   send to B          — brings B's child up. Without it B would be bound with
+//	                          no live child, the named rotation would be inert, and
+//	                          every assertion below would pass vacuously.
+//	M4   send to A again    — moves the cursor BACK to A. Without it the cursor is
+//	                          already on B and a daemon that ignored the named id
+//	                          would rotate B anyway, which is the defect passing.
+//	M5   new_session for B  — the frame under test, now that B can be acted on.
+//
+// M2.5 and M5 send the SAME frame naming the SAME conversation, with M3 as the only
+// variable between them, and each one's verdict is what makes the other's mean
+// something: M5's rotation cannot be an unconditional one, because the identical
+// frame changed nothing at M2.5, and M2.5's refusal cannot be a dead wire, because
+// the identical frame rotates at M5.
 //
 // The two assertions are a matched pair and neither alone would do. B's
 // session_transition carrying B's conversation id proves the NAMED conversation
@@ -56,6 +66,7 @@ func TestRelayV2_StreamNewSessionNamedConversationRotatesThatOne(t *testing.T) {
 		createBReqID     = uint64(2100)
 		sendToBReqID     = uint64(2101)
 		sendBackToAReqID = uint64(2102)
+		inertReqID       = uint64(2103)
 	)
 
 	testStart := time.Now()
@@ -218,6 +229,64 @@ func TestRelayV2_StreamNewSessionNamedConversationRotatesThatOne(t *testing.T) {
 	}
 	t.Logf("[t=%s] M2: minted conversation B = %s", elapsed(), convB)
 
+	// --- M2.5 (AC-4, fourth row): the SAME frame M5 sends, sent while B has no live
+	// child, must be inert. This is the exact state #2085 created and the one the
+	// first cut of #2099 got wrong: create_conversation binds and persists B's
+	// session but defers the spawn to B's first message, so B resolves through the
+	// registry perfectly well and only the child is missing. Rotating it anyway
+	// rekeys the pool, rewrites sessions.json, rebinds the conversation and tells
+	// every interactive client to render a session delimiter for a chat that has
+	// never had a turn — while RestartFresh spawns nothing, so there is no fresh
+	// session to show for any of it.
+	//
+	// The verdict is read as a PAIR, because either half alone is worthless. The
+	// registry proves the frame did nothing; the daemon's own record proves it
+	// ARRIVED, resolved B and chose the inert arm, without which an unmoved registry
+	// would be equally explained by a frame that never got there.
+	//
+	// They run in that order so the failure names the defect rather than its shadow:
+	// a daemon missing this guard rotates within milliseconds of the send, so the
+	// registry check fires first and reports the rotation itself. Ordered the other
+	// way, the same run fails on a missing log line and leaves the reader to work out
+	// what happened instead.
+	//
+	// The record, not a wire receive, is the arrival proof for a structural reason:
+	// new_session is fire-and-forget, so a refusal has no reply to wait for, and a
+	// receive that timed out would take the phone conn down with it (waitForLog's own
+	// doc records that constraint). The daemon runs under -pyry-verbose, so its DEBUG
+	// records reach h.Stderr.
+	preB, ok := readEntryByLabel(regPath, convB)
+	if !ok {
+		t.Fatalf("M2.5: conversation B (%s) has no session entry after create_conversation; the "+
+			"inertness under test would be about an unbound id instead of a childless one\nfile:\n%s",
+			convB, mustReadFile(t, regPath))
+	}
+	sendNewSessionFrameFor(t, phoneA, sendA, inertReqID, convB)
+
+	// A rotation persists sessions.json under Pool.mu BEFORE it notifies anyone, so an
+	// unmoved id is a direct observable rather than a race against the broadcast.
+	// Polled rather than sampled once: a wrong rotation would be racing this read.
+	// Conversation A is covered by M4's pre-rotation baseline below, which runs after
+	// this and would catch a frame that acted on the cursor instead.
+	assertBStill := func(stage string) {
+		t.Helper()
+		postB, ok := readEntryByLabel(regPath, convB)
+		if !ok || postB.ID != preB.ID {
+			t.Fatalf("M2.5 (AC-4, %s): conversation B's persisted session id moved %q → %q while B had "+
+				"no live child. A named id the daemon cannot act on must be inert: no rotation, no "+
+				"respawn.\nfile:\n%s", stage, preB.ID, postB.ID, mustReadFile(t, regPath))
+		}
+	}
+	settleB := time.Now().Add(time.Second)
+	for time.Now().Before(settleB) {
+		assertBStill("settling")
+		time.Sleep(50 * time.Millisecond)
+	}
+	waitForLogLineAll(t, h.Stderr, []string{"v2.new_session.no_live_child", convB}, 15*time.Second)
+	assertBStill("after the refusal was recorded")
+	t.Logf("[t=%s] M2.5: the new_session naming childless B was refused; its session is still %s",
+		elapsed(), preB.ID)
+
 	// --- M3: bring B's child up. Since #2085 create_conversation binds B's session
 	// but defers the child to B's first message, so without this B would be bound with
 	// no live child and the named rotation would be correctly inert.
@@ -238,35 +307,29 @@ func TestRelayV2_StreamNewSessionNamedConversationRotatesThatOne(t *testing.T) {
 			"assertion below would be meaningless\nfile:\n%s", preA.ID, initialUUID, mustReadFile(t, regPath))
 	}
 
-	// --- M5: new_session NAMING B. Re-sent on a short cadence like the bare-path
-	// sibling: the frame is fire-and-forget and drops silently on a detached session,
-	// so a single send would make this test timing-dependent rather than behavioural.
-	// Fresh envelope ids keep the send CipherState nonce advancing.
-	var reqID uint64 = 3000
-	sendNewSessionFrameFor(t, phoneA, sendA, reqID, convB)
-	reqID++
+	// --- M5: new_session NAMING B, sent ONCE and then waited out on a single
+	// deadline. The bare-path sibling re-sends on a cadence because its frame can
+	// drop silently on a detached session, but that shape is unusable here: a
+	// nextEnv that reaches its deadline closes the phone conn (see waitForLog's doc),
+	// so a cadence that ever went quiet would kill the wire and then report the
+	// death as a send failure. This session is demonstrably attached — four
+	// milestones have round-tripped on it and M2.5 watched this very frame type
+	// reach the handler — so one send is enough and the deadline is the only clock.
+	const m5ReqID = uint64(3000)
+	sendNewSessionFrameFor(t, phoneA, sendA, m5ReqID, convB)
 
 	var (
 		sawTransition bool
 		newBSessionID string
-		resend        = time.Now().Add(500 * time.Millisecond)
 		m5Deadline    = time.Now().Add(20 * time.Second)
 	)
 	for !sawTransition {
-		if time.Now().After(resend) {
-			sendNewSessionFrameFor(t, phoneA, sendA, reqID, convB)
-			reqID++
-			resend = time.Now().Add(500 * time.Millisecond)
-		}
-		env, ok := nextEnv(minTime(resend, m5Deadline))
+		env, ok := nextEnv(m5Deadline)
 		if !ok {
-			if time.Now().After(m5Deadline) {
-				t.Fatalf("M5 (AC-1/AC-2): never observed a session_transition for conversation B (%s) after a "+
-					"new_session naming it. Either the named id never reached the starter, or it was refused "+
-					"as unknown/unbound and the frame went inert.\nsessions.json:\n%s",
-					convB, mustReadFile(t, regPath))
-			}
-			continue // resend cadence, not the overall deadline
+			t.Fatalf("M5 (AC-1/AC-2): never observed a session_transition for conversation B (%s) after a "+
+				"new_session naming it. Either the named id never reached the starter, or it was refused "+
+				"as unknown/unbound and the frame went inert.\nsessions.json:\n%s",
+				convB, mustReadFile(t, regPath))
 		}
 		if env.Type != protocol.TypeSessionTransition {
 			continue
@@ -317,9 +380,58 @@ func TestRelayV2_StreamNewSessionNamedConversationRotatesThatOne(t *testing.T) {
 	t.Logf("[t=%s] M6: conversation A's session is still %s — the cursor's conversation was untouched", elapsed(), initialUUID)
 }
 
-// minTime returns the earlier of two deadlines. The M5 loop waits on whichever of
-// the resend cadence and the overall deadline comes first, so a quiet wire still
-// re-sends rather than blocking to the end of the test.
+// sendNewSessionFrameFor is sendNewSessionFrame carrying a conversation_id (#2099):
+// the frame names the conversation to restart instead of leaving the daemon to pick
+// its cursor's. It lives beside its one caller rather than in the shared-helpers
+// file, whose grouping is historical (helpers orphaned by #1348's deletions) rather
+// than thematic. Its bare twin stays there and stays exercised as itself: that is
+// the shape an un-upgraded client sends.
+func sendNewSessionFrameFor(t *testing.T, phone *fakephone.Client, cs *noise.CipherState, reqID uint64, conversationID string) {
+	t.Helper()
+	env, err := json.Marshal(protocol.Envelope{
+		ID:   reqID,
+		Type: protocol.TypeNewSession,
+		TS:   time.Now().UTC(),
+		Payload: mustJSON(t, protocol.NewSessionPayload{
+			ConversationID: conversationID,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("marshal new_session envelope: %v", err)
+	}
+	cipher, err := cs.Encrypt(env)
+	if err != nil {
+		t.Fatalf("seal new_session envelope: %v", err)
+	}
+	sendNoiseMsg(t, phone, cipher)
+}
+
+// readEntryByLabel returns the sessions.json entry a conversation's session is
+// persisted under. The pool labels a minted session with the conversation id that
+// asked for it, so the label is the only handle a test has on a non-bootstrap
+// session's id. Returns ok == false for a missing, unparseable or label-less file,
+// which callers treat as a failure rather than a retry: by the time this is called
+// the conversation has already been created and acknowledged over the wire.
+func readEntryByLabel(regPath, label string) (registryEntry, bool) {
+	data, err := os.ReadFile(regPath)
+	if err != nil {
+		return registryEntry{}, false
+	}
+	var reg registryFile
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return registryEntry{}, false
+	}
+	for _, e := range reg.Sessions {
+		if e.Label == label {
+			return e, true
+		}
+	}
+	return registryEntry{}, false
+}
+
+// minTime returns the earlier of two deadlines. The M2.5 and M5 loops wait on
+// whichever of the resend cadence and the overall deadline comes first, so a quiet
+// wire still re-sends rather than blocking to the end of the window.
 func minTime(a, b time.Time) time.Time {
 	if a.Before(b) {
 		return a

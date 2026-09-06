@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -195,7 +194,7 @@ func TestV2Session_NewSession_HandsNamedConversationToSeam(t *testing.T) {
 		want    string
 	}{
 		{"named conversation reaches the seam verbatim",
-			mustPayload(t, protocol.NewSessionPayload{ConversationID: namedConv}), namedConv},
+			mustMarshal(t, protocol.NewSessionPayload{ConversationID: namedConv}), namedConv},
 		{"absent payload is the cursor path",
 			nil, ""},
 		{"empty object is the cursor path",
@@ -282,7 +281,7 @@ func TestV2Session_NewSession_NamedConversationStillCapabilityGated(t *testing.T
 	frames <- sealAppFrameConn(t, send, "c-plain", protocol.Envelope{
 		Type: protocol.TypeNewSession,
 		TS:   time.Now().UTC(),
-		Payload: mustPayload(t, protocol.NewSessionPayload{
+		Payload: mustMarshal(t, protocol.NewSessionPayload{
 			ConversationID: "22222222-2222-4222-8222-222222222222",
 		}),
 	})
@@ -293,15 +292,4 @@ func TestV2Session_NewSession_NamedConversationStillCapabilityGated(t *testing.T
 		t.Errorf("StartNewSession calls = %q, want none: naming a conversation must not bypass the "+
 			"interactive capability gate", got)
 	}
-}
-
-// mustPayload marshals a payload for a test frame, failing the test rather than
-// returning an error the caller would have to thread through a table.
-func mustPayload(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal payload: %v", err)
-	}
-	return b
 }
