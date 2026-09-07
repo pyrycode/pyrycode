@@ -19,7 +19,8 @@ type Device struct {
     // #702 — authorizes THIS device to ANSWER a remote permission modal.
     AllowRemotePermissions bool `json:"allow_remote_permissions,omitempty"`
 
-    // #1527 — deadline for an UNREDEEMED pairing record; inert until #1529.
+    // #1527 — deadline for an UNREDEEMED pairing record; enforced by
+    // Registry.Validate since #1529 (see features/devices-registry.md).
     RedeemBy time.Time `json:"redeem_by,omitzero"`
 }
 
@@ -147,7 +148,7 @@ No fuzz target — the input space is fully covered by the table. No `-race` tes
 - **Auth wiring.** Phase 3: the WS-handshake auth predicate `(*Registry).Validate(plain) (Device, bool)` is delivered by #210 — see [`features/devices-registry.md`](devices-registry.md). The WS handler that calls it (returning `auth.invalid_token` per `protocol-mobile.md:97-98` on a miss, advancing `LastSeenAt` durability via scheduled `Save` on a hit) is a follow-up Phase-3 ticket. `VerifyToken` is intentionally NOT used by `Validate` — see the registry doc and #210's "Why not iterate `VerifyToken` over all devices?" for the reasoning.
 - **`pyry pair revoke <name>`.** Per-device revocation falls out of removing the row; structurally supported (each row is independent).
 - **`Device.TokenHashPrefix() string` for `pair list` UI.** The display rule lives in `protocol-mobile.md:663`; defer to whichever ticket builds the UI.
-- **Redemption-deadline enforcement.** #1527 adds `RedeemBy` and stamps it at mint; nothing reads it. #1528 records the first redemption on disk; #1529 rejects an unredeemed record past its deadline at `Validate` and the v2 handshake. See [`codebase/1527.md`](../codebase/1527.md).
+- ~~**Redemption-deadline enforcement.**~~ Delivered by #1527 (mint-time `RedeemBy` stamp) → #1528 (`ClearRedeemBy`, the relay's redemption persist) → #1529 (`Validate` rejects an unredeemed record past its deadline, and the v2 handshake gives that rejection the same wire shape as an unknown token). See [`features/devices-registry.md`](devices-registry.md) § `Validate`.
 
 ## Related
 

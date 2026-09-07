@@ -9,8 +9,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +34,7 @@ import (
 func TestRelayV2_Handshake(t *testing.T) {
 	t.Run("happy_path", testV2HappyPath)
 	t.Run("bad_token_4401", testV2BadToken)
+	t.Run("expired_token_4401", testV2ExpiredToken)
 	t.Run("ik_reject_4426", testV2IKReject)
 	t.Run("encrypted_echo_round_trip", testV2EncryptedEchoRoundTrip)
 	t.Run("tampered_noise_msg_4421", testV2TamperedNoiseMsg_4421)
@@ -265,6 +268,70 @@ func testV2BadToken(t *testing.T) {
 	h := startV2Harness(t, reg, nil)
 	phone := h.dialPhone(t)
 
+	assertRejectedAsInvalidToken(t, h, phone, "definitely-not-paired")
+}
+
+// testV2ExpiredToken is #1529's AC-3 and AC-4: a token the registry DOES know,
+// whose redemption window has elapsed, is refused exactly as an unknown one is.
+// It runs the same assertRejectedAsInvalidToken the unknown-token subtest above
+// runs, which is what makes "rejected identically" structural — the two cases
+// cannot drift apart on close code, error code, message or frame order without
+// the shared helper failing for both.
+//
+// The server-side discriminator AC-4 asks for is the log, so this subtest swaps
+// the manager's logger for a captured one. A client-visible difference would
+// turn the handshake into an oracle confirming that a photographed QR was once
+// real; a log line reaches only the operator.
+func testV2ExpiredToken(t *testing.T) {
+	const token = "expired-window-token"
+
+	expired := time.Now().UTC().Add(-time.Hour)
+	reg := &devices.Registry{}
+	reg.Add(devices.Device{
+		TokenHash: devices.HashToken(token),
+		Name:      "photographed-qr",
+		PairedAt:  expired.Add(-devices.RedemptionWindow),
+		RedeemBy:  expired,
+	})
+
+	logs := &safeBuffer{}
+	h := startV2Harness(t, reg, nil, func(cfg *relay.V2SessionConfig) {
+		cfg.Logger = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	})
+	phone := h.dialPhone(t)
+
+	assertRejectedAsInvalidToken(t, h, phone, token)
+
+	// The reject line is written before both frames the helper just observed,
+	// so it is on the buffer by now.
+	got := logs.String()
+	if !strings.Contains(got, "v2.handshake.reject.redemption_window_elapsed") {
+		t.Errorf("daemon log missing the elapsed-window event; got:\n%s", got)
+	}
+	if strings.Contains(got, "v2.handshake.reject.invalid_token") {
+		t.Errorf("daemon log used the unknown-token event; the two must be distinguishable server-side. got:\n%s", got)
+	}
+	// AC-4: the line carries neither the plain token nor the token hash.
+	if strings.Contains(got, token) {
+		t.Errorf("daemon log leaked the plain token; got:\n%s", got)
+	}
+	if strings.Contains(got, devices.HashToken(token)) {
+		t.Errorf("daemon log leaked the token hash; got:\n%s", got)
+	}
+}
+
+// assertRejectedAsInvalidToken drives a full Noise_IK handshake presenting
+// token and asserts the entire observable refusal: noise_resp first (so the
+// AEAD channel exists), then a noise_msg whose sealed envelope decodes to
+// auth.invalid_token carrying relay.MsgInvalidToken, then the 4401 WS close.
+//
+// Shared by the unknown-token and elapsed-window subtests so #1529's AC-3
+// ("rejected identically ... same close code, same error code, same message,
+// same frame ordering") holds by construction rather than by two sets of
+// assertions that happen to agree.
+func assertRejectedAsInvalidToken(t *testing.T, h *v2Harness, phone *fakephone.Client, token string) {
+	t.Helper()
+
 	initPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("phone keygen: %v", err)
@@ -273,7 +340,7 @@ func testV2BadToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewInitiator: %v", err)
 	}
-	initMsg, err := initiator.WriteInit(buildHelloEarly(t, "definitely-not-paired"))
+	initMsg, err := initiator.WriteInit(buildHelloEarly(t, token))
 	if err != nil {
 		t.Fatalf("WriteInit: %v", err)
 	}
@@ -316,6 +383,9 @@ func testV2BadToken(t *testing.T) {
 	}
 	if ep.Code != protocol.CodeAuthInvalidToken {
 		t.Errorf("error code = %q, want %q", ep.Code, protocol.CodeAuthInvalidToken)
+	}
+	if ep.Message != relay.MsgInvalidToken {
+		t.Errorf("error message = %q, want %q", ep.Message, relay.MsgInvalidToken)
 	}
 
 	// Frame 3: the WS close.

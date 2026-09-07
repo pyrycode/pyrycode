@@ -19,9 +19,9 @@ func TestRegistry_Validate_Hit(t *testing.T) {
 	})
 
 	before := time.Now()
-	got, ok := r.Validate("plain-1")
-	if !ok {
-		t.Fatalf("ok = false, want true")
+	got, res := r.Validate("plain-1")
+	if res != ValidateAccepted {
+		t.Fatalf("result = %v, want ValidateAccepted", res)
 	}
 	if got.Name != "alice" {
 		t.Errorf("Name = %q, want %q", got.Name, "alice")
@@ -51,13 +51,18 @@ func TestRegistry_Validate_Hit(t *testing.T) {
 	}
 }
 
-// TestRegistry_Validate_IgnoresExpiredRedeemBy pins the inertness of the
-// redemption deadline at the auth predicate: Validate is a pure hash lookup
-// this slice, so a record whose RedeemBy is already an hour in the past still
-// authenticates. The fixture's own precondition is asserted too — a silently
-// zero RedeemBy would pass this test and any future enforcement check alike,
-// making the pin vacuous.
-func TestRegistry_Validate_IgnoresExpiredRedeemBy(t *testing.T) {
+// TestRegistry_Validate_RejectsElapsedRedemptionWindow is AC-1: a record whose
+// redemption deadline is already an hour past no longer authenticates, and the
+// refusal leaves LastSeenAt exactly where it was — an expired token must not go
+// on refreshing the one column that would betray it as never-scanned in
+// `pyry pair list`. It carries AC-5's witness too: validation removes nothing,
+// so the row is still there for `pair list` to render.
+//
+// It inverts #1527's inertness pin, keeping that pin's non-vacuity assertions:
+// a silently zero RedeemBy would make the rejection prove nothing. They read the
+// row back off the registry rather than off the returned Device, because a
+// refusal returns the zero Device by design.
+func TestRegistry_Validate_RejectsElapsedRedemptionWindow(t *testing.T) {
 	t.Parallel()
 	when := mustParseTime(t, "2020-01-01T00:00:00Z")
 	expired := time.Now().Add(-time.Hour)
@@ -70,18 +75,110 @@ func TestRegistry_Validate_IgnoresExpiredRedeemBy(t *testing.T) {
 		RedeemBy:   expired,
 	})
 
-	got, ok := r.Validate("plain-expired")
-	if !ok {
-		t.Fatalf("ok = false, want true (RedeemBy is inert this slice)")
+	got, res := r.Validate("plain-expired")
+	if res != ValidateWindowElapsed {
+		t.Fatalf("result = %v, want ValidateWindowElapsed", res)
 	}
-	if got.Name != "stale" {
-		t.Errorf("Name = %q, want %q", got.Name, "stale")
+	if got != (Device{}) {
+		t.Errorf("Device = %+v, want the zero Device on a refusal", got)
 	}
-	if got.RedeemBy.IsZero() {
-		t.Fatalf("fixture RedeemBy is the zero value; the pin would hold vacuously")
+
+	rows := r.List()
+	if len(rows) != 1 {
+		t.Fatalf("List() has %d rows, want 1 — validation must never remove a record", len(rows))
 	}
-	if !got.RedeemBy.Before(time.Now()) {
-		t.Errorf("fixture RedeemBy = %v, want a deadline already in the past", got.RedeemBy)
+	if !rows[0].LastSeenAt.Equal(when) {
+		t.Errorf("LastSeenAt = %v, want the untouched %v", rows[0].LastSeenAt, when)
+	}
+	if rows[0].RedeemBy.IsZero() {
+		t.Fatalf("fixture RedeemBy is the zero value; the rejection would hold vacuously")
+	}
+	if !rows[0].RedeemBy.Before(time.Now()) {
+		t.Errorf("fixture RedeemBy = %v, want a deadline already in the past", rows[0].RedeemBy)
+	}
+}
+
+// TestRegistry_Validate_AcceptsUnelapsedRedemptionWindow is AC-2, the other
+// side of the enforcement: a deadline still in the future authenticates, and a
+// zero deadline authenticates however long ago the device was paired. The zero
+// arm covers both populations that carry it — a record written before the field
+// existed, and a device whose deadline #1528's recordRedemption already cleared
+// — so an operator's existing pairings survive the upgrade.
+//
+// Acceptance must still advance LastSeenAt, which is what makes the untouched
+// LastSeenAt asserted by the rejection test above a real distinction rather than
+// a predicate that never stamps at all.
+func TestRegistry_Validate_AcceptsUnelapsedRedemptionWindow(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2020-01-01T00:00:00Z")
+
+	tests := []struct {
+		name     string
+		redeemBy time.Time
+	}{
+		{name: "deadline still in the future", redeemBy: time.Now().Add(time.Hour)},
+		{name: "no deadline (pre-field record, or already redeemed)", redeemBy: time.Time{}},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			r.Add(Device{
+				TokenHash:  HashToken("plain-live"),
+				Name:       "live",
+				PairedAt:   when,
+				LastSeenAt: when,
+				RedeemBy:   tc.redeemBy,
+			})
+
+			got, res := r.Validate("plain-live")
+			if res != ValidateAccepted {
+				t.Fatalf("result = %v, want ValidateAccepted", res)
+			}
+			if got.Name != "live" {
+				t.Errorf("Name = %q, want %q", got.Name, "live")
+			}
+			if !got.LastSeenAt.After(when) {
+				t.Errorf("LastSeenAt = %v, want advanced past %v on acceptance", got.LastSeenAt, when)
+			}
+			if !got.RedeemBy.Equal(tc.redeemBy) {
+				t.Errorf("RedeemBy = %v, want the untouched %v — Validate must not clear it", got.RedeemBy, tc.redeemBy)
+			}
+		})
+	}
+}
+
+// TestDevice_RedemptionWindowElapsed pins the boundary the exported path cannot
+// reach without a fake clock: what happens at exactly RedeemBy. The deadline is
+// exclusive — at the instant itself the record has already stopped being
+// acceptable — so the predicate is `now >= RedeemBy`, not `now > RedeemBy`.
+func TestDevice_RedemptionWindowElapsed(t *testing.T) {
+	t.Parallel()
+	deadline := mustParseTime(t, "2026-01-01T00:00:00Z")
+
+	tests := []struct {
+		name     string
+		redeemBy time.Time
+		now      time.Time
+		want     bool
+	}{
+		{name: "no deadline never elapses", redeemBy: time.Time{}, now: deadline.Add(100 * 365 * 24 * time.Hour), want: false},
+		{name: "before the deadline", redeemBy: deadline, now: deadline.Add(-time.Nanosecond), want: false},
+		{name: "exactly at the deadline", redeemBy: deadline, now: deadline, want: true},
+		{name: "past the deadline", redeemBy: deadline, now: deadline.Add(time.Nanosecond), want: true},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := Device{RedeemBy: tc.redeemBy}
+			if got := d.redemptionWindowElapsed(tc.now); got != tc.want {
+				t.Errorf("redemptionWindowElapsed(%v) = %v, want %v", tc.now, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -127,9 +224,9 @@ func TestRegistry_Validate_Miss(t *testing.T) {
 			r := &Registry{}
 			tc.setup(r)
 			before := r.List()
-			got, ok := r.Validate(tc.plain)
-			if ok {
-				t.Errorf("ok = true, want false")
+			got, res := r.Validate(tc.plain)
+			if res != ValidateUnknownToken {
+				t.Errorf("result = %v, want ValidateUnknownToken", res)
 			}
 			if got != (Device{}) {
 				t.Errorf("device = %+v, want zero Device", got)
@@ -229,9 +326,9 @@ func TestRegistry_Validate_ConcurrentSameToken(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			d, ok := r.Validate("plain-1")
-			if !ok {
-				t.Errorf("[%d] ok = false, want true", i)
+			d, res := r.Validate("plain-1")
+			if res != ValidateAccepted {
+				t.Errorf("[%d] result = %v, want ValidateAccepted", i, res)
 				return
 			}
 			seen[i] = d.LastSeenAt
