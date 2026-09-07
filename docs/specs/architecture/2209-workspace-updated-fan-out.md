@@ -158,3 +158,17 @@ Verification per § B2: `go test -race ./cmd/pyry/... ./internal/relay/... ./int
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — implementation
+
+The design landed as planned; the two entries below record where the plan's own claims moved.
+
+**Sizing: the total-written-work estimate was low by about a quarter.** The plan predicted ~800 lines including itself and flagged the line as at its ceiling. Measured: 839 insertions across 8 files plus a 173-line plan, ~1010 in total. The two tests are where it went — the emitter's at 358 against ~290 projected, the handler's additions at 196 against ~130 — because both are table-driven over cases the acceptance criteria name individually, and each row costs its comment as well as its data. Every other line of the boundary held with room: 4 production source files, 2 call sites for the changed signature, 1 new exported type, 5 acceptance criteria, no new reject branches. The floor argument in § Context is unchanged and is why this shipped as one ticket rather than being re-split at implementation time: the only seam available is emitter / wiring, and an emitter nothing calls cannot be verified on its own. Recorded here rather than argued away — a builder sizing the next slice of this family should read ~1000, not ~625, for a copy-an-emitter-and-wire-it ticket with per-AC test tables.
+
+**Open questions, resolved.**
+
+1. *Does the announcement fire when `c.Reply` returns an error?* Yes, as designed. The reply's error is captured into `replyErr`, the fan-out runs, and `replyErr` is returned unchanged — so the handler's contract with the dispatcher is byte-identical to before this slice.
+2. *Named `WorkspaceAnnouncer` type or an inline func parameter?* Named, as designed. It carries the exclusion contract, the per-conn-not-per-device rule and the nil-means-no-fan-out rule in one doc comment that both call sites can be read against.
+3. *Does the guard map's `TypeWorkspaceUpdated` entry need an assertion change?* No — confirmed rather than assumed. The value moved from `"reply"` to `"reply+push"` and the entry moved out of the reply block to sit beside `TypeConversationUpdated`; `go test ./cmd/pyry/` stayed green through the edit, exactly as #2207's own comment predicted.

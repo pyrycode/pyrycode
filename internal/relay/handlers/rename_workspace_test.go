@@ -119,10 +119,13 @@ func assertRenameWsEnvelopeShape(t *testing.T, resp protocol.RoutingEnvelope, wa
 }
 
 // runRenameWs drives the handler once and returns the single outbound envelope.
+// The announcer is nil, which is the pre-#2209 shape: every case reached through
+// here therefore also covers the nil-hook arm. Cases that need the fan-out use
+// runRenameWsAnnouncing below.
 func runRenameWs(t *testing.T, reg *conversations.Registry, regPath string, req protocol.Envelope) (protocol.RoutingEnvelope, *dispatch.Conn) {
 	t.Helper()
 	c, recv := newRenameWsConn(t)
-	h := RenameWorkspace(reg, regPath, testLogger(t))
+	h := RenameWorkspace(reg, regPath, nil, testLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -480,5 +483,196 @@ func TestRenameWorkspace_SaveFailure_StillRepliesAndKeepsInMemory(t *testing.T) 
 	if got, ok := reg.WorkspaceLabel(renameWsPath); !ok || got != renameWsLabel {
 		t.Errorf("WorkspaceLabel(%q) = (%q, %v), want (%q, true) — a Save failure must not undo the in-memory write",
 			renameWsPath, got, ok, renameWsLabel)
+	}
+}
+
+// --- #2209: the fan-out to the other connected clients ---------------------
+
+// wsAnnounceCall records one WorkspaceAnnouncer invocation. repliesOut is how
+// many envelopes the conn's outbound channel already held when the hook fired,
+// which is what pins "fan out AFTER the correlated reply" deterministically
+// rather than by reading the code.
+type wsAnnounceCall struct {
+	payload    protocol.WorkspaceUpdatedPayload
+	exclude    string
+	repliesOut int
+}
+
+// runRenameWsAnnouncing drives the handler once with a recording announcer and
+// returns every call it made alongside the single outbound envelope. The sibling
+// runRenameWs passes a nil announcer, so every test written before this slice
+// keeps covering the nil-hook arm.
+func runRenameWsAnnouncing(t *testing.T, reg *conversations.Registry, regPath string, req protocol.Envelope) ([]wsAnnounceCall, protocol.RoutingEnvelope) {
+	t.Helper()
+	out := make(chan protocol.RoutingEnvelope, 4)
+	c := dispatch.NewTestConn(renameWsConnID, out, nil)
+	var calls []wsAnnounceCall
+	announce := func(p protocol.WorkspaceUpdatedPayload, excludeConnID string) {
+		calls = append(calls, wsAnnounceCall{payload: p, exclude: excludeConnID, repliesOut: len(out)})
+	}
+	h := RenameWorkspace(reg, regPath, announce, testLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+	select {
+	case env := <-out:
+		return calls, env
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for outbound envelope")
+		return nil, protocol.RoutingEnvelope{}
+	}
+}
+
+// TestRenameWorkspace_Success_AnnouncesToTheOtherClients covers AC #1's push
+// half: a successful rename announces exactly once, carrying the same record the
+// reply carries and naming the REQUESTER'S conn as the one to skip. The emitter
+// does the skipping; the handler's whole job is to hand over the right key, and
+// the key is the conn id because that is the space relay.ActiveConn is in.
+func TestRenameWorkspace_Success_AnnouncesToTheOtherClients(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newRenameWsReg(t)
+	calls, resp := runRenameWsAnnouncing(t, reg, regPath, renameWsRequest(t, protocol.RenameWorkspacePayload{
+		Path:  renameWsPath,
+		Label: renameWsPtr(renameWsLabel),
+	}))
+
+	env := assertRenameWsEnvelopeShape(t, resp, protocol.TypeWorkspaceUpdated)
+	if len(calls) != 1 {
+		t.Fatalf("announced %d times, want exactly 1", len(calls))
+	}
+	if calls[0].exclude != renameWsConnID {
+		t.Errorf("exclusion key = %q, want the requester's own conn id %q — it already holds the "+
+			"correlated reply", calls[0].exclude, renameWsConnID)
+	}
+	if calls[0].payload.Path != renameWsPath {
+		t.Errorf("announced Path = %q, want %q", calls[0].payload.Path, renameWsPath)
+	}
+	if calls[0].payload.Label == nil || *calls[0].payload.Label != renameWsLabel {
+		t.Errorf("announced Label = %v, want pointer to verbatim %q", calls[0].payload.Label, renameWsLabel)
+	}
+
+	// The announced record and the replied one are the same record: a client that
+	// learns of the rename by push must see what the requester saw.
+	var replied protocol.WorkspaceUpdatedPayload
+	if err := json.Unmarshal(env.Payload, &replied); err != nil {
+		t.Fatalf("unmarshal workspace_updated payload: %v", err)
+	}
+	if replied.Path != calls[0].payload.Path {
+		t.Errorf("replied Path %q != announced Path %q", replied.Path, calls[0].payload.Path)
+	}
+	if replied.Label == nil || *replied.Label != *calls[0].payload.Label {
+		t.Errorf("replied Label %v != announced Label %v", replied.Label, calls[0].payload.Label)
+	}
+
+	// AC #4's ordering clause: the reply was already on its way out when the hook
+	// fired, so nothing the fan-out does can precede or displace it.
+	if calls[0].repliesOut != 1 {
+		t.Errorf("the conn held %d outbound envelopes when the announcement fired, want 1 — the "+
+			"fan-out runs after the correlated reply", calls[0].repliesOut)
+	}
+}
+
+// TestRenameWorkspace_ClearedLabel_AnnouncesANullLabel covers AC #3: clearing
+// fans out the same way a set does, carrying the nil the wire renders as null.
+// The clear travels through the SAME hook rather than a quieter path — other
+// clients need to unname the workspace as much as they need to name it.
+func TestRenameWorkspace_ClearedLabel_AnnouncesANullLabel(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newRenameWsReg(t)
+	reg.SetWorkspaceLabel(renameWsPath, renameWsPtr(renameWsLabel))
+	calls, resp := runRenameWsAnnouncing(t, reg, regPath, renameWsRequest(t, protocol.RenameWorkspacePayload{
+		Path:  renameWsPath,
+		Label: nil,
+	}))
+
+	assertRenameWsEnvelopeShape(t, resp, protocol.TypeWorkspaceUpdated)
+	if len(calls) != 1 {
+		t.Fatalf("announced %d times, want exactly 1 — a clear fans out like a set", len(calls))
+	}
+	if calls[0].payload.Label != nil {
+		t.Errorf("announced Label = %q, want nil", *calls[0].payload.Label)
+	}
+	if calls[0].payload.Path != renameWsPath {
+		t.Errorf("announced Path = %q, want %q", calls[0].payload.Path, renameWsPath)
+	}
+}
+
+// TestRenameWorkspace_Rejects_AnnounceNothing pins the structural property every
+// reject branch shares with the store: each returns before the hook, so a refused
+// rename tells no other client anything. A fan-out on a reject would publish a
+// label this daemon never stored.
+func TestRenameWorkspace_Rejects_AnnounceNothing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		req  func(t *testing.T) protocol.Envelope
+	}{
+		{"malformed", func(t *testing.T) protocol.Envelope {
+			return protocol.Envelope{
+				ID:      renameWsRequestID,
+				Type:    protocol.TypeRenameWorkspace,
+				TS:      time.Now().UTC(),
+				Payload: []byte(`{"path":`),
+			}
+		}},
+		{"blank label", func(t *testing.T) protocol.Envelope {
+			return renameWsRequest(t, protocol.RenameWorkspacePayload{
+				Path: renameWsPath, Label: renameWsPtr("   "),
+			})
+		}},
+		{"label too long", func(t *testing.T) protocol.Envelope {
+			return renameWsRequest(t, protocol.RenameWorkspacePayload{
+				Path:  renameWsPath,
+				Label: renameWsPtr(strings.Repeat("x", protocol.MaxWorkspaceLabelBytes+1)),
+			})
+		}},
+		{"not found", func(t *testing.T) protocol.Envelope {
+			return renameWsRequest(t, protocol.RenameWorkspacePayload{
+				Path: "/work/nonexistent", Label: renameWsPtr(renameWsLabel),
+			})
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg, regPath := newRenameWsReg(t)
+			calls, resp := runRenameWsAnnouncing(t, reg, regPath, tc.req(t))
+
+			assertRenameWsEnvelopeShape(t, resp, protocol.TypeError)
+			if len(calls) != 0 {
+				t.Errorf("a refused rename announced %d times, want 0 — nothing was stored, so there "+
+					"is nothing to tell another client", len(calls))
+			}
+		})
+	}
+}
+
+// TestRenameWorkspace_NilAnnounce_LeavesTheOperationUnchanged covers AC #4's
+// nil-hook clause: a handler built without a fan-out stores, persists and replies
+// exactly as it did before this slice. The whole pre-#2209 suite runs this way
+// through runRenameWs; this names the property so it cannot be lost by accident.
+func TestRenameWorkspace_NilAnnounce_LeavesTheOperationUnchanged(t *testing.T) {
+	t.Parallel()
+	reg, regPath := newRenameWsReg(t)
+	c, recv := newRenameWsConn(t)
+	h := RenameWorkspace(reg, regPath, nil, testLogger(t))
+	if err := h(context.Background(), c, renameWsRequest(t, protocol.RenameWorkspacePayload{
+		Path:  renameWsPath,
+		Label: renameWsPtr(renameWsLabel),
+	})); err != nil {
+		t.Fatalf("handler with a nil announcer returned %v, want nil", err)
+	}
+
+	assertRenameWsEnvelopeShape(t, recv(), protocol.TypeWorkspaceUpdated)
+	if got, ok := reg.WorkspaceLabel(renameWsPath); !ok || got != renameWsLabel {
+		t.Errorf("stored label = (%q, %v), want (%q, true)", got, ok, renameWsLabel)
+	}
+	// Persisted, not just held: a nil hook must not have skipped the eager Save.
+	reloaded, err := conversations.Load(regPath)
+	if err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	if got, ok := reloaded.WorkspaceLabel(renameWsPath); !ok || got != renameWsLabel {
+		t.Errorf("label on disk = (%q, %v), want (%q, true)", got, ok, renameWsLabel)
 	}
 }
