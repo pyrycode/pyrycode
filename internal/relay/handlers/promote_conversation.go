@@ -51,6 +51,9 @@ type ConversationPromoter interface {
 	Promote(id conversations.ConversationID, name string) error
 	Get(id conversations.ConversationID) (conversations.Conversation, bool)
 	Save(path string) error
+	// WorkspaceLabel supplies the reply's workspace_label (#2210), read under the
+	// read-back row's own cwd — the payload's Cwd is not consumed here either.
+	WorkspaceLabel(cwd string) (string, bool)
 }
 
 // PromoteConversation returns a dispatch.Handler that processes a
@@ -178,7 +181,11 @@ func PromoteConversation(reg ConversationPromoter, registryPath string, logger *
 			IsArchived: got.IsArchived,
 			Name:       got.Name,
 			Cwd:        got.Cwd, // the row's pre-existing (already-confined) cwd — payload Cwd is NOT consumed
-			LastUsedAt: got.LastUsedAt,
+			// Keyed on the same got.Cwd the line above sends, so the label always
+			// names the workspace this frame reports rather than the one the
+			// request happened to mention.
+			WorkspaceLabel: workspaceLabelFor(reg, got.Cwd),
+			LastUsedAt:     got.LastUsedAt,
 		}
 		payloadJSON, err := json.Marshal(updated)
 		if err != nil {

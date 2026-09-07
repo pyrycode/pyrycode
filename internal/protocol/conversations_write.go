@@ -25,11 +25,21 @@ type CreateConversationPayload struct {
 // example shows "name": null (an unnamed scratch conversation); see the
 // rationale on CreateConversationPayload for why omitempty is omitted.
 type ConversationCreatedPayload struct {
-	ID         string    `json:"id"`
-	IsPromoted bool      `json:"is_promoted"`
-	Cwd        string    `json:"cwd"`
-	Name       *string   `json:"name"`
-	LastUsedAt time.Time `json:"last_used_at"`
+	ID         string `json:"id"`
+	IsPromoted bool   `json:"is_promoted"`
+	Cwd        string `json:"cwd"`
+	// WorkspaceLabel is the operator-set display name stored for the workspace at
+	// this frame's own Cwd (#2210), carrying the same value and the same contract
+	// ConversationSummary.WorkspaceLabel does on a list row — see the rationale
+	// there. Nullable but never omitted: a workspace with no stored label
+	// serializes an explicit null, so a client may treat a missing key as a
+	// malformed frame rather than as an unlabelled workspace. Nil is "no label
+	// stored"; a non-nil pointer to "" is the distinct explicitly-empty label the
+	// registry admits, and presence must come from the accessor's second return
+	// rather than from a label != "" comparison, which collapses the two.
+	WorkspaceLabel *string   `json:"workspace_label"`
+	Name           *string   `json:"name"`
+	LastUsedAt     time.Time `json:"last_used_at"`
 }
 
 // PromoteConversationPayload is the body of a promote_conversation frame
@@ -171,8 +181,29 @@ type ConversationUpdatedPayload struct {
 	// rows too, where the value is false — an absent key could not distinguish
 	// "restored to active" from "old daemon." Placed right after IsPromoted to
 	// mirror ConversationSummary and group the two state bools.
-	IsArchived bool      `json:"is_archived"`
-	Name       *string   `json:"name"`
-	Cwd        string    `json:"cwd"`
-	LastUsedAt time.Time `json:"last_used_at"`
+	IsArchived bool    `json:"is_archived"`
+	Name       *string `json:"name"`
+	Cwd        string  `json:"cwd"`
+	// WorkspaceLabel is the operator-set display name stored for the workspace at
+	// this frame's own Cwd (#2210), so a client patching a row in place from a
+	// pushed frame renders the operator's chosen name without re-listing to find
+	// it. Same value, same contract as ConversationSummary.WorkspaceLabel on a
+	// list row; nullable but never omitted, and presence comes from the registry
+	// accessor's second return, never from a label != "" comparison.
+	//
+	// That this record admits a workspace label while refusing a system prompt is
+	// not a contradiction, and the difference is audience. A prompt reaches no
+	// other read path — it is on neither list_conversations nor session_settings
+	// — so hanging it on a frame broadcast to every phone on this server-id would
+	// create disclosure. The label is already on every list_conversations row
+	// (#2208), readable by any paired client on demand, so carrying it here
+	// widens no audience: it changes only whether a client learns the value at
+	// push time or at its next list. Size points the same way — one 128-byte
+	// label on a single-row frame, against 8192 bytes of prompt times every row.
+	//
+	// The value is an opaque operator-supplied string echoed verbatim. Its
+	// 128-byte bound is enforced on the write path and is a size limit, not a
+	// safety property: rendering it safely stays the client's job.
+	WorkspaceLabel *string   `json:"workspace_label"`
+	LastUsedAt     time.Time `json:"last_used_at"`
 }

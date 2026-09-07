@@ -27,6 +27,36 @@ type ConversationLister interface {
 	WorkspaceLabel(cwd string) (string, bool)
 }
 
+// workspaceLabelReader is the one-method read every conversation-frame producer
+// needs (#2210). Each of the six narrow handler interfaces that gained
+// WorkspaceLabel satisfies it by method-set inclusion, so a handler passes its
+// existing registry value straight through.
+type workspaceLabelReader interface {
+	WorkspaceLabel(cwd string) (string, bool)
+}
+
+// workspaceLabelFor projects the label stored for cwd onto the nullable wire
+// field the conversation payloads carry (#2210), returning nil when no label is
+// stored. It exists so the one correctness rule this projection has lives in a
+// single place rather than being restated at each of the seven producers:
+// presence comes ONLY from the accessor's second return, never from a
+// label != "" comparison, which would collapse the registry's deliberately
+// distinct stored-empty and absent states.
+//
+// cwd must be the same value the caller writes to its payload's Cwd field.
+// Labels are keyed byte-exactly and the registry normalizes nothing, so a
+// caller that looks up a request's raw path while sending a resolved one would
+// report a labelled workspace as unlabelled.
+//
+// cmd/pyry's channel-new announce cannot reach this helper across the package
+// boundary and repeats the three lines inline.
+func workspaceLabelFor(r workspaceLabelReader, cwd string) *string {
+	if label, ok := r.WorkspaceLabel(cwd); ok {
+		return &label
+	}
+	return nil
+}
+
 // ListConversations returns a dispatch.Handler that answers a
 // list_conversations request with a conversations envelope. The handler
 // reads the registry, projects each row to a protocol.ConversationSummary,

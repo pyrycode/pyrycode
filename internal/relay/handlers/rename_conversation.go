@@ -35,6 +35,12 @@ const msgRenameConversationNotFound = "conversation not found"
 type ConversationRenamer interface {
 	Update(id conversations.ConversationID, fn func(*conversations.Conversation)) bool
 	Save(path string) error
+	// WorkspaceLabel supplies the reply's workspace_label (#2210) and MUST NOT be
+	// called from inside the Update callback: Update holds the registry's mutex
+	// for the callback's duration and this method takes the same non-reentrant
+	// lock, so a read there deadlocks the daemon. The handler captures the cwd in
+	// the callback and reads after Update returns.
+	WorkspaceLabel(cwd string) (string, bool)
 }
 
 // RenameConversation returns a dispatch.Handler that processes a
@@ -82,10 +88,17 @@ func RenameConversation(reg ConversationRenamer, registryPath string, logger *sl
 		// a second locked read. title is a local; both the row's Name and the
 		// reply's Name point at it (never at the *Conversation held by the slice,
 		// which a future Create may reallocate).
+		//
+		// cwd is captured here rather than read back afterwards for the same
+		// reason the record is: it is the row's own value under the one lock. The
+		// LABEL it keys, though, must be looked up outside the callback — see
+		// below.
 		title := p.Name
+		var cwd string
 		var updated protocol.ConversationUpdatedPayload
 		hit := reg.Update(conversations.ConversationID(p.ConversationID), func(cv *conversations.Conversation) {
 			cv.Name = &title
+			cwd = cv.Cwd
 			updated = protocol.ConversationUpdatedPayload{
 				ID:         string(cv.ID),
 				IsPromoted: cv.IsPromoted,
@@ -102,6 +115,20 @@ func RenameConversation(reg ConversationRenamer, registryPath string, logger *sl
 				"conversation_id", p.ConversationID)
 			return replyError(ctx, c, env, protocol.CodeConversationNotFound, msgRenameConversationNotFound, false)
 		}
+
+		// The workspace's label, read HERE and not in the callback above (#2210).
+		// Update holds the registry's mutex while it runs the callback and
+		// WorkspaceLabel takes that same non-reentrant mutex, so filling this
+		// field beside the others would deadlock the daemon on an ordinary
+		// rename — every registry consumer stuck behind a lock nobody releases.
+		// The cwd captured under the lock is what keys it, so the label names the
+		// workspace this very frame reports.
+		//
+		// After the hit check, so a not-found reply performs no pointless read.
+		// Renaming a conversation does not rename its folder: this value is
+		// unchanged by the write above and is carried so a client patching the
+		// row in place keeps rendering the workspace's name.
+		updated.WorkspaceLabel = workspaceLabelFor(reg, cwd)
 
 		// Eager best-effort persist so the rename survives a daemon restart. Save
 		// failure is non-fatal: the row is live in-memory and immediately usable;

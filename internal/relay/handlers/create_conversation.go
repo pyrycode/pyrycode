@@ -80,6 +80,11 @@ const createConversationMintTimeout = 30 * time.Second
 type ConversationCreator interface {
 	Create(c conversations.Conversation)
 	Save(path string) error
+	// WorkspaceLabel supplies the reply's workspace_label (#2210). A freshly
+	// created conversation inherits whatever name its workspace already carries,
+	// so a client that creates into a labelled folder renders the label from this
+	// reply rather than from its next list.
+	WorkspaceLabel(cwd string) (string, bool)
 }
 
 // SessionCreator is the minimal session-mint surface this handler consumes from
@@ -246,8 +251,12 @@ func CreateConversation(reg ConversationCreator, creator SessionCreator, registr
 			ID:         string(id),
 			IsPromoted: promoted,
 			Cwd:        cwd,
-			Name:       name,
-			LastUsedAt: now,
+			// Keyed on the same cwd the row was stored under and this frame
+			// reports — the label belongs to the workspace, and a conversation
+			// created into an already-named folder is named by it immediately.
+			WorkspaceLabel: workspaceLabelFor(reg, cwd),
+			Name:           name,
+			LastUsedAt:     now,
 		})
 		if err != nil {
 			return fmt.Errorf("marshal conversation_created payload: %w", err)

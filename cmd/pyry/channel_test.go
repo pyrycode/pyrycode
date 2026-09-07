@@ -428,6 +428,80 @@ func (r *recordingAnnouncer) announce(p protocol.ConversationUpdatedPayload) {
 	r.calls = append(r.calls, p)
 }
 
+// #2210 AC-1 + AC-2 for the seventh producer: the unsolicited create-announce
+// push carries workspace_label, holding the label stored for the announced row's
+// own cwd. This is the one producer outside internal/relay/handlers, and the
+// only one that is not a reply, so nothing in that package's coverage reaches it.
+//
+// The label is stored under the RESOLVED path and a decoy under the raw one,
+// which is the same distinction TestChannelCreator_AnnouncesStoredRow draws for
+// Cwd: a lookup keyed off the caller's unvalidated input would find the decoy.
+// On macOS the two genuinely differ (t.TempDir() sits under the /var symlink);
+// where they coincide the decoy is simply the same key and the assertion falls
+// back to the plain positive case.
+//
+// The absent case is asserted in the same test rather than in a second one: it
+// is the same announce path with nothing stored, and pairing them here keeps the
+// "explicit value, never a stale one" contract visible in one place.
+func TestChannelCreator_AnnouncesWorkspaceLabel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installIdentityTrustMark(t)
+
+	proj := filepath.Join(home, "labelled-project")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	wantCwd, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", proj, err)
+	}
+
+	// An unlabelled workspace announces an explicit absence, not a fallback.
+	reg, path := newChannelTestRegistry(t, home)
+	rec := &recordingAnnouncer{}
+	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, rec.announce, discardLogger())
+	if _, err := create(proj, ""); err != nil {
+		t.Fatalf("create error = %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("announced %d times, want exactly 1", len(rec.calls))
+	}
+	if got := rec.calls[0].WorkspaceLabel; got != nil {
+		t.Errorf("announced workspace_label = pointer to %q, want nil for an unlabelled workspace", *got)
+	}
+
+	// Now name the workspace and create a second channel in it.
+	const wantLabel = "Announced workspace"
+	const decoy = "keyed off the caller's raw path — never correct"
+	label := wantLabel
+	decoyLabel := decoy
+	reg.SetWorkspaceLabel(wantCwd, &label)
+	if proj != wantCwd {
+		reg.SetWorkspaceLabel(proj, &decoyLabel)
+	}
+
+	if _, err := create(proj, ""); err != nil {
+		t.Fatalf("second create error = %v", err)
+	}
+	if len(rec.calls) != 2 {
+		t.Fatalf("announced %d times after the second create, want 2", len(rec.calls))
+	}
+	got := rec.calls[1]
+	if got.Cwd != wantCwd {
+		t.Fatalf("announced cwd = %q, want the row's resolved %q", got.Cwd, wantCwd)
+	}
+	switch {
+	case got.WorkspaceLabel == nil:
+		t.Errorf("announced workspace_label = nil, want pointer to %q", wantLabel)
+	case *got.WorkspaceLabel == decoy:
+		t.Errorf("announced workspace_label = %q — the lookup keyed off the caller's raw "+
+			"path instead of the stored, resolved cwd %q", decoy, wantCwd)
+	case *got.WorkspaceLabel != wantLabel:
+		t.Errorf("announced workspace_label = %q, want %q", *got.WorkspaceLabel, wantLabel)
+	}
+}
+
 // AC-1: a successful create announces the STORED row, once.
 //
 // The Cwd assertion is what separates a read-back from a payload assembled out
