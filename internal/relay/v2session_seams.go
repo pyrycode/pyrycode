@@ -748,6 +748,30 @@ type V2SessionConfig struct {
 	// a running session alone". Do not widen it.
 	SystemPromptFor func(conversationID string) (protocol.SystemPromptPayload, bool)
 
+	// PairingMint mints a pairing for another device on behalf of the conn's
+	// authenticated one, for an inbound mint_pairing (#2127). handleMintPairing is
+	// its sole reader, and the seam's own doc block carries the contract — the
+	// authorization decision and its audit record are the implementation's, the
+	// minted device is always unprivileged, and the label arrives shape-validated.
+	//
+	// Optional: when nil the frame is CONSUMED BUT INERT — no reply, and not one
+	// byte of its payload parsed — mirroring the nil AttachmentIntake /
+	// AttachmentResolve / HistoryPage guards and buying the same property, that an
+	// unwired daemon performs zero parsing of remote-authored bytes. That is what
+	// leaves every non-production construction site (unit tests, the fake-daemon
+	// e2e harness, foreground/v1) compiling and behaving unchanged.
+	//
+	// SECURITY: this is the only seam on the manager that MINTS A CREDENTIAL, and
+	// the returned string is a plaintext bearer token. It reaches exactly one place
+	// — the pairing field of the AEAD-sealed pairing_minted reply, unicast to the
+	// conn that asked — and is never logged, never broadcast, and never wrapped
+	// into an error. Wiring it widens docs/protocol-mobile.md § Security model
+	// threat 4 on purpose (#2126's published decision): minting authority moves
+	// from "a shell on the host" to "any privileged paired device", bounded by the
+	// minted device being always unprivileged and by an unredeemed token expiring
+	// at devices.RedemptionWindow.
+	PairingMint PairingMinter
+
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
 	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
 	// simply unwired — foreground, or pre-#708 before the producer is live).
@@ -1274,4 +1298,121 @@ const (
 	// Answering a daemon bug as a daemon problem rather than as the client's
 	// malformed request is the fail-safe direction.
 	HistoryPageUnavailable
+)
+
+// PairingMinter mints a pairing for ANOTHER device on behalf of an already-paired
+// one (#2127), serving the wire contract #2126 declared. Declared here
+// (consumer side), beside ModalResolver and QuestionResolver, so internal/relay
+// imports none of what minting actually needs — crypto/rand, internal/pair,
+// internal/keys, internal/identity, internal/audit — and learns neither the relay
+// URL nor the server id it would otherwise have to be told. *devices.Device crosses
+// the seam (the per-conn s.device); this package already imports internal/devices,
+// so no new import. cmd/pyry's resolver is the sole production implementation.
+//
+// THE AUTHORIZATION DECISION IS THE IMPLEMENTATION'S, NOT THE HANDLER'S, and that
+// is the seam's defining property rather than a division of labour. A refusal must
+// be recorded through internal/audit, which lives in cmd/pyry; separating "deny"
+// from "record the denial" across two packages is how a later edit ends up with one
+// and not the other — questionResolverV2.admit's stated reason, transferred. The
+// handler applies no privilege check of its own and MUST NOT grow one: a second
+// arbiter of the same question is a second thing to keep in agreement.
+//
+// IT RUNS ON THE CONN'S appFrameWorker, NOT on the manager's Run goroutine, which
+// is what lets it take a file lock and write devices.json at all. It still stalls
+// that conn's later frames while it runs, so an implementation MUST return in
+// bounded time — production bounds its lock acquisition explicitly rather than
+// waiting the devices package default.
+//
+// SECURITY — three obligations Go's type system cannot state, restated here because
+// this is where an implementer meets them:
+//
+//   - deviceName IS REMOTE-AUTHORED, and it arrives ALREADY SHAPE-VALIDATED. The
+//     handler bounds it (protocol.MaxDeviceNameBytes, enforced at decode) and
+//     refuses any C0 control, DEL or C1 control before this seam is reached, which
+//     is what makes the value safe to store, to log and to render in a
+//     `pyry pair list` column. UTF-8 validity is NOT among those checks and does
+//     not need to be: encoding/json replaces every invalid byte and unpaired
+//     surrogate with U+FFFD, so a decoded string is valid by construction — the
+//     decoder's guarantee, spelled out at mintLabelIsDisplaySafe. An
+//     implementation MUST NOT relax the rest of the assumption by re-deriving the
+//     name from anywhere else, and MUST NOT let it become a path component —
+//     resolveDevicesPath sanitises the INSTANCE name, never a device name.
+//   - THE MINTED DEVICE IS ALWAYS UNPRIVILEGED. MintPairingPayload has no field for
+//     devices.Device.AllowRemotePermissions by declaration, and an implementation
+//     MUST pass false as a literal rather than threading a value from anywhere. A
+//     stolen privileged pairing can mint devices that watch and send; it must never
+//     be able to mint one that approves.
+//   - requester IS THE AUTHENTICATED DEVICE AND THE ONLY IDENTITY THERE IS. It is
+//     the per-conn s.device, bound at handshake after the presented token validated,
+//     and no field of the request names a device. A nil requester is a conn with no
+//     authenticated device and MUST deny — devices.Device.MayAnswerRemotePermission
+//     is nil-receiver-safe precisely so that reads as ordinary code.
+type PairingMinter interface {
+	// MintPairing mints one pairing for a new device and returns it encoded, or
+	// says why it did not. deviceName is the label to file the record under; the
+	// EMPTY STRING is not an error and not a refusal — it is "the client named no
+	// device", which an implementation answers with the same device-<hash8>
+	// fallback `pyry pair` generates, so the two entry points produce
+	// indistinguishable records.
+	MintPairing(requester *devices.Device, deviceName string) PairingMintResult
+}
+
+// PairingMintResult is one answer from the PairingMinter seam.
+//
+// AN OUTCOME DISCRIMINANT, NEVER AN ERROR, and the reason is specific rather than
+// stylistic: every error a mint can fail with wraps the ABSOLUTE devices.json path
+// — devices.WithLock's open/flock wraps, devices.Load's and Registry.Save's own —
+// so an error crossing this boundary would put a host path in reach of a handler
+// whose entire discipline is that it holds none, one interpolation away from a log
+// line or a reply. The error dies at the single scope that ever holds it.
+//
+// TWO REFUSALS RATHER THAN ONE, HistoryPageResult's reason: they differ in the
+// retryable flag a client actually branches on, so a comma-ok would collapse a
+// permanent refusal and a transient one into the same answer.
+type PairingMintResult struct {
+	// Pairing is the pair.Encode string — the {server, relay, token,
+	// server_static_pubkey} tuple as base64url, byte-for-byte what `pyry pair`
+	// prints on this host.
+	//
+	// A PLAINTEXT BEARER CREDENTIAL. It is never logged, no field decoded out of it
+	// is ever logged, and its ONLY egress is the pairing field of the AEAD-sealed
+	// pairing_minted reply unicast to the conn that asked. EMPTY unless Outcome is
+	// PairingMintOK, so a handler that ignored the outcome would emit nothing rather
+	// than a stale credential.
+	Pairing string
+
+	// Outcome says whether Pairing means anything.
+	Outcome PairingMintOutcome
+}
+
+// PairingMintOutcome discriminates the seam's answers finely enough for the handler
+// to choose a wire code, and no more finely than that.
+//
+// THREE MEMBERS, NOT ONE PER CAUSE. A busy lock, a registry read failure, a write
+// failure and an RNG failure all mean the same thing to a client and share one
+// published code; a per-cause enum would tempt a future handler into answering
+// distinctions protocol.CodePairingUnavailable's merge exists to hide.
+type PairingMintOutcome uint8
+
+const (
+	// PairingMintOK means a record was written and Pairing carries the credential.
+	//
+	// NOT the zero value, and that is the one place this enum departs from
+	// HistoryPageOutcome. There, a forgotten outcome reports an empty terminal page
+	// — inert. Here it would report a successful mint with an empty credential,
+	// which is a refusal spelled as a success. The zero value therefore denies.
+	PairingMintOK PairingMintOutcome = iota + 1
+
+	// PairingMintUnauthorized is the privilege refusal: the requesting device is
+	// authenticated but does not carry devices.Device.AllowRemotePermissions, or no
+	// longer does. NOTHING WAS CREATED — an implementation MUST reach this outcome
+	// without having written a record, and the handler's contract with a client is
+	// that a refusal leaves the registry untouched.
+	PairingMintUnauthorized
+
+	// PairingMintFailed is every host-side failure, merged: a devices.json lock the
+	// implementation could not acquire, a registry that could not be read or
+	// written, and a CSPRNG that refused. The only RETRYABLE outcome, because every
+	// cause can clear without the client changing its request.
+	PairingMintFailed
 )

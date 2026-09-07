@@ -73,6 +73,8 @@ A refused acquisition (lock held elsewhere past `pairLockWait`) fails closed: st
 
 **Step 9 gates step 10.** If the locked region fails — a busy lock, or `registry.Save` failing inside it — `Render` is skipped and the plaintext token never escapes the process. The user retries; a new (independent) token is minted on the next run; the orphaned in-memory device is dropped with the process. The reverse ordering (render first, save second) would be wrong: a post-render save failure would print a working pairing payload that the daemon would later reject because the token isn't in the registry. See [ADR 021](../decisions/021-pair-cli-order-of-operations.md). The static keypair, by contrast, is intentionally persisted *before* the random draw — every paired phone binds to the same keypair, so it must outlive any single `pyry pair` invocation.
 
+**Steps 6–9 are `mintDevice`, shared with the wire path (#2127).** `cmd/pyry/pair.go:mintDevice(mintRequest) (mintedDevice, error)` lifts the CSPRNG draw, the hash, the `device-<hash8>` fallback, the single clock read and the locked load-mutate-save verbatim out of this verb, so a device minted over `mint_pairing` (a paired client asking the daemon to pair a second device — see [Inbound `mint_pairing`](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md)) is indistinguishable from one this CLI minted. `mintRequest.lockWait` is a parameter rather than the package-level `pairLockWait` constant precisely so the two callers can hold the lock for different durations: this verb is an operator-invoked one-shot and keeps `pairLockWait` (`devices.DefaultLockWait`, 5s), while the wire path is a request a client is blocking on and passes a much shorter bound. `mintRequest.grantorHash` is the one field this verb never sets (it passes `""`, skipping the check entirely) — it exists so a *wire* mint can re-confirm, inside the same held lock, that the device asking for it still holds the privilege it claimed at handshake, which this verb has no equivalent need for since a shell on the host already implies that authority.
+
 ### Daemon-name validator mismatch
 
 `cmd/pyry/main.go:sanitizeName` is a transformer that permits `.` and uppercase and replaces other bad chars with `_`; `internal/keys.validDaemonName` rejects both `.` and uppercase outright. `PYRY_NAME=Foo` produces `~/.pyry/Foo/devices.json` from `resolveDevicesPath` (which calls `sanitizeName`) but fails at `keys.LoadOrCreate("~/.pyry", "Foo")` with `ErrInvalidDaemonName`. The mismatch is intentional — `internal/keys` cannot relax its allowlist without weakening the path-traversal defence — and surfaces as a clean `pyry: pair: keys: invalid daemon name "Foo"` error. **No auto-rewrite, no `strings.ToLower`-and-retry, no synchronization.** Operator-facing fix: rename the instance to match `[a-z0-9_-]{1,64}` with no leading `-`. See [codebase/438.md](../codebase/438.md) for the rationale.
@@ -383,13 +385,14 @@ The exit-2 non-empty-registry path (`os.Exit(2)` from inside `runPairPreflight`)
 
 ## Out of scope (deferred)
 
-- **Daemon-side `pair` control verb** — mirroring `pyry sessions new` once a WS-handshake auth path actually consumes `devices.json` in-process.
+- ~~**Daemon-side `pair` control verb**~~ Delivered by #2127 as `mint_pairing` / `pairing_minted` — a privileged paired client mints a pairing for a second device over the wire, through the same `mintDevice` this verb calls. See [Inbound `mint_pairing`](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md).
 - ~~**`flock`/`fcntl` on `devices.json`**~~ Delivered for the two CLI writers by #1531 (`devices.WithLock`, added by #1530). `register_push_token`, the daemon's writer, remains unlocked until #1532 — until then the daemon-vs-CLI race is still open even though CLI-vs-CLI is closed.
 - **Empty-relay e2e test** — would require swapping the default constant at build time; pinned by unit test instead.
 - **`--relay` mutating `~/.pyry/config.json`** — explicitly rejected; `--relay` overrides the printed payload only. Edit `config.json` directly to persist a relay change.
 
 ## Related
 
+- [Inbound `mint_pairing` (#2127)](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md) — the wire caller of the shared `mintDevice` step, and the revocation re-check (`grantorHash`) that only that caller needs.
 - [`features/config-package.md`](config-package.md) — `Config.RelayURL` and `Load`'s overlay-decode shape consumed in step 2.
 - [`features/identity-package.md`](identity-package.md) — `LoadOrCreate` contract for the per-instance server-id (step 5).
 - [`features/devices-package.md`](devices-package.md) — `Device` shape, `HashToken` (step 7), `VerifyToken` (used in the e2e linkage check).

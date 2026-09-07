@@ -892,6 +892,15 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// non-blocking enqueue; the worker routes it to handleRequestHistory.
 			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameHistoryRequest})
 			return
+		case protocol.TypeMintPairing:
+			// The fourth arm to run off Run (#2127), and the first WRITE verb among
+			// them. Answering this frame takes the devices.json flock(2), reads the
+			// registry, appends a record and rewrites the file — cross-process
+			// blocking I/O, which is precisely what must not happen on the goroutine
+			// that owns the send CipherState. Tags and falls through to the same
+			// non-blocking enqueue; the worker routes it to handleMintPairing.
+			m.enqueueAppFrame(ctx, s, appFrameJob{plaintext: plaintext, kind: appFrameMintPairing})
+			return
 		}
 	}
 
@@ -973,6 +982,9 @@ const (
 	appFrameAttachmentRequest
 	// appFrameHistoryRequest is the inbound conversation-history request (#2116).
 	appFrameHistoryRequest
+	// appFrameMintPairing is the inbound pairing-mint request (#2127) — the first
+	// member of this set whose handler WRITES host state rather than reading it.
+	appFrameMintPairing
 )
 
 // appFrameWorker is the per-conn sub-actor that runs application handlers
@@ -1030,6 +1042,14 @@ func (m *V2SessionManager) appFrameWorker(ctx context.Context, s *V2Session) {
 				// so both the page and every reject leave through forwardToRun and
 				// nothing on this path ever touches s.send.
 				m.handleRequestHistory(ctx, s, job.plaintext)
+			case appFrameMintPairing:
+				// The pairing-mint path (#2127), here because it takes the
+				// devices.json flock(2) and rewrites the file. Its single emission
+				// route is the history arm's — one envelope, reply and rejects alike
+				// through forwardToRun — and the FIFO shape of this worker is what
+				// bounds a conn to one mint in flight, which is why no per-verb
+				// concurrency limit exists for a verb that writes.
+				m.handleMintPairing(ctx, s, job.plaintext)
 			case appFrameRoute:
 				// The v1 application dispatch chain, unchanged: build the outbound
 				// channel, call dispatch.Route, forward its replies to Run.
