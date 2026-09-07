@@ -1,10 +1,11 @@
 # Pairing request/reply payloads (#2126)
 
-Wire vocabulary only, in a new `internal/protocol/pairing.go` — the request an
+Wire vocabulary, in `internal/protocol/pairing.go` — the request an
 already-paired client sends to mint a pairing for a second device, and the
-daemon's reply carrying it. No handler ships with it; `#2127` serves it, blocked
-on the redemption window (#1528, #1529) and the `devices.json` lock (#1531).
-Published contract:
+daemon's reply carrying it. Declared here; served by [Inbound `mint_pairing`
+(#2127) — `PairingMinter` seam](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md),
+which was blocked on the redemption window (#1528, #1529) and the
+`devices.json` lock (#1531) until both landed. Published contract:
 [`docs/protocol-mobile.md` § Minting a pairing from a paired client](../../protocol-mobile.md#minting-a-pairing-from-a-paired-client).
 
 ```go
@@ -21,11 +22,14 @@ type PairingMintedPayload struct {
 
 `TypeMintPairing = "mint_pairing"` / `TypePairingMinted = "pairing_minted"`,
 filed in `v2OnlyTypes`, the partition test's `all` slice and the
-`IsKnownAppType` rejects table; `excludedTypes["TypeMintPairing"] =
-"pending handler (#2127)"`, `excludedTypes["TypePairingMinted"] = "reply"`;
-**neither joins `inboundAppTypeSet`**, on `TypeRequestHistory`'s precedent. See
-[Drift detectors](protocol-package-drift-detectors.md) for what actually
-reddens the build on an unpartitioned constant.
+`IsKnownAppType` rejects table. Since #2127 wired `dispatchAppFrame`'s
+switch-intercept case, `TypeMintPairing` moved from `excludedTypes` to
+`inboundTypes` (`cmd/pyry/relay_guard_test.go`) — the guard makes that move
+mandatory the moment the case exists, so a handler landing without it reddens
+the build on its own; `excludedTypes["TypePairingMinted"] = "reply"` is
+unchanged, replies never join `inboundTypes`. See [Drift
+detectors](protocol-package-drift-detectors.md) for what actually reddens the
+build on an unpartitioned constant.
 
 ## The verb is named for what it does, not for the family it resembles
 
@@ -112,6 +116,7 @@ that drops the second half on the floor if nothing carries it across the gap.
 
 ## Related
 
+- [Inbound `mint_pairing` (#2127) — `PairingMinter` seam](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md) — the handler this vocabulary was declared ahead of.
 - [Messaging payloads](protocol-package-types-messaging-payloads.md) — the
   package's other decode hook, `SendMessagePayload.UnmarshalJSON`.
 - [Attachment envelope types](protocol-package-constants-codes-go-envelope-types-attachments.md) —

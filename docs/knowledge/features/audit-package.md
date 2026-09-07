@@ -10,16 +10,29 @@ modal. Landed in #712 (EPIC #597 Phase 3 — mobile remote head, ADR 025 §6
 
 This slice is the **writer primitive only** — it ships with **no caller**. The
 package does **not** own any calling loop, timer, nonce, or decision logic; it
-only records an already-decided `Entry`. Two callers construct one today: the
-modal control loop (#703) and, since #1986, `cmd/pyry`'s `questionResolverV2`
-— the per-device gate for an inbound `question_answer` / `question_refused`.
-Both reuse the same `ModalID`/`ModalClass` pair rather than the package
-growing a question-specific field: the batch id rides `ModalID` and the
-compile-time constant `classQuestion = "question"` rides `ModalClass`, so a
-forensic reader tells a question record from a modal one by that field alone.
-Adding a dedicated field was considered and rejected in #1986 — it would be a
-third production file in this package and would move its shared no-leak test,
-and the existing id/class pair already says which batch and what kind.
+only records an already-decided `Entry`. Three callers construct one today:
+the modal control loop (#703), `cmd/pyry`'s `questionResolverV2` since #1986
+— the per-device gate for an inbound `question_answer` / `question_refused` —
+and, since #2127, `cmd/pyry`'s `pairingMinterV2.MintPairing`. The first two
+reuse the same `ModalID`/`ModalClass` pair rather than the package growing a
+question-specific field: the batch id rides `ModalID` and the compile-time
+constant `classQuestion = "question"` rides `ModalClass`, so a forensic reader
+tells a question record from a modal one by that field alone. Adding a
+dedicated field was considered and rejected in #1986 — it would be a third
+production file in this package and would move its shared no-leak test, and
+the existing id/class pair already says which batch and what kind.
+
+`pairingMinterV2` widens the pattern one step further: its `ModalClass` rides
+the compile-time constant `classPairingMint = "pairing_mint"`, but `ModalID`
+is left **empty**, the field's first non-value across all three callers. A
+mint has no one-time nonce to name, and filling the field with the conn id or
+the minted device's hash would put a value in a field whose documented meaning
+is a modal or question-batch identifier — reusing the slot honestly requires
+leaving it unset when the caller has nothing that fits, not inventing a
+same-shaped stand-in. The generalizable point mirrors #1986's: a vocabulary
+field earns a new consumer by what it already means, and a caller with no
+value for a required-looking field should say so by leaving it empty, not by
+manufacturing one that reads as data but isn't.
 
 - Decision anchor: [ADR 025](../decisions/025-mobile-remote-head-interactive-session.md)
   § "Security model — remote permission granting", item 6 "Audit" — *"Each

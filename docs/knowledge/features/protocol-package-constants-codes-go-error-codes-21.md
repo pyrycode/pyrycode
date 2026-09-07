@@ -1,4 +1,4 @@
-# Error codes (27)
+# Error codes (29)
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -31,6 +31,10 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeHistoryUnavailable` | `history.unavailable` |
 | `CodeModelListUnavailable` | `model_list.unavailable` |
 | `CodeWorkspaceNotFound` | `workspace.not_found` |
+| `CodePairingNotPermitted` | `pairing.not_permitted` |
+| `CodePairingUnavailable` | `pairing.unavailable` |
+
+**The two `pairing.*` codes (#2127) reject an authenticated device on privilege, never on identity, and `auth.invalid_token` would say the wrong thing.** A `mint_pairing` from a device whose `MayAnswerRemotePermission` is false is answered `pairing.not_permitted` rather than the auth code, because the device's token is fine — reusing the auth code would read to a legitimate, merely-unprivileged client as "your pairing is broken," inviting a needless re-pair. It is also not an oracle: the refusal is unconditioned on the requested `device_name`, so it cannot be used to probe which names already exist, and it tells the caller nothing it could not already learn by answering any permission modal and being denied. `pairing.unavailable` is one retryable code standing in for three distinct daemon-side causes — a busy lock, a registry read/write failure, an RNG failure — merged deliberately on the same reasoning as `CodeModelListUnavailable` above: every cause clears without the client changing anything, and splitting them would publish facts about the host's disk or entropy state rather than about the request.
 
 **`CodeWorkspaceNotFound` (#2207) is its own group rather than a reuse of `CodeConversationNotFound`,** because `rename_workspace` names no conversation — it names a `cwd`, and a workspace has no row of its own (N conversations may share one). Reusing the conversation code would tell a client to go look for a row it never asked about. Non-retryable: the same path fails identically until a conversation is created there, matching the `not_found` family's existing retryability convention rather than `model_list.unavailable`'s bootstrap-race one.
 
