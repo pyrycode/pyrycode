@@ -76,6 +76,8 @@ func (m sessionMinter) Create(_ context.Context, label, spawnDir string) (string
 
 `sessionMinter{pool}` is threaded through `startRelay` → `startRelayV2` and into both `handlers.CreateConversation(...)` registration sites (the v1 dispatcher and the v2 manager handler map). Result: `internal/relay/handlers` stays free of any `internal/sessions` import — the cycle-free property is preserved, and the cmd-layer adapter is the sole validator of the spawn workdir (see [§ `Cwd` is the validated, trust-marked spawn workdir](#cwd-is-the-validated-trust-marked-spawn-workdir-685)).
 
+**Any new caller for whom an empty spawn dir is not a legitimate request must guard the empty string itself.** `resolveSpawnDir("")` is fail-open by contract — `("", nil)`, success, no confinement, no trust-mark — because that is exactly what the phone's optional `Cwd` needs. A caller with no such optional-input meaning (`internal/control`'s `channel.new` verb, #2155, is the first) cannot rely on `resolveSpawnDir` to reject an empty string on its behalf; it has to check before calling in. See [control-plane.md § Channel: new verb](control-plane.md#channel-new-verb-channelnew-2155).
+
 ### `Cwd` is the validated, trust-marked spawn workdir (#685)
 
 Through #677, the session spawned in the daemon's **shared** trusted workdir and the phone-influenced `conversation.Cwd` was inert stored metadata — *structurally* excluded from the spawn path. **#685 reverses that deferral:** the conversation's `Cwd` is now a validated spawn input, so a discussion's claude runs in its own recorded directory and discussions targeting different projects are isolated on disk.
