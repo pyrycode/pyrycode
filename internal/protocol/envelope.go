@@ -141,5 +141,7 @@ var inboundAppTypeSet = map[string]bool{
 	TypeWorkspaceFolderCreated: true,
 	TypeRecentWorkspaces:       true,
 	TypeRecentWorkspacesList:   true,
+	TypeRenameWorkspace:        true,
+	TypeWorkspaceUpdated:       true,
 	TypeRegisterPushToken:      true,
 }

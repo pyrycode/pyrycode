@@ -212,9 +212,10 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeSetSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
+		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 24; got != want {
+	if got, want := len(all), 26; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(inboundAppTypeSet), len(all); got != want {
@@ -351,6 +352,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeSetSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
+		TypeRenameWorkspace, TypeWorkspaceUpdated,
 		TypeRegisterPushToken,
 		// v2 control types.
 		TypeRekeyRequest,
@@ -462,6 +464,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeAttachmentNotFound":          CodeAttachmentNotFound,
 		"CodeAttachmentStreamAborted":     CodeAttachmentStreamAborted,
 		"CodeModelListUnavailable":        CodeModelListUnavailable,
+		"CodeWorkspaceNotFound":           CodeWorkspaceNotFound,
 	}
 	want := map[string]string{
 		"CodeProtocolUnknownType":         "protocol.unknown_type",
@@ -486,6 +489,7 @@ func TestErrorCode_Constants_MatchSpec(t *testing.T) {
 		"CodeAttachmentNotFound":          "attachment.not_found",
 		"CodeAttachmentStreamAborted":     "attachment.stream_aborted",
 		"CodeModelListUnavailable":        "model_list.unavailable",
+		"CodeWorkspaceNotFound":           "workspace.not_found",
 	}
 	if len(cases) != len(want) {
 		t.Fatalf("case-count drift: got %d, want %d", len(cases), len(want))
