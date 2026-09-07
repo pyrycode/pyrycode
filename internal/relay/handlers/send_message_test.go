@@ -1366,3 +1366,65 @@ func TestSendMessage_AutoNameNilSeamsStillAck(t *testing.T) {
 		}
 	})
 }
+
+// ackWatchingNamer wraps a real registry and records how many envelopes were
+// already queued outbound the first time the auto-naming step touched it. The
+// embedded *conversations.Registry supplies Save and WorkspaceLabel unchanged, so
+// the double still satisfies ConversationAutoNamer and the step under test does
+// real work rather than running against a stub.
+type ackWatchingNamer struct {
+	*conversations.Registry
+	out     <-chan protocol.RoutingEnvelope
+	queued  int
+	touched bool
+}
+
+func (n *ackWatchingNamer) Update(id conversations.ConversationID, fn func(*conversations.Conversation)) bool {
+	n.touched = true
+	n.queued = len(n.out)
+	return n.Registry.Update(id, fn)
+}
+
+// TestSendMessage_AcksBeforeAutoNaming pins the ordering the naming step must
+// keep: the ack is on its way out BEFORE any of the naming work begins.
+//
+// It is a real wire property and not bookkeeping. The step costs an fsync and a
+// fan-out, and EnqueueDelivery has already handed the turn to the drain, which
+// runs on its own goroutine — so time spent here is time in which the drain can
+// deliver the turn and the child can provoke frames of its own. Run ahead of the
+// ack, those frames reach the sender BEFORE the ack it is still waiting for.
+// #2159's first cut did exactly that and reordered the wire under two stream-json
+// e2e specs; nothing in the unit suite noticed, which is why this test exists.
+//
+// The assertion is on the OUTBOUND QUEUE DEPTH observed from inside the step,
+// which is deterministic: the handler runs synchronously on this goroutine, so
+// one queued envelope means the ack was written first and zero means it was not.
+func TestSendMessage_AcksBeforeAutoNaming(t *testing.T) {
+	t.Parallel()
+	reg, path := newAutoNameReg(t, nil)
+	c, recv, out := newSendMsgConn(t)
+	namer := &ackWatchingNamer{Registry: reg, out: out}
+	announce, pushed := capturingAnnouncer()
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, namer, path, announce, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	if !namer.touched {
+		t.Fatal("the auto-naming step never touched the registry; the ordering assertion below would pass vacuously")
+	}
+	if namer.queued != 1 {
+		t.Errorf("outbound envelopes queued when auto-naming began = %d, want 1 (the ack, already sent)", namer.queued)
+	}
+	// And the ack itself is unchanged by the move.
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+	if len(*pushed) != 1 {
+		t.Errorf("announce calls = %d, want 1", len(*pushed))
+	}
+}

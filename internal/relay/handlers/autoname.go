@@ -131,13 +131,21 @@ func deriveConversationName(text string) (string, bool) {
 // autoNameConversation gives an as-yet-unnamed conversation a title cut from the
 // message just accepted for it, persists it, and pushes the updated row to every
 // interactive-capable client (#2159). Called by SendMessage after a non-zero
-// EnqueueDelivery and before the ack, so only an ACCEPTED message names a
-// conversation: every reject branch returns before this point, which is what
-// makes "a rejected send writes no name" structural rather than a guard.
+// EnqueueDelivery, so only an ACCEPTED message names a conversation: every reject
+// branch returns before this point, which is what makes "a rejected send writes
+// no name" structural rather than a guard.
 //
 // It reports nothing and fails nothing. Auto-naming is a side effect of a
-// message that was already accepted, so no outcome here may change the ack the
-// caller is about to send.
+// message that was already accepted, so no outcome here may change what the
+// sender was told.
+//
+// IT RUNS AFTER THE ACK, not before it. The step costs an fsync and a fan-out —
+// milliseconds — and running it ahead of the ack lengthens the window between the
+// enqueue and the sender's confirmation, during which the drain has already
+// delivered the turn on its own goroutine. Frames the child then provokes reach
+// the phone BEFORE the ack it is still waiting for, which is a real reordering of
+// the wire and not merely a test artefact; #2159's first cut put the step ahead
+// of the ack and two stream-json e2e specs went red on exactly that.
 //
 // The ordering is load-bearing at two points:
 //

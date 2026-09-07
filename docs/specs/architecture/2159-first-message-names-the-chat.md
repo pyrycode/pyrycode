@@ -427,3 +427,58 @@ no assertion moves either way.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+### 2026-09-08 — the auto-naming step moved to AFTER the ack
+
+**Driven by:** the verification gate's regression report on PR #2221 — the
+stream-json e2e specs `TestRelayV2_StreamModalPermissionRoundTrip` (three of four
+subtests) and `TestRelayV2_StreamNewSessionRotatesAndRestartsFresh` passed on the
+merge-base and failed on the branch.
+
+**What was wrong.** § Design placed the step "after a non-zero `EnqueueDelivery`
+and before `replyAck`", following the ticket's Technical Notes, and § Concurrency
+argued the step was bounded on the `appFrameWorker` goroutine. Bounded it is —
+about 4 ms, dominated by `Save`'s fsync — but bounded is not free, and the
+argument missed what that window is racing. `EnqueueDelivery` hands the turn to
+the drain, which runs on **its own goroutine** and can deliver it, get the child
+to raise a permission approval, and have that approval broadcast as `modal_shown`
+while the handler is still fsyncing. The sender then receives `modal_shown`
+*before* the `ack` it is waiting for.
+
+That is a real reordering of the wire, not a test artefact: nothing has ever
+ordered a daemon push against a reply, and both specs record their phone's
+receive order. Instrumenting the failing subtest showed the phone receiving
+`queue_state, modal_shown, queue_state, conversation_updated, ack` — the
+ack-await loop consumed the run's only `modal_shown` and the later wait for one
+timed out. The daemon itself was healthy throughout: a SIGQUIT dump of the stuck
+process showed the approval correctly parked in `permbridge.Pending.Await` with
+no goroutine blocked on the registry.
+
+**The new contract.** `replyAck` is called first and its error is held in a
+local; `autoNameConversation` runs after it; the held error is returned. Nothing
+else about the step moves — same goroutine, same synchronous call, same order of
+operations inside it, same reject branches returning before it.
+
+The reasoning that makes this the right placement rather than a workaround:
+acceptance is established by the enqueue, so by the time the ack is due, the
+message is queued and the drain owns it. Everything after that is a side effect
+on registry metadata, and the sender's round-trip has no reason to wait on an
+fsync or on a fan-out aimed at *other* clients.
+
+**What it costs.** Nothing in the acceptance criteria. AC 2 keys naming on "a
+`send_message` is accepted (`EnqueueDelivery` returned non-zero)", which is
+unchanged; AC 3's "the `ack` is unchanged and is sent whether or not the push
+succeeded" is satisfied more strongly than before, since the ack now precedes the
+push outright. One behaviour genuinely changes: a conversation is now named even
+when the ack's own write fails. That is deliberate — a conn whose ack failed is
+on its way out, and the message it queued still runs, so its conversation still
+deserves its name.
+
+**Also revised by this entry:** § Concurrency's claim that "every blocking step
+is bounded there" was true but not sufficient, and § Error handling's row for the
+ack now reads "the ack precedes all of this" rather than "the ack is sent
+regardless". The `## Security review` verdict is unaffected — no finding in it
+depends on the step's position relative to the ack, and moving it neither widens
+the trust boundary nor changes what reaches disk, a log or the wire.

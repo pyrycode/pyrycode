@@ -334,18 +334,30 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 			// prompt names is operationally useful and discloses nothing.
 			"attachment_count", len(paths))
 
+		// THE ACK GOES OUT FIRST, and the auto-naming follows it (#2159). Acceptance
+		// is established by the enqueue above, not by anything below: the message is
+		// queued and the drain already owns it, so everything that follows is a side
+		// effect on registry metadata. Making the sender's round-trip wait on an
+		// fsync and on a broadcast aimed at OTHER clients would couple the hot path
+		// to work the sender does not need — and measurably so, at the millisecond
+		// scale a queued turn's delivery races in.
+		//
+		// The ack's error is carried past the naming rather than returned before it.
+		// A conn whose ack write failed is a conn on its way out, and the message it
+		// queued is still going to run, so its conversation still deserves its name.
+		ackErr := replyAck(ctx, c, env)
+
 		// Auto-name the conversation from this message, if it is the first one and
-		// the row is still unnamed (#2159). Placed HERE — after the enqueue
-		// succeeded and before the ack — so only an accepted message ever names a
-		// conversation: every reject branch above has already returned.
+		// the row is still unnamed. Reached only on an accepted message: every reject
+		// branch above has already returned, which is what makes "a rejected send
+		// writes no name" structural rather than a guard.
 		//
 		// p.Text, never the composed prompt: the prompt names on-host paths.
 		//
-		// It reports nothing and can fail nothing. The ack below is sent whether
-		// the name was written, declined, or pushed to nobody.
+		// It reports nothing and can fail nothing — see autoNameConversation.
 		autoNameConversation(reg, registryPath, announce, logger, c.ConnID(), p.ConversationID, p.Text)
 
-		return replyAck(ctx, c, env)
+		return ackErr
 	}
 }
 
