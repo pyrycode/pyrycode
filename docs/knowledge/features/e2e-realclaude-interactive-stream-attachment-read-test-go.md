@@ -32,7 +32,7 @@ mutant too, so the red is isolated to composition, not transfer.
   other reason to trust. No workaround was needed; this closes the second
   half of the 2026-05-16 decision to put the path in the prompt rather than
   inlining the bytes — see
-  [relay-package.md § Handlers](relay-package.md#handlers-per-envelope-type-processors-handlers-250).
+  [relay-package-handlers.md § Handlers](relay-package-handlers.md#handlers-per-envelope-type-processors-handlers-250).
 - **A short token round-trips byte-exact.** 24 lowercase hex characters came
   back with no case-folding, spacing, or chunking. A future test asserting on
   claude-echoed content this short can compare with a strict
