@@ -1,7 +1,17 @@
 # 004 — `fsnotify` for Live `/clear` Rotation Detection
 
-**Status:** Accepted and shipped (Phase 1.2b-B #39)
+**Status:** Superseded (#2137, 2026-09-07)
 **Date:** 2026-05-02
+
+> **Superseded — 2026-09-07 (#2137).** `internal/sessions/rotation` and its `fsnotify` watch are
+> retired: claude now announces its own resets (`conversation_reset`, #2134/#2135/#2136) on the
+> session's own stream, which answers the "which session rotated into this new file" question
+> directly instead of guessing from a filesystem CREATE + `lsof`/`/proc` probe. `fsnotify` dropped
+> out of `go.mod` with its last importer. The rationale below (latency, not owning `inotify`/`kqueue`
+> platform code, dependency trust) was sound for the problem this ADR solved; it stopped applying
+> once the fact it was inferring became directly observable. See
+> [`streamsup-package-announced-reset-follower.md`](../features/streamsup-package-announced-reset-follower.md)
+> for the mechanism that replaced it.
 
 ## Context
 

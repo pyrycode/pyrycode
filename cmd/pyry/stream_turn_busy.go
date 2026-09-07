@@ -406,8 +406,10 @@ func (t *turnBusyTracker) clearForSession(sessionID string) {
 // Carrying the delta here rather than in a capture method of its own is what
 // makes the two mutations atomic against each other, and the split version is a
 // reachable lost update rather than a style question: observe runs on the drain
-// goroutine while the teardown feed runs clearForSession on the pool's lifecycle
-// or rotation-watcher goroutine, so a /clear landing between the mark and a
+// goroutine while the teardown feed runs clearForSession on whichever goroutine
+// drove the transition — the pool's lifecycle goroutine on an eviction, the
+// runner's parse goroutine on a claude-announced /clear — so a /clear landing
+// between the mark and a
 // separate capture would sweep an empty inflight entry and let the capture
 // re-insert afterwards — a call reported in flight on a conversation whose
 // session is gone, and invisible to -race because both paths hold t.mu.

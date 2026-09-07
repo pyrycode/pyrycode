@@ -5,7 +5,6 @@ go 1.26.2
 require (
 	github.com/coder/websocket v1.8.13
 	github.com/flynn/noise v1.1.0
-	github.com/fsnotify/fsnotify v1.10.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pyrycode/tui-driver v1.12.0
 	golang.org/x/crypto v0.54.0

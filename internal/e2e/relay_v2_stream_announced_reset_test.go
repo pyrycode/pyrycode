@@ -29,10 +29,13 @@ import (
 //
 //   - ONE session_transition with reason clear, naming the pre-reset id and the
 //     announced one. Before this ticket nothing emitted it and no head drew a
-//     break, which is the visible half of the bug (AC 1). "Exactly one" is the
-//     load-bearing word: the rotation watcher observes the same rotation through
-//     the new transcript's creation, and the second of the two re-keys must find
-//     the old id already gone and stay silent.
+//     break, which is the visible half of the bug (AC 1). "Exactly one" was
+//     load-bearing against a second writer: the rotation watcher observed the same
+//     rotation through the new transcript's creation, and whichever of the two
+//     re-keyed second had to find the old id gone and stay silent. #2137 retired
+//     the watcher, so the follower is now the only writer and the count is one by
+//     construction — the assertion stays because it is what would catch a second
+//     writer being reintroduced.
 //   - the second turn's turn_end still reaches the phone (AC 2). This is the half
 //     that fails LOUDER than the original bug if it regresses: re-keying the
 //     registry without rotating the runner's stream session tag leaves every later
@@ -232,7 +235,7 @@ func TestRelayV2_StreamAnnouncedResetFollowsClaude(t *testing.T) {
 	if len(transitions) != 1 {
 		t.Fatalf("client saw %d session_transition frames, want exactly 1: %+v — "+
 			"0 means nothing followed the announcement and no head draws a break; "+
-			"more than 1 means the rotation watcher fired a second delimiter for the same reset",
+			"more than 1 means something re-keyed a second time for the same reset",
 			len(transitions), transitions)
 	}
 	// The wire reason is a plain string on the payload, so the literal is the

@@ -92,44 +92,6 @@ func TestPool_Mint_ThenActivateSpawns(t *testing.T) {
 	}
 }
 
-// TestPool_Activate_PrimesAllocatedUUID is the #2085 AC#4 regression: a
-// conversation whose first message arrives long after the mint must still spawn
-// without the rotation watcher reading its brand-new transcript as a /clear.
-//
-// The skip-set entry expires after allocatedTTL, so priming at mint time cannot
-// survive an arbitrary wait — the entry has to be written by the thing that
-// actually spawns. The test forces the expiry rather than waiting it out:
-// allocatedTTL is shortened, the mint's window is allowed to lapse, and only
-// then is Activate called. It fails against any implementation that primes at
-// mint and not at the spawn.
-func TestPool_Activate_PrimesAllocatedUUID(t *testing.T) {
-	// Not parallel: mutates the package-level allocatedTTL, matching
-	// TestPool_RegisterAllocatedUUID_Expires.
-	prev := allocatedTTL
-	allocatedTTL = 50 * time.Millisecond
-	defer func() { allocatedTTL = prev }()
-
-	dir := t.TempDir()
-	regPath := filepath.Join(dir, "sessions.json")
-	pool := helperPoolCreate(t, regPath, 0)
-	ctx, _ := runPoolInBackground(t, pool)
-
-	id, err := pool.Mint("conv-1", "")
-	if err != nil {
-		t.Fatalf("Mint: %v", err)
-	}
-	// Outlive any entry the mint may have written.
-	time.Sleep(150 * time.Millisecond)
-
-	if err := pool.Activate(ctx, id); err != nil {
-		t.Fatalf("Activate(minted): %v", err)
-	}
-	if !pool.IsAllocated(id) {
-		t.Errorf("IsAllocated(%q) = false after Activate, want true — the spawn must prime the "+
-			"rotation skip-set, or the watcher reads the new transcript's CREATE as a /clear rotation", id)
-	}
-}
-
 // TestPool_CreateIn_StillActivates pins the out-of-scope half of #2085: the
 // control plane's `sessions new` verb reaches the pool through Pool.Create →
 // CreateIn, and an operator asking for a session expects one. Only the relay's

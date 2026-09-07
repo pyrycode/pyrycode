@@ -154,8 +154,8 @@
 //	                               <uuid>.jsonl in the same dir, exactly as the
 //	                               file trigger does. That mirrors real claude:
 //	                               typing "/clear" starts a new session and
-//	                               rotates the on-disk session UUID, which pyry's
-//	                               rotation watcher follows into the registry.
+//	                               rotates the on-disk session UUID, which pyry
+//	                               follows into the registry.
 //	                               supervisor.StartNewSession types the "/clear"
 //	                               (ClearInputLine + TypePrompt) when a phone sends
 //	                               a new_session control frame, so the rotation the
@@ -769,9 +769,9 @@ func main() {
 	clearOnAnswer := modalTrig != "" && os.Getenv(envModalClearOnAns) != ""
 	// clearRotates: watch stdin for the "/clear" slash command (typed by
 	// supervisor.StartNewSession on a phone's new_session frame) and rotate the
-	// live session JSONL once on the first match, so pyry's rotation watcher
-	// follows the fresh <uuid>.jsonl into the registry. Additive and off by
-	// default (byte-identical when unset), like escEndsTurn.
+	// live session JSONL once on the first match, so the fresh <uuid>.jsonl is
+	// there for pyry to follow into the registry. Additive and off by default
+	// (byte-identical when unset), like escEndsTurn.
 	clearRotates := os.Getenv(envClearRotates) != ""
 	// trustTrig: the startup trust-folder dialog simulation (#993). A sibling of
 	// modalTrig — come up idle, raise trustScreen on the trigger, then clear it on
@@ -898,7 +898,7 @@ func main() {
 		// Clear-rotate mode (envClearRotates): the stdin reader signalled the
 		// "/clear" slash command was read — supervisor.StartNewSession typed it in
 		// response to a phone's new_session frame. Rotate the live session JSONL
-		// once so pyry's rotation watcher follows the fresh <uuid>.jsonl into the
+		// once so the fresh <uuid>.jsonl is there for pyry to follow into the
 		// registry, making the new_session frame the CAUSE of the on-disk rotation.
 		// One-shot via the shared `rotated` gate: a second /clear is inert, and the
 		// file trigger + this mode never both fire — mirroring the gates above.

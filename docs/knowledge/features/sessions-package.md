@@ -106,6 +106,6 @@ search can reach it.
 - [Per-session spawn workdir: `CreateIn` / `GetOrCreateIn` (#684)](sessions-package-key-types-per-session-spawn-workdir-createin-getor.md) — The pool-level primitive (EPIC #672, split from #681) that lets a session spawn its supervised claude in a directory **other than** the…
 - [Reviving a dropped session: `Pool.Revive` (#1487)](sessions-package-key-types-reviving-a-dropped-session-pool-revive.md) — `Pool.New` materialises exactly one `*Session` from `sessions.json` — the bootstrap (`pickBootstrap` is the only reader of `reg.Sessions`). 
 - [Transition observer (#659)](sessions-package-key-types-transition-observer.md) — The injectable, in-process signal a `cmd/pyry`-side consumer (#657) wires to map session boundaries onto the v2 `session_transition` wire…
-- [`Pool.AdoptAnnouncedID` (#2135)](sessions-package-key-types-adoptannouncedid.md) — The third sibling of `onRotate`/`RotateForNewSession`: adopts a session id claude announced on its own stdout, refusing a collision inside the same lock hold — and why a pool-side refusal alone isn't enough.
+- [`Pool.AdoptAnnouncedID` (#2135, sole announced-reset writer since #2137)](sessions-package-key-types-adoptannouncedid.md) — Adopts a session id claude announced on its own stdout, refusing a collision inside the same lock hold — and why a pool-side refusal alone isn't enough.
 - [Concurrency](sessions-package-concurrency.md) — `sync.RWMutex` on `Pool.sessions`:
 - [Testing](sessions-package-testing.md) — Three test files mirror the production layout. 

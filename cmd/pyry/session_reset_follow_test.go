@@ -188,12 +188,13 @@ func TestSessionResetFollower_EqualIDChangesNothing(t *testing.T) {
 // a missing feature — different regressions, which is why the two sentinels cannot
 // share a row.
 //
-// ErrSessionNotFound is what the pool answers when the rotation watcher observed the
-// same rotation first and already re-keyed — which is every reset until #2137 retires
-// the watcher. The conversation is then bound to the announced id, so the tag must
-// follow: a follower that rotated only on the pool's SUCCESS would leave every later
-// event tagged with the retired id, the drain's active-session gate would drop all of
-// them, and the conversation would go dark until the daemon restarted.
+// ErrSessionNotFound is what the pool answers when oldID is already gone. Until #2137
+// that was every reset, because the rotation watcher observed the same rotation first
+// and re-keyed; with the watcher retired it is the exception. The row is kept because
+// the branch is unchanged and the regression it guards is the expensive one: a
+// follower that rotated only on the pool's SUCCESS would leave every later event
+// tagged with the retired id, the drain's active-session gate would drop all of them,
+// and the conversation would go dark until the daemon restarted.
 //
 // ErrSessionIDTaken is the opposite and looks alike only from the error's side.
 // AdoptAnnouncedID returns it BEFORE rekeyLocked, so nothing was re-keyed and no

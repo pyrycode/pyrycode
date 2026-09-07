@@ -7,8 +7,11 @@ rotation watcher against a child that produces realistic JSONL behaviour.
 
 Used today only by `TestE2E_StartRotation_PrimitiveWiresFakeClaude` (a
 binary-boundary smoke test that does *not* touch
-`internal/sessions/rotation`). The next consumer ticket drives pyry's
-watcher against this primitive.
+`internal/sessions/rotation`). No later ticket ever drove pyry's watcher
+against this primitive — [#2137](https://github.com/pyrycode/pyrycode/issues/2137)
+retired the watcher first. `StartRotation` and `StartRotationWithRelay`
+stayed regardless: this test observes files on disk only, so it never
+depended on the watcher it was originally staged for.
 
 ### What it wires
 
@@ -105,9 +108,11 @@ not pyry's rotation watcher:
    the initial fd is no longer being written.
 
 Deliberately does **not** assert on pyry's session registry, run
-`/proc/<pid>/fd` probes, or drive `internal/sessions/rotation` — that's
-the next consumer ticket. When the consumer fails, it fails for one
-reason at a time.
+`/proc/<pid>/fd` probes, or drive `internal/sessions/rotation` — that
+package no longer exists ([retired #2137](rotation-watcher.md)). The
+on-disk-only scope this test chose turned out to be exactly right in
+hindsight: it never needed updating when the watcher it was staged
+ahead of was deleted instead of consumed.
 
 ### Why short-prefix `os.MkdirTemp` for HOME
 

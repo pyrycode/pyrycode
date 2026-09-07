@@ -78,8 +78,7 @@ func (p *Pool) GetOrCreateIn(ctx context.Context, id SessionID, label, spawnDir 
 // materialise is the take-or-register core shared by GetOrCreateIn and Revive:
 // validate the id, build the session off-lock, then under p.mu either hand back
 // the entry already registered for id (took == true) or register the freshly
-// built one, persist it, prime the rotation skip-set, and schedule its
-// lifecycle goroutine.
+// built one, persist it, and schedule its lifecycle goroutine.
 //
 // It never spawns claude. A registered session is in stateEvicted with its
 // lifecycle goroutine parked on the activate signal, so waking it is the
@@ -139,11 +138,6 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings Sessio
 		p.mu.Unlock()
 		return nil, false, err
 	}
-
-	// Prime the rotation watcher's skip-set inside the same critical
-	// section so any concurrent watcher snapshot sees register + skip-set
-	// atomically.
-	p.registerAllocatedUUIDLocked(id)
 
 	g, gctx := p.runGroup, p.runCtx
 	if g == nil {

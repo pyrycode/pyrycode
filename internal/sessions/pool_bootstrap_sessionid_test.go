@@ -110,9 +110,9 @@ func TestPool_New_ColdStart_MintsOwnIdNotForeign(t *testing.T) {
 }
 
 // TestPool_BootstrapID_FollowsClearRotation (AC-4): a /clear rotates the on-disk
-// id via RotateID (the exact seam the rotation watcher drives); BootstrapID then
-// resolves the rotated id, so the next spawn's ResolveSessionID provider hands
-// claude --session-id <rotated>, not the orphaned pre-/clear id.
+// id via RotateID (the rekey-and-persist seam every rotation path shares);
+// BootstrapID then resolves the rotated id, so the next spawn's ResolveSessionID
+// provider hands claude --session-id <rotated>, not the orphaned pre-/clear id.
 func TestPool_BootstrapID_FollowsClearRotation(t *testing.T) {
 	t.Parallel()
 	regDir := t.TempDir()

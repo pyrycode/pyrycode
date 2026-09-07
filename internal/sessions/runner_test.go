@@ -132,6 +132,8 @@ type lifecycleRunner struct {
 	// return until a child actually exists. Returning immediately made the
 	// rotation-watcher test race, because it proceeded to plant a transcript
 	// before the bootstrap had a pid for the watcher to attribute it against.
+	// That test went with the watcher in #2137; the readiness contract stands on
+	// its own, and every later test that plants a file relies on it.
 	readyOnce sync.Once
 	readyCh   chan struct{}
 	// restarts records the argv of every Restart call, in order. It replaces the

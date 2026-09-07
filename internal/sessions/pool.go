@@ -15,18 +15,8 @@ import (
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
-	"github.com/pyrycode/pyrycode/internal/sessions/rotation"
 	"golang.org/x/sync/errgroup"
 )
-
-// allocatedTTL bounds how long a UUID stays in the freshly-allocated skip
-// set before being pruned. Defined as a var (not const) so tests can shrink
-// it.
-var allocatedTTL = 30 * time.Second
-
-// newProbe is the rotation.Probe factory. Indirected via a package var so
-// tests can inject a fake without touching the platform-specific build files.
-var newProbe = rotation.DefaultProbe
 
 // ErrSessionNotFound is returned by Pool.Lookup for a non-empty unknown id.
 var ErrSessionNotFound = errors.New("sessions: session not found")
@@ -205,8 +195,6 @@ type Pool struct {
 	// pool_conv_sweep_test.go).
 	convSweepInterval time.Duration
 
-	allocated map[SessionID]time.Time
-
 	// activeCap mirrors Config.ActiveCap. Read-only after New, so no lock
 	// is needed to read it. Zero means uncapped — see Config.ActiveCap.
 	activeCap int
@@ -259,15 +247,19 @@ type Pool struct {
 
 	// transitionObserver is the optional, injectable signal surfaced on
 	// /clear rotations and evictions. Set once via SetTransitionObserver
-	// BEFORE Pool.Run; read-only thereafter, so the lifecycle + watcher
-	// goroutines (both spawned by Run) read it lock-free via Run's
+	// BEFORE Pool.Run; read-only thereafter, so the goroutines Run
+	// transitively spawns — the per-session lifecycle goroutines, and the
+	// runners they in turn start — read it lock-free via Run's
 	// goroutine-start happens-before. nil disables it. See transition.go.
 	transitionObserver TransitionObserver
 }
 
-// SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
-// only primitive types so the rotation package can consume snapshots without
-// importing internal/sessions.
+// SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. The primitive
+// field types are what let the retired rotation watcher consume snapshots without
+// importing internal/sessions; #2137 removed that consumer. Both the type and
+// Pool.Snapshot are kept for the same reason RotateID is — they are exported, and
+// removing them is a separate deliberate call rather than a side effect of
+// retiring the watcher.
 type SnapshotEntry struct {
 	ID  SessionID
 	PID int
@@ -545,7 +537,6 @@ func New(cfg Config) (*Pool, error) {
 		convReg:            cfg.ConversationsRegistry,
 		convRegistryPath:   cfg.ConversationsRegistryPath,
 		convSweepInterval:  sweepInterval,
-		allocated:          make(map[SessionID]time.Time),
 		activeCap:          cfg.ActiveCap,
 		sessionTpl:         cfg.Bootstrap,
 		idleTimeoutDefault: cfg.IdleTimeout,
@@ -585,13 +576,19 @@ func New(cfg Config) (*Pool, error) {
 // Pool.mu (W, via the function-level defer) and Session.lcMu; a read is
 // race-clean while holding either one. Lifecycle goroutines read it via
 // currentID() (Session.lcMu); Pool.mu-holders (List, ResolveID, Snapshot,
-// saveLocked, Activate) read it directly. The old "no concurrent reader
-// exists" claim went stale when #839 wired RotateID into the live fsnotify
-// rotation watcher, whose goroutine runs concurrently with the per-session
-// lifecycle goroutines and fires on every /clear. lastActiveAt shares the same
-// lcMu section. Lock order remains Pool.mu → Session.lcMu.
+// saveLocked, Activate) read it directly. The old "no concurrent reader exists"
+// claim went stale in #839 and MUST NOT be restored now that #2137 has retired
+// the rotation watcher that made it stale: a re-key still races the lifecycle
+// goroutines, only from a different goroutine. AdoptAnnouncedID — the sibling
+// that carries the announced-reset rotation — re-keys from the follower's
+// decorator on the runner's parse goroutine, which runs concurrently with the
+// per-session lifecycle goroutines exactly as the watcher's did. lastActiveAt
+// shares the same lcMu section. Lock order remains Pool.mu → Session.lcMu.
 //
-// This is the load-bearing seam the live-detection ticket reuses.
+// No production caller remains since #2137 (the watcher was the last one).
+// RotateID is kept deliberately: it predates the watcher, is exported, and is
+// the seam ~40 test references across five files drive. Removing it is a
+// separate call, not a side effect of retiring its last caller.
 func (p *Pool) RotateID(oldID, newID SessionID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -615,15 +612,12 @@ func (p *Pool) RotateID(oldID, newID SessionID) error {
 // ResolveSessionID pull (BootstrapID()) resolves the rotated id automatically —
 // no push into the spawn path, matching the #839 pull-not-push decoupling.
 //
-// Unlike RotateForNewSession it does NOT register the new id in the allocated
-// skip-set and does NOT fire a client transition. The absent skip-set entry is
-// deliberate and load-bearing: the rekey commits p.bootstrap → newID BEFORE the
-// next spawn creates <newID>.jsonl, so when the rotation watcher's handleCreate
-// fires, Snapshot() already reports {ID: newID} and the ref.ID==stem guard
-// (watcher.go) returns early — structurally identical to cold start, which
-// likewise leaves the bootstrap id un-allocated. A ReasonClear transition would
-// mislead clients into thinking the user ran /clear (client notification of a
-// self-heal is out of scope).
+// Unlike RotateForNewSession it does NOT fire a client transition: a ReasonClear
+// would mislead clients into thinking the user ran /clear (client notification of
+// a self-heal is out of scope). Both methods used to differ on a second axis too
+// — whether they primed the freshly-allocated skip-set that suppressed a
+// spurious rotation-watcher CREATE — but #2137 retired the watcher and deleted
+// the skip-set with it, so that asymmetry no longer exists on either side.
 //
 // Returns the minted id. ErrSessionNotFound if the bootstrap entry is somehow
 // absent (TOCTOU). A saveLocked failure is logged at Warn and swallowed — the
@@ -657,9 +651,11 @@ func (p *Pool) RotateBootstrapForSelfHeal() (SessionID, error) {
 // the new id + lastActiveAt under Session.lcMu, moves the map entry, and flips
 // the bootstrap pointer if oldID was the bootstrap. Caller MUST hold p.mu (write)
 // and MUST have already verified oldID is present and oldID != newID; it does not
-// persist (the caller invokes saveLocked). Shared by RotateID (watcher-observed
-// self-rotation) and RotateForNewSession (daemon-driven new_session) so the
-// re-key invariant lives in one place. Lock order remains Pool.mu → Session.lcMu.
+// persist (the caller invokes saveLocked). Shared by all four re-key paths so the
+// invariant lives in one place: AdoptAnnouncedID (claude's announced reset — the
+// only one with a production caller since #2137 retired the rotation watcher),
+// RotateForNewSession and RotateBootstrapForSelfHeal (daemon-driven, onto a freshly
+// minted id), and RotateID. Lock order remains Pool.mu → Session.lcMu.
 func (p *Pool) rekeyLocked(oldID, newID SessionID) {
 	sess := p.sessions[oldID]
 	sess.lcMu.Lock()
@@ -1519,18 +1515,22 @@ func (p *Pool) BootstrapID() SessionID {
 	return p.bootstrap
 }
 
-// Run blocks until ctx is cancelled, supervising every session in the pool,
-// running the rotation watcher (when ClaudeSessionsDir is set) and the
-// conversations auto-archive sweep loop (when ConversationsRegistry is set)
-// alongside it. errgroup ties the goroutines together: cancellation
+// Run blocks until ctx is cancelled, supervising every session in the pool and
+// running the conversations auto-archive sweep loop (when ConversationsRegistry
+// is set) alongside it. errgroup ties the goroutines together: cancellation
 // propagates, and Wait returns the first non-nil error.
+//
+// Until #2137 this also ran an fsnotify rotation watcher over ClaudeSessionsDir,
+// which guessed at which session had rotated by asking the OS which transcript
+// each tracked pid held open. claude announces the fact directly now
+// (conversation_reset, #2134/#2135/#2136), so the guess and its goroutine are
+// gone; AdoptAnnouncedID carries the rotation instead.
 //
 // Phase 1.1+ extends the fan-out to one supervisor.Run goroutine per session
 // — the errgroup wrapper introduced here is the extension point.
 func (p *Pool) Run(ctx context.Context) error {
 	p.mu.RLock()
 	bootstrap := p.sessions[p.bootstrap]
-	dir := p.claudeSessionsDir
 	p.mu.RUnlock()
 
 	// The bootstrap is never Remove-d (ErrCannotRemoveBootstrap), so its
@@ -1564,30 +1564,6 @@ func (p *Pool) Run(ctx context.Context) error {
 	// ErrPoolNotRunning. Embedded hosts (pyry acp) gate their first
 	// session/new on Ready() to close that unrecoverable startup race.
 	p.readyOnce.Do(func() { close(p.readyCh) })
-
-	if dir != "" {
-		w, err := rotation.New(rotation.Config{
-			Dir:    dir,
-			Probe:  newProbe(p.log),
-			Logger: p.log,
-			Snapshot: func() []rotation.SessionRef {
-				return p.snapshotForRotation()
-			},
-			IsAllocated: func(id string) bool {
-				return p.IsAllocated(SessionID(id))
-			},
-			OnRotate: func(oldID, newID string) error {
-				return p.onRotate(SessionID(oldID), SessionID(newID))
-			},
-		})
-		if err != nil {
-			// AC: pyry startup proceeds without a watcher rather than
-			// failing.
-			p.log.Warn("rotation watcher disabled", "err", err)
-		} else {
-			g.Go(func() error { return w.Run(gctx) })
-		}
-	}
 
 	if p.convReg != nil {
 		interval := p.convSweepInterval
@@ -1646,12 +1622,6 @@ func (p *Pool) Ready() <-chan struct{} {
 // lifecycle goroutine. Everything up to and including supervise is Pool.Mint;
 // this is that plus the Activate.
 //
-// The rotation skip-set is primed inside that final Activate, not here. It sat
-// between the persist and the supervise until #2085 gave the pool a mint that
-// defers its spawn indefinitely, at which point the entry's allocatedTTL could
-// expire before the child ever opened the transcript — so the prime moved to be
-// adjacent to the spawn it protects. See Pool.Activate.
-//
 // We persist BEFORE activating: a save failure with claude already running
 // would leave an unsupervised orphan whose JSONL has no on-disk record. A
 // registry-only entry that didn't activate is benign — the same shape as a
@@ -1708,10 +1678,7 @@ func (p *Pool) CreateIn(ctx context.Context, label, spawnDir string) (SessionID,
 // conversation without starting a process for a discussion nobody has spoken in
 // — and, the load-bearing half, so that every per-session setting chosen before
 // the first message is simply what the child launches with, instead of an
-// in-band correction applied to an already-running child (#2085). The rotation
-// skip-set is deliberately NOT primed here: its entry expires after
-// allocatedTTL, so a spawn deferred past that window needs the prime at the
-// spawn, which is where Pool.Activate now does it.
+// in-band correction applied to an already-running child (#2085).
 //
 // spawnDir is the per-session spawn working directory, used verbatim and NOT
 // validated, canonicalised, or trust-checked by the pool — callers supply a
@@ -1908,73 +1875,6 @@ func (p *Pool) Snapshot() []SnapshotEntry {
 	return out
 }
 
-// snapshotForRotation translates Pool.Snapshot into the primitive-typed
-// shape rotation.Watcher expects. Lives on Pool so the conversion happens
-// in exactly one place.
-func (p *Pool) snapshotForRotation() []rotation.SessionRef {
-	snap := p.Snapshot()
-	out := make([]rotation.SessionRef, len(snap))
-	for i, s := range snap {
-		out[i] = rotation.SessionRef{ID: string(s.ID), PID: s.PID}
-	}
-	return out
-}
-
-// RegisterAllocatedUUID records that id is a UUID pyry just minted (and is
-// about to write to disk via claude --session-id). The watcher consults this
-// set on every CREATE; matching entries skip the rotation path. Entries are
-// consumed on first IsAllocated hit, or pruned after allocatedTTL.
-//
-// Phase 1.2b-B has no live caller — pyry currently launches claude with
-// --continue, so claude picks the UUID. The scaffolding lands now so Phase
-// 1.1's `pyry sessions new` and `claude --session-id` wiring is a one-liner.
-func (p *Pool) RegisterAllocatedUUID(id SessionID) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.registerAllocatedUUIDLocked(id)
-}
-
-// registerAllocatedUUIDLocked is the lock-held variant of
-// RegisterAllocatedUUID. Caller MUST hold p.mu (write). Used by GetOrCreate's
-// register-and-supervise critical section to keep skip-set priming inside
-// the same atomic step as registry insertion.
-func (p *Pool) registerAllocatedUUIDLocked(id SessionID) {
-	if p.allocated == nil {
-		p.allocated = make(map[SessionID]time.Time)
-	}
-	p.pruneAllocatedLocked()
-	p.allocated[id] = time.Now().Add(allocatedTTL)
-}
-
-// IsAllocated reports whether id is in the freshly-allocated set, consuming
-// the entry on a true return. Opportunistically prunes expired entries.
-// Safe for concurrent use.
-func (p *Pool) IsAllocated(id SessionID) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.pruneAllocatedLocked()
-	deadline, ok := p.allocated[id]
-	if !ok {
-		return false
-	}
-	if time.Now().After(deadline) {
-		delete(p.allocated, id)
-		return false
-	}
-	delete(p.allocated, id) // consume on first hit
-	return true
-}
-
-// pruneAllocatedLocked drops expired entries. Caller must hold p.mu (write).
-func (p *Pool) pruneAllocatedLocked() {
-	now := time.Now()
-	for id, d := range p.allocated {
-		if now.After(d) {
-			delete(p.allocated, id)
-		}
-	}
-}
-
 // saveLocked snapshots the current in-memory sessions into a registryFile and
 // writes it atomically. Caller MUST hold p.mu (write). No-op when
 // registryPath is empty (test-only persistence-disabled mode).
@@ -2048,34 +1948,21 @@ func (p *Pool) persist() error {
 // when activating one more would exceed the cap, the LRU peer is evicted via
 // Session.Evict before this Activate proceeds.
 //
-// This is also where the rotation watcher's skip-set is primed, because this is
-// the pool's single spawn entry and the prime has to be adjacent to the spawn it
-// protects. claude opening <id>.jsonl looks like a /clear rotation to the
-// watcher, and the skip-set entry expires after allocatedTTL — so priming at
-// mint time only works while the spawn follows within milliseconds. Since #2085
-// a per-conversation session is minted at create_conversation and spawned
-// whenever the operator sends the first message, arbitrarily later, and the
-// prime had to move with the spawn. RotateForNewSession states the same
-// invariant for the direct-rotate path, including the ordering: the
-// registration completes before the spawn it protects.
+// Until #2137 this was also where the rotation watcher's freshly-allocated
+// skip-set was primed: claude opening <id>.jsonl looked like a /clear rotation
+// to the watcher, so the spawn had to announce its own id as not-a-rotation, and
+// #2085 moved that prime here from mint time because the TTL only covered a
+// spawn that followed within milliseconds. The watcher is gone and the skip-set
+// with it, so the prime is gone too — this is once again a plain spawn entry.
 //
-// Re-priming is harmless and deliberate rather than merely tolerated. It can
-// only ever skip a CREATE of the activated id's OWN transcript — a /clear mints
-// a different UUID, which is never in the set — and IsAllocated consumes on
-// first hit while pruneAllocatedLocked drops the rest at TTL, so a redundant
-// entry (a no-op activate, a reactivation after eviction) costs one map slot for
-// at most allocatedTTL.
-//
-// Lock discipline: RegisterAllocatedUUID takes and releases p.mu (write) before
-// p.capMu is acquired below — the documented capMu → mu → lcMu order is not
-// inverted, because no goroutine ever holds p.mu while acquiring p.capMu. The
-// Lookup above already takes and releases p.mu.RLock in this same position.
+// Lock discipline: the Lookup above takes and releases p.mu.RLock before p.capMu
+// is acquired below. The documented capMu → mu → lcMu order is not inverted,
+// because no goroutine ever holds p.mu while acquiring p.capMu.
 func (p *Pool) Activate(ctx context.Context, id SessionID) error {
 	sess, err := p.Lookup(id)
 	if err != nil {
 		return err
 	}
-	p.RegisterAllocatedUUID(id)
 	if p.activeCap <= 0 {
 		return sess.Activate(ctx)
 	}

@@ -16,8 +16,8 @@ import (
 
 // transitionRecorder is a TransitionObserver that appends every observed
 // SessionTransition under its own mutex. Fires arrive from different
-// goroutines (lifecycle goroutine for eviction, caller/watcher goroutine for
-// clear), so the mutex is load-bearing under -race.
+// goroutines (the lifecycle goroutine for eviction, whichever goroutine drove
+// the rotation for clear), so the mutex is load-bearing under -race.
 type transitionRecorder struct {
 	mu  sync.Mutex
 	got []SessionTransition
@@ -43,57 +43,12 @@ func (r *transitionRecorder) len() int {
 	return len(r.got)
 }
 
-// TestPool_TransitionObserver_ClearFiresOnRotate: a /clear rotation routed
-// through onRotate fires one ReasonClear signal carrying the old/new ids and a
-// non-zero occurred-at, and the underlying RotateID actually rotates the entry.
-func TestPool_TransitionObserver_ClearFiresOnRotate(t *testing.T) {
-	t.Parallel()
-	pool := helperPool(t, false)
-	rec := &transitionRecorder{}
-	pool.SetTransitionObserver(rec.observe)
-
-	oldID := pool.Default().ID()
-	newID := SessionID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
-
-	before := time.Now().UTC()
-	if err := pool.onRotate(oldID, newID); err != nil {
-		t.Fatalf("onRotate: %v", err)
-	}
-
-	got := rec.snapshot()
-	if len(got) != 1 {
-		t.Fatalf("observer fired %d times, want 1: %+v", len(got), got)
-	}
-	tr := got[0]
-	if tr.Reason != ReasonClear {
-		t.Errorf("Reason = %q, want %q", tr.Reason, ReasonClear)
-	}
-	if tr.PreviousID != oldID {
-		t.Errorf("PreviousID = %q, want %q", tr.PreviousID, oldID)
-	}
-	if tr.NewID != newID {
-		t.Errorf("NewID = %q, want %q", tr.NewID, newID)
-	}
-	if tr.OccurredAt.Before(before) || tr.OccurredAt.IsZero() {
-		t.Errorf("OccurredAt = %v, want >= %v and non-zero", tr.OccurredAt, before)
-	}
-
-	// RotateID's existing behaviour is unchanged: the entry moved from oldID
-	// to newID in the registry/in-memory map.
-	if _, err := pool.Lookup(oldID); !errors.Is(err, ErrSessionNotFound) {
-		t.Errorf("Lookup(oldID) err = %v, want ErrSessionNotFound (entry should have moved)", err)
-	}
-	if _, err := pool.Lookup(newID); err != nil {
-		t.Errorf("Lookup(newID) err = %v, want nil (entry should be present)", err)
-	}
-}
-
 // TestRotateForNewSession covers the DIRECT (daemon-driven) new_session
-// rotation: it mints a fresh id, re-keys the pool entry, registers the new id in
-// the allocated skip-set (so the fresh --session-id spawn's <newID>.jsonl CREATE
-// does not double-rotate the watcher), rebinds the owning conversation, and fires
-// exactly one ReasonClear transition — the same observable a /clear produces, but
-// minted and driven directly rather than observed. An unknown oldID is inert.
+// rotation: it mints a fresh id, re-keys the pool entry, rebinds the owning
+// conversation, and fires exactly one ReasonClear transition — the same
+// observable a /clear produces, but minted and driven directly rather than
+// followed. An unknown oldID is inert. It also primed the rotation watcher's
+// skip-set until #2137 retired the watcher.
 func TestRotateForNewSession(t *testing.T) {
 	t.Parallel()
 
@@ -138,12 +93,6 @@ func TestRotateForNewSession(t *testing.T) {
 		}
 		if conv.CurrentSessionID != string(newID) {
 			t.Errorf("CurrentSessionID = %q, want %q (rebound)", conv.CurrentSessionID, newID)
-		}
-
-		// Skip-set primed before the fresh spawn. IsAllocated consumes on hit, so
-		// assert exactly once.
-		if !pool.IsAllocated(newID) {
-			t.Errorf("IsAllocated(newID) = false, want true — the minted id must be registered before the --session-id spawn or the watcher double-rotates")
 		}
 
 		// Exactly one ReasonClear transition carrying old→new.
@@ -199,24 +148,6 @@ func TestRotateForNewSession(t *testing.T) {
 			t.Error("conversations.json rewritten on an unknown-id rotation; want untouched")
 		}
 	})
-}
-
-// TestPool_OnRotate_UnknownIDNoSignal: onRotate against an unknown id returns
-// ErrSessionNotFound and fires no signal (a failed rotation emits nothing).
-func TestPool_OnRotate_UnknownIDNoSignal(t *testing.T) {
-	t.Parallel()
-	pool := helperPool(t, false)
-	rec := &transitionRecorder{}
-	pool.SetTransitionObserver(rec.observe)
-
-	unknown := SessionID("ffffffff-ffff-4fff-8fff-ffffffffffff")
-	err := pool.onRotate(unknown, SessionID("11111111-1111-4111-8111-111111111111"))
-	if !errors.Is(err, ErrSessionNotFound) {
-		t.Fatalf("onRotate(unknown) err = %v, want ErrSessionNotFound", err)
-	}
-	if n := rec.len(); n != 0 {
-		t.Errorf("observer fired %d times on unknown-id rotation, want 0", n)
-	}
 }
 
 // TestPool_TransitionObserver_IdleEvictionFires: an idle eviction fires one
@@ -334,7 +265,9 @@ func TestPool_TransitionObserver_CapEvictionFires(t *testing.T) {
 
 // TestPool_TransitionObserver_NilIsNoOp: with no observer wired, rotation and
 // idle eviction behave exactly as today — no panic, the rotation moves the
-// entry, and the session still evicts.
+// entry, and the session still evicts. Drove the retired watcher seam onRotate
+// until #2137; AdoptAnnouncedID is the surviving re-key-and-notify sibling, and
+// the assertions carry over unchanged.
 func TestPool_TransitionObserver_NilIsNoOp(t *testing.T) {
 	t.Parallel()
 	pool := helperPoolIdle(t, 100*time.Millisecond)
@@ -343,8 +276,8 @@ func TestPool_TransitionObserver_NilIsNoOp(t *testing.T) {
 	// Rotation still rotates with a nil observer.
 	oldID := pool.Default().ID()
 	newID := SessionID("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
-	if err := pool.onRotate(oldID, newID); err != nil {
-		t.Fatalf("onRotate (nil observer): %v", err)
+	if err := pool.AdoptAnnouncedID(oldID, newID); err != nil {
+		t.Fatalf("AdoptAnnouncedID (nil observer): %v", err)
 	}
 	if _, err := pool.Lookup(newID); err != nil {
 		t.Errorf("Lookup(newID) after nil-observer rotate: %v, want nil", err)
@@ -383,11 +316,13 @@ func seedBoundConvRegistry(t *testing.T, pool *Pool, convID conversations.Conver
 	return reg, path
 }
 
-// TestPool_OnRotate_RebindsOwningConversation covers AC#1 + AC#3: a /clear
+// TestPool_AnnouncedReset_RebindsOwningConversation covers AC#1 + AC#3: a /clear
 // rotation re-points the owning conversation's binding in memory, that rebind
 // survives a reload from disk, and the observer fan-out still fires exactly once
-// with the clear signal.
-func TestPool_OnRotate_RebindsOwningConversation(t *testing.T) {
+// with the clear signal. It is NOT a duplicate of
+// TestPool_AdoptAnnouncedID_RebindsTheOwningConversation, which asserts the
+// in-memory rebind only — the reload-from-disk half lives here and nowhere else.
+func TestPool_AnnouncedReset_RebindsOwningConversation(t *testing.T) {
 	t.Parallel()
 	pool := helperPool(t, false)
 	oldID := pool.Default().ID()
@@ -399,8 +334,8 @@ func TestPool_OnRotate_RebindsOwningConversation(t *testing.T) {
 	rec := &transitionRecorder{}
 	pool.SetTransitionObserver(rec.observe)
 
-	if err := pool.onRotate(oldID, newID); err != nil {
-		t.Fatalf("onRotate: %v", err)
+	if err := pool.AdoptAnnouncedID(oldID, newID); err != nil {
+		t.Fatalf("AdoptAnnouncedID: %v", err)
 	}
 
 	// In-memory rebind (AC#1).
@@ -441,10 +376,10 @@ func TestPool_OnRotate_RebindsOwningConversation(t *testing.T) {
 	}
 }
 
-// TestPool_OnRotate_NoOwnerNoOp covers AC#4: rotating a session no conversation
-// owns mutates nothing, writes nothing (the file bytes are untouched, so Save
-// was skipped), returns nil, and still fires the observer once.
-func TestPool_OnRotate_NoOwnerNoOp(t *testing.T) {
+// TestPool_AnnouncedReset_NoOwnerNoOp covers AC#4: rotating a session no
+// conversation owns mutates nothing, writes nothing (the file bytes are
+// untouched, so Save was skipped), returns nil, and still fires the observer once.
+func TestPool_AnnouncedReset_NoOwnerNoOp(t *testing.T) {
 	t.Parallel()
 	pool := helperPool(t, false)
 	oldID := pool.Default().ID()
@@ -465,8 +400,8 @@ func TestPool_OnRotate_NoOwnerNoOp(t *testing.T) {
 	rec := &transitionRecorder{}
 	pool.SetTransitionObserver(rec.observe)
 
-	if err := pool.onRotate(oldID, newID); err != nil {
-		t.Fatalf("onRotate: %v", err)
+	if err := pool.AdoptAnnouncedID(oldID, newID); err != nil {
+		t.Fatalf("AdoptAnnouncedID: %v", err)
 	}
 
 	// No conversation mutated.
@@ -533,12 +468,12 @@ func TestPool_Eviction_BindingNeutral(t *testing.T) {
 	}
 }
 
-// TestPool_OnRotate_RebindRaceConcurrentSave mirrors
+// TestPool_AnnouncedReset_RebindRaceConcurrentSave mirrors
 // TestPool_TransitionObserver_RaceConcurrentFires but wires a registry whose
 // conversations are each bound to one rotating id. Under -race it exercises the
 // new edge — concurrent RebindSession + atomic Save on the same registry/path —
 // alongside the lock-free observer read and the lifecycle eviction fire.
-func TestPool_OnRotate_RebindRaceConcurrentSave(t *testing.T) {
+func TestPool_AnnouncedReset_RebindRaceConcurrentSave(t *testing.T) {
 	t.Parallel()
 	pool := helperPoolIdle(t, 80*time.Millisecond)
 	rec := &transitionRecorder{}
@@ -576,8 +511,8 @@ func TestPool_OnRotate_RebindRaceConcurrentSave(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if err := pool.onRotate(oldIDs[i], newIDs[i]); err != nil {
-				t.Errorf("onRotate(%d): %v", i, err)
+			if err := pool.AdoptAnnouncedID(oldIDs[i], newIDs[i]); err != nil {
+				t.Errorf("AdoptAnnouncedID(%d): %v", i, err)
 			}
 		}(i)
 	}
@@ -601,8 +536,8 @@ func TestPool_OnRotate_RebindRaceConcurrentSave(t *testing.T) {
 }
 
 // TestPool_TransitionObserver_RaceConcurrentFires drives the lifecycle fire
-// site (an idle eviction of the bootstrap) simultaneously with N watcher-style
-// onRotate fires from separate goroutines. Run under -race, this proves the
+// site (an idle eviction of the bootstrap) simultaneously with N announced-reset
+// re-keys from separate goroutines. Run under -race, this proves the
 // lock-free transitionObserver read is safe under concurrent reads and the
 // recorder's own mutex keeps it race-free under concurrent writes.
 func TestPool_TransitionObserver_RaceConcurrentFires(t *testing.T) {
@@ -632,8 +567,8 @@ func TestPool_TransitionObserver_RaceConcurrentFires(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			if err := pool.onRotate(oldIDs[i], newIDs[i]); err != nil {
-				t.Errorf("onRotate(%d): %v", i, err)
+			if err := pool.AdoptAnnouncedID(oldIDs[i], newIDs[i]); err != nil {
+				t.Errorf("AdoptAnnouncedID(%d): %v", i, err)
 			}
 		}(i)
 	}
@@ -699,10 +634,11 @@ func TestPool_AdoptAnnouncedID_RekeysAndFiresOneClear(t *testing.T) {
 }
 
 // TestPool_AdoptAnnouncedID_EqualIDChangesNothing pins AC 3's pool half, and it is
-// the one assertion here that onRotate would FAIL: RotateID checks membership before
-// it no-ops on equal ids, so onRotate's unconditional notify draws a spurious
-// delimiter for a session announcing the id it already has. This entry point must
-// not repeat that.
+// the one assertion here that a rekey-then-notify-unconditionally shape FAILS:
+// RotateID checks membership before it no-ops on equal ids, so a caller that
+// notifies on its nil return draws a spurious delimiter for a session announcing
+// the id it already has. That was the retired watcher seam onRotate's shape, and
+// this entry point must not repeat it.
 func TestPool_AdoptAnnouncedID_EqualIDChangesNothing(t *testing.T) {
 	t.Parallel()
 	pool := helperPool(t, false)
@@ -721,10 +657,12 @@ func TestPool_AdoptAnnouncedID_EqualIDChangesNothing(t *testing.T) {
 	}
 }
 
-// TestPool_AdoptAnnouncedID_UnknownOldID is the rotation watcher's path when it wins
-// the race to the same rotation: it already re-keyed, so oldID is gone. Refusing here
-// with no transition is what keeps "exactly one session_transition per reset"
-// structural rather than merely likely.
+// TestPool_AdoptAnnouncedID_UnknownOldID covers an announcement naming an oldID the
+// pool no longer holds. Until #2137 that was the rotation watcher winning the race to
+// the same rotation and re-keying first; the producers that survive it are a
+// daemon-driven rotation onto a MINTED id and the entry's removal (the divergence
+// #2176 tracks). Refusing here with no transition is what keeps "exactly one
+// session_transition per reset" structural rather than merely likely.
 func TestPool_AdoptAnnouncedID_UnknownOldID(t *testing.T) {
 	t.Parallel()
 	pool := helperPool(t, false)

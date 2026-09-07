@@ -177,12 +177,14 @@ func (f *sessionResetFollower) Sink(ev turnevent.Event) {
 // successful reset, spanning a registry write and the observer fan-out.
 //
 // Rotating unconditionally, and only then unwinding, rather than waiting for the
-// answer: the watcher may have observed the same rotation first (it fires on the
-// new transcript's creation), so ErrSessionNotFound is the answer on a path where
-// the conversation is ALREADY bound to the announced id. A tag left behind there
-// would have every later event dropped by the drain's active-session gate — the
-// dark conversation this ticket exists to prevent, and worse than the noise row it
-// would replace.
+// answer: rekeyPool answers nil on ErrSessionNotFound just as it does on a re-key
+// it performed itself, so there is no unwind on that sentinel and nothing to wait
+// for. A tag left behind on a path where the conversation IS already bound to the
+// announced id would have every later event dropped by the drain's active-session
+// gate — the dark conversation this seam exists to prevent, and worse than the noise
+// row it would replace. What that sentinel can mean now that #2137 retired the
+// rotation watcher, and why the branch is nevertheless left as it stands, is
+// rekeyPool's own doc below; the open divergence it names is #2176.
 //
 // The UNWIND is what ErrSessionIDTaken needs, and it is not the same case wearing
 // a different sentinel. AdoptAnnouncedID returns it BEFORE rekeyLocked: nothing was
@@ -240,13 +242,23 @@ func (f *sessionResetFollower) follow(newID string) {
 // Three answers mean it does, and they are three different situations rather than
 // one wearing three faces. adopt == nil is a runner built without a pool callback,
 // where there is no re-key to wait for and the tag half is the whole of it. A nil
-// error is this call having re-keyed. ErrSessionNotFound is someone else having done
-// so already — the rotation watcher fires on the new transcript's creation, so it may
-// observe the same rotation first, and until #2137 retires it that is the answer on
-// every reset. A follower that unwound there would leave the tag on the retired id
-// while the conversation is bound to the announced one, and the drain's
-// active-session gate would then drop every later event: the dark conversation this
-// seam exists to prevent, and worse than the noise row it would replace.
+// error is this call having re-keyed — since #2137 that is the ordinary answer, and
+// this call is the only thing that applies an announced reset. ErrSessionNotFound is
+// oldID being gone by the time the pool looked. A follower that unwound there would
+// leave the tag on the retired id while the conversation is bound to the announced
+// one, and the drain's active-session gate would then drop every later event: the
+// dark conversation this seam exists to prevent, and worse than the noise row it
+// would replace.
+//
+// That last answer is the one whose MEANING #2137 changed, and the branch is
+// deliberately left as it stands. While the rotation watcher ran it fired on the new
+// transcript's creation and usually observed the same rotation first, so the session
+// really did stand on newID and keeping the tag there was right. With the watcher
+// retired the surviving producers — a daemon-driven RotateForNewSession or
+// RotateBootstrapForSelfHeal, or a removal — move the session onto a MINTED id
+// instead, so the tag can end up somewhere the registry never went. That divergence
+// is #2176; it predates this ticket and is not fixed here, because the plain fix
+// (unwind on this sentinel) re-opens the dark conversation described above.
 //
 // SECURITY: the record is content-free — the two session ids and the error, never
 // anything claude authored beyond an id already validated as a canonical UUID stem by
@@ -254,9 +266,10 @@ func (f *sessionResetFollower) follow(newID string) {
 // error can reach here: that function deliberately has no logging surface at all,
 // because encoding/json quotes the offending input into its error text.
 //
-// It is Debug and not Warn precisely because it is the normal path today. Warn here
-// would cry wolf on every reset and train a reader to skip follow's refusal record,
-// which is the one that matters.
+// It stays Debug even though it is no longer the normal path. The record is not
+// actionable on its own — an operator cannot tell #2176's divergence from a benign
+// removal by reading it — so promoting it to Warn would train a reader to skip
+// follow's refusal record, which is the one that always matters.
 func (f *sessionResetFollower) rekeyPool(oldID, newID string) error {
 	if f.adopt == nil {
 		return nil

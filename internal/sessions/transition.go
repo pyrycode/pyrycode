@@ -32,15 +32,18 @@ type SessionTransition struct {
 
 // TransitionObserver is notified of clear/eviction transitions. It is invoked
 // SYNCHRONOUSLY from the goroutine that owns the transition (the lifecycle
-// goroutine for eviction, the rotation-watcher goroutine for clear) with NO
-// session or pool lock held. The implementation MUST NOT block — hand the
-// signal off to a buffered channel and return. A nil observer is disabled.
+// goroutine for eviction; for clear, whichever goroutine drove the rotation —
+// the runner's parse goroutine via AdoptAnnouncedID, or a control-plane
+// goroutine via RotateForNewSession) with NO session or pool lock held. The
+// implementation MUST NOT block — hand the signal off to a buffered channel and
+// return. A nil observer is disabled.
 type TransitionObserver func(SessionTransition)
 
 // SetTransitionObserver installs the pool's transition observer. It must be
-// called before Pool.Run: the field is then read-only, and the concurrent
-// reads from the lifecycle and watcher goroutines (both spawned by Run) are
-// race-free via Run's goroutine-creation happens-before edge. Calling it after
+// called before Pool.Run: the field is then read-only, and the concurrent reads
+// from the goroutines Run transitively spawns — the per-session lifecycle
+// goroutines, and the runners they in turn start — are race-free via Run's
+// goroutine-creation happens-before edge. Calling it after
 // Run has started is a programming error the race detector will flag. A nil
 // observer (the zero value, or an explicit nil) disables signalling.
 func (p *Pool) SetTransitionObserver(obs TransitionObserver) {
@@ -93,18 +96,16 @@ func (p *Pool) rebindConversation(oldID, newID SessionID) {
 // RotateForNewSession rotates the session keyed by oldID to a fresh
 // daemon-minted id and returns the new id for the caller to feed to
 // (*streamsup.Runner).RestartFresh. It is the DIRECT (new_session) analog of
-// onRotate: it re-keys the pool entry, registers the new id in the allocated
-// skip-set, rebinds the owning conversation, and fires a ReasonClear transition
-// so the client sees the fresh-session break — but it MINTS the id and drives
-// the rotation itself rather than observing claude's self-rotation.
+// AdoptAnnouncedID: it re-keys the pool entry, rebinds the owning conversation,
+// and fires a ReasonClear transition so the client sees the fresh-session break
+// — but it MINTS the id and drives the rotation itself rather than following the
+// reset claude announces.
 //
-// The skip-set registration is the key asymmetry vs onRotate. In onRotate claude
-// already created <newID>.jsonl and the id is deliberately UN-allocated (that is
-// how the watcher detects a real self-rotation). Here WE are about to spawn
-// claude --session-id <newID> via RestartFresh, so <newID>.jsonl will CREATE-fire
-// the watcher; the id MUST be in the skip-set or the watcher double-rotates.
-// Registering upholds the RegisterAllocatedUUID invariant that GetOrCreate
-// already obeys for caller-supplied --session-id mints.
+// It used to differ on a second axis: it primed the freshly-allocated skip-set,
+// because the <newID>.jsonl that RestartFresh was about to create would CREATE-fire
+// the rotation watcher, which would otherwise read the daemon's own spawn as a
+// self-rotation and double-rotate. #2137 retired the watcher and deleted the
+// skip-set, so the mint-and-drive is the whole of the difference now.
 //
 // Errors: a crypto/rand mint failure, or an absent oldID (TOCTOU: the binding may
 // vanish between the caller's resolve and this call), returns ("", err) with no
@@ -125,7 +126,6 @@ func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
 		return "", ErrSessionNotFound
 	}
 	p.rekeyLocked(oldID, newID)
-	p.registerAllocatedUUIDLocked(newID)
 	if err := p.saveLocked(); err != nil {
 		p.log.Warn("sessions: new_session rotate persist failed",
 			"event", "rotate_new_session.persist_failed",
@@ -152,22 +152,20 @@ func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
 var ErrSessionIDTaken = errors.New("sessions: session id already in use")
 
 // AdoptAnnouncedID re-keys the session claude ANNOUNCED a reset for onto the
-// announced id and, on success, fires a ReasonClear transition. It is the third
-// sibling of onRotate and RotateForNewSession (#2135), and the differences from
-// both are the whole of its contract:
+// announced id and, on success, fires a ReasonClear transition. It arrived in
+// #2135 as the third sibling of RotateForNewSession and the (now retired, #2137)
+// watcher seam onRotate, and the differences from both are the whole of its
+// contract:
 //
 //   - vs RotateForNewSession: it MINTS NOTHING. claude already created
 //     <newID>.jsonl and is writing to it; the daemon is following, not driving.
-//     For the same reason it does NOT register newID in the allocated skip-set —
-//     the id is deliberately un-allocated, which is how the rotation watcher
-//     tells a real self-rotation from a daemon-driven one (see
-//     RotateForNewSession's doc for that asymmetry stated the other way round).
 //   - vs onRotate: an equal-id announcement is refused BEFORE the re-key rather
-//     than after it. onRotate delegates to RotateID, which checks membership
-//     first and only then no-ops on oldID == newID, and then fires a transition
-//     unconditionally — so a session announcing the id it already has draws a
+//     than after it. onRotate delegated to RotateID, which checks membership
+//     first and only then no-ops on oldID == newID, and then fired a transition
+//     unconditionally — so a session announcing the id it already has drew a
 //     spurious delimiter. That is exactly what an announcement can carry and this
-//     method must not repeat it.
+//     method must not repeat it. RotateID survives the watcher's retirement and
+//     keeps that shape, which is why this method still does not delegate to it.
 //
 // It does NOT delegate to RotateID, and that is the reason the body below repeats
 // RotateForNewSession's locked shape rather than composing: the destination-collision
@@ -185,10 +183,16 @@ var ErrSessionIDTaken = errors.New("sessions: session id already in use")
 // names another live session would overwrite that session's entry and silently
 // swallow it. ErrSessionIDTaken refuses it.
 //
-// Errors: ErrSessionNotFound if oldID is unknown — the ordinary outcome when the
-// rotation watcher observed the same rotation first and already re-keyed, which is
-// what keeps "exactly one transition per reset" structural rather than merely
-// likely. ErrSessionIDTaken per above. Both return with no mutation and no
+// Errors: ErrSessionNotFound if oldID is unknown. While the rotation watcher ran
+// this was the ORDINARY outcome — it observed the same rotation first and had
+// already re-keyed — and that is what made "exactly one transition per reset"
+// structural rather than merely likely. #2137 retired the watcher, so this call is
+// now the one that applies an announced reset and the sentinel marks the exception:
+// oldID vanished because a daemon-driven rotation (RotateForNewSession,
+// RotateBootstrapForSelfHeal) or a removal got there first. Those rotate onto a
+// MINTED id, not this announced one, so unlike the watcher case the session does not
+// end up on newID — see rekeyPool, whose caller-side reading of this sentinel has not
+// been revisited. ErrSessionIDTaken per above. Both return with no mutation and no
 // transition. A saveLocked failure is logged at Warn and swallowed: the in-memory
 // rotation is already authoritative and durability is best-effort, matching
 // RotateForNewSession and rebindConversation. The notifyTransition fan-out runs off
@@ -217,24 +221,6 @@ func (p *Pool) AdoptAnnouncedID(oldID, newID SessionID) error {
 	}
 	p.mu.Unlock()
 
-	p.notifyTransition(SessionTransition{
-		PreviousID: oldID,
-		NewID:      newID,
-		Reason:     ReasonClear,
-		OccurredAt: time.Now().UTC(),
-	})
-	return nil
-}
-
-// onRotate performs a /clear rotation and, on success, fires a ReasonClear
-// transition. It is the clear surfacing seam wired into Pool.Run's rotation
-// watcher (the OnRotate callback). The RotateID error is returned verbatim and
-// no signal fires on the error path — a failed/no-op rotation emits nothing
-// (the watcher already logs and continues on an OnRotate error).
-func (p *Pool) onRotate(oldID, newID SessionID) error {
-	if err := p.RotateID(oldID, newID); err != nil {
-		return err
-	}
 	p.notifyTransition(SessionTransition{
 		PreviousID: oldID,
 		NewID:      newID,

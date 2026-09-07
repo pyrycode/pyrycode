@@ -40,8 +40,12 @@ that offers `RestartFresh` without a gate still rotates, just ungated, instead o
 degenerating into the inert default. `rotatingRunner` (`inbound_deliver_rotation_test.go`) is
 what makes that optionality load-bearing to existing coverage rather than academic: it exposes
 both methods unconditionally and leaves arming to the real `startFreshRunner`. The existing
-rotate-before-`RestartFresh` order (load-bearing for the double-rotation watcher skip-set) is
-unchanged; the arm is inserted ahead of both statements. `streamRunner.BeginRotation()` forwards
+rotate-before-`RestartFresh` order — originally load-bearing so the (now-retired, #2137) rotation
+watcher would observe the id registered as freshly allocated before it saw the CREATE, avoiding a
+double-rotation — is preserved on a surviving reason (#1330): `rotate()` fires the `ReasonClear`
+transition fan-out, so without the gate armed first, a turn accepted in the window between that
+fan-out and the fresh child existing would write into the doomed outgoing child and be silently
+dropped. The arm is inserted ahead of both statements. `streamRunner.BeginRotation()` forwards
 it, the third concrete method reached by type assertion off the un-widened `sessions.Runner`
 after `Interrupt` (#1120) and `RestartFresh` (#1124).
 

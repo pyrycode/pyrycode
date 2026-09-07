@@ -26,7 +26,7 @@ Two constraints bind at once, and only the parser's side of the fan-in channel s
 2. `newID == old` → return untouched: no re-key, no transition, no tag rotation (mirrors `AdoptAnnouncedID`'s own equal-id guard — the pool cannot guard a value it doesn't own, so both sides carry the check).
 3. `tag.Rotate(newID)` — **before** the pool call, not after. Rotating first closes the window that would otherwise open on every *successful* reset: the pool call's `notifyTransition` rebinds the conversation, and the rebind is what makes the old tag dead, so rotating the tag first means no goroutine can observe the rebind while the tag still reports the old id.
 4. `pool.AdoptAnnouncedID(old, newID)` — the pool seam ([`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md)), reached through `rekeyPool` (below). Its answer decides whether the rotation stands.
-5. **The unwind.** The tag ends on `newID` only when the pool's answer means the session is now on that id — `nil` (this call re-keyed) or `ErrSessionNotFound` (the rotation watcher won the race — see below). Every other answer means nothing moved, and the tag is rotated back to `old`.
+5. **The unwind.** The tag ends on `newID` only when the pool's answer means the session is now on that id — `nil` (this call re-keyed) or `ErrSessionNotFound` (some other rotation path already moved the session onto `newID` — see [`ErrSessionNotFound` after the watcher's retirement](#errsessionnotfound-after-the-watchers-retirement-2137) below). Every other answer means nothing moved, and the tag is rotated back to `old`.
 6. **The runner follows (#2136).** On the far side of the unwind — never before it — `follow` calls `adoptRunner(newID)`, which reaches [`(*streamsup.Runner).AdoptSessionID`](streamsup-package-satisfying-sessions-runner.md): the runner's live spawn id, the value `beginSpawn` puts into the next child's argv and environment. A refused id now reaches the tag, the registry and the runner alike not at all; an accepted one moves all three.
 
 Step 5 is the part that shipped wrong the first time and is why this file exists.
@@ -99,14 +99,28 @@ path. The refusal-path window is bounded to a lock acquisition and two map probe
 before any disk write; `exitForTag` running on the supervision goroutine is the only reader that
 could observe it.
 
-## Coexistence with the rotation watcher
+## `ErrSessionNotFound` after the watcher's retirement (#2137)
 
-Both `sessionResetFollower` and the [rotation watcher](rotation-watcher.md) rotate to the same
-announced id when claude self-clears — a double fire is harmless by design: whichever loses the
-race finds `oldID` already gone from the pool and gets `ErrSessionNotFound`, which `AdoptAnnouncedID`
-answers with no mutation and no transition, keeping "exactly one `session_transition`" structural.
-Retiring the watcher, now that this seam covers the same event faster and from the source rather
-than from a filesystem CREATE, is tracked separately (#2137) — not done here.
+Until #2137, `sessionResetFollower` and the (now-deleted) rotation watcher raced for the same
+announced `/clear`: whichever lost found `oldID` already gone from the pool and got
+`ErrSessionNotFound`, which `AdoptAnnouncedID` answers with no mutation and no transition — the
+mechanism that kept "exactly one `session_transition`" structural. `rekeyPool` treated that sentinel
+as success (the session now stands on `newID`) because the watcher, when it won, had applied *this
+same* rotation.
+
+\#2137 deleted the watcher, so `AdoptAnnouncedID` is now the **sole** writer of an announced re-key —
+see [`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md).
+`ErrSessionNotFound`'s surviving producers are `RotateForNewSession` and `RotateBootstrapForSelfHeal`,
+and both rotate `oldID` onto a **freshly minted** id, not the announced one. `rekeyPool` still
+answers `nil` on this sentinel, so `follow` still keeps its tag on the announced `newID` and calls
+`adoptRunner(newID)` — sound only when the registry actually agrees, which it no longer necessarily
+does. In the narrow race where a daemon-driven rotation lands between the announcement and this
+call, the tag and the registry can now end on different ids, which is a conversation-goes-dark
+failure mode. This is **pre-existing and narrow** (the same interleaving was possible before,
+merely rarer and masked by the watcher usually winning), and it is **filed, not fixed here**, as
+[#2176](https://github.com/pyrycode/pyrycode/issues/2176) — the fix changes `follow`'s unwind, which
+is a deliberate scope boundary this ticket did not cross: unwinding on this sentinel by default
+would re-open the dark-conversation failure the original tag-unwind lesson above exists to prevent.
 
 ## Not fed here
 
