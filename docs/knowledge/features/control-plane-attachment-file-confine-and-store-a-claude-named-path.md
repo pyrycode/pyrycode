@@ -116,6 +116,36 @@ than a special case. #1475 is an open, unresolved question about whether that di
 should be closed elsewhere in the daemon; this verb depends only on `Cwd` being present,
 absolute and confined, which holds under either resolution.
 
+## Announcing the store: `attachment_offered`, and the name it must not derive from (#2166)
+
+A successful store now fans one `attachment_offered` frame to every interactive-capable
+client, copying `streamApprovalBridge.broadcast`'s shape — monotonic per-emitter envelope
+id, the #607 interactive gate, torn-down-conn tolerance (see
+[v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md § Stream-json approval bridge](v2-session-manager-state-machine-inbound-modal-control-deny-on-timeout.md#stream-json-approval-bridge--the-verdict-arm-1080)
+for that fan-out's own account). `fileAttacher` gained a fourth dependency, a bare
+`func(conversationID, attachmentID, filename string)` rather than an interface — nil is a
+silent no-op, the same tolerance `SetApprovalSurfacer(nil)` already has above, so a daemon
+with no relay leg (`startRelay`'s empty-`relayURL` early return) stores exactly as before.
+
+**The announced name is the leaf of `Store`'s returned path, never the leaf of `resolved`
+— the two sit side by side in scope at the call site but are not interchangeable.**
+`resolved` is the *pre-sanitisation* path the model named; `attachments.Store` sanitises
+the filename before writing and returns the path it actually wrote. For any input
+`SanitizeFilename` doesn't touch — which is most inputs — `filepath.Base(resolved)` and
+`filepath.Base(stored)` agree, which is exactly why the wrong derivation is easy to
+introduce and not notice in review or in a casually-chosen test fixture: it only reddens
+on a name carrying a separator, a control character, or a leading dot. Announcing
+`resolved`'s leaf would leak the pre-sanitisation string past the sanitiser whose entire
+job is keeping that string off the wire.
+
+Refusals still announce nothing — the hook fires once, after `Store` returns nil and after
+the existing content-free `log.Info`, immediately before the verb returns the minted id —
+and a failed push never turns a successful store into a refusal. `filename` reaches no log
+field on any branch of the announce path either, matching this verb's refusal-side
+discipline above. See [protocol-mobile.md § Attachments](../protocol-mobile.md#attachments)
+for the client-facing contract this closes: the announced name is the stored name, and the
+offer is live-only (no registry, no replay).
+
 ## See also
 
 - [pyry-mcp-files-command.md](pyry-mcp-files-command.md) — `pyry mcp-files`, the `send_file`
