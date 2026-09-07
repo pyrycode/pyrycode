@@ -317,6 +317,18 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		"conn_id", s.connID,
 		"device_name", device.Name)
 	m.send(protocol.RoutingEnvelope{ConnID: s.connID, Frame: respFrame})
+	// Durably record this token's first redemption (#1528): clear the
+	// deadline `pyry pair` stamped and persist, so a redeemed device stays
+	// distinguishable from a never-scanned one across a restart. No-op for a
+	// record with no deadline and for an unwired DevicesPath; never fails the
+	// handshake. Placed AFTER the accept envelope so the phone never waits on
+	// the devices lock, and BEFORE the V2StateOpen transition below so that
+	// transition — the edge every enumeration and every test synchronises on —
+	// also orders the write.
+	m.recordRedemption(s.connID, device)
+	// s.device deliberately keeps the pre-clear snapshot: it records what
+	// authentication observed, and no reader consults RedeemBy off the session
+	// (#1529 enforces the deadline at the registry).
 	s.device = &device
 	// Record the negotiated interactive decision from the same slice the ack
 	// echoed (single source of truth) BEFORE the session becomes enumerable.

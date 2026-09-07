@@ -10,6 +10,7 @@ Lives in the same `internal/devices` package as `Device`, `HashToken`, `VerifyTo
 - **Phase 3 foundation (#210):** `(*Registry).Validate` — the WS-perimeter auth predicate. Composes `HashToken` + `FindByTokenHash`-shaped scan + in-memory `LastSeenAt` advance. Seventh export. No consumers wired in this slice (the WS auth handler is a follow-up Phase-3 ticket).
 - **Phase 3 foundation (#250):** `(*Registry).UpdatePushRegistration(tokenHash, platform, pushToken, name) bool` — the in-memory mutator for `Device.Platform` / `Device.PushToken` / `Device.Name` keyed by `TokenHash`. Returns `true` iff a matching row was found and mutated; caller chains `Save` for durability. Mutates the three fields under `r.mu`. Eighth export, consumed by `internal/relay/handlers.Handle` for the phone's `register_push_token` frame. `Name` is part of the mutation because the protocol's `device_name` makes the phone the source of truth for self-reported name (iOS Settings rename propagates).
 - **Handshake reload (#782):** `(*Registry).Reload(path)` — reconciles the on-disk device set into the in-memory registry so a device paired via `pyry pair` after daemon startup authenticates on its next handshake without a restart (and a `pyry pair revoke` stops being accepted, for free). Ninth export, called by `internal/relay`'s v2 handshake (before `Validate`) and by the `register_push_token` handler (before `Save`, as a clobber guard). See § Reload below and [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md).
+- **Redemption clear (#1528):** `(*Registry).ClearRedeemBy(tokenHash string) bool` — zeroes `Device.RedeemBy` on the matching device under `r.mu`, returning true *iff* a row matched **and** its deadline was non-zero. Tenth export. The return value is what decides whether a `Save` is warranted, so idempotency is decided by the registry rather than re-derived at the call site. Consumed by `internal/relay`'s v2 handshake accept tail (`recordRedemption`) — the first `devices.json` writer built on `WithLock` from birth. See § `ClearRedeemBy` below.
 
 ## Surface
 
@@ -25,6 +26,7 @@ func (r *Registry) FindByTokenHash(hash string) (Device, bool)
 func (r *Registry) Validate(plain string) (Device, bool)
 func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name string) bool
 func (r *Registry) Reload(path string) error
+func (r *Registry) ClearRedeemBy(tokenHash string) bool
 ```
 
 `Registry` holds the in-memory device slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk); persist via `Save`. Methods are safe for concurrent use.
@@ -282,9 +284,20 @@ has the full analysis, including the revoke-direction case (a revoked device
 can keep authenticating if a `register_push_token` interleaves between the
 revoke's write and the daemon's read of it). #1530 added
 `internal/devices.WithLock`, a cross-process `flock(2)` primitive sized to
-close this — see [`codebase/1530.md`](../codebase/1530.md) — but no writer
-here calls it yet. The two-writer clobber stays open until the `cmd/pyry` and
-daemon consumer slices wire it in.
+close this — see [`codebase/1530.md`](../codebase/1530.md).
+
+**Update (2026-09-07, #1528): the primitive has its first caller, but the
+three writers named above still don't use it.** `recordRedemption` (the
+redemption-clear writer, see § `ClearRedeemBy` below) is a fourth
+`devices.json` writer, lock-compliant from birth — it is presently the only
+production caller of `WithLock` in the tree. `pyry pair` (mint), `pyry pair
+revoke`, and `register_push_token` are unaffected and still race each other
+exactly as described above; #1531/#1532 are the tickets that retrofit them.
+`recordRedemption` is the pattern to copy when they do: `WithLock` around a
+`Reload` → mutate → `Save` region, reloading *inside* the lock rather than
+only before it, since the lock excludes a concurrent commit but does nothing
+about one that already landed between the pre-lock reload and the
+acquisition.
 
 ### Tests
 
@@ -299,6 +312,53 @@ idiom:
   the older value.
 - `TestReload_ConcurrentReloadValidate` — `-race` probe (concurrent
   `Reload`/`Validate`/`List`).
+
+## `ClearRedeemBy` — redemption clear (#1528)
+
+`ClearRedeemBy(tokenHash string) bool` zeroes `Device.RedeemBy` on the row whose
+`TokenHash` matches, under `r.mu`, mirroring `UpdatePushRegistration`'s shape
+(indexed loop, in-place element mutation, caller owns `Save`). It exists so
+`internal/relay`'s v2 handshake can durably record that a pairing token has
+been redeemed — see [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md)'s
+sibling concern and [`features/v2-session-manager.md`](v2-session-manager.md)
+for the call site.
+
+The return value is the load-bearing part: **true iff a matching device was
+found and its `RedeemBy` was non-zero** — i.e. iff memory actually changed and
+a `Save` is warranted. A hit whose deadline is already clear returns false, so
+a caller that validates the same device three times in a row (the common case)
+decides "nothing to persist" from this return alone, with no separate
+before/after comparison. `Validate` itself is untouched by this addition —
+its no-I/O contract (§ above) stays literally true, since the clear and the
+`Save` both live at the caller, one layer up.
+
+**The safety property is a consequence of composing with `Reload`, not
+something `ClearRedeemBy` does itself.** A caller that runs `Reload` inside
+the same locked region before calling `ClearRedeemBy` gets a for-free
+guarantee: if `pyry pair revoke` removed the device from disk between the
+caller's last read and the lock acquisition, that `Reload` drops it from
+memory first, so `ClearRedeemBy` reports no match and no `Save` runs — the
+write cannot resurrect a revoked credential. `ClearRedeemBy` has no opinion
+about revocation; it just reports whether the row it was asked about still
+exists and still needs clearing.
+
+### Testing a best-effort, lock-guarded persist
+
+Two witnesses worth reusing on any future best-effort `WithLock` consumer,
+both from `internal/relay/v2session_redemption_test.go`:
+
+- **A "the file wasn't rewritten" assertion is vacuous if it only compares
+  bytes** — `Save` is idempotent, so an unchanged-content write still passes a
+  byte comparison. Back-dating the file's mtime with `os.Chtimes` first makes
+  the assertion non-vacuous: `Save` commits via temp-file-then-rename, which
+  always installs a current mtime, so an unchanged mtime after the call under
+  test is proof no `Save` ran.
+- **`WithLock`'s sidecar file is a free witness for "the locked region was
+  never entered."** It's created before the caller's function runs, so
+  `os.Stat(path + ".lock")` returning `fs.ErrNotExist` is a strictly stronger
+  claim than "no `Save` ran" — it needs no seam, no counter, and no fake, and
+  it is what proves a no-deadline device costs nothing at all (not even a
+  lock acquisition).
 
 ## Out of scope (deferred)
 
