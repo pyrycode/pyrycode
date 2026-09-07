@@ -237,8 +237,15 @@ func TestMintPairing_Rejects(t *testing.T) {
 			wantCode: protocol.CodeProtocolMalformed,
 		},
 		{
-			name:     "device_name carries an ANSI escape run",
-			payload:  mintPayload("\x1b[31m" + mpTestLabelMark),
+			// BARE ESC, NOT A FULL CSI SEQUENCE, and deliberately: substrate-guard
+			// bans the CSI introducer — ESC followed by an open bracket — in
+			// pyrycode source outside its allowlist, in a comment as well as in a
+			// literal, so spelling a colour run here would redden the build (it
+			// did). Nothing is lost — mintLabelIsDisplaySafe refuses at the first
+			// offending rune, and ESC is the byte every ANSI escape run begins
+			// with.
+			name:     "device_name carries ESC, an ANSI escape run's first byte",
+			payload:  mintPayload("kitchen\x1b" + mpTestLabelMark),
 			wantCode: protocol.CodeProtocolMalformed,
 		},
 		{
@@ -247,8 +254,11 @@ func TestMintPairing_Rejects(t *testing.T) {
 			wantCode: protocol.CodeProtocolMalformed,
 		},
 		{
+			// U+0085 as an ESCAPE, never the raw two bytes: staticcheck ST1018
+			// fails the build on a control character spelled literally in source,
+			// which is the whole table's convention above.
 			name:     "device_name carries a C1 control",
-			payload:  mintPayload("kitchen" + mpTestLabelMark),
+			payload:  mintPayload("kitchen\u0085" + mpTestLabelMark),
 			wantCode: protocol.CodeProtocolMalformed,
 		},
 		{

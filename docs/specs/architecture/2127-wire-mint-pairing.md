@@ -555,3 +555,59 @@ next reader meets it.
 **What is unchanged.** Everything the gate exists for. Control characters, DEL and
 the C1 range are refused, which is what kills the log-injection newline and the
 ANSI escape run, and the answer is still `protocol.malformed`.
+
+### 2026-09-08 — the Security review's "until this ticket no client could author a device label" is false
+
+**What changed.** § Security review, *Error messages, logs, telemetry* argued the
+log-injection hazard was fully closed on the premise that a device label had no
+remote author before this ticket. It has had one since `register_push_token`:
+`RegisterPushToken` hands the payload's client-supplied `device_name` to
+`devices.Registry.UpdatePushRegistration`, which assigns it to
+`devices.Device.Name` — the overwrite is deliberate and that function's doc block
+says so — and nothing on that path checks the value's shape. So the *requesting*
+device's name, which AC-4 requires in the success record and which `auditMint`
+puts in `audit.Entry.DeviceLabel`, can carry a control character. The premise let
+that name skip the gate the minted name gets.
+
+**Why the fix is a correction rather than a second gate.** The exposure is
+pre-existing and wider than this path: the same unchecked `Device.Name` already
+reaches a daemon log from `RegisterPushToken` itself and from the rekey handler,
+and an audit record from `auditQuestion` and both `modalResolverV2` sites. A
+predicate applied at `MintPairing`'s log call alone would close none of those
+while reading as though the hazard were handled — the "one and not the other"
+split the `PairingMinter` seam comment warns about — and `cmd/pyry` cannot reach
+`internal/relay`'s unexported predicate, so it would also be a second copy of the
+rule. Filed as **#2219**, whose shape is one gate where the label enters the
+registry, the way `MintPairingPayload`'s bound is one gate. Widening it across
+those call sites is out of scope here (§ Scope Discipline).
+
+**What is unchanged.** The minted label's gate, which is what this ticket owns:
+`mintLabelIsDisplaySafe` still refuses every C0 control, DEL and C1 control at the
+trust boundary before the name can be stored, logged or rendered. The corrected
+claim, with #2219 named, now lives at `pairingMinterV2.MintPairing`'s success
+record where the two names sit side by side.
+
+### 2026-09-08 — two reject-table literals are respelled to satisfy build gates
+
+**What changed.** § Testing strategy lists the refused label shapes, two of which
+could not be written the obvious way:
+
+- The C1 control row carried a **raw U+0085 byte** in its source literal.
+  staticcheck ST1018 fails the build on that; it is now `\u0085`, which is the
+  convention every other row in the table already followed.
+- The ANSI row spelled a full colour run, whose CSI introducer `substrate-guard`
+  bans in pyrycode source outside its allowlist — in a comment as well as in a
+  literal. The row is now a **bare ESC**, and the coverage is identical:
+  `mintLabelIsDisplaySafe` refuses at the first offending rune, and ESC is the
+  byte every escape run starts with.
+
+**Why it is recorded.** Both gates run late in `make check` — staticcheck fourth,
+`substrate-guard` fifth — so the first red hid the second, and each cost a lap to
+find. The reasons now live at the rows themselves so the next editor does not
+restore either spelling.
+
+**What is unchanged.** The minted label's gate, which is what this ticket owns:
+`mintLabelIsDisplaySafe` still refuses every C0 control, DEL and C1 control at the
+trust boundary before the name can be stored, logged or rendered. The corrected
+claim, with #2219 named, now lives at `pairingMinterV2.MintPairing`'s success
+record where the two names sit side by side.

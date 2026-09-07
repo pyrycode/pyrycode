@@ -1328,12 +1328,15 @@ const (
 //
 //   - deviceName IS REMOTE-AUTHORED, and it arrives ALREADY SHAPE-VALIDATED. The
 //     handler bounds it (protocol.MaxDeviceNameBytes, enforced at decode) and
-//     refuses any control character, C1 control or invalid UTF-8 before this seam is
-//     reached, which is what makes the value safe to store, to log and to render in
-//     `pyry pair list`. An implementation MUST NOT relax that assumption by
-//     re-deriving the name from anywhere else, and MUST NOT let it become a path
-//     component — resolveDevicesPath sanitises the INSTANCE name, never a device
-//     name.
+//     refuses any C0 control, DEL or C1 control before this seam is reached, which
+//     is what makes the value safe to store, to log and to render in a
+//     `pyry pair list` column. UTF-8 validity is NOT among those checks and does
+//     not need to be: encoding/json replaces every invalid byte and unpaired
+//     surrogate with U+FFFD, so a decoded string is valid by construction — the
+//     decoder's guarantee, spelled out at mintLabelIsDisplaySafe. An
+//     implementation MUST NOT relax the rest of the assumption by re-deriving the
+//     name from anywhere else, and MUST NOT let it become a path component —
+//     resolveDevicesPath sanitises the INSTANCE name, never a device name.
 //   - THE MINTED DEVICE IS ALWAYS UNPRIVILEGED. MintPairingPayload has no field for
 //     devices.Device.AllowRemotePermissions by declaration, and an implementation
 //     MUST pass false as a literal rather than threading a value from anywhere. A

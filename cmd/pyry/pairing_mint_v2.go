@@ -149,9 +149,26 @@ func (m *pairingMinterV2) MintPairing(requester *devices.Device, deviceName stri
 
 	// THE ONE RECORD OF A SUCCESSFUL MINT. It names both devices — who asked and
 	// what was created — and neither the token, its hash, nor any part of the
-	// encoded pairing. The minted name is safe to log because the relay handler
-	// refused any control character in it before this method was called; the
-	// requesting name is operator-authored, set by `pyry pair --name` at a shell.
+	// encoded pairing.
+	//
+	// THE TWO NAMES DO NOT CARRY THE SAME GUARANTEE. The MINTED name is
+	// display-safe by construction: the relay handler refused every C0 control,
+	// DEL and C1 control in it before this method was called, which is the whole
+	// point of the gate this ticket added. The REQUESTING name has no such gate —
+	// a paired client can set its own devices.Device.Name through
+	// register_push_token, whose handler passes the payload's device_name to
+	// devices.Registry.UpdatePushRegistration by design, and nothing on that path
+	// checks its shape. So requester.Name — in this record, in the failure record
+	// above, and as DeviceLabel in auditMint below — can carry a control
+	// character.
+	//
+	// THAT RESIDUAL IS PRE-EXISTING AND TRACKED IN #2219, NOT CLOSED HERE. The
+	// same unchecked value already reaches the same kind of sink from
+	// register_push_token's own logs, the rekey handler's, and auditQuestion's
+	// audit record; a predicate applied at this one call site would close none of
+	// those while reading as though the hazard were handled. The fix belongs where
+	// the label enters the registry — one gate, the way MintPairingPayload's is one
+	// gate — which is #2219's shape.
 	m.logger.Info("pair: minted a pairing over the wire",
 		"event", "pairing.mint.ok",
 		"requesting_device", requester.Name,
