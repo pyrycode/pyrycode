@@ -63,6 +63,25 @@ type RunnerConfig struct {
 	// turn-event sink and the exit channel for that session.
 	SessionID string
 
+	// AdoptAnnouncedReset re-keys this runner's session onto an id claude
+	// announced a reset to, and draws the client's session delimiter (#2135). The
+	// pool sets it to a closure over Pool.AdoptAnnouncedID at both RunnerConfig
+	// construction sites; a runner built without one (a test pool, or any factory
+	// that does not observe resets) gets nil and the caller skips the call.
+	//
+	// IT TAKES BOTH IDS, and that is what lets it live on a per-session config at
+	// all. SessionID above is construction-fixed and, as its own doc says, does not
+	// mirror a rotation — so a closure capturing it would be correct for exactly one
+	// reset and fail-closed on every one after that. Carrying no identity of its own,
+	// this callback stays correct for the session's whole life and the CALLER supplies
+	// the live id (cmd/pyry reads it off the runner's streamSessionTag).
+	//
+	// It is invoked SYNCHRONOUSLY from the goroutine forwarding claude's stdout, so
+	// it must not block for long: it takes Pool.mu and fans out to the transition
+	// observer, whose own contract already forbids blocking. It is not a place to do
+	// I/O beyond the registry save the re-key already implies.
+	AdoptAnnouncedReset func(oldID, newID string) error
+
 	// ClaudeArgs is the extra argv passed through to claude.
 	ClaudeArgs []string
 

@@ -475,7 +475,15 @@ func New(cfg Config) (*Pool, error) {
 		// dropped on the floor by the stream factory, so removing them changes no
 		// behaviour — it stops advertising behaviour nothing implements. See
 		// RunnerConfig's doc for the two that represent real gaps.
-		SessionID:  string(bootstrapID),
+		SessionID: string(bootstrapID),
+		// #2135's announced-reset seam. p is the same late-bound pointer the
+		// comment above describes: the closure only fires when claude announces a
+		// reset on a running child, long after New has returned and assigned it.
+		// Both ids are parameters because SessionID above is construction-fixed —
+		// see the field's own doc.
+		AdoptAnnouncedReset: func(oldID, newID string) error {
+			return p.AdoptAnnouncedID(SessionID(oldID), SessionID(newID))
+		},
 		ClaudeArgs: bootstrapArgs,
 		// The stored posture the stream runner asserts to every child it spawns
 		// (#2064). settings is canonicalSettings'd above, so this is a real mode and
@@ -1833,7 +1841,11 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 		// #1108 seam: the same id already baked into ClaudeArgs as
 		// "--session-id <id>" is also exposed here so the stream RunnerFactory
 		// (#1109) can read it at construction.
-		SessionID:  string(id),
+		SessionID: string(id),
+		// Same seam as Pool.New's (#2135), and p is already in hand here.
+		AdoptAnnouncedReset: func(oldID, newID string) error {
+			return p.AdoptAnnouncedID(SessionID(oldID), SessionID(newID))
+		},
 		ClaudeArgs: args,
 		// Same seed as Pool.New's, and canonicalSettings runs above this site too
 		// (#2064).

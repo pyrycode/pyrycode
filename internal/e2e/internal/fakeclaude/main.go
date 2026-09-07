@@ -403,6 +403,7 @@ const (
 	envStreamWithholdMode = "PYRY_FAKE_CLAUDE_STREAM_WITHHOLD_MODE_ACK"
 	envStreamRoster       = "PYRY_FAKE_CLAUDE_STREAM_ROSTER"
 	envStreamModelWindows = "PYRY_FAKE_CLAUDE_STREAM_MODEL_WINDOWS"
+	envStreamResetTo      = "PYRY_FAKE_CLAUDE_STREAM_RESET_TO"
 	envApproveSocketFile  = "PYRY_FAKE_CLAUDE_APPROVE_SOCKET_FILE"
 	envRejectAbsentResume = "PYRY_FAKE_CLAUDE_REJECT_ABSENT_RESUME"
 	assistantMaxBytes     = 64 * 1024
@@ -735,7 +736,7 @@ func main() {
 		rosterTasks, _ := strconv.Atoi(os.Getenv(envStreamRoster))
 		runStreamJSON(stdin, os.Stdout, os.Getenv(envStreamInterrupt) != "", os.Getenv(envStreamBogus) != "",
 			os.Getenv(envStreamRateLimit), os.Getenv(envStreamWithholdMode) != "", rosterTasks,
-			os.Getenv(envStreamModelWindows) != "")
+			os.Getenv(envStreamModelWindows) != "", os.Getenv(envStreamResetTo))
 		return
 	}
 
@@ -1774,9 +1775,11 @@ func (w syncWriter) Write(p []byte) (int, error) {
 // tail makes a mis-slotted call-site edit a compile error, which a third adjacent bool
 // would not. rosterTasks extends the same discipline — bool, int, not a fourth bool.
 // modelWindows extends it once more: it lands AFTER the int, so the tail reads
-// int, bool and a transposed call site is still a compile error.
+// int, bool and a transposed call site is still a compile error. resetToID extends
+// it a further time and lands last, so the tail reads bool, string — the same
+// alternation, the same compile error on a transposition.
 func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rateLimitStatus string,
-	withholdModeAck bool, rosterTasks int, modelWindows bool) {
+	withholdModeAck bool, rosterTasks int, modelWindows bool, resetToID string) {
 	// bufio.ReadString (not bufio.Scanner) so an arbitrarily long line — a
 	// stream-json envelope carries a whole prompt — is never truncated by a token
 	// cap, and the final non-newline-terminated bytes at EOF are still processed.
@@ -1816,6 +1819,22 @@ func runStreamJSON(r io.Reader, w io.Writer, honorInterrupt, emitBogus bool, rat
 				// in order on one goroutine.
 				if rosterTasks > 0 {
 					if werr := writeBackgroundTaskRoster(w, rosterTasks); werr != nil {
+						return
+					}
+				}
+				// The announced-reset rider (#2135) writes on the same terms and for
+				// the same reason once more: BEFORE the reply, so a turn_end reaching a
+				// client implies the announcement has already been through the parser,
+				// the follower and the pool re-key. That is the happens-before the e2e
+				// uses in place of a sleep.
+				//
+				// FIRST TURN ONLY. claude mounts one fresh transcript per reset, and a
+				// second announcement of the same id would be an equal-id no-op the
+				// daemon deliberately ignores — so re-announcing would test nothing and
+				// would make "how many transitions did the client see" depend on how
+				// many turns a test happens to drive.
+				if resetToID != "" && turn == 1 {
+					if werr := writeConversationReset(w, resetToID); werr != nil {
 						return
 					}
 				}
@@ -2731,5 +2750,27 @@ func writeVerdictResponse(w io.Writer, msgID string, verdict approveVerdict) err
 		Type:      "result",
 		Subtype:   "success",
 		SessionID: streamSessionID,
+	})
+}
+
+// writeConversationReset writes one top-level conversation_reset line — claude's
+// own announcement that it reset the conversation and mounted a fresh transcript
+// under newID (#2135).
+//
+// The SHAPE is claude's, from #2088's live capture, and the two keys are exactly
+// the ones streamsup's emitConversationReset decodes. The VALUE is the caller's,
+// so a test can pre-place a transcript under the announced id and assert the
+// daemon's context gauge follows it — which is the only way the AC 4 assertion
+// discriminates rather than passing on a shared default.
+//
+// A map[string]any like the sibling writers: keys marshal sorted, so the line is
+// deterministic without declaring a struct for a shape nothing else reads. No
+// session_id and no uuid rider here, unlike writeBackgroundTaskRoster: the capture
+// this is modelled on carries neither, and inventing a field the real line does not
+// have would let a daemon-side decode quietly depend on it.
+func writeConversationReset(w io.Writer, newID string) error {
+	return writeJSONLine(w, map[string]any{
+		"type":                "conversation_reset",
+		"new_conversation_id": newID,
 	})
 }

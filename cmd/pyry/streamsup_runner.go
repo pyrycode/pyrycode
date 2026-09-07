@@ -306,7 +306,15 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) session
 		// they launch with. See withApprovalArgs' doc for the derivation.
 		scfg.Args = withApprovalArgs(scfg.Args, mcpServersPath, cfg.PermissionMode, cfg.OperatorBypass)
 		tag := newStreamSessionTag(cfg.SessionID)
-		parser, held := newSessionParser(sink.sinkForTag(tag.ID), cfg.Logger)
+		// #2135 chains the announced-reset follower between the retention holds and
+		// the fan-in send, rather than inside newSessionParser: it retains nothing,
+		// and it needs the two per-runner objects on this line — the live tag and the
+		// pool callback — which that function has no business knowing about. The
+		// placement it DOES need is being on the parser's side of the channel, which
+		// the chain's own doc states is what the retentions get from, and only from,
+		// sitting here.
+		follow := newSessionResetFollower(tag, cfg.AdoptAnnouncedReset, sink.sinkForTag(tag.ID), cfg.Logger)
+		parser, held := newSessionParser(follow.Sink, cfg.Logger)
 		scfg.Stdout = parser
 		scfg.OnChildExit = sink.exitForTag(tag.ID)
 		scfg.OnSessionRotate = tag.Rotate

@@ -52,10 +52,12 @@ lock-order + pre-persist-exposure lessons):
   `ReasonClear` with old/new ids; the `RotateID` error is returned verbatim and a
   failed/no-op rotation fires nothing. Fires after `Pool.mu` is released.
   Startup reconciliation (`reconcile.go`) calls `RotateID` **directly**, so no
-  spurious clear fires at boot before an observer is wired — the only production
-  clear paths are the live fsnotify watcher and, since #1125, `RotateForNewSession`
-  (the `new_session` control verb's daemon-driven direct rotation) firing the same
-  `ReasonClear` off-`Pool.mu`, no new `TransitionReason`.
+  spurious clear fires at boot before an observer is wired. Production clear paths
+  are the live fsnotify watcher, `RotateForNewSession` since #1125 (the `new_session`
+  control verb's daemon-driven direct rotation), and `AdoptAnnouncedID` since #2135
+  (the parser-side follower adopting claude's own reset announcement) — all three
+  fire the same `ReasonClear` off-`Pool.mu`, no new `TransitionReason`. See
+  [`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md).
 - **Eviction** — `Session.runActive` now returns `(TransitionReason, error)`;
   `Session.Run` fires `ReasonEviction` (empty `NewID`) **after** `transitionTo(stateEvicted)`
   returns (post-persist, no `lcMu` held), behind a `reason != "" && s.pool != nil`

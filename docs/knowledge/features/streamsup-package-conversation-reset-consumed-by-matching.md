@@ -38,9 +38,10 @@ every downstream consumer instead of each one re-deriving the question —
 `TestImportBoundary_StdlibOnly` keeps that package stdlib-only. The gate
 proves the id is *well-formed*, not that claude was *entitled* to name it; a
 buggy or compromised claude can announce any well-formed stem, including
-another session's. #2135, which re-keys the session registry on this value,
-owns the authorization question — the gate here only
-closes off traversal and newline injection into the eventual
+another session's. [`sessionResetFollower` and `Pool.AdoptAnnouncedID`
+(#2135)](streamsup-package-announced-reset-follower.md), which re-key the
+session registry on this value, own the authorization question — the gate
+here only closes off traversal and newline injection into the eventual
 `<dir>/<id>.jsonl` resolution it feeds.
 
 ## Testing: a hostile row can pass by failing at the wrong layer

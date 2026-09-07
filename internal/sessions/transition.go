@@ -1,6 +1,9 @@
 package sessions
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // TransitionReason is an internal/sessions-local vocabulary for a session
 // lifecycle transition. It is deliberately NOT protocol's wire reason — this
@@ -139,6 +142,88 @@ func (p *Pool) RotateForNewSession(oldID SessionID) (SessionID, error) {
 		OccurredAt: time.Now().UTC(),
 	})
 	return newID, nil
+}
+
+// ErrSessionIDTaken reports that a rotation's destination id already names a
+// DIFFERENT live session. It exists for AdoptAnnouncedID, whose new id comes
+// from the supervised child's stdout rather than from this package's own mint,
+// and it is a distinct sentinel rather than ErrSessionNotFound's opposite so a
+// caller can tell "nothing to rotate" from "rotating would swallow a session".
+var ErrSessionIDTaken = errors.New("sessions: session id already in use")
+
+// AdoptAnnouncedID re-keys the session claude ANNOUNCED a reset for onto the
+// announced id and, on success, fires a ReasonClear transition. It is the third
+// sibling of onRotate and RotateForNewSession (#2135), and the differences from
+// both are the whole of its contract:
+//
+//   - vs RotateForNewSession: it MINTS NOTHING. claude already created
+//     <newID>.jsonl and is writing to it; the daemon is following, not driving.
+//     For the same reason it does NOT register newID in the allocated skip-set —
+//     the id is deliberately un-allocated, which is how the rotation watcher
+//     tells a real self-rotation from a daemon-driven one (see
+//     RotateForNewSession's doc for that asymmetry stated the other way round).
+//   - vs onRotate: an equal-id announcement is refused BEFORE the re-key rather
+//     than after it. onRotate delegates to RotateID, which checks membership
+//     first and only then no-ops on oldID == newID, and then fires a transition
+//     unconditionally — so a session announcing the id it already has draws a
+//     spurious delimiter. That is exactly what an announcement can carry and this
+//     method must not repeat it.
+//
+// It does NOT delegate to RotateID, and that is the reason the body below repeats
+// RotateForNewSession's locked shape rather than composing: the destination-collision
+// check has to sit inside the SAME p.mu hold as the mutation, because a check
+// outside it is a TOCTOU. What is shared is rekeyLocked, which is where the re-key
+// invariant lives — the same sharing RotateForNewSession does.
+//
+// SECURITY: newID crosses a trust boundary this package has not had before. Until
+// #2135 nothing on the supervised child's stdout could mutate the registry; now one
+// line does. Two properties bound it. Its SHAPE is already settled upstream —
+// streamsup's emitConversationReset gates on transcript.ValidStem, an anchored
+// full match over lowercase hex, so the value carries no separator, no traversal
+// and no length. Its DESTINATION is settled here: rekeyLocked moves a map entry
+// without checking what is already at the destination, so adopting an id that
+// names another live session would overwrite that session's entry and silently
+// swallow it. ErrSessionIDTaken refuses it.
+//
+// Errors: ErrSessionNotFound if oldID is unknown — the ordinary outcome when the
+// rotation watcher observed the same rotation first and already re-keyed, which is
+// what keeps "exactly one transition per reset" structural rather than merely
+// likely. ErrSessionIDTaken per above. Both return with no mutation and no
+// transition. A saveLocked failure is logged at Warn and swallowed: the in-memory
+// rotation is already authoritative and durability is best-effort, matching
+// RotateForNewSession and rebindConversation. The notifyTransition fan-out runs off
+// p.mu, the established leaf-callback discipline.
+func (p *Pool) AdoptAnnouncedID(oldID, newID SessionID) error {
+	p.mu.Lock()
+	if _, ok := p.sessions[oldID]; !ok {
+		p.mu.Unlock()
+		return ErrSessionNotFound
+	}
+	if oldID == newID {
+		p.mu.Unlock()
+		return nil
+	}
+	if _, taken := p.sessions[newID]; taken {
+		p.mu.Unlock()
+		return ErrSessionIDTaken
+	}
+	p.rekeyLocked(oldID, newID)
+	if err := p.saveLocked(); err != nil {
+		p.log.Warn("sessions: announced reset persist failed",
+			"event", "adopt_announced_id.persist_failed",
+			"session_id", string(newID),
+			"previous_session_id", string(oldID),
+			"err", err)
+	}
+	p.mu.Unlock()
+
+	p.notifyTransition(SessionTransition{
+		PreviousID: oldID,
+		NewID:      newID,
+		Reason:     ReasonClear,
+		OccurredAt: time.Now().UTC(),
+	})
+	return nil
 }
 
 // onRotate performs a /clear rotation and, on success, fires a ReasonClear
