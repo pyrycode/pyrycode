@@ -167,6 +167,35 @@ Its wire field keeps the name `model` even though three other v2 payloads alread
 
 `TypeRequestModelList = "request_model_list"` is an inbound phone → binary **control** envelope in its **own** new const block, intercepted at `v2session.go`'s `dispatchAppFrame` **before** `dispatch.Route` (the `TypeRequestHistory` / `TypeRequestSessionSettings` precedent — **no `dispatch.Route` handler**). It joins the five inbound *ask the daemon for X* verbs already on this wire rather than inventing a sixth idiom for the same act. Carries the one-field `RequestModelListPayload` (`interactive.go` — see [Model-list payload](#model-list-payload-1704-shape-1705-fixtures--docs-producer-18481849)); the reply is `TypeModelList` / `ModelListPayload` **unchanged**, correlated via `Envelope.InReplyTo` (no request-id key, the `TypeAttachmentStored` decision transferred), carrying no `EventID`. Stays out of `inboundAppTypeSet` (a v2-only control envelope; `IsKnownAppType` rejecting it is the structural bar against a v1 client pushing one into the v1 handler chain). **Never sits in `excludedTypes` as "pending handler"**: unlike `TypeRequestHistory` (#2113→#2116) and `TypeRequestAttachment` (#2052→#2054), the declaration's only daemon-side consumer is the handler landing in this same ticket, so it is filed in `inboundTypes` as `"switch-intercepted"` from the moment it exists. See [Inbound `request_model_list`](v2-session-manager-state-machine-inbound-request-model-list-modellistfor-seam.md) for the handler and [Error codes](protocol-package-constants-codes-go-error-codes-21.md) for the retryable `model_list.unavailable` it mints.
 
+**v2 conversation-system-prompt-read vocabulary** (#2152, the read half of the #2151 cluster):
+
+| Group | Constant |
+|-------|----------|
+| Request system prompt | `TypeRequestSystemPrompt` |
+| System prompt | `TypeSystemPrompt` |
+
+`TypeRequestSystemPrompt = "request_system_prompt"` is an inbound phone → binary
+**control** envelope, intercepted at `v2session.go`'s `dispatchAppFrame` **before**
+`dispatch.Route` — the `TypeRequestModelList` / `TypeRequestSessionSettings`
+precedent, no `dispatch.Route` handler. Carries the one-field
+`RequestSystemPromptPayload` (`system_prompt.go` — see
+[Conversation system-prompt read payloads](protocol-package-types-system-prompt-payloads.md)).
+`TypeSystemPrompt = "system_prompt"` is the reply, correlated via
+`Envelope.InReplyTo` (no request-id key, no `conversation_id` either — the
+`TypeAttachmentStored` decision transferred), carrying no `EventID`. Both stay
+out of `inboundAppTypeSet` (v2-only control/reply). Neither ever sits in
+`excludedTypes` as "pending handler": the declaration's only daemon-side
+consumer is the handler landing in this same ticket, so `TypeRequestSystemPrompt`
+is filed in `inboundTypes` as `"switch-intercepted"` and `TypeSystemPrompt` in
+`excludedTypes` as `"reply"` from the moment both exist — `TypeRequestModelList`'s
+precedent, not `TypeRequestHistory`'s pending-handler window. **Its write-half
+sibling, `TypeSetSystemPrompt`, is `dispatch.Route`-dispatched** (filed
+`"map-dispatched"`) rather than switch-intercepted, and the split is deliberate:
+the write verb carries no capability gate, and this read verb is inert without
+the interactive capability. See
+[Inbound `request_system_prompt`](v2-session-manager-state-machine-inbound-request-system-prompt-systempromptfor-seam.md)
+for the handler; mints no error code and has no reject path.
+
 **v2 slash-command-list vocabulary** (#1726; payload #1727, producer #1720, fixtures/docs #1718):
 
 | Group | Constant |
