@@ -486,3 +486,40 @@ Each is resolved in Phase B and any that changes the design is recorded under
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — Open Questions resolved; no design change
+
+All three resolved as the design predicted, so nothing above was revised. Recorded
+because "resolved and confirmed" and "never checked" are indistinguishable from the
+diff alone.
+
+1. **Does `ResolvePath`'s leaf equal `Store`'s leaf for the same file?** Yes. Proved end
+   to end by `TestRelayV2_AttachmentOfferedRoundTrip`, which asserts the announced
+   `filename` equals the `attachment_chunk` `filename` for the same id — two independent
+   legs, one string. The e2e's host name deliberately carries a space so the sanitiser
+   rewrites it; a run using a name sanitisation leaves alone would have passed with the
+   two legs deriving the name two different ways.
+2. **Deadline and ordering in the e2e.** The retrieval neighbour's 15s is ample: the run
+   completes in about one second. The envelope pump classifies by type, so the bootstrap
+   session's own pushes interleave harmlessly.
+3. **Does the relay guard stay green?** Yes — `TestEveryInboundV2TypeHasHandler` passes
+   unchanged. #2082's `"push"` classification already covered this type and no inbound
+   handler is owed, since the frame is outbound-only.
+
+### 2026-09-07 — Two mutation checks, both discriminating
+
+Neither changed the design; both are recorded because a test that cannot fail is worth
+less than no test at all.
+
+- Announcing `filepath.Base(resolved)` instead of `filepath.Base(stored)` — the plausible
+  wrong implementation, since it is the value already in hand — reddens exactly the
+  sanitisation row of `TestFileAttacher_AnnouncesTheStoredName` and leaves the plain row
+  green. The pair discriminates as intended.
+- Leaving the emitter constructed but unwired (`announce` never assigned in
+  `startRelayV2`) reddens `TestRelayV2_AttachmentOfferedRoundTrip` on its "no
+  attachment_offered frame arrived" arm. The e2e exercises the production wiring rather
+  than a fixture: the harness rebuilds the daemon binary, so an in-tree mutation reaches
+  it (a `go test -overlay` would not — the harness's own `go build` never sees the
+  overlay).
