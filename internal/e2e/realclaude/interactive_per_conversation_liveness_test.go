@@ -151,6 +151,11 @@ type perConvHarness struct {
 	initRecv *noise.CipherState
 	home     string
 	workdir  string
+	// daemon is the live pyry process. Exposed for its captured stderr, which
+	// carries the daemon's own "spawning claude" records — the read
+	// TestInteractiveSystemPromptFile_LiveSpawnArgv takes its spawn-argv assertion
+	// from (#2093). The cases in this file do not use it.
+	daemon *bootstrapDaemon
 }
 
 // startPerConversationHarness stands up the real interactive stack exactly like
@@ -208,7 +213,7 @@ func startPerConversationHarness(t *testing.T) *perConvHarness {
 	t.Cleanup(func() { _ = phone.Close() })
 
 	initSend, initRecv := driveHandshakeInteractive(t, phone, pubKey, payload.Token)
-	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir}
+	return &perConvHarness{phone: phone, initSend: initSend, initRecv: initRecv, home: home, workdir: workdir, daemon: d}
 }
 
 // --- wire-drive helpers (transcribed into this package) ---------------------

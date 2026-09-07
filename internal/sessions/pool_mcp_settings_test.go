@@ -13,13 +13,15 @@ import (
 	"time"
 )
 
-// waitArgv is waitArgvRaw with the #943 "--settings <path>" pair stripped, so the
-// many pre-#943 argv assertions keep comparing only the flags they own. Every
-// interactive spawn now carries the pair; the tests in this file assert its
-// presence, placement, and file content directly via waitArgvRaw.
+// waitArgv is waitArgvRaw with the #943 "--settings <path>" and #2093
+// "--append-system-prompt-file <path>" pairs stripped, so the argv assertions
+// that predate each keep comparing only the flags they own. Every interactive
+// spawn now carries both pairs; the tests in this file assert the settings pair's
+// presence, placement, and file content directly via waitArgvRaw, and
+// pool_system_prompt_test.go does the same for the prompt pair.
 func waitArgv(t *testing.T, dir string) []string {
 	t.Helper()
-	return stripMCPSettings(t, waitArgvRaw(t, dir))
+	return stripSystemPrompt(t, stripMCPSettings(t, waitArgvRaw(t, dir)))
 }
 
 // stripMCPSettings removes the adjacent "--settings <path>" pair that #943

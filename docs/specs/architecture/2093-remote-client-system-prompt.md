@@ -201,3 +201,31 @@ exit code.
    confirm no equality assertion exists.
 3. **Trailing newline in the constant.** Ships with one, as a text file should.
    The byte pin makes it explicit either way.
+
+## Revisions
+
+### 2026-09-07 — open questions resolved during implementation
+
+No design change; all three answers confirmed the plan as committed.
+
+1. **`tdnClaudeCommand` degrades exactly as the technical notes predict, and it
+   gates nothing.** It returns `""` when the needle matches other than exactly one
+   row, and its single consumer assigns that to `tdnRecord.RunnerFromArgv`. Its
+   own doc states the label is "PROVENANCE, not a precondition", and the verdict
+   path — `tdnBeforeFault` and its after-side twin — keys on `Before`,
+   `HeldPIDs` and `HeldPGID`, never on `RunnerFromArgv`. So once every interactive
+   session carries the flag, an opt-in probe run on a machine with a live pyry
+   daemon records a self-describing `indeterminate` label and reaches the same
+   verdict it would have. Out of scope, and confirmed safe rather than assumed.
+2. **No exact-argv equality assertion exists in the live suite.** A sweep for
+   `slices.Equal` / `reflect.DeepEqual` against an argv or args value in
+   `internal/e2e/realclaude` returns nothing. The argv strings in
+   `teardown_liveness_probe_test.go` are hand-written fixtures fed to classifiers,
+   not comparisons against production output, so none of them redden.
+3. **Trailing newline shipped.** Pinned explicitly by `TestSystemPromptText_Pinned`.
+
+One thing the plan did not anticipate, resolved the same way: `operatorBypass`
+reads `base`, which now carries two more tokens. It is
+`slices.Contains(base, bypassPermissionsArg)` — an exact-element match against
+`--dangerously-skip-permissions` — so neither the flag nor a path can change its
+answer. Verified by reading the predicate rather than by the tests staying green.

@@ -22,7 +22,7 @@ func installedArgv(t *testing.T, argv []string) []string {
 	if len(argv) >= len(argvRecorderTemplate) && argv[0] == argvRecorderTemplate[0] {
 		argv = argv[len(argvRecorderTemplate):]
 	}
-	return stripMCPSettings(t, argv)
+	return stripSystemPrompt(t, stripMCPSettings(t, argv))
 }
 
 // waitRunning blocks until the double reports a live child, so an in-band
