@@ -762,3 +762,96 @@ func TestReload_ConcurrentReloadValidate(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestRegistry_ClearRedeemBy pins the return value the redemption record
+// (#1528) keys its Save decision on: true iff a row matched AND its deadline
+// was actually set. That is what makes a re-validation of an already-redeemed
+// device write nothing further — the idempotency lives here, not at the call
+// site.
+func TestRegistry_ClearRedeemBy(t *testing.T) {
+	t.Parallel()
+	aHash := HashToken("a")
+	bHash := HashToken("b")
+	paired := time.Now().UTC().Add(-time.Minute)
+	deadline := paired.Add(RedemptionWindow)
+
+	tests := []struct {
+		name        string
+		aRedeemBy   time.Time
+		tokenHash   string
+		wantOK      bool
+		wantARedeem time.Time
+	}{
+		{
+			name:        "hit-with-deadline-clears",
+			aRedeemBy:   deadline,
+			tokenHash:   aHash,
+			wantOK:      true,
+			wantARedeem: time.Time{},
+		},
+		{
+			// The already-redeemed row: nothing changed, so the caller must
+			// not Save.
+			name:        "hit-without-deadline-reports-no-change",
+			aRedeemBy:   time.Time{},
+			tokenHash:   aHash,
+			wantOK:      false,
+			wantARedeem: time.Time{},
+		},
+		{
+			name:        "miss-unknown-hash-leaves-deadline",
+			aRedeemBy:   deadline,
+			tokenHash:   HashToken("z"),
+			wantOK:      false,
+			wantARedeem: deadline,
+		},
+		{
+			name:        "miss-empty-hash-leaves-deadline",
+			aRedeemBy:   deadline,
+			tokenHash:   "",
+			wantOK:      false,
+			wantARedeem: deadline,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			r.Add(Device{Name: "alice", TokenHash: aHash, PairedAt: paired, RedeemBy: tc.aRedeemBy})
+			r.Add(Device{Name: "bob", TokenHash: bHash, PairedAt: paired, RedeemBy: deadline})
+
+			if got := r.ClearRedeemBy(tc.tokenHash); got != tc.wantOK {
+				t.Fatalf("ClearRedeemBy(%q) = %v, want %v", tc.tokenHash, got, tc.wantOK)
+			}
+
+			got := r.List()
+			if len(got) != 2 {
+				t.Fatalf("List() len = %d, want 2", len(got))
+			}
+			a, b := got[0], got[1]
+			if !a.RedeemBy.Equal(tc.wantARedeem) {
+				t.Errorf("alice RedeemBy = %v, want %v", a.RedeemBy, tc.wantARedeem)
+			}
+			// The mutator touches exactly one field of the matched row...
+			if a.Name != "alice" || a.TokenHash != aHash || !a.PairedAt.Equal(paired) {
+				t.Errorf("alice non-RedeemBy fields mutated: %+v", a)
+			}
+			// ...and never reaches the sibling row, deadline included.
+			if b.Name != "bob" || b.TokenHash != bHash || !b.RedeemBy.Equal(deadline) {
+				t.Errorf("bob mutated: %+v", b)
+			}
+		})
+	}
+}
+
+// TestRegistry_ClearRedeemBy_EmptyRegistry defends the zero-value receiver the
+// way TestRegistry_Validate_EmptyRegistry does for the auth predicate: a
+// registry with a nil device slice reports no change rather than panicking.
+func TestRegistry_ClearRedeemBy_EmptyRegistry(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	if r.ClearRedeemBy(HashToken("a")) {
+		t.Fatalf("ClearRedeemBy on an empty registry = true, want false")
+	}
+}

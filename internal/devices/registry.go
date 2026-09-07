@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 )
 
 // registryFile is the on-disk envelope for ~/.pyry/<name>/devices.json. The
@@ -235,6 +236,37 @@ func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name s
 			r.devices[i].Platform = platform
 			r.devices[i].PushToken = pushToken
 			r.devices[i].Name = name
+			return true
+		}
+	}
+	return false
+}
+
+// ClearRedeemBy zeroes RedeemBy on the device whose TokenHash equals
+// tokenHash, durably recording that its pairing token has been redeemed.
+// Returns true iff a matching device was found AND its RedeemBy was non-zero —
+// that is, iff the in-memory state actually changed and a Save is warranted.
+// A match whose deadline is already clear returns false, so the idempotency
+// the redemption call site needs is decided here rather than re-derived there.
+// Caller is responsible for persisting via Save.
+//
+// The zero value is "no deadline", and Device.RedeemBy is tagged omitzero, so
+// a cleared record loses the redeem_by key on the next Save rather than
+// persisting a zero instant.
+//
+// Concurrency: serialized under Registry.mu; safe to call from any goroutine.
+// It takes no file lock — callers that must exclude another OS process across
+// their whole read-modify-write wrap the sequence in WithLock, which stays this
+// package's sole acquirer.
+func (r *Registry) ClearRedeemBy(tokenHash string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.devices {
+		if r.devices[i].TokenHash == tokenHash {
+			if r.devices[i].RedeemBy.IsZero() {
+				return false
+			}
+			r.devices[i].RedeemBy = time.Time{}
 			return true
 		}
 	}
