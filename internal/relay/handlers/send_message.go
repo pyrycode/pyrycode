@@ -186,7 +186,20 @@ type SessionRouter interface {
 //     row, never phone-writable. An unbound conversation is rejected before
 //     enqueue, so a turn is never silently routed to the shared bootstrap
 //     session (#678 AC#4).
-func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, logger *slog.Logger) dispatch.Handler {
+//   - Since #2159 a prefix of payload.Text can become the conversation's stored
+//     display name, so it crosses into persisted state and onto a broadcast
+//     frame. That is not a new class of value in that field — rename_conversation
+//     already stores an arbitrary remote string as the name, unbounded — and the
+//     derived title is bounded at 41 runes, so this path admits strictly less
+//     than the field already did. It is still never logged: see
+//     autoNameConversation, which explains why the title counts as the same
+//     untrusted content the text is.
+//
+// Since #2159 it also takes the auto-naming seams: reg is the conversations
+// registry (nil means no registry leg, which names nothing), registryPath is the
+// canonical on-disk path passed to the eager Save, and announce fans the renamed
+// row to every interactive client and may be nil. See autoNameConversation.
+func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, reg ConversationAutoNamer, registryPath string, announce ConversationAnnouncer, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.SendMessagePayload
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -320,6 +333,18 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 			// A count, never an id and never a path: how many attachments the
 			// prompt names is operationally useful and discloses nothing.
 			"attachment_count", len(paths))
+
+		// Auto-name the conversation from this message, if it is the first one and
+		// the row is still unnamed (#2159). Placed HERE — after the enqueue
+		// succeeded and before the ack — so only an accepted message ever names a
+		// conversation: every reject branch above has already returned.
+		//
+		// p.Text, never the composed prompt: the prompt names on-host paths.
+		//
+		// It reports nothing and can fail nothing. The ack below is sent whether
+		// the name was written, declined, or pushed to nobody.
+		autoNameConversation(reg, registryPath, announce, logger, c.ConnID(), p.ConversationID, p.Text)
+
 		return replyAck(ctx, c, env)
 	}
 }

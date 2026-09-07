@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -206,7 +207,7 @@ func TestSendMessage_AckOnEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestSendMessage_TwoConversations_EachEnqueuesIndependently(t *testing.T) {
 			MessageID:      sendMsgMessageID,
 			Text:           text,
 		})
-		h := SendMessage(router, q, nil, sendMsgLogger(t))
+		h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
 		if err := h(context.Background(), c, req); err != nil {
 			t.Fatalf("handler(%s): %v", convID, err)
 		}
@@ -305,7 +306,7 @@ func TestSendMessage_UnknownConversation_RejectedBeforeEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -347,7 +348,7 @@ func TestSendMessage_NoBoundSession_RejectedBeforeEnqueue(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -390,7 +391,7 @@ func TestSendMessage_BacklogFull_RetryableReject(t *testing.T) {
 		Text:           sendMsgText,
 	})
 
-	h := SendMessage(router, q, nil, logger)
+	h := SendMessage(router, q, nil, nil, "", nil, logger)
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -444,7 +445,7 @@ func TestSendMessage_MalformedPayload_RejectedBeforeEnqueue(t *testing.T) {
 		Payload: []byte("not-json"),
 	}
 
-	h := SendMessage(router, q, nil, sendMsgLogger(t))
+	h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -571,7 +572,7 @@ func TestSendMessage_NoAttachments_DeliveredVerbatim(t *testing.T) {
 			res := &fakeAttachmentResolver{}
 			c, recv, _ := newSendMsgConn(t)
 
-			h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+			h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, sendMsgRawRequest(t, tt.payload)); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -655,7 +656,7 @@ func TestSendMessage_ComposesPromptFromAttachments(t *testing.T) {
 				AttachmentIDs:  tt.ids,
 			})
 
-			h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+			h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -728,7 +729,7 @@ func TestSendMessage_UnresolvedAttachment_RejectedBeforeEnqueue(t *testing.T) {
 				AttachmentIDs:  ids,
 			})
 
-			h := SendMessage(router, q, resolve, sendMsgLogger(t))
+			h := SendMessage(router, q, resolve, nil, "", nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -805,7 +806,7 @@ func TestSendMessage_AttachmentIDBound(t *testing.T) {
 				AttachmentIDs:  tt.ids,
 			})
 
-			h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+			h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -855,7 +856,7 @@ func TestSendMessage_RouteBeforeResolve(t *testing.T) {
 		AttachmentIDs:  []string{attachID(1)},
 	})
 
-	h := SendMessage(router, q, res.resolve, sendMsgLogger(t))
+	h := SendMessage(router, q, res.resolve, nil, "", nil, sendMsgLogger(t))
 	if err := h(context.Background(), c, req); err != nil {
 		t.Fatalf("handler: %v", err)
 	}
@@ -911,7 +912,7 @@ func TestSendMessage_AttachmentPathsNeverLogged(t *testing.T) {
 				AttachmentIDs:  ids,
 			})
 
-			h := SendMessage(router, q, res.resolve, logger)
+			h := SendMessage(router, q, res.resolve, nil, "", nil, logger)
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -971,7 +972,7 @@ func TestSendMessage_RelaysClientMessageIDVerbatim(t *testing.T) {
 				Text:           sendMsgText,
 			})
 
-			h := SendMessage(router, q, nil, sendMsgLogger(t))
+			h := SendMessage(router, q, nil, nil, "", nil, sendMsgLogger(t))
 			if err := h(context.Background(), c, req); err != nil {
 				t.Fatalf("handler: %v", err)
 			}
@@ -989,4 +990,379 @@ func TestSendMessage_RelaysClientMessageIDVerbatim(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- #2159: a new chat names itself from its first message -------------------
+
+const (
+	autoNameCwd = "/work/autoname"
+	// autoNameExisting is the name a seeded row already carries in the
+	// never-overwrite tests — deliberately unlike anything deriveConversationName
+	// would produce from sendMsgText, so a build that overwrote it is visible in
+	// the diff of the assertion rather than hidden behind a coincidence.
+	autoNameExisting = "operator's own title"
+	autoNameLabel    = "Client work"
+)
+
+// autoNameSeedTime is the seeded row's LastUsedAt — a fixed instant, so the
+// "auto-naming does not bump last_used_at" assertion compares against a known
+// value rather than against a window.
+var autoNameSeedTime = time.Date(2026, 6, 1, 9, 30, 0, 0, time.UTC)
+
+// newAutoNameReg returns a registry backed by a throwaway path (so the eager Save
+// writes to a temp dir) seeded with one conversation at sendMsgConvID whose Name
+// is name — nil for the unnamed row every auto-naming test starts from.
+func newAutoNameReg(t *testing.T, name *string) (*conversations.Registry, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	reg, err := conversations.Load(path)
+	if err != nil {
+		t.Fatalf("load registry: %v", err)
+	}
+	reg.Create(conversations.Conversation{
+		ID:         conversations.ConversationID(sendMsgConvID),
+		Name:       name,
+		Cwd:        autoNameCwd,
+		LastUsedAt: autoNameSeedTime,
+	})
+	return reg, path
+}
+
+// capturingAnnouncer returns a ConversationAnnouncer that appends every pushed
+// record, plus the slice it appends to. The handler runs synchronously in the
+// test goroutine, so reading the slice after the call returns is race-free.
+func capturingAnnouncer() (ConversationAnnouncer, *[]protocol.ConversationUpdatedPayload) {
+	var got []protocol.ConversationUpdatedPayload
+	return func(p protocol.ConversationUpdatedPayload) { got = append(got, p) }, &got
+}
+
+// storedName reads a conversation's name straight off the registry.
+func storedName(t *testing.T, reg *conversations.Registry, id string) *string {
+	t.Helper()
+	conv, ok := reg.Get(conversations.ConversationID(id))
+	if !ok {
+		t.Fatalf("conversation %q not in registry", id)
+	}
+	return conv.Name
+}
+
+// TestSendMessage_AutoNamesUnnamedConversation covers AC 2 and AC 3 on the happy
+// path: an accepted send over a nil-name row stores the derived title, persists
+// it, and pushes exactly one record carrying the stored name, the workspace's
+// label, an unchanged last_used_at and no in_reply_to.
+func TestSendMessage_AutoNamesUnnamedConversation(t *testing.T) {
+	t.Parallel()
+	reg, path := newAutoNameReg(t, nil)
+	label := autoNameLabel
+	reg.SetWorkspaceLabel(autoNameCwd, &label)
+	announce, pushed := capturingAnnouncer()
+	q := &fakeEnqueuer{}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{
+		ConversationID: sendMsgConvID,
+		MessageID:      sendMsgMessageID,
+		Text:           sendMsgText,
+	})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	// The ack is unchanged — auto-naming is a side effect of an accepted message.
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+
+	got := storedName(t, reg, sendMsgConvID)
+	if got == nil {
+		t.Fatalf("stored Name = nil, want %q", sendMsgText)
+	}
+	if *got != sendMsgText {
+		t.Errorf("stored Name = %q, want %q", *got, sendMsgText)
+	}
+
+	// Persisted eagerly: a fresh registry loaded off the same path sees the name,
+	// which is the property that makes it survive a daemon restart.
+	reloaded, err := conversations.Load(path)
+	if err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	if n := storedName(t, reloaded, sendMsgConvID); n == nil || *n != sendMsgText {
+		t.Errorf("reloaded Name = %v, want pointer to %q", n, sendMsgText)
+	}
+
+	if len(*pushed) != 1 {
+		t.Fatalf("announce calls = %d, want 1", len(*pushed))
+	}
+	p := (*pushed)[0]
+	if p.ID != sendMsgConvID {
+		t.Errorf("pushed ID = %q, want %q", p.ID, sendMsgConvID)
+	}
+	if p.Name == nil || *p.Name != sendMsgText {
+		t.Errorf("pushed Name = %v, want pointer to %q", p.Name, sendMsgText)
+	}
+	if p.Cwd != autoNameCwd {
+		t.Errorf("pushed Cwd = %q, want %q", p.Cwd, autoNameCwd)
+	}
+	if p.WorkspaceLabel == nil || *p.WorkspaceLabel != autoNameLabel {
+		t.Errorf("pushed WorkspaceLabel = %v, want pointer to %q", p.WorkspaceLabel, autoNameLabel)
+	}
+	if !p.LastUsedAt.Equal(autoNameSeedTime) {
+		t.Errorf("pushed LastUsedAt = %v, want %v (naming is not a use)", p.LastUsedAt, autoNameSeedTime)
+	}
+}
+
+// TestSendMessage_AutoNamePushesNullLabelWhenUnlabelled pins the nullable half of
+// the workspace_label projection: presence comes from the registry accessor's
+// second return, never from a label != "" compare.
+func TestSendMessage_AutoNamePushesNullLabelWhenUnlabelled(t *testing.T) {
+	t.Parallel()
+	reg, path := newAutoNameReg(t, nil)
+	announce, pushed := capturingAnnouncer()
+	c, _, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, announce, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	if len(*pushed) != 1 {
+		t.Fatalf("announce calls = %d, want 1", len(*pushed))
+	}
+	if lbl := (*pushed)[0].WorkspaceLabel; lbl != nil {
+		t.Errorf("pushed WorkspaceLabel = %q, want nil", *lbl)
+	}
+}
+
+// TestSendMessage_AutoNameNeverOverwrites covers AC 2's never-rename rule: a row
+// that already carries a name — from create, rename, promote, or this path on an
+// earlier message — is left alone and announces nothing.
+func TestSendMessage_AutoNameNeverOverwrites(t *testing.T) {
+	t.Parallel()
+	existing := autoNameExisting
+	reg, path := newAutoNameReg(t, &existing)
+	announce, pushed := capturingAnnouncer()
+	q := &fakeEnqueuer{}
+	c, recv, _ := newSendMsgConn(t)
+	req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), q, nil, reg, path, announce, sendMsgLogger(t))
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+	if n := storedName(t, reg, sendMsgConvID); n == nil || *n != autoNameExisting {
+		t.Errorf("stored Name = %v, want the untouched %q", n, autoNameExisting)
+	}
+	if len(*pushed) != 0 {
+		t.Errorf("announce calls = %d, want 0 (an already-named row announces nothing)", len(*pushed))
+	}
+	// The message itself is unaffected: naming is a side effect, not a gate.
+	if len(q.calls) != 1 {
+		t.Errorf("Enqueue calls = %d, want 1", len(q.calls))
+	}
+}
+
+// TestSendMessage_AutoNameSkipsRejectedSends covers AC 2's reject rule across
+// every branch that returns before the hook point. None of them may write a name
+// or push a record — a refused message names nothing.
+func TestSendMessage_AutoNameSkipsRejectedSends(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		router  SessionRouter
+		reject  bool
+		payload protocol.SendMessagePayload
+	}{
+		{
+			name:    "unknown conversation",
+			router:  &stubSessionRouter{err: conversations.ErrConversationNotFound},
+			payload: protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText},
+		},
+		{
+			name:    "no bound session",
+			router:  &stubSessionRouter{err: errors.New("no bound session")},
+			payload: protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText},
+		},
+		{
+			name:   "too many attachments",
+			router: routeTo(&stubTurnWriter{}),
+			payload: protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				Text:           sendMsgText,
+				AttachmentIDs:  repeatID(attachID(1), protocol.MaxAttachmentIDsPerMessage+1),
+			},
+		},
+		{
+			name:    "backlog full",
+			router:  routeTo(&stubTurnWriter{}),
+			reject:  true,
+			payload: protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg, path := newAutoNameReg(t, nil)
+			announce, pushed := capturingAnnouncer()
+			c, recv, _ := newSendMsgConn(t)
+
+			h := SendMessage(tc.router, &fakeEnqueuer{reject: tc.reject}, nil, reg, path, announce, sendMsgLogger(t))
+			if err := h(context.Background(), c, sendMsgRequest(t, tc.payload)); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+
+			assertSendMsgEnvelopeShape(t, recv(), protocol.TypeError)
+			if n := storedName(t, reg, sendMsgConvID); n != nil {
+				t.Errorf("stored Name = %q, want nil (a rejected send names nothing)", *n)
+			}
+			if len(*pushed) != 0 {
+				t.Errorf("announce calls = %d, want 0", len(*pushed))
+			}
+		})
+	}
+}
+
+// TestSendMessage_AutoNameFromTextNotComposedPrompt covers AC 2's last sentence
+// and AC 1's empty case together, on the two shapes a message with attachments
+// takes. The composed prompt names on-host paths; a title cut from it would put a
+// host filesystem path into a name pushed to every paired client.
+func TestSendMessage_AutoNameFromTextNotComposedPrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		text     string
+		wantName *string
+	}{
+		{
+			// Text plus an attachment: the title is the TEXT alone. A build that
+			// derived from the delivery string names this chat "hi there Attached"
+			// or worse, the path's first component.
+			name:     "text with an attachment names the chat from the text",
+			text:     sendMsgText,
+			wantName: &[]string{sendMsgText}[0],
+		},
+		{
+			// Attachment-only: the text normalises to empty, so nothing is written
+			// and nothing is pushed — even though the delivery string is a long,
+			// non-empty, daemon-authored block naming a path.
+			name: "an attachment-only message names nothing",
+			text: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg, path := newAutoNameReg(t, nil)
+			announce, pushed := capturingAnnouncer()
+			res := &fakeAttachmentResolver{paths: map[string]string{attachID(1): attachPath1}}
+			q := &fakeEnqueuer{}
+			c, _, _ := newSendMsgConn(t)
+			req := sendMsgRequest(t, protocol.SendMessagePayload{
+				ConversationID: sendMsgConvID,
+				Text:           tc.text,
+				AttachmentIDs:  []string{attachID(1)},
+			})
+
+			h := SendMessage(routeTo(&stubTurnWriter{}), q, res.resolve, reg, path, announce, sendMsgLogger(t))
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+
+			// The delivery really did carry the path — otherwise this test could
+			// pass against a build that dropped attachments entirely.
+			if len(q.calls) != 1 {
+				t.Fatalf("Enqueue calls = %d, want 1", len(q.calls))
+			}
+			if want := wantPrompt(tc.text, attachPath1); q.calls[0].delivery != want {
+				t.Fatalf("delivery = %q, want %q", q.calls[0].delivery, want)
+			}
+
+			got := storedName(t, reg, sendMsgConvID)
+			switch {
+			case tc.wantName == nil && got != nil:
+				t.Errorf("stored Name = %q, want nil", *got)
+			case tc.wantName != nil && (got == nil || *got != *tc.wantName):
+				t.Errorf("stored Name = %v, want pointer to %q", got, *tc.wantName)
+			}
+			wantPushes := 0
+			if tc.wantName != nil {
+				wantPushes = 1
+			}
+			if len(*pushed) != wantPushes {
+				t.Errorf("announce calls = %d, want %d", len(*pushed), wantPushes)
+			}
+		})
+	}
+}
+
+// TestSendMessage_AutoNameLogsWithoutTitleOrText covers AC 4: the one new event
+// carries conversation_id and neither the message text nor the derived title —
+// which is a prefix of that text and therefore the same untrusted user content.
+func TestSendMessage_AutoNameLogsWithoutTitleOrText(t *testing.T) {
+	t.Parallel()
+	reg, path := newAutoNameReg(t, nil)
+	logger, buf := sendMsgCapturingLogger(t)
+	c, _, _ := newSendMsgConn(t)
+	// A distinctive text so a leak cannot hide behind a word the log would carry
+	// for another reason, and long enough that the title is a strict prefix.
+	const secret = "zqxjvbrit confidential merger memo for the board tomorrow"
+	req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: secret})
+
+	h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, logger)
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "event=send_message.autonamed") {
+		t.Errorf("log does not carry event=send_message.autonamed; got:\n%s", out)
+	}
+	if !strings.Contains(out, "conversation_id="+sendMsgConvID) {
+		t.Errorf("log does not carry conversation_id=%s; got:\n%s", sendMsgConvID, out)
+	}
+	if strings.Contains(out, "zqxjvbrit") {
+		t.Errorf("log carries the message text (or the title cut from it); got:\n%s", out)
+	}
+}
+
+// TestSendMessage_AutoNameNilSeamsStillAck covers the two fail-closed shapes: a
+// nil registry names nothing, and a nil announcer pushes nothing. Both still ack,
+// which is the contract that keeps every caller with no relay leg working.
+func TestSendMessage_AutoNameNilSeamsStillAck(t *testing.T) {
+	t.Parallel()
+	t.Run("nil registry names nothing", func(t *testing.T) {
+		t.Parallel()
+		announce, pushed := capturingAnnouncer()
+		c, recv, _ := newSendMsgConn(t)
+		req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
+
+		h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, nil, "", announce, sendMsgLogger(t))
+		if err := h(context.Background(), c, req); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+		assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+		if len(*pushed) != 0 {
+			t.Errorf("announce calls = %d, want 0 (no registry, nothing to announce)", len(*pushed))
+		}
+	})
+
+	t.Run("nil announcer still names and acks", func(t *testing.T) {
+		t.Parallel()
+		reg, path := newAutoNameReg(t, nil)
+		c, recv, _ := newSendMsgConn(t)
+		req := sendMsgRequest(t, protocol.SendMessagePayload{ConversationID: sendMsgConvID, Text: sendMsgText})
+
+		h := SendMessage(routeTo(&stubTurnWriter{}), &fakeEnqueuer{}, nil, reg, path, nil, sendMsgLogger(t))
+		if err := h(context.Background(), c, req); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+		assertSendMsgEnvelopeShape(t, recv(), protocol.TypeAck)
+		if n := storedName(t, reg, sendMsgConvID); n == nil || *n != sendMsgText {
+			t.Errorf("stored Name = %v, want pointer to %q", n, sendMsgText)
+		}
+	})
 }
