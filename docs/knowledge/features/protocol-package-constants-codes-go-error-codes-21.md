@@ -1,4 +1,4 @@
-# Error codes (26)
+# Error codes (27)
 
 Wire values for the `code` field of error payloads (spec § Error codes). Naming convention: `Code<Category><Reason>` mirrors the dotted-string `category.reason` shape.
 
@@ -30,6 +30,9 @@ Wire values for the `code` field of error payloads (spec § Error codes). Naming
 | `CodeHistoryInvalidCursor` | `history.invalid_cursor` |
 | `CodeHistoryUnavailable` | `history.unavailable` |
 | `CodeModelListUnavailable` | `model_list.unavailable` |
+| `CodeWorkspaceNotFound` | `workspace.not_found` |
+
+**`CodeWorkspaceNotFound` (#2207) is its own group rather than a reuse of `CodeConversationNotFound`,** because `rename_workspace` names no conversation — it names a `cwd`, and a workspace has no row of its own (N conversations may share one). Reusing the conversation code would tell a client to go look for a row it never asked about. Non-retryable: the same path fails identically until a conversation is created there, matching the `not_found` family's existing retryability convention rather than `model_list.unavailable`'s bootstrap-race one.
 
 **The seven `attachment.*` codes (#1751) are vocabulary declared ahead of any consumer** — #1741 (reassembly), #1743 (storage), #1897 (inbound dispatch, split from #1744) and #1746 (retrieval, closed `NOT_PLANNED` and split into #2052 the request verb, #2053 the outbound stream, #2054 the handler that answers with these codes) are all wired blocked-by this ticket precisely so none of the four invents its own name for the same condition. Two decisions are worth carrying forward past this ticket:
 

@@ -177,6 +177,21 @@ neither calls `Save`, matching every other primitive in this package.
   refusal against the conversation list (this layer stores whatever key it is given, checked
   against nothing). A future second caller must not assume this setter behaves like its
   validated sibling just because they sit in the same file.
+- **The not-found refusal #2207 owns is this map's only ceiling, not just a UX nicety.** A
+  `workspace_labels` key is creatable only at a path that byte-equals a stored conversation's
+  `cwd`, so key count is bounded by the number of distinct `cwd`s the daemon actually hosts
+  purely because the wire handler refuses every other path. Nothing at this layer enforces
+  that — a future caller that skips the existence check (a CLI binding, say) would remove the
+  map's only bound. The reasoning is recorded here, next to the primitive, so a future relaxer
+  finds it before shipping one.
+- **`rename_workspace`'s consumer interface (`handlers.WorkspaceLabeler`) deliberately has no
+  `WorkspaceLabel` read method**, even though the handler needs to echo the stored label back
+  in its reply. The reply is projected from the *request's* validated value instead — which is
+  provably identical to what `SetWorkspaceLabel` just stored, by its verbatim-store contract —
+  so the interface has no door through which the handler could reply with a label the requester
+  did not itself supply. Omitting a read method from a narrow interface is a disclosure barrier
+  here, not just minimalism; the same shape is worth reaching for anywhere a handler echoes back
+  exactly what it was just told to store.
 - **`omitempty` on a map key tests length, not nilness** — a nil map and an allocated-then-
   emptied map both serialize to nothing. That is what makes "never set a label" and "set then
   cleared every label" indistinguishable on disk, and what lets `Save` copy the map
@@ -187,13 +202,18 @@ neither calls `Save`, matching every other primitive in this package.
   the omission requires a **set-then-cleared** arm compared byte-for-byte against a never-set
   arm — the shape `TestRegistry_Save_NoLabelsOmitsKey` uses, and the pattern to copy for any
   future `omitempty`-map field.
-- **Downstream size bound deferred, not decided.** This layer bounds neither per-label length
-  nor key count (nothing garbage-collects an orphaned key, though an orphan is also invisible —
-  no client shows a workspace with no conversations). #2208 embeds one label per conversation in
-  a `list_conversations` reply inside the 65519-byte v2 envelope; § `SetSystemPrompt`'s
-  escaped-worst-case-arithmetic warning applies again here, for a list-shaped payload rather than
-  a single field, and the bound has to be picked at #2207 against N labels in one reply, not one
-  label in isolation.
+- **Per-label size bound: 128 UTF-8 bytes, picked at #2207 against the list-shaped consumer, not
+  the single field.** This layer still bounds nothing itself (validation is `rename_workspace`'s,
+  per above) — the number is recorded here because it was chosen with #2208 in view.
+  `MaxWorkspaceLabelBytes`'s posture is borrowed from `MaxDeviceNameBytes` (bytes not runes,
+  refuse rather than truncate, offending bytes never echoed) but its *value* is re-derived: worst
+  case JSON escaping is 6 bytes per source byte, so a 128-byte label costs at most 768 wire bytes
+  (~790 with its key) inside the 65519-byte v2 envelope #2208's `list_conversations` reply must
+  fit in — roughly 80 fully-escaped worst-case labelled rows, ~50 for a realistic ASCII label.
+  Picking a larger bound here would have moved that arithmetic into a ticket that couldn't
+  revisit it. Key count is still unbounded at this layer and still relies on the wire handler's
+  not-found refusal (previous bullet) — nothing here garbage-collects an orphan, and an orphan
+  stays invisible since no client shows a workspace with no conversations.
 
 ## `Promote(id ConversationID, name string) error`
 
