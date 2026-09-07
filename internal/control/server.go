@@ -268,6 +268,33 @@ type Server struct {
 	// panicking, the state mcp.approve sat in until #1080.
 	fileAttacher func(sessionID, path string) (string, error)
 
+	// channelCreator, when set, services VerbChannelNew: given the directory a
+	// caller is standing in and an optional name, it confines that directory to
+	// $HOME, resolves its symlinks, trust-marks the realpath, mints a session,
+	// records a promoted conversation and persists the registry — answering with
+	// the minted conversation id. Installed Rekeyer-style via SetChannelCreator
+	// so NewServer's signature stays frozen across its call-site fan-out.
+	//
+	// A plain func rather than an interface, following fileAttacher for the same
+	// reason: everything the work needs — the conversations registry, its
+	// on-disk path, the session pool, and resolveSpawnDir, which is unexported
+	// in package main and unimportable here — lives at cmd/pyry's composition
+	// root. This package therefore owns the wire and the guard order, and
+	// nothing else. In particular it does NO path handling: the cwd it received
+	// reaches the creator verbatim, which is what keeps the confinement in one
+	// named place instead of two.
+	//
+	// Read once per request under s.mu, then the lock is RELEASED before the
+	// call — the leaf-lock discipline handleApprove and handleAttachFile follow,
+	// load-bearing here because the call mints a session and writes two
+	// registries, so holding s.mu across it would serialise every control verb
+	// behind one channel creation.
+	//
+	// Nil is the state until the daemon composition wires it, and stays nil in
+	// v1/foreground — handleChannelNew then answers Response.Error rather than
+	// panicking.
+	channelCreator func(cwd, name string) (string, error)
+
 	// streamingWG tracks streaming-handler goroutines (currently: the
 	// per-attach detach watcher). Serve waits on it before returning so a
 	// caller blocked on Serve can be sure no per-conn goroutines are left.
@@ -414,6 +441,42 @@ func (s *Server) SetApprovalSurfacer(surface func(permbridge.Request) func()) {
 func (s *Server) SetFileAttacher(attach func(sessionID, path string) (string, error)) {
 	s.mu.Lock()
 	s.fileAttacher = attach
+	s.mu.Unlock()
+}
+
+// SetChannelCreator installs the dependency that services VerbChannelNew: given
+// a host directory and an optional name, it creates a promoted conversation
+// rooted at that directory and returns the minted conversation id. Safe to call
+// from any goroutine; canonically called once between NewServer and Serve as
+// part of daemon startup. Passing nil clears a previously-installed creator
+// (used by tests; production startup installs once and never clears).
+//
+// Mirrors SetFileAttacher so NewServer's signature stays frozen across its
+// call-site fan-out (see #451 split rationale). A nil creator — never calling
+// this, or v1/foreground — leaves handleChannelNew replying "channel.new: no
+// channel creator configured", the same nil-dependency-degrades-cleanly shape
+// as SetRekeyer and SetApprovalRegistry.
+//
+// TWO OBLIGATIONS on an implementation, both load-bearing:
+//
+// The returned error's TEXT reaches the wire verbatim, so every refusal reason
+// must be STATIC: no requested path, no resolved path, no $HOME. This is not
+// general hygiene — the validator such an implementation is expected to reuse
+// (cmd/pyry's resolveSpawnDir) wraps a confinement error whose message embeds
+// both the resolved path and the operator's home directory, so forwarding it
+// unchanged is the failure mode to design against, not a hypothetical one.
+//
+// And cwd is passed through UNVALIDATED — this package deliberately does no
+// path handling — so the implementation owns confinement in full: confine to
+// $HOME and resolve symlinks BEFORE trust-marking anything, since a trust-mark
+// carries no $HOME bound of its own. An empty cwd never arrives from here, but
+// an implementation must refuse one anyway rather than treat it as a default:
+// the seam it would otherwise reach reads the empty string as "use the shared
+// trusted workdir" and skips validation entirely, which is the same fail-open
+// shape SetFileAttacher's empty-sessionID guard exists to close.
+func (s *Server) SetChannelCreator(create func(cwd, name string) (string, error)) {
+	s.mu.Lock()
+	s.channelCreator = create
 	s.mu.Unlock()
 }
 
@@ -646,6 +709,8 @@ func (s *Server) handle(conn net.Conn) {
 		s.handleApprove(conn, enc, req.Approve)
 	case VerbAttachFile:
 		s.handleAttachFile(conn, enc, req.AttachFile)
+	case VerbChannelNew:
+		s.handleChannelNew(conn, enc, req.Channel)
 	default:
 		_ = enc.Encode(Response{Error: fmt.Sprintf("unknown verb: %q", req.Verb)})
 	}
@@ -992,6 +1057,70 @@ func (s *Server) handleAttachFile(conn net.Conn, enc *json.Encoder, payload *Att
 		return
 	}
 	_ = enc.Encode(Response{AttachFile: &AttachFileResult{AttachmentID: id}})
+}
+
+// handleChannelNew serves a VerbChannelNew request: hand the caller's directory
+// and chosen name to the installed channel creator, and answer with the minted
+// conversation id or the creator's refusal reason.
+//
+// Guard order mirrors handleAttachFile's — nil dependency BEFORE payload
+// validation — so a daemon that never wired the creator answers the same way
+// whatever the request looks like, and a caller cannot use the shape of the
+// refusal to probe which dependencies a daemon has installed.
+//
+// Fail-closed in the literal sense: every branch encodes exactly one Response
+// and returns, so a caller never hangs waiting for an answer that was never
+// written, and nothing dereferences payload before the nil check.
+//
+// The empty-Cwd refusal is the wire half of a two-sided guard whose other half
+// lives in the creator, for the reason SetChannelCreator records: the validator
+// an implementation reuses reads the empty string as "use the shared trusted
+// workdir" and returns success WITHOUT confining or trust-marking anything, so
+// an empty cwd that got this far would produce a conversation rooted nowhere in
+// particular. Two guards rather than one, deliberately: this one is a wire-shape
+// check, and the creator's is what protects that seam from any future caller
+// that does not come through here. Same shape, and the same reasoning, as
+// handleAttachFile's empty-SessionID pair.
+//
+// This handler does NO path handling. The cwd reaches the creator exactly as it
+// arrived — not cleaned, not made absolute, not resolved — which is what keeps
+// confinement in one named place rather than split across two packages.
+//
+// The conn write deadline is extended past the handshake window before the call,
+// exactly as handleSessionsNew does: the creator mints a session and fsyncs two
+// registries, which can outrun the 5s handshake bound on a loaded system.
+// sessionOpTimeout is not a budget on the creator — nothing here cancels it —
+// only a backstop on a genuinely stuck response write.
+//
+// The creator's error text reaches Response.Error verbatim, which is only safe
+// because SetChannelCreator's contract obliges every reason to be static. This
+// handler adds the verb prefix and nothing else; in particular it never folds
+// the request's cwd or name back into the refusal, which is what AC#2's "echoes
+// neither the requested nor the resolved path" comes down to on this side.
+func (s *Server) handleChannelNew(conn net.Conn, enc *json.Encoder, payload *ChannelPayload) {
+	s.mu.Lock()
+	create := s.channelCreator
+	s.mu.Unlock()
+
+	if create == nil {
+		_ = enc.Encode(Response{Error: "channel.new: no channel creator configured"})
+		return
+	}
+	if payload == nil || payload.Cwd == "" {
+		_ = enc.Encode(Response{Error: "channel.new: missing cwd"})
+		return
+	}
+
+	// Best-effort, like handleSessionsNew's: a SetDeadline error on a broken
+	// conn surfaces on the Encode below rather than needing its own branch.
+	_ = conn.SetDeadline(time.Now().Add(sessionOpTimeout + sessionOpConnGrace))
+
+	id, err := create(payload.Cwd, payload.Name)
+	if err != nil {
+		_ = enc.Encode(Response{Error: fmt.Sprintf("channel.new: %v", err)})
+		return
+	}
+	_ = enc.Encode(Response{ChannelNew: &ChannelNewResult{ConversationID: id}})
 }
 
 // handleApprove serves a VerbMCPApprove request: register the forwarded
