@@ -37,7 +37,9 @@ restart), `Stopped` in a top-level `defer`.
 `Run` now has it). A third leaf mutex `restartMu` guards `args` (the live spawn base argv — assigned in
 exactly one place, `setArgsLocked`, called by both `Restart` and `SetSpawnArgs`), `iterCancel` (the
 current spawn iteration's `context.CancelFunc`), and — since #1124 — the `sessionID`/`rotatePending` pair
-`RestartFresh` rotates (see "Fresh-restart under a new id" below). Since #1481 `args` and the
+`RestartFresh` rotates (see "Fresh-restart under a new id" below). Since #2136, `sessionID` alone has a
+second writer, `AdoptSessionID` (below) — the two are not variants of each other: one is a daemon-ordered
+fresh restart, the other follows a reset claude already made in-process. Since #1481 `args` and the
 `sessionID`/`rotatePending` pair are read, and `iterCancel` is published, by `beginSpawn` in a **single**
 section per iteration; `clearIterCancel` drops the cancel once the iteration ends. That teardown accessor
 takes no argument deliberately — publishing a non-`nil` cancel outside `beginSpawn`'s section is precisely
@@ -76,6 +78,32 @@ five test doubles, all in this repo, so widening is compile-checked across the w
 production caller is `Pool.UpdateSettings`' in-band branch (#1581), which installs the recomposed argv
 through it and then delivers the change as a `/model` / `/effort` command instead of respawning. See
 [codebase/1580.md](../codebase/1580.md).
+
+**`AdoptSessionID(newID string)` — `SetSpawnArgs`' mirror image (#2136).** Installs `newID` as the id the
+runner's *next* spawn resumes, and does nothing else: one `restartMu` acquisition, writing `sessionID`
+alone — the first field of `RestartFresh`'s trio, touching neither `rotatePending` nor `freshSeq` nor
+`iterCancel`, and sending no `restartCh` hint. It exists because claude can reset a conversation
+in-process (`/clear`): `sessionResetFollower` ([announced reset follower](streamsup-package-announced-reset-follower.md))
+moves the pool registry and the sink tag onto the announced id, and without a runner-side counterpart the
+runner keeps the pre-reset id and its next crash-respawn `--resume`s the conversation the operator just
+cleared. It is not `RestartFresh` with the teardown removed: claude has already reset in-process, so there
+is no fresh transcript to arm and no child to relaunch — arming `rotatePending` would make the next spawn
+emit `--session-id` against a transcript that already exists, which claude refuses (ADR 032).
+
+An empty `newID` is refused at Warn, the same last-resort guard `RestartFresh` carries on `New`'s
+non-empty contract — but note the guard is *borrowed* here, not the reasoning behind it: `RestartFresh`'s
+callers hand it a daemon-minted id, while `AdoptSessionID`'s caller hands it a value claude wrote. What
+makes the guard sufficient rather than a validator is a different upstream check — `emitConversationReset`
+gates on `transcript.ValidStem`, an anchored full match over a canonical UUID stem — and that had to be
+verified against this caller specifically rather than inherited from the sibling method. A guard copied
+from a sibling is only as sound as its new caller's provenance, and that is worth re-checking every time,
+not assumed from the shape matching.
+
+Testing note: an argv assertion that the *next* spawn resumes the adopted id only discriminates if the
+fixture directory holds a transcript for the adopted id specifically. `useCreateForm` also answers
+`--resume` when `Config.ClaudeSessionsDir` is empty or via the `firstRun` latch — routes that produce the
+same argv without the adoption ever having run. Stage the transcript for the id under test, not the
+previous one, or the assertion rides the wrong route and stays green on a runner that never adopted.
 
 **`WriteUserTurn`/`WaitForPTY`.** `WriteUserTurn(ctx, conversationID, payload)` is a one-line wrap of the
 already-reviewed `WriteTurn` free function (#1088/#1093) — no new envelope construction, and it inherits
