@@ -425,3 +425,52 @@ race suite is the verifier's.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — implementation
+
+Four departures from the design above, plus the three Open Questions resolved.
+
+1. **`channelCreator` takes a `mint func(label, spawnDir string) (string, error)`, not
+   `*sessions.Pool`.** The design named the pool directly, which would have forced a real pool to
+   be stood up in every creator unit test. The narrowing closure lives at the composition root
+   (one line beside `SetChannelCreator`) and is the same narrowing `sessionMinter.Create`
+   performs for the wire path. The seam is deliberately mint-only: it must not re-validate,
+   because `spawnDir` reaches it already confined and trust-marked.
+
+2. **Three static refusal messages, not two.** The design conflated a rejected directory with a
+   failed `trustMark` write. They are different verdicts — the first is deterministic and about
+   the directory, the second is transient and about `~/.claude.json` — and telling an operator
+   their own project folder is "not allowed" when the real fault is a write error sends them
+   looking in the wrong place. `msgChannelWorkspaceFailed` covers the second.
+   `TestChannelCreator_WrapsSpawnDirSentinel` pins that the split is made with `errors.Is` against
+   `handlers.ErrSpawnDirRejected` rather than by matching message text.
+
+3. **Open question 1 resolved — the server-reject/transport split is not made at all.** The
+   design proposed either `runRekey`'s `isServerReject` message-prefix list or a new sentinel.
+   Both turned out to buy only a cosmetic prefix (`pyry channel new:` versus main's
+   `pyry: channel new:`): both classes are one stderr line and exit 1, which is all the
+   acceptance criteria constrain. So every failure routes through `channelNewVerdict` and
+   `os.Exit(1)`. This removes the hand-maintained prefix list, which would have gone stale
+   silently the first time a server message was reworded.
+
+4. **`channelNewVerdict` takes only the error.** `rekeyVerdict` also takes the conn id and quotes
+   it with `%q` because it renders operator-supplied input. This verb's verdict renders nothing
+   caller-supplied — every message it can format either originates in the daemon, where
+   `SetChannelCreator`'s contract has already made it static, or is a local syscall error — so
+   there is no second argument and nothing to escape.
+
+**Open question 2 resolved:** all three e2e tests ship, the `$HOME`-escape refusal included. It
+was easier than feared — a second `os.MkdirTemp` outside the daemon's temp `$HOME` is a genuine
+escape while still being a real, readable directory, so the refusal under test is the `$HOME`
+bound rather than a missing path.
+
+**Open question 3 resolved:** the bound session id is **not** echoed on the wire. The row carries
+one, and the e2e test observes it by reading `conversations.json`, so nothing needs it in the
+reply. `ChannelNewResult`'s doc records the reasoning.
+
+**Mutation-verified:** removing `channelCreator`'s empty-`cwd` guard makes
+`TestChannelCreator_RefusesEmptyCwd` fail with `create("") error = <nil>` — i.e. the creator
+*succeeds*, confirming the security review's fail-open finding was real rather than defensive,
+and that the test cannot pass vacuously.

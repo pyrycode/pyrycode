@@ -85,7 +85,9 @@ systemctl --user enable --now pyry
 
 The supervised `claude` has no terminal of its own, and since #1348 there is no way to borrow it: `pyry attach` was removed along with the terminal path it read from. Watch a live session from the desktop or mobile client instead.
 
-`pyry status`, `pyry logs`, and `pyry stop` work from any shell, talking to the daemon over its Unix socket at `~/.pyry/pyry.sock`.
+`pyry status`, `pyry logs`, `pyry stop`, and `pyry channel new` work from any shell, talking to the daemon over its Unix socket at `~/.pyry/pyry.sock`.
+
+`pyry channel new`, run inside a project folder, creates a **channel** — a long-lived conversation — whose workspace is that folder, and prints its conversation id. It exists because a client's workspace picker only offers folders that have already hosted a conversation, so a folder that merely exists on the host could not be chosen from a phone at all; your shell is already standing in the right place. `--name <label>` overrides the default name (the folder's own). The folder must be under `$HOME`.
 
 For the full walkthrough — multi-instance, troubleshooting, hooks under service-mode `PATH`, boot persistence — see [**`docs/guide.md`**](docs/guide.md) and [**`docs/deployment.md`**](docs/deployment.md).
 
