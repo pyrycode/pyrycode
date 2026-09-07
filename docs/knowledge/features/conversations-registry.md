@@ -12,6 +12,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Rotation-rebind primitive (#739):** `(*Registry).RebindSession(oldID, newID string) bool` re-points the conversation bound to `oldID` at `newID` and appends `oldID` to `SessionHistory`, under the registry lock; consumed by the pool's `/clear` rotation path so the conversation↔session binding stays current beyond the first rotation ([`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation*). The first production caller to **write** `SessionHistory`.
 - **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — but no longer independent of it: since #1488 `ShouldArchive` reads `IsArchived` and the sweep skips archived rows, so a manual archive is durable until the user unarchives. Called by the `archive_conversation`/`unarchive_conversation` wire verbs (#881), the sole production caller. See [codebase/880.md](../codebase/880.md), [codebase/881.md](../codebase/881.md).
 - **Bounded system-prompt primitive (#2149):** `(*Registry).SetSystemPrompt(id ConversationID, prompt *string) error` validates and sets `Conversation.SystemPrompt` under the registry lock; `MaxSystemPromptBytes = 8192` (inclusive) and two sentinels (`ErrSystemPromptTooLong`, `ErrSystemPromptInvalidUTF8`) join `ErrConversationNotFound` as the refusal set. #2150 reads the stored value at spawn (`Pool.refreshSystemPrompt`, called from `Pool.Activate`), #2151 wires `SetSystemPrompt` to the `set_system_prompt` wire verb (`handlers.SetSystemPrompt`, [`relay-package.md`](relay-package.md)), and #2152 reads it back over the wire (`request_system_prompt` / `system_prompt`, [v2-session-manager doc](v2-session-manager-state-machine-inbound-request-system-prompt-systempromptfor-seam.md)) — the full cluster is landed. `Registry.Update` remains the unvalidated escape hatch for the field, exactly as for every other field.
+- **Workspace-label storage primitive (#2206):** `(*Registry).WorkspaceLabel(cwd string) (string, bool)` / `(*Registry).SetWorkspaceLabel(cwd string, label *string)` persist an operator-chosen display name for a workspace, keyed by the exact `cwd` string (byte-exact, no normalization) rather than by conversation id — a workspace has no row of its own, so the label lives in its own top-level map instead of a per-conversation field. Storage only: no wire verb sets it yet (#2207) and no payload reads it onto the wire yet (#2208, #2210). See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
 
 ## Surface
 
@@ -50,6 +51,8 @@ func (r *Registry) Promote(id ConversationID, name string) error
 func (r *Registry) RebindSession(oldID, newID string) bool
 func (r *Registry) SetArchived(id ConversationID, archived bool) bool
 func (r *Registry) SetSystemPrompt(id ConversationID, prompt *string) error
+func (r *Registry) WorkspaceLabel(cwd string) (string, bool)
+func (r *Registry) SetWorkspaceLabel(cwd string, label *string)
 ```
 
 `Registry` holds the in-memory conversation slice plus a guarding mutex. Construct via `Load` (cold-start mints empty; warm-start reads from disk) or directly via `&Registry{}` (zero value is the empty registry — documented). Methods are safe for concurrent use.
@@ -94,7 +97,22 @@ The `ConversationID` doc-comment in `conversation.go` (#216) deferred the genera
 
 `system_prompt` (#2149) is likewise omitted here — this row holds no prompt. It appears as
 `"system_prompt": ""` on an explicitly-emptied row and `"system_prompt": "<text>"` on an
-operator-set one; see § `SetSystemPrompt` above.
+operator-set one; see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `SetSystemPrompt`.
+
+`workspace_labels` (#2206) is a **top-level** sibling of `conversations`, not a per-row field —
+a workspace has no row of its own, and N conversations can share one `cwd`. Omitted from the
+example above because no label is set; when present it looks like:
+
+```json
+{
+  "conversations": [ ... ],
+  "workspace_labels": {
+    "/Users/juhana/projects/taxes": "Tax Filing"
+  }
+}
+```
+
+See § *`WorkspaceLabel` / `SetWorkspaceLabel`* below.
 
 Envelope shape (`{"conversations": [...]}`), not a bare top-level array. Reserves room for future top-level fields (schema version, archive cursor) without breaking jq pipelines or stdlib decoder discipline. Same future-proofing rationale as the sessions and devices registries.
 
@@ -146,6 +164,8 @@ This diverges from `internal/devices`, whose `Save` still only snapshots-under-l
 
 `Conversation`'s slice field (`SessionHistory []string`) is **not** deep-copied at the snapshot boundary. The shallow copy is safe even though `RebindSession` (#739) now **appends** to `SessionHistory` in production: the append runs **under `r.mu`** (serialized against the snapshot copy) and only ever writes at index ≥ the old length, while a Save snapshot's view is exactly `[0:old-len]` — so the encode and a concurrent append touch disjoint addresses, and the snapshot captures a consistent pre- or post-rebind history with no torn read. `TestPool_OnRotate_RebindRaceConcurrentSave` (`internal/sessions`) exercises concurrent `RebindSession` + `Save` under `-race`. The deep-copy caveat still applies only to a hypothetical *in-place element* mutation of `SessionHistory` outside the registry lock — which no caller does; such a pattern would need a per-element `append([]string(nil), c.SessionHistory...)` deep copy.
 
+**A map-valued top-level field cannot reuse the slice's shallow-copy reasoning (#2206).** `workspaceLabels map[string]string` is copied **element-wise** into the snapshot inside the same `r.mu` section, not shared by map-header copy. The slice argument above works only because appends land at indices at or past the snapshot's length — maps have no equivalent disjointness: a map-header copy aliases the same buckets, so a concurrent `delete` or an insert-triggered rehash during `json.Marshal`'s range is a fatal `concurrent map iteration and map write` runtime throw that **kills the daemon**, not a race the detector reports or a non-concurrent test would ever reach. The same hazard is why `WorkspaceLabel` answers per-key `(string, bool)` rather than returning the map itself — a caller ranging over a returned map outside the lock hits the identical throw. Any future map-valued registry field needs the same two disciplines: element-wise copy in `Save`, per-key reads only.
+
 ## Sort discipline
 
 Snapshot is sorted by `LastUsedAt` ascending, tiebroken by `ID` byte-exact, before encode:
@@ -183,175 +203,10 @@ The returned `*Registry` is independent of the on-disk file — subsequent `Save
 
 ## CRUD
 
-### `Create(c Conversation)`
-
-Lock, append, unlock. **Caller owns uniqueness** — `Create` does not validate that `c.ID` is unique, well-formed, or non-empty. Same convention as `devices.Add`: keeping the registry I/O-thin lets the consuming layer (the conversations API in #218) own validation policy, which may evolve. AC pins the literal signature with no return value; match it exactly.
-
-### `Get(id ConversationID) (Conversation, bool)`
-
-Linear scan under lock; returns the first entry whose `ID` matches. Returns `(Conversation{}, false)` on miss. Byte-exact `==` comparison — `ConversationID` is a string newtype, no normalization. Linear scan is correct at this scale: a Phase 3 user will have O(10²) conversations at the high end. Indexing is premature.
-
-### `List(filter ...ListFilter) []Conversation`
-
-Returns a copy of the in-memory list, optionally narrowed by filter:
-
-- `r.List()` — return all conversations (snapshot copy).
-- `r.List(ListFilter{IsPromoted: ptrTo(true)})` — only promoted (channels).
-- `r.List(ListFilter{IsPromoted: ptrTo(false)})` — only unpromoted (discussions).
-- `r.List(ListFilter{IsPromoted: nil})` — equivalent to `r.List()` (nil pointer means "no filter on this field").
-- `r.List(ListFilter{IsArchived: ptrTo(true)})` — only archived (#880). `ptrTo(false)` — only active. `nil` (or the field omitted) — both, today's/unfiltered behavior.
-- `r.List(ListFilter{IsPromoted: ptrTo(true), IsArchived: ptrTo(true)})` — both non-nil fields on **one** `ListFilter` AND (#880): archived channels only.
-
-Variadic for ergonomics, **not** AND-composition **across separate `ListFilter` args**: when more than one `ListFilter` is supplied as separate variadic args, only `filter[0]` is consulted (documented in the doc comment). This is orthogonal to the AND-of-non-nil-fields rule *within* one `ListFilter` struct — the two rules operate at different levels (across args vs. within one arg) and are not in tension, though a skim can misread them as contradictory (code review NIT on #880; left as-is, not worth a rework). The returned slice is a copy; callers may mutate it freely without affecting registry state. `IsPromoted *bool` / `IsArchived *bool` each distinguish "filter to true" / "filter to false" / "no filter" (`nil`) — three states, which a bare `bool` cannot express.
-
-### `Update(id ConversationID, fn func(*Conversation)) bool`
-
-Locate the entry with matching `ID`, invoke `fn` with a pointer to the slice element under the registry lock, return `true`. On miss, return `false` and do not invoke `fn`.
-
-Critical contract for callers:
-
-- **`fn` runs with `r.mu` held.** `fn` MUST NOT call back into the registry (any `Registry` method would deadlock — `sync.Mutex` is non-reentrant).
-- **`fn` MUST NOT retain the `*Conversation` pointer past return.** A future `Create` may reallocate the slice; the pointer becomes a dangling reference into the old backing array.
-- **`fn` may read and mutate any field.** The registry does not validate post-mutation state — does not reject a flip that duplicates another entry's ID, does not reject `LastUsedAt` going backwards. Same "caller owns invariants" stance as `Create`.
-
-Pointer-to-slice-element is the right shape because `Conversation` carries a `*string Name` and a `[]string SessionHistory`; pass-by-value would force `fn` to construct a full replacement struct, defeating the point. `devices` doesn't need an `Update` because device records are append-only after pairing; conversations mutate (rename, promote, rotate sessions, bump LastUsedAt, move workspace — #823), so this method is genuinely needed. See [ADR 022](../decisions/022-conversations-update-callback-under-lock.md) for the snapshot-mutate-swap alternative considered and rejected.
-
-`Update` returns `bool`, not `(Conversation, bool)`. AC pins the no-return-value-for-the-post-state signature; if a future caller needs a post-mutation snapshot, add it then. Calling `Get(id)` after `Update` returns `true` works but races a concurrent `Update` on the same id — use the callback to read the post-state in place if that matters.
-
-### `Delete(id ConversationID) bool`
-
-Locate the entry whose `ID` matches and remove it via the slice-element-removal idiom (`r.conversations = append(r.conversations[:i], r.conversations[i+1:]...)`). Returns `true` on hit, `false` on miss. Mutex-guarded, no I/O, no validation, no `Save` — disk persistence stays with the caller, matching the `Create` / `Update` / `Promote` convention.
-
-Order-preserving: surrounding entries' relative order is unchanged. O(n) linear scan + O(n) shift, same complexity as `Get` / `Update`. Returns on first match — the registry does not enforce ID uniqueness on `Create`, but `Sweep` (its original consumer) iterates a `List()` snapshot exactly once per entry, so a duplicated ID is visited and deleted twice. The `delete_conversation` handler (#822, [codebase/822.md](../codebase/822.md)) is a second consumer, calling `Delete` once per phone-supplied id rather than iterating a snapshot — this is the terminal hard-delete primitive AC #822 reuses instead of introducing a soft-delete field; a miss maps to `conversation.not_found`.
-
-`List` returns a copy, so a snapshot taken before `Delete` is unaffected by the deletion: a caller iterating the snapshot can call `Delete` mid-loop without disturbing the iteration. This contract is pinned by the `delete-snapshot-safety` test row.
-
-The byte-exact `==` comparison on `ID` matches `Get`'s contract; no normalization. Does not race a concurrent `Create` of the same id — both serialize through `r.mu`.
-
-### `RebindSession(oldID, newID string) bool` (#739)
-
-Re-points the conversation **currently bound** to `oldID` at `newID`, recording `oldID` in the history trail. Locate the entry whose `CurrentSessionID == oldID`, set `CurrentSessionID = newID` and `SessionHistory = append(SessionHistory, oldID)`, return `true`. On miss, return `false` and mutate nothing. The scan and mutation are a **single critical section under `r.mu`** — no find-then-update window a concurrent `Create`/`Delete` could redirect (the same no-TOCTOU posture as `Update`/`Promote`).
-
-This is the **write side** of the conversation↔session binding maintenance: the pool's `/clear` rotation path calls it after `RotateID` re-keys the session map, so the binding stays current beyond the first rotation. See [`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation* for the full data flow and the eviction-neutrality argument. The matching reverse **read** lookup (session id → conversation id) is deferred to the downstream consumer #741, which adds its own scan rather than sharing one (PROJECT-MEMORY "Resist over-DRY on duplicated registry primitives").
-
-Contract:
-
-- **Match key is `CurrentSessionID`, not `ID`.** Unlike every other CRUD method, this scans by the *bound session id*. A session id binds exactly one conversation (set once at creation), so **first match wins and stops**, mirroring `Get`/`Update`; pathological duplicates rebind the first only — deterministic and documented.
-- **Empty `oldID` returns `false` before scanning.** An unbound conversation carries `CurrentSessionID == ""` (the unset sentinel), so a stray empty-id call must never sweep the first unbound row into a rebind. This is a **data-integrity guard at the primitive boundary**, not the eviction defense — that lives at the call site, which only rebinds on a `/clear` rotation (where `newID` is non-empty and distinct). Precondition (caller-guaranteed on the rotation path): `oldID` and `newID` non-empty and distinct.
-- **`SessionHistory` is oldest-first, append-in-place.** `append(SessionHistory, oldID)` — the retired id goes on the **end**, satisfying the field's documented "rotation appends in place" contract ([`features/conversations-package.md`](conversations-package.md)). #739 is the first production caller to write this field.
-- **No implicit `Save`.** Disk persistence stays with the caller, matching the `Create`/`Update`/`Promote`/`Delete` convention. The rotation caller (`Pool.rebindConversation`) `Save`s only on a `true` return, treats a `Save` error as non-fatal (the in-memory rebind is already usable), and skips `Save` entirely on a miss so the file mtime stays stable.
-
-### `SetArchived(id ConversationID, archived bool) bool` (#880)
-
-Flips the durable manual-archive flag: locate the entry whose `ID` matches, set
-`IsArchived = archived`, return `true`. On miss, return `false` and mutate nothing. Scan and
-mutation are a single critical section under `r.mu` — same no-TOCTOU posture as `Update` /
-`Promote` / `RebindSession`.
-
-- **One `bool` arg both archives and restores.** `SetArchived(id, true)` on an already-archived
-  row returns `true` and leaves it archived (idempotent); there is no separate `Archive`/
-  `Unarchive` pair.
-- **Flips exactly one field, structurally.** The method has no way to touch `Cwd`, `Name`,
-  `CurrentSessionID`, `SessionHistory`, or `IsPromoted` — this is deterministic enforcement of the
-  #880/#881 contract "toggling archived must not change id, cwd, name, or session binding," not a
-  convention the downstream verb handler has to remember.
-- **No implicit `Save`.** Matches `Create`/`Update`/`Promote`/`Delete`/`RebindSession`; persistence
-  is the caller's job.
-- **Modeled on `Delete`/`RebindSession`, not built on `Update`.** `Update(id, fn func(*Conversation))`
-  could express the same flip, but that hands the closure free rein over every field — the
-  single-field guarantee would then live only in the caller. A dedicated ~10-line method is this
-  package's established idiom for named-semantic mutations (`Promote`, `RebindSession`); `Update`
-  stays the escape hatch for ad hoc multi-field changes.
-
-Had no production callers as of #880; #881's `archive_conversation`/`unarchive_conversation`
-handler (`internal/relay/handlers.ArchiveConversation`) is the sole caller, flipping the flag
-then re-reading via `Get` for the reply snapshot (deliberately not folded into a single `Update`
-closure — see [codebase/881.md](../codebase/881.md)). See [codebase/880.md](../codebase/880.md).
-
-### `SetSystemPrompt(id ConversationID, prompt *string) error` (#2149)
-
-Validates then sets the durable per-conversation system prompt: locate the entry whose `ID`
-matches, assign `SystemPrompt`, return `nil`. On any refusal the registry is left untouched.
-Scan and mutation are one critical section under `r.mu` — same no-TOCTOU posture as
-`Update`/`Promote`/`RebindSession`/`SetArchived`. No implicit `Save`.
-
-- **One `*string` arg spans all three states, including "clear."** `nil` returns the row to
-  "no prompt"; a non-nil pointer (including one to `""`) stores its pointee after
-  validation. This is deliberate, not just convenient: the ticket's premise is that every
-  wire verb goes through one validated door, which is only true if the *clear* path goes
-  through it too. A `prompt string` signature would leave `Update` — documented as
-  deliberately unvalidated — as the only way back to "no prompt," pushing a whole verb
-  outside the validated boundary. `SetArchived`'s single `bool` that both sets and clears is
-  the same idea one type up.
-- **Validation runs before the lock, value-first then identity** — length, then UTF-8
-  validity, then the not-found scan, mirroring `Promote`'s empty-name-before-not-found
-  order. Length first is an O(1) gate: checking UTF-8 validity first would force a full scan
-  of an arbitrarily large hostile input before rejecting it for size. A value that is both
-  over-length and invalid UTF-8 therefore returns `ErrSystemPromptTooLong`, pinned by a test
-  row so a future reorder of the two checks can't silently change the sentinel a caller maps
-  to a wire code.
-- **Invalid UTF-8 is refused, not sanitized, because `encoding/json` substitutes U+FFFD on
-  marshal.** That substitution can *grow* a value past its accepted length after it was
-  already admitted — a measured 12-byte invalid input persists as 16 bytes — which would
-  break the round-trip guarantee (a stored value must survive `Save` → `Load` unchanged) for
-  any value near the bound. Any future byte-bounded string field in this package that also
-  promises round-trip fidelity needs the same UTF-8 gate for the same reason; the two
-  guarantees are incompatible without it.
-- **The 8192-byte bound is sized against the wire envelope, not against the raw string.**
-  `docs/protocol-mobile.md` § *Application-envelope size cap* puts the frame ceiling at
-  65519 bytes, but `encoding/json`'s HTML-escaping (`<`, `>`, `&`, U+2028, U+2029) costs up
-  to six bytes per escaped rune — a hostile all-`<` prompt at the bound serializes to
-  roughly 49 KB, not 8192. That still leaves headroom in a single-prompt payload, so the
-  bound holds today, but the "room to spare" reasoning was checked against the unescaped
-  byte count and does not automatically survive a future payload that carries more than one
-  prompt-sized field, or a `list_conversations`-style reply that embeds several. Re-derive
-  the escaped-worst-case arithmetic before reusing this bound in a list-shaped payload.
-- **Pointer ownership.** The implementation copies the pointee into a fresh local before
-  taking its address, so the stored pointer never aliases a caller-held variable — the same
-  defensive idiom `Promote` uses for `Name`. `Get` and `List` keep copying records shallowly
-  and sharing the stored pointer, exactly as they already do for `Name`.
-- **No implicit `Save`, no logger, nothing logged.** Matches `Create`/`Update`/`Promote`/
-  `Delete`/`RebindSession`/`SetArchived`. All three refusal sentinels are static and
-  returned naked — none interpolates the value, its length, or the conversation id — and the
-  package's one logging site (`sweep_loop.go` → `sweepOnce`) logs a count and a `Save`
-  error, never a record field. A refused value therefore cannot reach a log line or a wire
-  error message through this path.
-
-Store-only as of #2149: no getter, no wire verb, no CLI binding. `Get`/`List` are the read
-path the sibling slices (#2150, #2152) use.
-
-**`ErrSystemPromptInvalidUTF8` is unreachable from the `set_system_prompt` wire verb (#2151).**
-`encoding/json` substitutes U+FFFD for both an invalid byte and an unpaired surrogate escape
-while decoding a Go string, so whatever `json.Unmarshal` hands the handler is always valid
-UTF-8 regardless of what arrived on the wire — measured against three hostile encodings, all
-three decoded clean. The sentinel is still correctly kept and mapped (dropping it would be the
-fail-open shape a default-arm review flagged), and it stays live for the registry's other
-callers (`Update`, a future CLI) — but a test that feeds hostile bytes through the wire payload
-expecting this refusal will instead land on the success path. #2151 pins the unreachability
-itself with its own test rather than discovering it as a failing assertion.
-
-### `Promote(id ConversationID, name string) error`
-
-In-memory primitive that turns a discussion into a named channel: flips `IsPromoted` to `true` and sets `Name` to a non-nil pointer to `name`. Validation, the uniqueness scan, and the two-field mutation all run under `r.mu`; on any refusal the registry is left untouched. Persistence is the caller's job — `Promote` does not call `Save`, matching the `Create` / `Update` convention.
-
-| Refusal | Sentinel | Wire code (mapped by later ticket) |
-|---|---|---|
-| id absent | `ErrConversationNotFound` | `conversation.not_found` |
-| target already `IsPromoted == true` | `ErrConversationAlreadyPromoted` | `conversation.already_promoted` |
-| `name` collides with another *promoted* conversation | `ErrPromotionNameInUse` | TBD (likely `conversation.name_in_use`) |
-| `name` empty or whitespace-only | `ErrPromotionNameEmpty` | TBD (likely `conversation.name_empty` / 400) |
-
-Sentinels are exported and returned naked (`return ErrPromotionNameEmpty`); the primitive has no extra context to add — id and name are caller-supplied. Distinguish via `errors.Is`. The `not_found` sentinel lives in this package even though `internal/sessions` has `ErrSessionNotFound`: the two registries are deliberately decoupled (per ADR 022 and the registry tech notes), so a shared `ErrNotFound` would couple them.
-
-Behavioural fine print:
-
-- **Empty/whitespace check uses `strings.TrimSpace`** — covers ASCII space/tab/newline plus Unicode whitespace. The stored `Name` is the **untrimmed** input; trimming is a refusal predicate, not a normalizer. `Promote(id, "  general  ")` accepts the literal string with surrounding spaces.
-- **Uniqueness scope is "another *promoted* conversation"**, byte-exact `==`, case-sensitive, no Unicode normalization. A historical unpromoted record with a stray non-nil `Name` (e.g. a future `pyry conv name` that names a discussion before promoting) does not block. The `name-conflict-with-unpromoted-OK` test row pins this.
-- **No partial mutation on refusal.** Every refusal returns before touching `r.conversations[idx]`. The mutation is two field assignments at the bottom of the happy path; nothing earlier writes.
-- **Pointer ownership.** The implementation copies `name` into a fresh local before taking its address, so the stored `*Name` never aliases a caller-mutable variable. Strings are immutable so this is defensive idiom rather than necessity.
-- **No `LastUsedAt` bump.** `Promote` only flips `IsPromoted` and sets `Name`. If a consuming layer wants to bump `LastUsedAt` on promote, it calls `Update` after `Promote`. Two registry calls; no atomicity loss for this specific pair.
-
-`Promote` is a new method, not a thin wrapper over `Update`: `Update`'s callback returns no error, so building `Promote` on top of it would force the caller to thread refusal through a captured `*error`, which is uglier than just writing the dedicated method. The duplication is two field assignments under the same lock — trivial.
+Split into [`conversations-registry-crud.md`](conversations-registry-crud.md) (2026-09-07, this
+document was over the 50000-byte cap). Covers `Create`, `Get`, `List`, `Update`, `Delete`,
+`RebindSession` (#739), `SetArchived` (#880), `SetSystemPrompt` (#2149), `WorkspaceLabel` /
+`SetWorkspaceLabel` (#2206), and `Promote`.
 
 ## Tests
 
@@ -382,6 +237,17 @@ New (no devices counterpart):
 - `TestRegistry_Load_AbsentArchivedKeyDecodesActive` (#880, AC1) — hand-written registry JSON with the `is_archived` key omitted from a row decodes that row's `IsArchived == false`, no migration invoked.
 - `TestRegistry_Save_ActiveOmitsArchivedKey` (#880, AC1) — an all-active registry's `Save` output contains no `is_archived` substring; `Save → Load → Save` is byte-identical (the byte-stable reload discipline extended to the new field).
 - `TestRegistry_SetSystemPrompt_*` (#2149) — `_HitStoresVerbatim` (byte-equal stored value, every other field untouched, stored pointer not the caller's pointer); `_Refusals` (table: over-length, invalid UTF-8, unknown id, and the two combined-refusal ordering rows pinning length-first; each row also asserts `err.Error()` carries no fragment of a marked input — AC5); `_BoundaryIsBytes` (exactly `MaxSystemPromptBytes` accepted, one more refused, 4096 vs 4097 two-byte runes — pins bytes-not-runes); `_ClearAndExplicitlyEmpty` (nil clears, `strPtr("")` stores non-nil-empty, nil on an unknown id still refuses); `_RoundTrip` (none / explicitly-empty / newlines-and-non-ASCII survive `Save` → `Load`); `_DoesNotPersist` (mirrors `_Promote_DoesNotPersist`); `_RefusedValueNeverReachesDisk` (a refused marked value appears in neither file's bytes — AC5). Plus `TestRegistry_Save_NoPromptOmitsKey` and `TestRegistry_Load_AbsentPromptKeyDecodesNone` (AC4, mirroring the `IsArchived` pair) and `TestConversation_SystemPromptThreeStates` in `conversation_test.go` (AC1, the type-level round trip).
+- `TestRegistry_WorkspaceLabel_*` (#2206) — `_SetReadClear` (table: unset/set/overwrite/clear/
+  clear-unset/explicit-empty-vs-cleared, plus byte-exact key rows distinguishing `/a`, `/a/`,
+  `/A`, and a trailing-space variant as four distinct keys); `_RoundTrip` (two labels survive
+  `Save` → `Load`, plus an insertion-order-permutation arm pinning `encoding/json`'s sorted-map-
+  key output, plus a non-ASCII/newline arm); `_DoesNotPersist` (mirrors
+  `_SetSystemPrompt_DoesNotPersist`); `_ConcurrentAccess` (goroutines mixing `SetWorkspaceLabel`,
+  `WorkspaceLabel`, `Create`, `Save` — the one test that exercises `Save`'s encode against a live
+  concurrent map writer, i.e. the fatal-throw path `-race` alone does not report). Plus
+  `TestRegistry_Save_NoLabelsOmitsKey` (two arms: never-set, and set-then-cleared — the second is
+  the one a `IsArchived`/`SystemPrompt`-shaped byte-stability test structurally cannot cover) and
+  `TestRegistry_Load_AbsentLabelKeyDecodesEmpty` (mirrors `_AbsentPromptKeyDecodesNone`).
 
 `internal/conversations/id_test.go` mirrors `internal/sessions/id_test.go`:
 
@@ -399,9 +265,11 @@ New (no devices counterpart):
 - **Auto-archive predicate + sweep.** #219, #220.
 - **Migration from existing `Session` registry.** TBD ticket once Conversations is proven on disk; Phase 1/2 sessions stay untouched.
 - **Shared atomic-write helper across `devices` and `conversations`.** Issue tech note explicitly forbids; revisit only if real divergence cost surfaces.
+- **Workspace-label wire surface.** #2206 lands storage only. Setting a label over the wire (#2207, which also owns the not-found/non-blank/length refusals), surfacing it on `list_conversations` (#2208), and pushing it on live frames (#2210) are separate tickets against the same two accessors.
 
 ## Related
 
+- [`features/conversations-registry-crud.md`](conversations-registry-crud.md) — the CRUD method reference (`Create`/`Get`/`List`/`Update`/`Delete`/`RebindSession`/`SetArchived`/`SetSystemPrompt`/`WorkspaceLabel`+`SetWorkspaceLabel`/`Promote`), split out of this document.
 - [`features/conversations-package.md`](conversations-package.md) — `Conversation` + `ConversationID` (#216), the on-disk record shape this registry persists.
 - [`features/devices-registry.md`](devices-registry.md) — the structural reference implementation (atomic write, envelope shape, snapshot-then-write Save).
 - [`features/sessions-registry.md`](sessions-registry.md) — the older atomic-rename recipe both registries trace to.
@@ -412,10 +280,11 @@ New (no devices counterpart):
 - [codebase/739.md](../codebase/739.md) — per-ticket note for the `RebindSession` write primitive + the pool-side rotation/eviction wiring.
 - [codebase/868.md](../codebase/868.md) — per-ticket note for the `saveMu` fix (dedicated save mutex closes the cross-`Save` lost-update race).
 - [codebase/880.md](../codebase/880.md) — per-ticket note for `SetArchived` + `ListFilter.IsArchived` + the `list_conversations` read surfacing.
-- `docs/protocol-mobile.md` § *Application-envelope size cap* — the 65519-byte frame ceiling `MaxSystemPromptBytes` is sized against; read it alongside the HTML-escaping arithmetic in § `SetSystemPrompt` above before reusing the bound elsewhere.
+- `docs/protocol-mobile.md` § *Application-envelope size cap* — the 65519-byte frame ceiling `MaxSystemPromptBytes` is sized against; read it alongside the HTML-escaping arithmetic in [`conversations-registry-crud.md`](conversations-registry-crud.md) § `SetSystemPrompt` before reusing the bound elsewhere.
 - [`features/conversations-auto-archive.md`](conversations-auto-archive.md) — the `Sweep`/`ShouldArchive` hard-delete auto-archive; `SetArchived` (#880) is a distinct soft-archive mechanism, not a variant of it, but the hard-delete sweep now honours it — `ShouldArchive` exempts `IsArchived` rows (#1488).
 - `docs/specs/architecture/217-conversations-registry-crud.md` — architect's spec for the CRUD foundation.
 - `docs/specs/architecture/218-conversations-promotion-api.md` — architect's spec for `Promote`.
 - `docs/specs/architecture/739-conversation-session-binding-rotation.md` — architect's spec for `RebindSession` + the rotation rebind.
 - `docs/specs/architecture/880-durable-archived-state.md` — architect's spec for `SetArchived` + `ListFilter.IsArchived` + the read-surface projection.
 - `docs/specs/architecture/2149-conversation-system-prompt.md` — architect's spec for `SystemPrompt` + `SetSystemPrompt`.
+- `docs/specs/architecture/2206-workspace-label-registry-storage.md` — architect's spec for `WorkspaceLabel` + `SetWorkspaceLabel`.

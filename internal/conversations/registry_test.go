@@ -1695,3 +1695,367 @@ func TestRegistry_SetSystemPrompt_RefusedValueNeverReachesDisk(t *testing.T) {
 		}
 	}
 }
+
+// #2206 AC1: a stored label reads back through the read accessor; a label that
+// was set and then cleared reads as absent. Keys compare as bytes, so paths that
+// differ only in a trailing separator, a trailing space, or case are distinct
+// workspaces.
+func TestRegistry_WorkspaceLabel_SetReadClear(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		setup     func(*Registry)
+		key       string
+		wantLabel string
+		wantOK    bool
+	}{
+		{
+			name:  "unset key reads absent",
+			setup: func(*Registry) {},
+			key:   "/home/user/project",
+		},
+		{
+			name:      "set then read returns the label",
+			setup:     func(r *Registry) { r.SetWorkspaceLabel("/home/user/project", ptrTo("Tax filing")) },
+			key:       "/home/user/project",
+			wantLabel: "Tax filing",
+			wantOK:    true,
+		},
+		{
+			name: "a second set replaces rather than accumulates",
+			setup: func(r *Registry) {
+				r.SetWorkspaceLabel("/w", ptrTo("first"))
+				r.SetWorkspaceLabel("/w", ptrTo("second"))
+			},
+			key:       "/w",
+			wantLabel: "second",
+			wantOK:    true,
+		},
+		{
+			name: "clear removes the key, so the read is absent and not empty",
+			setup: func(r *Registry) {
+				r.SetWorkspaceLabel("/w", ptrTo("gone"))
+				r.SetWorkspaceLabel("/w", nil)
+			},
+			key: "/w",
+		},
+		{
+			name:  "clearing a key that was never set is a no-op",
+			setup: func(r *Registry) { r.SetWorkspaceLabel("/never", nil) },
+			key:   "/never",
+		},
+		{
+			name:      "an explicitly empty label is present, distinguishable from cleared",
+			setup:     func(r *Registry) { r.SetWorkspaceLabel("/w", ptrTo("")) },
+			key:       "/w",
+			wantLabel: "",
+			wantOK:    true,
+		},
+		{
+			name:  "byte-exact keys: a trailing separator is a different workspace",
+			setup: func(r *Registry) { r.SetWorkspaceLabel("/a", ptrTo("plain")) },
+			key:   "/a/",
+		},
+		{
+			name:  "byte-exact keys: case is significant",
+			setup: func(r *Registry) { r.SetWorkspaceLabel("/a", ptrTo("plain")) },
+			key:   "/A",
+		},
+		{
+			name:  "byte-exact keys: a trailing space is a different workspace",
+			setup: func(r *Registry) { r.SetWorkspaceLabel("/a", ptrTo("plain")) },
+			key:   "/a ",
+		},
+		{
+			name: "clearing one key leaves its byte-neighbours alone",
+			setup: func(r *Registry) {
+				r.SetWorkspaceLabel("/a", ptrTo("kept"))
+				r.SetWorkspaceLabel("/a/", ptrTo("cleared"))
+				r.SetWorkspaceLabel("/a/", nil)
+			},
+			key:       "/a",
+			wantLabel: "kept",
+			wantOK:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := &Registry{}
+			tt.setup(r)
+			got, ok := r.WorkspaceLabel(tt.key)
+			if ok != tt.wantOK {
+				t.Fatalf("WorkspaceLabel(%q) ok = %v, want %v", tt.key, ok, tt.wantOK)
+			}
+			if got != tt.wantLabel {
+				t.Errorf("WorkspaceLabel(%q) = %q, want %q", tt.key, got, tt.wantLabel)
+			}
+		})
+	}
+}
+
+// #2206 AC2: a label write changes no other registry state — the conversation
+// list is byte-identical across a set and a clear.
+func TestRegistry_SetWorkspaceLabel_LeavesConversationsUntouched(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-09-07T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{
+		ID:               "11111111-2222-4333-8444-555555555555",
+		Name:             strPtr("general"),
+		Cwd:              "/home/user/project",
+		CurrentSessionID: "sess-current",
+		SessionHistory:   []string{"sess-old"},
+		IsPromoted:       true,
+		IsArchived:       true,
+		SystemPrompt:     strPtr("be terse"),
+		LastUsedAt:       when,
+	})
+	before := r.List()
+
+	r.SetWorkspaceLabel("/home/user/project", ptrTo("Tax filing"))
+	r.SetWorkspaceLabel("/elsewhere", ptrTo("Other"))
+	r.SetWorkspaceLabel("/elsewhere", nil)
+
+	if after := r.List(); !reflect.DeepEqual(before, after) {
+		t.Errorf("conversation list changed across label writes:\n before = %+v\n after  = %+v", before, after)
+	}
+}
+
+// #2206 AC2: setting a label, saving, and loading into a fresh registry returns
+// the same label, through the existing snapshot-encode-fsync-rename save path.
+func TestRegistry_WorkspaceLabel_RoundTrip(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-09-07T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/home/user/project", LastUsedAt: when})
+
+	labels := map[string]string{
+		"/home/user/project": "Tax filing",
+		"/home/user/tmp2":    "Scratch — ä ö å 🐍\nsecond line",
+		"/home/user/blank":   "",
+	}
+	for k, v := range labels {
+		r.SetWorkspaceLabel(k, ptrTo(v))
+	}
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for k, want := range labels {
+		got, ok := back.WorkspaceLabel(k)
+		if !ok {
+			t.Errorf("WorkspaceLabel(%q) after reload: absent, want %q", k, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("WorkspaceLabel(%q) after reload = %q, want %q", k, got, want)
+		}
+	}
+	if got, ok := back.WorkspaceLabel("/never-set"); ok {
+		t.Errorf("an unset key reads present after reload, as %q", got)
+	}
+	if got := back.List(); len(got) != 1 || got[0].Cwd != "/home/user/project" {
+		t.Errorf("conversation list after reload = %+v, want the one seeded row", got)
+	}
+}
+
+// #2206 AC2/AC3: encoding/json sorts map keys, so the label map needs no
+// counterpart to the conversation slice's sort discipline — the same labels
+// inserted in opposite orders produce byte-identical files.
+func TestRegistry_Save_LabelOrderIsInsertionIndependent(t *testing.T) {
+	t.Parallel()
+	labels := map[string]string{"/z-last": "zed", "/a-first": "alpha", "/m-middle": "mid"}
+	write := func(order []string) []byte {
+		t.Helper()
+		r := &Registry{}
+		for _, k := range order {
+			r.SetWorkspaceLabel(k, ptrTo(labels[k]))
+		}
+		path := filepath.Join(t.TempDir(), "conversations.json")
+		if err := r.Save(path); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read after save: %v", err)
+		}
+		return data
+	}
+	forward := write([]string{"/a-first", "/m-middle", "/z-last"})
+	reverse := write([]string{"/z-last", "/m-middle", "/a-first"})
+	if string(forward) != string(reverse) {
+		t.Errorf("label insertion order changed the file bytes:\nforward = %s\nreverse = %s", forward, reverse)
+	}
+}
+
+// #2206: SetWorkspaceLabel does not persist implicitly — the Create / Update /
+// Promote / Delete / RebindSession / SetArchived / SetSystemPrompt convention.
+func TestRegistry_SetWorkspaceLabel_DoesNotPersist(t *testing.T) {
+	t.Parallel()
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/w", LastUsedAt: mustParseTime(t, "2026-09-07T12:34:56.789Z")})
+
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	if err := r.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	r.SetWorkspaceLabel("/w", ptrTo("Tax filing"))
+
+	back, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, ok := back.WorkspaceLabel("/w"); ok {
+		t.Errorf("on-disk label = %q, want absent (SetWorkspaceLabel must not Save)", got)
+	}
+}
+
+// #2206 AC3: a registry with no label set saves with no workspace_labels key at
+// all, so its bytes are identical to their pre-#2206 form and Save→Load→Save is a
+// fixed point.
+//
+// Two label-free states are checked because they are reached differently, and
+// only the second can catch a key emitted unconditionally as null:
+// TestRegistry_Save_NoPromptOmitsKey and TestRegistry_Save_ActiveOmitsArchivedKey
+// both build registries that never held a label, so a map allocated and then
+// emptied is a state neither can reach — an unconditionally written key would
+// still round-trip as a fixed point there while no longer matching a pre-ticket
+// file.
+func TestRegistry_Save_NoLabelsOmitsKey(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-09-07T12:34:56.789Z")
+	seed := func() *Registry {
+		r := &Registry{}
+		r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/a", LastUsedAt: when})
+		r.Create(Conversation{ID: "22222222-2222-4333-8444-555555555555", Cwd: "/b", LastUsedAt: when.Add(time.Second)})
+		return r
+	}
+	// saveTwice asserts the omitted key and the Save→Load→Save fixed point, and
+	// returns the first save's bytes for cross-state comparison.
+	saveTwice := func(r *Registry) []byte {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "conversations.json")
+		if err := r.Save(path); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		first, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read after save: %v", err)
+		}
+		if strings.Contains(string(first), "workspace_labels") {
+			t.Errorf("label-free registry serialized a workspace_labels key:\n%s", first)
+		}
+		back, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		path2 := filepath.Join(t.TempDir(), "conversations.json")
+		if err := back.Save(path2); err != nil {
+			t.Fatalf("re-Save: %v", err)
+		}
+		second, err := os.ReadFile(path2)
+		if err != nil {
+			t.Fatalf("read after re-save: %v", err)
+		}
+		if string(first) != string(second) {
+			t.Errorf("Save→Load→Save not byte-identical:\n first = %s\nsecond = %s", first, second)
+		}
+		return first
+	}
+
+	neverSet := saveTwice(seed())
+
+	cleared := seed()
+	cleared.SetWorkspaceLabel("/a", ptrTo("gone"))
+	cleared.SetWorkspaceLabel("/b", ptrTo("also gone"))
+	cleared.SetWorkspaceLabel("/a", nil)
+	cleared.SetWorkspaceLabel("/b", nil)
+
+	if got := saveTwice(cleared); string(got) != string(neverSet) {
+		t.Errorf("a set-then-cleared registry is not byte-identical to one that never held a label:\n cleared   = %s\n never-set = %s", got, neverSet)
+	}
+}
+
+// #2206 AC3: a registry file written before this ticket — one carrying no
+// workspace_labels key at all — loads with an empty label map and no error, with
+// no migration step. The freshly loaded map must also be writable: assignment to
+// a nil map panics, so the first set after such a Load is the lazy-allocation
+// path.
+func TestRegistry_Load_AbsentLabelKeyDecodesEmpty(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "conversations.json")
+	raw := `{"conversations":[{"id":"11111111-2222-4333-8444-555555555555","cwd":"/legacy","is_promoted":false,"last_used_at":"2026-09-07T12:34:56.789Z"}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, ok := r.Get("11111111-2222-4333-8444-555555555555"); !ok {
+		t.Fatal("legacy row missing after Load")
+	}
+	if got, ok := r.WorkspaceLabel("/legacy"); ok {
+		t.Errorf("absent workspace_labels key decoded as %q for the row's own cwd, want absent", got)
+	}
+
+	r.SetWorkspaceLabel("/legacy", ptrTo("Legacy"))
+	if got, ok := r.WorkspaceLabel("/legacy"); !ok || got != "Legacy" {
+		t.Errorf("first set on a freshly loaded legacy registry read back as (%q, %v), want (\"Legacy\", true)", got, ok)
+	}
+}
+
+// #2206 AC4: reads and writes of the label map are serialised by the registry's
+// existing mutex, Save's encode included.
+//
+// The encode is the load-bearing arm. Encoding the live map while a writer
+// mutates it is a fatal "concurrent map iteration and map write" runtime throw
+// that kills the process rather than a race the detector reports, so only a test
+// that runs Save against concurrent label writers can reach it.
+func TestRegistry_WorkspaceLabel_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
+	when := mustParseTime(t, "2026-09-07T12:34:56.789Z")
+	r := &Registry{}
+	r.Create(Conversation{ID: "11111111-2222-4333-8444-555555555555", Cwd: "/w0", LastUsedAt: when})
+
+	dir := t.TempDir()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	worker := func(n int, fn func(i int)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < n; i++ {
+				fn(i)
+			}
+		}()
+	}
+
+	const mutations = 200
+	worker(mutations, func(i int) {
+		r.SetWorkspaceLabel(fmt.Sprintf("/w%d", i%8), ptrTo(fmt.Sprintf("label-%d", i)))
+	})
+	worker(mutations, func(i int) { r.SetWorkspaceLabel(fmt.Sprintf("/w%d", i%8), nil) })
+	worker(mutations, func(i int) { r.WorkspaceLabel(fmt.Sprintf("/w%d", i%8)) })
+	worker(mutations, func(i int) {
+		r.Create(Conversation{ID: ConversationID(fmt.Sprintf("c%d", i)), Cwd: "/w0", LastUsedAt: when})
+	})
+	// Fewer iterations than the mutators: each Save fsyncs, and the arm only
+	// needs to overlap the mutation window, not match its length.
+	worker(40, func(i int) {
+		if err := r.Save(filepath.Join(dir, fmt.Sprintf("conversations-%d.json", i%4))); err != nil {
+			t.Errorf("Save: %v", err)
+		}
+	})
+
+	close(start)
+	wg.Wait()
+}

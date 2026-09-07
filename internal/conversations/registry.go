@@ -18,6 +18,24 @@ import (
 // future top-level fields without a wire break.
 type registryFile struct {
 	Conversations []Conversation `json:"conversations"`
+
+	// WorkspaceLabels maps a workspace's cwd — the exact string stored on a
+	// conversation's Cwd — to the operator-set display name for that workspace
+	// (#2206). Top-level rather than per-conversation because a label belongs to
+	// the workspace, not to a thread: N conversations can share one cwd, and a
+	// per-row copy would need N-way write fan-out and could disagree with itself.
+	//
+	// omitempty carries the same contract as Conversation.IsArchived's and
+	// SystemPrompt's: "an absent key decodes as no labels, with no migration
+	// step." On a map omitempty tests length rather than nilness, so a map that
+	// was allocated and then emptied by clearing its last label omits the key
+	// just as a never-allocated one does — which is what keeps a set-then-cleared
+	// registry byte-identical to its pre-#2206 form.
+	//
+	// encoding/json sorts map keys on marshal, so this field needs no counterpart
+	// to the Save-side sort applied to Conversations: output stays byte-identical
+	// for the same logical content regardless of insertion order.
+	WorkspaceLabels map[string]string `json:"workspace_labels,omitempty"`
 }
 
 // MaxSystemPromptBytes bounds Conversation.SystemPrompt, inclusive: a value of
@@ -60,6 +78,22 @@ type Registry struct {
 	saveMu        sync.Mutex
 	mu            sync.Mutex
 	conversations []Conversation
+
+	// workspaceLabels is the per-workspace display name map (#2206), guarded by
+	// mu like conversations. Nil until the first SetWorkspaceLabel stores a
+	// value, so a registry that never labels a workspace never allocates one.
+	//
+	// Save must copy this map inside its mu critical section, beside the
+	// conversations copy. Encoding the live map is not merely a data race:
+	// json.Marshal ranges over it, and a concurrent write during that range is a
+	// fatal "concurrent map iteration and map write" throw that kills the
+	// process. The copy must also be element-wise — a map header copy aliases the
+	// same buckets, so a delete or an insert-triggered rehash during the encode
+	// throws just the same. The shallow-copy reasoning that makes
+	// Conversation.SessionHistory safe does not transfer: it holds only because
+	// appends write at indices past the snapshot's length, and maps have no such
+	// disjointness.
+	workspaceLabels map[string]string
 }
 
 // Load reads path. A missing file returns an empty *Registry with no error
@@ -84,7 +118,7 @@ func Load(path string) (*Registry, error) {
 	if err := json.Unmarshal(data, &rf); err != nil {
 		return nil, fmt.Errorf("registry: parse %s: %w", path, err)
 	}
-	return &Registry{conversations: rf.Conversations}, nil
+	return &Registry{conversations: rf.Conversations, workspaceLabels: rf.WorkspaceLabels}, nil
 }
 
 // Save writes the registry atomically: temp file in filepath.Dir(path) at
@@ -106,6 +140,14 @@ func (r *Registry) Save(path string) error {
 	r.mu.Lock()
 	snapshot := make([]Conversation, len(r.conversations))
 	copy(snapshot, r.conversations)
+	// Copy the label map here too — see the workspaceLabels field doc for why
+	// encoding the live map is a fatal throw rather than a reported race. The
+	// copy is unconditional: an empty copy still omits the key, because
+	// omitempty on a map tests length rather than nilness.
+	labels := make(map[string]string, len(r.workspaceLabels))
+	for cwd, label := range r.workspaceLabels {
+		labels[cwd] = label
+	}
 	r.mu.Unlock()
 
 	sort.SliceStable(snapshot, func(i, j int) bool {
@@ -131,7 +173,7 @@ func (r *Registry) Save(path string) error {
 	}
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(&registryFile{Conversations: snapshot}); err != nil {
+	if err := enc.Encode(&registryFile{Conversations: snapshot, WorkspaceLabels: labels}); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("registry: encode: %w", err)
 	}
@@ -432,4 +474,76 @@ func (r *Registry) Promote(id ConversationID, name string) error {
 	r.conversations[idx].IsPromoted = true
 	r.conversations[idx].Name = &n
 	return nil
+}
+
+// WorkspaceLabel returns the operator-set display name stored for the workspace
+// at cwd, and true if one is set (#2206). Comparison is byte-exact, the same
+// contract Get gives for a conversation id: two paths differing only in a
+// trailing separator, a trailing space, or case are distinct workspaces, and
+// nothing here normalizes, resolves, joins, stats, or opens the key — at this
+// layer a cwd is a map key and nothing more.
+//
+// It answers for one workspace at a time and deliberately does NOT hand back the
+// map. A caller ranging over a shared map outside r.mu while another goroutine
+// writes it is not a race the detector reports but a fatal "concurrent map
+// iteration and map write" throw that kills the daemon, so the per-key signature
+// makes the escape structurally impossible rather than forbidding it in prose.
+// The consuming slices (#2208, #2210) call this once per conversation behind
+// their own narrow interfaces, which *Registry satisfies structurally.
+//
+// A cleared label reads as absent, never as a present empty string; an
+// explicitly-empty label reads as ("", true). The two states stay distinct.
+func (r *Registry) WorkspaceLabel(cwd string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	label, ok := r.workspaceLabels[cwd]
+	return label, ok
+}
+
+// SetWorkspaceLabel stores the display name for the workspace at cwd, or clears
+// it (#2206). The nullable argument spans both states through one door, mirroring
+// SetSystemPrompt's *string and SetArchived's single bool that both sets and
+// clears:
+//
+//   - nil          → the key is deleted, so WorkspaceLabel reports absent rather
+//     than a present empty string.
+//   - non-nil ""   → the explicitly-empty label, stored and reported present.
+//   - non-nil text → stored verbatim.
+//
+// It has no failure mode and returns nothing. In particular it does NOT check cwd
+// against the conversation list — #2207's handler owns the not-found refusal —
+// and, unlike its neighbour SetSystemPrompt, it does NOT validate the value.
+// Non-blank and length bounds belong to the wire handler; this layer stores what
+// it is given, under the key it is given. Any future caller (a CLI binding, a
+// second verb) inherits an unvalidated door and must bring its own bounds: the
+// two setters sit adjacent in this file with deliberately opposite contracts.
+//
+// Storing verbatim assumes a valid-UTF-8 label for round-trip fidelity, since
+// encoding/json substitutes U+FFFD on marshal — the hazard SetSystemPrompt
+// refuses with a sentinel. No sentinel here, because the wire path cannot produce
+// the input: encoding/json performs the same substitution while decoding into a
+// Go string, so whatever reaches a handler is already valid UTF-8.
+//
+// The pointee is copied into a fresh local before it is stored, so the map never
+// aliases a caller-held variable — the defensive idiom Promote uses for Name and
+// SetSystemPrompt for its prompt. The map is allocated lazily on the first store,
+// which is also the path a registry freshly loaded from a pre-#2206 file takes:
+// its map is nil, and assignment to a nil map panics.
+//
+// SetWorkspaceLabel does NOT call Save — disk persistence is the caller's
+// concern, matching the Create / Update / Promote / Delete / RebindSession /
+// SetArchived / SetSystemPrompt convention. It takes no logger, and nothing in
+// this package logs a record field, so a label cannot leave the registry file by
+// way of a log line.
+func (r *Registry) SetWorkspaceLabel(cwd string, label *string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if label == nil {
+		delete(r.workspaceLabels, cwd)
+		return
+	}
+	if r.workspaceLabels == nil {
+		r.workspaceLabels = make(map[string]string)
+	}
+	r.workspaceLabels[cwd] = *label
 }
