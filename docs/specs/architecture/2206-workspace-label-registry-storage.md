@@ -278,3 +278,26 @@ Each is recorded as resolved in `## Revisions` if implementation changes the ans
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — Open questions resolved during implementation; design unchanged
+
+1. **Accessor names — kept as planned.** `WorkspaceLabel(cwd string) (string, bool)` and
+   `SetWorkspaceLabel(cwd string, label *string)`. Nothing constrains them: #2207, #2208 and
+   #2210 each say only "the registry's label read method", and none of the three consumers
+   exists yet, so there is no call site to conflict with. Each will add the read method to its
+   own consumer-named narrow interface, which `*Registry` now satisfies structurally.
+2. **`omitempty` does omit a non-nil empty map — confirmed empirically, fallback not needed.**
+   `TestRegistry_Save_NoLabelsOmitsKey`'s set-then-cleared arm passes, and its bytes are
+   identical to the never-set arm's. So `Save` copies unconditionally and
+   `SetWorkspaceLabel(cwd, nil)` may leave an allocated-but-empty map behind without breaking
+   AC3. The planned fallback — nil the field when the last key is deleted, skip the copy when
+   nil — was not taken.
+
+The security review's one SHOULD FIX (state the unvalidated-door contract at the symbol, and
+name #2207 as the owner of the bounds) landed in `SetWorkspaceLabel`'s doc comment, which also
+names the adjacent `SetSystemPrompt`'s opposite contract as the hazard it guards against. The
+three concurrency SHOULD FIXes landed as designed: the element-wise copy inside `Save`'s
+existing `r.mu` section, the per-key read signature, and the `workspaceLabels` field doc
+recording why a map header copy would not have been enough.
