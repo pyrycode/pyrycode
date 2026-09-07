@@ -178,6 +178,16 @@ type Pool struct {
 	registryPath      string
 	claudeSessionsDir string
 
+	// systemPromptPath is the absolute path to the daemon's appended
+	// system-prompt file (#2093), a member of every session's spawnBase as
+	// "--append-system-prompt-file <path>". ONE file serves the whole daemon —
+	// the text is a constant, so there is nothing per-session about it — which is
+	// why it is here rather than on Session beside settingsPath, and why
+	// Pool.Remove must not remove it. Written by Pool.New and removed by Pool.Run
+	// on shutdown. Read-only after New, so no lock; buildSession is its only
+	// other reader.
+	systemPromptPath string
+
 	// convReg and convRegistryPath mirror Config.ConversationsRegistry /
 	// .ConversationsRegistryPath. Read-only after New — set once,
 	// consulted only by Pool.Run to decide whether to register the sweep
@@ -437,19 +447,37 @@ func New(cfg Config) (*Pool, error) {
 	// future one by construction — this ticket exists because a hand-placed
 	// cleanup was forgotten at two sites.
 	built := false
+
+	// The daemon's appended system-prompt file (#2093) tells claude its replies
+	// are rendered by a separate client rather than printed in a terminal. Like
+	// the --settings file it joins spawnBase rather than claudeSettingsArgs, so it
+	// survives every recompose; UNLIKE it, one file serves every session, so the
+	// path is kept on the Pool and removed once, in Run. A write failure is fatal
+	// at startup for the settings file's reason inverted: a daemon that started
+	// anyway would silently spawn every session reasoning about the wrong surface,
+	// which is a quiet wrong answer rather than a loud one.
+	systemPromptPath, err := writeSystemPrompt(cfg.RegistryPath, systemPromptText)
+	if err != nil {
+		// Ordered after the settings write so this failure is covered by the defer
+		// below, which is installed with the two paths already in hand.
+		_ = os.Remove(settingsPath)
+		return nil, fmt.Errorf("sessions: write system prompt: %w", err)
+	}
 	defer func() {
 		if !built {
 			_ = os.Remove(settingsPath)
+			_ = os.Remove(systemPromptPath)
 		}
 	}()
 
 	// base is the settings-free bootstrap argv (template plus the immutable
-	// --settings pair); bootstrapArgs appends the model/effort/YOLO suffix. Clone
-	// before appending: today's code aliases cfg.Bootstrap.ClaudeArgs directly,
-	// and we must not mutate the caller's slice. base is stored on the bootstrap
-	// Session so a live restart (#842) can recompose full argv from the persisted
-	// settings.
+	// --settings and --append-system-prompt-file pairs); bootstrapArgs appends the
+	// model/effort/YOLO suffix. Clone before appending: today's code aliases
+	// cfg.Bootstrap.ClaudeArgs directly, and we must not mutate the caller's
+	// slice. base is stored on the bootstrap Session so a live restart (#842) can
+	// recompose full argv from the persisted settings.
 	base := append(slices.Clone(cfg.Bootstrap.ClaudeArgs), "--settings", settingsPath)
+	base = append(base, "--append-system-prompt-file", systemPromptPath)
 	bootstrapArgs := append(slices.Clone(base), claudeSettingsArgs(settings)...)
 	// p is late-bound: the &Pool{} literal below assigns it, and the
 	// ResolveSessionID closure only reads it at spawn time (supervisor.Run),
@@ -530,6 +558,7 @@ func New(cfg Config) (*Pool, error) {
 	p = &Pool{
 		sessions:           map[SessionID]*Session{bootstrapID: sess},
 		bootstrap:          bootstrapID,
+		systemPromptPath:   systemPromptPath,
 		readyCh:            make(chan struct{}),
 		log:                cfg.Logger,
 		registryPath:       cfg.RegistryPath,
@@ -1543,6 +1572,15 @@ func (p *Pool) Run(ctx context.Context) error {
 		if bootstrap != nil && bootstrap.settingsPath != "" {
 			_ = os.Remove(bootstrap.settingsPath)
 		}
+		// The appended system-prompt file (#2093) is daemon-scoped, so this is its
+		// ONE removal site: Pool.Remove deletes a session's own settings file, and
+		// doing the same to this one would delete it out from under every session
+		// still running. Same SIGKILL exposure as the line above, bounded the same
+		// way — the name is fixed, so the next start overwrites rather than
+		// accumulating.
+		if p.systemPromptPath != "" {
+			_ = os.Remove(p.systemPromptPath)
+		}
 	}()
 
 	g, gctx := errgroup.WithContext(ctx)
@@ -1796,6 +1834,11 @@ func (p *Pool) buildSession(id SessionID, label, spawnDir string, settings Sessi
 	// a backing array.
 	base := append(slices.Clone(tpl.ClaudeArgs), "--session-id", string(id))
 	base = append(base, "--settings", settingsPath)
+	// The daemon's appended system-prompt file (#2093). Written once by Pool.New
+	// and shared by every session, so there is nothing to write or clean up here —
+	// only the path to place on this session's base, where it survives the same
+	// recomposes the --settings pair does.
+	base = append(base, "--append-system-prompt-file", p.systemPromptPath)
 	args := append(slices.Clone(base), claudeSettingsArgs(settings)...)
 	workDir := tpl.WorkDir
 	if spawnDir != "" {
