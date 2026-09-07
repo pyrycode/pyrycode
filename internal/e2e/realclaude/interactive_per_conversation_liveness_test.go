@@ -163,6 +163,17 @@ type perConvHarness struct {
 // its conversation over the wire. Skips cleanly when claude / creds are absent.
 func startPerConversationHarness(t *testing.T) *perConvHarness {
 	t.Helper()
+	return startPerConversationHarnessSeeded(t, nil)
+}
+
+// startPerConversationHarnessSeeded is startPerConversationHarness with a hook
+// that runs after the bootstrap registry is seeded and BEFORE the daemon starts,
+// for a case whose conversation state must already be on disk when the daemon
+// loads conversations.json. #2150 is the first such case: no verb writes a
+// conversation's system prompt yet (#2151 is that ticket), so the only way to
+// have one stored is to seed the file the daemon reads at startup.
+func startPerConversationHarnessSeeded(t *testing.T, seed func(home, workdir string)) *perConvHarness {
+	t.Helper()
 	// No t.Parallel: WithWorktreeAuthenticated calls t.Setenv.
 	if _, err := exec.LookPath("claude"); err != nil {
 		t.Skipf("realclaude: claude not on PATH: %v", err)
@@ -194,6 +205,9 @@ func startPerConversationHarness(t *testing.T) *perConvHarness {
 	// Seed ONLY the bootstrap pool id (loaded once at startup). NO
 	// seedBoundConversation — each case creates its conversation over the wire.
 	seedBootstrapRegistry(t, home, livePerConvBootstrapUUID)
+	if seed != nil {
+		seed(home, workdir)
+	}
 
 	fr := fakerelay.New(relayTestLogger())
 	t.Cleanup(func() { _ = fr.Close() })
