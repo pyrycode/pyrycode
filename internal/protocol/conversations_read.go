@@ -32,8 +32,21 @@ type ConversationSummary struct {
 	// serialized (no omitempty, unlike the on-disk Conversation.IsArchived):
 	// a client partitions active vs. archived and counts each side, so it must
 	// read the flag on active rows too, where the value is false.
-	IsArchived    bool      `json:"is_archived"`
-	Cwd           string    `json:"cwd"`
-	LastMessageTS time.Time `json:"last_message_ts"`
-	LastUsedAt    time.Time `json:"last_used_at"`
+	IsArchived bool   `json:"is_archived"`
+	Cwd        string `json:"cwd"`
+	// WorkspaceLabel is the operator-set display name stored for the workspace
+	// at this row's own Cwd (#2208), so a client renders the chosen name without
+	// a second read verb. It belongs to the workspace, not to this conversation:
+	// N rows sharing one Cwd carry one label, and a row in another workspace
+	// carries its own.
+	//
+	// A pointer without omitempty, the same discipline as Name's above, but here
+	// the absent omitempty is a client-visible contract rather than only a
+	// round-trip property: a workspace with no stored label must serialize an
+	// explicit null, and the consuming clients fail closed on a missing key the
+	// way they already do for a missing cwd. Nil is "no label stored"; a non-nil
+	// pointer to "" is the distinct explicitly-empty label the registry admits.
+	WorkspaceLabel *string   `json:"workspace_label"`
+	LastMessageTS  time.Time `json:"last_message_ts"`
+	LastUsedAt     time.Time `json:"last_used_at"`
 }
