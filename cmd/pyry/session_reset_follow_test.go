@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +44,28 @@ func (r *recordingAdopt) recorded() [][2]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([][2]string(nil), r.calls...)
+}
+
+// recordingAdoptRunner is a (*streamsup.Runner).AdoptSessionID double that records
+// every id it is handed. Recording the IDS rather than a count is what lets a test
+// assert the runner was moved onto the ANNOUNCED id rather than merely poked: an
+// adoption of the wrong id resumes the wrong transcript on the next crash, which is
+// the whole defect #2136 closes.
+type recordingAdoptRunner struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (r *recordingAdoptRunner) fn(newID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ids = append(r.ids, newID)
+}
+
+func (r *recordingAdoptRunner) recorded() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ids...)
 }
 
 // collectSink is a downstream sink double that appends every event it is
@@ -139,13 +162,18 @@ func TestSessionResetFollower_EqualIDChangesNothing(t *testing.T) {
 
 	tag := newStreamSessionTag(resetFollowSessionA)
 	adopt := &recordingAdopt{}
+	runner := &recordingAdoptRunner{}
 	next := &collectSink{}
 	f := newSessionResetFollower(tag, adopt.fn, next.fn, discardLogger())
+	f.adoptRunner = runner.fn
 
 	f.Sink(turnevent.ConversationReset{NewConversationID: resetFollowSessionA})
 
 	if got := adopt.recorded(); len(got) != 0 {
 		t.Errorf("pool re-key calls = %v, want none — an equal id must not reach the pool", got)
+	}
+	if got := runner.recorded(); len(got) != 0 {
+		t.Errorf("runner adopted %v, want nothing — the runner already holds this id (#2136 AC4)", got)
 	}
 	if id := tag.ID(); id != resetFollowSessionA {
 		t.Errorf("tag.ID() = %q, want the unchanged %q", id, resetFollowSessionA)
@@ -179,6 +207,15 @@ func TestSessionResetFollower_EqualIDChangesNothing(t *testing.T) {
 // through the real sinkForTag and read back the id it actually carries. A tag
 // assertion alone would pass a hypothetical follower that rotated correctly and
 // stamped from somewhere else.
+//
+// #2136 adds the runner's own id to each row, and DERIVES its expectation from
+// wantTag rather than declaring it, because the rule is a biconditional: the runner
+// ends on the announced id exactly when the tag does. Written that way the table
+// asserts the rule itself, a row added for a new sentinel gets the matching
+// expectation for free, and a follower that adopted on one qualifying answer but not
+// the other cannot pass. Its inverse is the third distinct regression here: a runner
+// left on the pre-reset id spawns --resume <pre-reset> on its next crash, silently
+// resurrecting the conversation the announcement cleared.
 func TestSessionResetFollower_PoolAnswerDecidesTheTag(t *testing.T) {
 	t.Parallel()
 
@@ -205,11 +242,24 @@ func TestSessionResetFollower_PoolAnswerDecidesTheTag(t *testing.T) {
 			sink := newStreamTurnSink(8, discardLogger())
 			tag := newStreamSessionTag(resetFollowSessionA)
 			adopt := &recordingAdopt{err: tc.err}
+			runner := &recordingAdoptRunner{}
 			f := newSessionResetFollower(tag, adopt.fn, sink.sinkForTag(tag.ID), discardLogger())
+			f.adoptRunner = runner.fn
 
 			f.Sink(turnevent.ConversationReset{NewConversationID: resetFollowSessionB})
 			if got := tag.ID(); got != tc.wantTag {
 				t.Errorf("tag.ID() = %q after a %v from the pool, want %q — %s", got, tc.err, tc.wantTag, tc.why)
+			}
+
+			// The biconditional, derived rather than declared: the runner moves exactly
+			// when the tag ended on the announced id.
+			var wantAdopted []string
+			if tc.wantTag == resetFollowSessionB {
+				wantAdopted = []string{resetFollowSessionB}
+			}
+			if got := runner.recorded(); !slices.Equal(got, wantAdopted) {
+				t.Errorf("runner adopted %v after a %v from the pool, want %v — the runner's id must end "+
+					"where the tag ends, or its next crash respawn resumes the wrong transcript", got, tc.err, wantAdopted)
 			}
 
 			f.Sink(turnevent.TextChunk{MessageID: "m-after", Text: "AFTER-THE-ANSWER"})
@@ -251,7 +301,9 @@ func TestSessionResetFollower_ForwardsEveryVariantAndToleratesNilNext(t *testing
 
 	tag := newStreamSessionTag(resetFollowSessionA)
 	next := &collectSink{}
+	runner := &recordingAdoptRunner{}
 	f := newSessionResetFollower(tag, nil, next.fn, discardLogger())
+	f.adoptRunner = runner.fn
 	for _, ev := range evs {
 		f.Sink(ev)
 	}
@@ -263,10 +315,17 @@ func TestSessionResetFollower_ForwardsEveryVariantAndToleratesNilNext(t *testing
 	if id := tag.ID(); id != resetFollowSessionB {
 		t.Errorf("tag.ID() = %q with a nil adopt, want %q", id, resetFollowSessionB)
 	}
+	// And the runner adopts along with it (#2136 AC3). The rule is about where the TAG
+	// ends, not about which sentinel came back, so a follower with no pool callback at
+	// all must move both halves rather than neither.
+	if got := runner.recorded(); !slices.Equal(got, []string{resetFollowSessionB}) {
+		t.Errorf("runner adopted %v with a nil adopt, want %v — the runner must follow the tag even "+
+			"where there is no pool answer to wait for", got, []string{resetFollowSessionB})
+	}
 
 	nilNext := newSessionResetFollower(newStreamSessionTag(resetFollowSessionA), nil, nil, discardLogger())
 	for _, ev := range evs {
-		nilNext.Sink(ev) // must not panic
+		nilNext.Sink(ev) // must not panic, adoptRunner included
 	}
 }
 

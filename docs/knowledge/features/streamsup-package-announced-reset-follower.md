@@ -25,8 +25,9 @@ Two constraints bind at once, and only the parser's side of the fan-in channel s
 1. Read `old := tag.ID()` — the **live** id, never a construction-time one. A closure over `RunnerConfig.SessionID` would be right for exactly one rotation and fail-closed after that, since that field is documented as construction-fixed and does not mirror a `/clear` rotation.
 2. `newID == old` → return untouched: no re-key, no transition, no tag rotation (mirrors `AdoptAnnouncedID`'s own equal-id guard — the pool cannot guard a value it doesn't own, so both sides carry the check).
 3. `tag.Rotate(newID)` — **before** the pool call, not after. Rotating first closes the window that would otherwise open on every *successful* reset: the pool call's `notifyTransition` rebinds the conversation, and the rebind is what makes the old tag dead, so rotating the tag first means no goroutine can observe the rebind while the tag still reports the old id.
-4. `pool.AdoptAnnouncedID(old, newID)` — the pool seam ([`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md)). Its answer decides whether the rotation stands.
+4. `pool.AdoptAnnouncedID(old, newID)` — the pool seam ([`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md)), reached through `rekeyPool` (below). Its answer decides whether the rotation stands.
 5. **The unwind.** The tag ends on `newID` only when the pool's answer means the session is now on that id — `nil` (this call re-keyed) or `ErrSessionNotFound` (the rotation watcher won the race — see below). Every other answer means nothing moved, and the tag is rotated back to `old`.
+6. **The runner follows (#2136).** On the far side of the unwind — never before it — `follow` calls `adoptRunner(newID)`, which reaches [`(*streamsup.Runner).AdoptSessionID`](streamsup-package-satisfying-sessions-runner.md): the runner's live spawn id, the value `beginSpawn` puts into the next child's argv and environment. A refused id now reaches the tag, the registry and the runner alike not at all; an accepted one moves all three.
 
 Step 5 is the part that shipped wrong the first time and is why this file exists.
 
@@ -64,6 +65,30 @@ real `sinkForTag`, read back for the session id its envelope actually carries �
 field directly, since a mis-tag is only harmful through what it stamps. A tag-field-only assertion
 would have passed the very follower that shipped wrong.
 
+## Extending the rule to the runner: one call site, not one per qualifying answer (#2136)
+
+AC 3 of #2136 stated the runner half as a biconditional: the runner's id ends on the announced id
+exactly when the tag does. `follow` already expressed the tag half across three returns and one
+unwind (steps 2, 3+5, and the equal-id early return); replicating the runner adopt beside each of
+the three qualifying returns would work today, but a sentinel added later to `AdoptAnnouncedID`
+would need a fourth site remembered to match it — the same shape of defect the unwind above exists
+to fix, one seam over.
+
+Instead the pool half of `follow` was extracted into `rekeyPool(oldID, newID) error`, which answers
+the one question both remaining steps need — does the session now stand on `newID`? — and collapses
+to nil for all three adopting answers (no pool wired, `nil`, `ErrSessionNotFound`) and the pool's
+own error otherwise. `follow` then has exactly one call to `adoptRunner`, downstream of `rekeyPool`
+returning nil, so a sentinel added later is answered once and the runner and the tag can no longer
+drift out of step by one call site being forgotten. The generalisable form: **a rule stated as a
+biconditional over an answer wants one call site keyed to that answer, not one call site per
+currently-known qualifying value** — the same lesson the unwind above teaches about auditing only
+the refusing side, applied to the accepting side instead.
+
+`TestSessionResetFollower_PoolAnswerDecidesTheTag`'s existing per-sentinel rows carry the runner
+expectation too, derived from the same row's tag expectation rather than declared independently —
+so the table asserts the biconditional itself, and a row added for a future sentinel gets the
+matching runner expectation for free.
+
 ## The one window this trades for a bigger one
 
 Rotating first and unwinding on refusal leaves one window: between the rotation and the unwind,
@@ -91,4 +116,5 @@ carries the **new** tag, since `sinkForTag` reads the tag after `Sink` returns �
 delivery (the drain has no arm for the variant either), but stated so a reader of a drop record
 knows which id to expect.
 
-See [`docs/specs/architecture/2135-follow-announced-reset.md`](../../specs/architecture/2135-follow-announced-reset.md) for the full design, concurrency model, and security review.
+See [`docs/specs/architecture/2135-follow-announced-reset.md`](../../specs/architecture/2135-follow-announced-reset.md) for the full design, concurrency model, and security review, and
+[`docs/specs/architecture/2136-adopt-announced-session-id.md`](../../specs/architecture/2136-adopt-announced-session-id.md) for the runner-side extension.

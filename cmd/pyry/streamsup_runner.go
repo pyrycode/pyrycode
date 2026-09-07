@@ -330,6 +330,15 @@ func newStreamRunnerFactory(sink *streamTurnSink, mcpServersPath string) session
 		if err != nil {
 			return nil, fmt.Errorf("cmd/pyry: stream runner: %w", err)
 		}
+		// #2136's runner half, closed here rather than above because the runner does not
+		// exist up there: the follower's Sink is what the parser writes into, and that
+		// parser is this runner's Stdout. This line is still inside the factory's own
+		// single-goroutine window and above anything that starts Run, so the assignment
+		// is published to the stdout forwarder by the same goroutine-creation edge the
+		// three Config seams on the lines above rely on. The concrete *streamsup.Runner
+		// is reached directly: sessions.Runner carries a method only when its consumer
+		// sits inside internal/sessions, and this consumer sits here.
+		follow.adoptRunner = r.AdoptSessionID
 		return streamRunner{r: r, sessionRetentions: held}, nil
 	}
 }
