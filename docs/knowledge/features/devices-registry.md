@@ -321,6 +321,24 @@ only before it, since the lock excludes a concurrent commit but does nothing
 about one that already landed between the pre-lock reload and the
 acquisition.
 
+**Update (2026-09-07, #1531): `pyry pair` (mint) and `pyry pair revoke` are
+lock-compliant too, closing CLI-vs-CLI in both directions.** `register_push_token`
+is now the one writer left unlocked (#1532), so the headline daemon-vs-CLI race
+is still open — a live daemon's stale `Save` can still erase a device `pyry
+pair` just added, or resurrect one `pyry pair revoke` just removed. What #1531
+closes: a `pyry pair` racing a `pyry pair revoke` can no longer resurrect the
+revoked device (the security-relevant direction), and CLI-vs-`recordRedemption`
+now serializes on the same sidecar. See [`features/pyry-pair-command.md`](pyry-pair-command.md)
+for the retrofit's operation-order and concurrency detail.
+
+Retrofitting mint surfaced the general trap in this pattern, worth naming for
+the next `WithLock` caller: **wrapping the existing `Save` in `WithLock` is not
+the same as moving the `Load` inside it.** A build that only locks around
+`Save` passes every "refuses when busy" test, because it genuinely does refuse
+when busy — the stale-snapshot bug it leaves in place only shows up under an
+interleaving assertion, not a contention one. See § "Testing a best-effort,
+lock-guarded persist" below for that test shape.
+
 ### Tests
 
 `internal/devices/registry_test.go`, mirroring the existing table + race-probe
@@ -381,12 +399,24 @@ both from `internal/relay/v2session_redemption_test.go`:
   claim than "no `Save` ran" — it needs no seam, no counter, and no fake, and
   it is what proves a no-deadline device costs nothing at all (not even a
   lock acquisition).
+- **A busy-lock refusal test proves the lock exists, not that the read moved
+  inside it — only an interleaving assertion proves the latter (#1531).** Park
+  a lock holder, start the write under test, assert it has *not* completed
+  after a short grace (a completion during the grace proves no region covers
+  the write), commit a second write from under the holder, release, then
+  assert the concurrent write survived. A build that wraps only the existing
+  `Save` in `WithLock` passes every "refuses when busy" test — it genuinely
+  does refuse when busy — but fails this one, because its `Load` still ran
+  before the lock was ever taken, so the concurrent write gets silently erased.
+  `cmd/pyry/pair_lock_test.go`'s `TestRunPairDefault_ReadsSnapshotInsideLock`
+  is the worked example; its discriminating power against that exact mutant
+  was verified with a `go test -overlay` run rather than assumed.
 
 ## Out of scope (deferred)
 
 - **Schema versioning.** Per AC: defer until first migration. The envelope shape reserves the field; add it then, not now.
-- **`pyry pair` (mint).** Sibling ticket — builds a `Device`, calls `Add` then `Save`.
-- **`pyry pair revoke <name>`.** Sibling ticket — calls `Remove(name)` then `Save`.
+- ~~**`pyry pair` (mint).**~~ Delivered — builds a `Device`, calls `Add` then `Save`, and (#1531) does so inside a `WithLock` region. See [`features/pyry-pair-command.md`](pyry-pair-command.md).
+- ~~**`pyry pair revoke <name>`.**~~ Delivered — calls `Remove(name)` then `Save`, and (#1531) does so inside the same `WithLock` region. See [`features/pyry-pair-command.md`](pyry-pair-command.md).
 - ~~**WS handshake auth.**~~ Delivered — the daemon `Load`s once at startup and `Validate(presented)`s per phone connect, and (as of #782) `Reload`s the on-disk set immediately before each v2 handshake's `Validate` so a device paired after startup is accepted without a restart. See § Reload and [`features/v2-session-manager.md`](v2-session-manager.md).
 - ~~**Per-device `last_seen_at` updates.**~~ Delivered by #210 (`Validate` advances `LastSeenAt` in memory on every hit). Disk persistence of the advanced value remains the auth handler's concern (periodic `Save` / graceful-shutdown hook); the predicate intentionally does not call `Save`.
 - **Push-token registration metadata.** Future top-level field (per `protocol-mobile.md:495`); the envelope shape supports additive growth.
