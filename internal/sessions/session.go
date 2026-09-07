@@ -439,6 +439,43 @@ type Session struct {
 	// literal and never spawns.
 	settingsPath string
 
+	// systemPromptPath is the absolute path to this session's appended
+	// system-prompt file — #2093's constant plus, since #2150, the bound
+	// conversation's operator-set prompt. Like settingsPath it is a member of
+	// spawnBase, so it survives every recompose (a backoff restart, the #842 live
+	// settings-restart) and is immutable post-construction, read without a lock.
+	//
+	// Its BYTES are not immutable: Pool.refreshSystemPrompt rewrites this file
+	// before every spawn that Pool.Activate drives, which is what carries a prompt
+	// set after the session was minted (#2085's create-then-configure-then-talk
+	// flow) into the child's argv without touching the frozen argv itself.
+	// Rewriting this path verbatim rather than re-deriving it from the session id
+	// is load-bearing: a /clear rotation re-keys the session in place, so after one
+	// this path still carries the pre-rotation id.
+	//
+	// Removed at session teardown (Pool.Remove), at daemon shutdown (Pool.Run
+	// removes the whole session-prompts directory), and on every error return
+	// between the write and a successful build. Empty on the bootstrap session,
+	// whose file is daemon-scoped and lives on the Pool as systemPromptPath, and
+	// on any test-constructed Session that hand-builds a literal and never spawns.
+	systemPromptPath string
+
+	// systemPrompt is the OPERATOR half of what this session was last composed
+	// with: the conversation's stored prompt at construction, refreshed by
+	// Pool.refreshSystemPrompt before each spawn. Empty means the session spawned
+	// with #2093's constant and nothing more, which covers both of #2149's
+	// no-bytes states.
+	//
+	// It is the operator half rather than the composed whole so a reader can
+	// compare it against the conversation's stored value without stripping a
+	// constant it does not own — Pool.SystemPromptFor is that reader's accessor
+	// and #2152 is the slice that reports the difference.
+	//
+	// Written under Pool.mu (write) by the refresh and set lock-free at
+	// construction, before the session is registered; read under Pool.mu (RLock).
+	// The same discipline settings follows, and deliberately NOT lcMu.
+	systemPrompt string
+
 	// pool is the back-pointer used to persist registry changes after a
 	// state transition. Set once, in Pool.New.
 	pool *Pool

@@ -127,12 +127,16 @@ func TestInteractiveSystemPromptFile_LiveSpawnArgv(t *testing.T) {
 		}
 	}
 
-	// One file for the whole daemon, so both spawns name the same path. The unit
-	// test TestPool_MintedSpawn_SharesBootstrapSystemPromptFile makes this claim
-	// deterministically; asserting it here too costs nothing and would catch a
-	// per-session file that only the live wiring produced.
-	if len(seen) > 1 {
-		t.Errorf("AC #4: the spawns name %d distinct prompt files (%v), want one daemon-scoped file",
-			len(seen), seen)
+	// Since #2150 the bootstrap keeps the daemon-scoped file while every
+	// conversation's session gets its own, because the appended text is no longer
+	// identical for every session: it carries that conversation's operator prompt.
+	// This assertion was "the spawns name ONE file" under #2093 and is inverted
+	// here — a shared file would mean one conversation's prompt reaching every
+	// other session. TestPool_MintedSpawn_UsesPerSessionSystemPromptFile makes the
+	// claim deterministically; asserting it live would catch a wiring that only
+	// production composes.
+	if len(records) > 1 && len(seen) < 2 {
+		t.Errorf("AC #4: %d spawns name %d distinct prompt file(s) (%v); the bootstrap and a "+
+			"conversation's session must not share one (#2150)", len(records), len(seen), seen)
 	}
 }
