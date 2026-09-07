@@ -489,3 +489,43 @@ standing example of a protocol document asserting behaviour nothing implements.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — implementation
+
+Two departures from the plan as committed, both additive; no design decision moved.
+
+**A changelog entry was added to `docs/protocol-mobile.md`.** The plan's
+Documentation section enumerated the table rows and the section only. Every
+protocol change on this document carries a dated newest-first Changelog entry —
+#2152, #2166, #2146, #2103 and #2099 all do — and AC #5's "dated" reads on it.
+Adding one is the house pattern rather than a scope widening.
+
+**One cross-reference was corrected before it landed.** The first draft of the
+section linked "`allow_remote_permissions` is never carried over the wire" to
+§ Modal (v2). That section does not state the rule — it is a daemon-side registry
+field this document does not otherwise describe — so the link pointed at a section
+that would not have supported the claim. Replaced with the plain statement plus
+ADR 025 § "Security model", which is the form `devices.Device` itself uses.
+
+**The plan's Testing strategy claims were mutation-verified rather than asserted**,
+which the drift-detectors overview requires and which is what the four fixture and
+key-set tests exist for. Four mutants, each run under `go test -overlay`:
+
+1. `TypeMintPairing`'s wire value → `"mint_pairings"`: **only**
+   `TestMintPairingPayload_RoundTrip` reddens. Confirms the drift-detectors
+   overview's rule on this pair specifically — all four classifier registries key
+   on the Go identifier and none of them moves, so the committed fixture is the
+   sole pin on the wire string.
+2. An `allow_remote_permissions` field added to `MintPairingPayload`:
+   `_WireKeys`, `_ZeroValue_KeyPresent` and `_RoundTrip` all redden. The
+   privilege-escalation absence is checked, not reviewed.
+3. The bound comparison `>` → `>=`: `_DeviceNameBound/at-bound-accepted` reddens,
+   so both edges are live.
+4. `omitempty` added to `device_name`: **only** `_ZeroValue_KeyPresent` reddens —
+   the round trip and the key set stay green, exactly as that test's own comment
+   claims, because the fixture carries a name.
+
+Both Open Questions resolved as the plan predicted: the bound is enforced at
+decode (question 2), and no expiry field is published (question 1).
