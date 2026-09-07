@@ -61,6 +61,14 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	if !c0.IsArchived {
 		t.Errorf("row 0 IsArchived: got false, want true")
 	}
+	// The re-marshal below cannot see WorkspaceLabel at all: Envelope.Payload is
+	// a json.RawMessage, so marshalling the envelope writes the fixture's own
+	// payload bytes back and the byte comparison passes whatever the struct
+	// gained or lost. These decoded assertions are the only proof the key is
+	// carried by the type.
+	if c0.WorkspaceLabel == nil || *c0.WorkspaceLabel != "Kitchen Claw" {
+		t.Errorf("row 0 WorkspaceLabel: got %v, want pointer to %q", c0.WorkspaceLabel, "Kitchen Claw")
+	}
 
 	// Row 1: name null on wire → nil pointer; active (is_archived false).
 	c1 := p.Conversations[1]
@@ -72,6 +80,9 @@ func TestConversationsPayload_RoundTrip(t *testing.T) {
 	}
 	if c1.IsArchived {
 		t.Errorf("row 1 IsArchived: got true, want false")
+	}
+	if c1.WorkspaceLabel != nil {
+		t.Errorf("row 1 WorkspaceLabel: got pointer to %q, want nil (wire was null)", *c1.WorkspaceLabel)
 	}
 
 	out, err := json.Marshal(env)

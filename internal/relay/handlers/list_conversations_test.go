@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,150 @@ func TestListConversations_SurfacesArchivedFlag(t *testing.T) {
 	}
 	if got, ok := byID["conv-archived"]; !ok || !got.IsArchived {
 		t.Errorf("conv-archived: got %+v, want present with IsArchived=true", got)
+	}
+}
+
+// summariesByID indexes a decoded reply so a test can assert on one row without
+// depending on the reply's sort order.
+func summariesByID(rows []protocol.ConversationSummary) map[string]protocol.ConversationSummary {
+	byID := make(map[string]protocol.ConversationSummary, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	return byID
+}
+
+// Each row's workspace_label is resolved from that row's own cwd. Two rows in
+// different workspaces carry their own values and neither inherits the other's,
+// and two rows sharing one cwd carry the same label — the label belongs to the
+// workspace, not to the thread.
+func TestListConversations_WorkspaceLabelIsPerWorkspace(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	ts := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	reg.Create(conversations.Conversation{ID: "conv-alpha-1", Cwd: "/work/alpha", LastUsedAt: ts})
+	reg.Create(conversations.Conversation{ID: "conv-alpha-2", Cwd: "/work/alpha", LastUsedAt: ts.Add(time.Hour)})
+	reg.Create(conversations.Conversation{ID: "conv-beta", Cwd: "/work/beta", LastUsedAt: ts.Add(2 * time.Hour)})
+	alpha := "Tax filing"
+	reg.SetWorkspaceLabel("/work/alpha", &alpha)
+
+	c, recv := newListConvConn(t)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 21)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	_, payload := decodeConversationsResponse(t, recv())
+	if len(payload.Conversations) != 3 {
+		t.Fatalf("len(Conversations): got %d, want 3", len(payload.Conversations))
+	}
+	byID := summariesByID(payload.Conversations)
+
+	for _, id := range []string{"conv-alpha-1", "conv-alpha-2"} {
+		got, ok := byID[id]
+		if !ok {
+			t.Fatalf("%s missing from reply: %+v", id, payload.Conversations)
+		}
+		if got.WorkspaceLabel == nil || *got.WorkspaceLabel != alpha {
+			t.Errorf("%s WorkspaceLabel: got %v, want pointer to %q", id, got.WorkspaceLabel, alpha)
+		}
+	}
+	got, ok := byID["conv-beta"]
+	if !ok {
+		t.Fatalf("conv-beta missing from reply: %+v", payload.Conversations)
+	}
+	if got.WorkspaceLabel != nil {
+		t.Errorf("conv-beta WorkspaceLabel: got pointer to %q, want nil (its own workspace is unlabelled)", *got.WorkspaceLabel)
+	}
+}
+
+// Before any label is ever set, every row carries an explicit null rather than an
+// omitted key. Asserted on the raw reply bytes: a decoded ConversationSummary
+// cannot tell a nil pointer from a key that omitempty dropped, which is exactly
+// the regression a stray omitempty tag on the field would cause — and a client
+// that fails closed on a missing key would reject the whole reply.
+func TestListConversations_UnlabelledWorkspaceSendsExplicitNull(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	ts := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	reg.Create(conversations.Conversation{ID: "conv-1", Cwd: "/work/one", LastUsedAt: ts})
+	reg.Create(conversations.Conversation{ID: "conv-2", Cwd: "/work/two", LastUsedAt: ts.Add(time.Hour)})
+
+	c, recv := newListConvConn(t)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 22)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	inner, payload := decodeConversationsResponse(t, recv())
+	if len(payload.Conversations) != 2 {
+		t.Fatalf("len(Conversations): got %d, want 2", len(payload.Conversations))
+	}
+	const wantKey = `"workspace_label":null`
+	if n := strings.Count(string(inner.Payload), wantKey); n != 2 {
+		t.Errorf("payload carries %d occurrences of %s, want 2 (one per row):\n%s", n, wantKey, inner.Payload)
+	}
+}
+
+// An archived row carries the key exactly like an active one: the handler lists
+// unfiltered, and archiving a conversation does not un-name its folder.
+func TestListConversations_ArchivedRowCarriesWorkspaceLabel(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	ts := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	reg.Create(conversations.Conversation{ID: "conv-archived", Cwd: "/work/shelved", IsArchived: true, LastUsedAt: ts})
+	label := "Shelved work"
+	reg.SetWorkspaceLabel("/work/shelved", &label)
+
+	c, recv := newListConvConn(t)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 23)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	_, payload := decodeConversationsResponse(t, recv())
+	if len(payload.Conversations) != 1 {
+		t.Fatalf("len(Conversations): got %d, want 1", len(payload.Conversations))
+	}
+	got := payload.Conversations[0]
+	if !got.IsArchived {
+		t.Fatalf("IsArchived: got false, want true (fixture seeds an archived row)")
+	}
+	if got.WorkspaceLabel == nil || *got.WorkspaceLabel != label {
+		t.Errorf("WorkspaceLabel: got %v, want pointer to %q", got.WorkspaceLabel, label)
+	}
+}
+
+// The registry keeps a stored empty label ("", true) distinct from an absent one
+// ("", false), so the projection must read presence from the accessor's second
+// return. Deriving the pointer from label != "" collapses the two and sends null
+// for a label that is genuinely stored. No wire path can store an empty label
+// today — rename_workspace refuses a blank one — but the registry API can, and
+// the collapse would silently diverge from WorkspaceLabel's stated contract.
+func TestListConversations_StoredEmptyLabelIsNotNull(t *testing.T) {
+	t.Parallel()
+	reg := &conversations.Registry{}
+	ts := time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC)
+	reg.Create(conversations.Conversation{ID: "conv-1", Cwd: "/work/blank", LastUsedAt: ts})
+	empty := ""
+	reg.SetWorkspaceLabel("/work/blank", &empty)
+
+	c, recv := newListConvConn(t)
+	h := ListConversations(reg)
+	if err := h(context.Background(), c, makeListConversationsRequest(t, 24)); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	inner, payload := decodeConversationsResponse(t, recv())
+	if len(payload.Conversations) != 1 {
+		t.Fatalf("len(Conversations): got %d, want 1", len(payload.Conversations))
+	}
+	if got := payload.Conversations[0].WorkspaceLabel; got == nil || *got != "" {
+		t.Errorf("WorkspaceLabel: got %v, want pointer to the empty string", got)
+	}
+	const wantKey = `"workspace_label":""`
+	if !strings.Contains(string(inner.Payload), wantKey) {
+		t.Errorf("payload does not carry %s:\n%s", wantKey, inner.Payload)
 	}
 }
 
