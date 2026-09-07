@@ -176,6 +176,17 @@ func TestIsKnownAppType(t *testing.T) {
 		// is the other one: an old phone never receives it.
 		{"request_history-rejected", TypeRequestHistory, false, ErrUnknownType},
 		{"history_page-rejected", TypeHistoryPage, false, ErrUnknownType},
+		// the v2-only pairing-mint pair. Same two halves as the history pair
+		// above — the request is inbound and the reply outbound-only — but here
+		// the inbound rejection is not merely load-bearing, it is the SECURITY
+		// PROPERTY this pair's declaring ticket ships. mint_pairing's reply is a
+		// bearer credential, so IsKnownAppType refusing the verb is the structural
+		// bar that stops a v1 client reaching the v1 handler chain with a
+		// credential-minting frame at all. A mutant filing either type in
+		// inboundAppTypeSet reddens these two rows and the disjointness branch of
+		// TestTypeConstants_V1V2Partition together.
+		{"mint_pairing-rejected", TypeMintPairing, false, ErrUnknownType},
+		{"pairing_minted-rejected", TypePairingMinted, false, ErrUnknownType},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -309,6 +320,13 @@ var v2OnlyTypes = map[string]bool{
 	// prompt.
 	TypeRequestSystemPrompt: true,
 	TypeSystemPrompt:        true,
+	// v2 pairing-mint pair: the request verb (inbound control) and the minted
+	// pairing it is answered with (outbound reply). The lane matters more here
+	// than on any neighbour above — the reply is a bearer credential, so
+	// IsKnownAppType rejecting the request is the structural bar that stops a v1
+	// client pushing a credential-minting verb into the v1 handler chain.
+	TypeMintPairing:   true,
+	TypePairingMinted: true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -400,6 +418,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestModelList,
 		// v2 conversation system-prompt read pair.
 		TypeRequestSystemPrompt, TypeSystemPrompt,
+		// v2 pairing-mint pair.
+		TypeMintPairing, TypePairingMinted,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

@@ -1652,3 +1652,78 @@ const (
 	TypeQuestionAnswer  = "question_answer"  // phone → binary, inbound v2 control (switch-intercepted — #1984)
 	TypeQuestionRefused = "question_refused" // phone → binary, inbound v2 control (switch-intercepted — #1984)
 )
+
+// Mobile Protocol v2 PAIRING-MINT PAIR (#2126; docs/protocol-mobile.md § Minting a
+// pairing from a paired client publishes both). The frame an already-paired client
+// sends to ask the daemon to mint a pairing for ANOTHER device, and the frame it is
+// answered with. Their payloads are MintPairingPayload and PairingMintedPayload
+// (pairing.go).
+//
+// THE GAP IT CLOSES: pairing has exactly one minter, the `pyry pair` CLI, and it
+// needs a shell on the daemon's host. runPairDefault reads 32 random bytes, hashes
+// them into a devices.Device and hands the tuple to pair.Encode. Two clients want a
+// second device paired without a shell — a browser build of the desktop client, and
+// a second person's client — and the shape is the one WhatsApp Web and Signal
+// Desktop use: a device that is already paired links the next one.
+//
+// THE NAMES ARE THE WRITE-VERB FAMILY'S, NOT THE request_* FAMILY'S, and the
+// departure is the point rather than an oversight. All seven inbound request_*
+// verbs — TypeRequestSnapshot, TypeRequestDebugBundle, TypeRequestSessionSettings,
+// TypeRequestAttachment, TypeRequestHistory, TypeRequestModelList,
+// TypeRequestSystemPrompt — are READS: each asks for something that already exists
+// and is answered with a projection of daemon state. This one CREATES. It mints a
+// credential and writes a durable devices.json record, so it takes the shape the
+// vocabulary already has for that — TypeCreateConversation→TypeConversationCreated,
+// TypeCreateWorkspaceFolder→TypeWorkspaceFolderCreated, imperative verb in and past
+// participle out. Filing a state-mutating verb under the read family's prefix would
+// hide the one thing a client most needs to read off the type string: this frame
+// has a side effect on the host. #2052's rule cuts the same way it does for the
+// reads — the wire type string IS the contract, and a name chosen twice is a name
+// chosen wrong once.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: these are
+// v2 CONTROL envelopes intercepted before internal/dispatch.Route, exactly as
+// TypeRequestHistory, TypeRequestModelList and TypeRequestSystemPrompt are. The
+// partition in internal/protocol/compat_test.go files both in v2OnlyTypes, and
+// inboundAppTypeSet's asserted count does not move.
+//
+// THAT LANE BINDS HARDER HERE THAN ON ANY OF THOSE THREE, because this verb's reply
+// is a bearer credential: IsKnownAppType returning ErrUnknownType is the structural
+// bar that stops a v1 client pushing a credential-minting verb into the v1 handler
+// chain at all. TypeRecentWorkspaces is the OTHER family and is not the precedent to
+// copy — its own block files it as a dispatch.Route read verb and justifies that
+// with "no untrusted input drives a filesystem operation, so it is NOT
+// security-sensitive". The inverse of that sentence is this pair.
+//
+// THE HANDLER MUST ANSWER ONLY AN AUTHENTICATED PAIRED DEVICE, and this declaration
+// carries that obligation rather than leaving it to the ticket that serves the
+// frame. A one-key request yields a reply carrying a live credential, so the whole
+// risk of the pair concentrates in the gate, and a declare-ahead slice is
+// structurally bad at remembering one. AN INTERACTIVE-CAPABILITY GATE IS NOT A
+// SUBSTITUTE: capability negotiation is a feature advertisement, not an
+// authorization, and the check that matters is that the conn is itself an
+// AEAD-authenticated device the registry holds. Rate-limiting the mint — an
+// already-paired hostile client can otherwise grow devices.json without bound and
+// hold many live credentials — is docs/protocol-mobile.md § Security model threat
+// 7's deferred posture, and #2127 must weigh it rather than inherit silence.
+//
+// IT WIDENS THREAT 4 (token leak via phone) ON PURPOSE. Minting authority moves from
+// "someone with a shell on the host" to "any paired device", so one compromised
+// client can mint further devices. The mitigation named there — per-device
+// revocation via `pyry pair rm` — still applies and the blast radius is unchanged in
+// kind. THREAT 1 DOES NOT LAND: device_name reaches no claude prompt on any path;
+// it is a registry label, and the hazards it does carry are named at the field.
+//
+// THE REPLY IS DECLARED AHEAD OF ITS HANDLER. #2127 serves this pair, blocked on the
+// redemption window (#1528, #1529) and the devices.json lock (#1531); until then
+// TypeMintPairing sits in cmd/pyry/relay_guard_test.go's excludedTypes as "pending
+// handler (#2127)" — TypeRequestHistory's precedent (#2113→#2116), the entry moving
+// up to inboundTypes as "switch-intercepted" when dispatchAppFrame gains its case —
+// and TypePairingMinted as an outbound "reply", exactly as TypeHistoryPage is.
+// Declaring ahead of serving is what lets the two client slices start against a
+// published contract instead of waiting on three blockers, and it is this repo's
+// established sequencing: #2052→#2054, #1983→#1984, #2113→#2116.
+const (
+	TypeMintPairing   = "mint_pairing"   // phone → binary, inbound v2 control (pending handler — #2127)
+	TypePairingMinted = "pairing_minted" // binary → phone, one minted pairing as the pair.Encode string, correlated via in_reply_to
+)
