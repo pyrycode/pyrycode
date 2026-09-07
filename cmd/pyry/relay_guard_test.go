@@ -116,6 +116,17 @@ var inboundTypes = map[string]string{
 	// and the guard reads case SELECTORS rather than case bodies. Its reply half,
 	// TypeHistoryPage, is outbound-only and stays excluded.
 	"TypeRequestHistory": "switch-intercepted",
+	// The pairing-mint request verb (#2127), moved up from excludedTypes' "pending
+	// handler (#2127)" when dispatchAppFrame gained its case — the move that entry
+	// named in advance, and mandatory rather than tidy-up: Assertion #2 fails a
+	// wired type left sitting in that map. Same filing as the three above and for
+	// the same reason: its case tags the frame and hands it to the conn's
+	// appFrameWorker, where the devices lock and the registry write run off Run,
+	// and the guard reads case SELECTORS rather than case bodies. It is the first
+	// member of this group whose handler WRITES host state. Its reply half,
+	// TypePairingMinted, is outbound-only and stays excluded — that entry says it
+	// never moves.
+	"TypeMintPairing": "switch-intercepted",
 	// The on-demand model-list request verb (#2125). It NEVER sat in excludedTypes
 	// as "pending handler", unlike the three above: its declaration and its handler
 	// land in one ticket, because the declaration's only daemon-side consumer is
@@ -418,23 +429,6 @@ var excludedTypes = map[string]string{
 	// modal_cancel. That move was mandatory rather than tidy-up — Assertion #2
 	// fails a wired type still sitting in this map. TypeAttachmentChunk made the
 	// same move one step later, in #1897.
-
-	// pending handler (#2127) — the pairing-mint request verb (#2126). #2126
-	// declares the constant, its payload and its published section; nothing
-	// dispatches it, so inboundTypes would fail Assertion #1, which requires an
-	// inbound type to be wired into the Handlers map or dispatchAppFrame. "push" is
-	// false for a genuinely inbound frame and filing it that way to dodge that
-	// assertion would be a lie to the guard rather than a classification —
-	// TypeRequestHistory's reasoning above, transferred, and this entry makes the
-	// same move it did: up to inboundTypes as "switch-intercepted" when #2127 gives
-	// dispatchAppFrame its case, which Assertion #2 then makes mandatory rather
-	// than tidy-up.
-	//
-	// The wait is longer than TypeRequestHistory's was. #2127 is blocked on the
-	// redemption window (#1528, #1529) and the devices.json lock (#1531), which is
-	// the whole reason the declaration ships alone: two client slices can be built
-	// against a published contract meanwhile.
-	"TypeMintPairing": "pending handler (#2127)",
 
 	// outbound reply — the minted pairing (#2126), correlated by in_reply_to, so
 	// "reply" is literally the definition this map gives above. TypeHistoryPage's

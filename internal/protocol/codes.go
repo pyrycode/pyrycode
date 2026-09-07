@@ -158,6 +158,44 @@ const (
 	// there, which is not something a retry accomplishes. The message is static and
 	// never echoes the requested path.
 	CodeWorkspaceNotFound = "workspace.not_found"
+
+	// Pairing-mint errors (#2127; docs/protocol-mobile.md § Error codes). MINTED
+	// WITH THE HANDLER THAT SENDS THEM, the sequencing #2052, the history group,
+	// #2125 and #2207 each followed: no reject vocabulary exists ahead of the code
+	// that can emit it.
+	//
+	// NEITHER IS CodeAuthInvalidToken, and that is the group's defining decision
+	// rather than a naming preference. A mint_pairing reaching a handler at all has
+	// already presented a token the handshake validated, so answering an auth code
+	// would tell a legitimate client its credential was rejected and invite it to
+	// re-pair — the one repair that cannot help. The device is authenticated; what
+	// it lacks is privilege.
+	//
+	// NEITHER IS AN ORACLE, which is the property the wire contract asks this group
+	// for. pairing.not_permitted reports only that the asking device lacks the
+	// remote-permissions flag — a fact it can already establish by answering any
+	// permission modal and being denied — and NOTHING about the host, the registry,
+	// or any other device. It is not conditioned on the requested device_name, so it
+	// cannot be used to probe which labels exist.
+	//
+	// pairing.unavailable MERGES EVERY HOST-SIDE FAILURE deliberately: a busy
+	// devices.json lock, a registry read or write error, and an RNG failure arrive
+	// as one answer. Each can clear without the client changing anything, the repair
+	// is identical for all three, and distinguishing them would publish facts about
+	// the machine rather than about the request. The errors behind them format an
+	// absolute host path and never reach the wire at all.
+	//
+	// A MALFORMED REQUEST IS NOT IN THIS GROUP. An undecodable payload — including
+	// a device_name over MaxDeviceNameBytes, which MintPairingPayload.UnmarshalJSON
+	// refuses — is answered with the existing CodeProtocolMalformed, the answer that
+	// type's own doc block assigns. A third code for it would be a second spelling
+	// of a decision already made.
+	//
+	// RETRYABILITY SPLITS THE PAIR ONE-TO-ONE: the privilege refusal is permanent
+	// for the device as paired (only a shell on the host can change it), and the
+	// host-side failure is the transient one.
+	CodePairingNotPermitted = "pairing.not_permitted" // the device is authenticated but is not privileged to mint; permanent
+	CodePairingUnavailable  = "pairing.unavailable"   // the mint could not be completed on the host; one merged, retryable answer
 )
 
 // Envelope-type constants — wire values for Envelope.Type

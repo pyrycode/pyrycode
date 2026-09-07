@@ -36,6 +36,157 @@ const pairVerbList = "list, revoke, preflight"
 // default. Unexported, and production never reassigns it.
 var pairLockWait = devices.DefaultLockWait
 
+// mintRequest is one ask of mintDevice: where to write, how long to wait for the
+// lock, what to call the device, and whether it may answer remote permissions.
+//
+// A STRUCT RATHER THAN FIVE POSITIONAL ARGUMENTS because two of the fields are
+// booleans-in-effect whose meaning is invisible at a call site — a bare `false`
+// for the privilege flag and a bare `""` for the grantor check are exactly the
+// values a reader must not have to count commas to identify.
+type mintRequest struct {
+	// devicesPath is the registry to append to; the lock sidecar is derived from
+	// it by devices.WithLock.
+	devicesPath string
+
+	// lockWait bounds the acquisition. A PARAMETER RATHER THAN pairLockWait
+	// directly, because this function now has two callers with different rights
+	// to block: the CLI is an operator-invoked one-shot and passes the devices
+	// package default, while the wire mint runs on a conn's app-frame worker with
+	// a client waiting and passes its own short bound.
+	lockWait time.Duration
+
+	// deviceName is the label to file the record under. The EMPTY STRING is not an
+	// error: it selects the device-<hash8> fallback, which is what makes a mint
+	// with no name asked for indistinguishable between the two entry points.
+	//
+	// UNVALIDATED HERE, AND DELIBERATELY SO. From the CLI it is operator-authored
+	// `--name` input, and this ticket does not change what that verb accepts; from
+	// the wire it has already passed the relay handler's display-safety gate. A
+	// check here would refuse a name `pyry pair` takes today.
+	deviceName string
+
+	// allowRemotePermissions sets devices.Device.AllowRemotePermissions. Only
+	// `pyry pair --allow-remote-permissions` ever passes true — the wire mint
+	// passes a literal false, and protocol.MintPairingPayload has no field that
+	// could carry anything else.
+	allowRemotePermissions bool
+
+	// grantorHash, when non-empty, is a token hash that must STILL name a device
+	// carrying AllowRemotePermissions at the moment of the write, checked against
+	// the snapshot this mutates inside the held lock. It is what makes `pyry pair
+	// revoke` effective against a live minting session rather than only against
+	// the revoked device's next connection: v2 reloads devices.json per handshake,
+	// so a conn's authenticated record is otherwise as of connect time.
+	//
+	// The CLI passes "" — an operator with a shell on the host is the authority
+	// this check exists to defer to, not a subject of it.
+	grantorHash string
+}
+
+// mintedDevice is one freshly minted pairing's non-derivable half: the plaintext
+// token and the label the record was actually filed under.
+type mintedDevice struct {
+	// token is the plaintext bearer credential, hex-encoded. It exists only in
+	// this process's RAM: its hash is what reached disk, and § Token visibility's
+	// single-egress rule binds every caller.
+	token string
+
+	// name is the label stored on the record — the caller's deviceName, or the
+	// device-<hash8> fallback when it named none. Returned because a caller that
+	// wants to record WHICH device it minted cannot re-derive the fallback without
+	// hashing the token itself.
+	name string
+}
+
+// errGrantorRevoked reports that mintRequest.grantorHash named no privileged
+// device in the registry snapshot inside the lock. Its own sentinel rather than a
+// generic error so the wire minter can answer the privilege refusal — which is
+// permanent and audited — rather than the retryable host-failure code every other
+// error from this function earns.
+var errGrantorRevoked = errors.New("pair: minting device is no longer privileged")
+
+// mintDevice performs the mint every `pyry pair` and every wire mint_pairing share
+// (#2127): draw a token, hash it, name the device, and append the record inside
+// ONE held devices lock.
+//
+// ONE FUNCTION, TWO CALLERS, so the two stampings cannot drift and `pyry pair`'s
+// observable behaviour is unchanged by the wire path existing. It is the block
+// runPairDefault held before this ticket, lifted rather than reimplemented.
+//
+// THE LOAD RUNS INSIDE THE LOCK, and that is #1531's whole lesson rather than a
+// stylistic preference: wrapping only the Save would still mutate a snapshot taken
+// outside the region and leave the erase-a-concurrent-write bug fully intact.
+// Everything the callers do around this — config, identity and key loads, and the
+// wire path's payload encoding — stays outside, because none of it touches
+// devices.json and redemptionLockWait's doc comment promises its peers hold
+// sub-millisecond regions.
+//
+// ONE CLOCK READ feeds both stamps, so RedeemBy - PairedAt is exactly
+// devices.RedemptionWindow rather than that window plus whatever scheduling delay
+// fell between two time.Now() calls.
+//
+// IT FAILS CLOSED. Every error path returns before or instead of the Save, so a
+// token whose hash never reached disk is discarded unrendered and unrecorded —
+// unusable rather than unaccounted for.
+//
+// SECURITY: no error this function returns can carry the plaintext token. The four
+// sources are crypto/rand.Read, devices.WithLock, devices.Load and Registry.Save;
+// none is handed the token, and the registry holds hashes only. That is
+// § Token visibility's argument, restated at the seam where a second caller now
+// meets it.
+func mintDevice(req mintRequest) (mintedDevice, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return mintedDevice{}, fmt.Errorf("read random: %w", err)
+	}
+	plain := hex.EncodeToString(raw[:])
+	hash := devices.HashToken(plain)
+
+	deviceName := req.deviceName
+	if deviceName == "" {
+		deviceName = "device-" + hash[:8]
+	}
+
+	mintedAt := time.Now().UTC()
+
+	if err := devices.WithLock(req.devicesPath, req.lockWait, func() error {
+		registry, err := devices.Load(req.devicesPath)
+		if err != nil {
+			return err
+		}
+		// The grantor check reads the SAME snapshot the append below mutates, so a
+		// revocation that committed before this lock was acquired is visible here
+		// and one committing after it cannot race in.
+		if req.grantorHash != "" && !registryGrants(registry, req.grantorHash) {
+			return errGrantorRevoked
+		}
+		registry.Add(devices.Device{
+			TokenHash:              hash,
+			Name:                   deviceName,
+			PairedAt:               mintedAt,
+			RedeemBy:               mintedAt.Add(devices.RedemptionWindow),
+			AllowRemotePermissions: req.allowRemotePermissions,
+		})
+		return registry.Save(req.devicesPath)
+	}); err != nil {
+		return mintedDevice{}, err
+	}
+	return mintedDevice{token: plain, name: deviceName}, nil
+}
+
+// registryGrants reports whether hash names a device in registry that still
+// carries AllowRemotePermissions. A device that is absent — revoked — and one
+// present but no longer privileged answer identically: both mean the grantor may
+// no longer mint, and neither is a distinction any caller acts on.
+func registryGrants(registry *devices.Registry, hash string) bool {
+	for _, d := range registry.List() {
+		if d.TokenHash == hash {
+			return d.AllowRemotePermissions
+		}
+	}
+	return false
+}
+
 // errPairDeviceNotFound signals out of `pyry pair revoke`'s locked region that
 // the named device was absent, so the os.Exit(1) that reports it can run
 // outside. An os.Exit inside the region would skip WithLock's deferred unlock
@@ -217,44 +368,13 @@ func runPairDefault(args []string) error {
 		return fmt.Errorf("pair: %w", err)
 	}
 
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Errorf("pair: read random: %w", err)
-	}
-	plain := hex.EncodeToString(raw[:])
-	hash := devices.HashToken(plain)
-
-	deviceName := parsed.deviceName
-	if deviceName == "" {
-		deviceName = "device-" + hash[:8]
-	}
-
-	// One clock read feeds both stamps, so RedeemBy - PairedAt is exactly
-	// devices.RedemptionWindow rather than that window plus whatever
-	// scheduling delay fell between two time.Now() calls.
-	mintedAt := time.Now().UTC()
-
-	// Read, mutate, and save inside one held lock. The read has to happen here
-	// rather than where it used to — before identity.LoadOrCreate — so that the
-	// snapshot this mutates is taken in the same critical section as the Save;
-	// locking around the Save alone would leave the stale-snapshot bug intact.
-	// Everything above stays outside: neither key load touches devices.json,
-	// and redemptionLockWait's doc comment promises its peers hold
-	// sub-millisecond regions, which holding across key generation would break.
-	if err := devices.WithLock(devicesPath, pairLockWait, func() error {
-		registry, err := devices.Load(devicesPath)
-		if err != nil {
-			return err
-		}
-		registry.Add(devices.Device{
-			TokenHash:              hash,
-			Name:                   deviceName,
-			PairedAt:               mintedAt,
-			RedeemBy:               mintedAt.Add(devices.RedemptionWindow),
-			AllowRemotePermissions: parsed.allowRemotePermissions,
-		})
-		return registry.Save(devicesPath)
-	}); err != nil {
+	minted, err := mintDevice(mintRequest{
+		devicesPath:            devicesPath,
+		lockWait:               pairLockWait,
+		deviceName:             parsed.deviceName,
+		allowRemotePermissions: parsed.allowRemotePermissions,
+	})
+	if err != nil {
 		return fmt.Errorf("pair: %w", err)
 	}
 
@@ -262,7 +382,7 @@ func runPairDefault(args []string) error {
 	payload := pair.Payload{
 		Server:             serverID,
 		Relay:              relay,
-		Token:              plain,
+		Token:              minted.token,
 		ServerStaticPubkey: base64.StdEncoding.EncodeToString(pub[:]),
 	}
 	if err := pair.Render(payload, os.Stdout); err != nil {

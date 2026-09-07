@@ -535,3 +535,23 @@ recorded here as 8-A with its resolution).
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-08 — the label gate does not check UTF-8 validity
+
+**What changed.** § The label gate and § Testing strategy both prescribed refusing
+invalid UTF-8 alongside control characters. `mintLabelIsDisplaySafe` checks only
+the control-character predicate, and the test table has no invalid-UTF-8 row.
+
+**Why.** The check is unreachable, so a test could not have reddened it.
+`encoding/json` replaces every invalid input byte and every unpaired surrogate
+with U+FFFD while decoding a string, so a decoded Go string is valid UTF-8 by
+construction — the gate is only ever handed one. An assertion no test can fail is
+worse than no assertion: it reads as coverage of a hazard that was closed
+somewhere else. The reason now lives in the function's own doc block, where the
+next reader meets it.
+
+**What is unchanged.** Everything the gate exists for. Control characters, DEL and
+the C1 range are refused, which is what kills the log-injection newline and the
+ANSI escape run, and the answer is still `protocol.malformed`.

@@ -801,6 +801,26 @@ func startRelayV2(
 		return path, true
 	}
 
+	// Inbound pairing-mint resolver (#2127): the per-device authorization gate for
+	// an inbound mint_pairing, the audit record of every refusal, and the encode of
+	// what it minted. Constructed here rather than inline in the config literal
+	// below only because its four daemon-authored values read better named than as
+	// a run of positional arguments.
+	//
+	// It is handed the SAME server id and static keypair `pyry pair` would load on
+	// this host — both come from the files identity.LoadOrCreate and
+	// keys.LoadOrCreate own, and the daemon already loaded them above — so a
+	// wire-minted pairing and a CLI-minted one name the same server and the same
+	// pin. The relay URL is the daemon's own, w.relayURL, which is the leg this
+	// process actually dials.
+	pairingMinter := newPairingMinterV2(
+		resolveDevicesPath(w.instanceName),
+		w.relayURL,
+		serverID,
+		staticKey.PublicKey(),
+		logger,
+	)
+
 	// Context-window usage reader (#857, rebuilt by #1214): reports the bootstrap
 	// session's current occupancy (used tokens + window size) for the
 	// screen_snapshot reply. session_settings read it too between #491 and #1610,
@@ -1047,6 +1067,12 @@ func startRelayV2(
 		// no-op keystroker whose ESC is moot — a stream-json approval has no PTY
 		// modal to dismiss and denies fail-closed via the permbridge timeout (#1103).
 		// Constructed above so its #1014 folder-not-trusted emit seams are set first.
+		// The wire's second pairing minter, alongside the `pyry pair` CLI (#2127).
+		// Both reach the same mintDevice, so a record created here is
+		// indistinguishable from one the CLI created — `pyry pair list` shows it
+		// and `pyry pair revoke` removes it, with no new verb.
+		PairingMint: pairingMinter,
+
 		ModalResolver: modalResolver,
 		// Inbound question-control resolver (#1986), discharging the seam's
 		// written ordering obligation: nothing may be wired here until the
