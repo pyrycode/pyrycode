@@ -324,6 +324,16 @@ Two choices worth keeping in mind for the next verb built this way:
 
 See `docs/specs/architecture/2155-channel-new-control-verb.md` for the full design and security review.
 
+## Fanning `channel.new` out: `conversation_updated` as an unsolicited push (#2156)
+
+A successful create now fans one `conversation_updated` frame to every interactive-capable client, so a channel created from the host's shell appears in an open desktop client without a reconnect. This is `conversation_updated`'s first unsolicited producer — the wire family's four other producers (`promote_conversation`, `rename_conversation`, `archive_conversation`, `change_workspace`) all reply to the requester only, because a host-side create has no requester to reply to. `conversationUpdateEmitterV2` copies `attachmentOfferEmitterV2`'s shape (see [§ Announcing the store](control-plane-attachment-file-confine-and-store-a-claude-named-path.md#announcing-the-store-attachment_offered-and-the-name-it-must-not-derive-from-2166)): a bare func returned from `startRelay`, nil when the relay leg is off, called last on the success path, and never able to turn a successful create into a refusal.
+
+**On a broadcast-widening change, audit the field set against what the recipient can already pull, not only who receives the frame.** The push turns a unicast reply into a broadcast, so the instinct is to check the audience. The sharper check is the payload: `ConversationUpdatedPayload`'s six fields are a strict subset of `ConversationSummary`'s seven, and every conn that can receive this push can already call `list_conversations` and read the same row — the push delivers sooner a value it could not otherwise be denied, so the audience question turns out to be free. The real question is the payload's *source*. Announcing the create request's raw `cwd` would put an unconfined, CLI-authored string on the wire; only building the payload from a `reg.Get` read-back — the stored, symlink-resolved path — keeps it the confined value. An AC that reads like an accuracy requirement ("read back from the registry rather than assembled from the request") can be the trust boundary itself; check what a "just build it from what's already in scope" shortcut would actually put on the wire before taking it.
+
+No log line on the announce path carries `Cwd` or `Name` — both are host filesystem strings, one a workspace path and the other its derived label. Test this per branch (success, dropped-push, ctx-cancelled, unexpected-error), not once on the happy path, and pick fixture values distinctive enough that the assertion can't pass by accident — a path or name built from a common word like "project" matches too much of the daemon's own log vocabulary to prove the field was actually excluded.
+
+See `docs/specs/architecture/2156-conversation-updated-host-create-fanout.md` for the full design and security review, and [protocol-package-drift-detectors.md § the `excludedTypes` classification key](protocol-package-drift-detectors.md) for how `relay_guard_test.go` records a type with two producers of different shapes.
+
 ## Process-Global vs Per-Session
 
 | Concern | Scope today | Source |
