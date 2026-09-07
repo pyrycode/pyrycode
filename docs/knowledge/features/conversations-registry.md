@@ -11,7 +11,7 @@ Lives in the same `internal/conversations` package as the `Conversation` type (#
 - **Deletion primitive (#237):** `(*Registry).Delete(id) bool` removes a single entry by ID under the registry lock; consumed by the auto-archive sweep ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)). #217 explicitly deferred deletion until a real consumer surfaced; #220's sweep is that consumer.
 - **Rotation-rebind primitive (#739):** `(*Registry).RebindSession(oldID, newID string) bool` re-points the conversation bound to `oldID` at `newID` and appends `oldID` to `SessionHistory`, under the registry lock; consumed by the pool's `/clear` rotation path so the conversation↔session binding stays current beyond the first rotation ([`features/conversation-session-binding.md`](conversation-session-binding.md) § *Maintaining the binding across rotation*). The first production caller to **write** `SessionHistory`.
 - **Durable manual-archive primitive (#880):** `(*Registry).SetArchived(id, archived bool) bool` flips the durable `Conversation.IsArchived` flag under the registry lock; `ListFilter.IsArchived *bool` narrows `List` to active-only/archived-only/both, ANDing with `IsPromoted` when both are set on one filter. Distinct from the auto-archive `Sweep` ([`features/conversations-auto-archive.md`](conversations-auto-archive.md)), which permanently deletes rather than flagging — but no longer independent of it: since #1488 `ShouldArchive` reads `IsArchived` and the sweep skips archived rows, so a manual archive is durable until the user unarchives. Called by the `archive_conversation`/`unarchive_conversation` wire verbs (#881), the sole production caller. See [codebase/880.md](../codebase/880.md), [codebase/881.md](../codebase/881.md).
-- **Bounded system-prompt primitive (#2149):** `(*Registry).SetSystemPrompt(id ConversationID, prompt *string) error` validates and sets `Conversation.SystemPrompt` under the registry lock; `MaxSystemPromptBytes = 8192` (inclusive) and two sentinels (`ErrSystemPromptTooLong`, `ErrSystemPromptInvalidUTF8`) join `ErrConversationNotFound` as the refusal set. Store-only slice: nothing reads or writes the field over the wire yet (#2150 reads it at spawn, #2151 sets it over the wire, #2152 reads it back).
+- **Bounded system-prompt primitive (#2149):** `(*Registry).SetSystemPrompt(id ConversationID, prompt *string) error` validates and sets `Conversation.SystemPrompt` under the registry lock; `MaxSystemPromptBytes = 8192` (inclusive) and two sentinels (`ErrSystemPromptTooLong`, `ErrSystemPromptInvalidUTF8`) join `ErrConversationNotFound` as the refusal set. #2150 reads the stored value at spawn (`Pool.refreshSystemPrompt`, called from `Pool.Activate`) and #2151 wires `SetSystemPrompt` to the `set_system_prompt` wire verb (`handlers.SetSystemPrompt`, [`relay-package.md`](relay-package.md)); #2152 (reading it back over the wire) is the one slice still open.
 
 ## Surface
 
@@ -320,6 +320,16 @@ Scan and mutation are one critical section under `r.mu` — same no-TOCTOU postu
 Store-only as of #2149: no getter, no wire verb, no CLI binding. `Get`/`List` are the read
 path the sibling slices (#2150, #2152) use.
 
+**`ErrSystemPromptInvalidUTF8` is unreachable from the `set_system_prompt` wire verb (#2151).**
+`encoding/json` substitutes U+FFFD for both an invalid byte and an unpaired surrogate escape
+while decoding a Go string, so whatever `json.Unmarshal` hands the handler is always valid
+UTF-8 regardless of what arrived on the wire — measured against three hostile encodings, all
+three decoded clean. The sentinel is still correctly kept and mapped (dropping it would be the
+fail-open shape a default-arm review flagged), and it stays live for the registry's other
+callers (`Update`, a future CLI) — but a test that feeds hostile bytes through the wire payload
+expecting this refusal will instead land on the success path. #2151 pins the unreachability
+itself with its own test rather than discovering it as a failing assertion.
+
 ### `Promote(id ConversationID, name string) error`
 
 In-memory primitive that turns a discussion into a named channel: flips `IsPromoted` to `true` and sets `Name` to a non-nil pointer to `name`. Validation, the uniqueness scan, and the two-field mutation all run under `r.mu`; on any refusal the registry is left untouched. Persistence is the caller's job — `Promote` does not call `Save`, matching the `Create` / `Update` convention.
@@ -389,7 +399,7 @@ New (no devices counterpart):
 - **Auto-archive predicate + sweep.** #219, #220.
 - **Migration from existing `Session` registry.** TBD ticket once Conversations is proven on disk; Phase 1/2 sessions stay untouched.
 - **Shared atomic-write helper across `devices` and `conversations`.** Issue tech note explicitly forbids; revisit only if real divergence cost surfaces.
-- **Reading, wiring, or wire-exposing `SystemPrompt`.** #2149 lands storage only. #2150 reads it at spawn, #2151 sets it over the wire, #2152 reads it back. `Registry.Update` remains the unvalidated escape hatch for it, exactly as for every other field.
+- **Reading `SystemPrompt` back over the wire.** #2149 landed storage, #2150 reads it at spawn, #2151 sets it over the wire (`set_system_prompt`) — #2152 is the one slice still open. `Registry.Update` remains the unvalidated escape hatch for the field, exactly as for every other field.
 
 ## Related
 

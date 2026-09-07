@@ -109,12 +109,59 @@ type ChangeWorkspacePayload struct {
 	Cwd            string `json:"cwd"`
 }
 
+// SetSystemPromptPayload is the body of a set_system_prompt frame
+// (docs/protocol-mobile.md § set_system_prompt). Phone → binary. It names a
+// target conversation and the durable per-conversation system prompt to store
+// for it — the operator-authored text appended to every session that
+// conversation spawns from then on.
+//
+// SystemPrompt is a pointer because the verb has to express THREE states, and a
+// plain string could only express two:
+//
+//	null (or the key absent) — clear: the conversation returns to spawning with
+//	                          the daemon constant alone, exactly as it does today
+//	""                       — explicitly empty (a distinct stored state)
+//	"<text>"                 — stored verbatim, after validation
+//
+// null and an absent key are indistinguishable after decode and both mean
+// clear. The pointer maps 1:1 onto conversations.Registry.SetSystemPrompt's own
+// *string argument, which is the single validating door for all three states —
+// including clear, which is why the field is nullable rather than the clear path
+// getting a verb of its own.
+//
+// No omitempty, matching CreateConversationPayload's rationale: omitempty on a
+// nil pointer would drop the key entirely and break byte-equivalent round-trip.
+//
+// The byte bound (conversations.MaxSystemPromptBytes) and the UTF-8 check are
+// enforced at the registry, not here — this type carries the value, it does not
+// police it.
+//
+// Deliberately NOT a reuse of ChangeWorkspacePayload or
+// ArchiveConversationPayload, per the semantic-coupling rationale the sibling
+// payloads document. The reply reuses ConversationUpdatedPayload verbatim — see
+// the note there on why that record gains no prompt field.
+type SetSystemPromptPayload struct {
+	ConversationID string  `json:"conversation_id"`
+	SystemPrompt   *string `json:"system_prompt"`
+}
+
 // ConversationUpdatedPayload is the body of a conversation_updated frame
 // (docs/protocol-mobile.md § conversation_updated). Binary → phone,
 // broadcast to all phones on this server-id. ID, IsPromoted, IsArchived, Cwd,
 // LastUsedAt are required. Name is spec-optional (a previously unnamed
 // conversation can be updated without acquiring a name) and is a pointer
 // for the same round-trip reason given on CreateConversationPayload.
+//
+// It deliberately carries NO system_prompt field (#2151), unlike rename /
+// archive / change_workspace where this record happens to already hold what
+// changed. Two reasons. Security: this frame is broadcast to all phones on this
+// server-id, so hanging up to 8192 bytes of operator text on it would widen the
+// audience for a value only the requester asked about — a projection type that
+// lacks the field cannot leak it, which is a stronger guarantee than a handler
+// that merely declines to fill it in. Scope: reading the prompt back is #2152,
+// which deliberately does not echo the text either. set_system_prompt therefore
+// replies with an unchanged-looking record that confirms the write without
+// carrying the value.
 type ConversationUpdatedPayload struct {
 	ID         string `json:"id"`
 	IsPromoted bool   `json:"is_promoted"`

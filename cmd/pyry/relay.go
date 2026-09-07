@@ -754,6 +754,11 @@ func startRelayV2(
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true),
 			protocol.TypeUnarchiveConversation: handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, false),
 			protocol.TypeChangeWorkspace:       handlers.ChangeWorkspace(w.convReg, resolveWorkspaceDir, resolveConversationsRegistryPath(w.instanceName), logger),
+			// set_system_prompt takes no session surface (#2151): the value's route
+			// to a running child is the registry, re-read at the pool's own spawn
+			// funnel by #2150's refreshSystemPrompt. Wiring a pool or runner in here
+			// would build the restart this verb is specified NOT to do.
+			protocol.TypeSetSystemPrompt:       handlers.SetSystemPrompt(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
 			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(w.convReg),
 			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),
