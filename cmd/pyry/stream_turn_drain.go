@@ -184,6 +184,34 @@ func (t *streamSessionTag) Rotate(newID string) {
 	t.id.Store(&newID)
 }
 
+// CompareAndSwap moves the tag onto newID only while it still holds oldID, and
+// answers whether the move happened. It is Rotate's conditional sibling and the
+// asymmetry between them is the point (#2176): a writer that DROVE the rotation —
+// the daemon-driven path reaching Rotate through Config.OnSessionRotate — re-keyed
+// the registry itself and is the authority, so it stores unconditionally. A writer
+// that merely FOLLOWS a rotation claude announced holds an id it read earlier and
+// must not overwrite a driver that won in between, so it comes through here.
+//
+// An empty newID is refused rather than stored, keeping Rotate's invariant that the
+// tag never holds "".
+//
+// The swap compares the loaded POINTER, not the string at swap time, which is
+// strictly stronger than a value CAS: a competing store that installs an equal
+// string in a different allocation fails here. That direction of failure is the safe
+// one — the follower declines and the competing writer's id stands — and it is not
+// ABA-exploitable in the other direction, since every store above allocates a fresh
+// *string and a live pointer cannot be reused underneath us.
+func (t *streamSessionTag) CompareAndSwap(oldID, newID string) bool {
+	if newID == "" {
+		return false
+	}
+	p := t.id.Load()
+	if *p != oldID {
+		return false
+	}
+	return t.id.CompareAndSwap(p, &newID)
+}
+
 // sinkFor returns the per-Parser sink closure for a runner whose session id never
 // changes — the frozen-tag form, kept for the tests and any future caller that has
 // a plain id rather than a live one. Production goes through sinkForTag: a stream
