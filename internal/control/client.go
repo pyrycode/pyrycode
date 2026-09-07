@@ -93,6 +93,37 @@ func SessionsNew(ctx context.Context, socketPath, label string) (string, error) 
 	return resp.SessionsNew.SessionID, nil
 }
 
+// ChannelNew asks the daemon to create a promoted conversation — a channel —
+// rooted at cwd, and returns the minted conversation id. cwd is the absolute
+// directory the caller is standing in, sent RAW: the daemon canonicalises,
+// confines it to $HOME and trust-marks the realpath, so this side does no path
+// handling and a client cannot bypass any of it by pre-resolving. An empty name
+// means "derive it from the base name of the resolved path".
+//
+// Same one-shot dial → encode → decode → close lifecycle as SessionsNew, and
+// the same empty-result guard. No typed ErrorCode is mapped: every refusal this
+// verb produces is a static message the caller prints rather than a sentinel it
+// must reconstruct, so a server error arrives as errors.New(resp.Error)
+// verbatim. That distinction is what lets a caller tell a server refusal from a
+// transport failure — the latter arrives wrapped from request — without a
+// hand-maintained list of message prefixes.
+func ChannelNew(ctx context.Context, socketPath, cwd, name string) (string, error) {
+	resp, err := request(ctx, socketPath, Request{
+		Verb:    VerbChannelNew,
+		Channel: &ChannelPayload{Cwd: cwd, Name: name},
+	})
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", errors.New(resp.Error)
+	}
+	if resp.ChannelNew == nil || resp.ChannelNew.ConversationID == "" {
+		return "", errors.New("control: empty channel.new response")
+	}
+	return resp.ChannelNew.ConversationID, nil
+}
+
 // SessionsRm asks the daemon to remove the named session and apply the
 // JSONL disposition policy. Empty policy is treated by the server as
 // JSONLPolicyLeave (matches sessions.JSONLLeave's zero-value default).

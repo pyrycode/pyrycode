@@ -123,6 +123,38 @@ const (
 	// mcp.approve; the dot is a documentation convention, not a parser
 	// rule.
 	VerbAttachFile Verb = "attachment.file"
+
+	// VerbChannelNew creates a promoted conversation — a channel, the
+	// registry's own word for IsPromoted=true — rooted at a directory on the
+	// host. Request.Channel carries that directory and an optional name;
+	// Response.ChannelNew carries the minted conversation id.
+	//
+	// It is the first CONVERSATION verb on the local control plane, which
+	// until now spoke only about sessions, logs and the daemon itself. It
+	// exists because a conversation's workspace was reachable only from a
+	// paired client, whose picker offers folders that have already hosted a
+	// conversation — so a folder that merely exists on the host could not be
+	// chosen at all. The operator's shell is already standing in the right
+	// directory, which makes a local verb the cheapest picker there is.
+	//
+	// The Cwd is CALLER-AUTHORED and is the security surface of this verb: it
+	// becomes the directory the conversation's claude is trust-marked in and
+	// later spawns in. This package does NO path handling — it forwards the
+	// string verbatim to the creator installed by SetChannelCreator, which
+	// confines it to $HOME, resolves its symlinks and trust-marks the realpath,
+	// in that order, through the same validator the wire create_conversation
+	// uses. The socket is local and 0600, so the peer is the operator; the
+	// confinement still applies, because any process running as the operator
+	// can dial it.
+	//
+	// Fail-closed: every path answers exactly one Response, and a daemon with
+	// no creator installed (v1/foreground, or a composition that never wired
+	// it) returns "channel.new: no channel creator configured" rather than
+	// panicking — the same nil-dependency-degrades-cleanly shape as VerbRekey,
+	// VerbMCPApprove and VerbAttachFile. No refusal echoes the requested or the
+	// resolved path. The dotted namespace matches sessions.* ; the dot is a
+	// documentation convention, not a parser rule.
+	VerbChannelNew Verb = "channel.new"
 )
 
 // JSONLPolicy is the wire-level enum selecting how the daemon disposes of a
@@ -175,6 +207,43 @@ type Request struct {
 	Approve  *ApprovePayload  `json:"approve,omitempty"`  // populated for VerbMCPApprove
 
 	AttachFile *AttachFilePayload `json:"attachFile,omitempty"` // populated for VerbAttachFile
+	Channel    *ChannelPayload    `json:"channel,omitempty"`    // populated for VerbChannelNew
+}
+
+// ChannelPayload names the host directory a new channel is rooted at and,
+// optionally, what to call it.
+//
+// Cwd is the absolute directory the calling CLI is standing in (os.Getwd), sent
+// raw: the daemon canonicalises and confines it, so the client does no path
+// handling either. It has NO omitempty — an empty Cwd is invalid input rather
+// than a defaulted one, and is refused twice over (see handleChannelNew).
+// Deliberately so: the seam it would otherwise reach reads the empty string as
+// "spawn in the shared trusted workdir" and skips confinement entirely, which
+// is the same fail-open shape AttachFilePayload.SessionID guards against.
+//
+// Name is the channel's display name. Empty means "derive it from the base name
+// of the RESOLVED path", computed daemon-side after confinement so a symlinked
+// entry directory names the real folder. Duplicate names are permitted, by
+// construction: the registry's Create is a bare append and the wire
+// create_conversation has the same property, so a uniqueness rule here would
+// make this verb's rows distinguishable from a client's.
+type ChannelPayload struct {
+	Cwd  string `json:"cwd"`
+	Name string `json:"name,omitempty"`
+}
+
+// ChannelNewResult carries the id of the created conversation. The id is a
+// lowercase UUIDv4 drawn from crypto/rand (conversations.NewID) and is never
+// taken from the request — a caller-chosen id could collide with, or overwrite,
+// a row it did not create. Safe to log and to print: it is what the CLI writes
+// to stdout.
+//
+// The bound session id is deliberately NOT echoed. The row carries one, exactly
+// as a client-created conversation's does, but nothing the operator does next
+// takes a session id, and a verb that answers with more than its caller needs
+// is a verb whose wire has to be kept compatible for no reason.
+type ChannelNewResult struct {
+	ConversationID string `json:"conversationID"`
 }
 
 // SessionsPayload carries arguments shared across the sessions.* verb
@@ -296,6 +365,7 @@ type AttachFileResult struct {
 //   - SessionsHasID: payload for VerbSessionsHasID
 //   - Approve: verdict for VerbMCPApprove (allow or deny)
 //   - AttachFile: minted attachment id for VerbAttachFile
+//   - ChannelNew: minted conversation id for VerbChannelNew
 //   - OK: success acknowledgment for verbs without a typed payload (e.g. VerbStop)
 //
 // Error is set when the server rejects the request.
@@ -307,6 +377,7 @@ type Response struct {
 	SessionsHasID *SessionsHasIDResult `json:"sessionsHasID,omitempty"` // populated for VerbSessionsHasID (1.3c-1)
 	Approve       *ApproveResult       `json:"approve,omitempty"`       // populated for VerbMCPApprove
 	AttachFile    *AttachFileResult    `json:"attachFile,omitempty"`    // populated for VerbAttachFile
+	ChannelNew    *ChannelNewResult    `json:"channelNew,omitempty"`    // populated for VerbChannelNew
 	OK            bool                 `json:"ok,omitempty"`
 	Error         string               `json:"error,omitempty"`
 	ErrorCode     ErrorCode            `json:"errorCode,omitempty"` // typed sentinel token (1.1d-B1)

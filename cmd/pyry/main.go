@@ -275,6 +275,8 @@ func runArgs(args []string) error {
 			return runLogs(args[2:])
 		case "sessions":
 			return runSessions(args[2:])
+		case "channel":
+			return runChannel(args[2:])
 		case "pair":
 			return runPair(args[2:])
 		case "rekey":
@@ -1121,6 +1123,19 @@ func runSupervisor(args []string) error {
 		_, err := pool.Lookup(id)
 		return err
 	}, resolveInstanceDirPath(*name), announceAttachment, logger))
+	// Install the channel.new creator (#2155) in the same window, over the SAME
+	// registry, path and pool every other conversation-keyed seam above resolves
+	// against. The mint closure is the narrowing sessionMinter.Create performs
+	// for the wire path, minus the ctx it discards and minus resolveSpawnDir —
+	// the creator calls that itself, because unlike the wire handler it needs
+	// the RESOLVED path back (to record as Cwd and to derive the name from) and
+	// Mint answers only with a session id. Resolving once here rather than
+	// widening handlers.SessionCreator also avoids a second trustMark write for
+	// a path already marked.
+	ctrl.SetChannelCreator(channelCreator(convReg, func(label, spawnDir string) (string, error) {
+		id, err := pool.Mint(label, spawnDir)
+		return string(id), err
+	}, convRegistryPath, logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}
@@ -3058,6 +3073,9 @@ Usage:
   pyry logs [flags]                              print recent supervisor logs
   pyry sessions <verb> [flags]                   manage sessions on a running
                                                   daemon (verbs: new, rm, rename, list)
+  pyry channel new [--name <label>]              create a channel whose workspace
+                                                  is the current directory, and
+                                                  print its conversation id
   pyry pair [flags] [--name <label>] [--relay <url>]
                                                  mint a device token, persist it
                                                   in ~/.pyry/<name>/devices.json,
