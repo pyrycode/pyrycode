@@ -58,6 +58,23 @@ type WorkspaceLabeler interface {
 	Save(path string) error
 }
 
+// WorkspaceAnnouncer fans a workspace_updated record, unsolicited, to every
+// connected interactive client EXCEPT the one named by excludeConnID — the
+// requester, which already holds its correlated reply. It is supplied by
+// cmd/pyry, where the emitter closes over the v2 session manager; the handler
+// cannot name that manager, so it takes this func instead.
+//
+// excludeConnID is a dispatch.Conn.ConnID() value, compared by the emitter
+// against relay.ActiveConn.ConnID — one string space, no mapping. Exclusion is
+// therefore per CONN and not per device: a requester with a second client open is
+// pushed on that second conn, which asked for nothing.
+//
+// It RETURNS NOTHING, and that is the contract rather than an omission: nothing
+// about the fan-out may fail the operation the operator asked for. A nil
+// WorkspaceAnnouncer is valid and means "no fan-out" — the shape a caller with no
+// relay leg takes, and the shape every test written before #2209 still uses.
+type WorkspaceAnnouncer func(p protocol.WorkspaceUpdatedPayload, excludeConnID string)
+
 // RenameWorkspace returns a dispatch.Handler that processes a rename_workspace
 // frame from a paired client: it sets or clears the operator-chosen display name
 // of a workspace, eagerly persists the registry so the change survives a daemon
@@ -70,14 +87,16 @@ type WorkspaceLabeler interface {
 // and no conversation record could carry the change without naming one arbitrary
 // member of that set.
 //
-// It replies to the REQUESTER ONLY. Fanning the change out to other connected
-// clients is #2209 and is deliberately not waited on here — an operator who
-// renames from one client and re-lists on another sees the new label once the
-// read projection lands (#2208).
+// The requester gets the correlated reply and EVERY OTHER connected interactive
+// client gets the same record as an unsolicited push (#2209), so a name chosen on
+// one machine is the name shown on all of them without a reload. The fan-out runs
+// last, after the store, the persist and the reply, and it returns nothing — see
+// WorkspaceAnnouncer for why, and the announce call below for what that buys.
 //
 // reg is the conversations registry (the single writer — no reload-before-save);
-// registryPath is the canonical on-disk path passed to the eager Save; logger is
-// the daemon's slog logger.
+// registryPath is the canonical on-disk path passed to the eager Save; announce
+// fans the record to the other clients and may be nil; logger is the daemon's
+// slog logger.
 //
 // SECURITY (this verb is security-sensitive — it stores untrusted operator text
 // supplied by a network-paired party, keyed by a path that party also supplies):
@@ -97,9 +116,13 @@ type WorkspaceLabeler interface {
 //     Cwd rather than from the request (see the success arm), so no request byte
 //     reaches the wire on any branch, reject or success.
 //
-//   - The label is an opaque display string: stored verbatim, echoed only to the
-//     requester, never logged, never interpolated into an error message, never a
-//     path component or an argv element. Its byte bound is a size limit and NOT a
+//   - The label is an opaque display string: stored verbatim, echoed as stored to
+//     the requester and — since #2209 — to the other paired interactive clients,
+//     never logged, never interpolated into an error message, never a path
+//     component or an argv element. The fan-out widens the audience and nothing
+//     else: every recipient is inside the same paired-Noise-session trust boundary
+//     the requester is, and each could already read the label back off its next
+//     list_conversations (#2208). Its byte bound is a size limit and NOT a
 //     safety property — see protocol.MaxWorkspaceLabelBytes, which says so at
 //     length. Validity is inherited rather than checked: encoding/json substitutes
 //     U+FFFD for invalid bytes and unpaired surrogates while decoding into a Go
@@ -124,7 +147,7 @@ type WorkspaceLabeler interface {
 // persist_failed's err, a filesystem error naming the daemon's own registry path.
 // The cost is visible and accepted: the record says a label changed and over
 // which conn_id, but not for which workspace.
-func RenameWorkspace(reg WorkspaceLabeler, registryPath string, logger *slog.Logger) dispatch.Handler {
+func RenameWorkspace(reg WorkspaceLabeler, registryPath string, announce WorkspaceAnnouncer, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.RenameWorkspacePayload
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -228,10 +251,16 @@ func RenameWorkspace(reg WorkspaceLabeler, registryPath string, logger *slog.Log
 		// wire — it changes where the bytes come from, making "the only path this
 		// verb publishes is one the daemon itself stored" structural rather than
 		// argued. Same posture set_system_prompt states for its own reply.
-		payloadJSON, err := json.Marshal(protocol.WorkspaceUpdatedPayload{
+		//
+		// Hoisted into a variable rather than marshalled inline because the
+		// fan-out below announces THIS value: the requester and every other client
+		// must be told the same record, and building it twice would make that a
+		// convention instead of a fact.
+		record := protocol.WorkspaceUpdatedPayload{
 			Path:  matched,
 			Label: p.Label,
-		})
+		}
+		payloadJSON, err := json.Marshal(record)
 		if err != nil {
 			return fmt.Errorf("marshal workspace_updated payload: %w", err)
 		}
@@ -239,6 +268,27 @@ func RenameWorkspace(reg WorkspaceLabeler, registryPath string, logger *slog.Log
 		logger.Info("relay: rename_workspace applied",
 			"event", "rename_workspace.applied",
 			"conn_id", c.ConnID())
-		return c.Reply(ctx, env, protocol.TypeWorkspaceUpdated, payloadJSON)
+		replyErr := c.Reply(ctx, env, protocol.TypeWorkspaceUpdated, payloadJSON)
+
+		// The fan-out (#2209), LAST and unconditionally. Three orderings are
+		// load-bearing here and each is a separate promise:
+		//
+		//   - After the store and the persist, so a broadcast can never fail the
+		//     operation the operator asked for. Every reject branch above returned
+		//     before this line, so a refused rename announces nothing.
+		//   - After the reply, so the requester's correlated ack is already on its
+		//     way before any other client is touched.
+		//   - Even when replyErr is non-nil. That error means the REQUESTER's conn
+		//     went away between the store and the ack; the label still landed, so
+		//     the other clients' view is still stale and still needs correcting.
+		//     Suppressing the push there would let one client's disconnect silently
+		//     withhold the update from every other client.
+		//
+		// announce returns nothing, so what this handler returns stays the reply's
+		// own error — unchanged from before this slice, nil hook or not.
+		if announce != nil {
+			announce(record, c.ConnID())
+		}
+		return replyErr
 	}
 }

@@ -122,7 +122,8 @@ type RenameWorkspacePayload struct {
 
 // WorkspaceUpdatedPayload is the body of a workspace_updated frame
 // (docs/protocol-mobile.md § Renaming a workspace). Binary → phone, sent in
-// reply to a rename_workspace (in_reply_to). Path is the workspace's stored cwd
+// reply to a rename_workspace (in_reply_to) and pushed to that requester's peers
+// with no correlation at all (see below). Path is the workspace's stored cwd
 // and Label is the label now stored for it — null when cleared, which is why the
 // field carries no omitempty (see RenameWorkspacePayload).
 //
@@ -131,9 +132,12 @@ type RenameWorkspacePayload struct {
 // are structurally identical today, and each stays free to change without
 // dragging the other across the wire boundary.
 //
-// This slice replies only to the requester. Fanning the change out to other
-// connected clients is #2209, at which point this type gains a second, unsolicited
-// producer the way TypeConversationUpdated has.
+// It has TWO KINDS OF PRODUCER since #2209, the way TypeConversationUpdated does:
+// the requester's correlated reply above, and an unsolicited push carrying no
+// in_reply_to at all, fanned to every OTHER interactive conn so a name chosen on
+// one machine shows on all of them. The record is the same either way — the push
+// carries the value the reply carried — so a client that matches this type on
+// correlation alone drops the pushed frame and should key on Path instead.
 type WorkspaceUpdatedPayload struct {
 	Path  string  `json:"path"`
 	Label *string `json:"label"`

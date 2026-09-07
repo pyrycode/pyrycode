@@ -825,6 +825,19 @@ func startRelayV2(
 	// import internal/protocol.
 	systemPrompt := systemPromptFor(w.promptState)
 
+	// The workspace-rename fan-out hook (#2209), declared HERE because the handler
+	// table below is a field of the config literal passed to NewV2SessionManager:
+	// at the TypeRenameWorkspace entry there is no manager yet to close over. The
+	// handler is handed a closure that reads this variable and the real emitter's
+	// announce is assigned into it after the manager exists, in the same
+	// post-construction window announce, announceConversation,
+	// modalResolver.streamApprovals and bridge.questions already use.
+	//
+	// Unlike those first two it is NOT a named return value: nothing outside this
+	// function invokes it, so it never reaches the composition root and neither
+	// startRelayV2's nor startRelay's signature changes.
+	var announceWorkspace func(protocol.WorkspaceUpdatedPayload, string)
+
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
 		Outbound:    conn.Send,
@@ -843,7 +856,18 @@ func startRelayV2(
 			// (#2207). It takes no session surface for the same reason
 			// set_system_prompt does not: naming a folder must not disturb anything
 			// running in it, and a handler holding no pool or runner seam cannot.
-			protocol.TypeRenameWorkspace:       handlers.RenameWorkspace(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			// The announcer is an indirection through announceWorkspace rather
+			// than the emitter itself, which does not exist yet at this line. The
+			// nil guard covers the window between here and the assignment below:
+			// unreachable in practice, because no frame can dispatch until mgr.Run
+			// starts and the assignment precedes that, but a hook read from another
+			// goroutine is not a place to rely on an argument.
+			protocol.TypeRenameWorkspace: handlers.RenameWorkspace(w.convReg, resolveConversationsRegistryPath(w.instanceName), func(p protocol.WorkspaceUpdatedPayload, excludeConnID string) {
+				if announceWorkspace == nil {
+					return
+				}
+				announceWorkspace(p, excludeConnID)
+			}, logger),
 			protocol.TypePromoteConversation:   handlers.PromoteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeDeleteConversation:    handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true),
@@ -1151,6 +1175,20 @@ func startRelayV2(
 	// written concurrently. Its route out is the same: a bare func returned to the
 	// composition root, which hands it to channelCreator.
 	announceConversation = newConversationUpdateEmitterV2(mgr, ctx, logger).announce
+
+	// Workspace-rename announcer (#2209): the second producer of workspace_updated,
+	// a frame #2207 shipped as a reply to its requester and nothing more. Once
+	// rename_workspace has stored the label and answered, this tells every OTHER
+	// interactive client, so the name chosen on one machine is the name shown on
+	// all of them without a reload.
+	//
+	// Filled into the hook declared above the config literal, in the same window as
+	// the two emitters above — after mgr, before mgr.Run's goroutine starts below —
+	// which is what orders this write before every read on an appFrameWorker
+	// goroutine and is why no lock is needed. It differs from those two in where it
+	// goes rather than when: they are returned to the composition root, and this one
+	// is read only by the handler already built above.
+	announceWorkspace = newWorkspaceUpdateEmitterV2(mgr, ctx, logger).announce
 
 	// Stream-json approval bridge (#1080): joins the daemon-singleton permbridge
 	// parked-approval store (claude-facing completers, keyed by tool_use_id) to

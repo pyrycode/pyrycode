@@ -173,15 +173,6 @@ var excludedTypes = map[string]string{
 	"TypeConversationDeleted":    "reply",
 	"TypeWorkspaceFolderCreated": "reply",
 	"TypeRecentWorkspacesList":   "reply",
-	// The rename_workspace ack (#2207). "reply" is literally this block's own
-	// definition today — it is correlated to its request by in_reply_to and has
-	// exactly one producer. #2209 adds an unsolicited host-side fan-out to the
-	// other connected clients, at which point this becomes the map's second
-	// dual-classified entry alongside TypeConversationUpdated below. That is a
-	// comment change and nothing more: no assertion parses either map's values,
-	// and the type never stops being classified, so nothing goes red when the
-	// second producer lands.
-	"TypeWorkspaceUpdated":       "reply",
 	"TypeSessionSettingsUpdated": "reply",
 	"TypeSessionSettings":        "reply",
 
@@ -209,6 +200,25 @@ var excludedTypes = map[string]string{
 	// because the type never stops being classified. Nothing goes red if a future
 	// producer re-splits this — only a reader notices.
 	"TypeConversationUpdated": "reply+push",
+
+	// BOTH, and the map's SECOND dual-classified entry (#2209). It sat in the
+	// "reply" block above from #2207 until this ticket, exactly as
+	// TypeConversationUpdated did, and moves out for the same reason: that block's
+	// header defines its label as "correlated to a request via in_reply_to", which
+	// is now true of only one of this type's two producers.
+	//
+	//   - reply, on rename_workspace: the requester's own ack, correlated by
+	//     in_reply_to, carrying the stored path and label.
+	//   - push, to every OTHER interactive conn: workspaceUpdateEmitterV2 fans the
+	//     same record, unsolicited, so a name chosen on one machine shows on all of
+	//     them. NOTHING SOLICITS IT — there is no request envelope for in_reply_to
+	//     to name, and the requester's conn id is the one conn the fan-out skips,
+	//     which is what keeps the two producers from both reaching one client.
+	//
+	// #2207's own comment here predicted this edit and predicted it would be a
+	// comment change and nothing more. It was: no assertion parses either map's
+	// values, and the type never stopped being classified, so nothing went red.
+	"TypeWorkspaceUpdated": "reply+push",
 
 	// outbound reply — the v2 attachment upload's success frame (#1895). Filed
 	// here rather than beside its own bidirectional sibling below, and the label
