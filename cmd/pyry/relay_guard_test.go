@@ -195,11 +195,14 @@ var excludedTypes = map[string]string{
 	//
 	//   - reply, on promote / rename / archive / change_workspace: each answers its
 	//     requester through Conn.Reply, correlated by in_reply_to.
-	//   - push, on a host-side `pyry channel new`: conversationUpdateEmitterV2 fans
-	//     the created row to every interactive conn. NOTHING SOLICITS IT — there is
-	//     no request envelope for in_reply_to to name, which is exactly the one
-	//     difference TypeAttachmentOffered's entry below records as the whole of
-	//     that classification. Correlation is the payload's own id.
+	//   - push, on a host-side `pyry channel new` and, since #2159, on the
+	//     auto-naming of a still-unnamed conversation from the first send_message
+	//     accepted for it: conversationUpdateEmitterV2 fans the stored row to every
+	//     interactive conn. ONE EMITTER, TWO PRODUCERS — the second reuses the first
+	//     one's fan-out rather than adding a loop of its own. NOTHING SOLICITS
+	//     EITHER — there is no request envelope for in_reply_to to name, which is
+	//     exactly the one difference TypeAttachmentOffered's entry below records as
+	//     the whole of that classification. Correlation is the payload's own id.
 	//
 	// The compound value is a REVIEW LABEL and nothing reads it: Assertion #3 keys
 	// on membership in exactly one of the two maps, and no assertion parses either

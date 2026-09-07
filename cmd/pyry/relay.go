@@ -901,7 +901,29 @@ func startRelayV2(
 			protocol.TypeCreateWorkspaceFolder: handlers.CreateWorkspaceFolder(resolveWorkspaceFolder, logger),
 			protocol.TypeRecentWorkspaces:      handlers.RecentWorkspaces(w.convReg),
 			protocol.TypeRegisterPushToken:     handlers.RegisterPushToken(registry, resolveDevicesPath(w.instanceName), logger),
-			protocol.TypeSendMessage:           handlers.SendMessage(w.router, w.queue, attachmentResolve, logger),
+			// send_message gained the auto-naming seams in #2159: a message accepted
+			// for a conversation whose stored Name is still nil names that chat after
+			// itself, so a desktop-started chat stops rendering as `Untitled`.
+			//
+			// The announcer is a nil-guarded closure over announceConversation —
+			// THIS FUNCTION'S OWN NAMED RETURN, which #2156 fills from its emitter
+			// below, after mgr exists and before mgr.Run starts. So this needs no
+			// hook variable of its own the way #2209's rename_workspace fan-out did:
+			// the variable that solves the same ordering problem is already in scope
+			// at this line. Reusing that emitter is also why this ticket adds no
+			// second fan-out loop — the interactive gate, the envelope counter and
+			// the torn-down-conn tolerance are all written.
+			//
+			// The nil guard covers the window between this literal and that
+			// assignment: unreachable in practice, since no frame can dispatch until
+			// mgr.Run starts, but a hook read from a dispatch goroutine is not a
+			// place to rely on an argument.
+			protocol.TypeSendMessage: handlers.SendMessage(w.router, w.queue, attachmentResolve, w.convReg, resolveConversationsRegistryPath(w.instanceName), func(p protocol.ConversationUpdatedPayload) {
+				if announceConversation == nil {
+					return
+				}
+				announceConversation(p)
+			}, logger),
 		},
 		// Screen-snapshot seam (#618): the supervisor renders the live screen
 		// inside the tui-driver seal; KnownConversation gates request_snapshot

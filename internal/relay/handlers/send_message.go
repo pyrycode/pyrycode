@@ -186,7 +186,20 @@ type SessionRouter interface {
 //     row, never phone-writable. An unbound conversation is rejected before
 //     enqueue, so a turn is never silently routed to the shared bootstrap
 //     session (#678 AC#4).
-func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, logger *slog.Logger) dispatch.Handler {
+//   - Since #2159 a prefix of payload.Text can become the conversation's stored
+//     display name, so it crosses into persisted state and onto a broadcast
+//     frame. That is not a new class of value in that field — rename_conversation
+//     already stores an arbitrary remote string as the name, unbounded — and the
+//     derived title is bounded at 41 runes, so this path admits strictly less
+//     than the field already did. It is still never logged: see
+//     autoNameConversation, which explains why the title counts as the same
+//     untrusted content the text is.
+//
+// Since #2159 it also takes the auto-naming seams: reg is the conversations
+// registry (nil means no registry leg, which names nothing), registryPath is the
+// canonical on-disk path passed to the eager Save, and announce fans the renamed
+// row to every interactive client and may be nil. See autoNameConversation.
+func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolver, reg ConversationAutoNamer, registryPath string, announce ConversationAnnouncer, logger *slog.Logger) dispatch.Handler {
 	return func(ctx context.Context, c *dispatch.Conn, env protocol.Envelope) error {
 		var p protocol.SendMessagePayload
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
@@ -320,7 +333,31 @@ func SendMessage(router SessionRouter, queue Enqueuer, resolve AttachmentResolve
 			// A count, never an id and never a path: how many attachments the
 			// prompt names is operationally useful and discloses nothing.
 			"attachment_count", len(paths))
-		return replyAck(ctx, c, env)
+
+		// THE ACK GOES OUT FIRST, and the auto-naming follows it (#2159). Acceptance
+		// is established by the enqueue above, not by anything below: the message is
+		// queued and the drain already owns it, so everything that follows is a side
+		// effect on registry metadata. Making the sender's round-trip wait on an
+		// fsync and on a broadcast aimed at OTHER clients would couple the hot path
+		// to work the sender does not need — and measurably so, at the millisecond
+		// scale a queued turn's delivery races in.
+		//
+		// The ack's error is carried past the naming rather than returned before it.
+		// A conn whose ack write failed is a conn on its way out, and the message it
+		// queued is still going to run, so its conversation still deserves its name.
+		ackErr := replyAck(ctx, c, env)
+
+		// Auto-name the conversation from this message, if it is the first one and
+		// the row is still unnamed. Reached only on an accepted message: every reject
+		// branch above has already returned, which is what makes "a rejected send
+		// writes no name" structural rather than a guard.
+		//
+		// p.Text, never the composed prompt: the prompt names on-host paths.
+		//
+		// It reports nothing and can fail nothing — see autoNameConversation.
+		autoNameConversation(reg, registryPath, announce, logger, c.ConnID(), p.ConversationID, p.Text)
+
+		return ackErr
 	}
 }
 
