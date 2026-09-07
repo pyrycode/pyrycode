@@ -664,9 +664,13 @@ type Runner struct {
 	// this mutex + restartCh (never a Pool lock), so the sessions layer can call
 	// them after releasing Pool.mu with no lock-order concern.
 	//
+	// AdoptSessionID (#2136) writes sessionID ALONE under this mutex — the trio's
+	// first field without the other two — which is what makes following claude's own
+	// announced reset distinguishable here from ordering a fresh restart.
+	//
 	// The charter is ONE ACQUISITION PER SPAWN SETUP (#1481): beginSpawn both reads
 	// the spawn inputs (args + the id pair) and publishes iterCancel in a single
-	// section, so a racing Restart/RestartFresh/SetSpawnArgs is serialised either
+	// section, so a racing Restart/RestartFresh/SetSpawnArgs/AdoptSessionID is serialised either
 	// fully before it (the spawn observes the swap) or fully after it (it finds a
 	// live cancel and tears that spawn down). Splitting the read from the publish
 	// — which is what this loop did until #1481 — leaves a gap where iterCancel is
@@ -678,10 +682,13 @@ type Runner struct {
 	iterCancel context.CancelFunc
 
 	// sessionID is the live claude session id read by each spawn's buildArgs (via
-	// beginSpawn). Seeded from cfg.SessionID in New; rotated to a new id by
-	// RestartFresh. The mutable analogue of the immutable cfg.SessionID — that
-	// field stays the construction-time input and New's non-empty validation
-	// source; after construction the live id is r.sessionID.
+	// beginSpawn). Seeded from cfg.SessionID in New. It has TWO writers after that,
+	// and they are not variants of one another: RestartFresh rotates it as part of a
+	// daemon-ordered fresh restart, and AdoptSessionID installs it alone when claude
+	// announces a reset the daemon is merely following (#2136). The mutable analogue
+	// of the immutable cfg.SessionID — that field stays the construction-time input
+	// and New's non-empty validation source; after construction the live id is
+	// r.sessionID.
 	sessionID string
 
 	// spawnMode is the permission posture each spawn writes to its child (#2064).
@@ -1353,6 +1360,62 @@ func (r *Runner) RestartFresh(newID string) {
 	if cancel != nil {
 		cancel()
 	}
+}
+
+// AdoptSessionID installs newID as the live session id the runner's NEXT spawn
+// resumes, and does nothing else (#2136). It exists for claude's OWN announced
+// conversation reset, which the daemon follows rather than orders: the pool
+// registry, the sink tag and the drain's gate all move onto the announced id,
+// and without this the runner keeps the pre-reset one and its next crash-respawn
+// --resumes the conversation the operator just cleared.
+//
+// It is SetSpawnArgs' mirror image. That method takes restartMu exactly once and
+// writes one field, and its doc names the three it is careful not to touch; this
+// one takes restartMu exactly once and writes the first of those three,
+// sessionID, touching neither rotatePending nor freshSeq nor iterCancel, and
+// sending no restartCh hint. So beginSpawn's #1481 single-acquisition property
+// survives by construction here for the same reason it does there, and the state
+// beginSpawn's doc forbids — defined over the fields this does not write — stays
+// unreachable. Against a racing beginSpawn it serialises wholly before (that
+// spawn resumes the announced id) or wholly after (that spawn keeps the previous
+// id and the next one takes the announced one); both are correct, because the
+// contract is the NEXT spawn and it promises nothing about one already in flight.
+//
+// What it deliberately is NOT is RestartFresh with the teardown removed. That
+// method rotates to an id the DAEMON minted and re-establishes first-run
+// semantics, so its trio arms a fresh transcript and its cancel makes the
+// successor child bind to it. Here claude has ALREADY reset in-process: the
+// transcript exists, the child running now is the one writing to it, and there is
+// nothing to re-establish and nothing to relaunch. Arming rotatePending would make
+// the next spawn emit --session-id against a live transcript, which claude refuses
+// (ADR 032); bumping freshSeq would authorise a spawn through the rotation gate
+// that succeeded no rotation.
+//
+// An empty newID is refused at Warn and nothing is written — the same last-resort
+// guard on New's non-empty contract RestartFresh carries, and above the section
+// for the same reason. The provenance argument is NOT RestartFresh's, though the
+// conclusion matches: that method's callers hand it a daemon-minted id, whereas
+// this one's caller hands it a value claude wrote. What makes the guard sufficient
+// rather than a validator is the boundary upstream — the parser's
+// emitConversationReset gates on transcript.ValidStem, an anchored full match over
+// a canonical lowercase UUID stem, so the id can carry no separator, no traversal,
+// no leading dash and no unbounded length by the time it reaches here. Nothing in
+// this package re-derives that shape, and nothing here joins a path with it: the
+// spawn's --session-id / --resume choice stays useCreateForm's, whose StatByID
+// probe runs ValidStem itself before any join.
+//
+// Like Restart and SetSpawnArgs it drives only Runner-internal state and takes no
+// Pool lock, so the sessions layer can call it after releasing Pool.mu with no
+// lock-order concern. restartMu stays a leaf: no call-out, no second lock, no I/O
+// under the section. Non-blocking and safe from any goroutine.
+func (r *Runner) AdoptSessionID(newID string) {
+	if newID == "" {
+		r.log.Warn("streamsup: AdoptSessionID called with empty id; ignoring")
+		return
+	}
+	r.restartMu.Lock()
+	r.sessionID = newID
+	r.restartMu.Unlock()
 }
 
 // beginSpawn captures one iteration's spawn inputs — the live (possibly

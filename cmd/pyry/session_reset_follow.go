@@ -54,14 +54,45 @@ import (
 // hands the child's output to a conversation it does not belong to. follow honours
 // the refusal by unwinding, and that is this type's half of the boundary: it owns
 // neither the shape nor the destination, it owns the ORDER and the UNWIND, below.
+//
+// #2136 extends how far the announced value reaches without moving that boundary.
+// The id now also becomes the runner's live spawn id, and beginSpawn puts that into
+// the next child's argv and environment — two destinations the tag and the registry
+// do not have. The controls are the same two and they are enough: the anchored
+// ValidStem match upstream excludes a leading dash, every separator and any length,
+// so the value can be neither read as a flag nor joined into a path, and nothing
+// here or in streamsup hand-rolls a join — the spawn's --session-id / --resume
+// choice stays useCreateForm's, whose StatByID probe runs ValidStem itself first.
+// What keeps the extension INSIDE the boundary rather than beside it is that the
+// runner is moved on the far side of the unwind: a refused id reaches the tag, the
+// registry and the runner alike not at all.
 type sessionResetFollower struct {
 	// tag is the runner's live session tag — both the source of the id being
 	// replaced and the thing replaced. Never a construction-time id: a captured one
 	// would be right for exactly one reset and wrong for every later one.
 	tag *streamSessionTag
 	// adopt re-keys the pool session, from sessions.RunnerConfig.AdoptAnnouncedReset.
-	// nil calls nothing — the tag still rotates, which is the half this type owns.
+	// nil calls nothing — the tag still rotates and the runner still adopts, which are
+	// the halves this type owns.
 	adopt func(oldID, newID string) error
+	// adoptRunner installs the announced id as the runner's live spawn id, from
+	// (*streamsup.Runner).AdoptSessionID (#2136). Without it the pool, the tag and
+	// the drain's gate all move onto the announced id while the runner keeps the
+	// pre-reset one, and its next crash respawn --resumes the conversation the
+	// announcement cleared.
+	//
+	// It is assigned AFTER construction, unlike every other field here, because the
+	// runner does not exist yet when this type is minted: newStreamRunnerFactory
+	// builds the follower above streamsup.New, since the follower's Sink is what the
+	// parser writes into and that parser is the runner's Stdout. The factory closes
+	// the loop on the line below that constructor — inside the single-goroutine
+	// window it already occupies, and before the sessions layer starts Run, so the
+	// goroutine-creation edge publishes it to the stdout forwarder that later reads
+	// it. Never written again.
+	//
+	// nil calls nothing, matching adopt and next. Production always supplies it; a
+	// test follower that leaves it nil exercises the tag half alone.
+	adoptRunner func(newID string)
 	// next is the downstream sink every event is forwarded to, unchanged. nil
 	// forwards nothing — a test convenience; production always supplies
 	// streamTurnSink.sinkForTag's closure.
@@ -118,7 +149,26 @@ func (f *sessionResetFollower) Sink(ev turnevent.Event) {
 // positively, because it is the rule and not the two sentinels that must survive a
 // new one being added: the tag ends on newID exactly when adopt answers nil (this
 // call re-keyed) or ErrSessionNotFound (someone else already did); every other
-// answer means NOTHING moved, and the tag goes back.
+// answer means NOTHING moved, and the tag goes back. rekeyPool is where that one
+// question is answered, so neither step below re-derives it from a sentinel list.
+//
+// The RUNNER then follows the tag, and #2136's rule is a biconditional over that
+// same answer: the runner's id ends on the announced id exactly when the tag does.
+// That is why it is one call on the far side of the unwind rather than one beside
+// each qualifying answer — a sentinel added later to AdoptAnnouncedID is then
+// answered once, by rekeyPool, with no second list to keep in step. Its inverse is
+// a distinct regression from the tag's: the runner's id is what beginSpawn feeds to
+// each spawn's argv, so a runner left on the pre-reset id spawns
+// --resume <pre-reset> on its next crash and silently resurrects the conversation
+// the announcement cleared, while every other reader of the daemon believes it is
+// in the new one.
+//
+// The runner adopts AFTER the pool's answer, where the tag rotated before it, which
+// leaves a window in which the tag reads the announced id and the runner still holds
+// the previous one. A crash inside it resumes the pre-reset transcript — today's
+// behaviour, and strictly better than resuming a DIFFERENT live session's, which is
+// what adopting before the answer would risk on the refusal path. It is left open
+// deliberately; there is no rollback here.
 //
 // Rotating first, rather than after a successful call: the pool call rebinds the
 // owning conversation, and the rebind is what makes the old tag dead. Doing it
@@ -164,40 +214,66 @@ func (f *sessionResetFollower) follow(newID string) {
 		return
 	}
 	f.tag.Rotate(newID)
-	if f.adopt == nil {
+	if err := f.rekeyPool(oldID, newID); err != nil {
+		// The pool moved nothing, so the tag goes back BEFORE the record is written and
+		// the runner is never asked to adopt. Warn rather than Debug: a refusal is claude
+		// naming an id the daemon cannot follow it to, which is either a defect or a
+		// confused child, and it is rare enough that it cannot bury rekeyPool's Debug.
+		f.tag.Rotate(oldID)
+		f.logger.Warn("relay: announced reset refused, tag left on the previous id",
+			"event", "announced_reset.refused",
+			"session_id", newID,
+			"previous_session_id", oldID,
+			"err", err)
 		return
+	}
+	if f.adoptRunner != nil {
+		f.adoptRunner(newID)
+	}
+}
+
+// rekeyPool runs the pool half of the adoption and answers the ONE question both
+// remaining steps need: does the session now stand on newID? nil says it does and
+// the pool's error says it does not, which is what lets follow express the unwind
+// and the runner adopt as one branch instead of replicating a sentinel list at each.
+//
+// Three answers mean it does, and they are three different situations rather than
+// one wearing three faces. adopt == nil is a runner built without a pool callback,
+// where there is no re-key to wait for and the tag half is the whole of it. A nil
+// error is this call having re-keyed. ErrSessionNotFound is someone else having done
+// so already — the rotation watcher fires on the new transcript's creation, so it may
+// observe the same rotation first, and until #2137 retires it that is the answer on
+// every reset. A follower that unwound there would leave the tag on the retired id
+// while the conversation is bound to the announced one, and the drain's
+// active-session gate would then drop every later event: the dark conversation this
+// seam exists to prevent, and worse than the noise row it would replace.
+//
+// SECURITY: the record is content-free — the two session ids and the error, never
+// anything claude authored beyond an id already validated as a canonical UUID stem by
+// streamsup's emitConversationReset. The event itself is never logged, and no decode
+// error can reach here: that function deliberately has no logging surface at all,
+// because encoding/json quotes the offending input into its error text.
+//
+// It is Debug and not Warn precisely because it is the normal path today. Warn here
+// would cry wolf on every reset and train a reader to skip follow's refusal record,
+// which is the one that matters.
+func (f *sessionResetFollower) rekeyPool(oldID, newID string) error {
+	if f.adopt == nil {
+		return nil
 	}
 	err := f.adopt(oldID, newID)
 	if err == nil {
-		return
+		return nil
 	}
-	// SECURITY: content-free — the two session ids and the error, never anything
-	// claude authored beyond an id already validated as a UUID stem upstream. The
-	// event itself is never logged, and no decode error can reach here: streamsup's
-	// emitConversationReset deliberately has no logging surface at all, because
-	// encoding/json quotes the offending input into its error text.
-	//
-	// ErrSessionNotFound is the EXPECTED outcome whenever the rotation watcher won
-	// the race to the same rotation, which is every reset until #2137 retires it —
-	// so it is Debug. Warn there would cry wolf on the normal path and train a
-	// reader to skip the record that matters.
 	if errors.Is(err, sessions.ErrSessionNotFound) {
 		f.logger.Debug("relay: announced reset already applied",
 			"event", "announced_reset.already_applied",
 			"session_id", newID,
 			"previous_session_id", oldID,
 			"err", err)
-		return
+		return nil
 	}
-	// Anything else means the pool moved nothing — ErrSessionIDTaken today, and any
-	// sentinel added later — so the tag goes back before the record is written. Warn
-	// rather than Debug: a refusal is claude naming an id the daemon cannot follow it
-	// to, which is either a defect or a confused child, and it is rare enough that it
-	// cannot bury the record above.
-	f.tag.Rotate(oldID)
-	f.logger.Warn("relay: announced reset refused, tag left on the previous id",
-		"event", "announced_reset.refused",
-		"session_id", newID,
-		"previous_session_id", oldID,
-		"err", err)
+	// ErrSessionIDTaken today, and any sentinel added later. Returning it unwrapped
+	// keeps follow's Warn naming what the pool actually answered.
+	return err
 }

@@ -2375,3 +2375,182 @@ func TestRunner_OnChildExit_FiresOnSpawnSetupFailure(t *testing.T) {
 			"iteration — the seam is unconditional and fires even when no claude process launched", fires, attempts)
 	}
 }
+
+// adoptedSessionID is the id an announced reset names in the AdoptSessionID
+// tests. Distinct from rotatedSessionID so a spawn's argv says on its face which
+// path put the id there, and a canonical lowercase UUID stem because
+// transcript.StatByID refuses anything else before it joins a path — an invalid
+// stem would answer "absent" for a reason the fixture did not intend.
+const adoptedSessionID = "abcdabcd-1234-4321-8765-0123456789ab"
+
+// TestRunner_AdoptSessionID_InstallsIDWithoutRotationMachinery pins the whole of
+// what adoption must NOT do (#2136 AC2) alongside the two ids it must leave
+// alone (AC4 and the empty-id guard).
+//
+// The Runner is constructed directly, as TestRunner_SpawnSetupFailureRetainsSessionID
+// does, so no child process is involved and every field is observed at the
+// source. iterCancel is a recording func and restartCh is allocated empty
+// because those two ARE the kill: RestartFresh's doc states these methods drive
+// only restartMu, a ctx cancel and restartCh, so a cancel that never fired and a
+// hint that was never sent is the complete statement of "the child is not
+// killed" — stronger than watching a pid, which cannot distinguish "not killed"
+// from "killed and respawned fast".
+//
+// The turnTarget assertion is AC2's "no turn is refused" at the consequence
+// rather than the field: it is the seam WriteUserTurn consults, and a gated
+// answer there is the ErrNoLiveChild every turn would get.
+func TestRunner_AdoptSessionID_InstallsIDWithoutRotationMachinery(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		adopt  string
+		wantID string
+		why    string
+	}{
+		{
+			name: "a different id", adopt: adoptedSessionID, wantID: adoptedSessionID,
+			why: "the announced id is what the next spawn must resume",
+		},
+		{
+			name: "the id already held", adopt: testSessionID, wantID: testSessionID,
+			why: "adopting the id the runner already holds changes nothing",
+		},
+		{
+			name: "the empty id", adopt: "", wantID: testSessionID,
+			why: "the runner never emits an empty id, so New's non-empty contract holds here too",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var cancelled atomic.Bool
+			r := &Runner{
+				cfg:        Config{SessionID: testSessionID},
+				log:        discardLogger(),
+				sessionID:  testSessionID,
+				restartCh:  make(chan struct{}, 1),
+				iterCancel: func() { cancelled.Store(true) },
+			}
+
+			r.AdoptSessionID(tc.adopt)
+
+			r.restartMu.Lock()
+			gotID, gotPending, gotSeq := r.sessionID, r.rotatePending, r.freshSeq
+			r.restartMu.Unlock()
+
+			if gotID != tc.wantID {
+				t.Errorf("sessionID = %q after AdoptSessionID(%q), want %q — %s",
+					gotID, tc.adopt, tc.wantID, tc.why)
+			}
+			if gotPending {
+				t.Error("rotatePending is set — adoption armed first-run form, so the next spawn would " +
+					"establish a fresh transcript instead of resuming the adopted one")
+			}
+			if gotSeq != 0 {
+				t.Errorf("freshSeq = %d, want 0 — adoption advanced the rotation gate's release "+
+					"authorisation, which counts rotations that landed and adoption is not one", gotSeq)
+			}
+			if cancelled.Load() {
+				t.Error("the iteration ctx was cancelled — adoption tore the live child down")
+			}
+			if n := len(r.restartCh); n != 0 {
+				t.Errorf("restartCh holds %d hint(s), want 0 — adoption asked Run to relaunch", n)
+			}
+			if _, gated := r.turnTarget(); gated {
+				t.Error("turnTarget reports gated — every turn arriving after an adoption would be " +
+					"refused with ErrNoLiveChild")
+			}
+
+			_, cancel, args, _, forceFirst, _, _ := r.beginSpawn(context.Background(), false)
+			defer cancel()
+			if forceFirst {
+				t.Error("beginSpawn reported forceFirst with no rotation pending")
+			}
+			if got := idFlagValue(args, "--resume"); got != tc.wantID {
+				t.Errorf("next spawn --resume = %q, want %q — %s:\n%v", got, tc.wantID, tc.why, args)
+			}
+		})
+	}
+}
+
+// TestRunner_AdoptSessionID_RespawnResumesAdoptedID is #2136 AC1 end to end: after
+// the runner adopts an announced id, its next crash-respawn resumes THAT
+// transcript and never the pre-reset one.
+//
+// The fixture holds a transcript for the ADOPTED id only, and that asymmetry is
+// what makes the assertion ride useCreateForm's StatByID probe. With
+// ClaudeSessionsDir left empty the probe is skipped and the resume form comes
+// from the Run loop's firstRun latch instead — the same argv by a different
+// route, proving nothing about the id the probe was handed. Staged the other way
+// round (a transcript for the pre-reset id) spawn 2 would resume for the wrong
+// reason on a runner that never adopted.
+//
+//	spawn 1: --session-id <pre-reset>  (no transcript for it ⇒ the probe says create)
+//	spawn 2: --resume     <adopted>    (crash respawn, transcript staged ⇒ resume)
+//
+// A runner that ignored the adoption emits --session-id <pre-reset> for spawn 2,
+// so the fixture discriminates on both the flag and the id.
+func TestRunner_AdoptSessionID_RespawnResumesAdoptedID(t *testing.T) {
+	t.Parallel()
+	out, stderr := &safeBuffer{}, &safeBuffer{}
+	cfg := helperRunCfg(t, "crash", out, stderr)
+	cfg.BackoffInitial = time.Millisecond
+	cfg.BackoffMax = 5 * time.Millisecond
+
+	sessionsDir := t.TempDir()
+	writeTranscript(t, sessionsDir, adoptedSessionID, time.Now())
+	cfg.ClaudeSessionsDir = sessionsDir
+
+	rec := &spawnArgsRecorder{}
+	cfg.Logger = slog.New(rec)
+	var (
+		r    *Runner
+		once sync.Once
+	)
+	// Adoption kills nothing, so spawn 1's child lives out its own crash and the
+	// respawn below is the child's own exit being answered — not a teardown this
+	// call ordered.
+	cfg.onSpawn = func(int) {
+		once.Do(func() { r.AdoptSessionID(adoptedSessionID) })
+	}
+
+	var err error
+	r, err = New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cancel, join := runInBackground(t, r)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for rec.count() < 2 {
+		if time.Now().After(deadline) {
+			cancel()
+			join()
+			t.Fatalf("saw only %d spawn(s), want ≥2", rec.count())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	join()
+
+	spawns := rec.all()
+
+	if got := idFlagValue(spawns[0], "--session-id"); got != testSessionID {
+		t.Errorf("spawn 1 --session-id = %q, want %q:\n%v", got, testSessionID, spawns[0])
+	}
+
+	if got := idFlagValue(spawns[1], "--resume"); got != adoptedSessionID {
+		t.Errorf("spawn 2 --resume = %q, want the adopted %q — the crash respawn resurrected the "+
+			"conversation the announced reset cleared:\n%v", got, adoptedSessionID, spawns[1])
+	}
+	if slices.Contains(spawns[1], testSessionID) {
+		t.Errorf("spawn 2 references the pre-reset id %q after the adoption:\n%v", testSessionID, spawns[1])
+	}
+
+	for i, args := range spawns[:2] {
+		if got := idFlagCount(args); got != 1 {
+			t.Errorf("spawn %d carries %d id flags, want exactly 1:\n%v", i+1, got, args)
+		}
+	}
+}
