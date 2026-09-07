@@ -24,9 +24,9 @@ Two constraints bind at once, and only the parser's side of the fan-in channel s
 
 1. Read `old := tag.ID()` — the **live** id, never a construction-time one. A closure over `RunnerConfig.SessionID` would be right for exactly one rotation and fail-closed after that, since that field is documented as construction-fixed and does not mirror a `/clear` rotation.
 2. `newID == old` → return untouched: no re-key, no transition, no tag rotation (mirrors `AdoptAnnouncedID`'s own equal-id guard — the pool cannot guard a value it doesn't own, so both sides carry the check).
-3. `tag.Rotate(newID)` — **before** the pool call, not after. Rotating first closes the window that would otherwise open on every *successful* reset: the pool call's `notifyTransition` rebinds the conversation, and the rebind is what makes the old tag dead, so rotating the tag first means no goroutine can observe the rebind while the tag still reports the old id.
+3. `tag.CompareAndSwap(old, newID)` — **before** the pool call, not after, and **conditional since #2176**: the write lands only while the tag still holds `old`. Rotating first closes the window that would otherwise open on every *successful* reset: the pool call's `notifyTransition` rebinds the conversation, and the rebind is what makes the old tag dead, so rotating the tag first means no goroutine can observe the rebind while the tag still reports the old id. Making the write conditional doesn't reopen that window — a compare-and-swap before the call is still a write before the call — it only changes what happens when the tag has a second writer in flight (below).
 4. `pool.AdoptAnnouncedID(old, newID)` — the pool seam ([`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md)), reached through `rekeyPool` (below). Its answer decides whether the rotation stands.
-5. **The unwind.** The tag ends on `newID` only when the pool's answer means the session is now on that id — `nil` (this call re-keyed) or `ErrSessionNotFound` (some other rotation path already moved the session onto `newID` — see [`ErrSessionNotFound` after the watcher's retirement](#errsessionnotfound-after-the-watchers-retirement-2137) below). Every other answer means nothing moved, and the tag is rotated back to `old`.
+5. **The unwind.** The tag ends on `newID` only when the pool's answer means the session is now on that id — `nil` (this call re-keyed) or no pool wired at all. Every other answer, `ErrSessionNotFound` included since #2176 (see [below](#errsessionnotfound-the-daemon-driven-race-and-why-the-writes-became-conditional-2137-2176)), means nothing moved and the tag is unwound with the same `CompareAndSwap(newID, old)` — **except** where a daemon-driven rotation raced this one and got there first, in which case both the forward write and the unwind decline rather than overwrite it, and the tag is left on *that* rotation's id instead of either `old` or `newID`.
 6. **The runner follows (#2136).** On the far side of the unwind — never before it — `follow` calls `adoptRunner(newID)`, which reaches [`(*streamsup.Runner).AdoptSessionID`](streamsup-package-satisfying-sessions-runner.md): the runner's live spawn id, the value `beginSpawn` puts into the next child's argv and environment. A refused id now reaches the tag, the registry and the runner alike not at all; an accepted one moves all three.
 
 Step 5 is the part that shipped wrong the first time and is why this file exists.
@@ -99,36 +99,84 @@ path. The refusal-path window is bounded to a lock acquisition and two map probe
 before any disk write; `exitForTag` running on the supervision goroutine is the only reader that
 could observe it.
 
-## `ErrSessionNotFound` after the watcher's retirement (#2137)
+## `ErrSessionNotFound`, the daemon-driven race, and why the writes became conditional (#2137, #2176)
 
 Until #2137, `sessionResetFollower` and the (now-deleted) rotation watcher raced for the same
 announced `/clear`: whichever lost found `oldID` already gone from the pool and got
-`ErrSessionNotFound`, which `AdoptAnnouncedID` answers with no mutation and no transition — the
-mechanism that kept "exactly one `session_transition`" structural. `rekeyPool` treated that sentinel
-as success (the session now stands on `newID`) because the watcher, when it won, had applied *this
-same* rotation.
+`ErrSessionNotFound`. `rekeyPool` read that sentinel as success — the session now stands on
+`newID` — because the watcher, when it won, had applied *this same* rotation onto *this same* id.
+\#2137 deleted the watcher. `ErrSessionNotFound`'s surviving producers —
+`RotateForNewSession`, `RotateBootstrapForSelfHeal`, `Remove`, the idle-eviction sweep, the
+create-rollback deletes — either re-key `oldID` onto a freshly **minted** id or leave no successor
+at all, so no remaining path can make the old reading true. #2176 deleted the arm: the sentinel now
+flows out as the error it is, and `follow` declines and unwinds on it like `ErrSessionIDTaken`
+always has.
 
-\#2137 deleted the watcher, so `AdoptAnnouncedID` is now the **sole** writer of an announced re-key —
-see [`sessions-package-key-types-adoptannouncedid.md`](sessions-package-key-types-adoptannouncedid.md).
-`ErrSessionNotFound`'s surviving producers are `RotateForNewSession` and `RotateBootstrapForSelfHeal`,
-and both rotate `oldID` onto a **freshly minted** id, not the announced one. `rekeyPool` still
-answers `nil` on this sentinel, so `follow` still keeps its tag on the announced `newID` and calls
-`adoptRunner(newID)` — sound only when the registry actually agrees, which it no longer necessarily
-does. In the narrow race where a daemon-driven rotation lands between the announcement and this
-call, the tag and the registry can now end on different ids, which is a conversation-goes-dark
-failure mode. This is **pre-existing and narrow** (the same interleaving was possible before,
-merely rarer and masked by the watcher usually winning), and it is **filed, not fixed here**, as
-[#2176](https://github.com/pyrycode/pyrycode/issues/2176) — the fix changes `follow`'s unwind, which
-is a deliberate scope boundary this ticket did not cross: unwinding on this sentinel by default
-would re-open the dark-conversation failure the original tag-unwind lesson above exists to prevent.
+A plain unwind was not enough on its own, because by the time #2176 landed the tag already had a
+second writer. `streamsup.Config.OnSessionRotate` — see [Session rotation notification
+(#1133)](streamsup-package-session-rotation-notification-onsessionrotate.md) — is `tag.Rotate`,
+fired by `RestartFresh` on a *different goroutine* after a daemon-driven rotation has already
+re-keyed the registry. Landing between the follower's read and either of its writes, that writer
+would let a plain forward write or a plain unwind store *over* it: forward, onto an announced id
+the registry never reached; unwind, back onto an id the registry has already left. Both end with
+the tag and the registry naming different sessions — the drain's active-session gate then drops
+every later event, the same dark-conversation failure class the original unwind (above) exists to
+prevent, reached through the sibling sentinel instead. #2176's fix is to make both of `follow`'s
+writes `CompareAndSwap`s against the value the call read, so a write lands only while the tag still
+holds it; losing the swap means the daemon-driven rotation got there first, and the follower
+declines the whole announcement rather than fight for the tag. `OnSessionRotate` stays a plain,
+unconditional `Rotate` — it drove its own rotation and *is* the authority. The follower only
+follows, so it writes solely where it still owns the value. **Driver stores, follower swaps** is
+the fix; nothing was added defensively around an unconditional write.
+
+That asymmetry is only safe because the tag's writer set is closed, and that is a claim worth
+re-verifying rather than trusting on its own restatement: `git grep '\.Rotate('` outside tests
+should match exactly one production call, `OnSessionRotate`'s assignment in
+`newStreamRunnerFactory` (`streamsup_runner.go`). With the set closed to that one unconditional,
+already-registry-backed writer, an id a declined announcement leaves standing is always
+daemon-minted and never attacker- or child-chosen — which is the whole safety argument for leaving
+it standing rather than restoring what the follower itself read. Re-run the grep before reusing
+this argument if code touching the tag changes again.
+
+`announced_reset.already_applied`, the record `ErrSessionNotFound`'s old success reading wrote, is
+gone — it asserted the session had moved onto the announced id, which #2176 found no remaining path
+can make true. `announced_reset.superseded` replaced it: written whenever a daemon-driven rotation
+is the reason an announcement is declined, whether that's a lost forward swap or a lost unwind,
+carrying `current_session_id` (what the tag actually ends on) and `err` only where a pool answer
+produced the decline. `announced_reset.refused` (`ErrSessionIDTaken` and any later sentinel) keeps
+its name and its cause; only its neighbour was renamed.
+
+The ticket's other candidate — widening `AdoptAnnouncedID` to report the id the session currently
+stands on, instead of touching the tag's write discipline — was rejected for missing the harder of
+the two interleavings: where the daemon-driven rotation lands *before* the follower's own forward
+write, `follow` never reaches the pool at all, so a pool-side answer has nothing to correct. Only
+the tag itself sits on both paths, which is why the fix had to live there.
 
 ## Not fed here
 
 `turnBusyTracker` gets nothing from this path: `turnMarkFor` answers `turnMarkNone` for
-`ConversationReset`, so there is nothing for `busy.observe` to act on. The forwarded event still
-carries the **new** tag, since `sinkForTag` reads the tag after `Sink` returns — immaterial for
-delivery (the drain has no arm for the variant either), but stated so a reader of a drop record
-knows which id to expect.
+`ConversationReset`, so there is nothing for `busy.observe` to act on. Which id the forwarded event
+carries is no longer a single answer since #2176's conditional writes: `sinkForTag` reads the tag
+after `Sink` returns, and that read can see `newID`, the pre-announcement `old`, or a third
+rotation's id, depending on which of `follow`'s writes won or lost its swap. Immaterial for
+delivery either way (the drain has no arm for the variant), but a reader of a drop record should
+read `current_session_id` off the record itself rather than assume the id from context.
 
-See [`docs/specs/architecture/2135-follow-announced-reset.md`](../../specs/architecture/2135-follow-announced-reset.md) for the full design, concurrency model, and security review, and
-[`docs/specs/architecture/2136-adopt-announced-session-id.md`](../../specs/architecture/2136-adopt-announced-session-id.md) for the runner-side extension.
+## A testing need licensed the interface, not a second implementation (#2176)
+
+`follow`'s read of the live tag and the conditional write that follows it are adjacent statements
+on one goroutine, so no external double could sit between them to prove the interleaving where a
+daemon-driven rotation lands in that exact gap. Rather than leave that interleaving unprovable, the
+tag field was retyped from the concrete `*streamSessionTag` to a two-method `sessionTag` interface
+(`ID`, `CompareAndSwap`) defined at the consumer, per `CODING-STYLE.md`'s "or a testing need"
+licence. A test double performs the competing rotation at the top of its own `CompareAndSwap` and
+then delegates — observationally exactly that ordering, since the follower's goroutine does nothing
+else in the gap. `*streamSessionTag` stays the only production implementation, and every existing
+construction kept compiling unchanged, since all of them already passed that concrete type: the
+widening's cost was its signature, not its call sites. Worth pricing an interface widening that way
+before sizing against it — a widening with many call sites but a pre-existing satisfying type can be
+far cheaper than the file count alone suggests.
+
+See [`docs/specs/architecture/2135-follow-announced-reset.md`](../../specs/architecture/2135-follow-announced-reset.md) for the full design, concurrency model, and security review,
+[`docs/specs/architecture/2136-adopt-announced-session-id.md`](../../specs/architecture/2136-adopt-announced-session-id.md) for the runner-side extension, and
+[`docs/specs/architecture/2176-conditional-tag-writes.md`](../../specs/architecture/2176-conditional-tag-writes.md) for the conditional-write design and its security review.
