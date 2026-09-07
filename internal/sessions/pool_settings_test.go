@@ -201,7 +201,6 @@ func spawnMintedWithSettings(t *testing.T, ctx context.Context, pool *Pool, spaw
 		t.Fatalf("saveLocked: %v", err)
 	}
 	pool.mu.Unlock()
-	pool.RegisterAllocatedUUID(id)
 	if err := pool.supervise(sess); err != nil {
 		t.Fatalf("supervise: %v", err)
 	}

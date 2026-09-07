@@ -491,7 +491,7 @@ func TestRelayV2_StreamNewSessionRotatesAndRestartsFresh(t *testing.T) {
 		// mismatch has exactly one reading; comparing against conversations.json's
 		// CurrentSessionID would confound "second rotation" with "cross-file skew".
 		// It is also the only admissible reader here: nothing on this failure path may
-		// call a t.Fatal*-ing helper (readBootstrap, waitForBootstrapID*, mustReadFile,
+		// call a t.Fatal*-ing helper (waitForBootstrapID, mustReadFile,
 		// boundSessionID), or its fatal fires first and this message never prints.
 		//
 		// ok=false conflates missing / unparseable / no bootstrap row, so it renders as

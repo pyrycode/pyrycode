@@ -140,11 +140,6 @@ func (p *Pool) materialise(id SessionID, label, spawnDir string, settings Sessio
 		return nil, false, err
 	}
 
-	// Prime the rotation watcher's skip-set inside the same critical
-	// section so any concurrent watcher snapshot sees register + skip-set
-	// atomically.
-	p.registerAllocatedUUIDLocked(id)
-
 	g, gctx := p.runGroup, p.runCtx
 	if g == nil {
 		// Roll back: registry entry must not survive when no lifecycle

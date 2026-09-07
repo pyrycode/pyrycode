@@ -18,11 +18,11 @@
 // call-site adapters, never here: the core returns a neutral Result so each
 // adapter composes it in its own order with its own convention.
 //
-// The package is a leaf: it imports stdlib only, neither internal/sessions nor
-// internal/sessions/rotation, so all three (sessions, rotation, cmd/pyry) can
-// import it with no cycle. The probe is accepted via a locally-defined
-// one-method interface (redeclared, not imported from rotation) that rotation's
-// existing probes satisfy structurally.
+// The package is a leaf: it imports stdlib only, and in particular not
+// internal/sessions, so every consumer can import it with no cycle. That leaf
+// rule is why the probe is accepted via a locally-defined one-method interface
+// rather than an imported one — originally so it could not depend on
+// internal/sessions/rotation, which #2137 has since deleted.
 package transcript
 
 import (
@@ -34,12 +34,13 @@ import (
 )
 
 // Ext is the suffix claude writes for session transcripts — the single source
-// of truth for the three families and the rotation watcher.
+// of truth for every family that resolves one.
 const Ext = ".jsonl"
 
 // uuidStemPattern matches the canonical 36-char lowercase UUIDv4 stem claude
-// uses for its <uuid>.jsonl filenames. Byte-identical to the three local
-// regexps it replaces (internal/sessions, cmd/pyry, internal/sessions/rotation).
+// uses for its <uuid>.jsonl filenames. Byte-identical to the local regexps it
+// replaced in internal/sessions and cmd/pyry (and, until #2137 deleted that
+// package, internal/sessions/rotation).
 var uuidStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ValidStem reports whether stem is a canonical lowercase UUIDv4 — the one
@@ -63,9 +64,15 @@ func sessionFileStem(name string) (string, bool) {
 	return stem, true
 }
 
-// Probe reports which JSONL a pid currently holds open ("" = none). Redeclared
-// here (not imported from internal/sessions/rotation) to keep this package a
-// leaf; rotation's *Probe values satisfy it structurally.
+// Probe reports which JSONL a pid currently holds open ("" = none). Declared
+// locally rather than imported, to keep this package a leaf.
+//
+// It has no production implementation since #2137 deleted internal/sessions/
+// rotation, whose per-pid probes were the only ones: real claude opens its
+// transcript, appends and closes within milliseconds, so asking the OS what a pid
+// holds open practically never answered. This interface and its Probed /
+// GuardProbedPath helpers are kept deliberately — they were already callerless
+// before that ticket, and removing them is a separate call.
 type Probe interface {
 	OpenJSONL(pid int) (string, error)
 }
@@ -83,7 +90,7 @@ type Result struct {
 func (r Result) Found() bool { return r.Path != "" }
 
 // CanonicalDir returns dir with symlinks resolved (filepath.Clean on error) —
-// the canonicalisation both families and the rotation watcher already do. A
+// the canonicalisation the resolver families already do. A
 // caller precomputes it once (per construction/subscription) and passes it to
 // GuardProbedPath / Probed.
 func CanonicalDir(dir string) string {

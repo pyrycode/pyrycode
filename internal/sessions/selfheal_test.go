@@ -10,12 +10,10 @@ import (
 // self-heal rotation primitive (#1165): it mints a fresh daemon id, re-keys the
 // CURRENT bootstrap entry to it (preserving the *Session pointer), flips
 // BootstrapID, and re-persists the registry — but, unlike RotateForNewSession,
-// it does NOT register the new id in the allocated skip-set and does NOT fire a
-// client transition. The absent skip-set entry is deliberate: the rekey commits
-// p.bootstrap → newID before the next spawn creates <newID>.jsonl, so the
-// rotation watcher's ref.ID==stem guard already covers the CREATE (cold-start
-// parity). A ReasonClear transition would mislead clients into thinking the user
-// ran /clear.
+// it does NOT fire a client transition, which would mislead clients into
+// thinking the user ran /clear. It also used to differ by not priming the
+// freshly-allocated skip-set, but #2137 retired the rotation watcher that set
+// existed for, so that half of the asymmetry is gone from both methods.
 func TestRotateBootstrapForSelfHeal(t *testing.T) {
 	t.Parallel()
 
@@ -52,12 +50,6 @@ func TestRotateBootstrapForSelfHeal(t *testing.T) {
 		}
 		if got != orig {
 			t.Errorf("Lookup(newID) returned a different *Session; want the rotated entry preserved")
-		}
-
-		// NOT registered in the skip-set — cold-start parity; the watcher's
-		// ref.ID==stem guard covers the <newID>.jsonl CREATE, no entry needed.
-		if pool.IsAllocated(newID) {
-			t.Errorf("IsAllocated(newID) = true, want false — self-heal must NOT register the skip-set (unlike RotateForNewSession)")
 		}
 
 		// Registry re-persisted with the new id as the sole bootstrap entry.

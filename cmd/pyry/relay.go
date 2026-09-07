@@ -189,8 +189,8 @@ type relayWiring struct {
 	activeSessionStarter relay.SessionStarter
 	// claudeSessionsDir is the directory the rotation-following JSONL resolver
 	// scans to tail the daemon's own claude child's transcript (turn stream #633,
-	// snapshot-usage reader #857). Empty disables reconcile, the rotation watcher,
-	// and the interactive turn/modal streams.
+	// snapshot-usage reader #857). Empty disables reconcile and the interactive
+	// turn/modal streams.
 	claudeSessionsDir string
 	// bootstrapIDFn returns the bootstrap session's pinned claude session id —
 	// the SAME id source the bootstrap spawn's --session-id uses (#839) — so the
@@ -591,8 +591,7 @@ func runConfigFor(
 // turn_end envelopes to interactive phones. It is gated on bridge != nil
 // (foreground has no PTY-output observer surface) plus a non-empty
 // claudeSessionsDir (the dir the rotation-following JSONL resolver scans; ""
-// already disables reconcile + the rotation watcher, so disabling the producer
-// too is coherent).
+// already disables reconcile, so disabling the producer too is coherent).
 //
 // SECURITY: StaticPriv is the binary's 32-byte X25519 static secret. It is
 // passed to the manager as an opaque slice and is never logged, wrapped into

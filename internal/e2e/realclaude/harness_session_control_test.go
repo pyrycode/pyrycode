@@ -30,8 +30,9 @@ const (
 )
 
 // Rotation / settle budgets for the new_session respawn. Real claude on /clear
-// (clear + mint a fresh transcript + fsnotify + watcher rotate) is seconds, not
-// fakeclaude milliseconds; and it rotates on every /clear, so the re-send cadence
+// (clear + mint a fresh transcript + announce the reset + the daemon's re-key) is
+// seconds, not fakeclaude milliseconds; and it rotates on every /clear, so the
+// re-send cadence
 // is deliberately slower than #1004's 250 ms to avoid stacking rotations while
 // still recovering from a frame that lands before the tui-driver session
 // re-attaches.
@@ -45,9 +46,9 @@ const (
 // --- on-disk sessions.json reader (the only genuinely new code) --------------
 
 // uuidStemPattern matches the canonical 36-char lowercase UUIDv4 stem claude uses
-// for its <uuid>.jsonl filenames. Transcribed from
-// internal/sessions/rotation/watcher.go (the e2e and e2e_realclaude build tags are
-// disjoint, so it cannot be imported).
+// for its <uuid>.jsonl filenames. Byte-identical to transcript.ValidStem's pattern,
+// which is the production source of truth; it is transcribed rather than imported
+// because this file's e2e_realclaude build tag has to stand alone.
 var uuidStemPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // ptr returns a pointer to v. SetSessionSettingsPayload uses pointer fields as a

@@ -16,7 +16,8 @@ import (
 var uuidV4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // TestE2E_StartRotation_PrimitiveWiresFakeClaude exercises the harness
-// primitive end-to-end without touching pyry's rotation watcher: spawn
+// primitive end-to-end, observing only the files on disk and never how (or
+// whether) the daemon follows them into its registry: spawn
 // pyry with fake-claude as the supervised child, observe the initial
 // jsonl appear, drop the trigger, and observe a fresh <uuid>.jsonl
 // appear in the same directory.

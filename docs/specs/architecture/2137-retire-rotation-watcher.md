@@ -365,3 +365,61 @@ it adds nothing — but **"do `AdoptAnnouncedID`'s bounds still hold once nothin
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — implementation (Phase B)
+
+**Open questions, resolved.**
+
+1. **The rebind test is not a duplicate → re-pointed, as the Design table predicted.**
+   `TestPool_AdoptAnnouncedID_RebindsTheOwningConversation` discards the registry path and asserts
+   the in-memory rebind only; the reload-from-disk half exists nowhere else. Kept and renamed
+   `TestPool_AnnouncedReset_RebindsOwningConversation`.
+2. **`rekeyPool` keeps Debug.** No test pins the level (no `already_applied` or `slog.Level`
+   assertion in `cmd/pyry/session_reset_follow_test.go`), so the choice was free. Kept because the
+   record is not actionable on its own — an operator cannot tell #2176's divergence from a benign
+   removal by reading it — and a Warn would compete with `follow`'s refusal Warn.
+3. **`claudeSessionsDir` stays** (resolved during the security review): `Pool.removeJSONL` joins it
+   to build the archive/purge path. Only `Run`'s local `dir` went.
+
+**Two corrections to the ticket's Technical Notes, found by compiling rather than grepping.**
+
+- **`encodeWorkdir` must NOT be deleted.** The ticket lists it as having no other caller. It has
+  one: `claudeSessionsDir` — which the same table lists as load-bearing for two sibling tests —
+  calls it to encode the resolved home. Deleting it as instructed would have broken the package.
+- **`readBootstrap` DID become orphaned and was deleted.** The ticket lists it as used by
+  `relay_v2_stream_new_session_test.go`. It is not: that file's only reference is inside a comment,
+  and the apparent usage in a `git grep -l` sweep is a substring artifact — `readBootstrap` is a
+  prefix of `readBootstrapIfPresent`, which *is* the helper those siblings call. Deleted, and the
+  comment naming it as a `t.Fatal*`-ing helper to avoid was updated.
+
+Net effect on the helper table: the two entries traded places relative to the ticket. Confirmed
+with `git grep -c -w` (exact-word) plus `staticcheck -tags e2e`, not with a substring grep.
+
+**Departures from the plan, all additive.**
+
+- **`TestPool_Run_NoWatcherWhenDirEmpty` was renamed, not deleted.** Its shutdown assertion (Run
+  supervises the bootstrap and exits cleanly on cancel) outlives the watcher; only its name and
+  doc were about it. Now `TestPool_Run_ExitsCleanlyOnCancel`.
+- **Two more comment sites in `internal/sessions/transition.go`**, beyond the plan's enumeration:
+  `TransitionObserver`'s doc named the rotation-watcher goroutine as the clear-transition caller,
+  and `SetTransitionObserver`'s race argument named "the lifecycle and watcher goroutines (both
+  spawned by Run)". Both corrected to name the goroutines that actually drive a re-key now; the
+  happens-before argument still holds, since Run transitively spawns the runners.
+- **`go mod tidy` dropped `github.com/fsnotify/fsnotify`** — the deleted package was its only
+  importer. The remaining `fsnotify` hits in the tree are comments and unrelated identifiers.
+- **`internal/transcript/transcript.go` needed five prose fixes, not three**: the ticket named the
+  package doc, `uuidStemPattern` and `Probe`; `Ext` and `CanonicalDir` also named the watcher.
+
+**Security review follow-through.**
+
+- The SHOULD FIX on `RotateID`'s doc landed as specified: the two-lock invariant and the
+  "the old 'no concurrent reader exists' claim went stale" warning are both preserved, with
+  `AdoptAnnouncedID` on the runner's parse goroutine named as the concurrent re-keyer in the
+  watcher's place. The comment now says explicitly that the stale claim must not be restored.
+- The OUT OF SCOPE finding was filed as **#2176** (`rekeyPool` reads `ErrSessionNotFound` as
+  "session stands on newID"), put on board #1 with Status=Inbox, and is named in `rekeyPool`'s
+  corrected doc and in `AdoptAnnouncedID`'s `Errors:` paragraph. Not fixed here: the fix changes
+  `follow`'s unwind, which is production behaviour outside this ticket's scope, and the plain
+  version of it re-opens the dark-conversation failure #2135 documented.
