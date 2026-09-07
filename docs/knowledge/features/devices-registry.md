@@ -11,6 +11,7 @@ Lives in the same `internal/devices` package as `Device`, `HashToken`, `VerifyTo
 - **Phase 3 foundation (#250):** `(*Registry).UpdatePushRegistration(tokenHash, platform, pushToken, name) bool` — the in-memory mutator for `Device.Platform` / `Device.PushToken` / `Device.Name` keyed by `TokenHash`. Returns `true` iff a matching row was found and mutated; caller chains `Save` for durability. Mutates the three fields under `r.mu`. Eighth export, consumed by `internal/relay/handlers.Handle` for the phone's `register_push_token` frame. `Name` is part of the mutation because the protocol's `device_name` makes the phone the source of truth for self-reported name (iOS Settings rename propagates).
 - **Handshake reload (#782):** `(*Registry).Reload(path)` — reconciles the on-disk device set into the in-memory registry so a device paired via `pyry pair` after daemon startup authenticates on its next handshake without a restart (and a `pyry pair revoke` stops being accepted, for free). Ninth export, called by `internal/relay`'s v2 handshake (before `Validate`) and by the `register_push_token` handler (before `Save`, as a clobber guard). See § Reload below and [ADR 029](../decisions/029-devices-registry-reload-at-handshake.md).
 - **Redemption clear (#1528):** `(*Registry).ClearRedeemBy(tokenHash string) bool` — zeroes `Device.RedeemBy` on the matching device under `r.mu`, returning true *iff* a row matched **and** its deadline was non-zero. Tenth export. The return value is what decides whether a `Save` is warranted, so idempotency is decided by the registry rather than re-derived at the call site. Consumed by `internal/relay`'s v2 handshake accept tail (`recordRedemption`) — the first `devices.json` writer built on `WithLock` from birth. See § `ClearRedeemBy` below.
+- **Redemption enforcement (#1529):** `Validate`'s return widened from `(Device, bool)` to `(Device, ValidateResult)` — a third outcome, `ValidateWindowElapsed`, refuses a matched device whose `RedeemBy` is set and already past, distinct from `ValidateUnknownToken` so the v2 handshake can log the two apart while giving both the identical `4401` / `auth.invalid_token` wire shape. See § `Validate` below.
 
 ## Surface
 
@@ -23,7 +24,7 @@ func (r *Registry) Add(d Device)
 func (r *Registry) Remove(name string) bool
 func (r *Registry) List() []Device
 func (r *Registry) FindByTokenHash(hash string) (Device, bool)
-func (r *Registry) Validate(plain string) (Device, bool)
+func (r *Registry) Validate(plain string) (Device, ValidateResult)
 func (r *Registry) UpdatePushRegistration(tokenHash, platform, pushToken, name string) bool
 func (r *Registry) Reload(path string) error
 func (r *Registry) ClearRedeemBy(tokenHash string) bool
@@ -132,49 +133,67 @@ The disk-read branch is shared with `Reload` (#782) via an unexported `readDevic
 
 `Add` does not validate uniqueness. The pair-mint consumer (#TBD) is the single producer that reaches `Add` and validates against `List()` first if needed. `Remove` returns `true` iff a device with matching `Name` was found and removed — consumers can assert "the device I just revoked actually existed" before logging.
 
-## `Validate` — the WS-perimeter auth predicate (#210)
+## `Validate` — the WS-perimeter auth predicate (#210, widened #1529)
 
-`Validate(plain string) (Device, bool)` is the single auth-check entry point on the phone-WS path. The handler calls it once per inbound connection: `d, ok := reg.Validate(plain)`. Returns the matched `Device` and `true` on a hit, the zero `Device` and `false` on any miss (no device matches; `plain` is the empty string).
+`Validate(plain string) (Device, ValidateResult)` is the single auth-check entry point on the phone-WS path. The handler calls it once per inbound connection: `d, result := reg.Validate(plain)`. `ValidateResult` is a three-way outcome, not a bool — the v2 handshake needs to tell "no such device" apart from "this device exists but its pairing token was never redeemed and its window elapsed" (AC-4 of #1529), even though both give the *client* the identical `4401` / `auth.invalid_token` close.
+
+```go
+type ValidateResult int
+
+const (
+    ValidateUnknownToken  ValidateResult = iota // fail-closed zero value: no match, or plain == ""
+    ValidateAccepted                            // matched, window not elapsed — the only result that authenticates
+    ValidateWindowElapsed                       // matched, but RedeemBy is set and has passed
+)
+```
+
+`ValidateUnknownToken` is the `iota` zero, matching the `RemotePermissionOutcome` pattern in `devices-package.md` — a forgotten assignment, or a future early-return that skips deciding, denies rather than accepts. Every refusal returns the zero `Device`, never the matched record — a populated `Device` alongside a refusal would invite a caller to read it.
 
 Body shape, in `internal/devices/auth.go`:
 
 ```go
-func (r *Registry) Validate(plain string) (Device, bool) {
+func (r *Registry) Validate(plain string) (Device, ValidateResult) {
     if plain == "" {
-        return Device{}, false
+        return Device{}, ValidateUnknownToken
     }
     hash := HashToken(plain)
     r.mu.Lock()
     defer r.mu.Unlock()
     for i := range r.devices {
         if r.devices[i].TokenHash == hash {
+            if r.devices[i].redemptionWindowElapsed(time.Now()) {
+                return Device{}, ValidateWindowElapsed
+            }
             r.devices[i].LastSeenAt = time.Now()
-            return r.devices[i], true
+            return r.devices[i], ValidateAccepted
         }
     }
-    return Device{}, false
+    return Device{}, ValidateUnknownToken
 }
 ```
 
-Five points of structural discipline:
+`redemptionWindowElapsed(now time.Time) bool` is a separate unexported `Device` method (`!d.RedeemBy.IsZero() && !now.Before(d.RedeemBy)`) rather than inlined, so the boundary — a zero deadline never elapses; at exactly `RedeemBy` the record has already stopped being acceptable — is table-testable at a caller-supplied instant without injecting a clock into `Registry`.
+
+Six points of structural discipline (one added by #1529):
 
 1. **Empty-plain early-out is first** — before `HashToken`, before the lock. The AC requires "no registry lookup on empty input"; this is the structural enforcement. Also defends (cheaply) the unreachable case of a `Device` persisted with `TokenHash == HashToken("")`.
 2. **`HashToken` runs outside the lock.** SHA-256 over a short string is microseconds, but moving it outside the critical section keeps the lock held only for the scan-and-mutate window — important because the auth path is the high-frequency reader.
-3. **Indexed loop (`for i := range r.devices`)** so the `LastSeenAt = time.Now()` assignment mutates the slice element in place. A value-loop (`for _, d := range r.devices`) would assign to a copy and the mutation would silently no-op.
-4. **Mutation and snapshot both inside the lock.** The returned `Device` is a value-type copy taken before the deferred unlock fires, so callers see the just-written timestamp.
-5. **Byte-exact `==` on `TokenHash`, not `subtle.ConstantTimeCompare`.** Constant-time at the plain↔hash boundary is owned by `HashToken`; once the wire plain has been hashed, comparing two 64-char hex strings is byte-exact (any timing leak reveals only a public derivative). Inherits #208 / #209 reasoning verbatim.
+3. **The window check runs strictly BEFORE the `LastSeenAt` stamp, inside the same critical section (#1529).** This ordering *is* the security property behind AC-1: a rejected-for-expiry attempt mutates nothing at all — not `LastSeenAt`, not any other field — so `pyry pair list` stays an honest witness that a token was never scanned. An expired token that kept refreshing that column would be indistinguishable from a device in daily use, which is exactly the signal the ticket exists to preserve. `Validate` also never reaches `Remove`, so an expired record is never deleted — `pyry pair revoke` stays the only remover.
+4. **Indexed loop (`for i := range r.devices`)** so the `LastSeenAt = time.Now()` assignment mutates the slice element in place. A value-loop (`for _, d := range r.devices`) would assign to a copy and the mutation would silently no-op.
+5. **Mutation and snapshot both inside the lock.** The returned `Device` is a value-type copy taken before the deferred unlock fires, so callers see the just-written timestamp.
+6. **Byte-exact `==` on `TokenHash`, not `subtle.ConstantTimeCompare`.** Constant-time at the plain↔hash boundary is owned by `HashToken`; once the wire plain has been hashed, comparing two 64-char hex strings is byte-exact (any timing leak reveals only a public derivative). Inherits #208 / #209 reasoning verbatim. The deadline check runs strictly after this match, so it introduces no branch on token content and no new timing signal about which hash matched.
 
 ### What `Validate` does NOT do
 
 - **No `Save`.** Disk persistence is the caller's concern. Validate runs on the WS hot path; an fsync per auth is a perf footgun. Future consumer schedules `Save` (periodic ticker / graceful-shutdown hook); the in-memory `LastSeenAt` is the source of truth for runtime decisions.
-- **No `context.Context`, no `*slog.Logger`, no error path.** Body is hash + lock + scan + mutate + snapshot — microseconds at p99, never blocks. Auth-event logging (with `conn-id`, `remote-host`, attempt counter) is the WS handler's concern; the predicate is logger-free. AC pins the signature as `(Device, bool)`.
+- **No `context.Context`, no `*slog.Logger`, no error path.** Body is hash + lock + scan + mutate + snapshot — microseconds at p99, never blocks. Auth-event logging (with `conn-id`, `remote-host`, attempt counter, and — since #1529 — which of the two refusal reasons fired) is the WS handler's concern; the predicate is logger-free. `ValidateResult` carries the *reason*, not a log line.
 - **No rate limiting / lockout / observability.** Per-token attempt counters, IP-level lockout, structured auth metrics — all WS-handler concerns. The predicate is a leaf primitive.
 
 ### Concurrency
 
 `Validate` takes `Registry.mu` exactly once across the scan + mutation + snapshot, releases on return. No new lock, no ordering, no callbacks, no re-entrance — the single-mutex contract from #209 is preserved.
 
-Two concurrent `Validate` calls of the same token serialize on `mu`. The first writes `T1`; the second observes `T2 ≥ T1` (Go's `time.Now()` is monotonic per process) and writes `T2`. Final stored `LastSeenAt` is `T2` — the "monotonically-non-decreasing" invariant the AC names. A concurrent `Save` snapshots whatever value sits in memory at its lock-acquisition; a concurrent `Remove` between two `Validate` calls makes the second return `(Device{}, false)` cleanly (scan runs after the splice committed; no torn read).
+Two concurrent `Validate` calls of the same token serialize on `mu`. The first writes `T1`; the second observes `T2 ≥ T1` (Go's `time.Now()` is monotonic per process) and writes `T2`. Final stored `LastSeenAt` is `T2` — the "monotonically-non-decreasing" invariant the AC names. A concurrent `Save` snapshots whatever value sits in memory at its lock-acquisition; a concurrent `Remove` between two `Validate` calls makes the second return `(Device{}, ValidateUnknownToken)` cleanly (scan runs after the splice committed; no torn read). A `ClearRedeemBy` racing a `Validate` on the same token resolves on the same mutex either way: the loser reads one side of the clear, and both orderings are correct (cleared → accept forever; not yet cleared but still in-window → accept).
 
 ### Why a method on `*Registry`
 
@@ -184,11 +203,14 @@ The mutation (`r.devices[i].LastSeenAt = ...`) is registry-side. A free function
 
 `internal/devices/auth_test.go`, same-package, table-driven, `t.Parallel()`, stdlib only.
 
-- `TestRegistry_Validate_Hit` — valid token returns matching device; `LastSeenAt` advanced (asserted both on returned snapshot and via `List()` to pin the in-memory mutation); `PairedAt` unchanged.
-- `TestRegistry_Validate_MissUnknown` — unknown token returns `(Device{}, false)`; `List()` shows no mutation.
-- `TestRegistry_Validate_MissEmpty` — empty plain returns `(Device{}, false)`; no mutation. The "no registry lookup" half is enforced structurally by the early-out; the test asserts the observable consequence (no mutation), which is what consumers care about.
+- `TestRegistry_Validate_Hit` — valid token returns matching device and `ValidateAccepted`; `LastSeenAt` advanced (asserted both on returned snapshot and via `List()` to pin the in-memory mutation); `PairedAt` unchanged.
+- `TestRegistry_Validate_MissUnknown` — unknown token returns `(Device{}, ValidateUnknownToken)`; `List()` shows no mutation.
+- `TestRegistry_Validate_MissEmpty` — empty plain returns `(Device{}, ValidateUnknownToken)`; no mutation. The "no registry lookup" half is enforced structurally by the early-out; the test asserts the observable consequence (no mutation), which is what consumers care about.
 - `TestRegistry_Validate_EmptyRegistry` — defends against panic on a zero-init `*Registry`.
 - `TestRegistry_Validate_ConcurrentSameToken` — race-detector probe (16 goroutines) plus monotonic-non-decreasing assertion: sort the per-goroutine observed `LastSeenAt` values and check each `>=` the previous; `final.After(when)` proves the structurally-correct lock didn't accidentally skip the mutation (e.g. value-receiver bug). Race detector catches a missing lock on the slice-element write.
+- `TestRegistry_Validate_RejectsElapsedRedemptionWindow` (#1529) — inverts #1527's `TestRegistry_Validate_IgnoresExpiredRedeemBy` inertness pin: a device whose `RedeemBy` is an hour past now returns `(Device{}, ValidateWindowElapsed)`, `LastSeenAt` is unchanged from its seeded value, and the row is still present in `List()` (the same accessor `pyry pair list` reads) — that last assertion doubles as the AC-5 witness that the reject removed nothing. Keeps the original pin's two non-vacuity assertions (fixture deadline non-zero, genuinely in the past).
+- A forward-dated `RedeemBy` yields `ValidateAccepted` and does advance `LastSeenAt`; a zero-value `RedeemBy` on a long-ago-paired record yields `ValidateAccepted` regardless of how long ago it was paired.
+- `TestDevice_RedemptionWindowElapsed` — table over the unexported `redemptionWindowElapsed`: zero deadline (never elapses), deadline in the past, deadline in the future, and `now` exactly at the deadline (the exclusive boundary — the exported path can't pin this without a fake clock).
 
 ## Tests
 
