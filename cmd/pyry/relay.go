@@ -236,6 +236,19 @@ type relayWiring struct {
 	// internal/relay; this cmd/pyry-typed value never does. nil in foreground/v1 ⇒
 	// no seam is built at all.
 	runSettings func(convID string) (boundRunSettings, bool)
+	// promptState is the resolution half of the conversation system-prompt read
+	// seam (#2152): it resolves a NAMED conversation to the prompt the registry
+	// stores and to what the session it is bound to was actually spawned with
+	// (main.go's resolveConversationPrompt). Built at main.go over the conversations
+	// registry and *sessions.Pool.SystemPromptFor so the internal/sessions
+	// dependency stays at the composition root, exactly as runSettings above is.
+	//
+	// systemPromptFor below composes it into the primitive-typed seam that crosses
+	// into internal/relay, where the stored/spawned-with COMPARISON is computed;
+	// this cmd/pyry-typed value never crosses. nil in foreground/v1 ⇒ no seam is
+	// built at all, and the verb answers its constant no-session reply to every
+	// request.
+	promptState func(convID string) (conversationPromptState, bool)
 	// modelListFor resolves a NAMED conversation to the model menu it should be
 	// offered, already shaped as a marshal-ready protocol.ModelListPayload, for the
 	// relay's on-demand request seam (#2125 fills V2SessionConfig.ModelListFor).
@@ -576,6 +589,77 @@ func runConfigFor(
 	}
 }
 
+// systemPromptFor composes the conversation system-prompt read seam (#2152) into
+// the primitive-typed value that crosses into internal/relay as
+// V2SessionConfig.SystemPromptFor: it takes the resolution half (main.go's
+// resolveConversationPrompt — registry → stored prompt, plus bound session → the
+// text that session was spawned with) and shapes it into a marshal-ready
+// protocol.SystemPromptPayload. Same shape as runConfigFor above: a named,
+// unit-testable adapter pulled out of otherwise untestable wiring.
+//
+// resolve == nil ⇒ nil, decided at BUILD time before any closure exists, so "no
+// path can invoke a nil resolver" is structural rather than a promise —
+// runConfigFor's rule, and the reason a wrapper must never be assigned
+// unconditionally into the config literal (a wrapper is non-nil even when the
+// field it closes over is nil, which would silently defeat the seam's nil
+// contract).
+//
+// The comma-ok crosses UNTOUCHED. false means the daemon does not host the named
+// conversation, and internal/relay turns that into its constant no-session reply;
+// this adapter must not pre-empt that by inventing a payload for it, and it must
+// not fold "hosted but running nothing" into it either — that case is a true
+// resolution whose verdict is no_session and whose stored value still travels.
+func systemPromptFor(resolve func(convID string) (conversationPromptState, bool)) func(convID string) (protocol.SystemPromptPayload, bool) {
+	if resolve == nil {
+		return nil
+	}
+	return func(convID string) (protocol.SystemPromptPayload, bool) {
+		st, ok := resolve(convID)
+		if !ok {
+			return protocol.SystemPromptPayload{}, false
+		}
+		return protocol.SystemPromptPayload{
+			SystemPrompt:        st.stored,
+			SessionPromptStatus: systemPromptStatus(st),
+		}, true
+	}
+}
+
+// systemPromptStatus computes the three-value verdict a system_prompt reply
+// carries: whether the running session was spawned with the stored value, with a
+// different one, or whether there is no running session to compare against.
+//
+// THE COLLAPSE IS THE WHOLE FUNCTION, and skipping it is the single most likely
+// way this verb ships wrong. The registry stores a TRI-state — nil is "no prompt",
+// a non-nil pointer to "" is the explicitly-empty state a client can mint through
+// set_system_prompt, and otherwise text — while Pool.SystemPromptFor returns "" for
+// BOTH no-bytes states by design, because composing the daemon's own prompt with
+// the operator's is the sessions package's business and a caller comparing the
+// composed text would have to strip a constant it does not own. So the comparison
+// runs on the COLLAPSED stored value: a conversation storing an explicitly empty
+// prompt whose session spawned with no operator text MATCHES. Comparing the
+// pointer's presence against the spawned-with string instead — `st.stored != nil`
+// as a proxy for "has bytes" — reports that pair as differing, and an operator
+// would be told a session is stale that is running exactly what they stored.
+//
+// spawnedWith nil is the ONLY spelling of "nothing to compare against". A non-nil
+// pointer to "" is a real answer meaning the session was spawned with no operator
+// text, and it participates in the comparison like any other value; conflating the
+// two would report every bare session as unresolvable.
+func systemPromptStatus(st conversationPromptState) string {
+	if st.spawnedWith == nil {
+		return protocol.SystemPromptStatusNoSession
+	}
+	stored := ""
+	if st.stored != nil {
+		stored = *st.stored
+	}
+	if stored == *st.spawnedWith {
+		return protocol.SystemPromptStatusMatches
+	}
+	return protocol.SystemPromptStatusDiffers
+}
+
 // startRelayV2 wires the Mobile Protocol v2 (Noise_IK E2E) dispatch leg: it
 // loads the binary's persistent static keypair, builds a V2SessionManager
 // against conn.Frames() registering the conversation / messaging / workspace /
@@ -734,6 +818,11 @@ func startRelayV2(
 	// handed the same w.modelWindows, so the two surfaces report one window for
 	// one session; wiring only one would make them disagree (#2107 AC 1).
 	runConfig := runConfigFor(w.runSettings, snapshotUsageFor(w.claudeSessionsDir, w.modelWindows))
+	// The system-prompt read seam (#2152), composed the same way and for the same
+	// reason: the resolution half is cmd/pyry-typed and the seam is not, so the
+	// shaping happens here rather than at the composition root, which does not
+	// import internal/protocol.
+	systemPrompt := systemPromptFor(w.promptState)
 
 	mgr, err := relay.NewV2SessionManager(relay.V2SessionConfig{
 		Frames:      conn.Frames(),
@@ -829,6 +918,17 @@ func startRelayV2(
 		// silently defeat the seam's nil ⇒ refuse contract. A pure read: it mints no
 		// id and mutates no daemon state.
 		ModelListFor: w.modelListFor,
+		// The conversation system-prompt read seam (#2152): what the registry stores
+		// for the NAMED conversation, plus a verdict on whether the session it is
+		// bound to was spawned with that same value — the gap #2151's store-and-
+		// apply-at-next-start design opens, and which an operator editing a prompt
+		// while typing at a live child cannot otherwise see. Composed above rather
+		// than assigned from w directly, exactly as RunConfigFor is, because the
+		// resolution half is cmd/pyry-typed; systemPromptFor collapses to nil when
+		// that half is unwired, so no wrapper can defeat the seam's nil contract. A
+		// pure read: it holds nothing that can start, restart, rotate or interrupt a
+		// session, which is what keeps reading a prompt from touching a running one.
+		SystemPromptFor: systemPrompt,
 		// Connect-time modal reconcile source (#877): enumerates the outstanding-
 		// modal registry as marshal-ready modal_shown payloads so a phone that
 		// connects/reconnects while a permission prompt is pending is unicast the

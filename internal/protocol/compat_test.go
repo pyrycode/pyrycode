@@ -302,6 +302,13 @@ var v2OnlyTypes = map[string]bool{
 	// v2 on-demand model-list request verb (inbound control). Its ANSWER is
 	// TypeModelList above, unchanged — this verb mints no second outbound shape.
 	TypeRequestModelList: true,
+	// v2 conversation system-prompt read pair: the request verb (inbound control)
+	// and the reply it is answered with (outbound). Unlike the model-list verb
+	// above this one DOES mint its own outbound shape, because the write half's
+	// ack (TypeConversationUpdated) is broadcast and deliberately carries no
+	// prompt.
+	TypeRequestSystemPrompt: true,
+	TypeSystemPrompt:        true,
 }
 
 // TestTypeConstants_V1V2Partition pins the architectural asymmetry that
@@ -391,6 +398,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestHistory, TypeHistoryPage,
 		// v2 on-demand model-list request verb (inbound control).
 		TypeRequestModelList,
+		// v2 conversation system-prompt read pair.
+		TypeRequestSystemPrompt, TypeSystemPrompt,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

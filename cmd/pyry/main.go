@@ -1041,6 +1041,15 @@ func runSupervisor(args []string) error {
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
 		},
+		// The registry half and the live-session half of one conversation's
+		// system-prompt picture (#2152), resolved together over the same registry and
+		// pool. An inline closure like runSettings above rather than a named adapter
+		// like modelListFor below, and for the reason that pair differs: this value is
+		// cmd/pyry-typed, so no internal/protocol annotation is needed here and none
+		// would compile — this file does not import that package.
+		promptState: func(convID string) (conversationPromptState, bool) {
+			return resolveConversationPrompt(convReg, pool, convID)
+		},
 		modelWindows: sessionModelWindows(pool),
 		// The conversation-keyed half of the model-list pair (#2125), built beside its
 		// enumerating twin below over the same registry and pool.
@@ -1703,6 +1712,107 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 		yolo:           s.YOLO,
 		permissionMode: s.PermissionMode,
 	}, true
+}
+
+// spawnedPromptReader is the single pool method resolveConversationPrompt needs,
+// declared at the consumer per CODING-STYLE; *sessions.Pool satisfies it with no
+// adapter. It exists for the same stated testing need sessionSettingsReader above
+// records: "no pool lookup is performed for an unbound conversation" is a claim
+// about CALLS, and the returned values cannot carry it — a conversation whose
+// session was spawned with no operator text reports exactly the "" a refusal
+// reports — so the double has to be able to count. Do not widen it past
+// SystemPromptFor.
+type spawnedPromptReader interface {
+	SystemPromptFor(id sessions.SessionID) (string, error)
+}
+
+// conversationPromptState is one conversation's system-prompt picture: what the
+// registry stores today, and what the session it is currently bound to was
+// actually spawned with. The two are read from different places and fail
+// differently, which is the whole reason the type has two fields rather than one
+// verdict — see resolveConversationPrompt.
+//
+// A struct rather than a two-value return, boundRunSettings' stated reason: two
+// adjacent same-typed values in a return list transpose silently, and here the
+// transposition would invert every verdict while type-checking perfectly.
+type conversationPromptState struct {
+	// stored is the registry's tri-state, COPIED rather than aliased: nil is "no
+	// prompt", a non-nil pointer to "" is the explicitly-empty state, otherwise
+	// the operator's text.
+	stored *string
+	// spawnedWith is the operator text the conversation's CURRENT session was
+	// spawned with, or nil when there is no running session to compare against —
+	// the conversation is bound to none, or bound to one the pool no longer holds.
+	// A non-nil pointer to "" is a real answer meaning "spawned with no operator
+	// text", and Pool.SystemPromptFor returns it for BOTH of the registry's
+	// no-bytes states, which is why the comparison must collapse before it
+	// compares (systemPromptFor, in relay.go, is where that happens).
+	spawnedWith *string
+}
+
+// resolveConversationPrompt is the system-prompt twin of resolveBoundRunSettings:
+// it resolves a named conversation to its stored prompt AND to what its running
+// session was spawned with, for the conversation-keyed read seam #2152 puts on the
+// wire (shaped into a payload at relay.go's systemPromptFor).
+//
+// THE TWO HALVES FAIL DIFFERENTLY AND THE RESULT KEEPS THEM APART. The comma-ok
+// means only "this daemon does not host the named conversation" — an unknown id,
+// returned BEFORE the pool is touched. A hosted conversation with no running
+// session is a successful resolution whose spawnedWith is nil, because "nothing is
+// running" is precisely when an operator most needs to see what is stored, and
+// collapsing it into a refusal would suppress the stored value.
+//
+// The empty-CurrentSessionID guard is the #678 isolation enforcement point
+// resolveBoundSession documents. Pool.SystemPromptFor is a plain map read and no
+// session is keyed under "", so it would miss rather than return the bootstrap —
+// but the guard stays anyway, so fall-through-to-a-shared-session has no
+// expression in this code path at all rather than depending on a fact about
+// another package's map. An empty convID lands in the first guard: no conversation
+// carries an empty id, so the pool is never touched for it either.
+//
+// stored is a COPY OF THE POINTEE, never conv.SystemPrompt itself. Registry.Get
+// copies the record shallowly under the registry mutex, so the pointer it returns
+// aliases registry-held memory — the aliasing hazard SetSystemPrompt's own block
+// flags for anything that projects the field. The read is race-free as it stands
+// (the pointer is taken under the lock, and Go strings are immutable), so the copy
+// is forward defence against a later change that retains or mutates it, not a fix
+// for a live race.
+//
+// SECURITY: convID is untrusted network input and never leaves this function — it
+// is a lookup key into the daemon's own registry and nothing else. The SESSION id
+// handed to the pool is daemon-authored, read off the resolved record, so no
+// caller can reach another conversation's session through here.
+// Pool.SystemPromptFor's error is discarded rather than wrapped: it is dropped bare
+// precisely so a hostile or malformed id cannot be reflected into a log line or
+// wire frame a caller builds from it, and an evicted session is not an operational
+// event — it is the ordinary "nothing is running" answer. This resolver takes no
+// logger and MUST NOT grow one: the only things a "why did it not resolve" line
+// could carry are the conversation id and the operator's prompt.
+//
+// Concurrency: the registry lock and the pool lock are taken SEQUENTIALLY and
+// never nested, so this adds no edge to the daemon's lock order
+// (Pool.SystemPromptFor requires p.mu unheld, and nothing is held here when it is
+// called). The two acquisitions leave a window in which a rotation or an idle
+// eviction lands between them, so a verdict can be one rotation stale; the client
+// repairs that by asking again. Closing it would need a combined registry+pool
+// acquisition no existing path takes — resolveBoundRunSettings' single-acquisition
+// argument does not transfer, because there the values were fields of ONE session.
+func resolveConversationPrompt(convReg *conversations.Registry, pool spawnedPromptReader, convID string) (conversationPromptState, bool) {
+	conv, ok := convReg.Get(conversations.ConversationID(convID))
+	if !ok {
+		return conversationPromptState{}, false
+	}
+	var st conversationPromptState
+	if conv.SystemPrompt != nil {
+		stored := *conv.SystemPrompt
+		st.stored = &stored
+	}
+	if conv.CurrentSessionID != "" {
+		if spawned, err := pool.SystemPromptFor(sessions.SessionID(conv.CurrentSessionID)); err == nil {
+			st.spawnedWith = &spawned
+		}
+	}
+	return st, true
 }
 
 // startFreshRunner is the new_session twin of interruptRunner: it dispatches a

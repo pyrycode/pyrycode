@@ -102,10 +102,14 @@ also pass.
 
 `SettingsFor`'s shape (see [that doc](sessions-package-key-types-pool-settingsfor.md)):
 one `p.mu.RLock`, `ErrSessionNotFound` on a miss, otherwise the stored value —
-here, the **operator** half only, not the composed whole, which is what lets a
-future wire-facing consumer (#2152) compare against `Conversation.SystemPrompt`
-without stripping a constant it does not own. In-process only; no control-plane
-verb or wire frame reads it yet.
+here, the **operator** half only, not the composed whole, which is what lets
+its wire-facing consumer (#2152's `request_system_prompt` handler, see
+[Inbound request_system_prompt](v2-session-manager-state-machine-inbound-request-system-prompt-systempromptfor-seam.md))
+compare against `Conversation.SystemPrompt` without stripping a constant it
+does not own. That comparison has to run on this accessor's **collapsed**
+return — it reports `""` for both of the registry's no-bytes states by
+design — never on whether the registry's stored pointer is nil; the seam doc
+has the trap. In-process only; no control-plane verb writes it.
 
 ## Known gap: `Pool.New`'s startup purge can leak the settings file (non-blocking, #2150 code review)
 

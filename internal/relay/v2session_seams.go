@@ -676,6 +676,78 @@ type V2SessionConfig struct {
 	// emit from forwardEnvelope to forwardToRun in the same change.
 	ModelListFor func(conversationID string) (protocol.ModelListPayload, bool)
 
+	// SystemPromptFor reports the NAMED conversation's stored system prompt and how
+	// the running session's spawned-with value compares to it, already shaped as a
+	// marshal-ready system_prompt payload, for an inbound request_system_prompt
+	// (#2152). handleRequestSystemPrompt is its sole reader.
+	//
+	// CONVERSATION-KEYED, ModelListFor's shape above: a string in, a payload and a
+	// comma-ok out, so this package imports neither internal/sessions nor
+	// internal/conversations and protocol is already imported both sides.
+	//
+	// IT ANSWERS TWO QUESTIONS AT ONCE AND THAT IS THE POINT. The stored value comes
+	// from the conversations registry; the spawned-with value comes from the live
+	// session (#2150's session-keyed Pool.SystemPromptFor). A client needs both,
+	// because a stored prompt takes effect only at the conversation's NEXT session
+	// start — so the stored value alone would tell an operator who edits it and keeps
+	// typing that their change is live when it is not. The producer resolves both and
+	// reports the COMPARISON rather than the second value; see the collapse rule
+	// below.
+	//
+	// THE COMPARISON IS COMPUTED ON THE COLLAPSED STORED VALUE, and getting this
+	// wrong is the single most likely way this path ships broken. The registry stores
+	// a tri-state (nil = no prompt, non-nil "" = explicitly empty, otherwise text)
+	// and Pool.SystemPromptFor returns "" for BOTH no-bytes states by design, because
+	// composing is the sessions package's business. So a conversation storing an
+	// explicitly empty prompt whose session spawned with no operator text MATCHES,
+	// and must not be reported as differing. The rule lives in the cmd/pyry producer,
+	// which is the only place holding both halves; this package neither re-derives it
+	// nor second-guesses it.
+	//
+	// TWO DIFFERENT RESOLUTION FAILURES, NOT ONE, and the seam keeps them apart even
+	// though the wire merges them. false means this daemon does not host the named
+	// conversation. A hosted conversation with no running session is TRUE, with the
+	// payload's SessionPromptStatus at protocol.SystemPromptStatusNoSession — the
+	// stored value is still reported, because "there is nothing running" is exactly
+	// when an operator most needs to see what is stored. Collapsing the two at the
+	// producer would make that impossible to express.
+	//
+	// Comma-ok, and a caller MUST NOT read the payload on false — the rule
+	// RunConfigFor and ModelListFor both state, and it is pinned here against a
+	// POISONED refusal double rather than borrowed from the producer's habit of
+	// zeroing its refusal return. Unlike ModelListFor, though, false is not turned
+	// into an error frame: this verb answers the constant no-session reply, which is
+	// a real answer, so an unhosted conversation is indistinguishable from a hosted
+	// one holding nothing and the verb is not a membership oracle.
+	//
+	// Optional: nil ⇒ every request is answered with that same constant reply
+	// (foreground / v1 / unwired), never an error and never a silent drop. This is
+	// deliberately NOT SettingsUpdater's nil posture: that seam is a write path that
+	// owes a distinguishable "unavailable", where a read documented as always
+	// answering one shape has nothing to gain from a second one.
+	//
+	// BOUNDED TIME, on the Run goroutine. The handler answers inline rather than
+	// handing off to the conn's appFrameWorker, so an implementation MUST stay a
+	// bounded in-memory read — production wires a registry lookup plus one pool map
+	// read. An implementation that reads a file belongs off Run, and moving it there
+	// means switching the handler's emit from forwardEnvelope to forwardToRun in the
+	// same change (see the handler's file header).
+	//
+	// SECURITY: conversationID is untrusted network input and stays a lookup key into
+	// the daemon's own registry — never returned, never joined into a path, never
+	// logged, never wrapped into an error. The SESSION id the producer reads the
+	// spawned-with value under is daemon-authored, taken from the resolved registry
+	// record, so a caller can never reach another conversation's session through this
+	// seam (the #678 hazard, closed by construction). The returned SystemPrompt is
+	// OPERATOR-AUTHORED TEXT that becomes standing instructions to a claude child: it
+	// is never logged at any level, and it reaches the wire only over the unicast,
+	// AEAD-sealed reply to the conn that asked — never the broadcast push path, which
+	// is why the write half's conversation_updated ack carries no prompt either.
+	// Read-only reflection: this seam holds nothing that can start, restart, rotate or
+	// interrupt a session, which is the structural half of "reading the prompt leaves
+	// a running session alone". Do not widen it.
+	SystemPromptFor func(conversationID string) (protocol.SystemPromptPayload, bool)
+
 	// ModalResolver resolves inbound modal_answer / modal_cancel control
 	// frames. Optional: when nil, both are inert no-ops (the modal bridge is
 	// simply unwired — foreground, or pre-#708 before the producer is live).
