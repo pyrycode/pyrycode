@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/pyrycode/pyrycode/internal/devices"
 	"github.com/pyrycode/pyrycode/internal/noise"
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
@@ -283,16 +284,32 @@ func (m *V2SessionManager) handleNoiseInit(ctx context.Context, s *V2Session, in
 		}
 	}
 
-	device, tokenOK := m.cfg.Devices.Validate(helloPayload.Token)
-	if !tokenOK {
+	device, tokenResult := m.cfg.Devices.Validate(helloPayload.Token)
+	if tokenResult != devices.ValidateAccepted {
 		// Token-failure path: emit AEAD-sealed error envelope and the
 		// 4401 close in a SINGLE routing envelope so the phone observes
 		// the error frame before the WS close (spec § Failure modes,
 		// line 436; matches v1 dispatcher's atomicity pattern).
+		//
+		// An elapsed redemption window (#1529) and an unrecognised token
+		// share this body wholesale — same sealed auth.invalid_token, same
+		// MsgInvalidToken, same 4401, same frame order. Only the log event
+		// below tells them apart, and it does so server-side only: a
+		// client-visible difference would turn the handshake into an oracle
+		// confirming that a photographed token was once real. Selecting a
+		// string here rather than branching into a second reject body is
+		// what keeps that identity structural.
+		rejectEvent := "v2.handshake.reject.invalid_token"
+		if tokenResult == devices.ValidateWindowElapsed {
+			rejectEvent = "v2.handshake.reject.redemption_window_elapsed"
+		}
 		errFrame, sealErr := m.sealError(s, protocol.CodeAuthInvalidToken,
 			MsgInvalidToken, helloID)
+		// SECURITY: the line carries neither the plain token nor its hash —
+		// nor the deadline, which would narrow when the token was minted for
+		// anyone reading logs. The event name is the whole discriminator.
 		m.cfg.Logger.Warn("relay: v2 handshake reject",
-			"event", "v2.handshake.reject.invalid_token",
+			"event", rejectEvent,
 			"conn_id", s.connID,
 			"close_code", int(StatusUnauthorized))
 		// Best-effort: send noise_resp first (so the AEAD channel exists

@@ -61,10 +61,12 @@ type Device struct {
 	// already been redeemed: a redeemed device keeps authenticating past
 	// it, which is why the name is not ExpiresAt.
 	//
-	// Nothing reads this field yet — Validate and the v2 handshake are
-	// pure hash lookups, so an already-past deadline still authenticates.
-	// Recording the first redemption and enforcing the deadline are
-	// separate follow-on slices.
+	// Validate enforces it (#1529): a record whose deadline is set and
+	// already past refuses with ValidateWindowElapsed, and the v2 handshake
+	// turns that into the same 4401 an unknown token gets. The zero value
+	// authenticates forever, which is both the migration path for a record
+	// predating the field and — since #1528's redemption clear — how an
+	// already-redeemed device is represented.
 	//
 	// omitzero, not omitempty: encoding/json omits empty scalars, maps and
 	// slices, never a struct, so omitempty on a time.Time is a silent
