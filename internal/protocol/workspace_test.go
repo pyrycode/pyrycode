@@ -101,6 +101,80 @@ func TestRecentWorkspacesListPayload_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRenameWorkspacePayload_RoundTrip pins the request wire shape (#2207). The
+// fixture carries a SET (a non-null label), the half the reply fixture below does
+// not cover.
+func TestRenameWorkspacePayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "rename_workspace.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeRenameWorkspace {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeRenameWorkspace)
+	}
+
+	var p RenameWorkspacePayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.Path != "/Users/juhana/pyry-workspace/alpha" {
+		t.Errorf("Path: got %q", p.Path)
+	}
+	if p.Label == nil || *p.Label != "Tax filing" {
+		t.Errorf("Label: got %v, want pointer to %q", p.Label, "Tax filing")
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
+// TestWorkspaceUpdatedPayload_RoundTrip pins the reply wire shape (#2207). The
+// fixture deliberately carries the CLEAR — an explicit "label":null — because
+// that is the arm an accidental `omitempty` on the field would break: a nil
+// pointer would marshal to an absent key, and the byte comparison below would
+// then differ from a fixture that has one. A set-label fixture could not tell the
+// two encodings apart.
+func TestWorkspaceUpdatedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "workspace_updated.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeWorkspaceUpdated {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeWorkspaceUpdated)
+	}
+	if env.InReplyTo == nil || *env.InReplyTo != 9 {
+		t.Errorf("InReplyTo: got %v, want pointer to 9", env.InReplyTo)
+	}
+
+	var p WorkspaceUpdatedPayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if p.Path != "/Users/juhana/pyry-workspace/beta" {
+		t.Errorf("Path: got %q", p.Path)
+	}
+	if p.Label != nil {
+		t.Errorf("Label: got pointer to %q, want nil (a cleared label is null, not \"\")", *p.Label)
+	}
+
+	out, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Equal(canonical(t, out), canonical(t, raw)) {
+		t.Errorf("round-trip bytes differ:\n got: %s\nwant: %s", out, raw)
+	}
+}
+
 func TestWorkspaceFolderCreatedPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "workspace_folder_created.json")
 

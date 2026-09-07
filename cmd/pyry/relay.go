@@ -836,9 +836,14 @@ func startRelayV2(
 		ServerID:    string(serverID),
 		Logger:      logger,
 		Handlers: map[string]dispatch.Handler{
-			protocol.TypeListConversations:     handlers.ListConversations(w.convReg),
-			protocol.TypeCreateConversation:    handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
-			protocol.TypeRenameConversation:    handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			protocol.TypeListConversations:  handlers.ListConversations(w.convReg),
+			protocol.TypeCreateConversation: handlers.CreateConversation(w.convReg, w.creator, resolveConversationsRegistryPath(w.instanceName), w.defaultCwd, logger),
+			protocol.TypeRenameConversation: handlers.RenameConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
+			// rename_workspace is the workspace-keyed sibling of the line above
+			// (#2207). It takes no session surface for the same reason
+			// set_system_prompt does not: naming a folder must not disturb anything
+			// running in it, and a handler holding no pool or runner seam cannot.
+			protocol.TypeRenameWorkspace:       handlers.RenameWorkspace(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypePromoteConversation:   handlers.PromoteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeDeleteConversation:    handlers.DeleteConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger),
 			protocol.TypeArchiveConversation:   handlers.ArchiveConversation(w.convReg, resolveConversationsRegistryPath(w.instanceName), logger, true),

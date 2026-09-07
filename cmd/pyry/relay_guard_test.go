@@ -75,6 +75,7 @@ var inboundTypes = map[string]string{
 	"TypeSetSystemPrompt":       "map-dispatched",
 	"TypeCreateWorkspaceFolder": "map-dispatched",
 	"TypeRecentWorkspaces":      "map-dispatched",
+	"TypeRenameWorkspace":       "map-dispatched",
 	"TypeRegisterPushToken":     "map-dispatched",
 
 	// Surface #2 — switch-intercepted before dispatch.Route (dispatchAppFrame).
@@ -172,6 +173,15 @@ var excludedTypes = map[string]string{
 	"TypeConversationDeleted":    "reply",
 	"TypeWorkspaceFolderCreated": "reply",
 	"TypeRecentWorkspacesList":   "reply",
+	// The rename_workspace ack (#2207). "reply" is literally this block's own
+	// definition today — it is correlated to its request by in_reply_to and has
+	// exactly one producer. #2209 adds an unsolicited host-side fan-out to the
+	// other connected clients, at which point this becomes the map's second
+	// dual-classified entry alongside TypeConversationUpdated below. That is a
+	// comment change and nothing more: no assertion parses either map's values,
+	// and the type never stops being classified, so nothing goes red when the
+	// second producer lands.
+	"TypeWorkspaceUpdated":       "reply",
 	"TypeSessionSettingsUpdated": "reply",
 	"TypeSessionSettings":        "reply",
 

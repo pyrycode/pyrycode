@@ -137,6 +137,27 @@ const (
 	// only way to say "no list", alongside the absence of a frame on the
 	// unsolicited paths.
 	CodeModelListUnavailable = "model_list.unavailable" // the daemon hosts the conversation but has no vocabulary to answer with; retryable
+
+	// Workspace error (#2207; docs/protocol-mobile.md § Error codes). MINTED WITH
+	// THE HANDLER THAT SENDS IT, the sequencing #2052, the history group and #2125
+	// each followed: no reject vocabulary exists ahead of the code that can emit it.
+	//
+	// NOT CodeConversationNotFound, and the distinction is the point rather than a
+	// naming preference. A rename_workspace names no conversation at all — its key
+	// is a workspace path, and N conversations may share one. Answering with the
+	// conversation code would send a client looking for a row it never asked about
+	// and could not act on.
+	//
+	// IT IS THE MAP'S ONLY CEILING, which is why it is a containment property and
+	// not merely a UX nicety. A workspace_labels key is creatable only at a path
+	// that byte-equals a stored conversation's cwd, so the key count is bounded by
+	// the number of distinct cwds the daemon actually hosts. Relaxing this refusal
+	// would remove that bound.
+	//
+	// NON-RETRYABLE: the same path fails identically until a conversation exists
+	// there, which is not something a retry accomplishes. The message is static and
+	// never echoes the requested path.
+	CodeWorkspaceNotFound = "workspace.not_found"
 )
 
 // Envelope-type constants — wire values for Envelope.Type
@@ -259,6 +280,31 @@ const (
 	// workspace paths ordered most-recent-first, each with its most-recent
 	// last_used_at. Also a inboundAppTypeSet member.
 	TypeRecentWorkspacesList = "recent_workspaces_list"
+	// TypeRenameWorkspace is a phone → binary dispatch.Route write verb (like
+	// rename_conversation / set_system_prompt): it sets or clears the
+	// operator-chosen display name of a workspace, so a folder whose name is
+	// unhelpful reads the way the operator thinks of it. The payload's label is
+	// nullable so "clear" is expressible distinctly from "set it to the empty
+	// string"; the non-blank check and the MaxWorkspaceLabelBytes bound live in the
+	// handler, because conversations.Registry.SetWorkspaceLabel is documented as
+	// validating nothing. It is a inboundAppTypeSet member, not a v2 control frame —
+	// see the v1/v2 partition in envelope.go / compat_test.go.
+	//
+	// KEYED BY WORKSPACE, NOT BY CONVERSATION, and that is why its reply is a new
+	// type rather than the reused conversation_updated record change_workspace
+	// answers with: N conversations share one cwd, a workspace has no row of its
+	// own, and no conversation record could carry the change without naming one
+	// arbitrary member of that set.
+	TypeRenameWorkspace = "rename_workspace"
+	// TypeWorkspaceUpdated is the binary → phone reply to a rename_workspace,
+	// correlated via in_reply_to. It carries the workspace's path and its stored
+	// label (null when cleared). Also a inboundAppTypeSet member.
+	//
+	// A NEW TYPE RATHER THAN A NEW ARM ON AN EXISTING ONE, deliberately, for
+	// compatibility: an un-upgraded client drops an unknown frame type, whereas a
+	// new field or a new meaning on a type it already handles would be rendered
+	// wrongly rather than ignored.
+	TypeWorkspaceUpdated = "workspace_updated"
 
 	// Push.
 	TypeRegisterPushToken = "register_push_token"

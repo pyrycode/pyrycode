@@ -484,3 +484,32 @@ Verification gate (§ B2): `go test -race` on `./internal/protocol/... ./interna
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — Phase B, open questions resolved
+
+1. **The reply fixture carries the CLEAR, not a set** (Open Question 1, and the one resolution that
+   changed a decision). `testdata/workspace_updated.json` is `"label":null`; the request fixture
+   `testdata/rename_workspace.json` carries a set. The reason is discrimination rather than
+   coverage: `canonical` is `json.Compact`, so the round-trip is a byte comparison, and a nil
+   pointer under an accidental `omitempty` would marshal to an **absent key** — which differs from a
+   fixture holding `"label":null` and therefore reddens. A set-label fixture cannot tell the two
+   encodings apart, since a set value marshals identically either way. The two fixtures between them
+   now cover both states.
+2. **No second length pin exists.** `TestTypeConstants_V1V2Partition` carries no `len(all)` check of
+   its own — only `TestInboundAppTypeSet_CoversAllExportedTypeConstants` does, and its pin moved
+   24 → 26 as planned (Open Question 2).
+3. **Nothing else keys on the error-code set** (Open Question 3).
+   `TestErrorCode_Constants_MatchSpec` carries a `len(cases) != len(want)` drift check, satisfied by
+   adding `CodeWorkspaceNotFound` to both of its maps. No other guard reddened on the new code,
+   confirming the ticket's reading that this pin is convention rather than a totality gate.
+4. **`replyError` echoes nothing** (Open Question 4). It marshals exactly
+   `protocol.ErrorPayload{Code, Message, Retryable}` and replies `TypeError`; there is no field
+   through which a request byte could reach the wire. The design is unchanged — the question was
+   whether every reject branch's no-echo property rests on the static message alone, and it does.
+   `TestRenameWorkspace_NoEcho_RejectRepliesCarryNoPayloadByte` pins it independently by scanning the
+   whole outbound frame, not just the message field.
+
+The security review's one SHOULD FIX landed as specified: `WorkspaceUpdatedPayload.Path` is
+projected from the matched row's `Cwd`, so no request byte reaches the wire on any branch.

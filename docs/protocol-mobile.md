@@ -481,6 +481,8 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
 | `recent_workspaces_list` | binary → phone | no | Reply to `recent_workspaces`, correlated by `in_reply_to`; carries the distinct workspace paths, most-recent-first, each with its most-recent `last_used_at`. |
+| `rename_workspace` | phone → binary | no | Sets or clears a workspace's operator-chosen display name, keyed by the workspace's `cwd`. Replies with `workspace_updated`. Keyed by **workspace, not conversation** — N conversations share one `cwd` — which is why the reply is its own type rather than the reused `conversation_updated` record. See [Renaming a workspace](#renaming-a-workspace). |
+| `workspace_updated` | binary → phone | no | Reply to `rename_workspace`, correlated by `in_reply_to`; carries the workspace's path and its stored label (`null` when cleared). A **new type rather than a new arm on an existing one**, so an un-upgraded client drops it as unknown instead of mis-rendering a record it already handles. |
 | `register_push_token` | phone → binary | no | |
 | `ack` | either | no | |
 | `error` | either | no | |
@@ -636,6 +638,47 @@ Example — a conversation whose stored prompt has moved on from what its live s
 ```
 
 **Prompt bytes reach no daemon log on any path**, the not-found and malformed branches included — nor does the prompt's length, nor the conversation id, nor the verdict, which is derived from the operator's text. Every record this verb writes carries a `conn_id` and an event name and nothing else.
+
+### Renaming a workspace
+
+`rename_workspace` sets or clears a workspace's display name — the operator-chosen label a client shows instead of, or beside, the folder's own path, so a workspace whose folder is called something unhelpful reads the way the operator thinks of it. **The name travels with the workspace, not with the client**: it is stored on the daemon, so every client sees the same label.
+
+It is keyed by **workspace, not by conversation**. A workspace is a folder — its `cwd` — and N conversations may share one, so no conversation record could carry the change without naming one arbitrary member of that set. That is why the reply is its own type rather than the reused `conversation_updated` record `change_workspace` answers with.
+
+```json
+{
+  "id": 9, "type": "rename_workspace", "ts": "...",
+  "payload": { "path": "/Users/juhana/pyry-workspace/alpha", "label": "Tax filing" }
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | string | The workspace being named: the exact `cwd` string stored on one or more conversations, **compared as bytes**. Two paths differing only in a trailing separator, a trailing space, or case are distinct workspaces. Archived conversations count — a workspace is a folder, and archiving a conversation does not un-name its folder. A path matching no conversation is refused. It is a **lookup key and nothing more**: the daemon never resolves, joins, stats, opens, or executes it. |
+| `label` | string \| null | The display name. **Nullable**, and the three states are distinct — see the table below. |
+
+| Value | Meaning |
+|---|---|
+| `null`, or the key omitted | **Clear.** A later read reports the label **absent**, not as a present empty string. |
+| `""` or whitespace only | **Refused** — clearing is said with a `null`, not with a blank string. |
+| any other string | Stored **verbatim** — the raw wire value, untrimmed — up to **128 UTF-8 bytes** (inclusive). Trimming is used only to decide blankness. |
+
+The **128-byte bound counts UTF-8 bytes, not runes**, and an over-bound label is **refused, never truncated**: a silently shortened name is a different name than the operator typed, and they would have no way to tell. The bound is a size limit and not a safety property — 128 bytes accommodates an ANSI escape run or a newline-injection payload several times over, so rendering a stored label safely remains the client's job.
+
+The reply is `workspace_updated`, correlated by `in_reply_to`, carrying the path and the label now stored (`null` when cleared). The change is persisted eagerly, so it **survives a daemon restart**.
+
+**This reply goes to the requester only.** A client that renames a workspace on one device and re-lists on another sees the new label through the list, not through a pushed frame.
+
+Refusals are all non-retryable, and every one of them carries a fixed message that echoes no supplied byte:
+
+| Condition | Code |
+|---|---|
+| Payload will not decode | `protocol.malformed` |
+| `label` is empty or whitespace-only | `protocol.malformed` |
+| `label` exceeds 128 UTF-8 bytes | `protocol.malformed` |
+| `path` matches no conversation's `cwd` | `workspace.not_found` |
+
+Nothing is stored on any refusal, and no reject reply carries a byte of the request — not the path, not the label, not the decode error. **The label reaches no daemon log on any path**, and neither does the path: a path is a filesystem location on the daemon's host, and on every reject branch it is a value the requester supplied. Every record this verb writes carries a `conn_id` and an event name and nothing else.
 
 ### `hello` (v2-specific note)
 
@@ -2977,6 +3020,7 @@ Application-level error codes (carried in `error` envelopes inside `noise_msg` p
 | **`history.invalid_page_size`** | no | A [`request_history`](#request_history) whose `limit` is **negative** (#2116). **`0` is not a reject** — it asks the daemon to choose. An ask *above* the ceiling is not a reject either; it is clamped. See [Page size](#page-size). |
 | **`history.invalid_cursor`** | no | A [`request_history`](#request_history) whose `cursor` does not decode, was minted for another conversation, or names a position not in this log (#2116). **Deliberately indistinguishable** across all three — a disclosure decision, not an imprecision: the distinctions are exactly what a probe would want, and the daemon's log raises one sentinel for all three, so the handler *cannot* branch on what it must not distinguish. The refusal **never echoes the cursor back**. Repair: restart the walk with an empty cursor. |
 | **`model_list.unavailable`** | yes, after a backoff | A [`request_model_list`](#asking-for-a-model-list-on-demand) naming a conversation the daemon **does** host, for which it has **no model vocabulary to answer with** (#2125). **It is not an empty menu**, and that distinction is the reason the code exists: `models` is documented never-`null` and never a stand-in for "unknown", so "no list" has to be said in an `error` frame rather than in a degraded `model_list`. **Deliberately merged** across two causes — nothing retained anywhere (no first child in the pool, one started with no `claude` at all, or its `initialize` reply not yet arrived) and a daemon with no model-list source wired. Both mean the same thing to a client and have the same repair, and a distinguishable code would publish whether the *host* is configured a certain way, which is a fact about the machine rather than about the request. **Retryable** because the dominant cause clears on its own: a child that has not answered `initialize` yet will, with the client changing nothing. Back off; never resend immediately. Contrast `conversation.not_found`, which this verb answers when the daemon does not host the conversation at all — permanent for the request as sent. The message is static and names no model, no conversation and no path. |
+| **`workspace.not_found`** | no | A [`rename_workspace`](#renaming-a-workspace) whose `path` matches no stored conversation's `cwd` (#2207). Comparison is **byte-exact** and includes archived conversations, so a near-miss — a trailing separator, a trailing space, a case difference — is a miss. **Not `conversation.not_found`**, and the distinction is the point rather than a naming preference: this request names no conversation at all, so the conversation code would send a client looking for a row it never asked about and could not act on. It applies to a **clear as much as to a set** — a `null` label at an unmatched path is refused, not silently accepted. Permanent for the request as sent: the same path fails identically until a conversation exists there, which is not something a retry accomplishes. The message is static and **never echoes the requested path**, which matters more here than on the conversation verbs because a path is a filesystem location on the daemon's host. |
 | **`history.unavailable`** | yes, after a backoff | The daemon could not read the conversation's log (#2116) — a corrupt or unrecognised segment, an I/O failure, or a daemon whose log is wired but not open. The **only retryable** member of this group, because every cause can clear without the client changing its request; the other three are permanent for the request as sent. **Back off; never resend immediately.** The message is static and names no path: the log's own errors format absolute filesystem paths, so no value derived from one reaches the wire. |
 
 WS close codes used at the transport layer:
