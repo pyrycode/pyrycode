@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 )
 
@@ -115,7 +116,7 @@ func TestChannelCreator_CreatesPromotedRow(t *testing.T) {
 
 	reg, path := newChannelTestRegistry(t, home)
 	minter := &stubMint{returnID: "11111111-2222-4333-8444-555555555555"}
-	create := channelCreator(reg, minter.mint, path, discardLogger())
+	create := channelCreator(reg, minter.mint, path, nil, discardLogger())
 
 	id, err := create(proj, "")
 	if err != nil {
@@ -198,7 +199,7 @@ func TestChannelCreator_NameOverride(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reg, path := newChannelTestRegistry(t, t.TempDir())
-			create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, discardLogger())
+			create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, nil, discardLogger())
 
 			if _, err := create(proj, tt.supplied); err != nil {
 				t.Fatalf("create error = %v", err)
@@ -227,7 +228,7 @@ func TestChannelCreator_RefusesEscapingDir(t *testing.T) {
 
 	reg, path := newChannelTestRegistry(t, home)
 	minter := &stubMint{returnID: "must-not-be-minted"}
-	create := channelCreator(reg, minter.mint, path, discardLogger())
+	create := channelCreator(reg, minter.mint, path, nil, discardLogger())
 
 	id, err := create(outside, "")
 	if err == nil {
@@ -285,7 +286,7 @@ func TestChannelCreator_RefusesEmptyCwd(t *testing.T) {
 
 	reg, path := newChannelTestRegistry(t, home)
 	minter := &stubMint{returnID: "must-not-be-minted"}
-	create := channelCreator(reg, minter.mint, path, discardLogger())
+	create := channelCreator(reg, minter.mint, path, nil, discardLogger())
 
 	if _, err := create("", ""); err == nil || err.Error() != msgChannelCwdRejected {
 		t.Fatalf("create(\"\") error = %v, want the static %q", err, msgChannelCwdRejected)
@@ -319,7 +320,7 @@ func TestChannelCreator_MintFailureLeavesNoRow(t *testing.T) {
 
 	reg, path := newChannelTestRegistry(t, home)
 	minter := &stubMint{returnErr: errors.New("sessions: create supervisor: " + proj)}
-	create := channelCreator(reg, minter.mint, path, discardLogger())
+	create := channelCreator(reg, minter.mint, path, nil, discardLogger())
 
 	_, err := create(proj, "")
 	if err == nil {
@@ -354,7 +355,7 @@ func TestChannelCreator_DuplicatesPermitted(t *testing.T) {
 	}
 
 	reg, path := newChannelTestRegistry(t, home)
-	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, discardLogger())
+	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, nil, discardLogger())
 
 	first, err := create(proj, "")
 	if err != nil {
@@ -397,7 +398,7 @@ func TestChannelCreator_WrapsSpawnDirSentinel(t *testing.T) {
 	trustMark = func(string) (string, error) { return "", errors.New("write ~/.claude.json: disk full") }
 
 	reg, path := newChannelTestRegistry(t, home)
-	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, discardLogger())
+	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, nil, discardLogger())
 
 	_, err := create(proj, "")
 	if err == nil {
@@ -413,6 +414,161 @@ func TestChannelCreator_WrapsSpawnDirSentinel(t *testing.T) {
 	}
 	if rows := reg.List(); len(rows) != 0 {
 		t.Errorf("registry holds %d rows after a trust-mark failure, want 0", len(rows))
+	}
+}
+
+// recordingAnnouncer records every record channelCreator announces (#2156).
+// A slice rather than a single value so "announced exactly once" is checkable —
+// a second push on the same create would be a client drawing the channel twice.
+type recordingAnnouncer struct {
+	calls []protocol.ConversationUpdatedPayload
+}
+
+func (r *recordingAnnouncer) announce(p protocol.ConversationUpdatedPayload) {
+	r.calls = append(r.calls, p)
+}
+
+// AC-1: a successful create announces the STORED row, once.
+//
+// The Cwd assertion is what separates a read-back from a payload assembled out
+// of the request, and it is not decoration. On macOS t.TempDir() sits under
+// /var/folders/…, and /var is a symlink, so the resolved path the row records
+// differs from the path handed in — a payload built from the caller's raw cwd
+// fails here. (On a filesystem where the two coincide the assertion is merely
+// weaker, the same limitation TestChannelCreator_CreatesPromotedRow carries.)
+// It matters beyond accuracy: the caller's cwd is unvalidated, and what
+// resolveSpawnDir confined is what the row holds.
+func TestChannelCreator_AnnouncesStoredRow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installIdentityTrustMark(t)
+
+	proj := filepath.Join(home, "announced-project")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	wantCwd, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", proj, err)
+	}
+
+	reg, path := newChannelTestRegistry(t, home)
+	rec := &recordingAnnouncer{}
+	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, rec.announce, discardLogger())
+
+	id, err := create(proj, "")
+	if err != nil {
+		t.Fatalf("create error = %v", err)
+	}
+	if len(rec.calls) != 1 {
+		t.Fatalf("announced %d times, want exactly 1", len(rec.calls))
+	}
+	got := rec.calls[0]
+	if got.ID != id {
+		t.Errorf("announced id = %q, want the created %q", got.ID, id)
+	}
+	if got.Cwd != wantCwd {
+		t.Errorf("announced cwd = %q, want the row's resolved %q — the record is read back from "+
+			"the registry, never assembled from the request's raw %q", got.Cwd, wantCwd, proj)
+	}
+	if got.Name == nil || *got.Name != filepath.Base(wantCwd) {
+		t.Errorf("announced name = %v, want %q", got.Name, filepath.Base(wantCwd))
+	}
+	if !got.IsPromoted {
+		t.Errorf("announced is_promoted = false; a channel is a promoted conversation")
+	}
+	if got.IsArchived {
+		t.Errorf("announced is_archived = true, want false on a freshly created row")
+	}
+
+	// The announced record must agree with what is actually stored, field for
+	// field — the property "carries the stored row" rather than "carries a
+	// plausible row".
+	rows := reg.List()
+	if len(rows) != 1 {
+		t.Fatalf("registry holds %d rows, want 1", len(rows))
+	}
+	if !got.LastUsedAt.Equal(rows[0].LastUsedAt) {
+		t.Errorf("announced last_used_at = %v, want the stored %v", got.LastUsedAt, rows[0].LastUsedAt)
+	}
+	if got.Cwd != rows[0].Cwd || got.IsPromoted != rows[0].IsPromoted || got.IsArchived != rows[0].IsArchived {
+		t.Errorf("announced record %+v disagrees with the stored row %+v", got, rows[0])
+	}
+}
+
+// AC-3: with no relay leg the hook is nil and the create succeeds silently.
+// This is the daemon startRelay's no-URL early return produces, so it is the
+// production shape rather than a defensive case.
+func TestChannelCreator_NilAnnounceStillCreates(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	installIdentityTrustMark(t)
+
+	proj := filepath.Join(home, "relayless")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+
+	reg, path := newChannelTestRegistry(t, home)
+	create := channelCreator(reg, (&stubMint{returnID: "sid"}).mint, path, nil, discardLogger())
+
+	id, err := create(proj, "")
+	if err != nil {
+		t.Fatalf("create with a nil announce hook error = %v, want success", err)
+	}
+	if id == "" {
+		t.Fatalf("create returned an empty id alongside a nil error")
+	}
+	if rows := reg.List(); len(rows) != 1 {
+		t.Fatalf("registry holds %d rows, want 1 — a nil hook must not change what is stored", len(rows))
+	}
+}
+
+// Every refusal path announces nothing: the announcement sits on the success
+// path, after every return above it. A client must not be told about a channel
+// that was never created.
+func TestChannelCreator_RefusalsAnnounceNothing(t *testing.T) {
+	outside := t.TempDir() // a sibling temp dir, deliberately not under home
+
+	tests := []struct {
+		name     string
+		cwd      string
+		mintFail bool
+	}{
+		{name: "empty cwd", cwd: ""},
+		{name: "directory escaping $HOME", cwd: outside},
+		{name: "session mint failure", mintFail: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			installIdentityTrustMark(t)
+
+			cwd := tt.cwd
+			minter := &stubMint{returnID: "sid"}
+			if tt.mintFail {
+				// A directory that PASSES confinement, so the run reaches the mint
+				// and fails there rather than being turned away earlier.
+				cwd = filepath.Join(home, "mint-fails")
+				if err := os.MkdirAll(cwd, 0o700); err != nil {
+					t.Fatalf("mkdir project: %v", err)
+				}
+				minter = &stubMint{returnErr: errors.New("pool down")}
+			}
+
+			reg, path := newChannelTestRegistry(t, home)
+			rec := &recordingAnnouncer{}
+			create := channelCreator(reg, minter.mint, path, rec.announce, discardLogger())
+
+			if _, err := create(cwd, ""); err == nil {
+				t.Fatalf("create(%q) succeeded, want a refusal", cwd)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("a refused create announced %d record(s): %+v", len(rec.calls), rec.calls)
+			}
+		})
 	}
 }
 
