@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -24,6 +25,29 @@ import (
 // pairVerbList is the displayed verb list in `pyry pair` usage errors.
 // Update in lockstep with the switch in runPair when new sub-verbs land.
 const pairVerbList = "list, revoke, preflight"
+
+// pairLockWait bounds how long `pyry pair` and `pyry pair revoke` block waiting
+// for the cross-process devices lock. WithLock's doc reserves a tightened bound
+// for callers on a request path and points everyone else at DefaultLockWait; an
+// operator-invoked one-shot is not a request path, so it inherits the default.
+//
+// A var rather than a const purely so the timeout-path test can shrink it — a
+// contention test that waits the real bound out costs the suite the full
+// default. Unexported, and production never reassigns it.
+var pairLockWait = devices.DefaultLockWait
+
+// errPairDeviceNotFound signals out of `pyry pair revoke`'s locked region that
+// the named device was absent, so the os.Exit(1) that reports it can run
+// outside. An os.Exit inside the region would skip WithLock's deferred unlock
+// and close: the kernel releases the flock at process termination either way,
+// but any other deferred cleanup added inside would silently stop running.
+// WithLock returns its function's error verbatim, so a sentinel costs nothing.
+//
+// Callers match it with errors.Is, never by comparing the printed message, so a
+// device whose Name happens to read like the not-found line cannot reach this
+// branch. A failed acquisition arrives as devices.ErrLockBusy instead and falls
+// through to the I/O-error path, so a busy lock never prints "no device named".
+var errPairDeviceNotFound = errors.New("pair revoke: no such device")
 
 // resolveDevicesPath returns ~/.pyry/<sanitized-name>/devices.json. Falls
 // back to a CWD-relative path if $HOME can't be resolved (matches
@@ -149,9 +173,13 @@ func runPair(args []string) error {
 }
 
 // runPairDefault implements the bare `pyry pair`: load config +
-// registry + server-id, mint a 256-bit token, persist a Device entry
-// (hashed), and render the pairing payload (QR + paste fallback) to
-// stdout.
+// server-id, mint a 256-bit token, persist a Device entry (hashed)
+// under the cross-process devices lock, and render the pairing payload
+// (QR + paste fallback) to stdout.
+//
+// A refused acquisition fails closed: the minted token is discarded
+// without being persisted or rendered, and a token whose hash never
+// reached disk is unusable rather than unrecorded.
 //
 // Returns nil on success. Returns a wrapped error for exit-1 conditions
 // (I/O errors, render write errors). Calls os.Exit(2) directly for
@@ -178,10 +206,6 @@ func runPairDefault(args []string) error {
 	}
 
 	devicesPath := resolveDevicesPath(parsed.instanceName)
-	registry, err := devices.Load(devicesPath)
-	if err != nil {
-		return fmt.Errorf("pair: %w", err)
-	}
 
 	serverID, err := identity.LoadOrCreate(resolveServerIDPath(parsed.instanceName))
 	if err != nil {
@@ -209,14 +233,28 @@ func runPairDefault(args []string) error {
 	// devices.RedemptionWindow rather than that window plus whatever
 	// scheduling delay fell between two time.Now() calls.
 	mintedAt := time.Now().UTC()
-	registry.Add(devices.Device{
-		TokenHash:              hash,
-		Name:                   deviceName,
-		PairedAt:               mintedAt,
-		RedeemBy:               mintedAt.Add(devices.RedemptionWindow),
-		AllowRemotePermissions: parsed.allowRemotePermissions,
-	})
-	if err := registry.Save(devicesPath); err != nil {
+
+	// Read, mutate, and save inside one held lock. The read has to happen here
+	// rather than where it used to — before identity.LoadOrCreate — so that the
+	// snapshot this mutates is taken in the same critical section as the Save;
+	// locking around the Save alone would leave the stale-snapshot bug intact.
+	// Everything above stays outside: neither key load touches devices.json,
+	// and redemptionLockWait's doc comment promises its peers hold
+	// sub-millisecond regions, which holding across key generation would break.
+	if err := devices.WithLock(devicesPath, pairLockWait, func() error {
+		registry, err := devices.Load(devicesPath)
+		if err != nil {
+			return err
+		}
+		registry.Add(devices.Device{
+			TokenHash:              hash,
+			Name:                   deviceName,
+			PairedAt:               mintedAt,
+			RedeemBy:               mintedAt.Add(devices.RedemptionWindow),
+			AllowRemotePermissions: parsed.allowRemotePermissions,
+		})
+		return registry.Save(devicesPath)
+	}); err != nil {
 		return fmt.Errorf("pair: %w", err)
 	}
 
@@ -345,9 +383,13 @@ func parsePairRevokeArgs(args []string) (pairRevokeArgs, error) {
 	}
 }
 
-// runPairRevoke implements `pyry pair revoke <name>`: load the device
-// registry for the resolved instance, remove the entry whose Name equals
-// <name>, and persist the change.
+// runPairRevoke implements `pyry pair revoke <name>`: under the
+// cross-process devices lock, load the device registry for the resolved
+// instance, remove the entry whose Name equals <name>, and persist the
+// change. Re-reading inside the region is what stops the save
+// resurrecting a device a racing `pyry pair` committed in between — the
+// security-relevant direction, since it would make a credential the
+// operator explicitly withdrew acceptable again.
 //
 // Returns nil on success (writes "Revoked <name>.\n" to stdout, exit 0).
 // Calls os.Exit(2) directly for usage failures (flag parse, missing or
@@ -365,15 +407,25 @@ func runPairRevoke(args []string) error {
 		os.Exit(2)
 	}
 	devicesPath := resolveDevicesPath(parsed.instanceName)
-	registry, err := devices.Load(devicesPath)
-	if err != nil {
-		return fmt.Errorf("pair revoke: %w", err)
-	}
-	if !registry.Remove(parsed.deviceName) {
+
+	// Read, remove, and save inside one held lock, re-reading here rather than
+	// mutating a snapshot taken before the acquisition — otherwise a device a
+	// racing `pyry pair` committed in between is erased by this Save.
+	err = devices.WithLock(devicesPath, pairLockWait, func() error {
+		registry, err := devices.Load(devicesPath)
+		if err != nil {
+			return err
+		}
+		if !registry.Remove(parsed.deviceName) {
+			return errPairDeviceNotFound
+		}
+		return registry.Save(devicesPath)
+	})
+	if errors.Is(err, errPairDeviceNotFound) {
 		fmt.Fprintf(os.Stderr, "pyry pair revoke: no device named %s\n", parsed.deviceName)
 		os.Exit(1)
 	}
-	if err := registry.Save(devicesPath); err != nil {
+	if err != nil {
 		return fmt.Errorf("pair revoke: %w", err)
 	}
 	fmt.Printf("Revoked %s.\n", parsed.deviceName)

@@ -121,6 +121,14 @@ All in `cmd/pyry/pair_test.go`. A local `holdPairLock` helper mirrors `holdLock`
 2. **Should mint's `Load` become `Reload` on a registry loaded earlier, mirroring `recordRedemption`?** Resolved in favour of moving `Load` wholesale. `recordRedemption` reloads because the daemon holds a long-lived `*Registry` it must preserve `LastSeenAt` on; the CLI is a one-shot with no earlier registry to reconcile into, so a plain `Load` inside the region is both simpler and strictly equivalent.
 3. **Does the grace period in the interleaving tests make them timing-dependent?** To confirm in Phase B by running the touched package repeatedly. The grace only needs to exceed the uncontended cost of mint's non-lock work (a keypair load and a CSPRNG read); the *green* path does not depend on it at all, since a correct implementation blocks until released.
 
+## Revisions
+
+**2026-09-07 — Open question 3 resolved, no design change.** The interleaving tests are not timing-dependent in practice. `-race -count=8` over both `ReadsSnapshotInsideLock` cases plus the busy-lock and read-verb cases is green with no races, and the grace window is only load-bearing on the red side: a correctly locked verb stays parked until the holder releases, so the green path never consults it.
+
+The discriminating power claimed for `TestRunPairDefault_ReadsSnapshotInsideLock` in § Testing strategy was verified rather than assumed, by running it against a mutant that hoists mint's `devices.Load` back outside the region so the lock wraps `Add` + `Save` only (`go test -overlay`, no worktree writes). The mutant fails on exactly the intended assertion — the device committed while the mint was parked is erased, leaving two entries instead of three — which is the failure mode the ticket warns "would leave the stale-snapshot bug fully intact".
+
+Implementation carried the plan unchanged otherwise. `internal/devices/registry_test.go` is not `gofmt`-clean on `origin/main`; it is outside this ticket's diff and was left alone.
+
 ## Security review
 
 **Verdict:** PASS
