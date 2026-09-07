@@ -155,45 +155,89 @@ func TestSessionResetFollower_EqualIDChangesNothing(t *testing.T) {
 	}
 }
 
-// TestSessionResetFollower_PoolErrorLeavesTheTagRotated pins the ordering decision
-// the type's doc argues, and it is the one assertion here whose inverse is a
-// REGRESSION rather than a missing feature.
+// TestSessionResetFollower_PoolAnswerDecidesTheTag pins the ordering decision the
+// type's doc argues, and both rows have an inverse that is a REGRESSION rather than
+// a missing feature — different regressions, which is why the two sentinels cannot
+// share a row.
 //
 // ErrSessionNotFound is what the pool answers when the rotation watcher observed the
 // same rotation first and already re-keyed — which is every reset until #2137 retires
-// the watcher. The conversation is then bound to the announced id. A follower that
-// rotated the tag only on the pool's success would leave every later event tagged with
-// the retired id, the drain's active-session gate would drop all of them, and the
-// conversation would go dark until the daemon restarted: strictly worse than the
-// missing delimiter this ticket set out to fix.
-func TestSessionResetFollower_PoolErrorLeavesTheTagRotated(t *testing.T) {
+// the watcher. The conversation is then bound to the announced id, so the tag must
+// follow: a follower that rotated only on the pool's SUCCESS would leave every later
+// event tagged with the retired id, the drain's active-session gate would drop all of
+// them, and the conversation would go dark until the daemon restarted.
+//
+// ErrSessionIDTaken is the opposite and looks alike only from the error's side.
+// AdoptAnnouncedID returns it BEFORE rekeyLocked, so nothing was re-keyed and no
+// conversation was rebound; the announced id belongs to a DIFFERENT live session. A
+// tag left rotated there stamps this runner's later events with the other session's
+// id, and the gate then ADMITS them into that conversation — one line on the
+// supervised child's stdout moving a conversation's output to another conversation.
+//
+// The assertion each row ends on is therefore the CONSEQUENCE, not the field: the tag
+// is only observable through the envelopes it stamps, so both rows feed a later event
+// through the real sinkForTag and read back the id it actually carries. A tag
+// assertion alone would pass a hypothetical follower that rotated correctly and
+// stamped from somewhere else.
+func TestSessionResetFollower_PoolAnswerDecidesTheTag(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name string
-		err  error
+		name    string
+		err     error
+		wantTag string
+		why     string
 	}{
-		{"watcher won the race", sessions.ErrSessionNotFound},
-		{"announced id already taken", sessions.ErrSessionIDTaken},
+		{
+			name: "watcher won the race", err: sessions.ErrSessionNotFound,
+			wantTag: resetFollowSessionB,
+			why:     "the pool is already on the announced id, and a tag left behind blackholes this conversation",
+		},
+		{
+			name: "announced id already taken", err: sessions.ErrSessionIDTaken,
+			wantTag: resetFollowSessionA,
+			why:     "the pool refused and moved nothing, and a tag left rotated delivers this runner's events into the other session's conversation",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			sink := newStreamTurnSink(8, discardLogger())
 			tag := newStreamSessionTag(resetFollowSessionA)
 			adopt := &recordingAdopt{err: tc.err}
-			f := newSessionResetFollower(tag, adopt.fn, nil, discardLogger())
+			f := newSessionResetFollower(tag, adopt.fn, sink.sinkForTag(tag.ID), discardLogger())
 
 			f.Sink(turnevent.ConversationReset{NewConversationID: resetFollowSessionB})
+			if got := tag.ID(); got != tc.wantTag {
+				t.Errorf("tag.ID() = %q after a %v from the pool, want %q — %s", got, tc.err, tc.wantTag, tc.why)
+			}
 
-			if got := tag.ID(); got != resetFollowSessionB {
-				t.Errorf("tag.ID() = %q after a %v from the pool, want the announced id %q — "+
-					"a tag left behind blackholes the conversation", got, tc.err, resetFollowSessionB)
+			f.Sink(turnevent.TextChunk{MessageID: "m-after", Text: "AFTER-THE-ANSWER"})
+			for i, id := range drainEnvelopeSessionIDs(sink) {
+				if id != tc.wantTag {
+					t.Errorf("envelope %d carries session id %q, want %q — %s", i, id, tc.wantTag, tc.why)
+				}
 			}
 		})
 	}
 }
 
-// TestSessionResetFollower_ForwardsEveryVariantAndTolerNilNext pins the decorator
+// drainEnvelopeSessionIDs empties the fan-in and returns the session id each
+// envelope carries, in order. Non-blocking: the sink has no drain attached here, so
+// what it holds is exactly what the closure stamped.
+func drainEnvelopeSessionIDs(sink *streamTurnSink) []string {
+	var ids []string
+	for {
+		select {
+		case env := <-sink.ch:
+			ids = append(ids, env.sessionID)
+		default:
+			return ids
+		}
+	}
+}
+
+// TestSessionResetFollower_ForwardsEveryVariantAndToleratesNilNext pins the decorator
 // contract the four retention holds state: every event of every variant is forwarded
 // unchanged, and a nil next forwards nothing rather than panicking.
 func TestSessionResetFollower_ForwardsEveryVariantAndToleratesNilNext(t *testing.T) {

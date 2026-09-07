@@ -47,8 +47,13 @@ import (
 // upstream — streamsup's emitConversationReset gates on transcript.ValidStem, an
 // anchored full match over lowercase hex, so nothing carrying a separator, a
 // traversal or a length ever reaches here and this type re-derives none of it. Its
-// DESTINATION is settled downstream, by Pool.AdoptAnnouncedID's collision refusal.
-// This type owns neither question; it owns the ORDER, below.
+// DESTINATION is decided downstream, by Pool.AdoptAnnouncedID's collision refusal —
+// but a refusal only BINDS if this type honours it, because the pool cannot reach
+// the tag. An announced id naming another live session that left the tag rotated
+// would stamp every later event of THIS runner with the other session's id, which
+// hands the child's output to a conversation it does not belong to. follow honours
+// the refusal by unwinding, and that is this type's half of the boundary: it owns
+// neither the shape nor the destination, it owns the ORDER and the UNWIND, below.
 type sessionResetFollower struct {
 	// tag is the runner's live session tag — both the source of the id being
 	// replaced and the thing replaced. Never a construction-time id: a captured one
@@ -108,22 +113,51 @@ func (f *sessionResetFollower) Sink(ev turnevent.Event) {
 // Pool.AdoptAnnouncedID guards the re-key half at the seam that owns THAT. The two
 // are not duplicates of each other.
 //
-// The tag rotates BEFORE the pool call and UNCONDITIONALLY on the differing-id
-// path. Unconditionally because the pool's rotation watcher may have observed the
-// same rotation first (it fires on the new transcript's creation), in which case
-// the pool call returns ErrSessionNotFound while the conversation is ALREADY bound
-// to the announced id — and a tag rotation made conditional on the pool's success
-// would then leave every later event tagged with an id the drain's active-session
-// gate no longer admits. That is the dark conversation this ticket exists to
-// prevent, and it is worse than the noise row it would replace. Before, because
-// the pool call rebinds the owning conversation, and the rebind is what makes the
-// old tag dead: rotating first means no other goroutine can observe the rebind
-// while the tag still reports the id it retired.
+// The tag rotates BEFORE the pool call, and is UNWOUND afterwards unless the
+// pool's answer means the session is now on the announced id. The rule stated
+// positively, because it is the rule and not the two sentinels that must survive a
+// new one being added: the tag ends on newID exactly when adopt answers nil (this
+// call re-keyed) or ErrSessionNotFound (someone else already did); every other
+// answer means NOTHING moved, and the tag goes back.
 //
-// The whole sequence runs SYNCHRONOUSLY on claude's stdout forwarder goroutine —
-// the goroutine that also produces every later event of this session — so no event
-// can be produced between the two steps. An asynchronous hand-off would reopen
-// exactly that window; it was rejected for that, not for cost.
+// Rotating first, rather than after a successful call: the pool call rebinds the
+// owning conversation, and the rebind is what makes the old tag dead. Doing it
+// first means no other goroutine can ever observe the rebind while the tag still
+// reports the id it retired — a window that would otherwise open on EVERY
+// successful reset, spanning a registry write and the observer fan-out.
+//
+// Rotating unconditionally, and only then unwinding, rather than waiting for the
+// answer: the watcher may have observed the same rotation first (it fires on the
+// new transcript's creation), so ErrSessionNotFound is the answer on a path where
+// the conversation is ALREADY bound to the announced id. A tag left behind there
+// would have every later event dropped by the drain's active-session gate — the
+// dark conversation this ticket exists to prevent, and worse than the noise row it
+// would replace.
+//
+// The UNWIND is what ErrSessionIDTaken needs, and it is not the same case wearing
+// a different sentinel. AdoptAnnouncedID returns it BEFORE rekeyLocked: nothing was
+// re-keyed and no conversation was rebound, and the announced id still belongs to a
+// DIFFERENT live session. A tag left on it would stamp this runner's later events
+// with the other session's id — sinkForTag reads the tag once per event — so the
+// drain's gate would ADMIT them into that conversation whenever the cursor sits
+// there, while this runner's own conversation went dark and exitForTag reported
+// this child's exit as the other session's. One line on the supervised child's
+// stdout would have moved a conversation's output to another conversation. The
+// announcement is ignored instead: tag unrotated, registry unchanged, one Warn.
+//
+// The unwind leaves one window and it is bounded and strictly smaller than the one
+// it replaces. Between the rotation and the unwind the tag reads newID, and
+// exitForTag runs on the runner's supervision goroutine rather than this one, so a
+// child exiting exactly there would be reported under the announced id. That window
+// spans only the refusal path, which returns before any disk write — a lock
+// acquisition and two map probes. Rotating after the call instead would trade it
+// for a window on every SUCCESSFUL reset, spanning the registry save and the
+// observer fan-out, and that is the common path.
+//
+// Everything else runs SYNCHRONOUSLY on claude's stdout forwarder goroutine — the
+// goroutine that also produces every later event of this session — so no event can
+// be produced between the steps. An asynchronous hand-off would reopen exactly that
+// window; it was rejected for that, not for cost.
 func (f *sessionResetFollower) follow(newID string) {
 	oldID := f.tag.ID()
 	if newID == oldID {
@@ -155,8 +189,14 @@ func (f *sessionResetFollower) follow(newID string) {
 			"err", err)
 		return
 	}
-	f.logger.Warn("relay: announced reset re-key failed",
-		"event", "announced_reset.rekey_failed",
+	// Anything else means the pool moved nothing — ErrSessionIDTaken today, and any
+	// sentinel added later — so the tag goes back before the record is written. Warn
+	// rather than Debug: a refusal is claude naming an id the daemon cannot follow it
+	// to, which is either a defect or a confused child, and it is rare enough that it
+	// cannot bury the record above.
+	f.tag.Rotate(oldID)
+	f.logger.Warn("relay: announced reset refused, tag left on the previous id",
+		"event", "announced_reset.refused",
 		"session_id", newID,
 		"previous_session_id", oldID,
 		"err", err)
