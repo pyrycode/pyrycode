@@ -207,6 +207,23 @@ const (
 	// conversation_updated / ConversationUpdatedPayload (only cwd changed), so
 	// there is no new reply type.
 	TypeChangeWorkspace = "change_workspace"
+	// TypeSetSystemPrompt is a phone → binary dispatch.Route write verb (like
+	// rename_conversation / change_workspace): it sets or clears a conversation's
+	// durable per-conversation system prompt — the operator-authored text #2150
+	// appends to every session that conversation spawns. Keyed by conversation,
+	// NOT by session (contrast set_session_settings): the prompt must be settable
+	// with no session live and must outlive every session the conversation has.
+	// The payload's system_prompt is nullable so "clear" is expressible distinctly
+	// from "set it to the empty string"; the byte bound and the UTF-8 check live at
+	// the registry door (conversations.MaxSystemPromptBytes), not here. It is a
+	// inboundAppTypeSet member, not a v2 control frame — see the v1/v2 partition in
+	// envelope.go / compat_test.go. The reply reuses conversation_updated /
+	// ConversationUpdatedPayload, so there is no new reply type — and that record
+	// deliberately carries NO prompt field, so the ack confirms the write without
+	// echoing up to 8192 bytes of operator text to a frame documented as broadcast
+	// to every phone on this server-id. The new value takes effect at the
+	// conversation's next session start, not on a running child.
+	TypeSetSystemPrompt = "set_system_prompt"
 
 	// Workspace.
 	// TypeCreateWorkspaceFolder is a phone → binary dispatch.Route write verb

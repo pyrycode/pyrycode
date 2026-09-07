@@ -72,6 +72,7 @@ var inboundTypes = map[string]string{
 	"TypeArchiveConversation":   "map-dispatched",
 	"TypeUnarchiveConversation": "map-dispatched",
 	"TypeChangeWorkspace":       "map-dispatched",
+	"TypeSetSystemPrompt":       "map-dispatched",
 	"TypeCreateWorkspaceFolder": "map-dispatched",
 	"TypeRecentWorkspaces":      "map-dispatched",
 	"TypeRegisterPushToken":     "map-dispatched",

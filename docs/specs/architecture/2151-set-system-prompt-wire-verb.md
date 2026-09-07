@@ -465,3 +465,46 @@ own ticket rather than inside the verb.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — the invalid-UTF-8 branch is unreachable from the wire
+
+**What changed.** The plan's testing strategy said the four reject branches would be exercised by a
+single wire-driven table. Three of them are; the fourth cannot be. `encoding/json` substitutes
+U+FFFD for every invalid byte *and* every unpaired surrogate escape while decoding a string, so the
+value the handler hands `Registry.SetSystemPrompt` is **always** valid UTF-8 regardless of what
+arrives on the wire. `ErrSystemPromptInvalidUTF8` is therefore unreachable through this handler.
+
+**How it surfaced.** Measured, not reasoned about: a throwaway probe decoded
+`"bad \xed\xa0\x80 bytes"`, the escape form `"bad \ud800 bytes"`, and a bare `"\xff\xfe"`, and
+`utf8.ValidString` returned true for all three. Written as planned, the invalid-UTF-8 row would have
+travelled the **success** path and failed with "want error, got conversation_updated" — an assertion
+failure that invites being "fixed" by loosening the expectation rather than by noticing the branch is
+dead.
+
+**What the implementation does instead.** The branch is kept and mapped — dropping it would turn an
+unhandled sentinel into a fall-through, which is the fail-open shape the security review's default
+arm exists to prevent — and it is pinned two ways rather than one:
+
+- `TestSetSystemPrompt_MapsRegistrySentinels` injects each sentinel through a recording fake, so the
+  whole sentinel → wire-code table is proven, including the two rows no payload can produce (invalid
+  UTF-8, and the unknown-error default).
+- `TestSetSystemPrompt_InvalidUTF8IsUnreachableFromTheWire` asserts the unreachability itself: that
+  both hostile encodings decode, that the decoded value is valid UTF-8, and that such a frame is
+  **accepted**. If a future Go release stops coercing, that test fails and says exactly which
+  wire-driven reject case is now owed.
+
+**A note the plan could not have made.** The coercion happens *before* #2149's validation rather than
+after it, so the round-trip guarantee that sentinel protects is not at risk on this path: what gets
+length-checked is what gets stored.
+
+### 2026-09-07 — open questions resolved
+
+1. **Dedicated `docs/protocol-mobile.md` subsection or table row?** Both, as the plan anticipated. A
+   table row for the type list, plus a *Setting a conversation's system prompt* subsection — the
+   tri-state table, the reply's deliberate silence about the value, the next-session-start timing,
+   and the refusal table would not fit a table cell.
+2. **Is the reply's `id` an echo of a supplied byte?** Resolved as planned and implemented that way:
+   projected from `cv.ID`, the stored record, reached only after the id matched an existing row. No
+   reject path sends it.

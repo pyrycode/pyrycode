@@ -424,6 +424,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | `archive_conversation` | phone → binary | no | Sets a conversation's durable archived flag (`IsArchived = true`); replies with the reused `conversation_updated` record. Symmetric restore is `unarchive_conversation` (shared payload). |
 | `unarchive_conversation` | phone → binary | no | Clears a conversation's durable archived flag (restore, `IsArchived = false`); replies with the reused `conversation_updated` record. |
 | `change_workspace` | phone → binary | no | Moves a conversation to a client-chosen workspace folder (updates its `cwd`, confined to `$HOME`); replies with the reused `conversation_updated` record. |
+| `set_system_prompt` | phone → binary | no | Sets or clears a conversation's durable system prompt — the operator-authored text every session it spawns is given. Replies with the reused `conversation_updated` record, which does **not** carry the value. Takes effect at the conversation's next session start, not on a running child. See [Setting a conversation's system prompt](#setting-a-conversations-system-prompt). |
 | `create_workspace_folder` | phone → binary | no | Creates a new folder on the daemon host under a client-supplied parent path (confined to `$HOME`); touches no conversation registry. Replies with `workspace_folder_created`. |
 | `workspace_folder_created` | binary → phone | no | Reply to `create_workspace_folder`, correlated by `in_reply_to`; carries the created folder's canonical (symlink-resolved) absolute path. |
 | `recent_workspaces` | phone → binary | no | Read verb (like `list_conversations`); requests the distinct set of recently-used workspace folders. Empty request payload. Replies with `recent_workspaces_list`. |
@@ -482,6 +483,39 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`history_page`** | binary → phone | no | **New in v2.** Outbound reply to a [`request_history`](#request_history), correlated by `in_reply_to` (#2113): one backward step of a walk — `entries` **newest-first**, an opaque `cursor` to ask again with, and `at_start`. **A walk terminates on `at_start`, never on an empty `entries`**, and a **short page is not an end-of-log signal** (the entry clamp bounds a count, not bytes). Each entry carries a durable per-conversation `id` — **not** an [`event_id`](#reconnect-replay--resync-consumer-647), which is the ring's per-process one — plus the stored frame's `type`, `payload` and `ts`, so a client re-reduces a page through its existing timeline reducer. Entries are **replayed content** and can be `claude`-authored, so [§ Security model](#security-model)'s threat 1 lands here. Emitted since **#2116**, and **shortened where needed to fit the [application-envelope cap](#application-envelope-size-cap)** — see [Page size](#page-size). See [Conversation history](#conversation-history-v2). |
 
 Payload shapes for unchanged types are identical to v1. The relevant per-type schemas are preserved in git history (the v1 doc has them); they are not duplicated here because v2 adds no fields and removes no fields. Implementations MUST tolerate unknown fields in payloads for forward compatibility.
+
+### Setting a conversation's system prompt
+
+`set_system_prompt` writes the durable, per-conversation system prompt: operator-authored text the daemon appends to the prompt of every session that conversation spawns. It is keyed by **conversation**, not by session — the prompt must be settable when nothing is running, and it outlives every session the conversation has. (The session-keyed sibling, `set_session_settings`, is a different verb with different semantics.)
+
+```json
+{
+  "id": 7, "type": "set_system_prompt", "ts": "...",
+  "payload": { "conversation_id": "conv-abc123", "system_prompt": "Answer only in haiku." }
+}
+```
+
+`system_prompt` is **nullable**, and the three states are distinct:
+
+| Value | Meaning |
+|---|---|
+| `null`, or the key omitted | **Clear.** The conversation returns to spawning with the daemon's own prompt alone. |
+| `""` | Explicitly empty — a distinct stored state, which spawns identically to cleared. |
+| any string | Stored verbatim, up to **8192 bytes** (inclusive). |
+
+The reply is the reused `conversation_updated` record, correlated by `in_reply_to`. It confirms the write but **does not carry the prompt** — that record is broadcast to every phone on the server-id, so it would widen the audience for a value only the requester asked about. A client that needs to display the current value reads it back through its own verb rather than from this ack.
+
+**The change takes effect at the conversation's next session start, and not before.** A session that is already running is left completely alone: no restart, no rotation, no interruption of an in-flight turn. An operator who edits the prompt and keeps typing in a live session will see no change until that session next starts. Clients should say so at the point of editing.
+
+Refusals are all non-retryable, and every one of them carries a fixed message that echoes no supplied byte:
+
+| Condition | Code |
+|---|---|
+| Payload will not decode | `protocol.malformed` |
+| Value exceeds 8192 bytes | `protocol.malformed` |
+| `conversation_id` matches no conversation | `conversation.not_found` |
+
+Nothing is stored on any refusal.
 
 ### `hello` (v2-specific note)
 

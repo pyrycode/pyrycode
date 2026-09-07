@@ -16,6 +16,7 @@ func TestIsKnownAppType(t *testing.T) {
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
 		TypeChangeWorkspace,
+		TypeSetSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRegisterPushToken,
@@ -197,11 +198,12 @@ func TestInboundAppTypeSet_CoversAllExportedTypeConstants(t *testing.T) {
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
 		TypeChangeWorkspace,
+		TypeSetSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRegisterPushToken,
 	}
-	if got, want := len(all), 23; got != want {
+	if got, want := len(all), 24; got != want {
 		t.Fatalf("type-list length: got %d, want %d", got, want)
 	}
 	if got, want := len(inboundAppTypeSet), len(all); got != want {
@@ -321,6 +323,7 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeDeleteConversation, TypeConversationDeleted,
 		TypeArchiveConversation, TypeUnarchiveConversation,
 		TypeChangeWorkspace,
+		TypeSetSystemPrompt,
 		TypeCreateWorkspaceFolder, TypeWorkspaceFolderCreated,
 		TypeRecentWorkspaces, TypeRecentWorkspacesList,
 		TypeRegisterPushToken,
