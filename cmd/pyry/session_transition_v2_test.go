@@ -248,7 +248,7 @@ func TestSessionTransitionBroadcast_PushErrorContinues(t *testing.T) {
 
 // TestSessionTransitionEnqueue_NonBlockingDropOnFull guards #659's MUST-NOT-BLOCK
 // observer contract: with no draining Run, sends past capacity drop instead of
-// blocking the pool's lifecycle/watcher goroutine.
+// blocking the goroutine that drove the transition.
 func TestSessionTransitionEnqueue_NonBlockingDropOnFull(t *testing.T) {
 	t.Parallel()
 	e := newSessionTransitionEmitterV2(&fakeInteractiveBcast{}, constResolver("", false), discardLogger())
@@ -372,7 +372,7 @@ func TestSessionTransitionBroadcast_UnresolvableDrops(t *testing.T) {
 
 // captureObserverSink is a transitionObserverSink double that records the
 // observer startSessionTransitionStreamV2 installs, so a test can invoke it
-// exactly as the pool's lifecycle/watcher goroutine would. Single-valued like the
+// exactly as the pool's transition-driving goroutine would. Single-valued like the
 // real Pool field, and written once before any concurrent read — the same
 // install-before-Run ordering SetTransitionObserver documents.
 type captureObserverSink struct{ obs sessions.TransitionObserver }

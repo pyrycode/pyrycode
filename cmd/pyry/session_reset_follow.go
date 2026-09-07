@@ -177,12 +177,14 @@ func (f *sessionResetFollower) Sink(ev turnevent.Event) {
 // successful reset, spanning a registry write and the observer fan-out.
 //
 // Rotating unconditionally, and only then unwinding, rather than waiting for the
-// answer: the watcher may have observed the same rotation first (it fires on the
-// new transcript's creation), so ErrSessionNotFound is the answer on a path where
-// the conversation is ALREADY bound to the announced id. A tag left behind there
-// would have every later event dropped by the drain's active-session gate — the
-// dark conversation this ticket exists to prevent, and worse than the noise row it
-// would replace.
+// answer: rekeyPool answers nil on ErrSessionNotFound just as it does on a re-key
+// it performed itself, so there is no unwind on that sentinel and nothing to wait
+// for. A tag left behind on a path where the conversation IS already bound to the
+// announced id would have every later event dropped by the drain's active-session
+// gate — the dark conversation this seam exists to prevent, and worse than the noise
+// row it would replace. What that sentinel can mean now that #2137 retired the
+// rotation watcher, and why the branch is nevertheless left as it stands, is
+// rekeyPool's own doc below; the open divergence it names is #2176.
 //
 // The UNWIND is what ErrSessionIDTaken needs, and it is not the same case wearing
 // a different sentinel. AdoptAnnouncedID returns it BEFORE rekeyLocked: nothing was

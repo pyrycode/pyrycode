@@ -26,16 +26,19 @@ package realclaude
 //     (#1031) supplies the entire real-claude spine and every rotation helper this
 //     test reuses (bootstrapRow, readBootstrapRowIfPresent, waitBootstrapID,
 //     waitBootstrapIDSettled, uuidStemPattern, and the newSessionResend/rotateBudget/
-//     idSettle* budgets) — but drives new_session on the DEFAULT (PTY) runner (a
-//     /clear keystroke → claude self-rotates → the fsnotify watcher rotates the
-//     registry).
+//     idSettle* budgets) — but drove new_session on the DEFAULT (PTY) runner (a
+//     /clear keystroke → claude self-rotates → an fsnotify watcher followed the new
+//     transcript into the registry). Both halves of that sentence are history: the
+//     sibling went with the terminal-driving interactive path in #1348 and the
+//     watcher was retired in #2137. Its helpers are what this test still reuses.
 //
 // This test differs from #1031 in exactly one axis: the stream-json interactive
 // runner. On that path new_session is a DAEMON-minted rotation (Pool.RotateForNewSession
 // mints a fresh id; (*streamsup.Runner).RestartFresh re-arms first-run form so the
 // next spawn is `claude --session-id <newID>` — a FRESH transcript, never `--resume`
-// — see streamsup's `Stdin` / `turnTarget` neighbourhood and its `Run`). No /clear, no watcher. That
-// fresh-spawn form is what mints a brand-new <newID>.jsonl on disk, and that
+// — see streamsup's `Stdin` / `turnTarget` neighbourhood and its `Run`). No /clear
+// keystroke, and no self-rotation for anything to follow: the daemon mints the id.
+// That fresh-spawn form is what mints a brand-new <newID>.jsonl on disk, and that
 // on-disk transcript is the real-claude-specific, word-independent observable at
 // the heart of AC3 (§ the fresh-spawn observable below).
 //

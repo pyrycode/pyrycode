@@ -15,7 +15,9 @@ import (
 // off-lock transition signal (Enqueue) and the emitter's Run goroutine.
 // Transitions are rare and human-paced (a /clear rotation or an idle/cap
 // eviction); 16 absorbs a burst, and drop-on-full bounds memory while never
-// wedging the pool's lifecycle/watcher goroutines (#659's MUST-NOT-BLOCK rule).
+// wedging the goroutines that drive a transition — the pool's lifecycle goroutine
+// on an eviction, the runner's parse goroutine or a control-plane goroutine on a
+// rotation (#659's MUST-NOT-BLOCK rule).
 const sessionTransitionQueueSize = 16
 
 // transitionObserverSink is the narrow *sessions.Pool surface
@@ -89,7 +91,8 @@ func newSessionTransitionEmitterV2(bcast interactiveBroadcaster, resolveConv fun
 
 // Enqueue is the sessions.TransitionObserver callback — the #659-mandated "hand
 // the signal off to a buffered channel and return." Invoked synchronously from
-// the pool's lifecycle/watcher goroutine with no lock held; a non-blocking
+// whichever goroutine drove the transition (see TransitionObserver's doc for the
+// list) with no lock held; a non-blocking
 // buffered send (drop-on-full) keeps that goroutine moving so a wedged fan-out
 // can never stall the pool.
 func (e *sessionTransitionEmitterV2) Enqueue(t sessions.SessionTransition) {

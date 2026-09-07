@@ -16,8 +16,8 @@ import (
 
 // transitionRecorder is a TransitionObserver that appends every observed
 // SessionTransition under its own mutex. Fires arrive from different
-// goroutines (lifecycle goroutine for eviction, caller/watcher goroutine for
-// clear), so the mutex is load-bearing under -race.
+// goroutines (the lifecycle goroutine for eviction, whichever goroutine drove
+// the rotation for clear), so the mutex is load-bearing under -race.
 type transitionRecorder struct {
 	mu  sync.Mutex
 	got []SessionTransition
@@ -657,10 +657,12 @@ func TestPool_AdoptAnnouncedID_EqualIDChangesNothing(t *testing.T) {
 	}
 }
 
-// TestPool_AdoptAnnouncedID_UnknownOldID is the rotation watcher's path when it wins
-// the race to the same rotation: it already re-keyed, so oldID is gone. Refusing here
-// with no transition is what keeps "exactly one session_transition per reset"
-// structural rather than merely likely.
+// TestPool_AdoptAnnouncedID_UnknownOldID covers an announcement naming an oldID the
+// pool no longer holds. Until #2137 that was the rotation watcher winning the race to
+// the same rotation and re-keying first; the producers that survive it are a
+// daemon-driven rotation onto a MINTED id and the entry's removal (the divergence
+// #2176 tracks). Refusing here with no transition is what keeps "exactly one
+// session_transition per reset" structural rather than merely likely.
 func TestPool_AdoptAnnouncedID_UnknownOldID(t *testing.T) {
 	t.Parallel()
 	pool := helperPool(t, false)

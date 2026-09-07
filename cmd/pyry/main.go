@@ -1708,10 +1708,11 @@ func resolveBoundRunSettings(convReg *conversations.Registry, pool sessionSettin
 // RestartFresh is inert (nil) and rotates nothing — no actuation beats wrong
 // actuation (#1121).
 //
-// Ordering is load-bearing: rotate() completes — including the allocated-skip-set
-// register published under Pool.mu — BEFORE RestartFresh spawns <newID>.jsonl, so
-// the watcher's CREATE observation is guaranteed to see the registration and skip
-// the id. Reversing it reopens the double-rotation race (spec §Concurrency).
+// Ordering is load-bearing: rotate() completes — the pool-side re-key published
+// under Pool.mu — BEFORE RestartFresh spawns <newID>.jsonl. Its original reason was
+// the rotation watcher, which had to observe the id registered as freshly allocated
+// before it saw the CREATE, or it double-rotated; #2137 retired the watcher and the
+// skip-set, and the reason that survives is #1330's, below.
 //
 // That order is PRESERVED at #1330; the rotation gate is armed AHEAD of both, not
 // substituted for either. rotate() also fires the ReasonClear transition fan-out,

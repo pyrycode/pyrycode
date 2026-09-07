@@ -32,10 +32,9 @@ const (
 // Rotation / settle budgets for the new_session respawn. Real claude on /clear
 // (clear + mint a fresh transcript + announce the reset + the daemon's re-key) is
 // seconds, not fakeclaude milliseconds; and it rotates on every /clear, so the
-// re-send cadence
-// is deliberately slower than #1004's 250 ms to avoid stacking rotations while
-// still recovering from a frame that lands before the tui-driver session
-// re-attaches.
+// re-send cadence is deliberately slower than #1004's 250 ms to avoid stacking
+// rotations while still recovering from a frame that lands before the tui-driver
+// session re-attaches.
 const (
 	newSessionResend = 1 * time.Second
 	rotateBudget     = 45 * time.Second

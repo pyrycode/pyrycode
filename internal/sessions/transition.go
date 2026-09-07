@@ -34,8 +34,9 @@ type SessionTransition struct {
 // SYNCHRONOUSLY from the goroutine that owns the transition (the lifecycle
 // goroutine for eviction; for clear, whichever goroutine drove the rotation —
 // the runner's parse goroutine via AdoptAnnouncedID, or a control-plane
-// goroutine via RotateForNewSession) with NO session or pool lock held. The implementation MUST NOT block — hand the
-// signal off to a buffered channel and return. A nil observer is disabled.
+// goroutine via RotateForNewSession) with NO session or pool lock held. The
+// implementation MUST NOT block — hand the signal off to a buffered channel and
+// return. A nil observer is disabled.
 type TransitionObserver func(SessionTransition)
 
 // SetTransitionObserver installs the pool's transition observer. It must be

@@ -71,8 +71,8 @@ func waitForBootstrapID(t *testing.T, regPath, want string, timeout time.Duratio
 // readable, parseable, and contains a bootstrap entry. Returns (_, false) on
 // any of: file missing, parse error, no bootstrap entry. The poll helpers
 // treat all three as "keep polling" rather than fataling — the file is
-// written atomically by RotateID's saveLocked, but it may not exist yet at
-// the very first poll iteration.
+// written atomically by the pool's saveLocked, whichever path drove the write,
+// but it may not exist yet at the very first poll iteration.
 func readBootstrapIfPresent(regPath string) (registryEntry, bool) {
 	data, err := os.ReadFile(regPath)
 	if err != nil {

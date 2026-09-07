@@ -247,15 +247,19 @@ type Pool struct {
 
 	// transitionObserver is the optional, injectable signal surfaced on
 	// /clear rotations and evictions. Set once via SetTransitionObserver
-	// BEFORE Pool.Run; read-only thereafter, so the lifecycle + watcher
-	// goroutines (both spawned by Run) read it lock-free via Run's
+	// BEFORE Pool.Run; read-only thereafter, so the goroutines Run
+	// transitively spawns — the per-session lifecycle goroutines, and the
+	// runners they in turn start — read it lock-free via Run's
 	// goroutine-start happens-before. nil disables it. See transition.go.
 	transitionObserver TransitionObserver
 }
 
-// SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. Carries
-// only primitive types so the rotation package can consume snapshots without
-// importing internal/sessions.
+// SnapshotEntry is one (id, pid) pair captured by Pool.Snapshot. The primitive
+// field types are what let the retired rotation watcher consume snapshots without
+// importing internal/sessions; #2137 removed that consumer. Both the type and
+// Pool.Snapshot are kept for the same reason RotateID is — they are exported, and
+// removing them is a separate deliberate call rather than a side effect of
+// retiring the watcher.
 type SnapshotEntry struct {
 	ID  SessionID
 	PID int
@@ -647,9 +651,11 @@ func (p *Pool) RotateBootstrapForSelfHeal() (SessionID, error) {
 // the new id + lastActiveAt under Session.lcMu, moves the map entry, and flips
 // the bootstrap pointer if oldID was the bootstrap. Caller MUST hold p.mu (write)
 // and MUST have already verified oldID is present and oldID != newID; it does not
-// persist (the caller invokes saveLocked). Shared by RotateID (watcher-observed
-// self-rotation) and RotateForNewSession (daemon-driven new_session) so the
-// re-key invariant lives in one place. Lock order remains Pool.mu → Session.lcMu.
+// persist (the caller invokes saveLocked). Shared by all four re-key paths so the
+// invariant lives in one place: AdoptAnnouncedID (claude's announced reset — the
+// only one with a production caller since #2137 retired the rotation watcher),
+// RotateForNewSession and RotateBootstrapForSelfHeal (daemon-driven, onto a freshly
+// minted id), and RotateID. Lock order remains Pool.mu → Session.lcMu.
 func (p *Pool) rekeyLocked(oldID, newID SessionID) {
 	sess := p.sessions[oldID]
 	sess.lcMu.Lock()

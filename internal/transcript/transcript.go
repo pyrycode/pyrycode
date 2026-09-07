@@ -90,9 +90,8 @@ type Result struct {
 func (r Result) Found() bool { return r.Path != "" }
 
 // CanonicalDir returns dir with symlinks resolved (filepath.Clean on error) —
-// the canonicalisation the resolver families already do. A
-// caller precomputes it once (per construction/subscription) and passes it to
-// GuardProbedPath / Probed.
+// the canonicalisation the resolver families already do. A caller precomputes it
+// once (per construction/subscription) and passes it to GuardProbedPath / Probed.
 func CanonicalDir(dir string) string {
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {

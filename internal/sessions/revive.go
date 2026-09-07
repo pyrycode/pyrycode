@@ -14,9 +14,9 @@ package sessions
 //
 // The absent context.Context is the API signal for that: Revive does no
 // blocking work and cannot spawn. Everything else — id validation, the
-// register + persist + rollback critical section, the rotation skip-set, the
-// ErrPoolNotRunning guard — is shared verbatim with GetOrCreateIn via
-// materialise, whose docstring carries the concurrency contract.
+// register + persist + rollback critical section, the ErrPoolNotRunning guard —
+// is shared verbatim with GetOrCreateIn via materialise, whose docstring carries
+// the concurrency contract.
 //
 // spawnDir is the revived session's spawn working directory, used verbatim and
 // NOT validated, canonicalised, or trust-checked by the pool — the caller

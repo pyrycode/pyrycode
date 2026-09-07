@@ -12,7 +12,7 @@ import (
 // BootstrapID, and re-persists the registry — but, unlike RotateForNewSession,
 // it does NOT fire a client transition, which would mislead clients into
 // thinking the user ran /clear. It also used to differ by not priming the
-// freshly-allocated skip-set, but #2137 retired the rotation watcher that set
+// freshly-allocated skip-set, but #2137 retired the rotation watcher that the set
 // existed for, so that half of the asymmetry is gone from both methods.
 func TestRotateBootstrapForSelfHeal(t *testing.T) {
 	t.Parallel()

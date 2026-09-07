@@ -423,3 +423,51 @@ with `git grep -c -w` (exact-word) plus `staticcheck -tags e2e`, not with a subs
   corrected doc and in `AdoptAnnouncedID`'s `Errors:` paragraph. Not fixed here: the fix changes
   `follow`'s unwind, which is production behaviour outside this ticket's scope, and the plain
   version of it re-opens the dark-conversation failure #2135 documented.
+
+### 2026-09-07 — rework leg 1 (verifier FAIL: the AC1 comment sweep stopped early)
+
+The design is unchanged; the finding was that AC1's second half — *"no comment left in the tree
+pointing a reader at it as live code"* — was under-delivered. The first pass swept the files it was
+editing plus a grep over `rotation watcher`; what it missed were sites naming the watcher's
+*mechanisms* rather than the watcher (`allocated-skip-set`, `rotation skip-set`,
+`lifecycle/watcher goroutine`) and sites in files the diff never opened.
+
+**Four MUST FIX production sites, corrected:**
+
+- `cmd/pyry/session_reset_follow.go` → `follow` — the "Rotating unconditionally" paragraph argued
+  from the watcher having usually applied the rotation first, in the present tense, one screen above
+  the `rekeyPool` doc this ticket corrected to say the opposite. It now argues from what is actually
+  true (rekeyPool answers nil on that sentinel, so there is no unwind to wait for) and points at
+  rekeyPool and #2176 for what the sentinel can mean now.
+- `cmd/pyry/main.go` → `startFreshRunner` — the ordering constraint survives on #1330's reason,
+  stated in the next paragraph; the dead first reason (the skip-set register racing the watcher's
+  CREATE) is now past-tense and the "reopens the double-rotation race" line, which was the watcher's
+  race, is gone.
+- `internal/sessions/get_or_create.go` → `materialise` and `internal/sessions/revive.go` → `Revive`
+  — both still listed priming the skip-set among what the critical section does, which this diff
+  had deleted from `materialise`'s body.
+- `internal/sessions/pool.go` → `rekeyLocked` — the caller enumeration was stale *and* short. All
+  four are now named: `AdoptAnnouncedID` (the only one with a production caller),
+  `RotateForNewSession`, `RotateBootstrapForSelfHeal`, `RotateID`.
+
+**One more production site the findings did not name, same rule:** `SnapshotEntry`'s doc said its
+primitive field types exist "so the rotation package can consume snapshots without importing
+internal/sessions" — present tense, naming the deleted package as a live consumer. Corrected, and
+the type and `Pool.Snapshot` are kept on `RotateID`'s reasoning: exported, test callers, removing
+them is a separate call.
+
+**SHOULD FIX and NIT items all applied**, including the concurrency-comment class the first pass
+half-corrected (`Pool.transitionObserver`'s field doc, `setBusy`, `sessionTransitionQueueSize`,
+`Enqueue` and their tests). Where the corrected sentence would have named a goroutine, it now names
+the rule instead — *whichever goroutine drove the transition* — so the next rotation path added does
+not restart this sweep.
+
+**Two stale citations found while rewriting, both pre-existing, both fixed in passing rather than
+left:** `TestRelayV2_NewSessionRotatesOnDisk` and `TestInteractiveSessionControlLiveness` are cited
+as live siblings by two test headers; `git log -S` shows both went with the terminal-driving
+interactive path in #1348. The headers now say so.
+
+Verified: `go build ./cmd/pyry`, `go vet ./...`, `go vet -tags e2e ./internal/e2e/...`,
+`go vet -tags e2e_realclaude ./internal/e2e/realclaude/`, `make cite-guard`, `make docs-guard`, and
+`go test -race` over `internal/sessions`, `cmd/pyry`, `internal/transcript` — all green. No
+assertion changed; the whole leg is comment prose.

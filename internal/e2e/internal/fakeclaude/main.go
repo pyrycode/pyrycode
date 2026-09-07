@@ -770,8 +770,8 @@ func main() {
 	// clearRotates: watch stdin for the "/clear" slash command (typed by
 	// supervisor.StartNewSession on a phone's new_session frame) and rotate the
 	// live session JSONL once on the first match, so the fresh <uuid>.jsonl is
-	// there for pyry to follow into the registry. Additive and off by
-	// default (byte-identical when unset), like escEndsTurn.
+	// there for pyry to follow into the registry. Additive and off by default
+	// (byte-identical when unset), like escEndsTurn.
 	clearRotates := os.Getenv(envClearRotates) != ""
 	// trustTrig: the startup trust-folder dialog simulation (#993). A sibling of
 	// modalTrig — come up idle, raise trustScreen on the trigger, then clear it on

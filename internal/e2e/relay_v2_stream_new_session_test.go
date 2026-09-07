@@ -50,10 +50,12 @@ import (
 //	  → drain gate (sink tag == active == post.ID ✓) → assistant_delta{"…two"}      ── M6
 //	no child's stdin log ever carries "/clear"                                      ── M5
 //
-// THE STREAM TWIN OF TestRelayV2_NewSessionRotatesOnDisk (the PTY new_session e2e).
-// The PTY test asserts the fsnotify watcher follows claude's self-rotated
-// <uuid>.jsonl into the registry after a typed /clear; the stream test asserts the
-// DAEMON-minted rotation lands directly — no watcher, no /clear.
+// THIS IS NOW THE ONLY new_session e2e IN THIS PACKAGE. Its PTY twin
+// (TestRelayV2_NewSessionRotatesOnDisk) went with the terminal-driving interactive
+// path in #1348, and the mechanism that twin asserted — claude self-rotated on a
+// typed /clear and an fsnotify watcher followed the new <uuid>.jsonl into the
+// registry — was retired in #2137. What survives, and what this test asserts, is the
+// DAEMON-minted rotation landing directly: no /clear keystroke anywhere.
 //
 // WHY M2's ON-DISK ROTATION IS A STRONG PROOF OF THE WHOLE MECHANISM (not just a
 // pool write). startFreshRunner's stream arm is a SINGLE path — newID, _ :=
