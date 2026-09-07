@@ -13,6 +13,7 @@ import (
 
 	"github.com/pyrycode/pyrycode/internal/control"
 	"github.com/pyrycode/pyrycode/internal/conversations"
+	"github.com/pyrycode/pyrycode/internal/protocol"
 	"github.com/pyrycode/pyrycode/internal/relay/handlers"
 )
 
@@ -78,10 +79,22 @@ const (
 // any future caller that does not come through the handler — the same reasoning
 // fileAttacher's empty-sessionID guard records, where the seam resolved to the
 // bootstrap session instead.
+//
+// announce tells every connected client the channel now exists (#2156), so a
+// conversation created from the host's shell reaches an open client without a
+// reconnect. A bare func for the reason mint is one, and for the reason
+// fileAttacher's own announce hook is: the value crossing out of the relay leg
+// stays a closure over a wire payload, so this seam takes on no relay type.
+//
+// IT MAY BE NIL, and the nil is not defensive padding — it is fileAttacher's
+// shape exactly. The hook is absent when the relay leg is: startRelay returns
+// before any manager exists when no URL is configured, so that daemon has
+// nobody to tell. A nil hook creates the channel and answers with its id.
 func channelCreator(
 	reg *conversations.Registry,
 	mint func(label, spawnDir string) (string, error),
 	registryPath string,
+	announce func(protocol.ConversationUpdatedPayload),
 	log *slog.Logger,
 ) func(cwd, name string) (string, error) {
 	return func(cwd, name string) (string, error) {
@@ -167,6 +180,47 @@ func channelCreator(
 			"event", "channel_new.created",
 			"conversation_id", string(id),
 			"session_id", sessionID)
+
+		// Tell every connected client the channel exists (#2156). LAST, and only
+		// on the success path: every refusal above has already returned, so a
+		// refused create announces nothing. Its result is deliberately not
+		// consulted and it returns no error of its own — a failed push must not
+		// turn a created channel into a refusal, because the row is in the
+		// registry and on disk whether or not anyone heard.
+		//
+		// That is also why a vanished read-back below is logged rather than
+		// returned: SetChannelCreator forwards this function's error text to the
+		// wire verbatim, which is what makes every refusal above a static
+		// constant, and a new message here would breach that contract for a
+		// channel that was in fact created.
+		if announce != nil {
+			// Read the row back rather than projecting the value constructed
+			// above, the way promote_conversation feeds its own reply. The stored
+			// Cwd is resolveSpawnDir's CONFINED, symlink-resolved output, so the
+			// read-back is what keeps the caller's raw, unvalidated cwd off the
+			// wire. Create→Get is two lock acquisitions, not atomic: a concurrent
+			// delete between them yields a miss, which is the truthful current
+			// state, so the announcement is skipped rather than faked.
+			//
+			// An if/else rather than this file's usual early return, because both
+			// arms answer identically: a second `return string(id), nil` here would
+			// read as though a vanished row changed what the verb replies, and it
+			// does not.
+			if got, ok := reg.Get(id); ok {
+				announce(protocol.ConversationUpdatedPayload{
+					ID:         string(got.ID),
+					IsPromoted: got.IsPromoted,
+					IsArchived: got.IsArchived,
+					Name:       got.Name,
+					Cwd:        got.Cwd,
+					LastUsedAt: got.LastUsedAt,
+				})
+			} else {
+				log.Warn("control: channel.new vanished before announce read-back",
+					"event", "channel_new.announce_row_vanished",
+					"conversation_id", string(id))
+			}
+		}
 		return string(id), nil
 	}
 }

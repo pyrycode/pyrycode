@@ -1000,7 +1000,7 @@ func runSupervisor(args []string) error {
 	// staticcheck U1000; #1080 is the thin change that adds the reader.
 	approvals := permbridge.New()
 
-	relayCleanup, approvalSurface, announceAttachment, err := startRelay(ctx, logger, relayWiring{
+	relayCleanup, approvalSurface, announceAttachment, announceConversation, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
 		version:       Version,
@@ -1132,10 +1132,16 @@ func runSupervisor(args []string) error {
 	// Mint answers only with a session id. Resolving once here rather than
 	// widening handlers.SessionCreator also avoids a second trustMark write for
 	// a path already marked.
+	//
+	// announceConversation (#2156) is the relay leg's conversation fan-out, so a
+	// channel created from the host's shell reaches every open client without a
+	// reconnect rather than waiting for its next list. It arrives nil from
+	// startRelay's no-URL early return — announceAttachment's shape one wiring
+	// up — and the creator creates exactly as before when it is.
 	ctrl.SetChannelCreator(channelCreator(convReg, func(label, spawnDir string) (string, error) {
 		id, err := pool.Mint(label, spawnDir)
 		return string(id), err
-	}, convRegistryPath, logger))
+	}, convRegistryPath, announceConversation, logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}

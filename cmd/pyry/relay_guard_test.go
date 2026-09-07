@@ -169,12 +169,36 @@ var excludedTypes = map[string]string{
 	"TypeError":                  "reply",
 	"TypeConversations":          "reply",
 	"TypeConversationCreated":    "reply",
-	"TypeConversationUpdated":    "reply",
 	"TypeConversationDeleted":    "reply",
 	"TypeWorkspaceFolderCreated": "reply",
 	"TypeRecentWorkspacesList":   "reply",
 	"TypeSessionSettingsUpdated": "reply",
 	"TypeSessionSettings":        "reply",
+
+	// BOTH, and the map's first dual-classified entry (#2156). It sat in the
+	// "reply" block above until a host-side producer appeared, and the block's own
+	// header is why it cannot stay there: that label is defined as "correlated to a
+	// request via in_reply_to", which is now true of only four of this type's five
+	// producers.
+	//
+	//   - reply, on promote / rename / archive / change_workspace: each answers its
+	//     requester through Conn.Reply, correlated by in_reply_to.
+	//   - push, on a host-side `pyry channel new`: conversationUpdateEmitterV2 fans
+	//     the created row to every interactive conn. NOTHING SOLICITS IT — there is
+	//     no request envelope for in_reply_to to name, which is exactly the one
+	//     difference TypeAttachmentOffered's entry below records as the whole of
+	//     that classification. Correlation is the payload's own id.
+	//
+	// The compound value is a REVIEW LABEL and nothing reads it: Assertion #3 keys
+	// on membership in exactly one of the two maps, and no assertion parses either
+	// map's values. So a type that is genuinely both is recorded as both rather
+	// than being flattened to whichever half was written first.
+	//
+	// This entry is the reason AC-4 of #2156 is an acceptance criterion rather than
+	// a note: the guard's assertions all stay green whether or not it is made,
+	// because the type never stops being classified. Nothing goes red if a future
+	// producer re-splits this — only a reader notices.
+	"TypeConversationUpdated": "reply+push",
 
 	// outbound reply — the v2 attachment upload's success frame (#1895). Filed
 	// here rather than beside its own bidirectional sibling below, and the label
