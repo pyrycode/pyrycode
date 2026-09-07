@@ -10,11 +10,12 @@ type CreateConversationPayload struct {
 }
 
 type ConversationCreatedPayload struct {
-    ID         string    `json:"id"`
-    IsPromoted bool      `json:"is_promoted"`
-    Cwd        string    `json:"cwd"`
-    Name       *string   `json:"name"`
-    LastUsedAt time.Time `json:"last_used_at"`
+    ID             string    `json:"id"`
+    IsPromoted     bool      `json:"is_promoted"`
+    Cwd            string    `json:"cwd"`
+    WorkspaceLabel *string   `json:"workspace_label"` // #2210 — see WorkspaceLabel note below
+    Name           *string   `json:"name"`
+    LastUsedAt     time.Time `json:"last_used_at"`
 }
 
 type PromoteConversationPayload struct {
@@ -64,12 +65,13 @@ type ChangeWorkspacePayload struct {
 }
 
 type ConversationUpdatedPayload struct {
-    ID         string    `json:"id"`
-    IsPromoted bool      `json:"is_promoted"`
-    IsArchived bool      `json:"is_archived"` // #881 — always serialized, no omitempty (see below)
-    Name       *string   `json:"name"`
-    Cwd        string    `json:"cwd"`
-    LastUsedAt time.Time `json:"last_used_at"`
+    ID             string    `json:"id"`
+    IsPromoted     bool      `json:"is_promoted"`
+    IsArchived     bool      `json:"is_archived"` // #881 — always serialized, no omitempty (see below)
+    Name           *string   `json:"name"`
+    Cwd            string    `json:"cwd"`
+    WorkspaceLabel *string   `json:"workspace_label"` // #2210 — see WorkspaceLabel note below
+    LastUsedAt     time.Time `json:"last_used_at"`
 }
 
 // SetSystemPromptPayload (#2151). SystemPrompt is *string, not string — nil
@@ -98,8 +100,11 @@ type SetSystemPromptPayload struct {
 - **`SetSystemPromptPayload` (#2151) is the group's second field-omitting reply: `ConversationUpdatedPayload` gains no `system_prompt` field for it.** Every other verb in this file that reuses `conversation_updated` has a field on that struct for what it changed (`Name`, `Cwd`, `IsArchived`); this one deliberately does not, even though up to 8192 bytes would fit. The record is documented as broadcast to every phone on the server-id, and the requester is the only party who asked about this value — a field would widen that audience for free. A projection type that omits a field is a structural leak barrier: the reply *cannot* carry the prompt, not merely doesn't today. Reading the value back is a distinct verb, `request_system_prompt` / `system_prompt` (#2152, see [`protocol-package-types-system-prompt-payloads.md`](protocol-package-types-system-prompt-payloads.md)), and it also never echoes the prompt into a broadcast type — its reply is unicast, correlated by `InReplyTo`.
 - **A JSON payload can never carry invalid UTF-8 into `SystemPrompt`, which makes one of the three registry sentinels unreachable through this handler.** `encoding/json` substitutes U+FFFD for both an invalid byte and an unpaired surrogate escape while decoding a Go string — measured against `"bad \xed\xa0\x80 bytes"`, `"bad \ud800 bytes"`, and a bare `"\xff\xfe"`, all three decode to valid UTF-8. `Registry.SetSystemPrompt`'s `ErrSystemPromptInvalidUTF8` sentinel therefore exists for the registry's other callers (`Update`, a future CLI) but no wire-driven test of this payload can trigger it — the coercion happens before validation, so what gets length-checked is what gets stored, and the round-trip guarantee is unaffected. Worth knowing before writing a "hostile bytes over the wire" test against any `*string` field this package decodes: the wire can't produce the failure case at all, and a test expecting a reject there will fail by landing on the success path instead.
 - **`ConversationUpdatedPayload.IsArchived` (#881) has no `omitempty`, unlike the on-disk `Conversation.IsArchived`.** A client must read the flag on active rows too (value `false`) to partition active vs. archived state — an absent key couldn't distinguish "restored to active" from "old daemon." Placed immediately after `IsPromoted` to mirror `ConversationSummary`'s field order (#880) and group the two state bools; the fixture (`testdata/conversation_updated.json`) and both producers (`rename_conversation.go`, `archive_conversation.go`) were updated in lockstep so an archived conversation renamed still reports `is_archived: true` correctly.
+- **`WorkspaceLabel` (#2210) is on both `ConversationCreatedPayload` and every `conversation_updated` producer — reply and the #2156 unsolicited push alike — and is deliberately not the `system_prompt` precedent it might look like.** Same `*string`, no-`omitempty`, second-return-derives-presence discipline as `ConversationSummary.WorkspaceLabel`, positioned after `Cwd` on both structs to match. `SetSystemPromptPayload` above shows the opposite call: `conversation_updated` gains no field for it because that reply broadcasts to every phone on the server-id and the prompt is reachable from no other read path, so a field would widen who can learn it. The label doesn't carry that risk — #2208 already put it on every `list_conversations` row available to the same audience these two frames reach, so filling it here only changes *when* a client learns a value it may already hold, never *who* can. Two producers (`change_workspace`, `rename_conversation`) build their payload inside `conversations.Registry.Update`'s callback and must read the label *after* `Update` returns, never inside it — see [`conversations-registry-crud.md`](conversations-registry-crud.md) § `WorkspaceLabel`.
 - **`ConversationUpdatedPayload` (#2156) gained a second producer shape without gaining a field.** The struct is unchanged; what changed is that one producer — a host-side `pyry channel new` create — populates it from a `reg.Get` read-back and pushes it with no `in_reply_to`, instead of replying to a request. Its six fields are a strict subset of `ConversationSummary`'s seven, so the push is not a disclosure widening: any conn that can receive it could already pull the same row via `list_conversations`. See [control-plane.md § Fanning `channel.new` out](control-plane.md#fanning-channelnew-out-conversation_updated-as-an-unsolicited-push-2156).
 - **`conversation_created.json` is the only fixture in the slice carrying `in_reply_to`** (`in_reply_to: 4`, matching the `create_conversation` frame at id 4). The test pins `env.InReplyTo != nil && *env.InReplyTo == 4`.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to #275, #272, #273. Required-field validation, name uniqueness, ID resolution, broadcast fan-out — all dispatcher / registry concerns.
 
 Golden round-trip tests in `conversations_write_test.go` decode each spec example through `Envelope` → `Envelope.Payload` → per-type struct and re-marshal byte-equivalently against the matching fixture. Flat test functions (no table-driven; `TestRenameConversationPayload_RoundTrip` #820, `TestDeleteConversationPayload_RoundTrip` / `TestConversationDeletedPayload_RoundTrip` #822, and two `ArchiveConversationPayload` round-trips — one per envelope fixture (`archive_conversation.json` / `unarchive_conversation.json`), differing only in `type` — #881 added alongside the original four), each follows the sibling-slice template. **`ChangeWorkspacePayload` (#823) breaks this pattern** — no `TestChangeWorkspacePayload_RoundTrip` and no `testdata/change_workspace.json` fixture were added; its JSON shape is exercised only indirectly, via `json.Unmarshal` inside `internal/relay/handlers/change_workspace_test.go`. See [codebase/823.md](../codebase/823.md) § Lessons learned.
+
+**A field added to `Envelope.Payload`'s underlying struct is invisible to these round-trip tests, `WorkspaceLabel` (#2210) included** — `Envelope.Payload` is `json.RawMessage`, so re-marshalling an envelope writes the fixture's original payload bytes back regardless of what the struct gained. `conversation_created.json` / `conversation_updated.json` gained the key anyway (one a real label, one `null`, so both states have a hand-written example), but what actually proves the field is on the wire is the decoded per-field assertions these tests already make, extended to cover it — the same trap and the same fix as `ConversationSummary.WorkspaceLabel` in [`protocol-package-types-conversations-read-payloads.md`](protocol-package-types-conversations-read-payloads.md), whose raw-bytes null-vs-omitted assertion is the pattern to copy for any nullable-but-mandatory field added here.

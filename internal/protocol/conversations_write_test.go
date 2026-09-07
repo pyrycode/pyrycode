@@ -71,6 +71,15 @@ func TestConversationCreatedPayload_RoundTrip(t *testing.T) {
 	if p.Name != nil {
 		t.Errorf("Name: got pointer to %q, want nil (wire was null)", *p.Name)
 	}
+	// The unlabelled-workspace case, the state a client meets before any folder
+	// is ever named. As with Name above, the decoded assertion is the whole
+	// check: the envelope round-trip re-marshals the fixture's raw payload bytes
+	// and cannot see this field. That the fixture spells it null rather than
+	// omitting the key is the wire contract, and it is what the handler tests
+	// assert on raw bytes.
+	if p.WorkspaceLabel != nil {
+		t.Errorf("WorkspaceLabel: got pointer to %q, want nil (wire was null)", *p.WorkspaceLabel)
+	}
 	wantTS, err := time.Parse(time.RFC3339Nano, "2026-05-08T10:34:01Z")
 	if err != nil {
 		t.Fatalf("parse expected last_used_at: %v", err)
@@ -284,6 +293,14 @@ func TestConversationUpdatedPayload_RoundTrip(t *testing.T) {
 	}
 	if p.Cwd != "/Users/juhana/pyry-workspace/weekly-planning" {
 		t.Errorf("Cwd: got %q", p.Cwd)
+	}
+	// The re-marshal below cannot see WorkspaceLabel at all: Envelope.Payload is
+	// a json.RawMessage, so marshalling env writes the fixture's own payload
+	// bytes back and the byte comparison passes whatever the struct gained or
+	// lost. This decoded assertion is the only thing holding the field to the
+	// fixture. The sibling conversation_created fixture carries the null case.
+	if p.WorkspaceLabel == nil || *p.WorkspaceLabel != "Weekly planning" {
+		t.Errorf("WorkspaceLabel: got %v, want pointer to %q", p.WorkspaceLabel, "Weekly planning")
 	}
 	wantTS, err := time.Parse(time.RFC3339Nano, "2026-05-08T10:34:30Z")
 	if err != nil {

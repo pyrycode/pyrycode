@@ -25,6 +25,10 @@ type ConversationArchiver interface {
 	SetArchived(id conversations.ConversationID, archived bool) bool
 	Get(id conversations.ConversationID) (conversations.Conversation, bool)
 	Save(path string) error
+	// WorkspaceLabel supplies the reply's workspace_label (#2210). Archiving a
+	// conversation does not un-name its folder, so the flip and the restore both
+	// report the label exactly as an untouched row would.
+	WorkspaceLabel(cwd string) (string, bool)
 }
 
 // ArchiveConversation returns a dispatch.Handler that processes an
@@ -114,12 +118,13 @@ func ArchiveConversation(reg ConversationArchiver, registryPath string, logger *
 		}
 
 		payloadJSON, err := json.Marshal(protocol.ConversationUpdatedPayload{
-			ID:         string(cv.ID),
-			IsPromoted: cv.IsPromoted,
-			IsArchived: cv.IsArchived,
-			Name:       cv.Name,
-			Cwd:        cv.Cwd,
-			LastUsedAt: cv.LastUsedAt,
+			ID:             string(cv.ID),
+			IsPromoted:     cv.IsPromoted,
+			IsArchived:     cv.IsArchived,
+			Name:           cv.Name,
+			Cwd:            cv.Cwd,
+			WorkspaceLabel: workspaceLabelFor(reg, cv.Cwd),
+			LastUsedAt:     cv.LastUsedAt,
 		})
 		if err != nil {
 			return fmt.Errorf("marshal conversation_updated payload: %w", err)

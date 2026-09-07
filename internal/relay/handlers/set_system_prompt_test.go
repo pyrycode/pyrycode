@@ -538,10 +538,21 @@ func (r *recordingSetter) Save(path string) error {
 	return r.reg.Save(path)
 }
 
+func (r *recordingSetter) WorkspaceLabel(cwd string) (string, bool) {
+	r.calls = append(r.calls, "WorkspaceLabel")
+	return r.reg.WorkspaceLabel(cwd)
+}
+
 // TestSetSystemPrompt_TouchesNoSessionSurface covers AC #4. The handler cannot
 // restart, rotate, recompose the argv of, or interrupt a live session, because
-// its entire interaction with the daemon is three conversations-registry calls —
+// its entire interaction with the daemon is four conversations-registry calls —
 // there is no session, pool or runner seam in its dependency set to reach.
+//
+// The fourth is WorkspaceLabel, added by #2210 to fill the reply's
+// workspace_label. It moved this count from three deliberately: the sequence is
+// the assertion, so a new registry door has to be admitted here rather than
+// absorbed. It is still a conversations-registry read and still reaches no
+// session surface, which is what this test is about.
 // (The structural half of that proof is the constructor signature, which this
 // test compiles against; the observable half is the exact call sequence below.)
 //
@@ -558,7 +569,7 @@ func TestSetSystemPrompt_TouchesNoSessionSurface(t *testing.T) {
 		{
 			"success writes, snapshots, persists — and nothing more",
 			[]byte(`{"conversation_id":"` + sspTargetID + `","system_prompt":"` + sspPrompt + `"}`),
-			[]string{"SetSystemPrompt", "Get", "Save"},
+			[]string{"SetSystemPrompt", "Get", "Save", "WorkspaceLabel"},
 		},
 		{
 			"a refused write never reaches the snapshot or the persist",

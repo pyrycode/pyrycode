@@ -207,13 +207,30 @@ func channelCreator(
 			// read as though a vanished row changed what the verb replies, and it
 			// does not.
 			if got, ok := reg.Get(id); ok {
+				// The workspace's label (#2210), keyed on the read-back row's own
+				// confined cwd — the same value this record reports — so a client
+				// patching its rows from the push renders the operator's chosen
+				// name instead of the folder name. Presence comes from the
+				// accessor's second return and never from a label != ""
+				// comparison, which would collapse the registry's distinct
+				// stored-empty and absent states. The three lines are inline
+				// rather than shared: the relay handlers' workspaceLabelFor is
+				// unexported in another package, and this is the only site here.
+				//
+				// Nothing below logs it. The value is operator-supplied text that
+				// belongs on the wire and nowhere else.
+				var workspaceLabel *string
+				if label, ok := reg.WorkspaceLabel(got.Cwd); ok {
+					workspaceLabel = &label
+				}
 				announce(protocol.ConversationUpdatedPayload{
-					ID:         string(got.ID),
-					IsPromoted: got.IsPromoted,
-					IsArchived: got.IsArchived,
-					Name:       got.Name,
-					Cwd:        got.Cwd,
-					LastUsedAt: got.LastUsedAt,
+					ID:             string(got.ID),
+					IsPromoted:     got.IsPromoted,
+					IsArchived:     got.IsArchived,
+					Name:           got.Name,
+					Cwd:            got.Cwd,
+					WorkspaceLabel: workspaceLabel,
+					LastUsedAt:     got.LastUsedAt,
 				})
 			} else {
 				log.Warn("control: channel.new vanished before announce read-back",

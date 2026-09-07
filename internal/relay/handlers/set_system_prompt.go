@@ -56,6 +56,12 @@ type ConversationSystemPromptSetter interface {
 	SetSystemPrompt(id conversations.ConversationID, prompt *string) error
 	Get(id conversations.ConversationID) (conversations.Conversation, bool)
 	Save(path string) error
+	// WorkspaceLabel supplies the reply's workspace_label (#2210). It is a fourth
+	// registry door on a handler whose narrowness is itself asserted — see
+	// TestSetSystemPrompt_TouchesNoSessionSurface, which pins the exact call
+	// sequence. Still a conversations-registry read and still no session,
+	// pool or runner seam.
+	WorkspaceLabel(cwd string) (string, bool)
 }
 
 // SetSystemPrompt returns a dispatch.Handler that processes a set_system_prompt
@@ -222,7 +228,12 @@ func SetSystemPrompt(reg ConversationSystemPromptSetter, registryPath string, lo
 			IsArchived: cv.IsArchived,
 			Name:       cv.Name,
 			Cwd:        cv.Cwd,
-			LastUsedAt: cv.LastUsedAt,
+			// The workspace's label, not the conversation's prompt: this is a
+			// value the requester's client can already read off any
+			// list_conversations row, which is exactly what the withheld prompt
+			// is not.
+			WorkspaceLabel: workspaceLabelFor(reg, cv.Cwd),
+			LastUsedAt:     cv.LastUsedAt,
 		})
 		if err != nil {
 			return fmt.Errorf("marshal conversation_updated payload: %w", err)
