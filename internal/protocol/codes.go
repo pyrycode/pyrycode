@@ -1403,6 +1403,73 @@ const (
 	TypeRequestModelList = "request_model_list" // phone → binary, inbound v2 control (switch-intercepted — #2125)
 )
 
+// Mobile Protocol v2 CONVERSATION SYSTEM-PROMPT READ PAIR (#2152, split from
+// #2094; docs/protocol-mobile.md § Reading a conversation's system prompt
+// publishes both). The frame a client sends to ask what system prompt one
+// conversation holds, and the frame it is answered with. Their payloads are
+// RequestSystemPromptPayload and SystemPromptPayload (system_prompt.go).
+//
+// THE DEFECT IT CLOSES is the read half TypeSetSystemPrompt (#2151) shipped
+// without. That verb's ack is the reused TypeConversationUpdated record, which
+// deliberately does NOT carry the value — it is broadcast to every phone on the
+// server-id, so carrying it there would widen the audience for a value only the
+// requester asked about — so a client that did not itself perform the write has
+// no way to learn what is stored. And because a stored prompt takes effect at the
+// conversation's NEXT session start, a client showing the stored value alone
+// tells an operator their edit is live when it is not.
+//
+// SO THE REPLY REPORTS A DIFFERENCE, NOT A SECOND COPY OF THE TEXT. The daemon
+// knows what the live session was spawned with (#2150's session-keyed
+// Pool.SystemPromptFor); the client's need is to be told the two disagree, so
+// SystemPromptPayload carries a three-value verdict rather than echoing up to
+// another 8192 bytes of operator text back over the wire. A client that wants to
+// show a diff is a later ticket.
+//
+// A READ ROUTE, NOT A FIELD ON AN EXISTING REPLY, and both alternatives were
+// rejected for a stated reason. It does not go on the TypeConversations record:
+// a prompt is capped at conversations.MaxSystemPromptBytes (8192) and that reply
+// carries EVERY row, so a handful of prompted conversations would blow the
+// 65519-byte application-envelope cap. It does not go on SessionSettingsPayload
+// either: that payload's contract is that every field sits at its zero when no
+// session resolves, which is exactly when an operator most needs to see what is
+// stored.
+//
+// THE NAME follows the six inbound "ask the daemon for X" verbs already here —
+// TypeRequestSnapshot, TypeRequestDebugBundle, TypeRequestSessionSettings,
+// TypeRequestAttachment, TypeRequestHistory, TypeRequestModelList — rather than
+// inventing a seventh idiom for the same act. #2052's rule applies: a wire type
+// string IS the contract, and a name chosen twice is a name chosen wrong once.
+//
+// UNLIKE ITS NEAREST FILE-SPREAD PRECEDENT IT MINTS NO ERROR CODE AND HAS NO
+// ERROR FRAME. TypeRequestModelList needs two codes because turnevent.ModelList's
+// Models is documented never-empty, so an empty menu cannot stand in for
+// "unknown". Here every unresolvable case has a truthful constant answer — the
+// reply whose system_prompt key is absent and whose verdict is "no_session" — so
+// this verb takes TypeRequestSessionSettings' always-answer posture instead. A
+// conversation this daemon does not host is answered with exactly that reply,
+// which makes the verb useless as a membership oracle.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: these
+// are v2 CONTROL envelopes intercepted before internal/dispatch.Route, exactly as
+// TypeRequestSessionSettings and TypeRequestModelList are. IsKnownAppType
+// rejecting them with ErrUnknownType is also the structural bar against a v1
+// client pushing one into the v1 handler chain. The partition in
+// internal/protocol/compat_test.go files both in v2OnlyTypes, and
+// inboundAppTypeSet's asserted count does not move.
+//
+// NEITHER EVER SITS IN excludedTypes AS "pending handler". Like
+// TypeRequestModelList and unlike TypeRequestHistory (#2113→#2116) or
+// TypeRequestAttachment (#2052→#2054), the declaration and the handler land in
+// ONE ticket — the declaration's only daemon-side consumer is that handler, so
+// cutting them apart would produce a slice consumed by exactly one sibling. The
+// request is therefore filed in cmd/pyry/relay_guard_test.go's inboundTypes as
+// "switch-intercepted" from the moment it exists, and the reply in excludedTypes
+// as an outbound reply, exactly as TypeHistoryPage is for TypeRequestHistory.
+const (
+	TypeRequestSystemPrompt = "request_system_prompt" // phone → binary, inbound v2 control (switch-intercepted — #2152)
+	TypeSystemPrompt        = "system_prompt"         // binary → phone, one conversation's stored prompt plus a live-session verdict, correlated via in_reply_to
+)
+
 // Mobile Protocol v2 clarifying-question batch (#1962, split from #1926). The
 // questions claude asks mid-turn when it needs the operator to choose between
 // approaches, carried to a client as one frame per batch. The call rides the same

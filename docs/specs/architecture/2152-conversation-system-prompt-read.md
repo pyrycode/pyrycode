@@ -576,3 +576,46 @@ answer?*
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-07
+
+## Revisions
+
+### 2026-09-07 — Open Questions resolved during Phase B
+
+No design changed; all three questions resolved as the plan predicted, recorded
+here so the resolutions are auditable rather than inferred from the diff.
+
+1. **`Registry.Get` and the registry mutex** — resolved during the security pass,
+   before the plan was committed. It takes the mutex and returns a shallow copy, so
+   the pointer is read under the lock and the pointee is an immutable Go string. The
+   copy-the-pointee rule in `resolveConversationPrompt` stays as forward defence
+   against a later change that retains or projects the field, and its doc comment
+   says so rather than claiming to fix a live race.
+   `TestResolveConversationPrompt_DoesNotAliasTheRegistrysPointer` pins it.
+2. **Which `docs/protocol-mobile.md` tables need rows** — one table, § Application
+   message types, carries every type in both directions; both new rows went there,
+   beside `request_history`. No second table exists for outbound replies.
+3. **The e2e fake-daemon harness** — no change needed. Nothing outside
+   `cmd/pyry/relay_guard_test.go`'s `inboundTypes`/`excludedTypes` and
+   `internal/protocol/compat_test.go`'s partition enumerates the type constants
+   exhaustively; both were fed, and `go vet ./...` compiles the e2e packages clean.
+
+### 2026-09-07 — non-vacuity of the two load-bearing tests
+
+Both new behaviours were mutation-checked in tree and reverted, because each is a
+place where a passing test could have been proving nothing:
+
+- **The collapse.** Making `systemPromptStatus` report an explicitly empty stored
+  prompt as `differs` reddened exactly one row —
+  `TestSystemPromptStatus_ComparesTheCollapsedStoredValue/an EXPLICITLY EMPTY
+  prompt, session spawned with none: the collapse` — and nothing else, so that row
+  is what carries the rule rather than riding along beside it.
+- **The comma-ok.** Rewriting the handler's resolve to `payload, _ = …` reddened
+  `TestV2Session_RequestSystemPrompt_UnresolvableAnswersTheConstantReply/a
+  conversation this daemon does not host` and
+  `TestV2Session_RequestSystemPrompt_UnhostedIsIndistinguishableFromQuiet`, which
+  is the poisoned refusal double doing its job: against a zero-valued refusal both
+  rows would have passed while proving nothing.
+
+The `cmd/pyry` mutation left the `internal/relay` empty-prompt row green, which is
+the separation working as intended — that package tests the wire shape against a
+double and does not own the comparison.

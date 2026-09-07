@@ -131,6 +131,27 @@ var inboundTypes = map[string]string{
 	// Its reply half is TypeModelList, which is outbound-only and stays excluded,
 	// exactly as TypeHistoryPage does for TypeRequestHistory.
 	"TypeRequestModelList": "switch-intercepted",
+	// The conversation system-prompt read verb (#2152). Like TypeRequestModelList
+	// above and unlike the three before it, it NEVER sat in excludedTypes as
+	// "pending handler": its declaration, its handler and its reply half land in one
+	// ticket, because the declaration's only daemon-side consumer is that handler.
+	// Filed here from the moment the constant exists — Assertion #3 reports an
+	// unclassified constant, and Assertion #1 is satisfied by the dispatchAppFrame
+	// case in the same commit.
+	//
+	// Its case DISPATCHES INLINE, the settings/model-list shape rather than the
+	// worker shape: answering is a registry lookup, one pool map read and one small
+	// marshal, not a file read. The guard reads case selectors rather than bodies,
+	// so that does not change the filing — it is recorded because a future edit
+	// moving this arm off Run has an emit-path obligation (see
+	// handleRequestSystemPrompt's file header).
+	//
+	// ITS WRITE HALF IS ON THE OTHER SURFACE. TypeSetSystemPrompt is
+	// "map-dispatched" above, and the split is deliberate rather than an accident of
+	// two tickets: the write verb carries no capability gate, and this one is inert
+	// without the interactive capability. Do not "fix" the asymmetry by moving
+	// either.
+	"TypeRequestSystemPrompt": "switch-intercepted",
 }
 
 // excludedTypes classifies every non-inbound Type* constant with its reason, so
@@ -197,6 +218,17 @@ var excludedTypes = map[string]string{
 	// an unemitted one. Unlike its request half this frame has no inbound leg at
 	// all, so this entry never moves to inboundTypes.
 	"TypeHistoryPage": "reply",
+
+	// The conversation system-prompt read reply (#2152), the answer to the
+	// request_system_prompt below. Filed on the same rule as TypeHistoryPage above
+	// and copying the same shape, TypeSessionSettings: an outbound v2 answer to an
+	// inbound request verb that named a conversation, correlated by in_reply_to and
+	// carrying no conversation id of its own. Unlike those two it lands in the SAME
+	// ticket as its request half and its handler, so it is never "pending". It has
+	// no inbound leg at all — the write half is a different type entirely
+	// (TypeSetSystemPrompt, map-dispatched, above) — so this entry never moves to
+	// inboundTypes.
+	"TypeSystemPrompt": "reply",
 
 	// outbound push / event — binary→phone, never dispatched inbound.
 	"TypeMessage":             "push",

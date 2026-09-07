@@ -854,6 +854,13 @@ func (m *V2SessionManager) dispatchAppFrame(ctx context.Context, s *V2Session, p
 			// handleRequestModelList's file header for what that placement obliges.
 			m.handleRequestModelList(ctx, s, probeEnv)
 			return
+		case protocol.TypeRequestSystemPrompt:
+			// Inline on Run (#2152), beside the two shape twins above rather than
+			// with the hand-off arms below: answering is a registry lookup, one pool
+			// map read and one small marshal. See handleRequestSystemPrompt's file
+			// header for what that placement obliges of a future edit.
+			m.handleRequestSystemPrompt(ctx, s, probeEnv)
+			return
 		case protocol.TypeAttachmentChunk:
 			// The FIRST control type whose handler does not run inline on Run
 			// (#1897), and one of two — the retrieval arm below joined it in
