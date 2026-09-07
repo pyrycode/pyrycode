@@ -3,7 +3,9 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -22,12 +24,41 @@ type attachFixture struct {
 	reg         *conversations.Registry
 	live        map[sessions.SessionID]bool
 	attach      func(sessionID, path string) (string, error)
+
+	// announced records every announcement the attacher made, in order. Guarded
+	// because the hook fires on whatever goroutine called attach, and the
+	// production seam is reached concurrently (control.Server.Serve accepts each
+	// conn onto its own goroutine) — so a fixture that assumed one goroutine
+	// would be modelling something the daemon does not do.
+	mu        sync.Mutex
+	announced []attachAnnouncement
+}
+
+// attachAnnouncement is one call of the announce hook: the three values the
+// attachment_offered frame carries.
+type attachAnnouncement struct {
+	conversationID string
+	attachmentID   string
+	filename       string
 }
 
 // newAttachFixture wires a fileAttacher over a fresh registry holding no
-// conversations and no live sessions. Callers add what they need with
-// bindConversation.
+// conversations and no live sessions, with a RECORDING announce hook. Callers
+// add what they need with bindConversation.
 func newAttachFixture(t *testing.T) *attachFixture {
+	t.Helper()
+	return newAttachFixtureWithAnnounce(t, true)
+}
+
+// newAttachFixtureWithoutAnnounce wires the same attacher with a NIL announce
+// hook — the daemon that has no relay leg, where startRelay returned early
+// before any manager existed. It must still store and still mint.
+func newAttachFixtureWithoutAnnounce(t *testing.T) *attachFixture {
+	t.Helper()
+	return newAttachFixtureWithAnnounce(t, false)
+}
+
+func newAttachFixtureWithAnnounce(t *testing.T, hook bool) *attachFixture {
 	t.Helper()
 	root := t.TempDir()
 	reg, err := conversations.Load(filepath.Join(root, "conversations.json"))
@@ -40,13 +71,32 @@ func newAttachFixture(t *testing.T) *attachFixture {
 		reg:         reg,
 		live:        map[sessions.SessionID]bool{},
 	}
+	var announce func(conversationID, attachmentID, filename string)
+	if hook {
+		announce = func(conversationID, attachmentID, filename string) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.announced = append(f.announced, attachAnnouncement{
+				conversationID: conversationID,
+				attachmentID:   attachmentID,
+				filename:       filename,
+			})
+		}
+	}
 	f.attach = fileAttacher(reg, func(id sessions.SessionID) error {
 		if f.live[id] {
 			return nil
 		}
 		return sessions.ErrSessionNotFound
-	}, f.instanceDir, nil)
+	}, f.instanceDir, announce, nil)
 	return f
+}
+
+// offers returns a copy of what the announce hook observed.
+func (f *attachFixture) offers() []attachAnnouncement {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.announced)
 }
 
 // bindConversation registers a conversation whose recorded workspace is a
@@ -355,7 +405,127 @@ func TestFileAttacher_Refusals(t *testing.T) {
 				t.Fatalf("attach = %q, want a refusal", id)
 			}
 			assertContentFree(t, err.Error(), path, filepath.Base(path))
+			// A refused store announces nothing. Asserted on EVERY row rather
+			// than a representative one, for assertContentFree's reason: the
+			// property is per-branch, and one branch that announced a file it
+			// did not store would tell clients to fetch bytes that are not
+			// there.
+			if got := f.offers(); len(got) != 0 {
+				t.Errorf("a refused store announced %d offer(s) (%+v); nothing is announced "+
+					"unless the file was stored", len(got), got)
+			}
 		})
+	}
+}
+
+// TestFileAttacher_AnnouncesTheStoredName is AC-1's pin. A successful store
+// announces once, naming the conversation it resolved, the id it minted, and —
+// the part that has to be got right — the name the file was actually STORED
+// under rather than the name it had on the host.
+//
+// The two rows are a discriminating PAIR, and the second is the whole point.
+// Announcing filepath.Base of the RESOLVED source path passes the first row and
+// fails the second, because attachments.Store sanitises the claude-authored name
+// before writing it: a space is not in SanitizeFilename's allowlist and becomes
+// an underscore. Only taking the leaf of the path Store RETURNED gets both
+// right, which is what makes the announced name and the name the retrieval leg
+// publishes one string rather than two derivations of one.
+//
+// The expectation is read off the FILESYSTEM — the single file present in the
+// attachment directory — rather than recomputed from the input, so a wrong
+// derivation reddens instead of being reproduced on both sides of the assertion.
+func TestFileAttacher_AnnouncesTheStoredName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		hostName string
+	}{
+		{
+			name:     "a name sanitisation leaves alone",
+			hostName: "report.md",
+		},
+		{
+			name:     "a name sanitisation rewrites",
+			hostName: "quarterly summary v2.md",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ws := t.TempDir()
+			writeFile(t, ws, tc.hostName, "the bytes claude wrote")
+
+			f := newAttachFixture(t)
+			const sid = "11111111-2222-4333-8444-555555555555"
+			convID := f.bindConversation(sid, ws)
+
+			id, err := f.attach(sid, tc.hostName)
+			if err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+
+			stored, err := attachments.ResolvePath(f.instanceDir, convID, id)
+			if err != nil {
+				t.Fatalf("ResolvePath: %v", err)
+			}
+			wantName := filepath.Base(stored)
+
+			got := f.offers()
+			if len(got) != 1 {
+				t.Fatalf("a successful store announced %d offer(s), want exactly 1", len(got))
+			}
+			if got[0].conversationID != string(convID) {
+				t.Errorf("announced conversation_id = %q, want the conversation the CALLING "+
+					"session resolved to (%q)", got[0].conversationID, convID)
+			}
+			if got[0].attachmentID != id {
+				t.Errorf("announced attachment_id = %q, want the id the verb minted and "+
+					"returned (%q)", got[0].attachmentID, id)
+			}
+			if got[0].filename != wantName {
+				t.Errorf("announced filename = %q, want %q — the leaf of the path Store wrote, "+
+					"which is the same string the retrieval leg publishes for this id; "+
+					"the host file was named %q", got[0].filename, wantName, tc.hostName)
+			}
+		})
+	}
+}
+
+// TestFileAttacher_NoAnnounceHookStillStores is AC-2. The hook is absent exactly
+// when the relay leg is — startRelay returns before building a manager when no
+// URL is configured — and that daemon must file the bytes and answer with a
+// minted id rather than refuse. The nil-tolerance SetApprovalSurfacer(nil)
+// already has, not the always-installed approval registry's shape.
+func TestFileAttacher_NoAnnounceHookStillStores(t *testing.T) {
+	t.Parallel()
+
+	ws := t.TempDir()
+	writeFile(t, ws, "note.md", "no relay leg here")
+
+	f := newAttachFixtureWithoutAnnounce(t)
+	const sid = "11111111-2222-4333-8444-555555555555"
+	convID := f.bindConversation(sid, ws)
+
+	id, err := f.attach(sid, "note.md")
+	if err != nil {
+		t.Fatalf("attach with no announce hook: %v", err)
+	}
+	if !conversations.ValidID(id) {
+		t.Errorf("id %q is not a canonical lowercase UUIDv4", id)
+	}
+	path, err := attachments.ResolvePath(f.instanceDir, convID, id)
+	if err != nil {
+		t.Fatalf("ResolvePath: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "no relay leg here" {
+		t.Errorf("stored bytes = %q, want the source file's contents", got)
 	}
 }
 

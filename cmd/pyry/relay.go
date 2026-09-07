@@ -383,17 +383,20 @@ func startRelay(
 	ctx context.Context,
 	logger *slog.Logger,
 	w relayWiring,
-) (cleanup func(), surface func(permbridge.Request) func(), err error) {
+) (cleanup func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), err error) {
 	if w.relayURL == "" {
 		logger.Info("relay: disabled (no URL configured)")
-		// No relay leg ⇒ no stream-approval bridge; surface stays nil, so the
-		// control server's SetApprovalSurfacer(nil) leaves mcp.approve modal-less.
-		return func() {}, nil, nil
+		// No relay leg ⇒ no stream-approval bridge and no attachment-offer
+		// emitter; both stay nil. SetApprovalSurfacer(nil) leaves mcp.approve
+		// modal-less, and a nil announce hook leaves attachment.file storing and
+		// minting with nobody to tell (#2166) — this early return is exactly the
+		// daemon that hook's nil-tolerance is written for.
+		return func() {}, nil, nil, nil
 	}
 
 	serverID, err := identity.LoadOrCreate(resolveServerIDPath(w.instanceName))
 	if err != nil {
-		return nil, nil, fmt.Errorf("load server-id: %w", err)
+		return nil, nil, nil, fmt.Errorf("load server-id: %w", err)
 	}
 
 	// Load the device registry once at daemon startup. A missing file
@@ -401,7 +404,7 @@ func startRelay(
 	// `pyry pair` runs. Malformed JSON fails fast.
 	registry, err := devices.Load(resolveDevicesPath(w.instanceName))
 	if err != nil {
-		return nil, nil, fmt.Errorf("load device registry: %w", err)
+		return nil, nil, nil, fmt.Errorf("load device registry: %w", err)
 	}
 
 	if w.allowInsecure {
@@ -418,17 +421,17 @@ func startRelay(
 		ServerIDConflictThreshold: relay4409Threshold(logger),
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("relay connect: %w", err)
+		return nil, nil, nil, fmt.Errorf("relay connect: %w", err)
 	}
 
 	// legCleanup tears down the v2 Noise manager — the sole consumer of
 	// conn.Frames() (ADR 024: v2 is a hard cutover, no mixed-mode path). The
 	// shared waitDone classifier below is appended to it in the returned cleanup.
 	logger.Info("relay: Mobile Protocol v2 (Noise_IK)")
-	drain, surface, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
+	drain, surface, announce, err := startRelayV2(ctx, logger, w, conn, registry, serverID)
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	legCleanup := func() {
 		// Close the connection first so Connection.run closes Frames,
@@ -468,7 +471,7 @@ func startRelay(
 		legCleanup()
 		<-waitDone
 	}
-	return cleanup, surface, nil
+	return cleanup, surface, announce, nil
 }
 
 // relay4409Threshold reads the PYRY_RELAY_4409_THRESHOLD test-only seam: a
@@ -604,10 +607,10 @@ func startRelayV2(
 	conn *relay.Connection,
 	registry *devices.Registry,
 	serverID identity.ServerID,
-) (drain func(), surface func(permbridge.Request) func(), err error) {
+) (drain func(), surface func(permbridge.Request) func(), announce func(conversationID, attachmentID, filename string), err error) {
 	staticKey, err := keys.LoadOrCreate(resolveStaticKeyBaseDir(), sanitizeName(w.instanceName))
 	if err != nil {
-		return nil, nil, fmt.Errorf("load static key: %w", err)
+		return nil, nil, nil, fmt.Errorf("load static key: %w", err)
 	}
 	priv := staticKey.PrivateKey()
 
@@ -1002,8 +1005,25 @@ func startRelayV2(
 		SettingsUpdater: w.settings,
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("build v2 session manager: %w", err)
+		return nil, nil, nil, fmt.Errorf("build v2 session manager: %w", err)
 	}
+
+	// Attachment-offer announcer (#2166): the producer half of a frame #2082
+	// published with nothing emitting it. Once attachment.file stores a file
+	// claude named, this tells every interactive client the file exists, so a
+	// client can draw it and fetch it with request_attachment — the id used to
+	// exist only in the control-socket reply that went back to claude.
+	//
+	// OUTSIDE the `if w.approvals != nil` block below, deliberately. It needs mgr
+	// and nothing else; putting it in there would tie announcing a stored file to
+	// the presence of a permission bridge, two capabilities with no relationship.
+	// Its route out is the same as that block's surface: a bare func returned to
+	// the composition root, which hands it to fileAttacher.
+	//
+	// Built AFTER mgr and BEFORE mgr.Run's goroutine starts below, the window
+	// streamApprovals and the bridge's post-construction assignments use — so
+	// nothing the Run goroutine reads is written concurrently.
+	announce = newAttachmentOfferEmitterV2(mgr, ctx, logger).announce
 
 	// Stream-json approval bridge (#1080): joins the daemon-singleton permbridge
 	// parked-approval store (claude-facing completers, keyed by tool_use_id) to
@@ -1218,7 +1238,7 @@ func startRelayV2(
 		streamQueueStateCleanup()
 		streamSessionErrCleanup()
 		<-mgrDone
-	}, surface, nil
+	}, surface, announce, nil
 }
 
 // conversationForSession resolves a claude session id to the id of the

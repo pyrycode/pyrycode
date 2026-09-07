@@ -998,7 +998,7 @@ func runSupervisor(args []string) error {
 	// staticcheck U1000; #1080 is the thin change that adds the reader.
 	approvals := permbridge.New()
 
-	relayCleanup, approvalSurface, err := startRelay(ctx, logger, relayWiring{
+	relayCleanup, approvalSurface, announceAttachment, err := startRelay(ctx, logger, relayWiring{
 		instanceName:  *name,
 		relayURL:      relayURL,
 		version:       Version,
@@ -1102,10 +1102,16 @@ func runSupervisor(args []string) error {
 	// the *sessions.Session: whether the named session is live is the entire
 	// question, and handing the attacher a session it has no use for would widen
 	// the seam for nothing.
+	//
+	// announceAttachment (#2166) is the relay leg's attachment-offer fan-out, so
+	// a stored file reaches paired clients as an attachment_offered rather than
+	// as nothing at all. It arrives nil from startRelay's no-URL early return —
+	// the SetApprovalSurfacer(nil) shape one line up — and the attacher stores
+	// and mints exactly as before when it is.
 	ctrl.SetFileAttacher(fileAttacher(convReg, func(id sessions.SessionID) error {
 		_, err := pool.Lookup(id)
 		return err
-	}, resolveInstanceDirPath(*name), logger))
+	}, resolveInstanceDirPath(*name), announceAttachment, logger))
 	if err := ctrl.Listen(); err != nil {
 		return fmt.Errorf("control listen: %w", err)
 	}

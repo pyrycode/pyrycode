@@ -79,12 +79,26 @@ var (
 // *sessions.Session leaking into a seam that has no use for one — liveness is
 // the entire question being asked.
 //
+// announce tells paired clients the file now exists (#2166), so a file claude
+// produced reaches a client as something rather than as nothing at all. A bare
+// func for the reason live is one, and for the reason snapshotSettings and
+// settingsUpdaterAdapter are: the value crossing out of the relay leg stays a
+// primitive-shaped closure, so this seam takes on no relay type.
+//
+// IT MAY BE NIL, and the nil is not defensive padding — it is the
+// SetApprovalSurfacer(nil) shape rather than the always-installed approval
+// registry's. The hook is absent exactly when the relay leg is: startRelay
+// returns before any manager exists when no URL is configured, so that daemon
+// has nobody to announce to. A nil hook stores the file and answers with the
+// minted id; it never turns a successful store into a refusal.
+//
 // log may be nil (tests, and any caller that has no logger yet); nothing here
 // requires one.
 func fileAttacher(
 	convReg *conversations.Registry,
 	live func(sessions.SessionID) error,
 	instanceDir string,
+	announce func(conversationID, attachmentID, filename string),
 	log *slog.Logger,
 ) func(sessionID, path string) (string, error) {
 	return func(sessionID, path string) (string, error) {
@@ -140,7 +154,15 @@ func fileAttacher(
 		// itself, so the leaf can never spell a directory. Its error is dropped
 		// for a sharper reason than EnsureDir's: the rename path returns an
 		// *os.LinkError whose Error() prints the destination, filename included.
-		if _, err := attachments.Store(dir, filepath.Base(resolved), data); err != nil {
+		//
+		// The RETURNED PATH is kept rather than discarded, and that is what makes
+		// the announcement below name the file that was actually written. Its
+		// leaf is Store's own SanitizeFilename output, which is also what the
+		// retrieval leg publishes for this id — one string, not two derivations
+		// of one. filepath.Base recovers it exactly: the sanitiser's allowlist
+		// rewrites every separator, so Join cleans nothing away.
+		stored, err := attachments.Store(dir, filepath.Base(resolved), data)
+		if err != nil {
 			return "", errAttachStoreFailed
 		}
 
@@ -153,6 +175,15 @@ func fileAttacher(
 		if log != nil {
 			log.Info("control: filed a host file as an attachment",
 				"conversation_id", string(conv.ID), "attachment_id", string(id))
+		}
+
+		// Tell paired clients the file exists (#2166). LAST, and only on the
+		// success path: every refusal above has already returned, so a refused
+		// store announces nothing. Its result is deliberately not consulted — a
+		// failed push must not turn a successful store into a refusal, because
+		// the bytes are on disk and the id is real whether or not anyone heard.
+		if announce != nil {
+			announce(string(conv.ID), string(id), filepath.Base(stored))
 		}
 		return string(id), nil
 	}
