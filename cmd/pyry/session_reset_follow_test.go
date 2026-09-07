@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +23,11 @@ const (
 	resetFollowSessionA = "aaaaaaaa-1111-4111-8111-111111111111"
 	resetFollowSessionB = "bbbbbbbb-2222-4222-8222-222222222222"
 	resetFollowSessionC = "cccccccc-3333-4333-8333-333333333333"
+	// resetFollowSessionM is the id a DAEMON-DRIVEN rotation mints while an announced
+	// reset is in flight — RotateForNewSession's or RotateBootstrapForSelfHeal's own
+	// value, never one claude named. It is the id the registry ends on in #2176's
+	// reproduction, and therefore the one the tag must end on too.
+	resetFollowSessionM = "dddddddd-4444-4444-8444-444444444444"
 )
 
 // recordingAdopt is a sessions.RunnerConfig.AdoptAnnouncedReset double that
@@ -188,13 +196,23 @@ func TestSessionResetFollower_EqualIDChangesNothing(t *testing.T) {
 // a missing feature — different regressions, which is why the two sentinels cannot
 // share a row.
 //
+// A nil answer is this call having re-keyed — since #2137 the ordinary path, and the
+// only answer that means the registry now stands on the announced id. It is a row
+// rather than a separate test so the biconditional below is asserted over ALL THREE
+// answers rather than over the two that decline.
+//
 // ErrSessionNotFound is what the pool answers when oldID is already gone. Until #2137
 // that was every reset, because the rotation watcher observed the same rotation first
-// and re-keyed; with the watcher retired it is the exception. The row is kept because
-// the branch is unchanged and the regression it guards is the expensive one: a
-// follower that rotated only on the pool's SUCCESS would leave every later event
-// tagged with the retired id, the drain's active-session gate would drop all of them,
-// and the conversation would go dark until the daemon restarted.
+// and re-keyed ONTO THE SAME ANNOUNCED ID, which is what made keeping the tag there
+// right. #2137 retired the watcher and the premise went with it: this row now models
+// the producers that survive — a daemon-driven RotateForNewSession or
+// RotateBootstrapForSelfHeal, which re-key onto a freshly MINTED id, or a Remove /
+// eviction / create-rollback, which leave no successor at all. None of them can put
+// the session on the announced id, so the follower declines and unwinds (#2176), and
+// the regression this row now guards is the mirror image of the one it guarded
+// before: a follower that kept the tag here leaves the registry on one id and the tag
+// on another, and the drain's gate takes the conversation dark exactly as it would
+// have on the old inverse.
 //
 // ErrSessionIDTaken is the opposite and looks alike only from the error's side.
 // AdoptAnnouncedID returns it BEFORE rekeyLocked, so nothing was re-keyed and no
@@ -227,9 +245,15 @@ func TestSessionResetFollower_PoolAnswerDecidesTheTag(t *testing.T) {
 		why     string
 	}{
 		{
-			name: "watcher won the race", err: sessions.ErrSessionNotFound,
+			name: "pool re-keyed", err: nil,
 			wantTag: resetFollowSessionB,
-			why:     "the pool is already on the announced id, and a tag left behind blackholes this conversation",
+			why:     "this call performed the re-key, so the registry and the tag agree on the announced id",
+		},
+		{
+			name: "session moved elsewhere or is gone", err: sessions.ErrSessionNotFound,
+			wantTag: resetFollowSessionA,
+			why: "every surviving producer of this sentinel puts the session on a MINTED id or on none, " +
+				"so a tag kept on the announced id names something the registry never went to",
 		},
 		{
 			name: "announced id already taken", err: sessions.ErrSessionIDTaken,
@@ -286,6 +310,242 @@ func drainEnvelopeSessionIDs(sink *streamTurnSink) []string {
 			return ids
 		}
 	}
+}
+
+// racingTag is a sessionTag double that fires a hook ONCE at the top of
+// CompareAndSwap and then delegates to the real tag it embeds.
+//
+// It exists because #2176's first interleaving is otherwise not injectable: follow
+// reads the live tag and conditionally writes it in two adjacent statements on one
+// goroutine, and no external double sits between them. A competing rotation performed
+// at the top of the delegated write IS that ordering, since the follower's goroutine
+// does nothing else in the gap — which is exactly why the write has to be conditional
+// rather than a store.
+//
+// The hook fires once so the UNWIND's own CompareAndSwap, on the rows that reach one,
+// sees the tag the first firing left rather than a second rotation the reproduction
+// does not contain.
+type racingTag struct {
+	*streamSessionTag
+	once sync.Once
+	hook func()
+}
+
+func (r *racingTag) CompareAndSwap(oldID, newID string) bool {
+	if r.hook != nil {
+		r.once.Do(r.hook)
+	}
+	return r.streamSessionTag.CompareAndSwap(oldID, newID)
+}
+
+// TestSessionResetFollower_CompetingRotationWins pins AC 2 of #2176: a daemon-driven
+// rotation racing an announced reset ends with the tag on the id the REGISTRY holds,
+// under both interleavings, and never on the announced id nor on the pre-announcement
+// one.
+//
+// Both rows model the same production sequence. A phone's new_session reaches
+// Pool.RotateForNewSession, which mints M, re-keys old → M under p.mu and only then
+// returns; RestartFresh fires OnSessionRotate later still, which is tag.Rotate. So the
+// registry reaching M strictly precedes the tag reaching it, and daemonRotate below
+// keeps that order — the ordering is what makes "the tag ends where the tag was last
+// written" and "the tag ends where the registry is" the same assertion.
+//
+// The pool then answers ErrSessionNotFound for the one reason that survives #2137: old
+// is gone because that rotation re-keyed it onto a MINTED id. Neither row may end on
+// the announced B (the registry never went there) nor on the pre-announcement A (the
+// registry left it), which is why a bare unwind is not the fix and the writes have to
+// be conditional in both directions.
+//
+// Each row asserts through the id a later event's envelope actually carries, not the
+// tag field: a mis-tag is only harmful through what it stamps, and a tag-field
+// assertion would pass a follower that stamped from somewhere else.
+func TestSessionResetFollower_CompetingRotationWins(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		// landsBeforeWrite picks where the competing rotation is injected: before the
+		// follower's own conditional write, or between that write and the pool's answer.
+		landsBeforeWrite bool
+		wantPoolCalls    int
+		why              string
+	}{
+		{
+			name: "before the follower's own tag write", landsBeforeWrite: true, wantPoolCalls: 0,
+			why: "the follower's write must not land at all once the tag has moved, so the pool is never asked",
+		},
+		{
+			name: "between that write and the pool's answer", landsBeforeWrite: false, wantPoolCalls: 1,
+			why: "the follower's write landed and the pool was asked, so only the UNWIND can put the tag back — and it must not",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sink := newStreamTurnSink(8, discardLogger())
+			live := newStreamSessionTag(resetFollowSessionA)
+			runner := &recordingAdoptRunner{}
+
+			// registry stands in for the pool entry: what AdoptAnnouncedID would find, and
+			// what the drain's active-session gate would later compare against.
+			registry := resetFollowSessionA
+			daemonRotate := func() {
+				registry = resetFollowSessionM
+				live.Rotate(resetFollowSessionM)
+			}
+
+			adopt := &recordingAdopt{err: sessions.ErrSessionNotFound}
+			var tag sessionTag = live
+			poolFn := adopt.fn
+			if tc.landsBeforeWrite {
+				tag = &racingTag{streamSessionTag: live, hook: daemonRotate}
+			} else {
+				poolFn = func(oldID, newID string) error {
+					daemonRotate()
+					return adopt.fn(oldID, newID)
+				}
+			}
+
+			f := newSessionResetFollower(tag, poolFn, sink.sinkForTag(live.ID), discardLogger())
+			f.adoptRunner = runner.fn
+
+			f.Sink(turnevent.ConversationReset{NewConversationID: resetFollowSessionB})
+
+			if registry != resetFollowSessionM {
+				t.Fatalf("registry = %q, want %q — the fixture never performed the competing rotation", registry, resetFollowSessionM)
+			}
+			if got := live.ID(); got != resetFollowSessionM {
+				t.Errorf("tag.ID() = %q, want the id the registry holds %q — %s", got, resetFollowSessionM, tc.why)
+			}
+			if got := len(adopt.recorded()); got != tc.wantPoolCalls {
+				t.Errorf("pool re-key calls = %d, want %d — %s", got, tc.wantPoolCalls, tc.why)
+			}
+			if got := runner.recorded(); len(got) != 0 {
+				t.Errorf("runner adopted %v, want nothing — a runner left on the announced id spawns "+
+					"--resume %s on its next crash while the registry is on %s", got, resetFollowSessionB, resetFollowSessionM)
+			}
+
+			f.Sink(turnevent.TextChunk{MessageID: "m-after", Text: "AFTER-THE-RACE"})
+			ids := drainEnvelopeSessionIDs(sink)
+			if len(ids) == 0 {
+				t.Fatalf("no envelopes reached the fan-in, so the id assertion below would pass vacuously")
+			}
+			for i, id := range ids {
+				if id != resetFollowSessionM {
+					t.Errorf("envelope %d carries session id %q, want %q — the conversation is bound to the "+
+						"registry's id, and the gate drops everything stamped with any other", i, id, resetFollowSessionM)
+				}
+			}
+		})
+	}
+}
+
+// TestSessionResetFollower_OneRecordPerDeclinedAnnouncement pins AC 4: every way the
+// follower declines writes EXACTLY ONE record naming both the announced id and the id
+// it read, and the two causes are told apart by the event key alone.
+//
+// "The session moved elsewhere or is gone" and "the announced id names a different
+// live session" are different facts for an operator: the first is a race the daemon
+// correctly stood down from, the second is claude naming an id that would have moved
+// this conversation's output into another one. A single key for both would make the
+// Warn-level record unreadable, and two records for one decline would make the count
+// meaningless.
+//
+// The first two rows share a key deliberately — both ARE "another rotation won", and
+// the record's current_session_id says where the tag actually ended, which is the
+// operator-facing difference. announced_reset.already_applied does not survive at all:
+// it named a case that is no longer "already applied", which is the whole of #2176.
+func TestSessionResetFollower_OneRecordPerDeclinedAnnouncement(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name        string
+		wire        func(live *streamSessionTag) (sessionTag, func(oldID, newID string) error)
+		wantEvent   string
+		wantCurrent string // "" = the key must be absent
+	}{
+		{
+			name: "the tag moved before the follower's write",
+			wire: func(live *streamSessionTag) (sessionTag, func(string, string) error) {
+				return &racingTag{streamSessionTag: live, hook: func() { live.Rotate(resetFollowSessionM) }},
+					func(string, string) error { return nil }
+			},
+			wantEvent: "announced_reset.superseded", wantCurrent: resetFollowSessionM,
+		},
+		{
+			name: "the pool no longer has the session",
+			wire: func(live *streamSessionTag) (sessionTag, func(string, string) error) {
+				return live, func(string, string) error { return sessions.ErrSessionNotFound }
+			},
+			// The unwind lands here — nothing else moved the tag — so the record reports the
+			// pre-announcement id, which is the whole point of AC 1.
+			wantEvent: "announced_reset.superseded", wantCurrent: resetFollowSessionA,
+		},
+		{
+			name: "the announced id names another live session",
+			wire: func(live *streamSessionTag) (sessionTag, func(string, string) error) {
+				return live, func(string, string) error { return sessions.ErrSessionIDTaken }
+			},
+			wantEvent: "announced_reset.refused",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			logger, buf := auditLogger()
+			live := newStreamSessionTag(resetFollowSessionA)
+			tag, adopt := tc.wire(live)
+			f := newSessionResetFollower(tag, adopt, nil, logger)
+
+			f.Sink(turnevent.ConversationReset{NewConversationID: resetFollowSessionB})
+
+			recs := followRecords(t, buf)
+			if len(recs) != 1 {
+				t.Fatalf("wrote %d records for one declined announcement, want exactly 1: %v", len(recs), recs)
+			}
+			rec := recs[0]
+			if got := rec["event"]; got != tc.wantEvent {
+				t.Errorf("event = %v, want %q — the cause must be readable from this key alone, and "+
+					"announced_reset.already_applied must not survive", got, tc.wantEvent)
+			}
+			if got := rec["session_id"]; got != resetFollowSessionB {
+				t.Errorf("session_id = %v, want the announced id %q", got, resetFollowSessionB)
+			}
+			if got := rec["previous_session_id"]; got != resetFollowSessionA {
+				t.Errorf("previous_session_id = %v, want the id the follower read %q", got, resetFollowSessionA)
+			}
+			got, present := rec["current_session_id"]
+			switch {
+			case tc.wantCurrent == "" && present:
+				t.Errorf("current_session_id = %v, want it absent — the refusal record leaves the tag "+
+					"where it read it and has nothing to report", got)
+			case tc.wantCurrent != "" && got != tc.wantCurrent:
+				t.Errorf("current_session_id = %v, want %q — this is the field that tells the two "+
+					"superseded causes apart", got, tc.wantCurrent)
+			}
+		})
+	}
+}
+
+// followRecords parses every JSON line in buf and returns the follower's own records —
+// those carrying an "announced_reset." event key. auditRecords does not fit: it filters
+// on one fixed msg, and these records deliberately carry different messages and levels.
+func followRecords(t *testing.T, buf *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var recs []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if ev, _ := rec["event"].(string); strings.HasPrefix(ev, "announced_reset.") {
+			recs = append(recs, rec)
+		}
+	}
+	return recs
 }
 
 // TestSessionResetFollower_ForwardsEveryVariantAndToleratesNilNext pins the decorator

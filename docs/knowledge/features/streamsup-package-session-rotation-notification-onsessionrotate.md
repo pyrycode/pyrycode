@@ -45,7 +45,11 @@ keep lock-free. `Config.OnSessionRotate` is no longer this tag's only writer: si
 [`sessionResetFollower`](streamsup-package-announced-reset-follower.md) rotates it too, on the path
 claude's own announced `/clear` takes rather than `RestartFresh`'s daemon-driven one. The type's own
 doc comment is corrected in the same change rather than left to rot, per the standing rule that a
-stale line-cite is worse than a missing one. `Rotate("")` is a no-op: the tag can never go empty, because an empty tag matches no bound
+stale line-cite is worse than a missing one. The two writers are not peers: this callback still
+calls the tag's plain, unconditional `Rotate` — it drove its own rotation and already re-keyed the
+registry, so it is the authority — while `sessionResetFollower`'s writes became conditional
+`CompareAndSwap`s in #2176, because a follower racing this callback must decline rather than
+overwrite it. `Rotate("")` is a no-op: the tag can never go empty, because an empty tag matches no bound
 session (`boundSessionIDForActive` reports `ok == false` for an empty `CurrentSessionID`) and would
 black-hole the conversation for the runner's life — enforced at the tag itself even though
 `RestartFresh`'s own empty-id refusal means production never reaches the guard. `sinkFor`/`exitFor` keep

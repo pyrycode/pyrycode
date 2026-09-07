@@ -191,8 +191,11 @@ var ErrSessionIDTaken = errors.New("sessions: session id already in use")
 // oldID vanished because a daemon-driven rotation (RotateForNewSession,
 // RotateBootstrapForSelfHeal) or a removal got there first. Those rotate onto a
 // MINTED id, not this announced one, so unlike the watcher case the session does not
-// end up on newID — see rekeyPool, whose caller-side reading of this sentinel has not
-// been revisited. ErrSessionIDTaken per above. Both return with no mutation and no
+// end up on newID. #2176 revisited the caller-side reading to match: rekeyPool no
+// longer collapses this sentinel to success, and the follower declines the
+// announcement and unwinds on it. This method's own behaviour is unchanged — the
+// sentinel meant "oldID is not here" throughout; only what a caller may conclude from
+// it did. ErrSessionIDTaken per above. Both return with no mutation and no
 // transition. A saveLocked failure is logged at Warn and swallowed: the in-memory
 // rotation is already authoritative and durability is best-effort, matching
 // RotateForNewSession and rebindConversation. The notifyTransition fan-out runs off
