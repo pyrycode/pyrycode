@@ -104,6 +104,16 @@ test helper to strip the new `--settings <path>` pair before asserting the
 `spawnBase` composition should check `cmd/pyry` argv assertions too — the
 blast radius is not scoped to one package just because the change is.
 
+`spawnBase` gained a second daemon-written file this way in #2093 —
+[`writeSystemPrompt` + `systemPromptText`](sessions-package-key-types-writesystemprompt-systemprompttext.md),
+joining `--settings <path>` with `--append-system-prompt-file <path>`
+immediately after it. Same composition-site discipline (both sites, survives
+every recompose), same test-helper pattern (a second strip pass in
+`waitArgv`/`installedArgv`, not a re-audit of the exact-argv assertions that
+depend on them) — but a **different cleanup lifecycle**, since that file is
+daemon-scoped rather than session-scoped and must not be removed by
+`Pool.Remove`. See that document for the divergence.
+
 See [codebase/943.md](../codebase/943.md) and
 [docs/specs/architecture/943-interactive-spawn-mcp-settings.md](../../specs/architecture/943-interactive-spawn-mcp-settings.md)
 for the original design, and [codebase/1518.md](../codebase/1518.md) and
