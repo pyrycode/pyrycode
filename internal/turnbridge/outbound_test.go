@@ -260,6 +260,51 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// #2223's stop shape reaches the payload, and stop_reason is STILL
+			// "end_turn" on the same frame — the two rows above are the other half
+			// of that claim, proving an event carrying no stop shape still produces
+			// exactly today's payload.
+			//
+			// The three values are mutually distinct and none is derivable from
+			// another: a budget stop whose subtype is error_max_turns, whose
+			// terminal_reason is a different token, and whose is_error is true while
+			// the wire's stop_reason stays end_turn. A mapper that crossed two
+			// fields, or that derived is_error from the subtype, reddens here.
+			name: "TurnEnd carries claude's stop shape beside an unchanged stop_reason",
+			ev: turnevent.TurnEnd{
+				Reason:         turnevent.TurnEndReasonEndTurn,
+				Outcome:        "error_max_turns",
+				IsError:        true,
+				TerminalReason: "max_turns",
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+				Outcome: "error_max_turns", IsError: true, TerminalReason: "max_turns",
+			},
+			wantOK: true,
+		},
+		{
+			// The window fields are NOT published, and this is the row that keeps
+			// that true now that the variant has publishable fields at all: an event
+			// carrying windows produces a payload with no trace of them. Without it,
+			// a future arm switching to an embedded struct would leak the pair and
+			// nothing would say so.
+			name: "TurnEnd model windows stay off the wire",
+			ev: turnevent.TurnEnd{
+				Reason:              turnevent.TurnEndReasonEndTurn,
+				ModelWindows:        []turnevent.ModelWindow{{ModelID: "claude-haiku-4-5", WindowTokens: 200000}},
+				DroppedModelWindows: 3,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+			},
+			wantOK: true,
+		},
+		{
 			// Stall carries conversation_id only; tc's non-empty TurnID and
 			// non-zero Seq are ignored (a stall is not turn-scoped, not a delta).
 			// StallPayload has no turn_id field, so none can leak.

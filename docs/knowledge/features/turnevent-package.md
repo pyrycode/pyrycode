@@ -134,7 +134,7 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `ThoughtChunk` | `MessageID, Text string` | streaming reasoning ("thinking") text |
 | `ToolStart` | `ToolCallID, Title string`, `Kind ToolKind`, `RawInput json.RawMessage`, `Locations []Location` | a new tool invocation |
 | `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent`, `ResultDetail string` | changed fields of an existing tool call; `Content` may be `nil` (status-only update). `ResultDetail` (#2024, all five sidecar shapes since #2025) is daemon-composed display text derived from claude's stdout sidecar — a read's or shell's line count, an edit's `+10 −3`, a write's `created · 54 lines`, a search's `78 lines`/`5 files` — named generically because it composes across shapes rather than minting a new event field per shape. Its two separator glyphs (U+2212, U+00B7) are the field's first non-ASCII bytes; every byte is still daemon-formatted from claude's counts, never claude's text passed through — see [streamsup-package-content-blocks-are-held-as-json-rawmessage.md](streamsup-package-content-blocks-are-held-as-json-rawmessage.md) |
-| `TurnEnd` | `Reason TurnEndReason`, `ModelWindows []ModelWindow`, `DroppedModelWindows int` (#2101) | end of a claude turn; reason plus claude's per-model context-window reading, decoded independently of the reason and unreachable on the wire — see below |
+| `TurnEnd` | `Reason TurnEndReason`, `ModelWindows []ModelWindow`, `DroppedModelWindows int` (#2101), `Outcome string`, `IsError bool`, `TerminalReason string` (#2223) | end of a claude turn; `Reason` is the daemon's two-value classification, `ModelWindows`/`DroppedModelWindows` are unreachable on the wire, and `Outcome`/`IsError`/`TerminalReason` are claude's own stop shape and DO reach the wire — see below |
 | `ModelWindow` (#2101, element type — not an `Event`, no marker) | `ModelID string`, `WindowTokens int` | one model's context-window reading off the `result` line's `modelUsage` map, sorted by `ModelID` |
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
 | `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |
@@ -250,16 +250,67 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
   missing (unusable window, over-long id, over-cap):
   `len(ModelWindows) + DroppedModelWindows == len(modelUsage)` is the
   invariant, matching `ModelList.DroppedModels`' "true size is len + dropped".
-  Unreachable on the wire by construction, not by omission:
-  `turnbridge.MapEvent`'s `TurnEnd` arm builds `protocol.TurnEndPayload` field
-  by field rather than embedding the event
-  ([turnbridge-package.md](turnbridge-package.md)), so these fields reach no
-  client until some future consumer explicitly wires them. `ModelID` is
+  **CORRECTED 2026-09-08 (#2223):** this pair is still unreachable on the wire
+  by construction — `turnbridge.MapEvent`'s `TurnEnd` arm builds
+  `protocol.TurnEndPayload` field by field rather than embedding the event
+  ([turnbridge-package.md](turnbridge-package.md)) — but that is no longer true
+  of the *variant as a whole*: three sibling fields landed in #2223 (below) and
+  do reach the wire, from the same arm, in the same ticket. `ModelID` is
   claude-authored text, bounded but not sanitized (no control-character or
   terminal-escape stripping) — `ModelOption.DisplayName`'s SECURITY posture
   applies unchanged: the render boundary owing sanitization is the client's.
   See [contextwindow-package.md](contextwindow-package.md) for the believed-window
   consumer this is meant to feed (`Usage.WindowTokens`, `defaultWindowTokens`).
+- **`TurnEnd` gained `Outcome string`, `IsError bool`, `TerminalReason string`
+  (#2223) — claude's own stop shape for the turn, published beside the
+  daemon's `Reason` and never reconciled with it.** `Reason` is streamsup's
+  `resultTurnEndReason` collapsing every subtype onto `end_turn`/`cancelled`;
+  `Outcome` is the subtype itself, carried verbatim, so a turn that hit
+  `--max-turns` is `end_turn` *and* `error_max_turns` at once — both readings
+  are true, and a consumer that "resolves" the disagreement by preferring one
+  undoes the reason the ticket exists (a truncated run reading as a finished
+  answer). `IsError` is read from claude, **not derived from `Outcome`**: claude
+  sends subtype `success` with `is_error: true` when the turn ended on an API
+  error — a context overflow is the documented case — so inferring the flag
+  from the subtype silently reclassifies exactly that turn as clean.
+  `TerminalReason` is the open-set, finer-grained cause beside the subtype
+  (`max_turns`, `budget_exhausted`, `prompt_too_long`, `hook_stopped`,
+  `completed`, …) and is what makes a context overflow legible at all, since
+  that turn's subtype is plain `success`.
+  Decoded off the raw `result` line bytes by a **second unmarshal target**,
+  `streamsup`'s `resultStopLine` — not two more fields on the package's
+  existing `resultLine` (the struct `decodeModelWindows` reads `modelUsage`
+  off). **The reason is failure isolation, not tidiness:** `resultLine` exists
+  so a hostile `modelUsage` shape fails *that* unmarshal without disturbing
+  anything else; folding the stop-shape keys into the same struct would let a
+  hostile `modelUsage` also blank `TerminalReason`, i.e. let one field claude
+  controls silently erase a different one. Two independent targets fail
+  independently — the same property `decodeModelWindows` states for
+  `Reason` versus the window pair, applied a second time for a different pair
+  of fields on the same line.
+  Both strings are bounded at construction by one shared constant,
+  `maxTurnEndStopField` (256 bytes — roughly 7x the longest subtype claude
+  has shipped, `error_max_structured_output_retries` at 35 bytes), and an
+  over-long value is **dropped, not truncated** — `ModelWindow.ModelID`'s
+  drop-not-truncate argument, generalized: both fields are open-set tokens a
+  *client matches* against a known list, never free text a client displays,
+  so a cut token (matching nothing) and an absent one carry the same meaning,
+  while a truncated *display* string would still say something. `Outcome`
+  and `TerminalReason` are claude-authored and reach a client unsanitized
+  (bounded, not scrubbed) — the first claude-authored strings this variant
+  publishes; the render boundary owing sanitization is the client's, per
+  `docs/protocol-mobile.md` § `turn_end`.
+  **Publishing `Outcome` is what first put a bound on `streamLine.Subtype`.**
+  That field had needed no length bound for its entire life not because it
+  was safe, but because its only two readers (`resultTurnEndReason`,
+  `emitSystemSubtype`) only ever compare it against literals in a `switch` —
+  it crossed no trust boundary. `boundStopField` is applied to a **copy** at
+  the publish site, and `resultTurnEndReason` is deliberately called on the
+  *unbounded* value first, so the bound cannot move `Reason` for any input.
+  The general lesson: an internal field with zero downstream readers beyond a
+  `switch` carries no bound not because the value is trusted, but because
+  nothing has yet carried it anywhere — widening an existing field's
+  *readership* needs the same bound review a brand-new decode does.
 - **Widening a sealed sum-type variant with a slice breaks `==`, and a grep for
   the variant's type name will not find where it breaks.** `TurnEnd` stopped
   being comparable the moment `ModelWindows` landed, and the site that

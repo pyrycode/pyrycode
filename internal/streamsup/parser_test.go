@@ -114,16 +114,25 @@ func TestParser_LineMapping(t *testing.T) {
 			want: []turnevent.Event{turnevent.ToolUpdate{ToolCallID: "tu-4", Status: turnevent.ToolStatusCompleted, Content: nil}},
 		},
 		{
+			// Outcome carries claude's subtype verbatim beside the daemon's own
+			// two-value Reason (#2223); the two are never reconciled.
 			name: "result ends the turn",
 			line: `{"type":"result","subtype":"success","session_id":"S"}`,
-			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}},
+			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn, Outcome: "success"}},
 		},
 		{
 			// The interrupt-terminated turn (spike T1, #1075): claude ends the
 			// turn with subtype error_during_execution → cancelled, not end_turn.
 			name: "result error_during_execution ends the turn as cancelled",
 			line: `{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"S"}`,
-			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonCancelled}},
+			want: []turnevent.Event{turnevent.TurnEnd{
+				Reason:  turnevent.TurnEndReasonCancelled,
+				Outcome: "error_during_execution",
+				// claude's OWN is_error off this line, read rather than derived from
+				// the subtype (#2223) — the row that would pass either way, which is
+				// why the success-with-is_error row lives in the stop-shape file.
+				IsError: true,
+			}},
 		},
 		{
 			// AC4: the mapping is scoped to error_during_execution only — a result
@@ -137,7 +146,7 @@ func TestParser_LineMapping(t *testing.T) {
 			// only error_during_execution maps to cancelled; everything else end_turn.
 			name: "result unknown subtype defaults to end_turn",
 			line: `{"type":"result","subtype":"max_tokens","session_id":"S"}`,
-			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn}},
+			want: []turnevent.Event{turnevent.TurnEnd{Reason: turnevent.TurnEndReasonEndTurn, Outcome: "max_tokens"}},
 		},
 		{
 			name: "system init is a no-op (per-turn marker, not session-open)",

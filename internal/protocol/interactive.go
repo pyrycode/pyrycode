@@ -160,10 +160,53 @@ type ToolResultPayload struct {
 // and does NOT import internal/turnevent — #608 produces the field via
 // string(turnevent.TurnEnd.Reason). The wire-value/taxonomy alignment is
 // documented, not enforced by a shared type.
+//
+// THREE FIELDS CARRY THE STOP SHAPE claude itself reported (#2223), beside
+// StopReason rather than instead of it. StopReason's values and its derivation are
+// unchanged and byte-identical for every subtype; the three below are what let a
+// client tell a turn that hit --max-turns, exhausted a budget or overflowed its
+// context apart from a finished answer, all of which used to arrive as a clean
+// "end_turn".
+//
+// TWO FIELDS ARE SPELLED LIKE A stop_reason AND NEITHER IS THE OTHER. StopReason
+// is the daemon's two-value classification; Outcome is claude's own subtype token.
+// claude's `result` line ALSO carries a key literally named stop_reason, and this
+// daemon does not forward it under any name — a value seen on this wire is always
+// one of the two fields declared here.
+//
+// No omitempty on any of them, per this file's rule as stated at ToolResultPayload:
+// absence and the zero value mean the same thing, always emitting the key keeps the
+// testdata fixture pinning the full shape, a client built before this landed ignores
+// the unknown keys, and one built after decodes a frame lacking them to the zero
+// value without error — which is the sense in which they are optional.
 type TurnEndPayload struct {
 	ConversationID string `json:"conversation_id"`
 	TurnID         string `json:"turn_id"`
 	StopReason     string `json:"stop_reason"`
+	// Outcome is claude's `result` subtype — an OPEN SET, carried verbatim. The
+	// observed values are success, error_during_execution, error_max_turns,
+	// error_max_budget_usd and error_max_structured_output_retries; a client must
+	// treat an unrecognised token as unknown rather than as an error, because
+	// claude may ship one at any time.
+	//
+	// SECURITY: claude-authored text. The daemon BOUNDS it (internal/streamsup's
+	// maxTurnEndStopField) and does NOT sanitize it — no control-character or
+	// terminal-escape stripping happens on this path — so the render boundary
+	// owing that sanitization is the CLIENT's, exactly as ModelOption's SECURITY
+	// paragraph states for the strings beside it. Empty means claude sent none or
+	// the value was past its bound; a client answers both the same way.
+	Outcome string `json:"outcome"`
+	// IsError is claude's own is_error flag for the turn. NOT derivable from
+	// Outcome: claude sends subtype `success` with is_error true when the turn
+	// ended on an API error, a context overflow being the documented case, so a
+	// client inferring this from the subtype reads exactly that turn as clean.
+	IsError bool `json:"is_error"`
+	// TerminalReason is claude's finer-grained cause beside the subtype — the most
+	// open of the three sets, nineteen values documented and explicitly not closed
+	// (max_turns, budget_exhausted, prompt_too_long, hook_stopped, completed, …).
+	// It is what makes a context overflow legible at all, since that turn's subtype
+	// is plain `success`. Carries Outcome's SECURITY paragraph unchanged.
+	TerminalReason string `json:"terminal_reason"`
 }
 
 // StallPayload is the body of an Envelope whose Type == TypeStall

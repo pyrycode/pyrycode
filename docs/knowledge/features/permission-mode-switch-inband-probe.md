@@ -87,6 +87,22 @@ reproduce command filters on `-run TestRealClaude_SetPermissionMode`, and these 
 tests are named outside that family on purpose so a reader copying that command doesn't
 accidentally sweep five more live children into a run budgeted for four.
 
+## A second, unrelated consumer of the `plan` capture (#2223)
+
+`testdata/permission_mode_switch_v2.1.239_plan.json` acquired a second reader
+that has nothing to do with permission modes: `internal/streamsup`'s
+`TestParser_ResultStopShape_CapturePin` (#2223) reads this file's `result`
+lines to pin the decode of claude's `error_max_turns` stop shape
+(`outcome`/`is_error`/`terminal_reason`), because that arm's argv runs
+`claude --max-turns 4` directly — the same `--max-turns` cap this ticket
+never intended to exercise, incidental to probing the `plan` mode switch, but
+enough to make claude emit a real `error_max_turns` trailer alongside the
+clean `success` line from the same run. No new live capture was built for
+\#2223's AC 4; this file already held both ends of the taxonomy. **This file
+now has two independent, unrelated consumers** — do not reshape its `result`
+lines, subtype values, or `max-turns` argv when touching the permission-mode
+probe without checking `internal/streamsup`'s capture-pin test first.
+
 ## Related
 
 - [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md) — #1595's

@@ -225,6 +225,20 @@ func TestTurnEndPayload_RoundTrip(t *testing.T) {
 	if payload.StopReason != "end_turn" {
 		t.Errorf("StopReason: got %q, want %q", payload.StopReason, "end_turn")
 	}
+	// The #2223 stop shape, asserted rather than merely present in the fixture.
+	// The fixture is deliberately a BUDGET-STOPPED turn whose stop_reason is still
+	// "end_turn": that combination is the whole point of the ticket, and a fixture
+	// where every field agreed would pin nothing — a decoder that read outcome off
+	// stop_reason, or is_error off the subtype, would pass it.
+	if payload.Outcome != "error_max_turns" {
+		t.Errorf("Outcome: got %q, want %q", payload.Outcome, "error_max_turns")
+	}
+	if !payload.IsError {
+		t.Errorf("IsError: got false, want true")
+	}
+	if payload.TerminalReason != "max_turns" {
+		t.Errorf("TerminalReason: got %q, want %q", payload.TerminalReason, "max_turns")
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
 }

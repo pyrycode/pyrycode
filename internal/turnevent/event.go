@@ -83,12 +83,23 @@ type ToolUpdate struct {
 	ResultDetail string
 }
 
-// TurnEnd marks the end of a claude turn, carrying the reason and — since #2101
-// — the context window claude reported for each model the turn touched.
+// TurnEnd marks the end of a claude turn, carrying the reason, — since #2101 —
+// the context window claude reported for each model the turn touched, and —
+// since #2223 — the STOP SHAPE claude itself reported for the turn.
 //
 // ACP models end-of-turn as the stopReason return value of session/prompt, not
 // as an event; converting TurnEnd back into that RPC return is the ACP
 // adapter's job, not this model's. Here we just carry the reason.
+//
+// TWO CLASSIFICATIONS RIDE THIS VARIANT AND THEY ARE NEVER RECONCILED. Reason is
+// the DAEMON's two-value reading, derived from the subtype by streamsup's
+// resultTurnEndReason and unchanged since #1075; Outcome is claude's own token
+// for the same stop, carried verbatim. A turn that hit --max-turns is
+// end_turn/error_max_turns, and both halves of that are true — the first is what
+// the ACP taxonomy can say, the second is what actually happened. #2223 added the
+// second precisely because collapsing every stop into the first made a truncated
+// run read as a finished answer, so a consumer that "resolves the disagreement"
+// by preferring one is undoing the ticket.
 //
 // THE WINDOW FIELDS RIDE THIS VARIANT RATHER THAN ONE OF THEIR OWN, and the
 // reason is that the window is learned at exactly the moment this event is
@@ -97,14 +108,18 @@ type ToolUpdate struct {
 // alternative — #1600's shape, a new variant off its own line — is the right
 // answer when the line is its own line, and this one is not.
 //
-// NONE OF IT REACHES THE WIRE, by construction rather than by omission.
-// turnbridge's MapEvent builds protocol.TurnEndPayload field by field
-// (ConversationID, TurnID, StopReason) rather than embedding this struct, so
-// widening the variant cannot widen the envelope. That is deliberate: no wire
-// consumer wants the window yet, and #2102 owns whatever publication it needs.
-// It is also why neither producer cap states a percentage of the v2
-// application-envelope — quoting one would measure a bound against a wire this
-// data never touches.
+// WIDENING THIS VARIANT STILL CANNOT WIDEN THE ENVELOPE, by construction rather
+// than by omission: turnbridge's MapEvent builds protocol.TurnEndPayload field by
+// field rather than embedding this struct, so every field's publication is a
+// decision someone made rather than a consequence of declaring it here.
+//
+// WHICH FIELDS ARE PUBLISHED CHANGED WITH #2223, and this paragraph used to say
+// none were. The window pair (ModelWindows, DroppedModelWindows) still is not —
+// no wire consumer wants it yet and #2102 owns whatever publication it needs — so
+// neither window cap states a percentage of the v2 application-envelope, quoting
+// one being a bound measured against a wire that data never touches. The three
+// stop fields below ARE published, so their shared cap (streamsup's
+// maxTurnEndStopField) does state one.
 //
 // This variant is therefore no longer comparable with ==. Nothing compared it
 // (the only TurnEnd{} in the tree is the sealed-interface assertion below), and
@@ -166,6 +181,59 @@ type TurnEnd struct {
 	// Like ModelList.DroppedModels it is DAEMON-derived rather than claude-derived:
 	// an int computed from map and slice lengths, carrying none of claude's bytes.
 	DroppedModelWindows int
+	// Outcome is the subtype claude put on its `result` line — the token naming
+	// HOW the turn stopped, where Reason names only whether it was cancelled.
+	// Observed values are success, error_during_execution, error_max_turns,
+	// error_max_budget_usd and error_max_structured_output_retries.
+	//
+	// AN OPEN SET, and carried VERBATIM per ModelAnnounced.Model's rule: no
+	// lowercasing, no mapping onto the values above, no rejection of a token this
+	// list does not name. A subtype claude ships tomorrow reaches a consumer as
+	// itself, which is the whole reason this is a string rather than an enum.
+	//
+	// EMPTY MEANS ABSENT-OR-OVER-CAP and the two are deliberately one reading.
+	// claude omits the key on some lines, and streamsup's maxTurnEndStopField
+	// DROPS an over-long value rather than cutting it — a cut token matches
+	// nothing a consumer could act on, so it would be a value that lies rather
+	// than a gap that shows. Neither shape is something a consumer answers
+	// differently, so neither gets a field to say which it was.
+	//
+	// NOT the same field as Reason and NOT claude's own `stop_reason` key, which
+	// this daemon does not forward at all. See this variant's doc for why the two
+	// classifications are never reconciled.
+	//
+	// SECURITY: claude-authored text. The daemon BOUNDS it and does NOT sanitize
+	// it — no control-character or terminal-escape stripping happens on this path
+	// — so it stays untrusted, model-influenced text, exactly as ModelWindow.ModelID
+	// states beside it. Unlike that field this one DOES reach a client, so the
+	// render boundary owing the sanitization is the CLIENT's and is named as such
+	// in docs/protocol-mobile.md § turn_end.
+	Outcome string
+	// IsError is claude's own is_error flag off the same line, false when absent.
+	//
+	// IT IS NOT DERIVED FROM Outcome and must not be. claude sends subtype
+	// `success` WITH is_error true when the turn ended on an API error — a context
+	// overflow is the documented case, where the `result` text is the error text —
+	// so a consumer inferring the flag from the subtype reads exactly that turn as
+	// a clean answer, which is the failure #2223 exists to remove.
+	//
+	// A plain bool: absent, JSON null and an explicit false are one reading, and
+	// nothing acts differently on the three, so a pointer would buy a distinction
+	// no consumer answers. DAEMON-observable rather than claude-authored TEXT — it
+	// carries no bytes of claude's — so it needs no cap.
+	IsError bool
+	// TerminalReason is claude's terminal_reason for the turn: the finer-grained
+	// cause beside the subtype, as in max_turns, budget_exhausted, prompt_too_long,
+	// hook_stopped or completed.
+	//
+	// THE MOST OPEN OF THE THREE SETS. claude documents nineteen values and the
+	// list is explicitly not closed, so this is carried verbatim under Outcome's
+	// rule with no mapping and no rejection — and it is the field that makes a
+	// context overflow legible at all, since its subtype is plain `success`.
+	//
+	// Empty means absent-or-over-cap, is bounded by the same maxTurnEndStopField,
+	// and carries Outcome's SECURITY paragraph unchanged.
+	TerminalReason string
 }
 
 // ModelWindow is one entry of TurnEnd.ModelWindows: the context window claude
