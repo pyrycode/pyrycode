@@ -151,24 +151,28 @@ func (m *pairingMinterV2) MintPairing(requester *devices.Device, deviceName stri
 	// what was created — and neither the token, its hash, nor any part of the
 	// encoded pairing.
 	//
-	// THE TWO NAMES DO NOT CARRY THE SAME GUARANTEE. The MINTED name is
-	// display-safe by construction: the relay handler refused every C0 control,
-	// DEL and C1 control in it before this method was called, which is the whole
-	// point of the gate this ticket added. The REQUESTING name has no such gate —
-	// a paired client can set its own devices.Device.Name through
-	// register_push_token, whose handler passes the payload's device_name to
-	// devices.Registry.UpdatePushRegistration by design, and nothing on that path
-	// checks its shape. So requester.Name — in this record, in the failure record
-	// above, and as DeviceLabel in auditMint below — can carry a control
-	// character.
+	// BOTH DOORS ONTO A REMOTE-AUTHORED NAME ARE NOW GATED, and they were not when
+	// this method was written. The MINTED name is display-safe by construction: the
+	// relay handler refused every C0 control, DEL and C1 control in it before this
+	// method was called, which is the whole point of the gate #2127 added. The
+	// REQUESTING name reaches devices.Device.Name the other way, through
+	// register_push_token — whose handler passes the payload's device_name to
+	// devices.Registry.UpdatePushRegistration by design, the phone being the source
+	// of truth for its own name — and since #2219 that handler refuses the same set
+	// at the same trust boundary, before the value can be stored. #2219 put the gate
+	// where the label ENTERS the registry rather than at this one call site, because
+	// a predicate here would have closed none of the other sinks the same value
+	// reaches while reading as though the hazard were handled.
 	//
-	// THAT RESIDUAL IS PRE-EXISTING AND TRACKED IN #2219, NOT CLOSED HERE. The
-	// same unchecked value already reaches the same kind of sink from
-	// register_push_token's own logs, the rekey handler's, and auditQuestion's
-	// audit record; a predicate applied at this one call site would close none of
-	// those while reading as though the hazard were handled. The fix belongs where
-	// the label enters the registry — one gate, the way MintPairingPayload's is one
-	// gate — which is #2219's shape.
+	// THAT IS NOT THE SAME AS "Device.Name IS DISPLAY-SAFE", and a later reader must
+	// not upgrade it into one. Two writers remain outside both gates: a name already
+	// stored in devices.json before #2219 landed is read back unchecked, and
+	// `pyry pair --name` is operator-authored and deliberately ungated —
+	// mintLabelIsDisplaySafe's own block states why that check does not live in the
+	// shared mint step. So requester.Name here, in the failure record above, and as
+	// DeviceLabel in auditMint below can still carry a control character on a
+	// registry that predates the gate, and a consumer rendering one to a terminal or
+	// a line-oriented log still owes its own escaping.
 	m.logger.Info("pair: minted a pairing over the wire",
 		"event", "pairing.mint.ok",
 		"requesting_device", requester.Name,
