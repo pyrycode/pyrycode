@@ -23,12 +23,25 @@ package realclaude
 //
 // CORRECTED 2026-09-08 (#2227): system/status is MAPPED now — it drives the
 // turnevent.Compacting edge pair from a case arm in streamsup.emitSystemSubtype, so
-// the "handful" above is six subtypes rather than five. The enumeration site is
-// unchanged and this correction restates no set; what it records is that the LAST
+// the "handful" above has grown by one. The enumeration site is unchanged and this
+// correction restates no set; what it records is that the LAST
 // measured-and-dropped subtype named in this package's prose has left, and that
 // system/compact_boundary took its place. That one is dropped by a DECISION — it
 // carries #2228's payload — not for want of a mapping, which is a distinction a
 // reader deciding whether a new subtype should surface needs.
+//
+// CORRECTED 2026-09-08 (#2232): the paragraph above carried a COUNT of the case
+// arms, and it is removed rather than raised — the arms are the ONE enumeration of
+// the mapped set and no comment should carry a number that goes stale the next time
+// one lands. Two did land since: #2237 gave system/compact_boundary its own arm, so
+// the succession above ended with nothing taking its place, and #2232 mapped
+// system/permission_denied. That last one reached this test's subject by a route
+// neither half of the split above describes — its `message` is a string where
+// streamsup.streamLine declares an object, so it failed the whole-line decode and
+// SURFACED as an unrecognized_message rather than being dropped anywhere.
+// streamsup.consumePermissionDeniedLine is what ends that, which makes it the first
+// entry here that removed a real row from an operator's timeline rather than
+// preventing a hypothetical one.
 //
 // CORRECTED 2026-09-08 (#2227, second): the split above is stated in TYPES and
 // SUBTYPES, and there is now one drop that keys on NEITHER. A `user` line whose

@@ -1535,11 +1535,32 @@ func TestDropcapClassification(t *testing.T) {
 		{
 			name: "system/compact_boundary", line: `{"type":"system","subtype":"compact_boundary"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
-			why: "#2227 left this one dropped on purpose: it carries compact_metadata — the " +
-				"trigger and token counts #2228 publishes — and an arm for it would emit a " +
-				"duplicate edge with nothing to add. The one measured-and-dropped subtype left " +
-				"standing, and the first to be dropped by a decision rather than for want of a " +
-				"mapping",
+			why: "CORRECTED (#2237): no longer the one measured-and-dropped subtype left " +
+				"standing — it is MAPPED now, onto turnevent.CompactionBoundary from a case arm " +
+				"in streamsup.emitSystemSubtype. The verdict is unchanged and is derived rather " +
+				"than declared: THIS line carries no compact_metadata, which is " +
+				"emitCompactionBoundary's presence gate, so the shipped parser emits nothing for " +
+				"it and dropcapClassify's default arm still reads it as a drop. Adding metadata " +
+				"flips it, which is what makes the row a pin on the gate rather than on the subtype",
+		},
+		{
+			name: "system/permission_denied", line: `{"type":"system","subtype":"permission_denied"}`,
+			why: "#2232: MAPPED, onto turnevent.ToolCallDenied. Unlike its three neighbours above " +
+				"this row is not a drop, and the difference is the whole point of it — the arm " +
+				"GATES ON NOTHING, so a line carrying no fields at all still maps. Those rows read " +
+				"as drops because each of their arms has a gate this bare line does not satisfy; " +
+				"add a gate here and this row goes red, which is the criterion #2232 AC 4 asked for",
+		},
+		{
+			name: "system/permission_denied with claude's own message shape",
+			line: `{"type":"system","subtype":"permission_denied","tool_name":"Bash",` +
+				`"tool_use_id":"toolu_1","message":"ls in '/' was blocked."}`,
+			why: "the shape every one of the seven committed denials actually arrives in, and it " +
+				"reaches the mapping by a DIFFERENT route than the row above: `message` is a " +
+				"STRING where streamsup.streamLine declares *streamMessage, so the line fails the " +
+				"whole-line decode and is recovered by streamsup.consumePermissionDeniedLine " +
+				"inside consumeLine's failure branch. Before #2232 it surfaced as an " +
+				"Unrecognized — a per-denial noise row — rather than being dropped at all",
 		},
 		{
 			name: "rate_limit_event", line: `{"type":"rate_limit_event"}`,

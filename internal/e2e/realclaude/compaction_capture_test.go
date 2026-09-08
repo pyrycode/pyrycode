@@ -11,9 +11,17 @@ package realclaude
 // sends is on record only as an SDK type declaration: a `system/status` line with
 // status "compacting" then null (carrying compact_result/compact_error), and a
 // `system/compact_boundary` line carrying compact_metadata. WHICH SEAM THOSE
-// ARRIVE ON IS THE OPEN QUESTION. Parser.emitSystemSubtype names five subtypes
-// and everything else falls through to emitUnrecognized, so a mapper planned
-// before the bytes land is planned against a coin flip.
+// ARRIVE ON IS THE OPEN QUESTION. Parser.emitSystemSubtype maps `system` per
+// subtype and an unmatched one is silently dropped, so a mapper planned before
+// the bytes land is planned against a coin flip.
+//
+// CORRECTED 2026-09-08 (#2232), two errors in one sentence, and the correction
+// leaves the historical point above standing. It carried a COUNT of that switch's
+// arms — the arms are the one enumeration of the mapped set, no comment should
+// restate the count, and this correction adds no replacement. And "falls through
+// to emitUnrecognized" was never true of a `system` line: the match sits INSIDE
+// consumeLine's ignoredLineTypes branch, so an unmatched subtype reaches that
+// branch's silent debug drop and the surfaced tier stays structurally unreachable.
 //
 // So the record keeps EVERY line of the turn (AC 1) and marks the compaction ones
 // by CONTENT rather than by envelope — see ccapMarkers. Filtering on a type or a

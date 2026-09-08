@@ -639,6 +639,25 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		{turnevent.CompactionBoundary{Trigger: "manual"}, turnMarkNone},
 		{turnevent.Unrecognized{Site: turnevent.UnrecognizedLineType, Kind: "some_future_event"}, turnMarkNone},
 		{turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), turnMarkNone},
+		// #2232. Neither an opener nor a closer, and its argument is the
+		// PermissionRequest row's rather than a fresh one: a denial is a verdict on a
+		// tool call, not a turn boundary, and the ToolStart the parser emits for the
+		// assistant tool_use before it already opened the turn. All seven captured
+		// denials sit in that order — tool_use, denial, tool_result — so a turn is open
+		// when this arrives and the TurnEnd that clears it still follows. The
+		// whitelist's default already answers it, so this row asserts an existing
+		// answer rather than a new arm; turnMarkFor is unchanged by that ticket.
+		//
+		// That is also why turnMarkFor's default-arm comment does NOT name this
+		// variant, which is a decision rather than an oversight. It names
+		// CompactionBoundary because the whitelist's answer is LOAD-BEARING there —
+		// that variant can reach the fan-in with no turn open at all, so opening a mark
+		// would wedge the conversation permanently. Opening one here would be merely
+		// redundant, never a wedge, so "any future variant" covers it. Naming every
+		// variant that lands in the default arm would grow a second enumeration of the
+		// variant set beside the marker-derived one this test reads, which is the drift
+		// the guard exists to foreclose.
+		{turnevent.ToolCallDenied{ToolName: "Bash", ToolCallID: "toolu-1"}, turnMarkNone},
 	}
 
 	covered := make([]string, 0, len(tests))
