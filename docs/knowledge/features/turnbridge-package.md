@@ -74,7 +74,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678) | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below) | true |
-| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason)}` | true |
+| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason), Outcome: ev.Outcome, IsError: ev.IsError, TerminalReason: ev.TerminalReason}` (#2223, straight-through, no cap here — see below) | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |
 | `Compacting` (#1074) | `TypeCompacting` | `CompactingPayload{tc.ConversationID, ev.Active}` (`tc.TurnID`/`tc.Seq` ignored) | true |
@@ -101,6 +101,26 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 - **`is_error = (Status == ToolStatusFailed)`** — `completed`/`pending`/`in_progress`
   all map to `false`. Round-trips with the inbound `toolStatus` (failed↔error,
   completed↔success).
+- **`TurnEnd`'s three stop-shape fields (#2223) cross straight through, deliberately
+  uncapped at this arm** — `ToolUpdate`'s `ResultDetail` row above is the standing
+  argument for that shape: both strings are bounded at *construction* by their
+  producer (`streamsup`'s `maxTurnEndStopField`), so a second bound here would be
+  a number to keep in step with one that already holds, not a second line of
+  defence. **The window pair on the same variant (`ModelWindows`,
+  `DroppedModelWindows`) is still not forwarded** — this arm builds the payload
+  field by field, so what reaches the wire is exactly what is named in the arm and
+  nothing else. This is the first ticket where `TurnEnd` carries both a published
+  and an unpublished field side by side, so **a row asserting the window pair
+  stays off the payload is now load-bearing** in a way it was not before #2223:
+  before this ticket "nothing on `TurnEnd` reaches the wire but `Reason`" was true
+  of the whole struct, and any test embedding the struct wholesale would have
+  failed to compile against `protocol.TurnEndPayload`'s narrower shape; now that
+  `TurnEnd` has some published and some unpublished fields, a future arm could
+  embed the struct, compile, and silently leak the window pair, so only an
+  explicit "still absent" assertion — not the type system — protects it. The
+  general rule for the next event to grow a mixed published/unpublished field
+  set: the moment the first field on a variant is published, the *rest* need a
+  test they never needed while none of them were.
 - **`ThoughtChunk` drops (ADR 025).** #607 defines no thought-text envelope and
   ADR 025 classes thinking as screen-sourced; so the thought *text is not forwarded*.
   The thinking **state** surfaces via `BuildTurnState(convID, StateThinking)`, which

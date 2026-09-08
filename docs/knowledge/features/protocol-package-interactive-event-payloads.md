@@ -47,6 +47,10 @@ type TurnEndPayload struct {
     ConversationID string `json:"conversation_id"`
     TurnID         string `json:"turn_id"`
     StopReason     string `json:"stop_reason"` // turnevent.TurnEndReason values, verbatim
+    // #2223 — claude's own stop shape, beside StopReason rather than instead of it.
+    Outcome        string `json:"outcome"`         // claude's result subtype, verbatim, open-set
+    IsError        bool   `json:"is_error"`        // claude's own is_error flag; NOT derivable from Outcome
+    TerminalReason string `json:"terminal_reason"` // claude's finer-grained cause; open-set
 }
 
 // #638 — the wire form of the internal-only turnevent.Stall onset marker.
@@ -90,6 +94,28 @@ type CompactingPayload struct {
   shape is `{conversation_id, turn_id}`; `stop_reason` is the #607 extension per the
   ticket title, following the "spec follows the code" convention (ADR 025
   § Consequences).
+- **`Outcome`/`IsError`/`TerminalReason` (#2223) carry claude's own stop shape
+  beside `StopReason`, never instead of it.** Two fields are spelled like a
+  `stop_reason` and neither is the other: `StopReason` stays the daemon's
+  unchanged two-value classification (byte-identical for every subtype — the
+  producer applies the two new fields' cap only at the *publish* site, never to
+  the value `resultTurnEndReason` reads), and `Outcome` is claude's own subtype
+  token, carried verbatim and never reconciled with it — a turn that hit
+  `--max-turns` is legitimately both `end_turn` and `error_max_turns`. claude's
+  `result` line separately carries a key literally named `stop_reason`, which
+  this daemon does not forward under any name — a `stop_reason` on this wire is
+  always the daemon's. `IsError` is read from claude, not derived from
+  `Outcome`: claude sends `success` with `is_error: true` when a turn ends on an
+  API error (a context overflow is the documented case), so deriving the flag
+  from the subtype would silently read that turn as clean. All three are
+  **claude-authored, open-set, and bounded but not sanitized** at construction
+  by `internal/streamsup`'s `maxTurnEndStopField` — an over-long value is
+  **dropped, not truncated**, `ModelWindow.ModelID`'s reasoning applied to a
+  matched token rather than a join key: a cut token matches nothing a client
+  could act on, so it would misinform where an absent value only under-informs.
+  The render boundary owing sanitization (no control-character or
+  terminal-escape stripping happens here) is the client's — see
+  `docs/protocol-mobile.md` § `turn_end` § Security model.
 - **`Seq` is `int`, not `uint64`.** A per-turn counter that resets each turn (the
   package count-field idiom: `DebugBundleDonePayload.Total`); `uint64` is reserved
   for the session-monotonic `Envelope.ID`.
@@ -168,7 +194,11 @@ Eight golden round-trip tests in `interactive_test.go` decode each fixture throu
 `Envelope` → `Envelope.Payload` → per-type struct, assert each field (incl. the
 boundary `Seq == 0` / `IsError == false`, `StopReason == "end_turn"`, and the
 `api_retry` fixture's non-zero `current`/`total`), then re-marshal
-byte-equivalently. The shared `roundTripEnvelope` helper re-marshals the
+byte-equivalently. `testdata/turn_end.json` gained `outcome`/`is_error`/
+`terminal_reason` (#2223) in `TurnEndPayload`'s declaration order — appended
+after `StopReason`, never interleaved, since `roundTripEnvelope` re-marshals
+the decoded struct and compares to the raw fixture, so declaration order *is*
+the wire's key order. The shared `roundTripEnvelope` helper re-marshals the
 **decoded payload struct** (not the original `RawMessage`) back into the envelope —
 that is what pins struct → wire shape, since a missing or reordered json tag only
 surfaces when the bytes are actually re-encoded (the original-`RawMessage`-passthrough
