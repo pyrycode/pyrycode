@@ -21,6 +21,15 @@ package realclaude
 // still reaches no client as an unrecognized_message, which is what this test
 // asserts and why the correction does not weaken it.
 //
+// CORRECTED 2026-09-08 (#2227): system/status is MAPPED now — it drives the
+// turnevent.Compacting edge pair from a case arm in streamsup.emitSystemSubtype, so
+// the "handful" above is six subtypes rather than five. The enumeration site is
+// unchanged and this correction restates no set; what it records is that the LAST
+// measured-and-dropped subtype named in this package's prose has left, and that
+// system/compact_boundary took its place. That one is dropped by a DECISION — it
+// carries #2228's payload — not for want of a mapping, which is a distinction a
+// reader deciding whether a new subtype should surface needs.
+//
 // CORRECTED 2026-08-19 (#1500): control_response is the SECOND type in that
 // consumed-by-its-own-arm category, so the "anything else" below now has two
 // exceptions rather than one. It is the ack the daemon solicits for itself on an

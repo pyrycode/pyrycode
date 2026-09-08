@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/pyrycode/pyrycode/internal/turnevent"
 )
 
 // compactionCapturePath is the committed real-claude capture of one live
@@ -251,5 +253,93 @@ func TestCompactionReaderGateHasExactlyOneLegalSkip(t *testing.T) {
 				t.Errorf("%s named no reason; the skip or fatal message would say nothing", action)
 			}
 		})
+	}
+}
+
+// TestCompactionFixtureReplayReachesBothEdges is #2227's AC 3: the committed
+// capture's own bytes, fed back through a real Parser, reach the same two edges the
+// hand-authored table in parser_compacting_test.go asserts.
+//
+// IT SKIPS TODAY, and on the one legal quadrant compactionReaderGate already
+// defines rather than on a branch of its own. #2229's capture fired against claude
+// 2.1.259 — outcome=fired, shapes=[system/compact_boundary system/status] — but the
+// run was the dispatcher's gate-only real-claude lap, which verifies from a detached
+// worktree and never runs `git add`, so an in-repo fixture write was discarded with
+// the worktree exactly as a tempdir write would have been. The assertion is written
+// anyway and arms the moment an operator commits those bytes; nothing about it has
+// to be remembered later, which is the whole value of putting it here now.
+//
+// WHAT IT ADDS OVER ITS SIBLING ABOVE is the mapping rather than the envelope. That
+// test pins the type/subtype each compaction line ARRIVED on; this one pins what the
+// shipped parser DOES with them, which is the claim a hand-authored line cannot
+// make on its own — the literals in parser_compacting_test.go encode this author's
+// reading of the capture, and only claude's own bytes can falsify it.
+func TestCompactionFixtureReplayReachesBothEdges(t *testing.T) {
+	raw, readErr := os.ReadFile(compactionCapturePath)
+	exists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		t.Fatalf("reading capture %s: %v", compactionCapturePath, readErr)
+	}
+	switch action, reason := compactionReaderGate(exists, len(compactionPinnedShapes) > 0); action {
+	case compactionGateSkip:
+		t.Skipf("#2227: %s", reason)
+	case compactionGateFatal:
+		t.Fatalf("#2227: %s", reason)
+	}
+
+	var capture compactionCapture
+	if err := json.Unmarshal(raw, &capture); err != nil {
+		t.Fatalf("decoding capture %s: %v", compactionCapturePath, err)
+	}
+	if !capture.IsCapture {
+		t.Fatalf("%s: is_capture is false — replaying a hand-written payload would prove only "+
+			"that the mapping agrees with its author", compactionCapturePath)
+	}
+
+	// EVERY frame in stream order, not the compaction-flagged ones. The record's
+	// flag is the probe's content classifier, and feeding the parser only what that
+	// classifier picked would let a line it missed — the one most likely to matter —
+	// go unreplayed. One parser across the whole turn, because the edge pair is
+	// cross-line state.
+	var got []string
+	p := NewParser(func(ev turnevent.Event) { got = append(got, compactingTrace(ev)) },
+		discardLogger())
+	replayed := 0
+	for _, f := range capture.Frames {
+		if f.PayloadEncoding != "json-string" || f.Payload == "" {
+			continue
+		}
+		replayed++
+		if _, err := p.Write([]byte(f.Payload + "\n")); err != nil {
+			t.Fatalf("%s: replaying frame %d: %v", compactionCapturePath, f.Index, err)
+		}
+	}
+	if replayed == 0 {
+		t.Fatalf("%s: replayed zero frames out of %d; a capture whose payloads cannot be fed back "+
+			"proves nothing", compactionCapturePath, len(capture.Frames))
+	}
+
+	var rising, falling, unrecognized int
+	for _, tr := range got {
+		switch tr {
+		case "compacting:true":
+			rising++
+		case "compacting:false":
+			falling++
+		case "unrecognized":
+			unrecognized++
+		}
+	}
+	if rising != 1 || falling != 1 {
+		t.Fatalf("%s: replaying %d frame(s) produced %d compacting:true and %d compacting:false, "+
+			"want exactly 1 of each. claude's own bytes disagree with the hand-authored literals "+
+			"in parser_compacting_test.go, and the bytes win — read the capture's frames and fix "+
+			"the mapping, not this assertion.\n  trace: %v",
+			compactionCapturePath, replayed, rising, falling, got)
+	}
+	if unrecognized != 0 {
+		t.Fatalf("%s: replaying the captured turn produced %d unrecognized_message frame(s), want "+
+			"0 — some line of a real compacting turn reaches a client as a noise row",
+			compactionCapturePath, unrecognized)
 	}
 }
