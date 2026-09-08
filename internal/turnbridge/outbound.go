@@ -339,9 +339,21 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Total:          e.Total,
 		}, true
 	case turnevent.Compacting:
+		// Like Stall and ApiRetry, a status peer carries conversation identity only —
+		// tc.TurnID and tc.Seq are ignored (not turn-scoped, not a delta).
+		//
+		// The two claude-authored strings (#2236) map straight through, deliberately
+		// UNCAPPED here on the TurnEnd arm's stated terms: streamsup bounds both at
+		// construction with maxCompactField, so a second bound in this adapter would be
+		// a number to keep in step with one that already holds. Both are empty on every
+		// rising edge and on the turn-boundary reset, and this arm neither fills nor
+		// clears them — it maps what the event holds, which is what makes the producer
+		// the single place either value is decided.
 		return protocol.TypeCompacting, protocol.CompactingPayload{
 			ConversationID: tc.ConversationID,
 			Active:         e.Active,
+			Result:         e.Result,
+			ErrorText:      e.ErrorText,
 		}, true
 	case turnevent.Unrecognized:
 		// Conversation identity only, like Stall and Compacting above: tc.TurnID

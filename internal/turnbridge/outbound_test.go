@@ -370,12 +370,43 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
-			name:    "Compacting cleared -> compacting, conversation_id + active only",
+			name:    "Compacting cleared with no outcome -> compacting, conversation_id + active",
 			ev:      turnevent.Compacting{Active: false},
 			tc:      tc,
 			wantTyp: protocol.TypeCompacting,
 			wantPayload: protocol.CompactingPayload{
 				ConversationID: "c1", Active: false,
+			},
+			wantOK: true,
+		},
+		{
+			// #2236. The two strings ride across UNCAPPED here for the reason the
+			// TurnEnd arm states beside them: streamsup bounds both at construction
+			// (maxCompactField), and a second bound in this adapter would be a number
+			// to keep in step with one that already holds.
+			name: "Compacting cleared with claude's outcome -> compacting carries both strings",
+			ev: turnevent.Compacting{
+				Active:    false,
+				Result:    "failed",
+				ErrorText: "context window still over budget",
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeCompacting,
+			wantPayload: protocol.CompactingPayload{
+				ConversationID: "c1", Active: false,
+				Result: "failed", ErrorText: "context window still over budget",
+			},
+			wantOK: true,
+		},
+		{
+			// The rising edge's fields are empty at the producer, so this row proves
+			// the ARM does not invent them — it maps what the event holds and no more.
+			name:    "Compacting raised -> compacting, no outcome yet",
+			ev:      turnevent.Compacting{Active: true},
+			tc:      tc,
+			wantTyp: protocol.TypeCompacting,
+			wantPayload: protocol.CompactingPayload{
+				ConversationID: "c1", Active: true,
 			},
 			wantOK: true,
 		},

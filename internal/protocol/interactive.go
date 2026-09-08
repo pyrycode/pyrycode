@@ -264,13 +264,71 @@ type ApiRetryPayload struct {
 
 // CompactingPayload is the body of an Envelope whose Type == TypeCompacting
 // (docs/protocol-mobile.md § compacting). Binary → phone direction; the wire
-// form of the internal-only turnevent.Compacting status peer. Banner-only
-// (tui-driver streams no compaction progress), so beyond the bridge-supplied
-// ConversationID the only field is Active — the show (true) / clear (false)
-// edge. Not turn-scoped, so there is no turn_id.
+// form of the internal-only turnevent.Compacting status peer. Active is the show
+// (true) / clear (false) edge, and ConversationID is bridge-supplied because the
+// internal marker carries none. Not turn-scoped, so there is no turn_id.
+//
+// CORRECTED 2026-09-08 (#2236): this doc called the frame "banner-only (tui-driver
+// streams no compaction progress)", and both halves were already false when #2227
+// gave the frame its first real producer — #1348 had deleted the driver the
+// parenthetical rests on, and the stream-json seam that replaced it reads claude's
+// outcome off the closing system/status line. The frame now carries that outcome.
+//
+// IT IS THE FIRST claude-AUTHORED TEXT ON THIS FRAME, which is a class change rather
+// than two more fields. Before this, every value here was the daemon's own — an id it
+// assigned and a bool it computed from a string comparison — so a reader could treat
+// the whole payload as trusted. Two of the four fields are now claude's, bounded but
+// unsanitized, and the SECURITY paragraph at ErrorText is what a renderer must read
+// before drawing either.
+//
+// No omitempty on either, per this file's rule as stated at ToolResultPayload:
+// absence and the zero value mean the same thing, always emitting the key keeps the
+// testdata fixture pinning the full shape, and a client built before this landed
+// ignores the unknown keys while one built after decodes an older frame lacking them
+// to the zero value without error.
 type CompactingPayload struct {
 	ConversationID string `json:"conversation_id"`
 	Active         bool   `json:"active"`
+	// Result is claude's own compact_result for the compaction that just ended —
+	// "success" on the observed success path (claude 2.1.259). An OPEN SET carried
+	// verbatim, on TurnEndPayload.Outcome's rule: treat an unrecognised token as
+	// unknown rather than as an error, because claude may ship one at any time.
+	//
+	// ALWAYS EMPTY ON A RISING EDGE. A compaction that has just started has no
+	// outcome to report, so a client rendering this field must gate on Active being
+	// false. Empty on a FALLING edge means one of three things a client answers
+	// identically: claude sent no key, claude sent an empty one, or the daemon closed
+	// the banner at its own turn boundary with no closing line to read.
+	//
+	// Spelled compact_result rather than result because a bare `result` beside
+	// `active` reads as the frame's own status — TurnEndPayload.ErrorCategory's
+	// spelling argument, and it also keeps the key identical to claude's own, which
+	// is what makes a daemon log line and a captured frame comparable by eye.
+	Result string `json:"compact_result"`
+	// ErrorText is claude's compact_error: free-form prose describing why a
+	// compaction failed, absent entirely on the observed success path. It is the
+	// field this frame exists to carry — before #2236 a failed compaction and a
+	// successful one were the same two bytes on the wire, so a client could only
+	// draw an ordinary banner for both.
+	//
+	// BOUNDED AT 256 BYTES BY THE DAEMON and CUT rather than dropped, unlike
+	// ErrorCategory beside it on turn_end: that is a token set, where a cut token
+	// would match no known value while looking like one; this is prose, where a cut
+	// sentence still reads as what it is. The cut is NOT reported — a client cannot
+	// distinguish a cut value from a short one and needs no such distinction.
+	//
+	// SECURITY: claude-authored text, bounded by the daemon and NOT sanitized, so
+	// TurnEndPayload.Outcome's SECURITY paragraph applies for provenance — the render
+	// boundary owing control-character and terminal-escape stripping is the CLIENT's.
+	// IT DOES NOT APPLY FOR SHAPE, and a client that renders this like its turn_end
+	// neighbours gets it wrong. Those are short category tokens; this is arbitrary
+	// prose, and newlines, terminal escapes, markup, a URL and text impersonating
+	// daemon chrome all fit inside 256 bytes. Render it as inert text —
+	// UnrecognizedMessagePayload.Raw's rule, the closer neighbour on shape, never an
+	// HTML sink, an attribute or a URL — and attribute it to claude rather than
+	// showing it as the daemon's own finding, which is the trap
+	// QuestionDismissedPayload's outcome field exists to avoid.
+	ErrorText string `json:"compact_error"`
 }
 
 // UnrecognizedMessagePayload is the body of an Envelope whose Type ==

@@ -324,8 +324,95 @@ func TestCompactingPayload_RoundTrip(t *testing.T) {
 	if !payload.Active {
 		t.Errorf("Active: got %v, want true", payload.Active)
 	}
+	// #2236's AC 2 at the wire: the rising edge names no outcome, because the
+	// compaction it announces has not finished. Both keys are still PRESENT and
+	// empty — this file emits no omitempty, so the fixture pins the full shape.
+	if payload.Result != "" || payload.ErrorText != "" {
+		t.Errorf("rising edge carries Result=%q ErrorText=%q, want both empty",
+			payload.Result, payload.ErrorText)
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestCompactingPayload_FallingEdgeRoundTrip is #2236's AC 1 at the wire. The
+// committed compacting.json is a RISING edge and cannot carry the two fields at
+// all, so the falling edge needs a fixture of its own — the shape a client reads
+// when a compaction FAILED, which before #2236 was indistinguishable from a
+// successful one everywhere outside a daemon log.
+func TestCompactingPayload_FallingEdgeRoundTrip(t *testing.T) {
+	raw := readFixture(t, "compacting_ended.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeCompacting {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeCompacting)
+	}
+
+	var payload CompactingPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if payload.Active {
+		t.Errorf("Active: got %v, want false", payload.Active)
+	}
+	if payload.Result != "failed" {
+		t.Errorf("Result: got %q, want %q", payload.Result, "failed")
+	}
+	if payload.ErrorText != "context window still over budget" {
+		t.Errorf("ErrorText: got %q, want %q", payload.ErrorText,
+			"context window still over budget")
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestCompactingPayload_OldDecoderReadsTheExtendedFrame is #2236's AC 4, and it is
+// asserted rather than assumed on purpose. That JSON decoding ignores unknown keys
+// is exactly the kind of "obviously true" wire-compatibility claim that goes false
+// unwatched — a later omitempty, a rename, or a payload growing a MarshalJSON of
+// its own would break it silently, and every one of those is a plausible edit here.
+//
+// oldCompactingPayload is the struct as it shipped at #1074: the two fields a
+// client built before #2236 declares. Deliberately a local type rather than a
+// commented-out copy, so it is compiled and decoded rather than read.
+func TestCompactingPayload_OldDecoderReadsTheExtendedFrame(t *testing.T) {
+	type oldCompactingPayload struct {
+		ConversationID string `json:"conversation_id"`
+		Active         bool   `json:"active"`
+	}
+
+	tests := []struct {
+		fixture    string
+		wantActive bool
+	}{
+		{"compacting.json", true},
+		{"compacting_ended.json", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.fixture, func(t *testing.T) {
+			var env Envelope
+			if err := json.Unmarshal(readFixture(t, tc.fixture), &env); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+			var old oldCompactingPayload
+			if err := json.Unmarshal(env.Payload, &old); err != nil {
+				t.Fatalf("an old decoder failed on the extended frame: %v — the two added keys "+
+					"must be invisible to a client that does not declare them", err)
+			}
+			if old.ConversationID != "c1" {
+				t.Errorf("ConversationID: got %q, want %q", old.ConversationID, "c1")
+			}
+			if old.Active != tc.wantActive {
+				t.Errorf("Active: got %v, want %v", old.Active, tc.wantActive)
+			}
+		})
+	}
 }
 
 func TestUnrecognizedMessagePayload_RoundTrip(t *testing.T) {

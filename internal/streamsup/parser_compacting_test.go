@@ -263,6 +263,136 @@ func TestParser_CompactingRisingEdgeLogsNothingFromTheLine(t *testing.T) {
 	}
 }
 
+// compactingStartLineWithOutcome is a RISING line carrying the two keys the
+// closing line carries. Constructed rather than observed, and that is the point:
+// a rising-edge row fed compactingStartLine could not fail, because that line has
+// no compact_result or compact_error to leak. #2236's AC 2 is a claim about what
+// the rising arm does with fields it CAN see, so the line has to have them.
+const compactingStartLineWithOutcome = `{"type":"system","subtype":"status","status":"compacting",` +
+	`"compact_result":"success","compact_error":"boom"}`
+
+// compactingEdges runs a sequence and returns only the Compacting events, in
+// order. compactingRun's trace projection collapses the pair to two tokens, which
+// is right for the rows about WHICH edges fire and useless for the rows about what
+// they carry; compactingEvents returns every event, so a caller would re-filter.
+func compactingEdges(t *testing.T, lines ...string) []turnevent.Compacting {
+	t.Helper()
+	var got []turnevent.Compacting
+	for _, ev := range compactingEvents(t, lines...) {
+		if c, ok := ev.(turnevent.Compacting); ok {
+			got = append(got, c)
+		}
+	}
+	return got
+}
+
+// TestParser_CompactingFallingEdgeCarriesClaudesOutcome is #2236's AC 1 and AC 3.
+//
+// The two values are the ones emitCompactingStatus has decoded and capped since
+// #2227; what this ticket changes is which sink they reach, so the rows here assert
+// the VALUES rather than re-deriving the bound. That the bound itself is unchanged
+// is proved by TestParser_CompactingLogsClaudesFailureTextBounded still passing
+// untouched — same constant, same truncateField call, same two locals, now used
+// twice instead of once.
+func TestParser_CompactingFallingEdgeCarriesClaudesOutcome(t *testing.T) {
+	t.Parallel()
+
+	long := strings.Repeat("e", maxCompactField+64)
+	tests := []struct {
+		name       string
+		lines      []string
+		wantResult string
+		wantError  string
+		why        string
+	}{
+		{
+			name:       "a failed compaction names itself",
+			lines:      []string{compactingStartLine, compactingFailLine},
+			wantResult: "failed",
+			wantError:  "context window still over budget",
+			why: "AC 1, and the whole ticket. Before this the frame carried a bare boolean, so a " +
+				"failed compaction and a successful one were indistinguishable everywhere a client " +
+				"can see and the only diagnostic was a Debug the production daemon does not print",
+		},
+		{
+			name:       "a successful compaction carries its result and no error",
+			lines:      []string{compactingStartLine, compactingEndLine},
+			wantResult: "success",
+			wantError:  "",
+			why: "AC 3's absent case. On the success path claude sends no compact_error key at " +
+				"all, and an absent string decodes to the zero value — the edge still fires",
+		},
+		{
+			name: "both present and both empty",
+			lines: []string{compactingStartLine,
+				`{"type":"system","subtype":"status","status":null,"compact_result":"","compact_error":""}`},
+			wantResult: "",
+			wantError:  "",
+			why: "AC 3's empty case. Absent, null and empty are one reading for both fields, which " +
+				"is why systemStatusLine declares them as plain strings rather than pointers",
+		},
+		{
+			name: "an oversized error is cut at the cap and the edge still fires",
+			lines: []string{compactingStartLine,
+				`{"type":"system","subtype":"status","status":null,"compact_result":"failed",` +
+					`"compact_error":"` + long + `"}`},
+			wantResult: "failed",
+			wantError:  strings.Repeat("e", maxCompactField),
+			why: "AC 3's oversized case. truncateField CUTS rather than dropping, unlike #2224's " +
+				"maxTurnEndStopField: this is prose, where a cut sentence still reads as what it " +
+				"is, not a token set where a cut token would match nothing while looking like one",
+		},
+		{
+			name:       "the daemon's own reset carries neither",
+			lines:      []string{compactingStartLine, compactingResultLine},
+			wantResult: "",
+			wantError:  "",
+			why: "consumeLine's turn-boundary reset is the SECOND producer of a falling edge and it " +
+				"has no claude line to read an outcome off. Empty here is a true statement: the " +
+				"daemon closed the edge itself and claude reported nothing",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			edges := compactingEdges(t, tc.lines...)
+			if len(edges) != 2 || edges[1].Active {
+				t.Fatalf("edges = %+v, want a rising edge then a falling one", edges)
+			}
+			falling := edges[1]
+			if falling.Result != tc.wantResult {
+				t.Errorf("Result = %q, want %q\nwhy: %s", falling.Result, tc.wantResult, tc.why)
+			}
+			if falling.ErrorText != tc.wantError {
+				t.Errorf("len(ErrorText) = %d, want %d (first difference matters more than the "+
+					"bytes; got %.60q)\nwhy: %s",
+					len(falling.ErrorText), len(tc.wantError), falling.ErrorText, tc.why)
+			}
+		})
+	}
+}
+
+// TestParser_CompactingRisingEdgeCarriesNeitherField is AC 2.
+//
+// It is the field-level sibling of TestParser_CompactingRisingEdgeLogsNothingFromThe
+// Line, and it is non-vacuous for the same reason that one is not: the line it feeds
+// CARRIES both keys, so an arm that started copying them fails here. A rising edge
+// reporting an outcome would be a claim about a compaction that has not finished.
+func TestParser_CompactingRisingEdgeCarriesNeitherField(t *testing.T) {
+	t.Parallel()
+
+	edges := compactingEdges(t, compactingStartLineWithOutcome)
+	if len(edges) != 1 || !edges[0].Active {
+		t.Fatalf("edges = %+v, want exactly one rising edge", edges)
+	}
+	if got := edges[0]; got.Result != "" || got.ErrorText != "" {
+		t.Errorf("rising edge = %+v, want Result and ErrorText empty: the rising arm reads Status "+
+			"and nothing else, and the line it was fed carries both keys precisely so that a copy "+
+			"would show up here", got)
+	}
+}
+
 // The two `user` lines a real compact turn puts on the wire AFTER the falling
 // edge, transcribed from the capture record #2229's probe wrote during the
 // 2026-09-08 real-claude lap against claude 2.1.259 (recovered from that run's

@@ -344,14 +344,14 @@ const maxModelField = 256
 // carries when compaction ENDS — compact_result and compact_error (#2227). 256, the
 // family's value, and a separate constant for maxRateLimitField's stated reason.
 //
-// THE ONLY CAP IN THIS FILE THAT BOUNDS A LOG RATHER THAN AN EVENT, which is the
-// whole reason it needs its own paragraph. Neither field reaches the wire: the
-// event this mapping produces is turnevent.Compacting{Active bool}, a boolean the
-// parser computes, so no byte claude wrote crosses the transport and the envelope
-// arithmetic the caps above do has no term here. What the cap bounds is a Debug
-// record, and emitUnrecognized states the package rule that record is an exception
-// to. See emitCompactingStatus for why the exception is taken and why #2224 rather
-// than emitRateLimit is the precedent that governs it.
+// IT BOUNDS TWO SINKS AT ONE SITE (#2236, which is the correction: this paragraph
+// used to say it was the only cap in the file bounding a LOG rather than an event,
+// and that was true for one day). Both values now ride turnevent.Compacting to the
+// wire as well as the Debug record, and the arm applies truncateField ONCE, passing
+// the same two locals to both — so the cap cannot be right in one sink and wrong in
+// the other. The envelope arithmetic the caps above do therefore has a term here
+// after all: 512 bytes worst case, ~0.8% of the 65519-byte application-envelope cap.
+// See emitCompactingStatus for the wire-facing blast radius in full.
 //
 // No RATE bound, and here that is derived rather than inherited: the log fires on
 // the FALLING edge only, an edge can fall only from one that rose, and a rising
@@ -2083,14 +2083,15 @@ type systemThinkingTokensLine struct {
 // nothing — the conservative direction, since a status this parser cannot read
 // must not be read as a compaction ending.
 //
-// CompactResult and CompactError are declared for the LOG, not for the machine:
-// nothing branches on either, which is what makes the falling edge a function of
-// Status alone (see emitCompactingStatus for why that width is the point). The
-// captured line carries compaction's outcome across both fields; compact_metadata,
-// which the sibling compact_boundary line carries, is deliberately NOT declared
-// here. Absence from the decode target is a stronger guarantee than a sweep —
-// #2228 is the ticket that publishes the trigger and the token counts, and until
-// it lands those values are structurally unreachable from this code.
+// CompactResult and CompactError are declared for the LOG AND FOR THE EVENT (#2236
+// widened the sink; #2227 declared them for the log alone), and in neither case for
+// the machine: nothing branches on either, which is what makes the falling edge a
+// function of Status alone (see emitCompactingStatus for why that width is the
+// point). The captured line carries compaction's outcome across both fields;
+// compact_metadata, which the sibling compact_boundary line carries, is deliberately
+// NOT declared here. Absence from the decode target is a stronger guarantee than a
+// sweep — #2237 is the ticket that publishes the trigger and the token counts, and
+// until it lands those values are structurally unreachable from this code.
 type systemStatusLine struct {
 	Status        string `json:"status"`
 	CompactResult string `json:"compact_result"`
@@ -3191,6 +3192,13 @@ func (p *Parser) consumeLine(line []byte) {
 		// first has already closed the turn holding a lit banner, which is the stuck
 		// banner AC 5 exists to forbid. The two emits are in one arm precisely so that
 		// order cannot be separated from the reset it belongs to.
+		//
+		// THIS EDGE NAMES NO OUTCOME (#2236) and the zero values are a true statement
+		// rather than a gap: there is no claude line here to read compact_result or
+		// compact_error off, so what closed the banner was the daemon's own turn
+		// boundary and claude reported nothing about how the compaction went. A client
+		// reads empty for "absent, empty, or the daemon closed it", which are one
+		// reading — see turnevent.Compacting's Result.
 		if p.compacting {
 			p.compacting = false
 			p.emit(turnevent.Compacting{Active: false})
@@ -3972,23 +3980,27 @@ func (p *Parser) emitThinkingProgress(line []byte) bool {
 // reason, and here that refusal is load-bearing: it is what the zero-unrecognized
 // live gate rests on for a subtype the daemon does in fact recognise.
 //
-// THE LOG IS THIS PACKAGE'S ONE EXCEPTION TO "NEVER THE CONTENT ITSELF", and it is
-// taken knowingly rather than drifted into. emitUnrecognized states that rule and now
-// carries a pointer here. Three things bound the exception. It fires on the falling
-// edge only, so at most once per completed compaction whatever claude sends. It
-// carries exactly two fields, both through truncateField at maxCompactField, and
-// compact_metadata is not even declared on the decode target. And the precedent that
-// governs it is #2224, not emitRateLimit: decodeAssistantError already bounds
-// claude-authored error text at 256 bytes and publishes it ON THE WIRE, so a bounded
-// copy in a Debug the production daemon does not print is strictly less exposure than
-// the package already ships. What the exception buys is the only diagnostic there is
-// for a compaction that FAILED — the event carries a bare boolean, so without this
-// record a failed compaction and a successful one are indistinguishable everywhere.
+// THE LOG IS NO LONGER AN EXCEPTION TO "NEVER THE CONTENT ITSELF" (#2236), and the
+// reason is worth stating because the exception was argued at length one day earlier.
+// #2227 logged compact_result and compact_error precisely BECAUSE they did not reach
+// the wire, so the Debug record was the only place a failed compaction was visible at
+// all — emitUnrecognized's rule inverted, and defensible only for as long as that
+// was true. It is not true now: the falling edge publishes both. The record stays,
+// byte-identical, because a daemon-side diagnostic is worth having beside the frame;
+// but it is a bounded copy of something already on the wire rather than a carve-out,
+// which is the ordinary shape emitUnrecognized itself has.
 //
-// NOTHING FROM THE LINE REACHES THE EVENT. Active is a bool this function computes
-// from a string comparison; no compact_result, no compact_error, no token count and
-// no trigger crosses the transport. A hostile line can move a boolean and nothing
-// else, which is the whole of this mapping's wire-facing blast radius.
+// EXACTLY TWO CLAUDE-AUTHORED STRINGS REACH THE EVENT, and the bound on them is
+// applied ONCE (see the falling-edge arm below) so the two sinks cannot drift. Active
+// is still a bool this function computes from a string comparison, no token count and
+// no trigger crosses the transport, and compact_metadata is not even declared on the
+// decode target — #2237 is the ticket that publishes those. So the wire-facing blast
+// radius of a hostile line is a boolean plus 512 bytes claude wrote, both bounded
+// here and neither read by anything in the daemon. The precedent governing the two
+// strings is #2224's ErrorCategory, which publishes claude-authored error text on
+// this same lane under a 256-byte bound; where this one departs from it — prose
+// rather than a token set, cut rather than dropped — is argued at
+// turnevent.Compacting's ErrorText.
 func (p *Parser) emitCompactingStatus(line []byte) bool {
 	var sl systemStatusLine
 	if err := json.Unmarshal(line, &sl); err != nil {
@@ -4010,13 +4022,16 @@ func (p *Parser) emitCompactingStatus(line []byte) bool {
 		return true
 	}
 	p.compacting = false
+	// Bounded ONCE and used twice (#2236). The two locals reach the Debug record and
+	// the event, so the record is byte-identical to the one #2227 shipped and the cap
+	// cannot drift between the two sinks — there is only one place it is applied.
 	result, resultTruncated := truncateField(sl.CompactResult, maxCompactField)
 	detail, detailTruncated := truncateField(sl.CompactError, maxCompactField)
 	p.log.Debug(compactingEndedMsg,
 		"compact_result", result,
 		"compact_error", detail,
 		"truncated", resultTruncated || detailTruncated)
-	p.emit(turnevent.Compacting{Active: false})
+	p.emit(turnevent.Compacting{Active: false, Result: result, ErrorText: detail})
 	return true
 }
 
@@ -5171,12 +5186,14 @@ func truncateField(s string, limit int) (string, bool) {
 // The log records site, type, and byte count only — never the content itself,
 // which is the package's standing rule; the content crosses the wire, not the log.
 //
-// CORRECTED 2026-09-08 (#2227): "the package's standing rule" now has exactly one
-// exception, named here so the sentence above does not go quietly false.
-// emitCompactingStatus logs compact_result and compact_error, both capped at
-// maxCompactField, on a falling edge only. It is the inverse of this site's shape and
-// that is why it needed an argument: there the content does NOT cross the wire, so a
-// log is the only place a failed compaction is visible at all.
+// CORRECTED 2026-09-08 (#2227, then #2236 the same day): the rule above briefly had
+// one exception and no longer does, and both edits are kept rather than collapsed
+// because the second only makes sense against the first. #2227 logged
+// compact_result and compact_error from emitCompactingStatus BECAUSE that content
+// did not cross the wire, inverting this site's shape — a log was then the only place
+// a failed compaction was visible at all. #2236 published both fields on the
+// falling edge, so that record became a bounded copy of something already on the
+// wire: the same shape as here, and no longer an exception to anything.
 func (p *Parser) emitUnrecognized(site turnevent.UnrecognizedSite, kind string, raw []byte) {
 	text, truncated := truncateRaw(raw)
 	p.log.Debug("streamsup: unrecognized payload",

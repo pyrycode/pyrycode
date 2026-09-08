@@ -1477,7 +1477,66 @@ type ApiRetry struct {
 // because the EDGE is what lights the banner, not because a deleted driver was
 // silent about the rest. #2228 is the ticket that adds claude's trigger and token
 // counts on top of this edge.
-type Compacting struct{ Active bool }
+//
+// AMENDED 2026-09-08 (#2236): "Active is the only field" held for one day. The
+// closing system/status line carries claude's own outcome across compact_result and
+// compact_error, and emitCompactingStatus had been decoding and capping both since
+// #2227 — into a Debug record the production daemon does not print. So a failed
+// compaction and a successful one were indistinguishable everywhere a client can
+// see, which is the whole gap this amendment closes. What changed is which sink two
+// already-bounded strings reach, not what bounds them.
+type Compacting struct {
+	Active bool
+	// Result is claude's compact_result off the CLOSING system/status line —
+	// "success" on the observed success path (claude 2.1.259, #2229's live lap).
+	// An OPEN SET carried verbatim, on TurnEnd.Outcome's rule: a consumer treats an
+	// unrecognised token as unknown rather than as an error, because claude may ship
+	// one at any time.
+	//
+	// EMPTY ON EVERY RISING EDGE, and empty is honest on two further paths. claude
+	// sends no key at all where compaction succeeded silently, and streamsup's
+	// turn-boundary reset — the second producer of a falling edge — has no claude
+	// line to read an outcome off at all. Absent, empty and daemon-reset are one
+	// reading, which is why this is a plain string: a *string would buy a
+	// distinction no consumer answers. #2237 owns the presence-versus-zero question
+	// for the fields on the sibling compact_boundary line.
+	//
+	// RESULT IS NOT A DISCRIMINATOR ANYWHERE IN THE DAEMON, and that is structural
+	// rather than incidental: emitCompactingStatus's falling edge is a function of
+	// `status` leaving "compacting" and of nothing else, so a failed compaction
+	// closes the banner exactly as a successful one does. This field says which it
+	// was; it never decides whether the edge fell.
+	Result string
+	// ErrorText is claude's compact_error off the same line — free-form prose
+	// describing why a compaction failed, absent entirely on the observed success
+	// path. Named ErrorText rather than Error because a struct field called Error
+	// invites confusion with the error interface at every call site that touches it.
+	//
+	// BOUNDED AT 256 BYTES BY streamsup's maxCompactField, and CUT rather than
+	// dropped — which is where it parts company with #2224's ErrorCategory, whose
+	// producer drops past its bound. That field is a token set, where a cut token
+	// would match no known value while looking like one; this is prose, where a cut
+	// sentence still reads as what it is. The cut is not reported: a consumer cannot
+	// distinguish a cut value from a short one and needs no such distinction. The
+	// producer scrubs the cut for invalid UTF-8 (truncateField), so a slice landing
+	// mid-rune cannot reach a JSON string field malformed.
+	//
+	// SECURITY: claude-authored text, bounded by the daemon and NOT sanitized —
+	// TurnEnd.ErrorCategory's SECURITY paragraph applies for provenance, including
+	// that the render boundary owing control-character and terminal-escape stripping
+	// is the CLIENT's. It does NOT apply for shape, and a consumer that treats the
+	// two alike gets this one wrong. ErrorCategory is a short category token; this is
+	// arbitrary prose, and newlines, terminal escapes, markup, a URL and text
+	// impersonating daemon chrome all fit inside 256 bytes. Render it as inert text
+	// attributed to claude — UnrecognizedMessagePayload.Raw's rule, the closer
+	// neighbour on shape — never as the daemon's own statement.
+	//
+	// NOTHING IN THE DAEMON ACTS ON IT: no retry, no backoff, no teardown and no
+	// routing is keyed on this value. Whoever first makes the daemon behave
+	// differently on it owes the review that turns claude-authored prose into an
+	// actuator.
+	ErrorText string
+}
 
 // ConversationReset reports that claude reset the conversation and mounted a
 // fresh transcript under a new id. It maps claude's top-level
