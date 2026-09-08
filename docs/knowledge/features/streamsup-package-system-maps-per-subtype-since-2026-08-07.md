@@ -45,5 +45,18 @@ a spurious one (a banner that closes a beat early). See
 own zero-unrecognized criterion exposed: compaction's *consequences* — claude's summary and the harness's
 `/compact` echo — arrive as `user` lines, not `system` ones, and needed a separate suppression the
 subtype-level seam argument didn't predict. The fixture [#2229's capture wrote](e2e-realclaude-compaction-capture-test-go.md)
-still never landed in the tree, so #2227 proved its edges with a live assertion instead of a fixture
-replay — see that document for what that fixture's continued absence still blocks.
+had not landed in the tree at the time, so #2227 proved its edges with a live assertion instead of a
+fixture replay — see that document for the state of the fixture now.
+
+**`compact_result`/`compact_error` moved from the log to the frame (#2236).** `emitCompactingStatus`
+already decoded and bounded (`maxCompactField`, 256 bytes, cut not dropped) both values off the closing
+`system/status` line for a Debug record — the only diagnostic a failed compaction had, because the edge
+pair itself carries a bare boolean and success looks identical to failure everywhere a client can see.
+`turnevent.Compacting` gained `Result`/`ErrorText` fields so the same two already-computed locals reach
+the emitted event too; the Debug record is unchanged (same message, same values, computed once and used
+twice — `TestParser_CompactingLogsClaudesFailureTextBounded` passes without modification, which is the
+evidence the sink changed and the bound didn't). The state machine itself is untouched: `compact_result`
+is still not a discriminator, and the falling edge still fires — wide, as above — whether the compaction
+it closes succeeded or failed. See
+[the interactive payload doc](protocol-package-interactive-event-payloads.md) for the wire shape and
+the security posture of putting claude-authored free-form prose on this frame.
