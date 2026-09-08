@@ -23,8 +23,8 @@ import "encoding/json"
 // Event is the sealed sum type of outbound turn events: TextChunk,
 // ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted,
 // BackgroundTaskUpdated, BackgroundTaskRoster, ThinkingProgress, the
-// internal-only status peers Stall, ApiRetry, and Compacting, and the
-// diagnostic marker Unrecognized.
+// internal-only status peers Stall, ApiRetry, and Compacting, the compaction
+// boundary CompactionBoundary, and the diagnostic marker Unrecognized.
 // The unexported marker
 // keeps the variant set
 // closed to this package, so external ACP-spec churn cannot inject a variant.
@@ -1538,6 +1538,97 @@ type Compacting struct {
 	ErrorText string
 }
 
+// CompactionBoundary reports that a compaction finished, what triggered it, and
+// how far the context shrank. It maps claude's system/compact_boundary line
+// (#2237) — the seventh `system` subtype the parser translates rather than drops,
+// and the sibling of the line Compacting's edge pair is read off.
+//
+// IT IS A SEPARATE VARIANT RATHER THAN THREE MORE FIELDS ON Compacting, and the
+// reason is an ORDERING that no amount of design preference can work around. The
+// committed capture (internal/e2e/realclaude/testdata/compaction_v2.1.259.json,
+// claude 2.1.259, one manual /compact) puts the compact turn's lines in this
+// order: status:"compacting", then status:null + compact_result — WHICH IS WHERE
+// THE FALLING EDGE FIRES — then system/init, then this line. By the time claude
+// states the counts, the frame that would have carried them has shipped. So this
+// is conversation-scoped exactly as Compacting is, and a client applies it to the
+// divider it has already drawn.
+//
+// IT ALSO FIRES WITH NO EDGE BEFORE IT, deliberately. The producer
+// (streamsup's emitCompactionBoundary) reads and writes NO parser state — not the
+// compacting flag, not anything — so a boundary line that followed no
+// status:"compacting" is mapped identically to one that did. An auto-compaction
+// that announces itself differently is therefore still published, which is the
+// second reason the falling edge was the wrong carrier.
+//
+// EVERY FIELD IS claude's, AND SO IS THE FACT OF THE BOUNDARY. That is a class
+// change rather than a wider payload, and it is worth stating because the nearest
+// sibling is weaker: Compacting.Active is a bool the daemon COMPUTES from a string
+// comparison it makes itself, so a client could read that field as the daemon's
+// own observation. Nothing here is. A fabricated line reading pre_tokens 999999
+// and post_tokens 1 draws a plausible compaction mark where nothing was compacted.
+// Render this as claude's ASSERTION, attributed to claude, never as the daemon's
+// finding — and note that NOTHING IN THE DAEMON ACTS ON ANY FIELD HERE: no retry,
+// no backoff, no teardown and no routing is keyed on them, which is what keeps a
+// fabricated value a misleading label rather than an actuator. Whoever first makes
+// the daemon behave differently on one owes the review that changes that.
+//
+// The rest of compact_metadata is NOT carried, and the exclusion is structural
+// rather than a filter: streamsup's decode target declares these three fields and
+// encoding/json discards every other key, including ones claude has not shipped
+// yet. cumulative_dropped_tokens and duration_ms are left out because nothing asks
+// for them and an unused field is a claim nobody checks; preserved_segment,
+// preserved_messages and logical_parent_uuid are left out because they name
+// entries in the OPERATOR'S OWN TRANSCRIPT, and they sit unredacted in the
+// committed capture. Like every sibling here it also carries neither claude's
+// session_id nor claude's uuid, on BackgroundTaskStarted's rule.
+//
+// It opens and closes no turn, exactly as ModelAnnounced does not. Like every
+// variant here it carries no conversation identity of the DAEMON's — the bridge
+// injects that.
+type CompactionBoundary struct {
+	// Trigger is claude's own compact_metadata.trigger — "manual" on the observed
+	// path (claude 2.1.259, a typed /compact), with "auto" claude's other documented
+	// value. An OPEN SET carried verbatim, on TurnEnd.Outcome's rule: a consumer
+	// treats an unrecognised token as unknown rather than as an error.
+	//
+	// BOUNDED AT 256 BYTES BY streamsup's maxCompactTrigger, and DROPPED rather than
+	// cut — the opposite of Compacting.ErrorText beside it, and the same answer
+	// maxTurnEndStopField gives for turn_end's three strings. That field is prose,
+	// where a cut sentence still reads as what it is; this is a token a consumer
+	// MATCHES, where a cut token would match no known value while looking like one.
+	// Carrying the empty value says "no trigger I can offer you", which the consumer
+	// must already handle because the set is open. There is consequently no
+	// truncation report and none is owed: a dropped scalar is directly observable as
+	// the empty value.
+	//
+	// SECURITY: claude-authored, bounded by the daemon and NOT sanitized. The
+	// provenance reading is Compacting.ErrorText's; the SHAPE reading is not, and a
+	// consumer that treats the two alike gets this one wrong in the safe direction
+	// but for the wrong reason. This is a short token from an open set, so it takes
+	// TurnEnd.Outcome's rule — switch on it against known values — never
+	// UnrecognizedMessagePayload.Raw's prose latitude.
+	Trigger string
+	// PreTokens and PostTokens are claude's context size before and after the
+	// compaction, exactly as it stated them.
+	//
+	// POINTERS, and this is where the variant departs from Compacting's field shape
+	// on purpose. Compacting.Result is a plain string because absent, empty and
+	// daemon-reset are one reading there. Here they are not: a count claude OMITTED
+	// and a count of ZERO are different facts, post_tokens is optional in claude's
+	// own shape, and a consumer that collapses them renders "24k → 0 tokens" for a
+	// boundary claude reported without a post count. nil means claude stated no such
+	// count; a non-nil pointer to 0 means claude stated zero.
+	//
+	// NEITHER IS CLAMPED, RANGE-CHECKED OR ORDERED, on RateLimited.ResetsAt's rule:
+	// they are claude's numbers, not the daemon's. PostTokens greater than PreTokens
+	// is not rejected and not corrected. A value encoding/json cannot fit in an int
+	// fails the WHOLE line's decode and produces no event at all, which is
+	// fail-closed and is the one place a single absurd field costs the frame rather
+	// than the field.
+	PreTokens  *int
+	PostTokens *int
+}
+
 // ConversationReset reports that claude reset the conversation and mounted a
 // fresh transcript under a new id. It maps claude's top-level
 // `conversation_reset` line (#2134) — the announcement claude writes on its own
@@ -1681,6 +1772,7 @@ func (SlashCommandList) isTurnEvent()      {}
 func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
+func (CompactionBoundary) isTurnEvent()    {}
 func (ConversationReset) isTurnEvent()     {}
 func (Unrecognized) isTurnEvent()          {}
 

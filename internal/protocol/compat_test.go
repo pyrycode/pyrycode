@@ -248,6 +248,7 @@ var v2OnlyTypes = map[string]bool{
 	TypeStall:               true,
 	TypeApiRetry:            true,
 	TypeCompacting:          true,
+	TypeCompactionBoundary:  true,
 	TypeUnrecognizedMessage: true,
 	TypeRequestSnapshot:     true,
 	TypeScreenSnapshot:      true,
@@ -422,6 +423,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeRequestSystemPrompt, TypeSystemPrompt,
 		// v2 pairing-mint pair.
 		TypeMintPairing, TypePairingMinted,
+		// v2 compaction boundary (outbound status, #2237).
+		TypeCompactionBoundary,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]

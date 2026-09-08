@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -370,6 +371,84 @@ func TestCompactingPayload_FallingEdgeRoundTrip(t *testing.T) {
 	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestCompactionBoundaryPayload_RoundTrip is #2237 at the wire: the frame carrying
+// claude's trigger and both counts, with the observed capture's own values.
+func TestCompactionBoundaryPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "compaction_boundary.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeCompactionBoundary {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeCompactionBoundary)
+	}
+
+	var payload CompactionBoundaryPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if payload.Trigger != "manual" {
+		t.Errorf("Trigger: got %q, want %q", payload.Trigger, "manual")
+	}
+	if payload.PreTokens == nil || *payload.PreTokens != 23600 {
+		t.Errorf("PreTokens: got %s, want 23600", countOrNull(payload.PreTokens))
+	}
+	if payload.PostTokens == nil || *payload.PostTokens != 2612 {
+		t.Errorf("PostTokens: got %s, want 2612", countOrNull(payload.PostTokens))
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestCompactionBoundaryPayload_AbsentCountIsNullNotZero is the wire half of #2237's
+// AC 1, and the reason it is a fixture of its own rather than a column on the test
+// above: one payload cannot carry both a present and an absent post_tokens.
+//
+// The round-trip is what makes it non-vacuous in the direction that matters. Decoding
+// `null` to a nil pointer is not the claim — the claim is that a nil pointer ENCODES
+// back to `null` rather than to `0` or to a dropped key, which is the only thing that
+// makes absence survive to a client. roundTripEnvelope compares bytes, so an
+// omitempty added here later for tidiness reddens rather than silently erasing the
+// distinction.
+func TestCompactionBoundaryPayload_AbsentCountIsNullNotZero(t *testing.T) {
+	raw := readFixture(t, "compaction_boundary_no_post.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	var payload CompactionBoundaryPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.PreTokens == nil || *payload.PreTokens != 23600 {
+		t.Errorf("PreTokens: got %s, want 23600 — an absent post_tokens must not cost the "+
+			"count claude DID state", countOrNull(payload.PreTokens))
+	}
+	if payload.PostTokens != nil {
+		t.Errorf("PostTokens: got %s, want null. A client rendering \"24k → 0 tokens\" for a "+
+			"boundary claude reported without a post count is the failure this shape exists to "+
+			"prevent, and a plain int field passes every other assertion in this file",
+			countOrNull(payload.PostTokens))
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// countOrNull renders a count pointer for a failure message, keeping nil and zero
+// visibly apart — every assertion above turns on that distinction, so a message
+// printing both as "0" would misdescribe the failure it reports.
+func countOrNull(p *int) string {
+	if p == nil {
+		return "null"
+	}
+	return strconv.Itoa(*p)
 }
 
 // TestCompactingPayload_OldDecoderReadsTheExtendedFrame is #2236's AC 4, and it is

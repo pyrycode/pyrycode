@@ -629,6 +629,14 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		{turnevent.Stall{}, turnMarkNone},
 		{turnevent.ApiRetry{Active: true, Current: 1, Total: 3}, turnMarkNone},
 		{turnevent.Compacting{Active: true}, turnMarkNone},
+		// #2237. Neither an opener nor a closer, and its argument is the strongest on
+		// this list rather than another restatement: the producer emits this for a
+		// boundary line that followed no compacting edge, deliberately, so it can reach
+		// the fan-in with no turn open at all. Opening a mark would then wedge the
+		// conversation permanently — the turn end that would clear it may never exist.
+		// The whitelist's default already answers it, so this row asserts an existing
+		// answer rather than a new arm; turnMarkFor is unchanged by that ticket.
+		{turnevent.CompactionBoundary{Trigger: "manual"}, turnMarkNone},
 		{turnevent.Unrecognized{Site: turnevent.UnrecognizedLineType, Kind: "some_future_event"}, turnMarkNone},
 		{turnevent.NewPermissionRequest("req-1", "tu-1", "Proceed?", nil), turnMarkNone},
 	}

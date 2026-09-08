@@ -70,6 +70,21 @@ capture ticket whose only live-firing execution is the automated gate — becaus
 on the first pass and no repair leg ever touched a real checkout — has no equivalent commit to ride
 in on.
 
+### The committed fixture is the only source a reviewer can re-derive from (#2237)
+
+\#2237's replay row (`internal/streamsup/compaction_capture_test.go`, joining
+`compactionReaderGate`) needed `compact_boundary`'s observed trigger and counts, and
+three different sources offered them: the ticket body's own transcription, a
+recovered `$TMPDIR` capture record left over from an earlier failed promotion
+attempt, and the committed `testdata/compaction_v2.1.259.json` itself — and they do
+not all agree (`pre_tokens` reads 23599 in one record, 23600 in the committed
+fixture). Only the committed file is something a future reviewer can re-open and
+re-check the literal against; the other two are gone or unreadable from a normal
+checkout. The replay test also re-decodes the values **out of the capture's own
+bytes** at assertion time rather than comparing against the same constant it feeds
+the parser — a self-agreement would pass even if both sides had quietly drifted
+from the fixture together.
+
 ### Related
 
 - [streamsup's per-subtype map](streamsup-package-system-maps-per-subtype-since-2026-08-07.md) — the

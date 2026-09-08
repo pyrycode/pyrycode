@@ -216,7 +216,17 @@ func turnMarkFor(ev turnevent.Event) turnMark {
 	default:
 		// Stall / ApiRetry / Compacting — tui-driver status peers with no turn
 		// lifecycle meaning (the emitter's `Handle` treats them the same way) —
-		// plus Unrecognized, and any future variant.
+		// plus Unrecognized, CompactionBoundary, and any future variant.
+		//
+		// CompactionBoundary (#2237) is the one worth naming rather than leaving to
+		// "any future variant", because it is the first arrival here that may reach the
+		// fan-in with NO TURN OPEN AT ALL: its producer emits it for a compaction
+		// boundary line that followed no compacting edge, so an auto-compaction
+		// announcing itself differently is still published. That makes the whitelist's
+		// answer load-bearing rather than merely correct — opening a mark on it would
+		// wedge the conversation, since the turn end that would clear it may never come.
+		// It needs no arm of its own; this default IS the answer, which is why #2237
+		// changed this comment and no code here.
 		//
 		// The opener set above is a whitelist, so Unrecognized needs no code
 		// change to land here, and landing here is the CORRECT answer rather than

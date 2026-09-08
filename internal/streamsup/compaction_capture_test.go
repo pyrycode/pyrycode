@@ -352,3 +352,162 @@ func TestCompactionFixtureReplayReachesBothEdges(t *testing.T) {
 			compactionCapturePath, unrecognized)
 	}
 }
+
+// TestCompactionFixtureReplayPublishesTheBoundary is #2237's AC 2: the committed
+// capture's own bytes, fed back through a real Parser, produce exactly one boundary
+// frame carrying claude's trigger and both token counts — and nothing else from
+// compact_metadata, uuids first among them.
+//
+// IT REPLAYS THE WHOLE TURN, not the boundary line alone, for the sibling above's
+// reason and one of its own: the frame must be produced ONCE across a turn that also
+// contains two system/status lines, a system/init and two `user` lines, so a mapping
+// that fired on the wrong line would show up here as a count rather than as a value.
+//
+// THE FORBIDDEN STRINGS ARE READ OUT OF THE CAPTURE, never retyped. That is what
+// makes the check survive a re-capture at a new claude release: the identifiers move
+// with the fixture, and a uuid this file had transcribed by hand would silently stop
+// being the uuid the bytes carry. The trigger is excluded from the sweep because it
+// is the one string that SHOULD cross.
+func TestCompactionFixtureReplayPublishesTheBoundary(t *testing.T) {
+	raw, readErr := os.ReadFile(compactionCapturePath)
+	exists := readErr == nil
+	if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+		t.Fatalf("reading capture %s: %v", compactionCapturePath, readErr)
+	}
+	switch action, reason := compactionReaderGate(exists, len(compactionPinnedShapes) > 0); action {
+	case compactionGateSkip:
+		t.Skipf("#2237: %s", reason)
+	case compactionGateFatal:
+		t.Fatalf("#2237: %s", reason)
+	}
+
+	var capture compactionCapture
+	if err := json.Unmarshal(raw, &capture); err != nil {
+		t.Fatalf("decoding capture %s: %v", compactionCapturePath, err)
+	}
+	if !capture.IsCapture {
+		t.Fatalf("%s: is_capture is false — replaying a hand-written payload would prove only "+
+			"that the mapping agrees with its author", compactionCapturePath)
+	}
+
+	var boundaries []turnevent.CompactionBoundary
+	p := NewParser(func(ev turnevent.Event) {
+		if b, ok := ev.(turnevent.CompactionBoundary); ok {
+			boundaries = append(boundaries, b)
+		}
+	}, discardLogger())
+	var boundaryPayload string
+	for _, f := range capture.Frames {
+		if f.PayloadEncoding != "json-string" || f.Payload == "" {
+			continue
+		}
+		if f.Type == "system" && f.Subtype == "compact_boundary" {
+			boundaryPayload = f.Payload
+		}
+		if _, err := p.Write([]byte(f.Payload + "\n")); err != nil {
+			t.Fatalf("%s: replaying frame %d: %v", compactionCapturePath, f.Index, err)
+		}
+	}
+	if boundaryPayload == "" {
+		t.Fatalf("%s: the capture holds no system/compact_boundary line, so this test would "+
+			"assert over a turn that never carried the frame it is about", compactionCapturePath)
+	}
+	if len(boundaries) != 1 {
+		t.Fatalf("%s: replaying the captured turn produced %d compaction boundary frame(s), want "+
+			"exactly 1. The capture's census is one system/compact_boundary line, so more than "+
+			"one means a second line reached the arm and zero means claude's own bytes disagree "+
+			"with the hand-authored literal in parser_compacting_test.go — and the bytes win",
+			compactionCapturePath, len(boundaries))
+	}
+
+	// The three published values, re-derived from the captured line's own bytes rather
+	// than from a constant this package also feeds the parser. Comparing the mapping
+	// against the literal it was built from would be an agreement with itself.
+	var observed struct {
+		CompactMetadata struct {
+			Trigger    string `json:"trigger"`
+			PreTokens  *int   `json:"pre_tokens"`
+			PostTokens *int   `json:"post_tokens"`
+		} `json:"compact_metadata"`
+	}
+	if err := json.Unmarshal([]byte(boundaryPayload), &observed); err != nil {
+		t.Fatalf("%s: the captured boundary line does not decode: %v", compactionCapturePath, err)
+	}
+	got := boundaries[0]
+	if got.Trigger != observed.CompactMetadata.Trigger {
+		t.Errorf("%s: Trigger = %q, want %q — the value claude actually stated",
+			compactionCapturePath, got.Trigger, observed.CompactMetadata.Trigger)
+	}
+	if !sameCount(got.PreTokens, observed.CompactMetadata.PreTokens) {
+		t.Errorf("%s: PreTokens = %s, want %s", compactionCapturePath,
+			tokenCount(got.PreTokens), tokenCount(observed.CompactMetadata.PreTokens))
+	}
+	if !sameCount(got.PostTokens, observed.CompactMetadata.PostTokens) {
+		t.Errorf("%s: PostTokens = %s, want %s", compactionCapturePath,
+			tokenCount(got.PostTokens), tokenCount(observed.CompactMetadata.PostTokens))
+	}
+	// Non-vacuity for the three assertions above: a capture whose boundary line carried
+	// no trigger and no counts would satisfy all of them while proving nothing.
+	if observed.CompactMetadata.Trigger == "" ||
+		observed.CompactMetadata.PreTokens == nil || observed.CompactMetadata.PostTokens == nil {
+		t.Fatalf("%s: the captured boundary line states trigger=%q pre=%s post=%s; a line missing "+
+			"any of the three makes the comparisons above vacuous, so re-capture rather than "+
+			"weakening them", compactionCapturePath, observed.CompactMetadata.Trigger,
+			tokenCount(observed.CompactMetadata.PreTokens), tokenCount(observed.CompactMetadata.PostTokens))
+	}
+
+	rendered, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshalling the mapped event: %v", err)
+	}
+	leaked := 0
+	for _, s := range capturedStrings(t, boundaryPayload) {
+		if s == observed.CompactMetadata.Trigger {
+			continue // the one string that SHOULD cross
+		}
+		if s != "" && strings.Contains(string(rendered), s) {
+			leaked++
+			t.Errorf("%s: the mapped frame carries %q, which is on claude's line but not on the "+
+				"allowlist. The line's preserved_segment, preserved_messages and "+
+				"logical_parent_uuid name entries in the OPERATOR'S OWN TRANSCRIPT and sit "+
+				"unredacted in this fixture, so a replay leaks real identifiers rather than "+
+				"placeholders", compactionCapturePath, s)
+		}
+	}
+	// Non-vacuity for the sweep: a boundary line carrying only the trigger would make
+	// the loop above pass without comparing anything.
+	if leaked == 0 && len(capturedStrings(t, boundaryPayload)) < 2 {
+		t.Fatalf("%s: the captured boundary line carries fewer than two distinct strings, so the "+
+			"leak sweep compared nothing", compactionCapturePath)
+	}
+}
+
+// capturedStrings returns every string VALUE reachable in one captured line, at any
+// depth, including inside arrays. Keys are excluded: a key is claude's vocabulary and
+// appears in no frame, whereas a value is the operator's identifier and is what a
+// leak would carry.
+func capturedStrings(t *testing.T, payload string) []string {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal([]byte(payload), &doc); err != nil {
+		t.Fatalf("decoding the captured line for its strings: %v", err)
+	}
+	var out []string
+	var walk func(any)
+	walk = func(v any) {
+		switch n := v.(type) {
+		case string:
+			out = append(out, n)
+		case []any:
+			for _, e := range n {
+				walk(e)
+			}
+		case map[string]any:
+			for _, e := range n {
+				walk(e)
+			}
+		}
+	}
+	walk(doc)
+	return out
+}

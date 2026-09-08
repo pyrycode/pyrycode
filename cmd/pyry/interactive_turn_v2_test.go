@@ -2154,6 +2154,73 @@ func TestInteractiveTurnEmitterV2_ThinkingProgressEventKindNamesTheVariant(t *te
 	}
 }
 
+// TestInteractiveTurnEmitterV2_CompactionBoundaryEventKindNamesTheVariant is
+// #2237's half of the arm above's claim, and its content-free negative is the one
+// that matters: Trigger is claude's own word for what started the compaction, and it
+// is precisely the field a log line explaining a compaction would reach for.
+//
+// The trigger fixture is a conspicuous sentinel rather than "manual", for the reason
+// the rate-limited block below states: the captured log carries the literal
+// kind=compaction_boundary, so a natural value that is a substring of the frame name
+// or the event name would make the negative red against a correct implementation.
+func TestInteractiveTurnEmitterV2_CompactionBoundaryEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		// Drop slog's own time= attr: the count needles below are bare numerals and
+		// would otherwise match the clock's digits, exactly as measured on the
+		// thinking-progress test above.
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	pre, post := 23600, 2612
+	e.Handle(context.Background(), turnevent.CompactionBoundary{
+		Trigger:    compactionBoundaryTriggerFixture,
+		PreTokens:  &pre,
+		PostTokens: &post,
+	})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=compaction_boundary") {
+		t.Fatalf("log does not name the variant (want kind=compaction_boundary):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for compaction_boundary:\n%s", logs)
+	}
+	if strings.Contains(logs, "time=") {
+		t.Fatalf("capture carries slog's timestamp; the count checks below can match the clock:\n%s", logs)
+	}
+	if strings.Contains(logs, compactionBoundaryTriggerFixture) {
+		t.Fatalf("claude-authored trigger %q leaked into the kind log:\n%s",
+			compactionBoundaryTriggerFixture, logs)
+	}
+	// Both counts are claude's own integers; neither ever reaches a log.
+	for _, count := range []string{"23600", "2612"} {
+		if strings.Contains(logs, count) {
+			t.Fatalf("claude-authored count %q leaked into the kind log:\n%s", count, logs)
+		}
+	}
+}
+
+// compactionBoundaryTriggerFixture is a sentinel for the reason the rate-limited
+// block below gives: a substring of the frame name, the event name or the log
+// message would make a content-free negative red against correct code.
+const compactionBoundaryTriggerFixture = "qq-trigger-sentinel"
+
 // The claude-authored fixture values the three rate-limited tests below share.
 // They are conspicuous sentinels rather than natural-looking values on purpose:
 // the AC#3 test asserts its negative with a strings.Contains over the whole

@@ -1,16 +1,20 @@
-# Interactive event payloads (#607, #638, #1074)
+# Interactive event payloads (#607, #638, #1074, #2237)
 
 The **v2 additive application events** — the wire representation of
-`internal/turnevent`'s neutral turn-event model (#606). All eight are **binary →
+`internal/turnevent`'s neutral turn-event model (#606). All nine are **binary →
 phone only**, sent **only** to a phone whose `interactive` capability was echoed in
 `hello_ack`; an old phone never sees them and keeps the coarse v1 `message`
 fan-out. Spec source: `docs/protocol-mobile.md` § Interactive events. They map 1:1
 to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` /
-`TypeToolResult` / `TypeTurnEnd` (all #607), `TypeStall` (#638), and `TypeApiRetry`
-/ `TypeCompacting` (#1074). The first five are the wire form of ACP-shaped turn
-events; `stall`, `api_retry`, and `compacting` are the wire form of
-**internal-only** signals (no ACP equivalent) — `stall` added in #638, the other
-two in #1074 as PTY-derived status peers of `stall`.
+`TypeToolResult` / `TypeTurnEnd` (all #607), `TypeStall` (#638), `TypeApiRetry`
+/ `TypeCompacting` (#1074), and `TypeCompactionBoundary` (#2237, its own const
+block — see [Envelope types](protocol-package-constants-codes-go-envelope-types.md)).
+The first five are the wire form of ACP-shaped turn events; `stall`, `api_retry`,
+and `compacting` are the wire form of **internal-only** signals (no ACP
+equivalent) — `stall` added in #638, the other two in #1074 as PTY-derived status
+peers of `stall`. `compaction_boundary` is neither: a claude-authored fact with no
+ACP mapping and no PTY lineage of its own, conversation-scoped like `stall` but
+carrying no daemon-computed field at all — see below.
 
 ```go
 type TurnStatePayload struct {
@@ -76,6 +80,17 @@ type ApiRetryPayload struct {
 type CompactingPayload struct {
     ConversationID string `json:"conversation_id"`
     Active         bool   `json:"active"`
+}
+
+// #2237 — the wire form of turnevent.CompactionBoundary. A separate frame from
+// CompactingPayload, not a wider one: claude states trigger/pre_tokens/post_tokens
+// on a line that arrives after Compacting's falling edge has already shipped, so a
+// client applies this frame to the divider it has already drawn.
+type CompactionBoundaryPayload struct {
+    ConversationID string `json:"conversation_id"`
+    Trigger        string `json:"trigger"`     // claude's compact_metadata.trigger, open-set, bounded+dropped not cut
+    PreTokens      *int   `json:"pre_tokens"`  // NO omitempty — absence must reach the wire as null, never 0
+    PostTokens     *int   `json:"post_tokens"` // claude's own shape marks this one optional
 }
 ```
 
@@ -183,6 +198,35 @@ type CompactingPayload struct {
   every observed line so it is not realistically cutable at all. See
   `docs/protocol-mobile.md` § `compacting` § Security model for the full
   argument.
+- **`CompactionBoundaryPayload` (#2237) is a bigger class change than
+  `CompactingPayload`'s, and the payload doc says so explicitly.**
+  `CompactingPayload.Active` is the daemon's own bool, computed from a string
+  comparison the daemon makes; here **every field is claude's, including the
+  fact of the boundary itself** — the frame is produced even when no
+  `compacting` edge preceded it, so it can be the *only* evidence a compaction
+  happened. Render it as claude's assertion, attributed to claude, never as the
+  daemon's own finding — nothing in the daemon acts on any field of it. `Trigger`
+  takes `TurnEndPayload.Outcome`'s open-set-token rule (dropped past its bound,
+  not cut) rather than `CompactingPayload.ErrorText`'s free-prose rule, since a
+  client switches on it rather than displaying it.
+- **`PreTokens`/`PostTokens` are `*int` with no `omitempty`, `SessionTransitionPayload.WorkspaceCwd`'s
+  shape rather than the usual pointer-plus-omitempty pattern**, because a count
+  claude omitted and a count of zero are different facts a client must not
+  collapse — omitting the key would read as "absent" only by convention a client
+  could get wrong; a literal `null` cannot be misread. **A presence-preserving
+  field needs two test rows, not one, and the weaker row passes either way**: a
+  plain `int` satisfies "explicit zero crosses as zero" and quietly fails "absent
+  crosses as absent" — both rows green is the only state in which the distinction
+  has actually survived, and the same pair matters again at the wire, where the
+  real claim is that a nil pointer *encodes* back to a literal `null`, which only
+  a byte-exact round-trip catches.
+- **The allowlist decode (`streamsup`'s three-field `compactMetadata` target)
+  makes a "no uuid crosses" leak test structurally true, which is worth stating
+  rather than treating as a hard-won guarantee**: `encoding/json` discards every
+  undeclared key, so the event cannot hold a uuid regardless of what claude adds
+  to the line later. A sweep asserting no uuid appears in the marshalled event is
+  a tripwire against a future field, not a proof about today's code — the actual
+  guarantee is the three-field decode target itself.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to
   every v1 slice. The intersection-of-capabilities trust decision, the
   internal-event → envelope mapping, and the capability-gated push all live in the

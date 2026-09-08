@@ -1,7 +1,9 @@
 package streamsup
 
 import (
+	"encoding/json"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,9 +30,39 @@ const (
 	compactingEndLine   = `{"type":"system","subtype":"status","status":null,"compact_result":"success"}`
 	compactingFailLine  = `{"type":"system","subtype":"status","status":null,` +
 		`"compact_result":"failed","compact_error":"context window still over budget"}`
-	compactBoundaryLine = `{"type":"system","subtype":"compact_boundary",` +
-		`"compact_metadata":{"trigger":"manual","pre_tokens":120000,"post_tokens":18000}}`
+	// TRANSCRIBED FROM THE COMMITTED CAPTURE (#2237), not hand-authored like its
+	// neighbours above and not retyped from the ticket body. Frame 16 of
+	// internal/e2e/realclaude/testdata/compaction_v2.1.259.json, whole and in claude's
+	// own key order, with the redaction placeholder the capture carries left in place.
+	//
+	// It replaces a literal that carried INVENTED counts (120000/18000) written when
+	// no capture existed. That the numbers were plausible is exactly what made them
+	// worth replacing: a row asserting on them was asserting on this file's author.
+	//
+	// It carries every key the observed line carries, INCLUDING the four #2237 does
+	// not publish and the three uuids it must not leak. That is deliberate and is
+	// what makes the allowlist rows below non-vacuous — a decode target that grew a
+	// field would show up here rather than in review.
+	compactBoundaryLine = `{"type":"system","subtype":"compact_boundary","session_id":"$SESSION_ID",` +
+		`"uuid":"7d31f0bb-482d-45c0-bf8a-2ef2cd2ccfc0","compact_metadata":{"trigger":"manual",` +
+		`"pre_tokens":23600,"post_tokens":2612,"cumulative_dropped_tokens":20988,"duration_ms":15596,` +
+		`"preserved_segment":{"head_uuid":"ae93ee09-99cd-472e-a34b-10278c8aa85a",` +
+		`"anchor_uuid":"e9d8ca32-d112-4cfd-876b-656936a4ee31",` +
+		`"tail_uuid":"134c965c-edc1-45bf-8cc7-e2aa0198c829"},` +
+		`"preserved_messages":{"anchor_uuid":"e9d8ca32-d112-4cfd-876b-656936a4ee31",` +
+		`"uuids":["ae93ee09-99cd-472e-a34b-10278c8aa85a","134c965c-edc1-45bf-8cc7-e2aa0198c829"],` +
+		`"all_uuids":["ae93ee09-99cd-472e-a34b-10278c8aa85a","134c965c-edc1-45bf-8cc7-e2aa0198c829"]}},` +
+		`"logical_parent_uuid":"134c965c-edc1-45bf-8cc7-e2aa0198c829"}`
 	compactingResultLine = `{"type":"result","subtype":"success"}`
+)
+
+// The observed line's three published values, as constants, so a row cannot assert
+// on a number this file typed twice and get them to agree with each other rather
+// than with the capture.
+const (
+	compactBoundaryTrigger   = "manual"
+	compactBoundaryPreTokens = 23600
+	compactBoundaryPostToken = 2612
 )
 
 // compactingTrace renders one event as the single token this file's rows assert
@@ -46,6 +78,13 @@ func compactingTrace(ev turnevent.Event) string {
 			return "compacting:true"
 		}
 		return "compacting:false"
+	case turnevent.CompactionBoundary:
+		// #2237. Named rather than collapsed into "other", because the rows below are
+		// about ORDER — where this frame falls relative to the edge pair and the turn
+		// boundary — and a token reading "other" would let it move without a row noticing.
+		// The VALUES are not projected here: those are
+		// TestParser_CompactBoundaryPublishesTriggerAndCounts's, over the events themselves.
+		return "compact_boundary"
 	case turnevent.TurnEnd:
 		return "turn_end"
 	case turnevent.Unrecognized:
@@ -129,12 +168,14 @@ func TestParser_CompactingEdges(t *testing.T) {
 				"an unconditional emit would put a compacting:false on every turn that ever ends",
 		},
 		{
-			name:  "compact_boundary is not an edge",
+			name:  "compact_boundary is a frame of its own and not an edge",
 			lines: []string{compactingStartLine, compactBoundaryLine, compactingEndLine},
-			want:  []string{"compacting:true", "compacting:false"},
-			why: "the metadata line is #2228's, and it carries nothing this ticket publishes. It " +
-				"stays dropped — silently, because `system` is on ignoredLineTypes, which is why " +
-				"leaving it unmapped costs no unrecognized_message",
+			want:  []string{"compacting:true", "compact_boundary", "compacting:false"},
+			why: "#2237's AC 3, and the row is unchanged in what it PROTECTS. The boundary line now " +
+				"produces a frame, but it is not an edge: it neither opens nor closes the pair, so " +
+				"the falling edge that follows still fires. That is what proves emitCompactionBoundary " +
+				"left the compacting flag alone — a mapping that set or cleared it would swallow the " +
+				"third token here",
 		},
 		{
 			name: "an undecodable status line leaves the edge intact",
@@ -396,9 +437,11 @@ func TestParser_CompactingRisingEdgeCarriesNeitherField(t *testing.T) {
 // The two `user` lines a real compact turn puts on the wire AFTER the falling
 // edge, transcribed from the capture record #2229's probe wrote during the
 // 2026-09-08 real-claude lap against claude 2.1.259 (recovered from that run's
-// artifact directory; the fixture the probe wrote in-repo went out with the
-// detached worktree, which is the whole of why compactionPinnedShapes is still
-// empty). Both carry `message.content` as a JSON STRING rather than the block
+// artifact directory, because the fixture the probe wrote in-repo went out with
+// the detached worktree; #2236 landed those recovered bytes and filled
+// compactionPinnedShapes from them, so the capture is committed now and these
+// literals are no longer the only record of the shape). Both carry
+// `message.content` as a JSON STRING rather than the block
 // array streamMessage declares, which is the property that matters here — it is
 // what makes streamLine's decode fail and so what kept isSynthetic, the flag the
 // parser has suppressed harness prose on since #2087, from ever being consulted.
@@ -431,6 +474,201 @@ const (
 	compactUnflaggedUserLine = `{"type":"user","message":{"role":"user","content":"plain prose"},` +
 		`"session_id":"s","uuid":"f0f0f0f0-0000-0000-0000-00000000f0f0"}`
 )
+
+// compactBoundaries runs a sequence and returns only the CompactionBoundary
+// events, in order — compactingEdges' sibling for #2237's frame.
+func compactBoundaries(t *testing.T, lines ...string) []turnevent.CompactionBoundary {
+	t.Helper()
+	var got []turnevent.CompactionBoundary
+	for _, ev := range compactingEvents(t, lines...) {
+		if b, ok := ev.(turnevent.CompactionBoundary); ok {
+			got = append(got, b)
+		}
+	}
+	return got
+}
+
+// tokenCount renders one count pointer for a failure message, keeping nil and zero
+// visibly apart. Every assertion below turns on that distinction, so a message that
+// printed both as "0" would describe the failure it is reporting incorrectly.
+func tokenCount(p *int) string {
+	if p == nil {
+		return "absent"
+	}
+	return strconv.Itoa(*p)
+}
+
+// TestParser_CompactBoundaryPublishesTriggerAndCounts is #2237's AC 1, AC 3 and
+// AC 4: which boundary lines produce a frame, and what each frame carries.
+//
+// THE ABSENT-VERSUS-ZERO PAIR IS THE TICKET. Rows 2 and 3 feed the same line shape
+// with post_tokens omitted and with post_tokens explicitly 0, and they are two rows
+// rather than one precisely so neither can pass while the other fails: a plain int
+// field satisfies row 3 and quietly fails row 2, which is the "24k → 0 tokens"
+// rendering AC 1 exists to forbid.
+//
+// The rows assert on constants transcribed from the committed capture rather than on
+// numbers retyped here, so a literal edited to match a mapping would have to edit the
+// capture's own values to stay green.
+func TestParser_CompactBoundaryPublishesTriggerAndCounts(t *testing.T) {
+	t.Parallel()
+
+	pre, post := compactBoundaryPreTokens, compactBoundaryPostToken
+	zero := 0
+	longTrigger := strings.Repeat("t", maxCompactTrigger+1)
+
+	tests := []struct {
+		name        string
+		lines       []string
+		wantFrames  int
+		wantTrigger string
+		wantPre     *int
+		wantPost    *int
+		why         string
+	}{
+		{
+			name:       "the observed line publishes the trigger and both counts",
+			lines:      []string{compactingStartLine, compactBoundaryLine, compactingEndLine},
+			wantFrames: 1, wantTrigger: compactBoundaryTrigger, wantPre: &pre, wantPost: &post,
+			why: "AC 1, over claude's own bytes. Before this the trigger and the counts reached " +
+				"nothing at all: the line was the one measured-and-dropped subtype left standing",
+		},
+		{
+			name: "an absent post_tokens crosses as absent, not as zero",
+			lines: []string{`{"type":"system","subtype":"compact_boundary",` +
+				`"compact_metadata":{"trigger":"auto","pre_tokens":23600}}`},
+			wantFrames: 1, wantTrigger: "auto", wantPre: &pre, wantPost: nil,
+			why: "AC 1's whole point. post_tokens is optional in claude's own shape, and the " +
+				"committed capture happens to carry it — so absence is a hermetic row's job. A " +
+				"client rendering \"24k → 0 tokens\" here is the failure the criterion names",
+		},
+		{
+			name: "an explicit zero post_tokens crosses as zero, not as absent",
+			lines: []string{`{"type":"system","subtype":"compact_boundary",` +
+				`"compact_metadata":{"trigger":"auto","pre_tokens":23600,"post_tokens":0}}`},
+			wantFrames: 1, wantTrigger: "auto", wantPre: &pre, wantPost: &zero,
+			why: "the other half of the pair, and the row a plain int field passes. Both rows " +
+				"green is the only state in which present-versus-absent has actually survived",
+		},
+		{
+			name:       "a boundary line following no compacting edge is still published",
+			lines:      []string{compactBoundaryLine},
+			wantFrames: 1, wantTrigger: compactBoundaryTrigger, wantPre: &pre, wantPost: &post,
+			why: "AC 4. Whether an AUTO compaction announces itself with the same status lines is " +
+				"unmeasured — the capture drove a manual /compact — so the arm reads no parser " +
+				"state at all and a boundary with nothing before it maps identically",
+		},
+		{
+			name:       "a line carrying no compact_metadata produces no frame",
+			lines:      []string{`{"type":"system","subtype":"compact_boundary","session_id":"s"}`},
+			wantFrames: 0,
+			why: "AC 3. A frame carrying no trigger and no count is a claim with no content; the " +
+				"metadata pointer is the presence discriminator, and the line is still CONSUMED",
+		},
+		{
+			name:       "an undecodable boundary line produces no frame",
+			lines:      []string{`{"type":"system","subtype":"compact_boundary","compact_metadata":[1,2]}`},
+			wantFrames: 0,
+			why: "AC 3, per emitCompactingStatus's undecodable arm: a line this parser cannot read " +
+				"is not evidence of anything, and inventing the observation would be worse than " +
+				"missing it",
+		},
+		{
+			name: "a count claude sent out of int range costs the whole frame",
+			lines: []string{`{"type":"system","subtype":"compact_boundary",` +
+				`"compact_metadata":{"trigger":"manual","pre_tokens":1e400,"post_tokens":3}}`},
+			wantFrames: 0,
+			why: "the fail-closed direction, pinned. One absurd field fails the line's whole decode " +
+				"rather than half of it, so the frame is lost instead of arriving half-true. Losing " +
+				"a frame is recoverable; a frame asserting numbers claude did not state is not",
+		},
+		{
+			name: "an oversized trigger is dropped and the counts still cross",
+			lines: []string{`{"type":"system","subtype":"compact_boundary","compact_metadata":` +
+				`{"trigger":"` + longTrigger + `","pre_tokens":23600,"post_tokens":2612}}`},
+			wantFrames: 1, wantTrigger: "", wantPre: &pre, wantPost: &post,
+			why: "the bound DROPS rather than cuts, unlike Compacting.ErrorText beside it: this is " +
+				"a token a client matches, where a cut token would match no known value while " +
+				"looking like one. The counts are unaffected — the bound is per field, not per frame",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := compactBoundaries(t, tc.lines...)
+			if len(got) != tc.wantFrames {
+				t.Fatalf("frames = %d, want %d\nwhy: %s", len(got), tc.wantFrames, tc.why)
+			}
+			if tc.wantFrames == 0 {
+				return
+			}
+			b := got[0]
+			if b.Trigger != tc.wantTrigger {
+				t.Errorf("Trigger = %q, want %q\nwhy: %s", b.Trigger, tc.wantTrigger, tc.why)
+			}
+			if !sameCount(b.PreTokens, tc.wantPre) {
+				t.Errorf("PreTokens = %s, want %s\nwhy: %s",
+					tokenCount(b.PreTokens), tokenCount(tc.wantPre), tc.why)
+			}
+			if !sameCount(b.PostTokens, tc.wantPost) {
+				t.Errorf("PostTokens = %s, want %s\nwhy: %s",
+					tokenCount(b.PostTokens), tokenCount(tc.wantPost), tc.why)
+			}
+		})
+	}
+}
+
+// sameCount compares two count pointers by PRESENCE first and value second, which
+// is the comparison the whole ticket turns on. Written out rather than reached with
+// reflect.DeepEqual so the nil-versus-zero case is visibly the first branch.
+func sameCount(got, want *int) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return *got == *want
+}
+
+// TestParser_CompactBoundaryCarriesNothingElseFromTheMetadata is #2237's AC 2 at
+// the producer: the allowlist, asserted over claude's own bytes.
+//
+// It is a tripwire rather than a proof, and saying so is the honest framing. The
+// real guarantee is STRUCTURAL — turnevent.CompactionBoundary has three fields and
+// systemCompactBoundaryLine declares three, so encoding/json discards every other
+// key including ones claude has not shipped yet. What this test catches is a FUTURE
+// field being added to either without the exclusion decision being made again, and
+// the identifiers it would leak are the ones that matter most: three uuids naming
+// entries in the operator's own transcript, unredacted in the committed capture.
+func TestParser_CompactBoundaryCarriesNothingElseFromTheMetadata(t *testing.T) {
+	t.Parallel()
+
+	got := compactBoundaries(t, compactBoundaryLine)
+	if len(got) != 1 {
+		t.Fatalf("frames = %d, want 1", len(got))
+	}
+	rendered, err := json.Marshal(got[0])
+	if err != nil {
+		t.Fatalf("marshalling the event: %v", err)
+	}
+	// Every identifier the observed line carries and this frame must not. Taken from
+	// the same literal the parser was fed, so a capture re-taken at a new claude
+	// release moves both ends together.
+	for _, id := range []string{
+		"$SESSION_ID",
+		"7d31f0bb-482d-45c0-bf8a-2ef2cd2ccfc0", // the line's own uuid
+		"ae93ee09-99cd-472e-a34b-10278c8aa85a", // preserved_segment.head_uuid
+		"e9d8ca32-d112-4cfd-876b-656936a4ee31", // preserved_segment.anchor_uuid
+		"134c965c-edc1-45bf-8cc7-e2aa0198c829", // tail_uuid and logical_parent_uuid
+		"20988",                                // cumulative_dropped_tokens
+		"15596",                                // duration_ms
+	} {
+		if strings.Contains(string(rendered), id) {
+			t.Errorf("the frame carries %q, which is on the line but not on the allowlist. The "+
+				"uuids name entries in the operator's own transcript; the two counts are simply "+
+				"unasked-for, and an unused field is a claim nobody checks", id)
+		}
+	}
+}
 
 // compactingEvents is compactingRun's sibling for the rows that assert on an
 // event's FIELDS rather than on its kind. The trace projection collapses every

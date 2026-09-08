@@ -281,6 +281,36 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// banner or screen text is ever held or forwarded.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.CompactionBoundary:
+		// claude's compaction boundary (#2237), taking the same shape as the status
+		// peers above: NO turn-lifecycle mutation (no startTurnIfNeeded / transitionTo /
+		// endTurn; inTurn, turnID, currentState untouched).
+		//
+		// Kept a separate case from the ApiRetry/Compacting pair despite the identical
+		// body, following this switch's own rule: it merges arms that share a REASON, and
+		// this one's reason is its own. Those are sub-states of a live turn with two
+		// edges; this is a MARK IN THE CONVERSATION'S HISTORY with none — it says why
+		// claude no longer remembers something from before that point. The producer emits
+		// it for a boundary line that followed no compacting edge at all (deliberately, so
+		// an auto-compaction announcing itself differently is still published), so unlike
+		// its neighbours this frame may legitimately arrive with no turn open whatever.
+		// Opening one here would wedge the conversation exactly as opening one on an
+		// unrecognized message would: no turn end follows a mark orthogonal to the turn.
+		// turnMarkFor's default already answers turnMarkNone, and
+		// TestTurnMarkFor_TotalOverEveryVariant pins it.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position ahead of
+		// the mark. Like turn_state this flows through emit() and is NOT a droppable delta
+		// (the droppable set is assistant_delta only, #610), so it holds a queue slot;
+		// that is bounded by the producer rather than here — one frame per compaction
+		// boundary line, no accumulator and no dedup, and the frame is four small fields.
+		//
+		// No capability gate in the arm, and no second bound on the trigger. The
+		// interactive grant is filtered once, in emit(), for every frame type; the trigger
+		// was bounded at construction by streamsup's maxCompactTrigger. Writing either
+		// here is how a single gate stops being single.
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.Unrecognized:
 		// A parser-gap diagnostic, not a claude sub-state, but it takes the same
 		// shape as the status peers above: NO turn-lifecycle mutation (no
@@ -730,6 +760,17 @@ func eventKind(ev turnevent.Event) string {
 		return "api_retry"
 	case turnevent.Compacting:
 		return "compacting"
+	case turnevent.CompactionBoundary:
+		// The variant NAME only, for the arms below's reason, and the temptation here is
+		// Trigger — claude's own word, and precisely the field a log line explaining a
+		// compaction would reach for. It is not returned, and neither count is. The
+		// variant is claimed by a Handle case on this lane, so this file's
+		// `interactive_turn.unknown` Debug is not a live call site for it; the reachable
+		// one is the no-cursor drop, which returns before the type switch, plus the OTHER
+		// eventKind sites (acp_turn_stream.go, stream_turn_busy.go, stream_turn_drain.go),
+		// all of which would otherwise read kind=unknown for a variant the daemon does
+		// recognize.
+		return "compaction_boundary"
 	case turnevent.Unrecognized:
 		// The variant NAME only. The event's Kind field holds claude's offending
 		// type string, which is not returned here: this feeds log fields, and the

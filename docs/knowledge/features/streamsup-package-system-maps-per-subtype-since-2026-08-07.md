@@ -38,6 +38,24 @@ not a gap: it carries nothing this edge pair needs, its metadata is #2228's payl
 would emit a duplicate edge with nothing to add — it inherits `status`'s former title as the one
 measured-and-dropped `system` subtype left standing.
 
+**CORRECTED 2026-09-08 (#2237): `compact_boundary` now has its own arm — the "deliberate non-mapping"
+above described #2227's state, not the package's.** `emitSystemSubtype`'s seventh case,
+`emitCompactionBoundary`, decodes `compact_metadata` through a target declaring exactly three fields
+(`trigger`, `pre_tokens`, `post_tokens`) — the allowlist is structural, so `encoding/json` drops every
+other key, including the three operator-transcript uuids the line also carries, without a scrubbing
+step to maintain. A nil `compact_metadata` (the line decoded but said nothing to publish) and an
+undecodable line both consume the line and emit nothing, the latter on `emitCompactingStatus`'s own
+undecodable precedent (a Debug naming the subtype keyword only). `trigger` is bounded at
+`maxCompactTrigger` (256 bytes) and **dropped, not cut**, on `maxTurnEndStopField`'s reasoning: it is a
+token a client matches against a known set, so a cut token would match nothing while still looking like
+one. The two counts cross unclamped, as claude's own numbers. **The arm reads and writes no `Parser`
+field at all — not even `p.compacting`** — which is what lets it fire identically whether or not a
+compacting edge preceded it (an auto-compaction that announces itself differently is still published)
+and is why the line still costs nothing when it falls between a rising and falling edge that never see
+it. See [turnevent-package.md](turnevent-package.md) for why the counts need a frame of their own
+rather than riding the falling edge's payload, and
+[the interactive payload doc](protocol-package-interactive-event-payloads.md) for the wire shape.
+
 The falling edge is wide by design: any `status` other than `"compacting"` closes it, `compact_result`
 included, because a missed close (a stuck "compacting" banner) is a worse operator-facing failure than
 a spurious one (a banner that closes a beat early). See
