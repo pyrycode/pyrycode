@@ -239,3 +239,36 @@ meantime; the reader's assertions arm on the commit that lands the bytes.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+### 2026-09-08 — measured size against the estimate
+
+The ticket estimated ~700-800 lines of total written work. The actual is **1588**: 241 (this plan,
+including the mandatory `## Security review` section the `security-sensitive` label adds), 1092
+(`internal/e2e/realclaude/compaction_capture_test.go`) and 255
+(`internal/streamsup/compaction_capture_test.go`). That trips the one-ticket boundary's 800-line
+row by roughly 2×. Recorded here rather than silently absorbed, with `needs-human:sizing` on the
+ticket, because the ticket is at the split-depth limit and a split is forbidden.
+
+**A split does not exist here even setting the depth limit aside**, which is the floor rule and not
+a preference. The probe alone cannot be verified — its output is a file no committed test reads —
+and the reader alone has nothing to read. Cutting between them produces two children each of whose
+only consumer is the other, which is precisely the one-consumer slice the floor rule says to merge
+back even when the merged ticket exceeds a ceiling row.
+
+**Where the estimate went wrong is measurable and worth carrying forward.** It sized against
+#2089's `tool_progress_capture_test.go` "at 529 lines on first landing" — but that first landing is
+the one whose live run produced a zero-frame capture and needed three repair legs to reach a
+working 1174 lines. Sizing a capture probe against a sibling's *broken* first landing rather than
+its working final understates it by the cost of the legs. This file lands at 1092 in one pass with
+the staging measurement, the outcome verdict and the offline guards already in it — the things
+#2089 added in legs two through four.
+
+### 2026-09-08 — `ccapAwaitCompactTurn` takes its durations as parameters
+
+Design said the compact turn's wait ends on the earliest of a `result`, quiescence or the budget.
+It does, but `ccapQuiet` is 30 s, so a test of the quiescence arm against the constant would cost
+30 s of wall clock per row. The two durations are parameters and the live call site passes the
+constants, which lets `TestCcapAwaitCompactTurnDoesNotDependOnAResult` prove all three exits in
+milliseconds against a real `dropcapRecorder`.
