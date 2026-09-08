@@ -41,16 +41,27 @@ operator commits the bytes the 2026-09-08 run already produced, or the probe is 
 worktree whose result actually gets pushed — the fixture's-absence gate (`os.Stat(ccapFixturePath)`)
 means a re-run costs nothing but the live-gate lap.
 
-**#2227 shipped the mapping this fixture was for without waiting on it, and the fixture is still
+**The bytes landed via #2236, riding an unrelated ticket rather than a repair leg.** #2236 (put a
+failed compaction's result and error on the compacting frame) carried an opportunistic, explicitly
+non-acceptance-criterion clause to commit one of the operator machine's surviving records if its own
+security scan came back clean. It did: `testdata/compaction_v2.1.259.json` is committed,
+`compactionPinnedShapes` is filled from the record's own `compaction_shapes`, and
+`TestRealClaudeCompactionCaptureShapesArePinned` / `TestCompactionFixtureReplayReachesBothEdges` both
+pass rather than skip. The lesson generalizes past this one fixture: a capture lost to a throwaway
+verification worktree is not gone for good if the operator-machine record survives — the
+opportunistic-commit clause pattern (bound the work, gate on a security scan, drop and say so in a
+ticket comment if the scan can't clear) is worth reusing on any future ticket that finds a stray
+capture record sitting on an ancestor ticket's dropped fixture.
+
+**#2227 shipped the mapping this fixture was for without waiting on it, while the fixture was still
 absent.** Rather than block on the lost bytes, #2227 (1) hand-authored the hermetic table from the
 observed shapes recorded in prose above, (2) wrote the fixture-armed replay anyway, gated on
-`compactionReaderGate`'s existing absent-fixture skip so it costs nothing today and reddens the moment
-the bytes land, and (3) proved the two acceptance criteria that actually need a live turn —
+`compactionReaderGate`'s existing absent-fixture skip so it cost nothing at the time and would redden
+the moment the bytes landed, and (3) proved the two acceptance criteria that actually need a live turn —
 the edge pair firing and zero unrecognized frames — with a new standalone live test
 (`internal/e2e/realclaude/compacting_edges_test.go`) that needs no fixture at all rather than replaying
-one. That pattern — replay test armed-but-empty, live assertion carrying the real proof — is the
-template for #2228 too, which still cannot build its fixture-replay half until an operator commits
-these bytes or a re-run is pushed from a persistent checkout.
+one. That pattern — replay test armed-but-empty, live assertion carrying the real proof — is what let
+the mapping ship without the fixture blocking it; #2236 later filled the pin, as above.
 
 Contrast with [`tool_progress_capture_test.go`](e2e-realclaude-tool-progress-capture-test-go.md)'s
 fixture, which is committed: that one landed via a **builder's repair-leg commit**

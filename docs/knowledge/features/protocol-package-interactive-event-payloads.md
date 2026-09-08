@@ -154,6 +154,35 @@ type CompactingPayload struct {
   never a string, so raw banner/screen text is structurally unable to reach the
   wire. Same no-`omitempty`, no-`turn_id`, bridge-supplies-`ConversationID`
   discipline as `StallPayload`.
+- **`CompactingPayload` is no longer PTY-derived, and as of #2236 it is no
+  longer daemon-authored either.** The "banner-only (tui-driver streams no
+  compaction progress)" doc comment was already false the moment #2227 gave the
+  frame its first real producer — #1348 had deleted the driver it rested on —
+  and #2236 replaced it rather than patch it. `Result`/`ErrorText` are claude's
+  own `compact_result`/`compact_error` off the closing `system/status` line,
+  which makes this the first frame in the section carrying claude-authored text
+  where every prior field was the daemon's own (an id it assigned, a bool it
+  computed). `Result` follows `TurnEndPayload.Outcome`'s open-set rule — an
+  unrecognised token is unknown, not an error. `ErrorText` is free-form prose,
+  not a token, and that shape difference is why it does **not** inherit
+  `ErrorCategory`'s SECURITY paragraph verbatim: prose can carry newlines, ANSI
+  escapes, markdown, or text impersonating daemon chrome inside its 256-byte
+  cap, so a renderer must treat it as inert text — never fed to an HTML sink, an
+  attribute, or a URL (`UnrecognizedMessagePayload.Raw`'s rule) — and always
+  attribute it to claude, never show it as the daemon's own finding. Both
+  fields read empty on a rising edge by construction (the arm that emits it has
+  read only `Status`), and empty on a falling edge is one reading for three
+  causes a client cannot and need not distinguish: absent, empty, or the
+  daemon's own turn-boundary reset closing the edge with no claude line to read
+  them off. Bounded at 256 bytes each by `internal/streamsup`'s
+  `maxCompactField`, which **cuts** rather than drops — unlike
+  `maxTurnEndStopField`'s drop-not-truncate rule for `Outcome`/`ErrorCategory`.
+  The two packages disagree on purpose: a cut token can match no known value
+  while still looking like one (bad for `Outcome`), but a cut sentence still
+  reads as what it is (fine for prose), and `compact_result` is a short token in
+  every observed line so it is not realistically cutable at all. See
+  `docs/protocol-mobile.md` § `compacting` § Security model for the full
+  argument.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to
   every v1 slice. The intersection-of-capabilities trust decision, the
   internal-event → envelope mapping, and the capability-gated push all live in the

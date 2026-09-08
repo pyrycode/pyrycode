@@ -50,15 +50,24 @@ const compactionCaptureVersion = "2.1.259"
 // so whether a compaction line is a new arm in that switch or a new top-level type
 // decides the whole shape of #2227's and #2228's mapping.
 //
-// IT IS EMPTY ON PURPOSE UNTIL THE LIVE GATE HAS RUN, and it is what sequences this
-// family. The fixture cannot exist before `make e2e-realclaude` produces it, which
-// happens after verification, so a reader that asserted against bytes today would
-// redden `make check` for every unrelated ticket. compactionReaderGate turns that
-// into a state machine with exactly one legal skip: filling this slice is the
-// commit that lands the fixture, and a fixture landing WITHOUT it fatals rather
-// than passing quietly. AC 4's end state is reached by construction, not by
+// IT WAS EMPTY ON PURPOSE UNTIL THE LIVE GATE HAD RUN, and it is what sequenced this
+// family. The fixture could not exist before `make e2e-realclaude` produced it, which
+// happens after verification, so a reader that asserted against bytes any earlier
+// would have reddened `make check` for every unrelated ticket. compactionReaderGate
+// turns that into a state machine with exactly one legal skip: filling this slice is
+// the commit that lands the fixture, and a fixture landing WITHOUT it fatals rather
+// than passing quietly. #2229's AC 4 end state is reached by construction, not by
 // remembering.
-var compactionPinnedShapes = []string{}
+//
+// FILLED 2026-09-08 (#2236), and NOT by a live lap of its own. #2229's probe fired
+// against claude 2.1.259 and reported outcome=fired, but the run was the dispatcher's
+// gate-only real-claude lap, which verifies from a detached worktree and never runs
+// `git add` — so the fixture it wrote in-repo went out with the worktree. The record
+// survived in that run's artifact directory and is what landed here; the two values
+// below are its own compaction_shapes, and the reader still re-derives them from each
+// line's OWN bytes rather than from the record's labels, so committing the record did
+// not turn this measurement into an agreement with itself.
+var compactionPinnedShapes = []string{"system/compact_boundary", "system/status"}
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.
