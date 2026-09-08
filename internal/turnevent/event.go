@@ -49,12 +49,29 @@ type ThoughtChunk struct {
 // RawInput is opaque pass-through tool input the model never parses or mutates;
 // it is carried as json.RawMessage (undecoded bytes) precisely because that
 // does not force a parse — consumers decode it on their own terms.
+//
+// ParentToolCallID names the Agent/Task call that spawned the subagent making
+// this call, or is EMPTY on the main conversation (#2191). A consumer joins a
+// child to its parent on the parent's own ToolCallID, which is byte-identical
+// across the two — so three parallel subagents read as three groups rather than
+// thirty interleaved rows. Nesting is carried by carrying nothing: the value is
+// read off claude's line verbatim with no branch on depth, so a call made by a
+// subagent that a subagent spawned names the INNER Agent call and a consumer
+// rebuilds the whole tree by following ids.
+//
+// EMPTY HAS ONE MEANING, "main thread", and that is what makes it safe to drop
+// an unusable value into. streamsup drops rather than cuts a value it cannot
+// read or that exceeds its cap, because this is a JOIN KEY and a cut id matches
+// no ToolCallID while still looking like one — see the constant named at
+// streamsup's parentToolUseID. So a dropped value degrades to top-level
+// rendering, which is honest, rather than to a wrong parent, which is not.
 type ToolStart struct {
-	ToolCallID string
-	Title      string
-	Kind       ToolKind
-	RawInput   json.RawMessage
-	Locations  []Location
+	ToolCallID       string
+	ParentToolCallID string
+	Title            string
+	Kind             ToolKind
+	RawInput         json.RawMessage
+	Locations        []Location
 }
 
 // ToolUpdate carries changed fields of an existing tool call. Content may be
@@ -76,11 +93,17 @@ type ToolStart struct {
 // bounded by int64's range at construction. Treat it as display text — render it
 // verbatim, never parse it; the unit words and both glyphs live here precisely
 // so a client need not switch on a tool name to know what the number counts.
+// ParentToolCallID is ToolStart's field with ToolStart's meaning, carried here so
+// the result row can be grouped with the call row it completes. It is read off the
+// `user` line this update was mapped from, not copied from the ToolStart — the
+// parser holds no cross-line state for it — so the two agreeing is a fact about
+// claude's wire rather than something this package arranges.
 type ToolUpdate struct {
-	ToolCallID   string
-	Status       ToolStatus
-	Content      ToolContent
-	ResultDetail string
+	ToolCallID       string
+	ParentToolCallID string
+	Status           ToolStatus
+	Content          ToolContent
+	ResultDetail     string
 }
 
 // TurnEnd marks the end of a claude turn, carrying the reason, — since #2101 —

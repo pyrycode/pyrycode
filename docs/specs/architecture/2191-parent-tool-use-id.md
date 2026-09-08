@@ -352,3 +352,65 @@ remembering.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+### 2026-09-09 — the line estimate was wrong by 2.4x, and the probe is why
+
+The plan committed to the ticket's own estimate of ~800 lines of total written work.
+The implementation landed **1923 insertions across 12 files** (excluding this spec, which
+is its own commit). Recorded here rather than left for the verifier to find, because the
+gap is a sizing lesson rather than scope creep: **no boundary of the one-ticket table was
+crossed except the line count**, and the design is the one this plan describes, unchanged.
+
+Where it went, and why none of it is discretionary:
+
+- `internal/e2e/realclaude/parent_tool_use_capture_test.go` — **911 lines**, 47% of the
+  diff. This is the whole miss. The estimate's nearest analogue (#2224, 808 lines across
+  10 files) **synthesized its fixture and shipped no probe at all**, so the estimate
+  priced a live capture probe at approximately zero; the ticket named it "the offsetting
+  cost #2224 did not pay" without costing it. This package's probes are
+  `compaction_capture_test.go` at 1100 lines and `tool_progress_capture_test.go` at 1174.
+  The new one is **smaller than both**, at the same comment density (212 comment lines
+  against their 264 and 354), and reuses the shared rig rather than rebuilding it. A
+  capture probe in this package is a 900–1200 line artefact; there is no version of this
+  ticket in which it is a 200-line one.
+- The four offline guards inside it — `ptucIsAgentTool`'s both-spellings table,
+  `ptucReadLine`'s three-spellings-of-absent table, `fixtureWorthy`'s eight refusal arms,
+  and `ptucAwaitTurn`'s three exits — are what stop a vacuous capture promoting, which is
+  the failure mode that costs a whole downstream ticket. They mirror #2229's own guards.
+- Production Go stayed close to the estimate: 176 lines in `parser.go`, 65 in
+  `interactive.go`, 41 in `event.go`, 35 in `outbound.go` — 317 in all, most of it the
+  doc comments this package requires of a new decode target and a new bound.
+
+**The ticket was not split, and the floor rule is why.** The capture's only consumer is
+the reader in the same ticket, so cutting them apart would produce a child nothing
+outside the family calls — the shape § A1's floor rule says to merge back even when the
+ceiling disagrees. The ceiling protects against a budget miss, which costs a continuation
+leg; the floor protects against a ticket that cannot be verified on its own, which no
+resume fixes. Neither cost was paid here: the run finished inside budget.
+
+**For the next estimate in this family:** a ticket asking for a live capture should price
+the probe at ~900 lines on its own, before any of the mapping work, and pick its analogue
+from a ticket that shipped one (#2229, #2089) rather than from one that synthesized its
+fixture (#2224).
+
+### Open questions, resolved
+
+1. **Does the live turn produce a nested spawn?** Still unknown, and now unknowable until
+   the gate runs — which is why nothing asserts on it. The probe records
+   `nested_spawn_observed` and `distinct_parent_ids` as data; `ptucLimitations` states
+   that nesting is unmeasured in the bytes, and AC 3's proof is the synthesized line in
+   `TestParser_ParentToolUseID_ReadsInnerDepthVerbatim`. Design unchanged.
+2. **Will the dispatcher's gate lap land the fixture?** Unchanged and still expected to
+   need a follow-up commit. The probe writes in-repo, prints the exact `git add` and the
+   exact pin value to paste, and writes its record outside the worktree so recovery is
+   possible if the promotion is discarded with the worktree as #2229's was.
+
+### One design decision the plan did not anticipate
+
+`ptucModel` is **sonnet**, where every sibling probe uses haiku. The turn's whole premise
+is that claude *delegates* rather than doing two trivial reads itself, and a model that
+inlines them produces a green run with no subagent in it — a did-not-fire verdict that
+looks identical to a finding about `parent_tool_use_id`. The extra token cost buys the
+capture's non-vacuity. Named at the constant.

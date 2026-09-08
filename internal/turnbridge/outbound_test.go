@@ -113,6 +113,50 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// #2191. The row above is the main-thread case and pins the field EMPTY,
+			// which is what makes this pair non-vacuous: a mapping that dropped the
+			// value passes that row alone, and one that stamped a constant passes this
+			// row alone. The value crosses verbatim under a renamed key —
+			// ParentToolCallID on the event, parent_tool_use_id on the wire, matching
+			// the tool_use_id beside it — so this row also pins the rename.
+			name: "ToolStart carries the spawning Agent call under the wire's name",
+			ev: turnevent.ToolStart{
+				ToolCallID:       "tool-9",
+				ParentToolCallID: "toolu_01Agent",
+				Title:            "Read",
+				Kind:             turnevent.ToolKindRead,
+				RawInput:         json.RawMessage(`{"file_path":"/tmp/x"}`),
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolUse,
+			wantPayload: protocol.ToolUsePayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-9",
+				ParentToolUseID: "toolu_01Agent",
+				Name:            "Read", InputSummary: `{"file_path":"/tmp/x"}`,
+				Input: map[string]string{"file_path": "/tmp/x"},
+			},
+			wantOK: true,
+		},
+		{
+			// The result half of the same pair, and it must carry the SAME id so a
+			// client can group the two rows it already joins on tool_use_id.
+			name: "ToolUpdate carries the spawning Agent call under the wire's name",
+			ev: turnevent.ToolUpdate{
+				ToolCallID:       "tool-9",
+				ParentToolCallID: "toolu_01Agent",
+				Status:           turnevent.ToolStatusCompleted,
+				Content:          turnevent.TextContent{Text: "ok"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolResult,
+			wantPayload: protocol.ToolResultPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-9",
+				ParentToolUseID: "toolu_01Agent",
+				IsError:         false, ResultSummary: "ok",
+			},
+			wantOK: true,
+		},
+		{
 			// The id report token is the DAEMON's tool_call_id on the event and this
 			// frame's tool_use_id on the wire; every other token already names a key
 			// this frame carries and crosses untouched. Separate slice literals for ev

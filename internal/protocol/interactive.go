@@ -78,13 +78,42 @@ type AssistantDeltaPayload struct {
 // command line. A client may render them as inert text; it must never open one
 // as a path on its own filesystem, execute or re-shell one, or feed one to an
 // HTML sink, an attribute, or a URL.
+// ParentToolUseID (#2191) names the Agent/Task call that spawned the subagent
+// making this call, and is EMPTY on the main conversation. A client joins a child
+// to its parent on the ToolUseID these frames already carry — the two are
+// byte-identical — so three parallel subagents render as three collapsible groups
+// instead of thirty rows interleaved into the main thread. Nesting needs no extra
+// field: the value is claude's own, read verbatim with no branch on depth, so a
+// call made by a subagent that a subagent spawned names the INNER Agent call and
+// following ids rebuilds the whole tree.
+//
+// IT IS A GROUPING HINT, NOT A CAPABILITY, and it takes Input's rule above. It is
+// model-authored text that crossed the subprocess trust boundary; the daemon
+// neither resolved it nor checked that it names a call this client has seen.
+// Render the row under a parent when the id matches one, render it at top level
+// when it does not, and never dereference it as anything else. Nothing in the
+// daemon branches on the value.
+//
+// Empty has exactly ONE meaning, "main thread", which is what makes it safe to
+// drop an unusable value into: the producer (streamsup's parentToolUseID) empties
+// a value it cannot read or that exceeds its cap rather than cutting it, because a
+// cut join key matches no ToolUseID while still looking like one. So an emptied
+// id degrades to top-level rendering — the behaviour before this field existed —
+// rather than to a wrong parent. There is deliberately no report naming which
+// emptiness it is; unlike ToolDeniedPayload's fields, this one has no second
+// meaning for a report to disambiguate.
+//
+// It carries no omitempty, per this file's rule: absence and "" mean the same
+// thing, and always emitting the key keeps the testdata fixture pinning the full
+// shape. A client built before this landed ignores the unknown key.
 type ToolUsePayload struct {
-	ConversationID string            `json:"conversation_id"`
-	TurnID         string            `json:"turn_id"`
-	ToolUseID      string            `json:"tool_use_id"`
-	Name           string            `json:"name"`
-	InputSummary   string            `json:"input_summary"`
-	Input          map[string]string `json:"input"`
+	ConversationID  string            `json:"conversation_id"`
+	TurnID          string            `json:"turn_id"`
+	ToolUseID       string            `json:"tool_use_id"`
+	ParentToolUseID string            `json:"parent_tool_use_id"`
+	Name            string            `json:"name"`
+	InputSummary    string            `json:"input_summary"`
+	Input           map[string]string `json:"input"`
 }
 
 // MarshalJSON normalises a nil Input to an empty map, so a tool call with no
@@ -142,13 +171,25 @@ func (p ToolUsePayload) MarshalJSON() ([]byte, error) {
 // pinning the full shape. A client built before this landed ignores the unknown
 // key; one built after it decodes a frame that lacks the key to "" without
 // error, so the field is optional in the sense that binds.
+// ParentToolUseID (#2191) is ToolUsePayload's field with ToolUsePayload's meaning
+// and ToolUsePayload's grouping-hint-not-a-capability rule, carried here so a
+// result row groups with the call row it completes. Read that docblock; it is the
+// single source of truth for both.
+//
+// The BOUND matters more on this frame than on that one, which is why the producer
+// caps it at all. tool_result is never-droppable control class (§ Error codes,
+// 4413): a frame over the application-envelope cap is LOST, not truncated, so an
+// unbounded claude-authored string here would cost the whole row rather than
+// shorten it. The value is bounded at construction at 256 bytes, which is why the
+// worst case computed for ResultSummary above still holds.
 type ToolResultPayload struct {
-	ConversationID string `json:"conversation_id"`
-	TurnID         string `json:"turn_id"`
-	ToolUseID      string `json:"tool_use_id"`
-	IsError        bool   `json:"is_error"`
-	ResultSummary  string `json:"result_summary"`
-	ResultDetail   string `json:"result_detail"`
+	ConversationID  string `json:"conversation_id"`
+	TurnID          string `json:"turn_id"`
+	ToolUseID       string `json:"tool_use_id"`
+	ParentToolUseID string `json:"parent_tool_use_id"`
+	IsError         bool   `json:"is_error"`
+	ResultSummary   string `json:"result_summary"`
+	ResultDetail    string `json:"result_detail"`
 }
 
 // ToolDeniedPayload is the body of an Envelope whose Type == TypeToolDenied
