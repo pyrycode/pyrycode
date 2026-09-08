@@ -78,3 +78,28 @@ is still not a discriminator, and the falling edge still fires — wide, as abov
 it closes succeeded or failed. See
 [the interactive payload doc](protocol-package-interactive-event-payloads.md) for the wire shape and
 the security posture of putting claude-authored free-form prose on this frame.
+
+**Eighth arm, `permission_denied` (#2232) — and a decode failure the plan never saw coming.**
+`emitSystemSubtype`'s eighth case, `emitPermissionDenied`, maps `system/permission_denied` to
+`turnevent.ToolCallDenied` (`ToolName`, `ToolCallID`, `Message`, and — when claude sends them —
+`DecisionReasonType`/`DecisionReason`). It is unconditional, `emitBackgroundTaskStarted`'s posture
+rather than `emitCompactionBoundary`'s: every decodable line emits exactly one event whatever the
+fields hold, including all-empty, because the subtype itself is the whole payload here — nothing
+else on this surface tells a client the call was denied rather than run-and-failed, so gating on a
+field would re-drop the line silently in exactly the case a claude rename causes.
+
+The switch arm alone maps nothing in production, because none of the seven captured real denials
+ever reach it. `streamLine.Message` is declared `*streamMessage`, and claude spells `message` on
+this line as a plain **string** — so `consumeLine`'s whole-line decode fails before `sl.Type`/
+`sl.Subtype` are ever read, and every real denial surfaced as `Unrecognized` forever instead.
+`consumePermissionDeniedLine` recovers it inside that decode-failure branch, beside
+`dropHarnessProseLine` and disjoint from it by type (a top-level `system`+`permission_denied`
+envelope match versus a `user` line's string-content shape) — both entry points stay necessary,
+since a denial line that *does* decode cleanly (no `message` key present at all) still takes the
+switch arm, and `TestDropcapClassification` carries one row per entry point for exactly that reason.
+**The general trap: a single wrongly-typed field on a shared decode target like `streamLine` fails
+the ENTIRE top-level decode, not just that field**, so a new subtype's switch arm can be correctly
+written and completely unreachable in production if any of claude's actual bytes for that line
+don't match the shared target's field types. Check a subtype's fixture against `streamLine`'s
+declared field types before writing the switch arm, not after finding the RED run that says the
+arm never fired.
