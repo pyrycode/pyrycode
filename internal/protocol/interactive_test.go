@@ -239,6 +239,13 @@ func TestTurnEndPayload_RoundTrip(t *testing.T) {
 	if payload.TerminalReason != "max_turns" {
 		t.Errorf("TerminalReason: got %q, want %q", payload.TerminalReason, "max_turns")
 	}
+	// #2224's category, and the fixture value is deliberately one NOTHING else on
+	// the frame implies: a turn that stopped on --max-turns whose API was ALSO rate
+	// limited. A decoder that read this off the subtype, off terminal_reason or off
+	// is_error would pass a fixture where the four agreed; it cannot pass this one.
+	if payload.ErrorCategory != "rate_limit" {
+		t.Errorf("ErrorCategory: got %q, want %q", payload.ErrorCategory, "rate_limit")
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
 }

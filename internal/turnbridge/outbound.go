@@ -314,6 +314,12 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Outcome:        e.Outcome,
 			IsError:        e.IsError,
 			TerminalReason: e.TerminalReason,
+			// #2224's category maps through on the same terms, and its producer bounded
+			// it at the same construction site with the same constant. That it was read
+			// off an `assistant` line rather than the `result` line changes nothing
+			// here: this arm maps an already-built event and knows nothing about which
+			// line any field came from.
+			ErrorCategory: e.ErrorCategory,
 		}, true
 	case turnevent.Stall:
 		// A stall carries conversation identity only — it is not turn-scoped and

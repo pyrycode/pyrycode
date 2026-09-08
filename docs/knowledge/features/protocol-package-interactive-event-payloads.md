@@ -51,6 +51,8 @@ type TurnEndPayload struct {
     Outcome        string `json:"outcome"`         // claude's result subtype, verbatim, open-set
     IsError        bool   `json:"is_error"`        // claude's own is_error flag; NOT derivable from Outcome
     TerminalReason string `json:"terminal_reason"` // claude's finer-grained cause; open-set
+    // #2224 — claude's API error category, read off an `assistant` line, not `result`.
+    ErrorCategory  string `json:"error_category"`  // why the API call failed; independent of Outcome
 }
 
 // #638 — the wire form of the internal-only turnevent.Stall onset marker.
@@ -116,6 +118,21 @@ type CompactingPayload struct {
   The render boundary owing sanitization (no control-character or
   terminal-escape stripping happens here) is the client's — see
   `docs/protocol-mobile.md` § `turn_end` § Security model.
+- **`ErrorCategory` (#2224) answers a different question from the three fields
+  beside it, and is spelled `error_category` rather than `error` on purpose.**
+  `Outcome`/`IsError`/`TerminalReason` all describe how the turn ended and are
+  read off the `result` line; `ErrorCategory` describes why claude's API call
+  failed and is read off the wrapper level of an `assistant` message — a
+  sibling of `message`, never a content block. A bare `error` key beside
+  `is_error` on the same frame would read as `is_error`'s detail; the daemon
+  already renames on this path (`outcome` is claude's `subtype`, and claude's
+  own `stop_reason` is not forwarded at all under any name). The two axes are
+  independent — a frame can carry `outcome: "success"` and
+  `error_category: "rate_limit"` together — so a client must not derive one
+  from the other. Same bound, same drop-not-truncate rule, same
+  unsanitized-render-boundary-is-the-client's posture as its three siblings,
+  applied by the same producer constant (`maxTurnEndStopField`), which now
+  covers all four fields rather than three.
 - **`Seq` is `int`, not `uint64`.** A per-turn counter that resets each turn (the
   package count-field idiom: `DebugBundleDonePayload.Total`); `uint64` is reserved
   for the session-monotonic `Envelope.ID`.

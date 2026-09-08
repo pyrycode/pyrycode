@@ -134,7 +134,7 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `ThoughtChunk` | `MessageID, Text string` | streaming reasoning ("thinking") text |
 | `ToolStart` | `ToolCallID, Title string`, `Kind ToolKind`, `RawInput json.RawMessage`, `Locations []Location` | a new tool invocation |
 | `ToolUpdate` | `ToolCallID string`, `Status ToolStatus`, `Content ToolContent`, `ResultDetail string` | changed fields of an existing tool call; `Content` may be `nil` (status-only update). `ResultDetail` (#2024, all five sidecar shapes since #2025) is daemon-composed display text derived from claude's stdout sidecar — a read's or shell's line count, an edit's `+10 −3`, a write's `created · 54 lines`, a search's `78 lines`/`5 files` — named generically because it composes across shapes rather than minting a new event field per shape. Its two separator glyphs (U+2212, U+00B7) are the field's first non-ASCII bytes; every byte is still daemon-formatted from claude's counts, never claude's text passed through — see [streamsup-package-content-blocks-are-held-as-json-rawmessage.md](streamsup-package-content-blocks-are-held-as-json-rawmessage.md) |
-| `TurnEnd` | `Reason TurnEndReason`, `ModelWindows []ModelWindow`, `DroppedModelWindows int` (#2101), `Outcome string`, `IsError bool`, `TerminalReason string` (#2223) | end of a claude turn; `Reason` is the daemon's two-value classification, `ModelWindows`/`DroppedModelWindows` are unreachable on the wire, and `Outcome`/`IsError`/`TerminalReason` are claude's own stop shape and DO reach the wire — see below |
+| `TurnEnd` | `Reason TurnEndReason`, `ModelWindows []ModelWindow`, `DroppedModelWindows int` (#2101), `Outcome string`, `IsError bool`, `TerminalReason string` (#2223), `ErrorCategory string` (#2224) | end of a claude turn; `Reason` is the daemon's two-value classification, `ModelWindows`/`DroppedModelWindows` are unreachable on the wire, `Outcome`/`IsError`/`TerminalReason` are claude's own stop shape read off the `result` line, and `ErrorCategory` is claude's API-failure category read off an `assistant` line — all four claude-authored fields DO reach the wire — see below |
 | `ModelWindow` (#2101, element type — not an `Event`, no marker) | `ModelID string`, `WindowTokens int` | one model's context-window reading off the `result` line's `modelUsage` map, sorted by `ModelID` |
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
 | `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |
@@ -311,6 +311,42 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
   `switch` carries no bound not because the value is trusted, but because
   nothing has yet carried it anywhere — widening an existing field's
   *readership* needs the same bound review a brand-new decode does.
+- **`TurnEnd` gained a fourth stop-shape field, `ErrorCategory string` (#2224) —
+  read off a different line than the other three, and the parser's first
+  cross-line state that remembers content rather than counts it.**
+  `Outcome`/`IsError`/`TerminalReason` all decode from the `result` line that
+  ends the turn; `ErrorCategory` is the wrapper-level `error` key on an
+  `assistant` line — a sibling of `message`, never inside `message.content` —
+  naming why claude's API call failed (`rate_limit`, `overloaded`,
+  `account_on_hold`, `authentication_failed`, …) rather than how the turn
+  stopped. The two axes are independent: a frame can carry `Outcome: "success"`
+  and `ErrorCategory: "rate_limit"` on the same `turn_end`. Because
+  `emitAssistant` sees only the decoded message and emits nothing for one with
+  no mappable content blocks, the value has nowhere to ride until the next
+  `result` line, so `streamsup.Parser` gained a new field,
+  `assistantErrorCategory`, written by every `assistant` line (an absent
+  `error` key writes `""`) and read-and-cleared by the same `result` arm that
+  already resets `thinkingSinceEmit`. That is a new *kind* of state for the
+  parser: `thinkingSinceEmit`'s doc argued it was "a token COUNTER — not a
+  memory of anything claude said," a defense that does not stretch to a
+  remembered category, and the doc was corrected in place rather than left
+  standing (`Parser`'s and `emitBackgroundTaskRoster`'s comments, both amended
+  again for #2224). The residual case a counter's argument can't answer: a
+  child that dies without a `result` line leaves `assistantErrorCategory` set
+  on a parser `cmd/pyry` reuses across the respawn, and attributing a stale
+  category to a later turn is a **wrong claim**, not an early event like the
+  counter's residual. The fix is a latch, not a second reset point: every
+  `assistant` line overwrites the field, including to empty, so the residual
+  survives only until the next `assistant` line rather than until the next
+  `result`. The narrowing is accepted rather than closed — a turn that emits
+  no `assistant` line at all before its `result` still reports the dead turn's
+  category, pinned by a named test rather than silently possible — chosen as
+  the fail-closed direction: a dropped category (an error-bearing line
+  followed by a clean one inside one turn) matches today's behaviour, while a
+  stale one sends an operator to fix an account that is fine. See
+  [streamsup-package-result-stop-shape-second-decode-target-and-dr.md](streamsup-package-result-stop-shape-second-decode-target-and-dr.md)
+  for the shared decode/cap mechanics (`assistantErrorLine`,
+  `maxTurnEndStopField`, `boundStopField`) this field reuses unchanged.
 - **Widening a sealed sum-type variant with a slice breaks `==`, and a grep for
   the variant's type name will not find where it breaks.** `TurnEnd` stopped
   being comparable the moment `ModelWindows` landed, and the site that

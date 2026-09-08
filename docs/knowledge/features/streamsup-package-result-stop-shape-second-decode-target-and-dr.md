@@ -76,3 +76,19 @@ published fields this decode feeds, and
 [turnbridge-package.md](turnbridge-package.md) for the still-unpublished
 `ModelWindows`/`DroppedModelWindows` pair this ticket's design deliberately
 left alone on the same variant.
+
+**#2224 reuses this shape's cap for a field decoded off a different line.**
+`assistantErrorLine{ Error string `json:"error"` }` is a third sibling
+target, read off the wrapper level of an `assistant` line rather than the
+`result` line the two fields above share, and bounded by the same
+`boundStopField`/`maxTurnEndStopField` pair rather than a new constant — the
+constant's own doc states the reason: these are one shape, "short open-set
+tokens off a single line, matched by a consumer against a known list," and
+that a value comes off a different line does not split the shape. Because the
+value must survive from the `assistant` line to the `result` line that
+publishes it, this is the first field in the family that needs the parser to
+remember something claude said rather than decode-and-publish within one
+line — see [turnevent-package.md](turnevent-package.md) § `TurnEnd` for the
+cross-line latch design and its residual/fail-closed argument, which is a
+parser-state question rather than a decode-isolation one and belongs there
+instead.

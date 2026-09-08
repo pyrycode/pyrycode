@@ -1234,34 +1234,42 @@ const maxModelWindowID = 256
 // the line. What is RETAINED is only the capped result.
 const maxModelWindowEntries = 16
 
-// maxTurnEndStopField caps BOTH claude-authored strings turnevent.TurnEnd
-// publishes for the turn's stop shape — Outcome (the `result` line's subtype) and
-// TerminalReason (#2223). Applied at CONSTRUCTION, exactly as every cap above is,
-// so an oversized value never enters the event stream, the push queue, or any log.
+// maxTurnEndStopField caps ALL THREE claude-authored strings turnevent.TurnEnd
+// publishes — Outcome (the `result` line's subtype) and TerminalReason (#2223), plus
+// ErrorCategory (the `assistant` line's wrapper-level error, #2224). Applied at
+// CONSTRUCTION, exactly as every cap above is, so an oversized value never enters the
+// event stream, the push queue, or any log.
 //
-// ONE CONSTANT OVER TWO FIELDS, on maxTaskFieldID's precedent — that one bounds
-// TaskID, ToolCallID and TaskType together because they are one SHAPE. These two
+// CORRECTED 2026-09-08 (#2224): this doc said "BOTH claude-authored strings" and
+// carried two-field arithmetic. Three fields share the constant now, and the numbers
+// below are recomputed rather than left reading as true.
+//
+// ONE CONSTANT OVER THREE FIELDS, on maxTaskFieldID's precedent — that one bounds
+// TaskID, ToolCallID and TaskType together because they are one SHAPE. These three
 // are one shape in the same sense: short open-set tokens off a single line,
 // matched by a consumer against a known list rather than read as prose. Their
 // budgets are therefore not independent things a future change could want to move
 // apart, which is the condition maxRateLimitField's separate-constant paragraph
-// sets for splitting one.
+// sets for splitting one. That #2224's value comes off a DIFFERENT line than the
+// other two does not split the shape: what the constant governs is how a consumer
+// reads the value, not which line it was read from.
 //
-// MEASURED against the two documented sets, which is the check maxModelResolved's
+// MEASURED against the three documented sets, which is the check maxModelResolved's
 // doc requires: the longest subtype is error_max_structured_output_retries at 35
-// bytes and the longest terminal_reason structured_output_retry_exhausted at 33,
-// so 256 is roughly 7x the observation — maxTaskFieldID's own multiple over an
-// identifier, and for its reason verbatim: room for a token claude has not shipped
+// bytes, the longest terminal_reason structured_output_retry_exhausted at 33, and
+// the longest error category authentication_failed / oauth_org_not_allowed at 21,
+// so 256 is roughly 7x the largest observation — maxTaskFieldID's own multiple over
+// an identifier, and for its reason verbatim: room for a token claude has not shipped
 // yet, and still a hard cut on anything that has stopped being a token. The
 // committed capture's own values are far shorter (max_turns at 9, completed at 9).
 //
 // The envelope arithmetic, in maxTaskDescription's style: worst case one turn_end
-// carries 2 * 256 = 512 bytes of claude-derived text. That is 0.8% of the v2
+// carries 3 * 256 = 768 bytes of claude-derived text. That is ~1.2% of the v2
 // application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
-// Application-envelope size cap) — the smallest share of any cap in this family,
-// which is what a two-token frame should cost. Unlike the window caps beside it
-// this one DOES owe an envelope percentage, because unlike them these fields reach
-// the wire; see turnevent.TurnEnd's doc, which states the split.
+// Application-envelope size cap) — still the smallest share of any cap in this
+// family, which is what a three-token frame should cost. Unlike the window caps
+// beside it this one DOES owe an envelope percentage, because unlike them these
+// fields reach the wire; see turnevent.TurnEnd's doc, which states the split.
 //
 // OVERFLOW DROPS THE VALUE RATHER THAN TRUNCATING IT, so truncateField is
 // deliberately NOT called on either field. This is maxModelWindowID's departure
@@ -1278,8 +1286,14 @@ const maxModelWindowEntries = 16
 // either, because a dropped scalar is directly observable as the empty value the
 // wire documents rather than an absence a consumer would have to infer.
 //
-// No RATE bound, and none is owed: a `result` line is the turn boundary, so this
-// fires once per TURN — maxModelWindowID's situation exactly.
+// No RATE bound, and none is owed — but the reason is no longer the one-line one it
+// was. Two of the three are read off the `result` line, which IS the turn boundary,
+// so they fire once per TURN (maxModelWindowID's situation exactly). ErrorCategory's
+// bound fires once per ASSISTANT LINE, which is oftener; what is still once per turn
+// is its PUBLICATION, since only the latched value reaches an event. Each application
+// is a length test against a line already bounded by defaultMaxParseBuf, so the
+// oftener firing costs O(1) per line and retains nothing — which is what makes a rate
+// bound unnecessary rather than merely unmeasured.
 const maxTurnEndStopField = 256
 
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
@@ -1558,8 +1572,7 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // only input is the Write bytes.
 //
 // Turn-stateless in everything that describes claude's output. The parser holds
-// no turn counter, no awaiting flag, no transcript, and remembers nothing any
-// line SAID: every mapping is a pure function of the line it reads.
+// no turn counter, no awaiting flag and no transcript.
 //
 // AMENDED 2026-08-09 (#1385): it holds exactly one piece of cross-line state, and
 // the absolute phrasing this paragraph used to carry ("no per-session
@@ -1570,6 +1583,45 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // consumeLine's `result` arm zeroes it unconditionally, both result subtypes go
 // through that arm, and it is the only cross-line state besides the partial-line
 // buffer. No other line type can create, reset, or leak state across a boundary.
+//
+// AMENDED 2026-09-08 (#2224): there are TWO pieces of cross-line state, and the
+// clause the paragraph above rested on — "remembers nothing any line SAID: every
+// mapping is a pure function of the line it reads" — is now false rather than
+// merely narrower, so it has been struck rather than qualified.
+// assistantErrorCategory holds up to 256 bytes of claude's own text, read off an
+// `assistant` line and published on the `result` line's turn_end. #1385's defence
+// ("a COUNTER, not a memory of anything claude said") does not stretch to cover it
+// and is not asked to.
+//
+// The RESET is unchanged and still the whole of the cross-turn argument: the same
+// `result` arm clears both, unconditionally, before the emit, and there is still no
+// second reset point. A category read during a turn cannot reach the next turn's
+// turn_end through any completed boundary.
+//
+// THE RESIDUAL IS WHERE THE TWO FIELDS DIVERGE, and the counter's argument must not
+// be inherited here by resemblance. A child that dies WITHOUT a `result` line leaves
+// a residual on a long-lived parser (cmd/pyry builds one per session, not per turn,
+// and streamsup rebinds the same one across respawns). For the counter that costs at
+// most one event arriving early, bounded by the invariant at its field. For a
+// remembered CATEGORY it would mean reporting one turn's rate_limit on a later turn's
+// turn_end — a wrong claim rather than an early event, and nothing about the field
+// bounds it.
+//
+// WHAT ANSWERS IT IS THE WRITE, NOT A SECOND RESET. Every `assistant` line writes the
+// field, an absent `error` key writing empty, so the residual survives only until the
+// next assistant line — inside the next turn, and long before its boundary. That is
+// last-writer-wins at the one write site rather than a second boundary to keep
+// correct, which is the property having ONE boundary buys.
+//
+// The narrowing is not an elimination, and the remainder is accepted rather than
+// unnoticed: a turn that emits NO assistant line at all before its `result` still
+// reports the dead turn's category.
+// TestParser_AssistantErrorCategory_ResidualSurvivesAResultlessTurn pins exactly that,
+// so the day someone adds a child-restart clear, the test that reddens is the notice
+// that this decision moved. The latch's own cost — an error-bearing line followed by
+// a clean one INSIDE one turn drops the category — is the fail-closed direction: a
+// dropped category is precisely today's behaviour, while a stale one is a false
+// statement about the operator's account.
 //
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
@@ -1602,6 +1654,26 @@ type Parser struct {
 	// read-modify-write here needs no mutex. If a future slice adds a concurrent
 	// reader, this is the first field its guard has to cover.
 	thinkingSinceEmit int
+
+	// assistantErrorCategory is the wrapper-level API error the most recent
+	// `assistant` line reported, bounded at decode by decodeAssistantError and
+	// published on the next turn_end (#2224). Rewritten by EVERY assistant line —
+	// an absent `error` key writes empty — and cleared with thinkingSinceEmit at
+	// consumeLine's one reset. See Parser's doc for why the write is a latch rather
+	// than a sticky set; it is the residual argument, not a style choice.
+	//
+	// THE FIRST FIELD HERE THAT HOLDS CLAUDE'S OWN BYTES, so two properties it
+	// inherits are worth stating rather than assuming. Its size is bounded by
+	// maxTurnEndStopField and it holds one value, never a list, so no input can grow
+	// it. And it is retained only between two lines — nothing formats a *Parser and
+	// no debug bundle reaches parser state, so it is not reachable by any dump.
+	//
+	// The single-writer invariant covers it exactly as it covers thinkingSinceEmit,
+	// including across a child respawn: the runner rebinds this parser as the new
+	// child's Stdout, and cmd.Wait returns only after the previous forwarder
+	// goroutine has finished, which is the happens-before edge between the two
+	// writers. A future concurrent reader guards both fields, not one.
+	assistantErrorCategory string
 
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
@@ -1847,6 +1919,32 @@ type resultModelUsage struct {
 type resultStopLine struct {
 	IsError        bool   `json:"is_error"`
 	TerminalReason string `json:"terminal_reason"`
+}
+
+// assistantErrorLine is the decoded API-error category of one `assistant` line
+// (#2224). Kept separate from streamLine for resultStopLine's reason applied to a
+// different line type: the segmentation struct stays at Type/Subtype/Message, and
+// TestStreamLine_StaysSegmentationOnly enforces it.
+//
+// A SEPARATE TARGET RATHER THAN A WIDER streamLine, and the isolation runs in BOTH
+// directions here, which is stronger than resultStopLine needs. streamLine decodes
+// `message`, whose content array claude controls; folded together, a hostile message
+// shape would blank the category, and an `error` of a hostile shape would blank the
+// message — costing every content block on the line. Two targets fail independently,
+// so a line whose message will not decode still reports its category, and a line
+// whose category will not decode still emits all its blocks.
+//
+// ONE KEY DECLARED, and absence from the decode target is the stronger guarantee —
+// a field that is never declared cannot leak. The key deliberately NOT declared is
+// `message` itself: claude's prose for the turn lives there, a turn_end frame has
+// never carried it, and this ticket does not start.
+//
+// A plain string, so a non-string `error` — a number, an object, claude's own richer
+// error shape if it ever ships one — fails the whole decode and takes the absent
+// path. That is the conservative direction: an error this parser cannot read must not
+// be published as one it can.
+type assistantErrorLine struct {
+	Error string `json:"error"`
 }
 
 // systemBackgroundTasksLine is the decoded payload of one
@@ -2864,6 +2962,20 @@ func (p *Parser) consumeLine(line []byte) {
 	}
 	switch sl.Type {
 	case "assistant":
+		// The wrapper-level API error category (#2224), read here rather than inside
+		// emitAssistant for two reasons that both bite. It is a sibling of `message`
+		// on the LINE, so emitAssistant — which takes only the decoded message —
+		// cannot reach it; consumeLine's `user` arm below, which passes the raw line
+		// for its own sidecar, is the in-file precedent. And emitAssistant returns
+		// early on a nil message and emits nothing for a message with no mappable
+		// blocks, so a read inside it would miss exactly the error-bearing line
+		// carrying no blocks — which is the likeliest shape for a line whose API call
+		// failed, not an edge case.
+		//
+		// ASSIGNED, NOT OR'd: an assistant line with no `error` key clears the field.
+		// That is the latch Parser's doc argues, and it is what keeps a dead turn's
+		// category from riding into the next one's turn_end.
+		p.assistantErrorCategory = decodeAssistantError(line)
 		p.emitAssistant(sl.Message)
 	case "user":
 		// The line bytes ride along so emitUser can decode the tool_use_result
@@ -2875,15 +2987,23 @@ func (p *Parser) consumeLine(line []byte) {
 		// turn and every other subtype → end_turn. Richer max_tokens/refusal
 		// classification remains future work (resultTurnEndReason's default).
 		//
-		// Also the ONE reset point for the parser's only accumulator (#1385).
-		// Unconditional and before the emit, so both result subtypes reset and a
-		// cancelled turn leaks no residual into the next one. A child that dies
-		// WITHOUT a result leaves a residual behind on a long-lived parser
-		// (cmd/pyry builds one per session, not per turn); that is bounded by the
-		// invariant at the field — the next turn's first event can arrive at most
-		// minThinkingTokensPerEvent-1 tokens early — and a second reset path for it
+		// Also the ONE reset point for BOTH pieces of the parser's cross-line state —
+		// the #1385 accumulator and #2224's error category. Unconditional and before
+		// the emit, so both result subtypes reset and a cancelled turn leaks no
+		// residual into the next one. A child that dies WITHOUT a result leaves a
+		// residual behind on a long-lived parser (cmd/pyry builds one per session, not
+		// per turn); for the counter that is bounded by the invariant at the field —
+		// the next turn's first event can arrive at most minThinkingTokensPerEvent-1
+		// tokens early. The category's residual has no such bound and is answered by
+		// its WRITE instead (see the assistant arm above), because a second reset path
 		// would buy a second boundary to keep correct, which is what having one
 		// boundary avoids.
+		//
+		// The category is READ into a local and cleared in the same step, so the clear
+		// stays at this one point AND ahead of the emit while the value still reaches
+		// it. Reading it off the field inside the composite literal below would work
+		// today and break the moment anyone moved the reset a line, which is the kind
+		// of ordering dependence a single reset point exists to remove.
 		//
 		// The line bytes ride along so decodeModelWindows can read the modelUsage
 		// map, a sibling of `subtype` rather than a field inside it — the shape
@@ -2898,6 +3018,8 @@ func (p *Parser) consumeLine(line []byte) {
 		// passed INTO the same emit, so no decode outcome can reorder, duplicate or
 		// suppress the boundary.
 		p.thinkingSinceEmit = 0
+		errorCategory := p.assistantErrorCategory
+		p.assistantErrorCategory = ""
 		windows, droppedWindows := decodeModelWindows(line)
 		isError, terminalReason := decodeStopShape(line)
 		p.emit(turnevent.TurnEnd{
@@ -2912,9 +3034,13 @@ func (p *Parser) consumeLine(line []byte) {
 			// the ONE site that publishes the subtype — its only other readers,
 			// resultTurnEndReason above and emitSystemSubtype, compare it against
 			// literals and carry it nowhere, which is why the bound belongs here.
-			Outcome:             boundStopField(sl.Subtype),
-			IsError:             isError,
-			TerminalReason:      terminalReason,
+			Outcome:        boundStopField(sl.Subtype),
+			IsError:        isError,
+			TerminalReason: terminalReason,
+			// Already bounded, at the decode rather than here: unlike the subtype
+			// beside it this value was not read off this line, so there is no
+			// unbounded original to bound at the publish site.
+			ErrorCategory:       errorCategory,
 			ModelWindows:        windows,
 			DroppedModelWindows: droppedWindows,
 		})
@@ -3431,6 +3557,22 @@ func (p *Parser) emitBackgroundTaskUpdated(line []byte) bool {
 // derivable from anything the daemon keeps. Whoever adds a second retention in
 // this family owes the same statement — the amnesia argument no longer carries it
 // on its own.
+//
+// RE-SCOPED 2026-09-08 (#2224): the parser now remembers something claude SAID —
+// assistantErrorCategory, an API error token read off an `assistant` line and held
+// until the turn boundary — so the CORRECTED 2026-08-09 paragraph's defence of the
+// counter ("remembers no task, no roster, and nothing any line said") no longer
+// describes everything the parser holds, and it is not stretched to.
+//
+// The refusal survives, and by the explicit rule the #2077 entry above already had
+// to state rather than by amnesia. What makes a synthesized task-finish event
+// underivable is that nothing anywhere retains a PREVIOUS roster to diff a current
+// one against. #2224's field is a scalar off a different line type, holds no task and
+// no roster, and is overwritten rather than accumulated, so it brings a disappearance
+// no closer to being detectable. What has finally expired is the shape of argument:
+// this doc can no longer say the parser forgets everything, only that it remembers
+// nothing a finish event could be computed from. A third retention owes that same
+// sentence about itself — the general claim is gone for good.
 func (p *Parser) emitBackgroundTaskRoster(line []byte) bool {
 	var tl systemBackgroundTasksLine
 	if err := json.Unmarshal(line, &tl); err != nil {
@@ -4817,8 +4959,36 @@ func decodeStopShape(line []byte) (isError bool, terminalReason string) {
 	return sl.IsError, boundStopField(sl.TerminalReason)
 }
 
-// boundStopField answers maxTurnEndStopField for one of the two stop-shape
-// strings: the value unchanged, or empty when it exceeds the cap.
+// decodeAssistantError reads the wrapper-level API error category off one `assistant`
+// line and returns it bounded (#2224). A pure function of the bytes: no receiver, no
+// parser state read or written, nothing logged on any path.
+//
+// decodeStopShape's three properties hold here verbatim and are not restated: it
+// cannot disturb what the line emits, every failure returns a value rather than an
+// error, and the decode error is DISCARDED rather than logged because encoding/json
+// quotes the offending input into its error text — logging nothing at all is what
+// makes "no claude-authored byte from this decode reaches a log line" structural.
+//
+// THE BOUND IS APPLIED HERE rather than at the emit, and here it does more work than
+// it does for its siblings: the value is not published on the line it is read from
+// but REMEMBERED until the turn boundary, so bounding at the emit would leave an
+// unbounded string sitting in parser state in between. Bounding at the decode means
+// the parser never holds one.
+//
+// WHAT IT DELIBERATELY DOES NOT DO is treat an unreadable `error` differently from an
+// absent one. Both give "", and a consumer cannot tell them apart, because there is
+// nothing it would do differently — turnevent.TurnEnd.Outcome's absent-or-over-cap
+// collapse, applied to a third shape.
+func decodeAssistantError(line []byte) string {
+	var al assistantErrorLine
+	if err := json.Unmarshal(line, &al); err != nil {
+		return ""
+	}
+	return boundStopField(al.Error)
+}
+
+// boundStopField answers maxTurnEndStopField for one of the three claude-authored
+// strings turn_end publishes: the value unchanged, or empty when it exceeds the cap.
 //
 // IT DROPS RATHER THAN CUTS, which is the whole of the judgement made about these
 // values and is argued at the constant. The boundary is <=, matching
@@ -4826,10 +4996,10 @@ func decodeStopShape(line []byte) (isError bool, terminalReason string) {
 //
 // No strings.ToValidUTF8 scrub, unlike truncateField, and its absence is
 // deliberate: that function scrubs because it CUTS, and a cut can land mid-rune.
-// Nothing here cuts. Both inputs are decoded into Go strings, where encoding/json
-// has already U+FFFD-replaced invalid input, so there is no ill-formed sequence
-// left for a scrub to remove — the exception truncateField names is
-// json.RawMessage, which neither of these is.
+// Nothing here cuts. All three inputs are decoded into Go strings, where
+// encoding/json has already U+FFFD-replaced invalid input, so there is no ill-formed
+// sequence left for a scrub to remove — the exception truncateField names is
+// json.RawMessage, which none of these is.
 func boundStopField(s string) string {
 	if len(s) > maxTurnEndStopField {
 		return ""
