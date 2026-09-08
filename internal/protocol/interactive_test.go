@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -2458,5 +2459,128 @@ func TestRequestModelListPayload_ZeroValue_KeyPresent(t *testing.T) {
 	}
 	if want := `{"conversation_id":""}`; string(b) != want {
 		t.Errorf("zero payload: got %s, want %s — the key is unconditional, so a client that names no conversation still sends a well-formed frame", b, want)
+	}
+}
+
+func TestToolDeniedPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "tool_denied.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeToolDenied {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeToolDenied)
+	}
+
+	var payload ToolDeniedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ConversationID != "c1" {
+		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
+	}
+	if payload.TurnID != "t7" {
+		t.Errorf("TurnID: got %q, want %q", payload.TurnID, "t7")
+	}
+	// The join key. A client correlates this row with the tool_use and tool_result
+	// carrying the same value, so it is asserted for its exact bytes rather than for
+	// being non-empty.
+	if payload.ToolUseID != "toolu_01A9F" {
+		t.Errorf("ToolUseID: got %q, want %q", payload.ToolUseID, "toolu_01A9F")
+	}
+	// Empty AND named in dropped_fields: the daemon emptied an over-cap name. The
+	// pairing is the whole reason the second report slice exists, so both halves are
+	// asserted together.
+	if payload.ToolName != "" {
+		t.Errorf("ToolName: got %q, want %q — the fixture names it dropped", payload.ToolName, "")
+	}
+	if payload.DecisionReasonType != "rule" {
+		t.Errorf("DecisionReasonType: got %q, want %q", payload.DecisionReasonType, "rule")
+	}
+	if want := "Command matches a deny rule for this session…"; payload.DecisionReason != want {
+		t.Errorf("DecisionReason: got %q, want %q", payload.DecisionReason, want)
+	}
+	if want := "Claude requested permissions to use Bash, but you haven't granted it yet…"; payload.Message != want {
+		t.Errorf("Message: got %q, want %q", payload.Message, want)
+	}
+	if want := []string{"message", "decision_reason"}; !reflect.DeepEqual(payload.TruncatedFields, want) {
+		t.Errorf("TruncatedFields: got %v, want %v", payload.TruncatedFields, want)
+	}
+	// tool_name, not the daemon-internal spelling: every token in either slice names
+	// a key THIS frame carries, so a client can look it up.
+	if want := []string{"tool_name"}; !reflect.DeepEqual(payload.DroppedFields, want) {
+		t.Errorf("DroppedFields: got %v, want %v", payload.DroppedFields, want)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestToolDeniedPayload_EmptyReasons_RoundTrip pins the shape every committed capture
+// actually produces: both reason fields empty and neither report slice populated. It is
+// the row that fails if a MarshalJSON or an omitempty is ever added — the populated row
+// above passes either way, so on its own it proves nothing about absence.
+//
+// Empty and named in NEITHER slice is the reading "claude sent nothing", which is what
+// makes the two nulls load-bearing rather than incidental.
+func TestToolDeniedPayload_EmptyReasons_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "tool_denied_empty_reasons.json")
+
+	// The four keys whose value here is a zero an omitempty would elide, asserted on
+	// the bytes rather than on the decoded struct: a dropped key decodes to the same
+	// zero value, so only the wire form can tell the two apart.
+	for _, want := range []string{
+		`"decision_reason_type":""`,
+		`"decision_reason":""`,
+		`"truncated_fields":null`,
+		`"dropped_fields":null`,
+	} {
+		if !bytes.Contains(canonical(t, raw), []byte(want)) {
+			t.Errorf("fixture must carry %s explicitly, got: %s", want, raw)
+		}
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeToolDenied {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeToolDenied)
+	}
+
+	var payload ToolDeniedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.ToolName != "Bash" {
+		t.Errorf("ToolName: got %q, want %q", payload.ToolName, "Bash")
+	}
+	if payload.DecisionReasonType != "" || payload.DecisionReason != "" {
+		t.Errorf("both reason fields must decode empty, got %q / %q",
+			payload.DecisionReasonType, payload.DecisionReason)
+	}
+	if payload.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil", payload.TruncatedFields)
+	}
+	if payload.DroppedFields != nil {
+		t.Errorf("DroppedFields: got %v, want nil", payload.DroppedFields)
+	}
+
+	// The claim that binds: a nil slice must ENCODE back to a literal null. An
+	// allocated [] would tell a phone that claude's cut text is complete, which is the
+	// opposite of what nothing-was-cut means.
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestToolDeniedType_IsNotClaudesVocabulary pins the wire type as the DAEMON's word.
+// claude's line is system/permission_denied; the frame follows internal/turnevent's
+// variant instead, so a claude rename lands in the parser rather than breaking every
+// client at once.
+func TestToolDeniedType_IsNotClaudesVocabulary(t *testing.T) {
+	if TypeToolDenied != "tool_denied" {
+		t.Errorf("TypeToolDenied: got %q, want %q", TypeToolDenied, "tool_denied")
+	}
+	if TypeToolDenied == "permission_denied" {
+		t.Error("TypeToolDenied must not adopt claude's own subtype spelling")
 	}
 }

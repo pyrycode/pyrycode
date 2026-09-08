@@ -88,6 +88,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `ModelList` (#1848) | `TypeModelList` | `ModelListPayload{tc.ConversationID, models, ev.DroppedModels}` (`tc.TurnID`/`tc.Seq` ignored — one `initialize` exchange per child, not even per-turn, opens and closes no turn; `turnMarkFor` answers `turnMarkNone` by construction). `ev.Models` looped into `[]protocol.ModelOption`, nil left nil (`ModelListPayload.MarshalJSON` owns nil→`[]`, the `ToolStart`/`BackgroundTaskRoster` rule); each row's six fields cross verbatim, including `EffortLevels` (nil→`[]` via `ModelOption.MarshalJSON`) and `TruncatedFields` (nil stays nil — that field is deliberately exempt from normalisation, so an absence reaches the wire as `null`, the opposite polarity from `EffortLevels` one field over). `DroppedModels` is carried from the decode, never recomputed from `len(models)` and never a constant. No re-cap, re-order or charset check of any field — the producer already bounds all three dimensions (`streamsup`'s `maxModelListEntries`/`maxModelResolved`/`maxModelEffortLevel*`), and `internal/relay`'s `validModel`/`validEffort` bound a phone-supplied *inbound* value, not this outbound report. No suppression branch — a zero-value `ModelList` maps, `ModelAnnounced`'s posture unchanged | true |
 | `SlashCommandList` (#2001) | `TypeSlashCommandList` | `SlashCommandListPayload{tc.ConversationID, commands, ev.DroppedCommands}` (`tc.TurnID`/`tc.Seq` ignored — the same `initialize`-exchange, not-even-per-turn addressing as `ModelList`; `turnMarkFor` answers `turnMarkNone`). `ev.Commands` looped into `[]protocol.SlashCommand`, nil left nil (`SlashCommandListPayload.MarshalJSON` owns nil→`[]`, the `ModelList`/`BackgroundTaskRoster` rule); each row's five fields cross verbatim, including `Aliases` (nil→`[]` via `SlashCommand.MarshalJSON`) and `TruncatedFields` (nil stays nil — deliberately exempt from normalisation, so an absence reaches the wire as `null`, the opposite polarity from `Aliases` one field over). `DroppedCommands` is the decode's count **plus** whatever the frame cut below drops, never recomputed from `len(commands)` alone and never a constant. No re-cap, re-order or charset check of any dimension the producer already bounds (`streamsup`'s `maxSlashCommandName`/`maxSlashCommandDescription`/`maxSlashCommandArgumentHint`/`maxSlashCommandAlias`/`maxSlashCommandAliasCount`/`maxSlashCommandListEntries`), and `Name` is not an identifier (`__remote-workflow` is in the committed capture) so no charset assumption belongs here either. No suppression branch — a zero-value `SlashCommandList` maps, `ModelList`'s posture unchanged. **Frame-size bound (#2002):** the producer's content caps alone allow a payload several times the 65519-byte v2 envelope, and no *count* cap can close that — the only entry count whose worst case fits (51) is the committed capture's own size, so it would fire on claude's ordinary output. The arm instead walks `e.Commands`, marshals each row as the wire `protocol.SlashCommand` (not the turnevent one — its `MarshalJSON` normalisations are part of what actually crosses), and takes the tail-cut prefix that fits under `maxSlashCommandListBytes` (64000 B), `break`ing rather than skipping on the first row that would not, so a client sees a shortened menu rather than one with holes | true |
 | `CompactionBoundary` (#2237) | `TypeCompactionBoundary` | `CompactionBoundaryPayload{tc.ConversationID, ev.Trigger, ev.PreTokens, ev.PostTokens}` (`tc.TurnID`/`tc.Seq` ignored — a compaction boundary is a fact about the conversation's context, not about the turn that happened to contain it). Nothing is re-capped here: the producer bounded `Trigger` at construction. The two count pointers cross **verbatim, not deep-copied** — the producer allocates a fresh `int` per line and retains neither, and nothing downstream mutates a payload, so the aliasing is observable to no one | true |
+| `ToolCallDenied` (#2233) | `TypeToolDenied` | `ToolDeniedPayload{tc.ConversationID, tc.TurnID, ToolUseID: ev.ToolCallID, ToolName: ev.ToolName, DecisionReasonType: ev.DecisionReasonType, DecisionReason: ev.DecisionReason, Message: ev.Message, TruncatedFields: deniedReportKeys(ev.TruncatedFields), DroppedFields: deniedReportKeys(ev.DroppedFields)}` — **turn-scoped**, taking `ToolStart`/`ToolUpdate`'s shape rather than the status peers' (`tc.Seq` still ignored): the denial names one call the client already has a `tool_use` for and must land in the same turn. Every string crosses verbatim and nothing is re-capped — the producer bounded all five at construction (`streamsup`'s `maxTaskFieldID`/`maxDenialProse`) | true |
 | `ThoughtChunk` | `""` | `nil` | **false** (drop) |
 | nil / unknown | `""` | `nil` | false (drop) |
 
@@ -221,6 +222,35 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   and JSON key names are both inside the bytes that actually cross, and a
   measurement taken against the internal type would under-count every row
   with a nil `Aliases`.
+- **The first arm that rewrites a report slice's *contents* changes what "pure"
+  costs, and a `reflect.DeepEqual` snapshot does not catch the aliasing on its
+  own.** Every arm before `ToolCallDenied` (#2233) either reads a slice or
+  re-slices/loops into a fresh one; `deniedReportKeys` (below) is the first to
+  rewrite one element of the producer's own slice — renaming
+  `turnevent.ToolCallDenied`'s `tool_call_id` report token to this frame's
+  `tool_use_id` wire key — and the same event is also read by `cmd/pyry`'s
+  history-append path and by `eventKind`'s other call sites. A rename that
+  wrote back through the producer's array, or returned it with one element
+  substituted, would make this arm's output visible to those other readers.
+  `deniedReportKeys` copies unconditionally, even when no token changes, and
+  the test proves it by writing a sentinel *through the payload's slice* after
+  the call and asserting the event's own slice is unchanged — comparing the
+  event to a pre-call `DeepEqual` snapshot alone would pass a rename that
+  happened to write back the *same* value.
+- **A payload field's name can diverge from the event field it maps, and when
+  it does, a report slice naming that field has to be translated at the same
+  seam.** `ToolDeniedPayload.ToolUseID` is `ToolCallDenied.ToolCallID` renamed
+  (`ToolUsePayload`/`ToolResultPayload`'s `tool_use_id` precedent), but
+  `ToolCallDenied.TruncatedFields`/`DroppedFields` still name that field
+  `tool_call_id` — their own producer's field name. Nothing in the type system
+  catches a missed rename here: both sides are plain `[]string`, and a
+  round-trip fixture is byte-equal whichever token is inside it. The failure
+  only surfaces when a client tries to look the reported token up against the
+  frame's own keys and finds none. See
+  [protocol-package-interactive-event-payloads.md](protocol-package-interactive-event-payloads.md)
+  for the payload-side shape, the three-valued reading the two slices make
+  decidable, and a doc-comment ordering claim about these same slices that
+  shipped false.
 
 ### `BuildTurnState` — the lifecycle payload builder
 

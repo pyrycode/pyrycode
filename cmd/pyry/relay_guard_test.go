@@ -299,6 +299,7 @@ var excludedTypes = map[string]string{
 	"TypeApiRetry":            "push",
 	"TypeCompacting":          "push",
 	"TypeCompactionBoundary":  "push",
+	"TypeToolDenied":          "push",
 	"TypeUnrecognizedMessage": "push",
 	"TypeScreenSnapshot":      "push",
 	"TypeResync":              "push",

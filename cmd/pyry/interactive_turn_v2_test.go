@@ -112,6 +112,19 @@ func pushesFor(pushes []recordedPush, connID string) []recordedPush {
 	return out
 }
 
+// pushesOfType is pushesFor's sibling on the other axis: it selects by envelope type
+// rather than by conn, for a test whose arm emits one frame among several and needs to
+// address a specific one without depending on the emission order.
+func pushesOfType(pushes []recordedPush, typ string) []recordedPush {
+	var out []recordedPush
+	for _, p := range pushes {
+		if p.env.Type == typ {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func turnStateValues(t *testing.T, pushes []recordedPush) []string {
 	t.Helper()
 	var out []string
@@ -3432,3 +3445,142 @@ func TestInteractiveTurnEmitterV2_ConversationResetEmitsNoFrame(t *testing.T) {
 		t.Error("a conversation_reset opened a turn; it is neither an opener nor a closer")
 	}
 }
+
+// AC#1/#2/#3: a ToolCallDenied fans out as one tool_denied envelope to
+// interactive-capable conns only, carrying the cursor's conversation_id, the live
+// turn's id, and a tool_use_id BYTE-IDENTICAL to the tool_use frame for the same call.
+//
+// The denial is handled after a ToolStart because that is the observed line order
+// (assistant/tool_use → system/permission_denied → user/tool_result), and it is what
+// lets the join be asserted against a real sibling frame rather than against a literal
+// this test wrote twice.
+func TestInteractiveTurnEmitterV2_ToolDeniedFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	ctx := context.Background()
+	e.Handle(ctx, turnevent.ToolStart{
+		ToolCallID: "toolu_01A9F",
+		Title:      "Bash",
+		Kind:       turnevent.ToolKindExecute,
+		RawInput:   json.RawMessage(`{"command":"ls /etc"}`),
+	})
+	e.Handle(ctx, turnevent.ToolCallDenied{
+		ToolName:        "Bash",
+		ToolCallID:      "toolu_01A9F",
+		Message:         "requested permissions to use Bash",
+		TruncatedFields: []string{"message"},
+	})
+
+	denials := pushesOfType(bcast.pushes, protocol.TypeToolDenied)
+	if len(denials) != 1 {
+		t.Fatalf("tool_denied pushed %d envelopes; want exactly 1 (interactive conn only)", len(denials))
+	}
+	if denials[0].connID != "a" {
+		t.Fatalf("tool_denied pushed to conn %q; want interactive conn %q", denials[0].connID, "a")
+	}
+	var dp protocol.ToolDeniedPayload
+	if err := json.Unmarshal(denials[0].env.Payload, &dp); err != nil {
+		t.Fatalf("decode tool_denied payload: %v", err)
+	}
+	if dp.ConversationID != testConvID {
+		t.Fatalf("tool_denied conversation_id: got %q, want %q", dp.ConversationID, testConvID)
+	}
+	if dp.ToolName != "Bash" || dp.Message != "requested permissions to use Bash" {
+		t.Fatalf("tool_denied payload: got %+v", dp)
+	}
+	if want := []string{"message"}; !slices.Equal(dp.TruncatedFields, want) {
+		t.Fatalf("tool_denied truncated_fields: got %v, want %v", dp.TruncatedFields, want)
+	}
+	if dp.DroppedFields != nil {
+		t.Fatalf("tool_denied dropped_fields: got %v, want nil", dp.DroppedFields)
+	}
+
+	uses := pushesOfType(bcast.pushes, protocol.TypeToolUse)
+	if len(uses) != 1 {
+		t.Fatalf("expected exactly one tool_use to join against; got %d", len(uses))
+	}
+	var up protocol.ToolUsePayload
+	if err := json.Unmarshal(uses[0].env.Payload, &up); err != nil {
+		t.Fatalf("decode tool_use payload: %v", err)
+	}
+	// The join key, and the turn the two share. A denial that opened a turn of its own
+	// would leave the client unable to place the row beside the call it names.
+	if dp.ToolUseID != up.ToolUseID {
+		t.Fatalf("tool_denied tool_use_id %q != tool_use tool_use_id %q; the two frames "+
+			"describe the same call and a client joins them on this value",
+			dp.ToolUseID, up.ToolUseID)
+	}
+	if dp.TurnID == "" || dp.TurnID != up.TurnID {
+		t.Fatalf("tool_denied turn_id %q != tool_use turn_id %q", dp.TurnID, up.TurnID)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatal("non-interactive conn b received the tool_denied")
+	}
+}
+
+// TestInteractiveTurnEmitterV2_ToolDeniedEventKindNamesTheVariant is the log half of
+// the arm above's claim, and its content-free negative is the one that matters here:
+// the tool name and claude's rejection prose are exactly what a log line explaining a
+// denial would reach for, and the prose may quote the command line that was refused.
+//
+// The fixtures are conspicuous sentinels rather than "Bash" and a natural sentence, on
+// the reason the compaction-boundary and rate-limited blocks above state: the captured
+// log carries the literal kind=tool_denied, so a natural value that is a substring of
+// the frame name or the event name would make the negative red against correct code.
+func TestInteractiveTurnEmitterV2_ToolDeniedEventKindNamesTheVariant(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	cur := &stubCursor{} // empty cursor: the no_cursor drop logs eventKind
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, logger)
+
+	e.Handle(context.Background(), turnevent.ToolCallDenied{
+		ToolName:           toolDeniedNameFixture,
+		ToolCallID:         toolDeniedIDFixture,
+		Message:            toolDeniedMessageFixture,
+		DecisionReasonType: toolDeniedReasonTypeFixture,
+		DecisionReason:     toolDeniedReasonFixture,
+	})
+
+	logs := buf.String()
+	if logs == "" {
+		t.Fatal("expected a DEBUG no-cursor drop log; got none")
+	}
+	if !strings.Contains(logs, "kind=tool_denied") {
+		t.Fatalf("log does not name the variant (want kind=tool_denied):\n%s", logs)
+	}
+	if strings.Contains(logs, "kind=unknown") {
+		t.Fatalf("eventKind returned unknown for tool_denied:\n%s", logs)
+	}
+	// Every claude-derived field on the variant, including the id: none reaches a log.
+	for _, leak := range []string{
+		toolDeniedNameFixture, toolDeniedIDFixture, toolDeniedMessageFixture,
+		toolDeniedReasonTypeFixture, toolDeniedReasonFixture,
+	} {
+		if strings.Contains(logs, leak) {
+			t.Fatalf("claude-authored value %q leaked into the kind log:\n%s", leak, logs)
+		}
+	}
+}
+
+// The claude-authored fixture values the tool-denied kind test uses. Conspicuous
+// sentinels rather than natural values, for the reason the compaction-boundary block
+// above gives: a substring of the frame name, the event name or the log message would
+// make a content-free negative red against correct code.
+const (
+	toolDeniedNameFixture       = "qq-toolname-sentinel"
+	toolDeniedIDFixture         = "qq-toolid-sentinel"
+	toolDeniedMessageFixture    = "qq-message-sentinel"
+	toolDeniedReasonTypeFixture = "qq-reasontype-sentinel"
+	toolDeniedReasonFixture     = "qq-reason-sentinel"
+)

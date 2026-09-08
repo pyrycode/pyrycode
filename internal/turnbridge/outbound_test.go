@@ -113,6 +113,52 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// The id report token is the DAEMON's tool_call_id on the event and this
+			// frame's tool_use_id on the wire; every other token already names a key
+			// this frame carries and crosses untouched. Separate slice literals for ev
+			// and wantPayload, this table's standing rule, so a rename that mutated in
+			// place could not make both sides agree by aliasing.
+			name: "ToolCallDenied -> tool_denied renames only the id report token",
+			ev: turnevent.ToolCallDenied{
+				ToolName:           "Bash",
+				ToolCallID:         "tool-1",
+				Message:            "requested permissions to use Bash",
+				DecisionReasonType: "rule",
+				DecisionReason:     "matches a deny rule",
+				TruncatedFields:    []string{"message", "decision_reason"},
+				DroppedFields:      []string{"tool_name", "tool_call_id", "decision_reason_type"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolDenied,
+			wantPayload: protocol.ToolDeniedPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-1",
+				ToolName: "Bash", DecisionReasonType: "rule",
+				DecisionReason:  "matches a deny rule",
+				Message:         "requested permissions to use Bash",
+				TruncatedFields: []string{"message", "decision_reason"},
+				DroppedFields:   []string{"tool_name", "tool_use_id", "decision_reason_type"},
+			},
+			wantOK: true,
+		},
+		{
+			// Nothing cut and nothing dropped: both slices stay nil rather than
+			// becoming empty non-nil ones. nil is what reaches the wire as null, and an
+			// allocated [] would tell a phone claude's cut text is complete.
+			name: "ToolCallDenied with nothing cut -> both report slices stay nil",
+			ev: turnevent.ToolCallDenied{
+				ToolName:   "Bash",
+				ToolCallID: "tool-2",
+				Message:    "requested permissions to use Bash",
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeToolDenied,
+			wantPayload: protocol.ToolDeniedPayload{
+				ConversationID: "c1", TurnID: "t1", ToolUseID: "tool-2",
+				ToolName: "Bash", Message: "requested permissions to use Bash",
+			},
+			wantOK: true,
+		},
+		{
 			name: "ToolUpdate failed -> tool_result is_error true",
 			ev: turnevent.ToolUpdate{
 				ToolCallID: "tool-1",
@@ -2728,6 +2774,113 @@ func TestMapEvent_CompactionBoundaryCarriesNothingElse(t *testing.T) {
 		if _, present := keys[forbidden]; present {
 			t.Errorf("payload carries %q; a compaction boundary is a mark in the conversation's "+
 				"history and may arrive with no turn open at all", forbidden)
+		}
+	}
+}
+
+// TestMapEvent_ToolDeniedDoesNotMutateTheEvent pins the property the report-token rename
+// makes newly reachable in this file. This is the first arm that rewrites slice CONTENTS
+// rather than only reading them, and the same event is also observed by cmd/pyry's
+// history-append path and by the remaining eventKind call sites — so a rename applied in
+// place, or a payload sharing the producer's backing array, would let this arm's output
+// become visible to them as a corrupted report.
+//
+// TestMapEventSlashCommandListDoesNotMutateTheEvent is the pattern; the failure it guards
+// against here is different in kind, because that arm only ever re-slices.
+func TestMapEvent_ToolDeniedDoesNotMutateTheEvent(t *testing.T) {
+	t.Parallel()
+
+	ev := turnevent.ToolCallDenied{
+		ToolName:           "Bash",
+		ToolCallID:         "tool-1",
+		Message:            "requested permissions to use Bash",
+		DecisionReasonType: "rule",
+		TruncatedFields:    []string{"message"},
+		DroppedFields:      []string{"tool_call_id", "decision_reason_type"},
+	}
+	before := turnevent.ToolCallDenied{
+		ToolName:           "Bash",
+		ToolCallID:         "tool-1",
+		Message:            "requested permissions to use Bash",
+		DecisionReasonType: "rule",
+		TruncatedFields:    []string{"message"},
+		DroppedFields:      []string{"tool_call_id", "decision_reason_type"},
+	}
+
+	_, payload, ok := MapEvent(ev, TurnContext{ConversationID: "c1", TurnID: "t1"})
+	if !ok {
+		t.Fatal("MapEvent refused a ToolCallDenied; the arm must map every one of them")
+	}
+	if !reflect.DeepEqual(ev, before) {
+		t.Errorf("MapEvent mutated the event: got %+v, want %+v", ev, before)
+	}
+
+	// DeepEqual alone would pass on a rename that happened to write the same value, so
+	// the aliasing itself is checked: writing through the payload's slice must not be
+	// visible on the event's.
+	p, isDenied := payload.(protocol.ToolDeniedPayload)
+	if !isDenied {
+		t.Fatalf("payload is %T, want protocol.ToolDeniedPayload", payload)
+	}
+	if len(p.DroppedFields) > 0 {
+		p.DroppedFields[0] = "QQ-Sentinel-ZZ"
+	}
+	if len(p.TruncatedFields) > 0 {
+		p.TruncatedFields[0] = "QQ-Sentinel-ZZ"
+	}
+	if !reflect.DeepEqual(ev, before) {
+		t.Errorf("the payload's report slices alias the event's: writing through one "+
+			"changed the other. got %+v, want %+v", ev, before)
+	}
+}
+
+// TestMapEvent_ToolDeniedCarriesNothingElse pins the frame's key set, including that the
+// two report keys are always present. seq is absent because the payload has no field for
+// it; turn_id IS present, unlike the conversation-scoped status peers, because a denial
+// belongs to the turn that made the call it names.
+func TestMapEvent_ToolDeniedCarriesNothingElse(t *testing.T) {
+	t.Parallel()
+
+	_, payload, ok := MapEvent(turnevent.ToolCallDenied{
+		ToolName:   "Bash",
+		ToolCallID: "tool-1",
+	}, TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7})
+	if !ok {
+		t.Fatal("MapEvent refused a ToolCallDenied; the arm must map every one of them")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshalling the payload: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("re-decoding the payload: %v", err)
+	}
+	want := map[string]bool{
+		"conversation_id": true, "turn_id": true, "tool_use_id": true, "tool_name": true,
+		"decision_reason_type": true, "decision_reason": true, "message": true,
+		"truncated_fields": true, "dropped_fields": true,
+	}
+	for k := range keys {
+		if !want[k] {
+			t.Errorf("payload carries key %q, which is not on the allowlist", k)
+		}
+	}
+	for k := range want {
+		if _, present := keys[k]; !present {
+			t.Errorf("payload is missing key %q; every key is always present on this "+
+				"file's frames, which is what lets the testdata fixtures pin the full shape", k)
+		}
+	}
+	if _, present := keys["seq"]; present {
+		t.Error("payload carries \"seq\"; only assistant_delta is delta-ordered")
+	}
+	// Nothing was cut or dropped, so both reports must be a literal null rather than
+	// an empty array. [] would say claude's text is complete when it is merely uncut.
+	for _, report := range []string{"truncated_fields", "dropped_fields"} {
+		if got := string(keys[report]); got != "null" {
+			t.Errorf("%s: got %s, want null — an allocated [] and a nil report are "+
+				"different statements to a client", report, got)
 		}
 	}
 }

@@ -31,7 +31,36 @@ These six live in their **own** const block (not merged into the `TypeRekeyReque
 |-------|-----------|
 | Status peers of stall | `TypeApiRetry`, `TypeCompacting` |
 
-`TypeApiRetry = "api_retry"` and `TypeCompacting = "compacting"` share their own adjacent const block (not merged into the interactive block above) so the doc comment can name them explicitly as PTY-derived status peers of `TypeStall`, not turn-lifecycle events. Both are outbound binary → phone only, carry the named payload structs `ApiRetryPayload` / `CompactingPayload` (`interactive.go` — see [Interactive event payloads](#interactive-event-payloads-607-638-1074)), and stay out of `inboundAppTypeSet` (two `{"api_retry-rejected"/"compacting-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). Unlike `stall`, both carry an explicit `active: false` falling edge — see the payload doc below. The consumer (`cmd/pyry/interactive_turn_v2.go`'s `Handle`) is `security-sensitive`: it forwards a screen-derived attempt counter across the tui-driver substrate seal. See [codebase/1074.md](../codebase/1074.md).
+`TypeApiRetry = "api_retry"` and `TypeCompacting = "compacting"` share their own adjacent const block (not merged into the interactive block above) so the doc comment can name them explicitly as PTY-derived status peers of `TypeStall`, not turn-lifecycle events. Both are outbound binary → phone only, carry the named payload structs `ApiRetryPayload` / `CompactingPayload` (`interactive.go` — see [Interactive event payloads](#interactive-event-payloads-607-638-1074-2237-2233)), and stay out of `inboundAppTypeSet` (two `{"api_retry-rejected"/"compacting-rejected", …, ErrUnknownType}` rows in `compat_test.go` pin the v1 rejection). Unlike `stall`, both carry an explicit `active: false` falling edge — see the payload doc below. The consumer (`cmd/pyry/interactive_turn_v2.go`'s `Handle`) is `security-sensitive`: it forwards a screen-derived attempt counter across the tui-driver substrate seal. See [codebase/1074.md](../codebase/1074.md).
+
+**v2 tool-denial vocabulary** (#2233; spec `docs/protocol-mobile.md` § `tool_denied`):
+
+| Group | Constant |
+|-------|----------|
+| Tool denied | `TypeToolDenied` |
+
+`TypeToolDenied = "tool_denied"` is an outbound binary → phone event in its **own** new
+const block — the same single-type-own-block precedent as `TypeCompactionBoundary` /
+`TypeRateLimited` / `TypeModelList`. The wire form of `turnevent.ToolCallDenied` (#2232's
+translation of claude's `system/permission_denied` line), carrying the named payload
+struct `ToolDeniedPayload` in `interactive.go` (see [Interactive event payloads](#interactive-event-payloads-607-638-1074-2237-2233)).
+**Turn-scoped, unlike its `compaction_boundary`/`rate_limited` single-block siblings** —
+it carries a `turn_id` because it joins the `tool_use`/`tool_result` frames for the same
+call on a byte-identical `tool_use_id`, the reason it is a frame of its own rather than
+two fields on `tool_result` (the denial line arrives before the result, and #2234's
+result-line recovery reports denials whose `tool_result` has already shipped). Stays out
+of `inboundAppTypeSet` (`{"tool_denied-rejected", TypeToolDenied, false, ErrUnknownType}`
+in `compat_test.go` pins the v1 rejection — the structural guarantee that no inbound
+re-authorize path exists for a blocked call). Shipped wired end to end in one ticket, the
+`#1386`/`#2237` ship-together call rather than the background-task/rate-limited split: no
+producer dependency gap, since #2232 already landed the parser half, so
+`internal/turnbridge`'s `MapEvent` arm and `cmd/pyry/interactive_turn_v2.go`'s `Handle` +
+`eventKind` arms all landed with the constant. **The report-slice rename lesson** — the
+daemon's `tool_call_id` token becomes this frame's `tool_use_id` key at the bridge, the
+first `MapEvent` arm to rewrite slice *contents* rather than pass them through — is
+recorded in [turnbridge-package.md](turnbridge-package.md); the payload's own shape and a
+doc-comment ordering trap are recorded in
+[Interactive event payloads](#interactive-event-payloads-607-638-1074-2237-2233).
 
 **v2 compaction-boundary vocabulary** (#2237; spec `docs/protocol-mobile.md` § `compaction_boundary`):
 
@@ -39,7 +68,7 @@ These six live in their **own** const block (not merged into the `TypeRekeyReque
 |-------|----------|
 | Compaction boundary | `TypeCompactionBoundary` |
 
-`TypeCompactionBoundary = "compaction_boundary"` is an outbound binary → phone event in its **own** new const block — the same single-type-own-block precedent as `TypeResync` / `TypeSessionError` / `TypeThinkingProgress` / `TypeRateLimited` / `TypeModelList` / `TypeSlashCommandList` — **not** folded into the `api_retry`/`compacting` status-peer block one paragraph up, even though claude's `compact_boundary` line is a sibling of the `system/status` line `compacting` maps. The reason is ordering, not taste: claude states the boundary's trigger and token counts on a line that arrives *after* `compacting`'s falling edge has already shipped (the committed capture's turn order), so the two frames cannot share a payload and do not share a const block either. The wire form of `turnevent.CompactionBoundary` (`internal/streamsup`'s `emitCompactionBoundary`), carrying the named payload struct `CompactionBoundaryPayload` in `interactive.go` (see [Interactive event payloads](#interactive-event-payloads-607-638-1074-2237)). Stays out of `inboundAppTypeSet` (`{"compaction_boundary-rejected", TypeCompactionBoundary, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). Shipped wired end to end in one ticket, `#1386`'s ship-together call rather than the background-task/rate-limited split: no producer dependency gap, so `internal/turnbridge`'s `MapEvent` arm and `cmd/pyry/interactive_turn_v2.go`'s `Handle` + `eventKind` arms all landed with the constant. See [turnevent-package.md](turnevent-package.md) and [streamsup-package-system-maps-per-subtype-since-2026-08-07.md](streamsup-package-system-maps-per-subtype-since-2026-08-07.md).
+`TypeCompactionBoundary = "compaction_boundary"` is an outbound binary → phone event in its **own** new const block — the same single-type-own-block precedent as `TypeResync` / `TypeSessionError` / `TypeThinkingProgress` / `TypeRateLimited` / `TypeModelList` / `TypeSlashCommandList` — **not** folded into the `api_retry`/`compacting` status-peer block one paragraph up, even though claude's `compact_boundary` line is a sibling of the `system/status` line `compacting` maps. The reason is ordering, not taste: claude states the boundary's trigger and token counts on a line that arrives *after* `compacting`'s falling edge has already shipped (the committed capture's turn order), so the two frames cannot share a payload and do not share a const block either. The wire form of `turnevent.CompactionBoundary` (`internal/streamsup`'s `emitCompactionBoundary`), carrying the named payload struct `CompactionBoundaryPayload` in `interactive.go` (see [Interactive event payloads](#interactive-event-payloads-607-638-1074-2237-2233)). Stays out of `inboundAppTypeSet` (`{"compaction_boundary-rejected", TypeCompactionBoundary, false, ErrUnknownType}` in `compat_test.go` pins the v1 rejection). Shipped wired end to end in one ticket, `#1386`'s ship-together call rather than the background-task/rate-limited split: no producer dependency gap, so `internal/turnbridge`'s `MapEvent` arm and `cmd/pyry/interactive_turn_v2.go`'s `Handle` + `eventKind` arms all landed with the constant. See [turnevent-package.md](turnevent-package.md) and [streamsup-package-system-maps-per-subtype-since-2026-08-07.md](streamsup-package-system-maps-per-subtype-since-2026-08-07.md).
 
 **v2 screen-snapshot types** (#617; spec `docs/protocol-mobile.md` § Screen snapshot):
 

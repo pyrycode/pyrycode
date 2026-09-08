@@ -1842,3 +1842,34 @@ const (
 const (
 	TypeCompactionBoundary = "compaction_boundary" // binary → phone, outbound v2 compaction boundary
 )
+
+// Mobile Protocol v2 tool-denial marker. claude refused to run a tool call it had
+// already announced; this frame says WHICH call, so a blocked tool row can look
+// blocked rather than broken (docs/protocol-mobile.md § tool_denied, #2233).
+//
+// A FRAME OF ITS OWN RATHER THAN TWO FIELDS ON tool_result, and the choice is forced
+// twice over rather than preferred. claude states the denial on a separate
+// system/permission_denied line that arrives BEFORE the tool result
+// (assistant/tool_use → system/permission_denied → user/tool_result, measured across
+// the three denial-bearing arms of the committed bypass_reescalation capture), so
+// folding it in would need the parser to latch cross-line state keyed by tool_use_id.
+// And #2234's result-line recovery reports denials whose tool_result frame has already
+// shipped, which a field on a sent frame cannot answer at all. A standalone frame needs
+// neither. See internal/turnevent's ToolCallDenied for the captured line order.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give: the
+// wire follows internal/turnevent's VARIANT, so a claude rename lands in one place
+// instead of breaking every client at once. claude's subtype is permission_denied; the
+// daemon's word names what the frame is ABOUT — a tool call — where "permission" names
+// the mechanism that refused it and would read as a sibling of the MCP approval flow
+// this has nothing to do with.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is an
+// outbound binary → phone event an old phone never receives. The drift detector in
+// internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter. Keeping it there is also
+// the structural guarantee that no inbound re-authorize path exists — nothing in this
+// daemon accepts a tool_denied FROM a phone.
+const (
+	TypeToolDenied = "tool_denied" // binary → phone, outbound v2 tool-denial marker
+)

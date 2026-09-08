@@ -249,6 +249,7 @@ var v2OnlyTypes = map[string]bool{
 	TypeApiRetry:            true,
 	TypeCompacting:          true,
 	TypeCompactionBoundary:  true,
+	TypeToolDenied:          true,
 	TypeUnrecognizedMessage: true,
 	TypeRequestSnapshot:     true,
 	TypeScreenSnapshot:      true,
@@ -425,6 +426,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		TypeMintPairing, TypePairingMinted,
 		// v2 compaction boundary (outbound status, #2237).
 		TypeCompactionBoundary,
+		// v2 tool-denial marker (outbound turn-stream event, #2233).
+		TypeToolDenied,
 	}
 	for _, ty := range all {
 		inV1 := inboundAppTypeSet[ty]
