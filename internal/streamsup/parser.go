@@ -359,6 +359,37 @@ const maxModelField = 256
 // compaction — not per line, whatever claude sends.
 const maxCompactField = 256
 
+// maxCompactTrigger caps the ONE claude-authored string a system/compact_boundary
+// line publishes — compact_metadata.trigger (#2237). 256, the family's value, and a
+// separate constant for maxRateLimitField's stated reason: the neighbour above names
+// the two fields IT bounds, and widening either doc to cover a third field on a
+// different line would make both less true than two constants are expensive.
+//
+// IT DROPS RATHER THAN CUTS, which is the whole judgement here and is why
+// truncateField is deliberately not called on this value. maxTurnEndStopField's
+// argument transfers verbatim: a client MATCHES this token against known values from
+// an open set, so a cut token is indistinguishable from a token the client has never
+// heard of — a state it must already handle. Carrying the empty value says exactly
+// that and invents nothing. The neighbour's cut-not-drop answer is the opposite for
+// the opposite reason: compact_error is prose, where a cut sentence still reads as
+// what it is.
+//
+// No truncation report is owed, on maxTurnEndStopField's rule again: a dropped scalar
+// is directly observable as the empty value, unlike an absence a consumer would have
+// to infer.
+//
+// The envelope arithmetic: 256 bytes worst case, ~0.4% of the 65519-byte
+// application-envelope cap, on a frame whose only other payload is a conversation id
+// and two integers. This frame cannot approach that cap, which is the opposite of the
+// situation #2002 had to bound.
+//
+// No RATE bound, and none is owed. One application per compact_boundary line, and
+// each is an O(1) length test against a line already bounded by defaultMaxParseBuf.
+// A stream emitting the line in a loop produces small frames that turnMarkFor's
+// default classifies turnMarkNone, which makes every one of them droppable at the
+// fan-in — the same posture turnevent.Unrecognized carries.
+const maxCompactTrigger = 256
+
 // compactingEndedMsg is the Debug message the falling edge emits, as a literal so
 // the test asserting the record's attribute set is closed can find it by message
 // rather than by position.
@@ -3387,6 +3418,17 @@ func (p *Parser) consumeLine(line []byte) {
 			// That it costs no unrecognized_message is the property this branch provides
 			// — which is why AC 2 of #2227 is structural rather than earned.
 			//
+			// CORRECTED 2026-09-08 (#2237): compact_boundary has left as well, so the
+			// sentence above has no member at all now and the paragraph is a record of a
+			// state that lasted one ticket. Its "an arm here would emit a duplicate edge"
+			// reading is the part worth not carrying forward: the mapping that landed is
+			// NOT an edge — emitCompactionBoundary reads and writes no parser state and
+			// produces a conversation-scoped frame of its own, because the boundary line
+			// arrives AFTER the falling edge has already fired and cannot ride it. Every
+			// measured `system` subtype is now claimed by emitSystemSubtype, and this
+			// branch's silent drop is left for never-seen ones — where its property is
+			// unchanged and is what keeps a chatty new subtype off the wire.
+			//
 			// system/init is a per-turn marker (spike § 1), not a session-open event,
 			// and it is still NOT the accumulator's boundary. The parser is no longer
 			// wholly turn-stateless: it holds one accumulator (#1385), whose boundary is
@@ -3433,6 +3475,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitModelAnnounced(line)
 	case "status":
 		return p.emitCompactingStatus(line)
+	case "compact_boundary":
+		return p.emitCompactionBoundary(line)
 	default:
 		return false
 	}
@@ -4039,6 +4083,125 @@ func (p *Parser) emitCompactingStatus(line []byte) bool {
 // value, the empty string included, closes an open one — see emitCompactingStatus
 // for why that asymmetry is the design rather than a missing case.
 const compactingStatus = "compacting"
+
+// emitCompactionBoundary maps one system/compact_boundary line onto at most one
+// turnevent.CompactionBoundary (#2237), always consuming the line. It is the seventh
+// arm of emitSystemSubtype and the last compaction line left unmapped: #2227 called
+// this subtype the one measured-and-dropped member standing, and named this ticket
+// its owner.
+//
+// IT IS A FRAME OF ITS OWN BECAUSE OF AN ORDERING, not because a wider Compacting
+// payload was unappealing. The committed capture's compact turn runs
+// status:"compacting", then status:null + compact_result — WHERE THE FALLING EDGE
+// FIRES — then system/init, then this line. claude states the counts after the frame
+// that would have carried them has already shipped, so the falling edge cannot carry
+// them at any price. See turnevent.CompactionBoundary for what a client does with a
+// conversation-scoped frame arriving behind a divider it has already drawn.
+//
+// IT READS AND WRITES NO PARSER STATE, and that one property is the whole of AC 3's
+// second half and AC 4. p.compacting is neither consulted nor touched, so a boundary
+// line following no rising edge maps identically to one following an edge, and no arm
+// of consumeLine's turn-boundary reset has anything of this function's to reset.
+// Whether an AUTO compaction announces itself with the same status lines is
+// unmeasured — the capture drove a manual /compact — and statelessness is what makes
+// that question not need an answer before this can ship.
+//
+// THE ALLOWLIST IS THE DECODE TARGET, not a filter step downstream of one.
+// compactMetadata declares three fields, so encoding/json discards every other key
+// including ones claude has not shipped yet. That matters more here than the phrase
+// suggests: the observed line carries three uuids naming entries in the OPERATOR'S
+// OWN TRANSCRIPT (preserved_segment, preserved_messages, logical_parent_uuid), and
+// they sit unredacted in the committed capture. UnrecognizedMessagePayload's doc is
+// this package's statement of why a model-adjacent blob is bounded at construction;
+// the answer here is narrower than a cap and needs none — the target admits one token
+// and two integers and no operator-authored text at all, so maxCompactField's
+// truncateField pair has nothing to bound.
+//
+// THREE CONSUMING PATHS, in the order they appear below:
+//
+//   - undecodable → Debug naming the subtype, no event. emitCompactingStatus's
+//     undecodable arm verbatim, on its stated ground: the subtype is a message-name
+//     keyword rather than payload, and no claude-authored field was decoded on this
+//     path. A count claude sent out of int range lands here too, which is fail-closed
+//     — one absurd field costs the frame rather than producing a half-true one.
+//   - decodable, no compact_metadata → no event, nothing logged. The metadata pointer
+//     is the presence discriminator: a frame carrying no trigger and no count would be
+//     a claim with no content.
+//   - metadata present → one event, whatever the three fields hold. A trigger claude
+//     omitted and a count claude omitted are both publishable facts, which is exactly
+//     the distinction turnevent.CompactionBoundary's pointers exist to carry.
+//
+// NOTHING IS LOGGED ON THE EMITTING PATH, unlike emitCompactingStatus above. That
+// function's Debug is an argued exception — #2227 needed a diagnostic for values that
+// reached no wire, and #2236 kept it as a bounded copy of something now published.
+// Here emitThinkingProgress's posture applies instead: everything decoded reaches the
+// wire, so a second sink would be a record to keep in step with the frame for no
+// diagnostic gain, and the trigger is the field a drop site would be most tempted to
+// explain itself with.
+func (p *Parser) emitCompactionBoundary(line []byte) bool {
+	var bl systemCompactBoundaryLine
+	if err := json.Unmarshal(line, &bl); err != nil {
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "compact_boundary")
+		return true
+	}
+	if bl.CompactMetadata == nil {
+		return true
+	}
+
+	// Bounded by DROPPING, never truncateField — see maxCompactTrigger for why a token
+	// set parts company with the prose cap beside it. Applied here at construction, as
+	// every cap in this package is, so an oversized value never enters an event.
+	trigger := bl.CompactMetadata.Trigger
+	if len(trigger) > maxCompactTrigger {
+		trigger = ""
+	}
+	// The two counts cross UNBOUNDED and UNCLAMPED, on turnevent.RateLimited.ResetsAt's
+	// rule: they are claude's numbers, not the daemon's, and an int cannot grow. The
+	// pointers are claude's presence, carried rather than collapsed.
+	p.emit(turnevent.CompactionBoundary{
+		Trigger:    trigger,
+		PreTokens:  bl.CompactMetadata.PreTokens,
+		PostTokens: bl.CompactMetadata.PostTokens,
+	})
+	return true
+}
+
+// systemCompactBoundaryLine is the decode target for one system/compact_boundary
+// line. Everything above the metadata is deliberately absent: claude's session_id and
+// uuid are claude's identities rather than the daemon's (systemTaskStartedLine's
+// rule), and logical_parent_uuid names an entry in the operator's own transcript.
+//
+// CompactMetadata is a POINTER so absence is decidable — jsonKey's presence-versus-
+// present-zero rule applied to an object rather than to a key. A value decode cannot
+// answer it: an absent object and one carrying no fields both give the zero struct.
+type systemCompactBoundaryLine struct {
+	CompactMetadata *compactMetadata `json:"compact_metadata"`
+}
+
+// compactMetadata IS THE ALLOWLIST. Three fields, and the exclusion of every other key
+// on the object is structural — encoding/json discards what this does not declare —
+// rather than a scrub somebody has to maintain as claude adds keys.
+//
+// The four observed keys deliberately not here, and they are not one class:
+// cumulative_dropped_tokens and duration_ms are simply unasked-for, and an unused
+// field is a claim nobody checks; preserved_segment and preserved_messages carry
+// UUIDS NAMING ENTRIES IN THE OPERATOR'S OWN TRANSCRIPT, which is a different kind of
+// reason and the one that would matter if a later ticket weighed adding them.
+type compactMetadata struct {
+	// Trigger is claude's own word for what started the compaction — "manual" observed,
+	// "auto" documented. An open set; the bound is applied by the caller, not here, so
+	// the decode target stays a pure shape declaration.
+	Trigger string `json:"trigger"`
+	// PreTokens and PostTokens are POINTERS so a count claude omitted is distinguishable
+	// from a count of zero all the way to the client. post_tokens is optional in
+	// claude's own shape and the committed capture happens to carry it, so absence is a
+	// hermetic row's job rather than the fixture's — see
+	// TestParser_CompactBoundaryPublishesTriggerAndCounts, where the absent and the
+	// explicit-zero rows sit side by side precisely so a plain int cannot pass one while
+	// failing the other.
+	PreTokens  *int `json:"pre_tokens"`
+	PostTokens *int `json:"post_tokens"`
+}
 
 // emitRateLimit decodes one top-level rate_limit_event line and emits at most one
 // turnevent.RateLimited. It never emits an Unrecognized, and it returns nothing:

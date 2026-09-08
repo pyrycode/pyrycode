@@ -411,6 +411,49 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// #2237. A separate frame from compacting above rather than a wider one,
+			// because claude states these values on a line that arrives AFTER the falling
+			// edge has shipped. Like the status peers it carries conversation identity
+			// only: tc's non-empty TurnID and non-zero Seq are ignored and the payload has
+			// no field either could land in.
+			name: "CompactionBoundary -> compaction_boundary, trigger and both counts verbatim",
+			ev: turnevent.CompactionBoundary{
+				Trigger:    "manual",
+				PreTokens:  intPtr(23600),
+				PostTokens: intPtr(2612),
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeCompactionBoundary,
+			wantPayload: protocol.CompactionBoundaryPayload{
+				ConversationID: "c1",
+				Trigger:        "manual",
+				PreTokens:      intPtr(23600),
+				PostTokens:     intPtr(2612),
+			},
+			wantOK: true,
+		},
+		{
+			// The row that would pass with an int field and fail the ticket. reflect.DeepEqual
+			// on two *int distinguishes nil from a pointer to zero, so an arm that
+			// defaulted an absent count — or a payload that declared plain ints — reddens
+			// here. A trigger the producer dropped for length arrives as "" and is mapped
+			// as "": this adapter neither re-bounds nor substitutes.
+			name: "CompactionBoundary with an absent post count keeps it absent, not zero",
+			ev: turnevent.CompactionBoundary{
+				Trigger:   "",
+				PreTokens: intPtr(23600),
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeCompactionBoundary,
+			wantPayload: protocol.CompactionBoundaryPayload{
+				ConversationID: "c1",
+				Trigger:        "",
+				PreTokens:      intPtr(23600),
+				PostTokens:     nil,
+			},
+			wantOK: true,
+		},
+		{
 			name: "Unrecognized -> unrecognized_message, conversation identity only",
 			ev: turnevent.Unrecognized{
 				Site:      turnevent.UnrecognizedLineType,
@@ -2625,6 +2668,66 @@ func TestMapEventTurnEnd_ModelWindowsStayOffTheWire(t *testing.T) {
 	for _, leak := range []string{"claude-sonnet-5", "1000000", "ModelWindows", "\"7\"", ":7"} {
 		if strings.Contains(string(gotJSON), leak) {
 			t.Errorf("payload JSON carries %q: %s", leak, gotJSON)
+		}
+	}
+}
+
+// intPtr is the count-pointer constructor #2237's rows need. A helper rather than a
+// per-row local because the whole point of the pointers is nil-versus-pointer-to-zero,
+// and `&v` over a loop variable is exactly how that distinction gets written wrong.
+func intPtr(v int) *int { return &v }
+
+// TestMapEvent_CompactionBoundaryCarriesNothingElse is #2237's AC 2 at the wire: the
+// mapped frame's key set is exactly four, so nothing from claude's compact_metadata
+// can reach a client through this adapter even if a later edit widens the event.
+//
+// It asserts the KEY SET rather than searching for particular uuids, which is the
+// stronger of the two and the one this layer can make. streamsup's replay test greps
+// the captured identifiers out of the event; here the event is a Go struct that
+// cannot hold one, so the only failure mode left is a FIELD being added — and an
+// allowlist stated as "these four and no others" is what catches that, where a
+// substring search over values would not.
+func TestMapEvent_CompactionBoundaryCarriesNothingElse(t *testing.T) {
+	t.Parallel()
+
+	_, payload, ok := MapEvent(turnevent.CompactionBoundary{
+		Trigger:    "manual",
+		PreTokens:  intPtr(23600),
+		PostTokens: intPtr(2612),
+	}, TurnContext{ConversationID: "c1", TurnID: "t1", Seq: 7})
+	if !ok {
+		t.Fatal("MapEvent refused a CompactionBoundary; the arm must map every one of them")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshalling the payload: %v", err)
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		t.Fatalf("re-decoding the payload: %v", err)
+	}
+	want := map[string]bool{
+		"conversation_id": true, "trigger": true, "pre_tokens": true, "post_tokens": true,
+	}
+	for k := range keys {
+		if !want[k] {
+			t.Errorf("payload carries key %q, which is not on the allowlist. claude's "+
+				"compact_metadata also holds three uuids naming entries in the operator's own "+
+				"transcript, and this frame publishes a trigger and two counts and nothing else", k)
+		}
+	}
+	for k := range want {
+		if _, present := keys[k]; !present {
+			t.Errorf("payload is missing key %q; every key is always present on this file's "+
+				"frames, which is what lets the testdata fixtures pin the full shape", k)
+		}
+	}
+	// turn_id and seq are not merely absent from the output — the payload has no field
+	// for either, so a non-empty TurnID and non-zero Seq above cannot leak.
+	for _, forbidden := range []string{"turn_id", "seq"} {
+		if _, present := keys[forbidden]; present {
+			t.Errorf("payload carries %q; a compaction boundary is a mark in the conversation's "+
+				"history and may arrive with no turn open at all", forbidden)
 		}
 	}
 }

@@ -331,6 +331,96 @@ type CompactingPayload struct {
 	ErrorText string `json:"compact_error"`
 }
 
+// CompactionBoundaryPayload is the body of an Envelope whose Type ==
+// TypeCompactionBoundary (docs/protocol-mobile.md § compaction_boundary, #2237).
+// Binary → phone direction; the wire form of turnevent.CompactionBoundary. Like
+// compacting it is conversation-scoped rather than turn-scoped, so there is no
+// turn_id.
+//
+// IT IS NOT A WIDER `compacting`, AND IT COULD NOT HAVE BEEN. claude states the
+// trigger and the counts on a separate system/compact_boundary line that arrives
+// AFTER the closing system/status line the falling edge is read off, so the numbers
+// do not exist until that frame has shipped. A client applies this to the divider it
+// has ALREADY drawn from compacting's falling edge — and, per the next paragraph,
+// sometimes draws the divider from this frame alone.
+//
+// EVERY FIELD IS claude's, AND SO IS THE FACT OF THE BOUNDARY. That is a class change
+// rather than a wider payload, and it is a step beyond the one #2236 made next door:
+// CompactingPayload.active is a bool the DAEMON computes from a string comparison it
+// makes itself, so a client can read that field as the daemon's own observation. No
+// field here is. The daemon publishes this frame for a boundary line that followed no
+// compacting edge at all — deliberately, so an auto-compaction announcing itself
+// differently is still published — which means this frame can be the ONLY evidence a
+// compaction happened. A fabricated line reading pre_tokens 999999 and post_tokens 1
+// draws a plausible compaction mark where nothing was compacted. Render it as
+// claude's ASSERTION, attributed to claude, never as the daemon's own finding, which
+// is the trap QuestionDismissedPayload's outcome field exists to avoid. NOTHING IN
+// THE DAEMON ACTS ON ANY FIELD HERE — no retry, no backoff, no teardown, no routing —
+// which is what keeps a fabricated value a misleading label rather than an actuator.
+//
+// NOTHING ELSE FROM claude's compact_metadata CROSSES, and the exclusion is
+// structural rather than a scrub: the daemon's decode target (streamsup's
+// compactMetadata) declares these three fields, so encoding/json discards every other
+// key including ones claude has not shipped yet. The line carries four more, and they
+// are two different classes — cumulative_dropped_tokens and duration_ms are simply
+// unasked-for, while preserved_segment, preserved_messages and logical_parent_uuid
+// carry UUIDS NAMING ENTRIES IN THE OPERATOR'S OWN TRANSCRIPT. Neither claude's
+// session_id nor claude's uuid crosses either, per this file's standing rule.
+//
+// THE TWO COUNTS DEPART FROM THIS FILE'S NO-omitempty RULE IN SHAPE BUT NOT IN
+// SPIRIT, and the departure is the frame's whole point. Elsewhere here absence and
+// the zero value mean the same thing; here they do not — post_tokens is optional in
+// claude's own shape, so a client that collapses them renders "24k → 0 tokens" for a
+// boundary claude reported without a post count. They are therefore POINTERS, and
+// they still carry NO omitempty: an absent count marshals as a literal `null` rather
+// than dropping the key, which keeps every key always present, keeps the testdata
+// fixtures pinning the full shape, and states the absence instead of leaving a client
+// to infer it. SessionTransitionPayload.WorkspaceCwd is the same shape for the same
+// reason, and SessionSettingsPayload's pointer-plus-omitempty is what this
+// deliberately is not. A client built before this landed ignores the whole frame; the
+// daemon always emits all four keys.
+type CompactionBoundaryPayload struct {
+	ConversationID string `json:"conversation_id"`
+	// Trigger is claude's own word for what started the compaction — `manual` on the
+	// observed path (claude 2.1.259, a typed /compact), with `auto` claude's other
+	// documented value. An OPEN SET carried verbatim, on TurnEndPayload.Outcome's rule:
+	// treat an unrecognised token as unknown rather than as an error, because claude may
+	// ship one at any time. Empty means claude named no trigger this client can be
+	// offered — either it sent none, or the daemon dropped an oversized one.
+	//
+	// BOUNDED AT 256 BYTES BY THE DAEMON and DROPPED rather than cut, which is the
+	// opposite of compact_error next door and the same answer turn_end's three strings
+	// get. That field is prose, where a cut sentence still reads as what it is; this is
+	// a token a client MATCHES, where a cut token would match no known value while
+	// looking like one. The drop is not reported and needs no report: an empty value is
+	// directly observable, unlike an absence a client would have to infer.
+	//
+	// SECURITY: claude-authored text, bounded by the daemon and NOT sanitized, so
+	// CompactingPayload.ErrorText's SECURITY paragraph applies for provenance — the
+	// render boundary owing control-character and terminal-escape stripping is the
+	// CLIENT's. IT DOES NOT APPLY FOR SHAPE, and this one is the safer half of that
+	// pair rather than the riskier: this is a short token from an open set, so it takes
+	// TurnEndPayload.Outcome's rule — switch on it against known values — and never
+	// UnrecognizedMessagePayload.Raw's prose latitude. A client that renders this token
+	// verbatim into a sentence is rendering up to 256 bytes claude chose.
+	Trigger string `json:"trigger"`
+	// PreTokens and PostTokens are claude's context size before and after the
+	// compaction, exactly as claude stated them.
+	//
+	// `null` MEANS claude STATED NO SUCH COUNT and `0` means claude stated zero, and a
+	// client MUST NOT collapse them: rendering "24k → 0 tokens" for a boundary with no
+	// post count is the failure this shape exists to prevent. Degrade where a count is
+	// absent — say the conversation was compacted without claiming a size.
+	//
+	// NEITHER IS CLAMPED, RANGE-CHECKED OR ORDERED by the daemon, on
+	// RateLimitedPayload's rule: they are claude's numbers, not the daemon's. post
+	// greater than pre is not rejected and not corrected, and neither is a negative.
+	// What the daemon does guarantee is that a value it could not decode as an integer
+	// produces no frame at all rather than a frame with an invented number.
+	PreTokens  *int `json:"pre_tokens"`
+	PostTokens *int `json:"post_tokens"`
+}
+
 // UnrecognizedMessagePayload is the body of an Envelope whose Type ==
 // TypeUnrecognizedMessage (docs/protocol-mobile.md § unrecognized_message).
 // Binary → phone direction; the wire form of the internal-only

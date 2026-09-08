@@ -57,6 +57,18 @@ func cedgeTrace(ev turnevent.Event) string {
 			return "compacting:true"
 		}
 		return "compacting:false"
+	case turnevent.CompactionBoundary:
+		// #2237's AC 5, and the token is a SHAPE rather than the values — deliberately,
+		// for two reasons that happen to agree. The counts differ every lap, so an
+		// assertion on them could only ever be re-derived from the frame it is checking.
+		// And Trigger is claude-authored text: this token lands in CI output on failure,
+		// so rendering its bytes would route up to 256 bytes claude chose into a build
+		// log, which is the exposure the arm above avoids by carrying only Site and Kind.
+		// What survives is exactly what the criterion asks: whether claude stated each of
+		// the three, which is also the distinction a client renders on.
+		return fmt.Sprintf("%strigger=%s,pre=%s,post=%s", cedgeCompactBoundary,
+			cedgeStated(e.Trigger != ""), cedgeStated(e.PreTokens != nil),
+			cedgeStated(e.PostTokens != nil))
 	case turnevent.TurnEnd:
 		return "turn_end"
 	case turnevent.Unrecognized:
@@ -64,6 +76,26 @@ func cedgeTrace(ev turnevent.Event) string {
 	default:
 		return "other"
 	}
+}
+
+// cedgeCompactBoundary is the prefix every boundary token carries, so the AC-5
+// assertion can count the class while the token keeps the three presence readings.
+const cedgeCompactBoundary = "compact_boundary:"
+
+// cedgeCompactBoundaryFull is the token a boundary claude stated all three parts of
+// produces. Composed from the same pieces cedgeTrace uses, so the two cannot drift
+// into a comparison that is always false.
+var cedgeCompactBoundaryFull = fmt.Sprintf("%strigger=%s,pre=%s,post=%s",
+	cedgeCompactBoundary, cedgeStated(true), cedgeStated(true), cedgeStated(true))
+
+// cedgeStated renders one presence reading. Words rather than bools because the
+// failure message is read by whoever is holding a red live gate they cannot re-run
+// at will, and "post=absent" says what "post=false" does not.
+func cedgeStated(ok bool) string {
+	if ok {
+		return "stated"
+	}
+	return "absent"
 }
 
 // cedgeUnrecognized is the prefix every unrecognized token carries, so the AC-2
@@ -151,6 +183,13 @@ func cedgeAwaitCompactTurn(c *cedgeCollector, wantEnds, sentAt int, quiet, budge
 // compacting frame with active:true and then exactly one with active:false reach the
 // event stream a real compacting turn produces (AC 1), and that same turn produces
 // zero unrecognized_message frames (AC 2).
+//
+// EXTENDED 2026-09-08 (#2237): it answers that ticket's AC 5 as well — the compaction
+// boundary frame reaches the same stream, carrying the trigger and both counts claude
+// actually stated. It rides here rather than in a lap of its own because the staging
+// is the expensive part and this test already drives it; the assertion sits with the
+// edges it is a sibling of, and the header's "two criteria" is now three across two
+// tickets.
 //
 // IT DELIBERATELY READS NO FIXTURE, and that is a decision rather than a
 // convenience. #2229's capture fired against claude 2.1.259 and reported
@@ -274,6 +313,40 @@ func TestRealClaude_CompactingEdges(t *testing.T) {
 	}
 	if err := cedgeAssertOrder(turn); err != nil {
 		t.Fatalf("#2227: %v (terminated_on=%s)\n  trace: %v", err, terminatedOn, turn)
+	}
+
+	// --- #2237's AC 5 -------------------------------------------------------------
+	// The boundary frame reaches the event stream a REAL compact turn produces, with
+	// the counts claude actually stated. Asserted on shape rather than on values: the
+	// numbers differ every lap, so a value assertion could only be re-derived from the
+	// frame it checks — and the trigger is claude-authored text this test must not
+	// print into a build log.
+	//
+	// It rides this test rather than a lap of its own because the staging is the
+	// expensive part: two priming turns and a real /compact against live claude, all
+	// of which this test already drives. A second test would double the token cost to
+	// observe the same turn.
+	//
+	// The frame is NOT ordered against the edges here, and that is deliberate rather
+	// than an omission. The captured turn puts the boundary line after the falling
+	// edge — which is the whole reason this is a separate frame — but that ordering is
+	// claude's, observed once, on the MANUAL path. Pinning it live would turn a claude
+	// release reordering its own lines into a red on a criterion that never asked for
+	// it. What the criterion asks is that the frame arrives at all, with the counts.
+	boundaries := collector.countPrefix(sentAt, cedgeCompactBoundary)
+	if boundaries != 1 {
+		t.Fatalf("#2237: the `/compact` turn produced %d compaction boundary frame(s), want "+
+			"exactly 1 (terminated_on=%s). The captured turn carries one "+
+			"system/compact_boundary line; zero means the seam moved or claude stopped "+
+			"sending it, and more than one means the arm fired on a line it does not own.\n"+
+			"  trace: %v", boundaries, terminatedOn, turn)
+	}
+	if full := collector.count(sentAt, cedgeCompactBoundaryFull); full != 1 {
+		t.Fatalf("#2237: the boundary frame did not carry all three parts (terminated_on=%s). "+
+			"The trace names each frame as %s<presence readings> — read those: a count reading "+
+			"`absent` means claude stated no such number on this lap, which is a legitimate "+
+			"shape the daemon publishes but not the one this criterion asserts.\n  trace: %v",
+			terminatedOn, cedgeCompactBoundary, turn)
 	}
 
 	// --- AC 2 --------------------------------------------------------------------

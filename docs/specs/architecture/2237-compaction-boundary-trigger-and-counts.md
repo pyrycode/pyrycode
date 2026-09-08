@@ -379,4 +379,34 @@ Scenarios, by criterion. Hermetic rows sit beside #2227's and #2236's in
 
 ## Revisions
 
-*(none yet — Phase B appends here if the design moves)*
+**2026-09-08 — Phase B. The design did not move; three things are recorded because they
+were decided or discharged during implementation.**
+
+1. **Both open questions are discharged without a code change, which was the plan's own
+   prediction and is worth stating rather than leaving inferable.** Whether an `auto`
+   compaction announces itself with the same status lines, and whether the boundary line
+   can arrive with no `compact_metadata`, are both still UNMEASURED — the capture drove a
+   manual `/compact`. Neither needed an answer: `emitCompactionBoundary` reads and writes
+   no parser state, so a boundary following no edge maps identically (pinned by the
+   "a boundary line following no compacting edge is still published" row), and the
+   metadata pointer answers the second either way (pinned by the "a line carrying no
+   compact_metadata produces no frame" row). Nothing is left for a later ticket.
+
+2. **The security review's one SHOULD FIX landed in three places.** The paragraph naming
+   this frame as *claude's assertion, not the daemon's observation* — the class change
+   beyond #2236's, since every field here is claude's INCLUDING the fact of the boundary —
+   is now on `turnevent.CompactionBoundary`, on `CompactionBoundaryPayload`, and in
+   `docs/protocol-mobile.md` § `compaction_boundary`. Its second finding, that the live
+   test's trace token must not carry `Trigger`'s bytes into a CI log, is honoured by
+   `cedgeTrace` rendering presence readings (`cedgeStated`) rather than values.
+
+3. **Two test-only classification maps had to be amended, neither anticipated by the
+   plan and neither a design change.** `internal/protocol`'s `TestTypeConstants_V1V2Partition`
+   requires every `Type*` constant to appear in its `all` slice and in exactly one of
+   `inboundAppTypeSet` / `v2OnlyTypes`; `cmd/pyry`'s relay guard requires every registered
+   type to be classified inbound or excluded. Both are drift detectors doing their job —
+   a new outbound frame is exactly what they exist to make somebody classify — and the
+   answer in both cases is the one `TypeCompacting` beside it already has.
+
+**Production files touched: 7, as the plan's sizing section predicted, with no eighth
+discovered mid-build.**

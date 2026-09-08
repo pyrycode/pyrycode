@@ -1811,3 +1811,34 @@ const (
 	TypeMintPairing   = "mint_pairing"   // phone → binary, inbound v2 control (pending handler — #2127)
 	TypePairingMinted = "pairing_minted" // binary → phone, one minted pairing as the pair.Encode string, correlated via in_reply_to
 )
+
+// Mobile Protocol v2 compaction boundary. claude finished compacting a
+// conversation's context; this frame says what triggered it and how far the
+// context shrank, so the mark a compaction leaves in a thread can say WHY claude
+// no longer remembers something from before that point
+// (docs/protocol-mobile.md § compaction_boundary).
+//
+// Grouped alone rather than with api_retry/compacting, and the reason is an
+// ORDERING rather than a taxonomy preference. Those two are show/clear sub-states
+// with two edges; this is a single mark with none. More to the point, it CANNOT be
+// a wider compacting payload: claude states the counts on a separate
+// system/compact_boundary line that arrives AFTER the closing system/status line
+// the falling edge is read off, so by the time the numbers exist the frame that
+// would have carried them has shipped. See internal/turnevent's CompactionBoundary
+// for the captured line order.
+//
+// The NAME is the daemon's, not claude's, for the reason the blocks above give:
+// the wire follows internal/turnevent's VARIANT, so a claude rename lands in one
+// place instead of breaking every client at once. claude's subtype is
+// compact_boundary; the daemon's word for the process is "compaction" throughout
+// this package and internal/streamsup, and the discriminating word is "boundary" —
+// what this frame MARKS — where `compacting` beside it names a state with two
+// edges. The two frames stay separate and neither absorbs the other.
+//
+// MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: this is
+// an outbound binary → phone event an old phone never receives. The drift detector
+// in internal/protocol/compat_test.go partitions Type* constants between
+// inboundAppTypeSet and v2OnlyTypes; this lives in the latter.
+const (
+	TypeCompactionBoundary = "compaction_boundary" // binary → phone, outbound v2 compaction boundary
+)

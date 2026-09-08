@@ -355,6 +355,34 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Result:         e.Result,
 			ErrorText:      e.ErrorText,
 		}, true
+	case turnevent.CompactionBoundary:
+		// Conversation identity only, like the status peers above: tc.TurnID and tc.Seq
+		// are ignored and the payload has no field for either. The reason is specific to
+		// this variant rather than borrowed. A compaction boundary is a mark in the
+		// CONVERSATION's history — it says why claude no longer remembers something from
+		// before that point — and the producer emits it for a boundary line that followed
+		// no compacting edge at all, so it can legitimately arrive with no turn open.
+		//
+		// Every field crosses VERBATIM and nothing is invented, filtered or defaulted.
+		// Trigger is bounded at CONSTRUCTION by the producer (streamsup's
+		// maxCompactTrigger, which DROPS rather than cuts), so a second bound here would
+		// be a number to keep in step with one that already holds — the Compacting arm's
+		// stated terms. Neither count is clamped, range-checked or ordered: they are
+		// claude's numbers, not the daemon's, exactly as the RateLimited arm below says of
+		// ResetsAt, and a value the producer could not decode produced no event to map.
+		//
+		// THE TWO POINTERS CROSS AS POINTERS, which is what carries claude's presence
+		// rather than collapsing it — a nil PostTokens means claude stated no such count
+		// and must not become a zero. They are not deep-copied: the producer allocates a
+		// fresh int per line, retains neither, and nothing downstream mutates a payload,
+		// so the aliasing is observable to nobody and a defensive copy would only obscure
+		// that.
+		return protocol.TypeCompactionBoundary, protocol.CompactionBoundaryPayload{
+			ConversationID: tc.ConversationID,
+			Trigger:        e.Trigger,
+			PreTokens:      e.PreTokens,
+			PostTokens:     e.PostTokens,
+		}, true
 	case turnevent.Unrecognized:
 		// Conversation identity only, like Stall and Compacting above: tc.TurnID
 		// and tc.Seq are ignored. This one is not merely "not turn-scoped" — an
