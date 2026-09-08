@@ -441,6 +441,31 @@ const maxCompactTrigger = 256
 // is a fan-out question, and it belongs to the ticket that puts the event on a wire.
 const maxDenialProse = 2 << 10
 
+// maxTurnDenials caps BOTH dimensions of one turn's denial bookkeeping (#2234): how
+// many tool_use_ids Parser.deniedThisTurn remembers, and how many permission_denials
+// entries emitRecoveredDenials reads off a `result` line. maxTaskRosterEntries'
+// answer to an array length claude controls, applied to a second array — and
+// maxTaskFieldID's one-constant-over-several-fields form, because the two dimensions
+// are the same population counted at its two ends and a budget change to one is a
+// budget change to the other.
+//
+// MEASURED across every committed capture that reports a denial (2026-09-08, at
+// 6e6f926e): the longest permission_denials array is ONE entry, and no turn carries
+// more than one system/permission_denied line. 16 is a wide multiple of that — wider
+// than maxTaskRosterEntries' 8 over its own observation — because a model looping on
+// refused calls is a plausible turn shape where a live background-task roster is not,
+// and the retention is cheap: 16 ids, each already bounded by maxTaskFieldID, is
+// 4 KiB of worst-case parser state per session.
+//
+// ITS SECOND DIMENSION FAILS CLOSED, and that is the reason one constant can serve
+// both. A set AT the cap no longer proves it holds every id this turn announced, so
+// emitRecoveredDenials recovers nothing rather than risking a SECOND marker for a
+// call already reported. What that gives up is only reachable in the posture where
+// denial LINES do arrive — the posture this whole slice exists because the daemon
+// does not run in — so the set is empty rather than full exactly where recovery
+// matters. See Parser.deniedThisTurn.
+const maxTurnDenials = 16
+
 // compactingEndedMsg is the Debug message the falling edge emits, as a literal so
 // the test asserting the record's attribute set is closed can find it by message
 // rather than by position.
@@ -1745,6 +1770,26 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // whole of the cross-turn argument; what moved is that the reset now says so on the
 // wire. Its residual is bounded by that same reset and is argued at the field.
 //
+// AMENDED 2026-09-08 (#2234): there are FOUR pieces of cross-line state.
+// deniedThisTurn is the set of tool_use_ids that already produced a denial marker
+// from their own line this turn, and it takes none of the three arguments above by
+// inheritance. It is not a counter; no line writes it on the way past, so #2224's
+// laundering has no analogue; and nothing outside the parser mirrors it, so #2227's
+// published reset is not owed.
+//
+// WHAT IS NEW IS THE DIRECTION ITS RESIDUAL FAILS IN, and that is the one thing this
+// entry exists to say. Every field above fails by SPEAKING — an event early, a wrong
+// category, a banner outliving its cause. A stale id here fails by SILENCE: it
+// suppresses a later turn's genuine marker, which is the defect #2234 fixes,
+// restored in the one case nobody would look. Three things bound it and no second
+// reset is minted. The `result` arm clears the set unconditionally, so only a child
+// that dies without a `result` leaves one at all. claude's tool_use_ids are per-call
+// unique, so a later turn colliding with a stale id is not a shape claude produces.
+// And a collision could only suppress a marker for an id the client has ALREADY seen
+// a denial for, so the loss is a second report of one call, never the only report of
+// one. THE SINGLE RESET POINT IS UNCHANGED and remains the whole of the cross-turn
+// argument.
+//
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
 // writer), so Write — hence buf and the sink calls — is only ever invoked
@@ -1827,6 +1872,36 @@ type Parser struct {
 	// including across a child respawn. A future concurrent reader guards all THREE
 	// fields, not two.
 	compacting bool
+
+	// deniedThisTurn holds the tool_use_ids that already produced a
+	// turnevent.ToolCallDenied from their own system/permission_denied line during
+	// the turn now open (#2234). Written only by emitPermissionDenied, read and
+	// cleared only by consumeLine's one reset; emitRecoveredDenials consults the
+	// cleared-off copy to decide which of the `result` line's permission_denials
+	// entries went unannounced.
+	//
+	// LAZILY ALLOCATED and cleared by setting nil, so a session that never denies a
+	// call — every session on a posture claude does not refuse anything in — pays no
+	// allocation at all. A nil set reads as empty, which is the same answer an empty
+	// one gives, so no call site distinguishes the two.
+	//
+	// BOUNDED IN BOTH DIRECTIONS, and it is the first field here that holds a
+	// COLLECTION of claude's bytes rather than one value or none. maxTurnDenials caps
+	// the CARDINALITY and maxTaskFieldID has already capped each id before it is
+	// recorded — emitPermissionDenied records the value it published, after the drop,
+	// and records nothing when that value is empty. So no input can grow this past
+	// 16 * 256 bytes, and an id too long to publish is also too long to remember. Like
+	// assistantErrorCategory it is retained only inside a turn, nothing formats a
+	// *Parser, and no debug bundle reaches parser state.
+	//
+	// See Parser's doc for the residual argument, which is the one thing that does NOT
+	// carry over from the three fields above: this one's stale value fails by
+	// suppressing a later marker rather than by publishing a wrong one.
+	//
+	// The single-writer invariant covers it exactly as it covers the three above,
+	// including across a child respawn. A future concurrent reader guards all FOUR
+	// fields, not three.
+	deniedThisTurn map[string]struct{}
 
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
@@ -2072,6 +2147,49 @@ type resultModelUsage struct {
 type resultStopLine struct {
 	IsError        bool   `json:"is_error"`
 	TerminalReason string `json:"terminal_reason"`
+}
+
+// resultDenialsLine is the decoded payload of the one `result` key that lists the
+// tool calls claude refused during the turn it ends (#2234). Kept separate from
+// streamLine for systemTaskStartedLine's reason, and TestStreamLine_StaysSegmentationOnly
+// enforces that boundary.
+//
+// A THIRD TARGET ON THE SAME LINE, beside resultLine and resultStopLine, and the
+// reason is the failure isolation resultStopLine's doc argues — held now in three
+// directions rather than two. This key's payload is an ARRAY whose element shape
+// claude controls; folded into either sibling, a hostile one would ALSO erase
+// modelUsage or terminal_reason, and a hostile modelUsage would erase the denials the
+// daemon could otherwise recover. Three targets fail independently, and none can
+// disturb the turn boundary, which comes from the already-decoded streamLine. That
+// three-way independence is AC 3 in full.
+//
+// The captured line carries twenty-two keys; one is declared.
+type resultDenialsLine struct {
+	PermissionDenials []resultDenialEntry `json:"permission_denials"`
+}
+
+// resultDenialEntry is one element of that array. Every captured entry carries
+// EXACTLY three keys — tool_name, tool_use_id, tool_input — measured 2026-09-08
+// across every committed capture that reports a denial, per emitPermissionDenied's
+// rule that the mapping comes from captures and never from a hand-built payload.
+//
+// TWO ARE DECLARED, AND tool_input IS THE REFUSAL THIS SHAPE IS ABOUT. It is the
+// tool's full input — a shell command in every captured entry, which may carry
+// whatever an operator typed — and it is the only one of the three the marker does
+// not already have from the system/permission_denied line's mapping. The client
+// already holds it from the `tool_use` frame for the same tool_use_id, so decoding it
+// here would buy a second copy of something nothing reads, which is how a field
+// leaks later. Absence from the DECODE TARGET is the stronger guarantee, exactly as
+// systemPermissionDeniedLine states for session_id and uuid: a field that is never
+// declared cannot leak.
+//
+// Both are plain strings, so an entry of any other shape — a number, an array, an
+// object whose values are not strings — fails the WHOLE decode and recovers nothing,
+// which is the fail-closed direction systemPermissionDeniedLine takes for the same
+// reason.
+type resultDenialEntry struct {
+	ToolName  string `json:"tool_name"`
+	ToolUseID string `json:"tool_use_id"`
 }
 
 // assistantErrorLine is the decoded API-error category of one `assistant` line
@@ -3298,8 +3416,24 @@ func (p *Parser) consumeLine(line []byte) {
 		p.thinkingSinceEmit = 0
 		errorCategory := p.assistantErrorCategory
 		p.assistantErrorCategory = ""
+		// THE FOURTH FIELD'S RESET IS THE THIRD THAT READS-AND-CLEARS IN ONE STEP
+		// (#2234), on the category's rule above and for its reason: the clear stays at
+		// this one point AND ahead of the emit while the value still reaches the arm
+		// that needs it. Unconditional, like its three neighbours, so a cancelled turn
+		// carries no announced id into the next one — and the direction that matters
+		// here is that a residual would SUPPRESS a later marker rather than publish a
+		// wrong one, which is argued at the field.
+		announced := p.deniedThisTurn
+		p.deniedThisTurn = nil
 		windows, droppedWindows := decodeModelWindows(line)
 		isError, terminalReason := decodeStopShape(line)
+		// ORDERED BEFORE THE TurnEnd BELOW, which is AC 1's real content rather than a
+		// detail of it: a client closes the turn on that event, so a marker emitted
+		// after it would arrive for a turn already finished — #2232's defect restored
+		// under a different name. The call sits BELOW the resets with the two decodes
+		// above it, so no outcome of any of the three can reorder, duplicate or
+		// suppress the boundary.
+		p.emitRecoveredDenials(line, announced)
 		p.emit(turnevent.TurnEnd{
 			// resultTurnEndReason reads the UNBOUNDED subtype, deliberately: the cap
 			// governs what is PUBLISHED, and routing the classification through it
@@ -3678,6 +3812,24 @@ func (p *Parser) emitPermissionDenied(line []byte) bool {
 	decisionReasonType := dropField(dl.DecisionReasonType, "decision_reason_type", maxTaskFieldID)
 	decisionReason := cutField(dl.DecisionReason, "decision_reason", maxDenialProse)
 
+	// The ONE write site of the turn's announced-id set (#2234). The value recorded is
+	// the one PUBLISHED — after dropField, never dl.ToolUseID — so an id too long to
+	// carry on the event is also too long to remember, and the set inherits
+	// maxTaskFieldID's bound without restating it. An emptied or absent id records
+	// nothing: it is no join key, so it could only conflate every id the daemon
+	// dropped into one entry that suppressed all of them.
+	//
+	// Recorded BEFORE the emit and unconditionally on the emitting path, so no
+	// ordering between the two can leave a marker published under an id the set does
+	// not hold. Growth stops at maxTurnDenials — see that constant for why a full set
+	// suppresses recovery rather than evicting.
+	if toolCallID != "" && len(p.deniedThisTurn) < maxTurnDenials {
+		if p.deniedThisTurn == nil {
+			p.deniedThisTurn = make(map[string]struct{}, 1)
+		}
+		p.deniedThisTurn[toolCallID] = struct{}{}
+	}
+
 	p.emit(turnevent.ToolCallDenied{
 		ToolName:           toolName,
 		ToolCallID:         toolCallID,
@@ -3689,6 +3841,132 @@ func (p *Parser) emitPermissionDenied(line []byte) bool {
 		DroppedFields:   dropped,
 	})
 	return true
+}
+
+// recoveredDenialsCutMsg is the Debug message the cut site emits, as a literal so a
+// test asserting the record's attribute set is closed can find it by message rather
+// than by position — compactingEndedMsg's shape and its reason.
+const recoveredDenialsCutMsg = "streamsup: capping result permission_denials"
+
+// emitRecoveredDenials reads the `result` line's permission_denials array and emits
+// one turnevent.ToolCallDenied for each entry that no system/permission_denied line
+// announced this turn (#2234). announced is the turn's id set, read off the parser
+// and cleared by the caller before this runs.
+//
+// WHY THE RECOVERY EXISTS AT ALL is measured rather than a hedge against a vendor
+// sentence. Across every committed capture that reports a denial (2026-09-08, at
+// 6e6f926e), the five bypass_approval_argv_v2.1.239_* arms — launched with
+// --permission-prompt-tool, which is how cmd/pyry/mcp_config.go launches claude in
+// PRODUCTION — carry nine denials in `result` and ZERO permission_denied lines. So on
+// the daemon's own posture #2232's mapping reports nothing at all for a blocked call,
+// and this arm is the only thing that makes one reach the client there.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes handed down by consumeLine's
+// `result` arm — never a nested field, and that is emitPermissionDenied's whole
+// forgery argument held for a second entry point. streamLine's doc states the
+// property: control shapes are read from the top level only and nested content is
+// never re-scanned, so a tool result whose text is literally a `result` line cannot
+// mint a denial.
+//
+// NOTHING IS LOGGED FROM CLAUDE'S BYTES on any path, and the decode error in
+// particular is DISCARDED rather than logged, for decodeModelWindows' reason:
+// encoding/json QUOTES the offending input into its error text, so `"err", err` would
+// route claude's own tool names and ids into the daemon log through a channel no
+// per-attribute check can see. The one Debug below carries a single daemon-computed
+// integer.
+//
+// THE CUT IS REPORTED IN A LOG RATHER THAN ON THE EVENT, which departs from
+// emitBackgroundTaskRoster — the bound this follows — and the departure is stated
+// rather than left to be noticed. That arm reports its count on
+// BackgroundTaskRoster.DroppedTasks because it has an event to carry one; here every
+// event is a per-entry marker and a count belongs to none of them, while a field for
+// it would widen turnevent and protocol for a number no consumer acts on. What is
+// logged is the LENGTH of input the daemon refused, never any of it — the same class
+// as the oversized-partial-line drop's "bytes". The roster's own refusal to log a
+// count is not contradicted: that one covers its UNDECODABLE path, where nothing
+// decoded and the length would be the only thing said about a line.
+//
+// FOUR OUTCOMES PER ENTRY, and only the first two cost the client anything:
+//
+//   - id empty, or over maxTaskFieldID → dropped, counted. The id is the client's
+//     join key (turnevent.ToolCallDenied.ToolCallID) and a recovered marker carries no
+//     prose to stand on instead, so an unattributable one is strictly worse than none.
+//   - beyond maxTurnDenials → dropped, counted, from the TAIL: claude's order is
+//     preserved because no ranking is invented, emitBackgroundTaskRoster's rule.
+//   - already announced → SUPPRESSED, and deliberately not counted. It is the correct
+//     outcome rather than a loss, and folding it into the cut report would make the
+//     ordinary line-bearing posture look like it was overflowing.
+//   - otherwise → one marker, carrying the two fields the entry has and empty prose.
+func (p *Parser) emitRecoveredDenials(line []byte, announced map[string]struct{}) {
+	// A set at its cap no longer proves it holds every id this turn announced, so
+	// recovering could publish a SECOND marker for a call already reported. Going
+	// silent instead is the fail-closed direction and costs nothing where it matters —
+	// see maxTurnDenials.
+	if len(announced) >= maxTurnDenials {
+		return
+	}
+	var dl resultDenialsLine
+	if err := json.Unmarshal(line, &dl); err != nil {
+		return
+	}
+
+	// The COUNT bound runs before the loop and truncates from the TAIL, which is
+	// emitBackgroundTaskRoster's shape and its reason: claude's order is preserved
+	// because no ranking is invented, its ordering semantics being unobserved.
+	entries := dl.PermissionDenials
+	var dropped int
+	if len(entries) > maxTurnDenials {
+		dropped = len(entries) - maxTurnDenials
+		entries = entries[:maxTurnDenials]
+	}
+
+	// recovered is the ids this loop has already emitted, so an array naming one id
+	// twice mints one marker rather than two — the same "no second marker per id"
+	// property announced gives across the two paths, held within this one. A SECOND
+	// set rather than adding to announced: that map is the parser's own state,
+	// cleared-off but still the caller's value, and a helper that mutates what it was
+	// handed is a side effect nothing here needs. Lazily allocated, so the ordinary
+	// one-entry array allocates nothing.
+	var recovered map[string]struct{}
+	for _, entry := range entries {
+		if entry.ToolUseID == "" || len(entry.ToolUseID) > maxTaskFieldID {
+			dropped++
+			continue
+		}
+		if _, ok := announced[entry.ToolUseID]; ok {
+			continue
+		}
+		if _, ok := recovered[entry.ToolUseID]; ok {
+			continue
+		}
+		var droppedFields []string
+		// The name DROPS rather than cuts, on turnevent.ToolCallDenied.ToolName's
+		// reasoning: a consumer switches on it against claude's tool set, so a cut name
+		// matches nothing while still looking like a tool. The report uses the DAEMON's
+		// field name, as emitPermissionDenied's does.
+		toolName := entry.ToolName
+		if len(toolName) > maxTaskFieldID {
+			toolName = ""
+			droppedFields = append(droppedFields, "tool_name")
+		}
+		p.emit(turnevent.ToolCallDenied{
+			ToolName:   toolName,
+			ToolCallID: entry.ToolUseID,
+			// Message, DecisionReasonType and DecisionReason are left EMPTY and nothing
+			// is synthesized into them. The entry says only that the call was refused;
+			// inventing prose here would be the daemon speaking in claude's voice about a
+			// denial claude described nowhere. TruncatedFields stays nil for the same
+			// reason — no value on this path is cut, so none can be reported as cut.
+			DroppedFields: droppedFields,
+		})
+		if recovered == nil {
+			recovered = make(map[string]struct{}, 1)
+		}
+		recovered[entry.ToolUseID] = struct{}{}
+	}
+	if dropped > 0 {
+		p.log.Debug(recoveredDenialsCutMsg, "dropped", dropped)
+	}
 }
 
 // systemPermissionDeniedLine is the decoded payload of one system/permission_denied

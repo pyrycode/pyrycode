@@ -168,28 +168,40 @@ func capturedDenialLines(t *testing.T, arm string) []json.RawMessage {
 	return lines
 }
 
-// replayDenialCapture feeds every line of one arm through a FRESH parser each and
-// returns the denials it emitted, beside the count of turnevent.Unrecognized events
-// the same replay produced.
+// replayDenialCapture feeds every line of one arm through ONE parser, in the order
+// claude wrote them, and returns the denials it emitted beside the count of
+// turnevent.Unrecognized events the same replay produced.
 //
-// A fresh parser per line is licensed by the documented turn-statelessness
-// (maxTaskRosterEntries): the only cross-line state is the partial-line buffer,
-// which a complete line never uses. It is also what makes each denial's mapping
-// independent of every line before it.
+// CORRECTED 2026-09-08 (#2234): this used a FRESH parser per line, licensed by a
+// turn-statelessness that was already only mostly true and is now false in a way
+// this replay is specifically about. The parser holds four pieces of cross-line
+// state, and one of them — deniedThisTurn — is the set that stops a denial being
+// reported twice when its `result` line names it again. Every arm here carries
+// exactly that pairing for every denial, so a per-line parser reported all seven
+// twice while claiming to replay claude's stream. A replay that cannot express the
+// state the lines are about is not a replay, and the counts it produced were an
+// artifact of the harness rather than a measurement of the mapping.
+//
+// One parser is also simply what production does: cmd/pyry builds one per session
+// and streamsup rebinds it across respawns, so this now matches the shape the bytes
+// were recorded from rather than a shape convenient to assert.
 //
 // The unrecognized count is returned rather than asserted here so one caller can
-// pin it as the thing this ticket CHANGED — see
-// TestParser_DenialCaptureCostsNoUnrecognizedRow.
+// pin it as the thing #2232 CHANGED — see TestParser_DenialCaptureCostsNoUnrecognizedRow.
 func replayDenialCapture(t *testing.T, arm string) (denials []turnevent.ToolCallDenied, unrecognized int) {
 	t.Helper()
+	sink := func(ev turnevent.Event) {
+		switch e := ev.(type) {
+		case turnevent.ToolCallDenied:
+			denials = append(denials, e)
+		case turnevent.Unrecognized:
+			unrecognized++
+		}
+	}
+	p := NewParser(sink, discardLogger())
 	for _, line := range capturedDenialLines(t, arm) {
-		for _, ev := range collectEvents(string(line)) {
-			switch e := ev.(type) {
-			case turnevent.ToolCallDenied:
-				denials = append(denials, e)
-			case turnevent.Unrecognized:
-				unrecognized++
-			}
+		if _, err := p.Write(append(bytes.Clone(line), '\n')); err != nil {
+			t.Fatalf("%s: Write err = %v, want nil", denialCapturePath(arm), err)
 		}
 	}
 	return denials, unrecognized
@@ -398,5 +410,62 @@ func TestParser_DenialCaptureCostsNoUnrecognizedRow(t *testing.T) {
 					denialCapturePath(arm), len(denials), denialCapturePinnedCounts[arm])
 			}
 		})
+	}
+}
+
+// TestParser_DenialCaptureRecoversNothingItAlreadyAnnounced is #2234's AC 2 proven
+// against claude's own bytes rather than against a hand-built line.
+//
+// The four arms are the ideal witness for it and cost nothing to reuse: every denial
+// they carry appears TWICE — once as its own system/permission_denied line and again
+// as an entry in the `result` line that ends the same turn — which is exactly the
+// double report the per-turn id set exists to collapse. Without the suppression each
+// of the seven would be published twice here.
+//
+// The counts alone would catch that, because the pins above are strict equalities,
+// but only INCIDENTALLY: a reader would have to know the captures carry both shapes
+// to see why. This test says so, and it separates the two paths by the one thing that
+// distinguishes them — a recovered marker cannot carry claude's prose, and every
+// captured line carries a message. A count that matched while the recovery had
+// displaced the line's mapping would still redden here.
+//
+// The family that actually EXERCISES the recovery, bypass_approval_argv_v2.1.239_*,
+// has no reader in this package and deliberately gets none: capturedLines' docblock
+// forbids growing a reader a path parameter, so a fifth family means a fifth reader,
+// and that is its own slice. AC 1 is proven on hand-built lines in
+// result_denial_recovery_test.go.
+func TestParser_DenialCaptureRecoversNothingItAlreadyAnnounced(t *testing.T) {
+	t.Parallel()
+
+	proven := 0
+	for _, arm := range denialCaptureArms {
+		captured := capturedDenialLinesOnly(t, arm)
+		denials, _ := replayDenialCapture(t, arm)
+		if len(denials) != len(captured) {
+			t.Errorf("%s: replaying the record produced %d markers for %d captured denial lines. "+
+				"The record's result lines name every one of these ids again, so a surplus is a "+
+				"recovered marker for a call the line already reported",
+				denialCapturePath(arm), len(denials), len(captured))
+			continue
+		}
+		for i, got := range denials {
+			// Every captured line carries a message, so an empty one here would mean the
+			// recovery had displaced the line's own mapping rather than been suppressed by
+			// it — the same discrimination the hand-built AC 2 row makes.
+			if captured[i].Message == "" {
+				t.Fatalf("%s: captured denial %d carries no message, so the check below would "+
+					"pass on a recovered marker", denialCapturePath(arm), i)
+			}
+			if got.Message != captured[i].Message {
+				t.Errorf("%s: marker %d carries %d bytes of message, want the line's %d — a "+
+					"prose-less marker here is a recovered one standing in for the line's",
+					denialCapturePath(arm), i, len(got.Message), len(captured[i].Message))
+			}
+			proven++
+		}
+	}
+	if proven != 7 {
+		t.Fatalf("checked %d markers, want 7 — the ticket's measurement; a suppression claim over "+
+			"fewer proves less than it says", proven)
 	}
 }
