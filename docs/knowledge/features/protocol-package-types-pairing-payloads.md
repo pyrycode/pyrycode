@@ -14,7 +14,17 @@ const MaxDeviceNameBytes = 128
 type MintPairingPayload struct {
     DeviceName string `json:"device_name"` // no omitempty
 }
+```
 
+`MaxDeviceNameBytes` bounds `MintPairingPayload.DeviceName` and, since #2219, a second
+consumer: `RegisterPushTokenPayload.DeviceName`, checked in the handler rather than at
+decode — see [`relay-package-handlers.md` § Display-safety
+gate](relay-package-handlers.md#display-safety-gate-on-device_name-and-platform-2219). The
+constant's placement (here, not beside `RegisterPushTokenPayload` in `push.go`) means a
+reader of that type alone cannot discover from the type itself that its `DeviceName` is
+bounded — unlike `MaxWorkspaceLabelBytes`, which sits beside the payload it bounds.
+
+```go
 type PairingMintedPayload struct {
     Pairing string `json:"pairing"` // opaque pair.Encode string
 }

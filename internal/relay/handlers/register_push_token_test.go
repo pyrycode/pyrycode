@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -467,5 +468,327 @@ func TestRegisterPushToken_MalformedPayload_EmitsProtocolMalformed(t *testing.T)
 
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("expected registry file to NOT exist after malformed reject; stat err = %v", err)
+	}
+}
+
+// pushStoredName, pushStoredPlatform and pushStoredPush are the seeded triple every
+// display-safety test below asserts is STILL on the device after a reject. They
+// are deliberately distinct from testDeviceName / testPlatform / testPushToken so
+// a mutation that wrote the payload's values through would be visible rather than
+// coincidentally equal to what was already there.
+const (
+	pushStoredName     = "seeded-name"
+	pushStoredPlatform = "apns"
+	pushStoredPush     = "apns-token-seed"
+)
+
+// assertRejectedNoWrite is the shared assertion for every display-safety reject:
+// the reply is a non-retryable protocol.malformed error, the seeded device is
+// unmutated in memory, and devices.json was never created.
+//
+// IT ALSO ASSERTS THE MESSAGE DOES NOT ECHO THE REFUSED VALUE, which is the
+// on-the-wire half of this ticket's no-leak rule and the reason the check is a
+// helper rather than four copies: a reply that quoted the bytes would hand a
+// display-forgery payload to whatever renders the error, which is the hazard the
+// gate exists to stop. It returns the message so a caller can compare messages
+// ACROSS branches without this helper needing to know the constants.
+func assertRejectedNoWrite(t *testing.T, env protocol.Envelope, reg *devices.Registry, path, refused string) string {
+	t.Helper()
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeProtocolMalformed {
+		t.Errorf("Code = %q, want %q", payload.Code, protocol.CodeProtocolMalformed)
+	}
+	if payload.Retryable {
+		t.Errorf("Retryable = true, want false (the phone re-sends this frame on every connect)")
+	}
+	if payload.Message == "" {
+		t.Error("Message is empty, want a static explanation")
+	}
+	if refused != "" && strings.Contains(payload.Message, refused) {
+		t.Errorf("Message %q echoes the refused value; it must be static", payload.Message)
+	}
+
+	got, ok := reg.FindByTokenHash(devices.HashToken(testPlainToken))
+	if !ok {
+		t.Fatal("seeded device missing from registry after reject")
+	}
+	if got.Name != pushStoredName || got.Platform != pushStoredPlatform || got.PushToken != pushStoredPush {
+		t.Errorf("device mutated by a rejected frame: Name=%q Platform=%q PushToken=%q, want %q/%q/%q",
+			got.Name, got.Platform, got.PushToken, pushStoredName, pushStoredPlatform, pushStoredPush)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("expected registry file to NOT exist after a rejected frame; stat err = %v", err)
+	}
+	return payload.Message
+}
+
+// seededDevice is the fixture every display-safety test starts from: a paired
+// device already carrying a full, safe (Platform, PushToken, Name) triple.
+func seededDevice() devices.Device {
+	return devices.Device{
+		TokenHash: devices.HashToken(testPlainToken),
+		Name:      pushStoredName,
+		Platform:  pushStoredPlatform,
+		PushToken: pushStoredPush,
+	}
+}
+
+// TestRegisterPushToken_UnsafeFieldValues_EmitProtocolMalformedNoWrite is the
+// ticket's central table: every refused character class, on each of the two
+// client-authored fields the gate covers.
+//
+// THE REFUSED SET IS mintLabelIsDisplaySafe's, and the rows pin its three EDGES
+// rather than only its interior, because an off-by-one on any of them is the
+// realistic way this predicate breaks: U+001F/U+0020 (top of C0), U+007F (DEL) and
+// U+009F (top of C1) are each refused here while their safe neighbours are
+// admitted by TestRegisterPushToken_AdmissibleFieldValues_StoredVerbatim.
+//
+// Every value embeds the character MID-STRING, so a check that only inspected a
+// prefix or a suffix would pass the table while leaving the injection possible.
+//
+// The ESC rows carry a BARE ESC, deliberately not the ESC-then-open-bracket that
+// starts a real ANSI run: cmd/substrate-guard bans that source sequence in every
+// .go file outside its two-path allowlist, with no per-line exemption. The gate
+// refuses ESC as a C0 control on its own, so the CSI tail exercised no extra
+// branch — do not "complete" these values.
+func TestRegisterPushToken_UnsafeFieldValues_EmitProtocolMalformedNoWrite(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		field string // which payload field carries the hostile value
+		value string
+	}{
+		{"device_name NUL", "device_name", "kitchen\x00pad"},
+		{"device_name TAB", "device_name", "kitchen\tpad"},
+		{"device_name LF forges a log line", "device_name", "kitchen\nfake log line"},
+		{"device_name CR", "device_name", "kitchen\rfake log line"},
+		{"device_name ESC", "device_name", "kitchen\x1bpad"},
+		{"device_name U+001F top of C0", "device_name", "kitchen\x1fpad"},
+		{"device_name DEL", "device_name", "kitchen\x7fpad"},
+		{"device_name U+0085 NEL in C1", "device_name", "kitchen\u0085pad"},
+		{"device_name U+009F top of C1", "device_name", "kitchen\u009fpad"},
+		{"platform LF", "platform", "fcm\nfake log line"},
+		{"platform ESC", "platform", "fcm\x1bpad"},
+		{"platform DEL", "platform", "fcm\x7f"},
+		{"platform U+009F", "platform", "fcm\u009f"},
+	}
+
+	// Messages are collected per field so the per-branch-message design is pinned
+	// without naming a literal: rows sharing a field must answer identically, and
+	// the two fields must answer differently. A single shared "malformed" string
+	// would satisfy every other assertion in this test and fail here.
+	byField := map[string]string{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg, path := freshRegistryWithDevice(t, seededDevice())
+			snapshot := seededDevice()
+			c, recv := newTestConn(t, &snapshot)
+
+			p := protocol.RegisterPushTokenPayload{
+				Platform:   testPlatform,
+				Token:      testPushToken,
+				DeviceName: testDeviceName,
+			}
+			switch tc.field {
+			case "device_name":
+				p.DeviceName = tc.value
+			case "platform":
+				p.Platform = tc.value
+			}
+
+			h := RegisterPushToken(reg, path, testLogger(t))
+			if err := h(context.Background(), c, makeRequest(t, p)); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+			msg := assertRejectedNoWrite(t, env, reg, path, tc.value)
+
+			if prev, seen := byField[tc.field]; seen && prev != msg {
+				t.Errorf("message for field %q = %q, want %q (rows sharing a field share a message)", tc.field, msg, prev)
+			}
+			byField[tc.field] = msg
+		})
+	}
+
+	if a, b := byField["device_name"], byField["platform"]; a != "" && b != "" && a == b {
+		t.Errorf("device_name and platform share the message %q; each reject branch carries its own", a)
+	}
+}
+
+// TestRegisterPushToken_DeviceNameByteBound_RefusesOverAcceptsAt pins
+// protocol.MaxDeviceNameBytes at this frame, in BYTES rather than runes, and pins
+// that the answer is a rejected frame rather than a truncated name.
+//
+// The at-bound row runs the whole accept path — reload, save, reloaded-value
+// check — so a guard written with >= instead of > reddens on a stored value and
+// not merely on a reply code.
+func TestRegisterPushToken_DeviceNameByteBound_RefusesOverAcceptsAt(t *testing.T) {
+	t.Parallel()
+	atBound := strings.Repeat("n", protocol.MaxDeviceNameBytes)
+	overBound := atBound + "n"
+
+	t.Run("over bound is refused and nothing is written", func(t *testing.T) {
+		t.Parallel()
+		reg, path := freshRegistryWithDevice(t, seededDevice())
+		snapshot := seededDevice()
+		c, recv := newTestConn(t, &snapshot)
+
+		h := RegisterPushToken(reg, path, testLogger(t))
+		req := makeRequest(t, protocol.RegisterPushTokenPayload{
+			Platform:   testPlatform,
+			Token:      testPushToken,
+			DeviceName: overBound,
+		})
+		if err := h(context.Background(), c, req); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+		env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+		assertRejectedNoWrite(t, env, reg, path, overBound)
+	})
+
+	t.Run("exactly at bound is stored whole", func(t *testing.T) {
+		t.Parallel()
+		reg, path := freshRegistryWithDevice(t, seededDevice())
+		if err := reg.Save(path); err != nil {
+			t.Fatalf("Save seed: %v", err)
+		}
+		snapshot := seededDevice()
+		c, recv := newTestConn(t, &snapshot)
+
+		h := RegisterPushToken(reg, path, testLogger(t))
+		req := makeRequest(t, protocol.RegisterPushTokenPayload{
+			Platform:   testPlatform,
+			Token:      testPushToken,
+			DeviceName: atBound,
+		})
+		if err := h(context.Background(), c, req); err != nil {
+			t.Fatalf("handler: %v", err)
+		}
+		assertEnvelopeShape(t, recv(), protocol.TypeAck)
+
+		back, err := devices.Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		got, ok := back.FindByTokenHash(devices.HashToken(testPlainToken))
+		if !ok {
+			t.Fatal("device missing from reloaded registry")
+		}
+		if got.Name != atBound {
+			t.Errorf("stored Name is %d bytes, want the %d supplied verbatim (never truncated)", len(got.Name), len(atBound))
+		}
+	})
+}
+
+// TestRegisterPushToken_UnsafeNameMatchingStored_RefusedNotDeduped is the
+// ORDERING test, and the one this ticket's third acceptance criterion exists for.
+//
+// The seeded device already carries an unsafe name — the pre-gate residual, a
+// value stored before any check existed — and the payload repeats it verbatim, so
+// the dedupe comparison would match on all three fields. A guard placed AFTER that
+// comparison answers ack and the unsafe value keeps its place in the registry and
+// in every log that names it; a guard placed BEFORE refuses. Nothing else in the
+// suite can tell those two implementations apart.
+func TestRegisterPushToken_UnsafeNameMatchingStored_RefusedNotDeduped(t *testing.T) {
+	t.Parallel()
+	const unsafe = "kitchen\nfake log line"
+	d := devices.Device{
+		TokenHash: devices.HashToken(testPlainToken),
+		Name:      unsafe,
+		Platform:  testPlatform,
+		PushToken: testPushToken,
+	}
+	reg, path := freshRegistryWithDevice(t, d)
+	snapshot := d
+	c, recv := newTestConn(t, &snapshot)
+
+	h := RegisterPushToken(reg, path, testLogger(t))
+	req := makeRequest(t, protocol.RegisterPushTokenPayload{
+		Platform:   testPlatform,
+		Token:      testPushToken,
+		DeviceName: unsafe,
+	})
+	if err := h(context.Background(), c, req); err != nil {
+		t.Fatalf("handler: %v", err)
+	}
+
+	env := assertEnvelopeShape(t, recv(), protocol.TypeError)
+	var payload protocol.ErrorPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal error payload: %v", err)
+	}
+	if payload.Code != protocol.CodeProtocolMalformed {
+		t.Errorf("Code = %q, want %q — an unsafe value that matches the stored one must be refused, not deduped", payload.Code, protocol.CodeProtocolMalformed)
+	}
+	if strings.Contains(payload.Message, unsafe) {
+		t.Errorf("Message %q echoes the refused value", payload.Message)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("expected registry file to NOT exist after a rejected frame; stat err = %v", err)
+	}
+}
+
+// TestRegisterPushToken_AdmissibleFieldValues_StoredVerbatim is the other half of
+// the character-set boundary: the neighbours of every refused edge, plus the two
+// characters a NEARBY predicate refuses and this one must not.
+//
+// internal/sessions' admissibleClientField shares this loop but additionally
+// refuses a double quote and invalid UTF-8, for reasons its own block states about
+// a system prompt it renders. Copying that function instead of
+// mintLabelIsDisplaySafe would pass every reject row above and redden exactly
+// here, which is why a quote has a row.
+//
+// STORED VERBATIM means byte-for-byte: no truncation, no escaping, no repair. The
+// assertion reads the value back off disk rather than out of memory so an escape
+// introduced by the persist path would redden too.
+func TestRegisterPushToken_AdmissibleFieldValues_StoredVerbatim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"space, the neighbour below U+001F", "kitchen pad"},
+		{"tilde U+007E, the neighbour below DEL", "kitchen~pad"},
+		{"U+00A0, the neighbour above the C1 range", "kitchen\u00a0pad"},
+		{"a double quote, which admissibleClientField refuses and this must not", `kitchen "pad"`},
+		{"a multi-byte rune", "keittiö — Juhana's iPad 📱"},
+		{"the empty string, meaning the client named no device", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg, path := freshRegistryWithDevice(t, seededDevice())
+			if err := reg.Save(path); err != nil {
+				t.Fatalf("Save seed: %v", err)
+			}
+			snapshot := seededDevice()
+			c, recv := newTestConn(t, &snapshot)
+
+			h := RegisterPushToken(reg, path, testLogger(t))
+			req := makeRequest(t, protocol.RegisterPushTokenPayload{
+				Platform:   testPlatform,
+				Token:      testPushToken,
+				DeviceName: tc.value,
+			})
+			if err := h(context.Background(), c, req); err != nil {
+				t.Fatalf("handler: %v", err)
+			}
+			assertEnvelopeShape(t, recv(), protocol.TypeAck)
+
+			back, err := devices.Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got, ok := back.FindByTokenHash(devices.HashToken(testPlainToken))
+			if !ok {
+				t.Fatal("device missing from reloaded registry")
+			}
+			if got.Name != tc.value {
+				t.Errorf("stored Name = %q, want %q verbatim", got.Name, tc.value)
+			}
+		})
 	}
 }
