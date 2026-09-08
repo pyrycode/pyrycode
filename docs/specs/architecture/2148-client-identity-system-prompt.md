@@ -554,3 +554,35 @@ resolver happens to respect ctx. An explicit `ctx.Err()` check now answers befor
 the call, so the totality holds for any resolver — a test double or a future second
 implementation included. This delivers the § Error handling table as written; it
 does not change it.
+
+### 2026-09-08 — rework 1: two repo-wide lint gates the hostile-input tables tripped
+
+No design change. All three verifier findings were confined to two test files and
+one doc comment; the production logic is untouched by this pass.
+
+**1. The hostile rows spell their control sequences, and the repo bans two of the
+spellings.** The `"C1 control in name"` row carried a raw U+0085 byte pair, which
+staticcheck refuses (ST1018), and both the sessions and relay tables carried the
+CSI introducer in its hex-escaped source form, which `cmd/substrate-guard` refuses
+in *both* of its spellings — hex-escaped and raw — anywhere in the tree, comments
+included. The C1 row now uses the equivalent `\u`-escape and each table composes
+its CSI run at run time through a `csiRun` variable. Both are byte-identical to
+what they replaced, so every row asserts exactly what it did before. Allowlisting
+the two files was rejected: the guard's allowlist is per-file and wholesale, so
+exempting a file to let one row spell an escape would exempt every future literal
+in it too. The awkwardness is real and worth naming — these rows exist to prove
+such sequences are *refused* — but a repo-wide guard a test may opt out of is not
+a guard.
+
+**2. `handleActiveConns`' doc contradicted the `ActiveConn` doc § Design amended.**
+It still claimed the returned slice holds "only conn-id strings + the negotiated
+interactive bool (non-secret routing / decision data)", which the two new fields
+made false. On a ticket whose only control against a `%+v` log leak *is* that
+documented obligation, a second doc restating the superseded claim undercuts it.
+Amended to point at `ActiveConn`'s doc rather than to restate the obligation, so
+the rule stays written in exactly one place.
+
+**Gate note.** `make check` runs `staticcheck` before `substrate-guard`, so the
+first red hid the second entirely. Every tier was therefore re-run individually
+here — vet, staticcheck, substrate-guard, cite-guard, docs-guard — rather than
+only the tier that had failed.

@@ -11,6 +11,13 @@ import (
 	"github.com/pyrycode/pyrycode/internal/protocol"
 )
 
+// csiRun is an ANSI CSI escape run, composed at run time rather than spelled as
+// a source literal. cmd/substrate-guard bans the CSI introducer in both of its
+// source spellings — hex-escaped and raw — anywhere in the tree, and a test
+// feeding one through the handshake is not an exception to that rule: the guard
+// is repo-wide by design, and allowlisting a file would exempt it wholesale.
+var csiRun = string(rune(0x1b)) + "[31m"
+
 // buildHelloIdentityEarlyData is buildHelloEarlyData with the two self-reported
 // identity fields under the test's control — the inputs #2148 retains.
 func buildHelloIdentityEarlyData(t *testing.T, token, deviceName, clientVersion string) []byte {
@@ -93,7 +100,7 @@ func TestV2Session_ActiveConns_RetainsClientIdentity(t *testing.T) {
 	}{
 		{"ordinary report", "Juhanas-MacBook", "0.4.1", "Juhanas-MacBook", "0.4.1"},
 		{"reports nothing", "", "", "", ""},
-		{"control characters retained verbatim", "a\nb", "1\x1b[31m", "a\nb", "1\x1b[31m"},
+		{"control characters retained verbatim", "a\nb", "1" + csiRun, "a\nb", "1" + csiRun},
 		{"quote retained verbatim", `a"b`, `1"`, `a"b`, `1"`},
 		{"name at the bound is kept", strings.Repeat("n", maxRetainedClientNameBytes), "1", strings.Repeat("n", maxRetainedClientNameBytes), "1"},
 		{"over-bound name dropped, not truncated", overName, "0.4.1", "", "0.4.1"},

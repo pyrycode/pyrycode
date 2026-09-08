@@ -1772,12 +1772,18 @@ func (m *V2SessionManager) ActiveConns(ctx context.Context) []ActiveConn {
 // map, a torn s.state, or a torn s.interactive (set before V2StateOpen on the
 // same goroutine).
 //
-// The returned slice is freshly allocated and owned by the caller; it holds
-// only conn-id strings + the negotiated interactive bool (non-secret routing /
-// decision data), never a *V2Session or any key/plaintext bytes. Order is Go's
-// randomized map-iteration order — an unordered set by design: the AC requires
-// no ordering and the broadcast consumer fans out order-independently, so no
-// O(n log n) sort is paid on the single dispatch goroutine.
+// The returned slice is freshly allocated and owned by the caller, and holds no
+// *V2Session and no key or plaintext bytes. It is NOT uniformly daemon-authored
+// routing data, though: alongside the conn-id and the negotiated interactive
+// bool it carries DeviceName and ClientVersion, which the client authored about
+// itself and which nothing in this package validates. See ActiveConn's doc for
+// the obligation that places on a consumer — in particular that neither field
+// may be logged and that the struct must never be formatted wholesale.
+//
+// Order is Go's randomized map-iteration order — an unordered set by design:
+// the AC requires no ordering and the broadcast consumer fans out
+// order-independently, so no O(n log n) sort is paid on the single dispatch
+// goroutine.
 func (m *V2SessionManager) handleActiveConns() []ActiveConn {
 	out := make([]ActiveConn, 0, len(m.sessions))
 	for connID, s := range m.sessions {
