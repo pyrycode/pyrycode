@@ -296,6 +296,35 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			ResultSummary:  resultSummary(e.Content),
 			ResultDetail:   e.ResultDetail,
 		}, true
+	case turnevent.ToolCallDenied:
+		// TURN-SCOPED, unlike the status peers below: tc.TurnID is carried, and only
+		// tc.Seq is ignored. A denial is not a mark in the conversation's history — it
+		// names ONE tool call the client has already seen a tool_use for, and the
+		// captured line order puts it strictly inside the turn that made the call
+		// (assistant/tool_use → system/permission_denied → user/tool_result). A client
+		// joins the three frames on ToolUseID, so they have to agree on the turn too.
+		//
+		// Every string crosses VERBATIM and nothing is re-capped: the producer bounded
+		// all five at CONSTRUCTION (streamsup's maxTaskFieldID / maxDenialProse), so a
+		// second bound here would be a number to keep in step with one that already
+		// holds — the standing terms of every arm in this file.
+		//
+		// The ONE transformation is the id report token. turnevent.ToolCallDenied names
+		// that field tool_call_id, its own field name; this frame carries it as
+		// tool_use_id, the name the tool_use and tool_result frames already use. A token
+		// naming a key the frame does not carry is one a client cannot look up, so the
+		// vocabulary is translated here rather than published broken.
+		return protocol.TypeToolDenied, protocol.ToolDeniedPayload{
+			ConversationID:     tc.ConversationID,
+			TurnID:             tc.TurnID,
+			ToolUseID:          e.ToolCallID,
+			ToolName:           e.ToolName,
+			DecisionReasonType: e.DecisionReasonType,
+			DecisionReason:     e.DecisionReason,
+			Message:            e.Message,
+			TruncatedFields:    deniedReportKeys(e.TruncatedFields),
+			DroppedFields:      deniedReportKeys(e.DroppedFields),
+		}, true
 	case turnevent.TurnEnd:
 		// The three stop-shape fields map straight through, deliberately UNCAPPED
 		// here — ToolUpdate's ResultDetail arm above argues the shape of this
@@ -803,6 +832,39 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// ThoughtChunk and nil/unknown drop (see doc comment).
 		return "", nil, false
 	}
+}
+
+// deniedReportKeys translates one of turnevent.ToolCallDenied's report slices from the
+// DAEMON's field vocabulary into protocol.ToolDeniedPayload's wire keys. Exactly one
+// token differs: that event names the id tool_call_id, its own field name, where the
+// frame carries it as tool_use_id — the name the tool_use and tool_result frames already
+// use for the same identifier. A token naming a key the frame does not carry is one a
+// client cannot look up, which would make the report useless precisely on the join key.
+//
+// nil in, nil out, and that polarity is load-bearing rather than tidy: a nil report says
+// nothing was cut or dropped, and protocol.ToolDeniedPayload has no MarshalJSON, so nil
+// is what reaches the wire as a literal null. An empty non-nil slice would ship [] and
+// tell a phone that claude's cut text is complete.
+//
+// It COPIES unconditionally rather than rewriting in place, and returns a fresh backing
+// array even when no token changed. This is the only arm in this file that rewrites
+// slice CONTENTS, and the same event is also observed by cmd/pyry's history-append path
+// and by eventKind's other call sites; sharing the producer's array would let this
+// function's output become visible to them as a corrupted report. Copying is what makes
+// MapEvent's documented purity true for this variant rather than nearly true.
+func deniedReportKeys(report []string) []string {
+	if report == nil {
+		return nil
+	}
+	out := make([]string, len(report))
+	for i, name := range report {
+		if name == "tool_call_id" {
+			out[i] = "tool_use_id"
+			continue
+		}
+		out[i] = name
+	}
+	return out
 }
 
 // BuildTurnState shapes a turn_state payload for the given conversation and

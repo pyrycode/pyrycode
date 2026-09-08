@@ -274,3 +274,29 @@ the report slices make readable.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+### 2026-09-08 — four stale count sentences in live prose, not three
+
+The ticket names three sentences reading "fifteen" (§ Interactive events,
+§ `session_transition`, § `model_list`) and AC 4 asks for those three. A sweep of the
+file found a **fourth** in live prose — § `slash_command_list` carries
+`session_transition`'s and `model_list`'s sentence verbatim — so correcting only the
+named three would have left the file self-contradicting on the same page, which is the
+condition AC 4 exists to end rather than to enumerate. All four now read "seventeen".
+
+The remaining ten occurrences of "fifteen" are **dated changelog entries** and were
+deliberately left alone: they record what was true when written, and rewriting a dated
+entry to match today's count destroys the record the entry exists to keep.
+
+The count itself was re-derived rather than taken from the ticket, by the recipe AC 4
+names: `#### ` headings from `turn_state` through `model_announced` numbered sixteen
+before this change and seventeen after, verified against the file both times.
+
+Neither Open Question changed the design. Question 1 (section placement) landed as
+planned, after § `tool_result`. Question 2 (whether the emitter arm should
+`transitionTo`) was re-checked against the surrounding arms during implementation and
+confirmed: `startTurnIfNeeded` mints a turn without emitting anything, and only
+`transitionTo` emits a `turn_state`, so omitting it costs the client no addressing and
+avoids claiming a transition the event does not report.

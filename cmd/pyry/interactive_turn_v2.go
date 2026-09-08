@@ -249,6 +249,39 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		e.flushDelta(ctx) // buffered text precedes the tool_result
 		e.transitionTo(ctx, convID, turnbridge.StateResponding)
 		e.emitMapped(ctx, convID, ev)
+	case turnevent.ToolCallDenied:
+		// claude refused a tool call it had already announced (#2233). TURN-SCOPED,
+		// taking ToolStart/ToolUpdate's shape above rather than the status peers' below,
+		// and the reason is the join: this frame names ONE call the client has already
+		// seen a tool_use for, carries that call's tool_use_id, and must land in the
+		// same turn as it. The captured line order puts it strictly between the two
+		// (assistant/tool_use → system/permission_denied → user/tool_result), so
+		// startTurnIfNeeded ordinarily finds the turn the tool_use opened and mints
+		// nothing; it is called anyway so a denial arriving first still addresses a
+		// turn rather than an empty string.
+		//
+		// It deliberately does NOT call transitionTo, which is the one place it departs
+		// from the two arms it otherwise copies. A denial reports no lifecycle change:
+		// the ToolStart before it already set responding, and emitting a second
+		// turn_state would claim a transition this event does not report. turnMarkFor
+		// answers turnMarkNone for the variant and #2232 pinned that with a row in the
+		// turn-mark totality guard, so nothing downstream reads a busy edge off it.
+		//
+		// Flush any pending delta first so buffered text keeps its wire position ahead
+		// of the denial. Like turn_state this flows through emit() and is NOT a
+		// droppable delta (the droppable set is assistant_delta only, #610), so it holds
+		// a queue slot; that is bounded by the producer rather than here — one frame per
+		// permission_denied line, no accumulator and no dedup.
+		//
+		// No capability gate in the arm, and no second bound on claude's five strings.
+		// The interactive grant is filtered once, in emit(), for every frame type; all
+		// five were bounded at construction by streamsup's maxTaskFieldID /
+		// maxDenialProse. Writing either here is how a single gate stops being single.
+		if !e.startTurnIfNeeded(convID) {
+			return
+		}
+		e.flushDelta(ctx)
+		e.emitMapped(ctx, convID, ev)
 	case turnevent.TurnEnd:
 		if !e.inTurn {
 			e.logger.Debug("relay: interactive-turn drop; turn_end outside turn",
@@ -760,6 +793,18 @@ func eventKind(ev turnevent.Event) string {
 		return "api_retry"
 	case turnevent.Compacting:
 		return "compacting"
+	case turnevent.ToolCallDenied:
+		// The variant NAME only, and here the temptation is the widest on this switch:
+		// ToolName and Message are exactly what a log line explaining a denial would
+		// reach for, and Message is claude-authored prose that may quote THE COMMAND
+		// LINE THAT WAS REFUSED. Neither is returned, and neither is the id or either
+		// reason field. The variant is claimed by a Handle case on this lane, so this
+		// file's `interactive_turn.unknown` Debug is not a live call site for it; the
+		// reachable one is the no-cursor drop, which returns before the type switch,
+		// plus the OTHER eventKind sites (acp_turn_stream.go, stream_turn_busy.go,
+		// stream_turn_drain.go), all of which would otherwise read kind=unknown for a
+		// variant the daemon does recognize.
+		return "tool_denied"
 	case turnevent.CompactionBoundary:
 		// The variant NAME only, for the arms below's reason, and the temptation here is
 		// Trigger — claude's own word, and precisely the field a log line explaining a

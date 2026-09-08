@@ -1,0 +1,1 @@
+{"id":914,"type":"tool_denied","ts":"2026-09-08T11:04:09Z","payload":{"conversation_id":"c1","turn_id":"t7","tool_use_id":"toolu_01B3C","tool_name":"Bash","decision_reason_type":"","decision_reason":"","message":"Claude requested permissions to use Bash, but you haven't granted it yet.","truncated_fields":null,"dropped_fields":null}}

@@ -151,6 +151,107 @@ type ToolResultPayload struct {
 	ResultDetail   string `json:"result_detail"`
 }
 
+// ToolDeniedPayload is the body of an Envelope whose Type == TypeToolDenied
+// (docs/protocol-mobile.md § tool_denied, #2233). Binary → phone direction; the wire
+// form of turnevent.ToolCallDenied, which reports that claude REFUSED to run a tool
+// call it had already announced. Turn-scoped like the two frames it joins, so unlike
+// the conversation-scoped status peers below it carries a turn_id.
+//
+// IT IS NOT A WIDER tool_result, AND IT COULD NOT HAVE BEEN. claude states the denial
+// on a line that arrives BEFORE the tool result, so folding it in would need the parser
+// to latch cross-line state keyed by tool_use_id; and #2234's result-line recovery
+// reports denials for calls whose tool_result frame has already shipped, which a field
+// on a sent frame cannot answer. A client joins this row to the tool_use and
+// tool_result carrying the same ToolUseID — the identifier is byte-identical across all
+// three, which is the whole point of publishing it.
+//
+// ToolName IS SPELLED tool_name WHERE ToolUsePayload SPELLS THE SAME VALUE name, and
+// the divergence is deliberate rather than drift. On that frame the tool IS the
+// subject, so an unqualified name is unambiguous; here it is one named thing among
+// several. The binding reason is the report slices below: they name fields by keys THIS
+// frame carries, so the token and the wire key have to be the same string.
+//
+// THE TWO REPORT SLICES ARE THE FRAME'S OWN VOCABULARY, NOT THE DAEMON'S INTERNAL ONE.
+// turnevent.ToolCallDenied names the id tool_call_id — its own field name — and the
+// bridge (internal/turnbridge's deniedReportKeys) rewrites exactly that one token to
+// tool_use_id on the way here. A token naming a key the frame does not carry is one a
+// client cannot look up, which would make the report unusable precisely where it
+// matters most. Every other token already names a key declared below.
+//
+// THE THREE-VALUED READING THE SLICES MAKE DECIDABLE is what they are for, and it is
+// the reason a second slice exists at all. For any field named in either:
+//
+//   - empty and named in NEITHER slice — claude sent nothing.
+//   - empty and named in dropped_fields — the daemon emptied an over-cap value.
+//   - present and named in truncated_fields — the daemon cut claude's text to fit.
+//
+// Without dropped_fields an empty ToolName could not be told from a tool_name claude
+// never sent. RateLimitedPayload.TruncatedFields carries only the first distinction
+// because on that event nothing drops; CompactionBoundaryPayload.Trigger drops with no
+// report because it is the only droppable value there, so an empty trigger is already
+// unambiguous. Here three fields drop, and the ambiguity is real.
+//
+// BOTH SLICES ARE nil WHEN NOTHING FIRED, AND nil REACHES THE WIRE AS null. This type
+// therefore has NO MarshalJSON, and the absence is deliberate: RateLimitedPayload is the
+// precedent, and BackgroundTaskRosterPayload.MarshalJSON's nil→[] means the OPPOSITE and
+// does not generalise. An empty roster is a positive statement; nothing-was-cut is an
+// absence. An allocated [] here would tell a phone that claude's cut text is complete.
+// No omitempty either, per this file's rule, so both keys are always present.
+//
+// SECURITY: Message and DecisionReason are claude-authored PROSE that crossed the
+// subprocess trust boundary — bounded by the daemon (internal/streamsup's
+// maxDenialProse) and NOT sanitized. A rule-based denial may quote THE COMMAND LINE THAT
+// WAS REFUSED, which carries whatever an operator typed, and every captured denial names
+// absolute host paths of the session's allowed working directories. They take
+// UnrecognizedMessagePayload.Raw's rule: render as inert text ATTRIBUTED TO claude, never
+// as the daemon's own finding, and never feed either to an HTML sink, an attribute, a
+// URL, or anything that executes or re-shells it. ToolName and DecisionReasonType are
+// short TOKENS from open sets and take the NARROWER TurnEndPayload.Outcome rule instead —
+// switch on them against known values, treat an unrecognised one as unknown — the same
+// prose-versus-token split CompactingPayload.ErrorText and CompactionBoundaryPayload.Trigger
+// draw next door. Every bound is the producer's, decided at construction, so this struct
+// re-decides no maximum: a second cap here would be a second place the limit is decided
+// and the two could disagree silently. The frame is a REPORT, never a control input —
+// NOTHING IN THE DAEMON KEYS A BEHAVIOUR ON ANY FIELD HERE, which is what keeps a
+// fabricated denial a misleading label rather than an actuator.
+type ToolDeniedPayload struct {
+	ConversationID string `json:"conversation_id"`
+	TurnID         string `json:"turn_id"`
+	// ToolUseID is the refused call, byte-identical to the tool_use and tool_result
+	// frames for the same call. Empty and named in dropped_fields means the daemon
+	// emptied an over-cap id rather than cutting it: a cut join key joins to nothing
+	// while still looking like a real handle, which is strictly worse than an absence
+	// a client can see.
+	ToolUseID string `json:"tool_use_id"`
+	// ToolName is claude's name for the tool it refused ("Bash" in every captured
+	// denial). An OPEN SET carried verbatim; dropped rather than cut when over-cap,
+	// since a consumer matches this token against claude's tool set.
+	ToolName string `json:"tool_name"`
+	// DecisionReasonType is claude's word for WHAT denied the call — "classifier",
+	// "asyncAgent", "mode" and "rule" are the documented values. OBSERVED ABSENT IN
+	// EVERY CAPTURED DENIAL at claude 2.1.239, so empty is the ordinary reading here
+	// rather than the exceptional one; the slices above say which emptiness it is.
+	DecisionReasonType string `json:"decision_reason_type"`
+	// DecisionReason is claude's free-form explanation, absent in every captured
+	// denial exactly as DecisionReasonType is. Cut rather than dropped and reported in
+	// truncated_fields, on Message's reasoning: a cut sentence still reads as what it
+	// is. Carries Message's SECURITY reading verbatim.
+	DecisionReason string `json:"decision_reason"`
+	// Message is claude's rejection text — the prose it also writes into the
+	// tool_result. Cut rather than dropped, reported in truncated_fields.
+	Message string `json:"message"`
+	// TruncatedFields names the fields the daemon CUT to fit their caps, in this
+	// struct's declaration order, under this frame's wire keys: "decision_reason",
+	// "message". nil when nothing was cut, never an empty slice.
+	TruncatedFields []string `json:"truncated_fields"`
+	// DroppedFields names the fields the daemon EMPTIED for exceeding their caps, in
+	// declaration order, under this frame's wire keys: "tool_use_id", "tool_name",
+	// "decision_reason_type" — tool_use_id rather than the daemon-internal
+	// tool_call_id, which is what the bridge's rename exists to guarantee. nil when
+	// nothing was dropped.
+	DroppedFields []string `json:"dropped_fields"`
+}
+
 // TurnEndPayload is the body of an Envelope whose Type == TypeTurnEnd
 // (docs/protocol-mobile.md § turn_end). Binary → phone direction; marks the
 // end of an assistant turn. StopReason carries the
