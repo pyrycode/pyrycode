@@ -491,7 +491,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`assistant_delta`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_use`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`tool_result`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
-| **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
+| **`turn_end`** | binary → phone | no | **New in v2** (interactive, capability-gated). Since #2223 it also carries the **stop shape `claude` itself reported** — `outcome`, `is_error`, `terminal_reason` — beside the unchanged `stop_reason`, so a turn stopped by a turn cap, a budget cap or a context overflow no longer reads as a finished answer. The three are **optional and open-set**, and its first `claude`-authored strings. See [`turn_end`](#turn_end). |
 | **`stall`** | binary → phone | no | **New in v2** (interactive, capability-gated). |
 | **`api_retry`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's live API-error retry state (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`compacting`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's auto-compaction banner (#1074). See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -817,8 +817,19 @@ The number is fixed by the envelope, not by taste. `encoding/json` escapes HTML 
 | `conversation_id` | string | Conversation this turn belongs to. |
 | `turn_id` | string | Identifies the turn that ended. |
 | `stop_reason` | string | Why the turn ended; one of `end_turn`, `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`. These mirror the ACP turn-end reasons. |
+| `outcome` | string | **Optional, open set.** `claude`'s own subtype for the stop — observed values `success`, `error_during_execution`, `error_max_turns`, `error_max_budget_usd`, `error_max_structured_output_retries`. Absent decodes to `""`. |
+| `is_error` | bool | **Optional.** `claude`'s own error flag for the turn. Absent decodes to `false`. **Not derivable from `outcome`** — see below. |
+| `terminal_reason` | string | **Optional, open set.** `claude`'s finer-grained cause beside `outcome` — e.g. `completed`, `max_turns`, `budget_exhausted`, `prompt_too_long`, `hook_stopped`, `aborted_tools`. Absent decodes to `""`. |
 
-ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` is added here per the implementing ticket (#607), following the "spec follows the code" convention (ADR 025 § Consequences).
+ADR 025's base `turn_end` shape is `{conversation_id, turn_id}`; `stop_reason` is added here per the implementing ticket (#607), following the "spec follows the code" convention (ADR 025 § Consequences). The three stop-shape fields are added by #2223 under the same convention.
+
+**The three new fields are optional and open-set, and a client must decode an absent one to the empty value** (`""` / `false`) rather than treating absence as an error. The daemon always emits all three keys, so absence means an older binary; a value the lists above do not name means a newer `claude`. Both are ordinary, and a client that rejects an unrecognised token breaks on `claude`'s next release — `terminal_reason` in particular is explicitly not a closed set.
+
+**`stop_reason` and `outcome` are different fields, and neither is `claude`'s own `stop_reason`.** `stop_reason` is the daemon's two-value classification (`end_turn` | `cancelled` in practice) and is **unchanged by #2223** — byte-identical for every subtype, before and after. `outcome` is `claude`'s token for the same stop. A turn that hit `--max-turns` is `stop_reason: "end_turn"` *and* `outcome: "error_max_turns"`: both are true, and a client that resolves the disagreement by preferring one is undoing the point. `claude`'s `result` line carries a key literally named `stop_reason` as well; the daemon does **not** forward it under any name, so a `stop_reason` on this wire is always the daemon's.
+
+**`is_error` is read from `claude`, never inferred from `outcome`.** `claude` sends `outcome: "success"` with `is_error: true` when a turn ended on an API error — a context overflow is the documented case, where `terminal_reason` reads `prompt_too_long`. A client deriving the flag from the subtype renders exactly that turn as a clean answer, which is the failure this frame exists to remove.
+
+**`outcome` and `terminal_reason` are `claude`-authored strings flowing *out of* `claude` to a client**, so [§ Security model](#security-model)'s threat 1 lands in the outward direction — the same reading [`attachment_offered`](#attachment_offered)'s `filename` carries. The daemon **bounds** both at 256 bytes at the point it builds the event and **does not sanitize** them: no control-character or terminal-escape stripping happens on this path, and the render boundary owing that sanitization is the **client's**. A value past the bound is **dropped, not truncated** — it arrives as `""` — because a cut token would match no known value while looking like one; a client therefore cannot distinguish "over-bound" from "absent", and needs no such distinction, since both mean the same thing to it.
 
 #### `stall`
 

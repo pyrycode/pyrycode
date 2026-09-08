@@ -1234,6 +1234,54 @@ const maxModelWindowID = 256
 // the line. What is RETAINED is only the capped result.
 const maxModelWindowEntries = 16
 
+// maxTurnEndStopField caps BOTH claude-authored strings turnevent.TurnEnd
+// publishes for the turn's stop shape — Outcome (the `result` line's subtype) and
+// TerminalReason (#2223). Applied at CONSTRUCTION, exactly as every cap above is,
+// so an oversized value never enters the event stream, the push queue, or any log.
+//
+// ONE CONSTANT OVER TWO FIELDS, on maxTaskFieldID's precedent — that one bounds
+// TaskID, ToolCallID and TaskType together because they are one SHAPE. These two
+// are one shape in the same sense: short open-set tokens off a single line,
+// matched by a consumer against a known list rather than read as prose. Their
+// budgets are therefore not independent things a future change could want to move
+// apart, which is the condition maxRateLimitField's separate-constant paragraph
+// sets for splitting one.
+//
+// MEASURED against the two documented sets, which is the check maxModelResolved's
+// doc requires: the longest subtype is error_max_structured_output_retries at 35
+// bytes and the longest terminal_reason structured_output_retry_exhausted at 33,
+// so 256 is roughly 7x the observation — maxTaskFieldID's own multiple over an
+// identifier, and for its reason verbatim: room for a token claude has not shipped
+// yet, and still a hard cut on anything that has stopped being a token. The
+// committed capture's own values are far shorter (max_turns at 9, completed at 9).
+//
+// The envelope arithmetic, in maxTaskDescription's style: worst case one turn_end
+// carries 2 * 256 = 512 bytes of claude-derived text. That is 0.8% of the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap) — the smallest share of any cap in this family,
+// which is what a two-token frame should cost. Unlike the window caps beside it
+// this one DOES owe an envelope percentage, because unlike them these fields reach
+// the wire; see turnevent.TurnEnd's doc, which states the split.
+//
+// OVERFLOW DROPS THE VALUE RATHER THAN TRUNCATING IT, so truncateField is
+// deliberately NOT called on either field. This is maxModelWindowID's departure
+// from the text caps, taken for its stated reason rather than by resemblance: that
+// cap drops because #2102 JOINS on the id and a cut id matches nothing. These two
+// are matched the same way — a client switches on them against known tokens — so a
+// cut token is indistinguishable from a token the client has never heard of, which
+// is a state it must already handle because the set is open. Carrying the empty
+// value says exactly that and invents nothing.
+//
+// There is consequently NO truncation report on this shape and none is owed.
+// turnevent.ModelAnnounced.Truncated exists because that field is DISPLAYED, where
+// a mangled value is worth flagging; and unlike ModelWindows there is no counter
+// either, because a dropped scalar is directly observable as the empty value the
+// wire documents rather than an absence a consumer would have to infer.
+//
+// No RATE bound, and none is owed: a `result` line is the turn boundary, so this
+// fires once per TURN — maxModelWindowID's situation exactly.
+const maxTurnEndStopField = 256
+
 // controlResponseSuccess is the ONE response.subtype whose payload this parser
 // will read. Byte-exact equality against a DAEMON-authored constant, never a fold
 // or a prefix: it is the SHARED PRECONDITION of both of emitModelList's emits, and
@@ -1761,6 +1809,44 @@ type resultLine struct {
 // consumer could size anything against.
 type resultModelUsage struct {
 	ContextWindow int `json:"contextWindow"`
+}
+
+// resultStopLine is the decoded payload of the two keys that say HOW one `result`
+// line's turn stopped (#2223). Kept separate from streamLine for
+// systemTaskStartedLine's reason, and TestStreamLine_StaysSegmentationOnly
+// enforces that boundary.
+//
+// A SEPARATE TARGET FROM resultLine, THOUGH BOTH READ THE SAME LINE, and the
+// reason is failure isolation rather than tidiness. resultLine decodes modelUsage,
+// a map whose VALUE SHAPE claude controls; a hostile one — a number, an array, an
+// object of numbers — fails that unmarshal, which is the property
+// decodeModelWindows' doc rests on. Folded into one struct, that same hostile
+// modelUsage would ALSO erase terminal_reason: one field claude controls would
+// silently suppress another. Two targets fail independently, and neither can
+// disturb the turn boundary, which comes from the already-decoded streamLine.
+//
+// The captured line carries eighteen keys on the budget-stopped arm and
+// twenty-two on the clean one; two are declared. Absence from the DECODE TARGET is
+// a stronger guarantee than a test sweep, because a field that is never declared
+// cannot leak — and the field this omission is really about is `result`, which
+// carries claude's free-text answer for the turn (its API error text, when
+// is_error rides a `success`). A turn_end frame has never carried claude's prose
+// and this ticket does not start.
+//
+// IsError is a plain bool, not *bool: absent, null and an explicit false are one
+// reading and nothing acts differently on the three, so a pointer would buy a
+// distinction no consumer answers. systemThinkingTokensLine argues the same for
+// int over *int. A value of any other JSON type fails the whole decode and takes
+// the both-fields-absent path, which is the conservative direction — an is_error
+// this parser cannot read must not read as an error.
+//
+// TerminalReason is a plain string, which is why truncateField's json.RawMessage
+// exception does not reach this shape: encoding/json has already
+// U+FFFD-replaced invalid input on decode, so no verbatim byte survives to be
+// scrubbed. It is bounded rather than scrubbed anyway — see maxTurnEndStopField.
+type resultStopLine struct {
+	IsError        bool   `json:"is_error"`
+	TerminalReason string `json:"terminal_reason"`
 }
 
 // systemBackgroundTasksLine is the decoded payload of one
@@ -2804,10 +2890,31 @@ func (p *Parser) consumeLine(line []byte) {
 		// emitUser and emitRateLimit both take the raw line for. The call sits
 		// BELOW the accumulator reset and its result is passed INTO the same emit,
 		// so no decode outcome can reorder, duplicate or suppress the boundary.
+		//
+		// decodeStopShape (#2223) takes the raw line for the same reason and under
+		// the same rule: its own decode target, so no shape of is_error or
+		// terminal_reason can reach segmentation, and no shape of modelUsage can
+		// reach it. Both calls sit BELOW the accumulator reset and both results are
+		// passed INTO the same emit, so no decode outcome can reorder, duplicate or
+		// suppress the boundary.
 		p.thinkingSinceEmit = 0
 		windows, droppedWindows := decodeModelWindows(line)
+		isError, terminalReason := decodeStopShape(line)
 		p.emit(turnevent.TurnEnd{
-			Reason:              resultTurnEndReason(sl.Subtype),
+			// resultTurnEndReason reads the UNBOUNDED subtype, deliberately: the cap
+			// governs what is PUBLISHED, and routing the classification through it
+			// would let an over-long value move stop_reason — a wire value #2223
+			// promises is byte-identical for every subtype.
+			Reason: resultTurnEndReason(sl.Subtype),
+			// claude's token VERBATIM, per turnevent.TurnEnd.Outcome's rule: no
+			// lowercasing, no mapping onto the observed set, no rejection of one it
+			// does not name. The cap is the only judgement made about it, and this is
+			// the ONE site that publishes the subtype — its only other readers,
+			// resultTurnEndReason above and emitSystemSubtype, compare it against
+			// literals and carry it nowhere, which is why the bound belongs here.
+			Outcome:             boundStopField(sl.Subtype),
+			IsError:             isError,
+			TerminalReason:      terminalReason,
 			ModelWindows:        windows,
 			DroppedModelWindows: droppedWindows,
 		})
@@ -4678,6 +4785,56 @@ func resultTurnEndReason(subtype string) turnevent.TurnEndReason {
 	default:
 		return turnevent.TurnEndReasonEndTurn
 	}
+}
+
+// decodeStopShape reads the two stop-shape keys off one `result` line and returns
+// them bounded (#2223). A pure function of the bytes: no receiver, no parser state
+// read or written, nothing logged on any path.
+//
+// IT CANNOT DISTURB THE TURN BOUNDARY, which is decodeModelWindows' property held
+// for a second pair of fields and the reason this is another unmarshal rather than
+// a wider streamLine. The reason and the emit are the caller's; every failure here
+// returns a value, never an error, and (false, "") is a complete answer to "claude
+// said nothing usable".
+//
+// NOTHING IS LOGGED, on any path, and the decode error in particular is DISCARDED
+// rather than logged — decodeModelWindows' reason verbatim: encoding/json QUOTES
+// the offending input bytes into its error text, so `"err", err` would route
+// claude's own token into the daemon log through a channel no per-attribute check
+// can see. Logging nothing at all is what makes "no claude-authored byte from this
+// decode reaches a log line" structural rather than a rule each future attribute
+// has to be checked against.
+//
+// THE BOUND IS APPLIED HERE rather than at the emit, so no caller can publish an
+// unbounded terminal_reason by forgetting to. The subtype's bound cannot live here
+// — it is not read off these bytes — which is why boundStopField is a named
+// function both sites call rather than an inline length test.
+func decodeStopShape(line []byte) (isError bool, terminalReason string) {
+	var sl resultStopLine
+	if err := json.Unmarshal(line, &sl); err != nil {
+		return false, ""
+	}
+	return sl.IsError, boundStopField(sl.TerminalReason)
+}
+
+// boundStopField answers maxTurnEndStopField for one of the two stop-shape
+// strings: the value unchanged, or empty when it exceeds the cap.
+//
+// IT DROPS RATHER THAN CUTS, which is the whole of the judgement made about these
+// values and is argued at the constant. The boundary is <=, matching
+// truncateField's, so a value of exactly the cap is carried.
+//
+// No strings.ToValidUTF8 scrub, unlike truncateField, and its absence is
+// deliberate: that function scrubs because it CUTS, and a cut can land mid-rune.
+// Nothing here cuts. Both inputs are decoded into Go strings, where encoding/json
+// has already U+FFFD-replaced invalid input, so there is no ill-formed sequence
+// left for a scrub to remove — the exception truncateField names is
+// json.RawMessage, which neither of these is.
+func boundStopField(s string) string {
+	if len(s) > maxTurnEndStopField {
+		return ""
+	}
+	return s
 }
 
 // decodeModelWindows reads the modelUsage map off one `result` line and returns

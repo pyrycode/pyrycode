@@ -164,3 +164,26 @@ Each is resolved in Phase B; anything that moves the design is recorded under `#
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
 
+## Revisions
+
+### 2026-09-08 — both Open Questions resolved; the design did not move
+
+1. **No path reconstructs a `TurnEnd`.** `git grep 'turnevent.TurnEnd{'` over non-test Go returns exactly one construction site, streamsup's `result` arm; the four `internal/e2e/internal/fakeclaude` hits are prose in comments. `cmd/pyry`'s two `turnevent.TurnEnd` arms switch on the type and read `Reason` only, and `session_model_window_hold` stores windows rather than whole events. So no hold or snapshot can replay a `TurnEnd` carrying empty stop fields, and the producer needed no defence against one.
+2. **The captured budget-stopped line's shape is as the census read it** — 18 keys, `errors: ["Reached maximum number of turns (4)"]` present, no `result` key, and `stop_reason: "tool_use"` (claude's own key, which this daemon does not forward). The clean line beside it carries 22 keys including `result`. `TestParser_ResultStopShape_CapturePin` asserts only the three fields this ticket reads, so neither shape difference reaches an assertion.
+
+Three additions beyond the plan, none of them a design change:
+
+- A subtest asserting no over-long claude byte reaches a log line, covering the clause of AC 2 the plan had argued in prose only.
+- A `turnbridge` row asserting the window pair still does **not** reach the payload. The plan's Design says publication is a per-field decision; now that the variant has publishable fields, that row is what keeps the unpublished half honest.
+- A hostile-shape table (`is_error` as a string, `terminal_reason` as a number, object, array, and null) proving each leaves the turn boundary and the outcome standing. This is the failure-isolation claim the two-decode-target choice rests on, measured rather than asserted.
+
+One pre-existing condition left alone: `internal/streamsup/helper_test.go` is unformatted on `main` and is not in this diff.
+
+### 2026-09-08 — the size estimate above was low; correcting it against the measured diff
+
+The Context section closes with "the written total at roughly 580 lines of code plus this spec … No overage is claimed." **That was wrong and the measurement is 815 insertions on the feature commit plus a 166-line spec, about 980 lines** — over the 800-line ceiling by ~180 and within 2% of the refiner's own ~1000 estimate, which this plan had judged high.
+
+The error was not scope: the four production files, five acceptance criteria, zero new exported types and zero forced call-site updates are all exactly as planned, and dropping the capture harness did save what it was expected to save. It was **doc-comment density**. This package argues each cap, each decode target and each dropped-vs-truncated choice in prose at the point of the decision, and that convention turns a 6-line constant into a 40-line one; `parser.go` grew 159 lines for roughly 20 of statements, and the test file's 423 lines carry their non-vacuity arguments the same way. Estimating the statements and not the prose is what put the figure at 580.
+
+Nothing about the outcome changes. The ceiling and the one-consumer floor disagreed before a line was written — the retain half's only consumer is the publish half — and § A1's rule is that the floor wins, the overage is stated, and the ticket is built. The refiner reached the same conclusion independently. This entry exists so the number in the plan is not left contradicting the diff beside it; **the lesson for the next estimate on this package is to size the prose, not the statements.**
+

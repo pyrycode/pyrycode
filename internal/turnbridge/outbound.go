@@ -297,10 +297,23 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			ResultDetail:   e.ResultDetail,
 		}, true
 	case turnevent.TurnEnd:
+		// The three stop-shape fields map straight through, deliberately UNCAPPED
+		// here — ToolUpdate's ResultDetail arm above argues the shape of this
+		// choice. Both strings are bounded at CONSTRUCTION by their producer
+		// (streamsup's maxTurnEndStopField), where every cap in that package is
+		// applied, so a second bound here would be a number to keep in step with
+		// one that already holds. The window fields on the same variant are NOT
+		// mapped, which stays true: this arm builds the payload field by field, so
+		// what reaches the wire is what is named here and nothing else.
 		return protocol.TypeTurnEnd, protocol.TurnEndPayload{
 			ConversationID: tc.ConversationID,
 			TurnID:         tc.TurnID,
+			// Unchanged and unchanged-by-construction: still the daemon's own
+			// two-value classification, never claude's `stop_reason` key.
 			StopReason:     string(e.Reason),
+			Outcome:        e.Outcome,
+			IsError:        e.IsError,
+			TerminalReason: e.TerminalReason,
 		}, true
 	case turnevent.Stall:
 		// A stall carries conversation identity only — it is not turn-scoped and
