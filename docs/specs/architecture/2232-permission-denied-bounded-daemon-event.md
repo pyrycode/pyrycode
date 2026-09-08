@@ -128,3 +128,13 @@ One failure mode: the line will not decode into the shape (a numeric `tool_name`
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+### 2026-09-08 — a new `turnevent.Event` variant reaches `cmd/pyry`, which this plan's file list did not
+
+**What changed.** One row for `turnevent.ToolCallDenied` in `TestTurnMarkFor_TotalOverEveryVariant`'s table in `cmd/pyry/stream_turn_busy_test.go`, answering `turnMarkNone`. No production change anywhere: `turnMarkFor`'s opener set is a whitelist and its `default` arm already returns `turnMarkNone`.
+
+**What drove it.** The verifier's gate. `turnEventVariants` derives the variant set from the SEALING MECHANISM — it AST-walks `internal/turnevent/*.go` for `isTurnEvent` marker declarations — so `func (ToolCallDenied) isTurnEvent() {}` enrolled the new variant in the totality guard automatically and the table went one row short. That is #1496's guard doing exactly what a hand-kept list could not.
+
+**What it corrects in this plan.** The Files read list names nothing under `cmd/`, and the Testing strategy does not mention the totality guard — the omission the ticket's own "2 production files" estimate made easy. **The blast radius of a NEW `turnevent.Event` variant is not the files that construct it.** Declaring the marker method is what enrols the variant, so any marker-derived guard is a consumer of the declaration itself, wherever it lives. The check that would have caught this before the RED run is `grep -rn isTurnEvent` outside `internal/turnevent`, which finds `turnEventVariants` and its sole caller.
+
+**Why the answer needed no arm.** A denial is a verdict on a tool call, not a turn boundary, and the `ToolStart` the parser emits for the assistant `tool_use` before it already opened the turn — the order every one of the seven captured denials sits in. This is `PermissionRequest`'s argument, not `CompactionBoundary`'s: opening a mark here would be redundant, never a wedge, because the `TurnEnd` that would clear it still follows. `turnMarkFor`'s default-arm comment therefore does NOT gain this variant's name; it names `CompactionBoundary` only because the whitelist's answer is load-bearing there, and naming every variant would grow a second enumeration of the set beside the marker-derived one. The reasoning is recorded at the row, which is the sole place the open/close/none split is stated.
