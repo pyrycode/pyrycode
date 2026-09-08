@@ -204,6 +204,19 @@ type relayWiring struct {
 	// transitions is the pool-side session-transition observer sink the
 	// session_transition producer (#657) installs on.
 	transitions transitionObserverSink
+	// setClientIdentity installs the pool's client-identity resolver (#2148),
+	// taking the enumerator it should read — in production mgr.ActiveConns, which
+	// exists only inside startRelayV2. Built at main.go over *sessions.Pool for the
+	// SAME reason modelListFor below is: the internal/sessions dependency stays at
+	// the composition root, and startRelayV2 holds no pool reference at all. The
+	// direction is the unusual part — this is the one wiring value that flows
+	// relay → pool rather than pool → relay — which is why it is a setter taking an
+	// enumerator rather than a plain resolved value: the pool is built before the
+	// v2 manager exists.
+	//
+	// nil in foreground/v1 ⇒ no resolver is installed and no session names a
+	// client, which is the pre-#2148 text byte for byte.
+	setClientIdentity func(enum func(context.Context) []relay.ActiveConn)
 	// qse is the pre-built queue_state emitter (#722) whose Run goroutine
 	// startRelayV2 starts over the v2 manager.
 	qse *queueStateEmitterV2
@@ -1418,6 +1431,17 @@ func startRelayV2(
 	// the clear is nil-safe.
 	streamTransitionsCleanup := startSessionTransitionStreamV2(ctx, w.transitions, mgr,
 		func(sid string) (string, bool) { return conversationForSession(w.convReg, sid) }, w.busy, w.hist, logger)
+
+	// Hand the pool the open-conn enumerator so a session's appended system prompt
+	// can name the clients attached when it spawns (#2148). Placed beside the
+	// observer install above because both are pool installs driven from here, but
+	// note it does NOT share that one's pre-Pool.Run ordering requirement: mgr.Run
+	// is already started by this point, so the pool holds the resolver in an atomic
+	// (see sessions.Pool.SetClientIdentityResolver). Nothing is installed in
+	// foreground/v1, where the field is nil.
+	if w.setClientIdentity != nil {
+		w.setClientIdentity(mgr.ActiveConns)
+	}
 
 	// Wire the queue_state producer (#722): start the pre-built emitter's Run
 	// goroutine over mgr, fanning a queue_state envelope to capability-gated

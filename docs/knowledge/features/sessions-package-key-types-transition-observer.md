@@ -78,3 +78,19 @@ goroutine would add goroutines to paths that deliberately have none and could
 reorder signals. The non-blocking burden is therefore the observer's: the
 `TransitionObserver` contract documents "MUST NOT block — hand off to a buffered
 channel"; #657 owns the non-blocking impl. See [codebase/659.md](../codebase/659.md).
+
+**This pattern does not transfer to every pool setter — check whose goroutines
+read the field, not which precedent the setter resembles.** #2148's
+`Pool.SetClientIdentityResolver` first copied this contract verbatim (plain
+field, set-once-before-`Run`) on the reasoning that its readers are also
+`Activate`'s callers. They are not: the resolver is read by goroutines the
+*relay's* v2 manager spawns (a per-conn `appFrameWorker` on every handshake),
+and `startRelayV2` starts that manager's `Run` before it installs anything —
+unlike `SetTransitionObserver`'s readers, which are exclusively `Pool.Run`'s
+own descendants and therefore provably created after `startRelay` returns. A
+conn completing its handshake in that window would read the field concurrently
+with the install's write. `Pool.clientIdentity` is an `atomic.Pointer` instead.
+The general form: this setter shape is race-free only when every reader
+goroutine is a descendant of the *same* `Run` the install precedes — verify
+that per field, since two setters that look identical can differ in exactly
+this way.
