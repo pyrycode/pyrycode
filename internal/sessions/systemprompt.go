@@ -1,9 +1,14 @@
 package sessions
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
 )
@@ -67,6 +72,270 @@ func composeSystemPrompt(operator string) string {
 		return systemPromptText
 	}
 	return systemPromptText + "\n" + operator
+}
+
+// ClientIdentity is one attached client's self-reported identity: the
+// device_name and client_version it put in its own hello.
+//
+// BOTH FIELDS ARE REMOTE-AUTHORED AND UNVALIDATED. Nothing between the wire and
+// admitClient inspects them — internal/relay retains them verbatim on purpose,
+// because validating there would bind a wire type to a rendering decision it does
+// not own (the argument composeSystemPrompt makes for leaving #2149's
+// Registry.SetSystemPrompt the single door for operator bytes). A holder of this
+// type holds untrusted text until admitClient has passed it.
+//
+// Either field may be empty: neither client sends a product name today
+// (pyrycode-desktop reports a hostname, pyrycode-mobile a device model), and a
+// client is free to report nothing at all.
+type ClientIdentity struct {
+	Name    string
+	Version string
+}
+
+// ClientIdentityResolver answers which clients are attached right now. It is the
+// seam by which internal/sessions learns something only internal/relay knows,
+// without importing it — TransitionObserver's shape, pointing the other way.
+//
+// The implementation MUST respect ctx and MUST NOT block indefinitely: the
+// production one funnels a request onto the relay manager's Run goroutine and
+// waits for the reply, and it is called immediately before a claude spawn.
+// Returning nil is always a valid answer and is what every failure collapses to;
+// there is deliberately no error return, so nothing here can fail a spawn.
+type ClientIdentityResolver func(ctx context.Context) []ClientIdentity
+
+// maxClientNameBytes and maxClientVersionBytes bound what one client may
+// contribute to the composed prompt. UTF-8 BYTES, NOT RUNES, matching every
+// bound in internal/protocol. An over-bound value is REFUSED, never truncated:
+// a truncation would invent a value the client did not report.
+//
+// A LENGTH CEILING IS NOT A SAFETY PROPERTY — MaxDeviceNameBytes' warning
+// transfers unchanged, and is restated rather than cross-referenced because the
+// ceiling is exactly what a later reader is most likely to mistake for
+// containment. 64 bytes accommodates a newline-injection payload many times
+// over. What actually holds the structure is admissibleClientField's character
+// set plus the placement, not these numbers.
+//
+// The numbers are NOT borrowed from MaxDeviceNameBytes, whose 128 is picked for a
+// hand-typed pairing label rendered as a terminal row. These are picked against a
+// different arithmetic: the value is a span inside one sentence that is prepended
+// to EVERY turn of the session and charged in tokens each time. 64 covers a
+// macOS hostname (`Juhanas-MacBook.local`, 21) and an Android Build.MODEL with
+// room to spare; 32 covers a semver with a long pre-release tag. Worst case for
+// the whole section is maxNamedClients × (64 + 32) plus framing — the same order
+// as systemPromptText itself, which is the most this feature may cost.
+const (
+	maxClientNameBytes    = 64
+	maxClientVersionBytes = 32
+)
+
+// maxNamedClients caps how many clients the section may name. Past it the section
+// is EMPTY — the whole admitted set or none.
+//
+// Naming a truncated subset is the option not taken: clientSectionLead states
+// that what follows is the attached clients, so a silently trimmed list would make
+// that sentence false inside a system prompt. Falling back to today's text is both
+// honest and the fail-closed direction. Four is past any realistic operator fleet
+// (a laptop, a phone, a spare), so the whole-or-nothing rule is unreachable in
+// ordinary use and is really a bound on a client that opens conns to inflate the
+// prompt.
+const maxNamedClients = 4
+
+// clientIdentityTimeout bounds one resolver call.
+//
+// It exists for the case AC #4 names: the relay manager is wired but its Run
+// goroutine is not running (not yet started, or already exited), where
+// V2SessionManager.ActiveConns has no receiver for its request and waits on ctx
+// alone. The bound turns that from a blocked spawn into a bounded no-identity
+// answer, and it degrades a future caller that violates the never-from-Run rule
+// into a stall rather than a deadlock.
+//
+// 250ms is picked against the site, not against a network: the resolve runs
+// immediately before a claude spawn that costs hundreds of milliseconds, so the
+// worst case is invisible next to work already being done, while being orders of
+// magnitude above what a live Run loop needs to answer a map read.
+const clientIdentityTimeout = 250 * time.Millisecond
+
+// clientSectionLead opens the section naming the attached clients. It is a
+// TRANSCRIPTION OF A SELF-REPORT and nothing else — "the name and version it
+// reported for itself" — so systemPromptText's constraint holds here unchanged:
+// it asserts nothing about what any client can render or do, because such a claim
+// rots the day that client ships a change. TestClientSectionText_Pinned pins it
+// against an independent copy for exactly that reason.
+//
+// It is also the structural half of the trust boundary. Client bytes are placed
+// AFTER this lead, inside quotes, on the same line — never at the start of a
+// line — which with admissibleClientField's refusal of both control characters
+// and the quote delimiter is what makes "no line originates from a client" true
+// by construction rather than by escaping.
+const clientSectionLead = "Clients attached when this session started, each shown by the name and " +
+	"version it reported for itself when it connected: "
+
+// SetClientIdentityResolver installs the pool's client-identity resolver; a nil
+// resolver (the zero value, or an explicit nil) disables client naming, which is
+// the shape foreground mode, v1, and almost every test in this package run in.
+//
+// The value is held in an atomic rather than a plain field, which is where this
+// departs from SetTransitionObserver's otherwise identical pre-Run contract. The
+// reason is concrete: the install happens inside startRelayV2, and the relay
+// manager's own Run goroutine is ALREADY started by then. Run creates a
+// per-conn appFrameWorker on every handshake, and that worker is one of the
+// goroutines that reaches Pool.Activate — so a conn completing its handshake in
+// the window between mgr.Run and this call would read the field concurrently with
+// this write. The window is narrow and the race is real; an atomic closes it for
+// four lines and removes the need to reason about the ordering at all. Do not
+// "simplify" it back to a plain field.
+func (p *Pool) SetClientIdentityResolver(r ClientIdentityResolver) {
+	if r == nil {
+		p.clientIdentity.Store(nil)
+		return
+	}
+	p.clientIdentity.Store(&r)
+}
+
+// attachedClients resolves the clients attached right now, or nil.
+//
+// It is TOTAL, the posture conversationPrompt takes for the conversations
+// registry: no resolver wired, a resolver reporting nothing, a manager whose Run
+// goroutine cannot answer, and an already-cancelled ctx all yield nil rather than
+// an error. Nothing on this path can fail or delay a spawn beyond
+// clientIdentityTimeout.
+//
+// Takes no pool lock, and is called from refreshSystemPrompt between that
+// function's two lock acquisitions — the same off-lock window the file write
+// already occupies — so no I/O and no cross-goroutine wait executes inside the
+// pool's critical section, and the documented capMu → mu → lcMu order cannot
+// invert.
+func (p *Pool) attachedClients(ctx context.Context) []ClientIdentity {
+	resolver := p.clientIdentity.Load()
+	if resolver == nil || *resolver == nil {
+		return nil
+	}
+	// A done ctx answers here rather than inside the resolver. The production
+	// resolver does return nil on a cancelled ctx, but that is ITS contract and
+	// this function's totality must not be borrowed from it: any resolver, including
+	// a test double or a future second implementation, gets the same answer.
+	if ctx.Err() != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, clientIdentityTimeout)
+	defer cancel()
+	return (*resolver)(ctx)
+}
+
+// admissibleClientField reports whether one reported field may appear in the
+// composed prompt, returning it VERBATIM when it may.
+//
+// Verbatim is deliberate: a value is refused or used as sent, never repaired.
+// Trimming, escaping or truncating would each put a value in claude's prompt that
+// no client reported, and an escaping pass is the kind of thing that grows a
+// bypass. TrimSpace appears only in the blank test, not in the returned value.
+//
+// The character set is mintLabelIsDisplaySafe's — no C0, no DEL, no C1 — plus a
+// refusal of the double quote. The quote is what makes the refusal structural
+// rather than cosmetic: clientSection renders the value INSIDE quotes, so
+// refusing the delimiter is what guarantees no value can close the structure
+// around itself. Invalid UTF-8 is refused too; the composed text is written to a
+// file claude reads as text.
+func admissibleClientField(v string, maxBytes int) (string, bool) {
+	if len(v) > maxBytes || !utf8.ValidString(v) || strings.TrimSpace(v) == "" {
+		return "", false
+	}
+	for _, r := range v {
+		if r < 0x20 || (r >= 0x7f && r <= 0x9f) || r == '"' {
+			return "", false
+		}
+	}
+	return v, true
+}
+
+// admitClient is THE trust boundary: the one place a remote-authored
+// ClientIdentity becomes text the daemon is willing to compose into a system
+// prompt. Everything upstream of it — the relay's retention, ActiveConn, the
+// cmd/pyry closure — carries the bytes and judges nothing.
+//
+// The two fields are judged independently, and the NAME is what gates the client:
+// an inadmissible name drops the whole identity, because a version alone names
+// nobody, while an inadmissible version drops only itself and leaves the client
+// named. A refusal is silent — no log line, at any level, so a hostile name has
+// no line to appear in, which is the package's existing rule for prompt bytes.
+func admitClient(c ClientIdentity) (ClientIdentity, bool) {
+	name, ok := admissibleClientField(c.Name, maxClientNameBytes)
+	if !ok {
+		return ClientIdentity{}, false
+	}
+	version, _ := admissibleClientField(c.Version, maxClientVersionBytes)
+	return ClientIdentity{Name: name, Version: version}, true
+}
+
+// clientSection renders the section naming clients, or "" when there is none to
+// render — no admissible identity, or more than maxNamedClients of them.
+//
+// Admitted identities are SORTED and DEDUPLICATED before rendering, and neither
+// is cosmetic. V2SessionManager.ActiveConns returns Go's randomized map-iteration
+// order, so an unsorted section would rewrite the prompt file with different
+// bytes on every refresh of an unchanged conn set. Dedup collapses one client
+// holding two conns — a reconnect whose previous conn is not yet reaped — into
+// the one client it is.
+//
+// The returned section ends in "\n", exactly as systemPromptText does, so both
+// joins in composeSystemPromptFor use the same blank-line separator convention.
+func clientSection(clients []ClientIdentity) string {
+	named := make([]ClientIdentity, 0, len(clients))
+	for _, c := range clients {
+		if admitted, ok := admitClient(c); ok {
+			named = append(named, admitted)
+		}
+	}
+	slices.SortFunc(named, func(a, b ClientIdentity) int {
+		if c := strings.Compare(a.Name, b.Name); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Version, b.Version)
+	})
+	named = slices.Compact(named)
+	if len(named) == 0 || len(named) > maxNamedClients {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString(clientSectionLead)
+	for i, c := range named {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(`"` + c.Name + `"`)
+		if c.Version != "" {
+			b.WriteString(` (version "` + c.Version + `")`)
+		}
+	}
+	b.WriteString(".\n")
+	return b.String()
+}
+
+// composeSystemPromptFor is composeSystemPrompt plus the section naming the
+// clients attached as the prompt is composed (#2148). Order is constant, then
+// clients, then the operator's bytes.
+//
+// WITH NO SECTION TO ADD IT DELEGATES to composeSystemPrompt rather than
+// reconstructing its result. That is what makes AC #2's "byte-for-byte what it is
+// today" a structural property instead of a second branch that happens to agree
+// today and drifts tomorrow, and it is why TestComposeSystemPrompt and
+// TestSystemPromptText_Pinned needed no edit for this ticket.
+//
+// composeSystemPrompt keeps its own signature and its own body for the same
+// reason. buildSession stays on it too: the construction-time write is overwritten
+// by refreshSystemPrompt before any child comes up, so composing client names
+// there would produce bytes nothing ever reads.
+func composeSystemPromptFor(operator string, clients []ClientIdentity) string {
+	section := clientSection(clients)
+	if section == "" {
+		return composeSystemPrompt(operator)
+	}
+	out := systemPromptText + "\n" + section
+	if operator != "" {
+		out += "\n" + operator
+	}
+	return out
 }
 
 // sessionPromptsDir is the per-session prompt directory's name under the daemon
@@ -296,7 +565,13 @@ func (p *Pool) conversationPrompt(label string) string {
 // file write runs between the two, off the lock, so no I/O executes inside the
 // pool's critical section. Both acquisitions are released before Pool.Activate
 // takes p.capMu, so the documented capMu → mu → lcMu order is not inverted.
-func (p *Pool) refreshSystemPrompt(sess *Session) {
+// Since #2148 it also names the clients attached at this moment, resolved through
+// attachedClients. That resolve happens AFTER both early returns above, which is
+// load-bearing: an already-active session skips it, so no cross-goroutine wait is
+// ever paid on Activate's LRU-touch hot path. The snapshot's staleness is benign —
+// clientSectionLead is written in the past tense as a transcription, so a client
+// detaching between the resolve and the write makes the sentence no less true.
+func (p *Pool) refreshSystemPrompt(ctx context.Context, sess *Session) {
 	if sess.systemPromptPath == "" {
 		// The bootstrap (its file is daemon-scoped and lives on the Pool) and any
 		// test-constructed Session literal that never spawns.
@@ -311,7 +586,8 @@ func (p *Pool) refreshSystemPrompt(sess *Session) {
 	p.mu.RUnlock()
 
 	operator := p.conversationPrompt(label)
-	if _, err := writeSystemPromptFile(sess.systemPromptPath, composeSystemPrompt(operator)); err != nil {
+	clients := p.attachedClients(ctx)
+	if _, err := writeSystemPromptFile(sess.systemPromptPath, composeSystemPromptFor(operator, clients)); err != nil {
 		p.log.Warn("refresh appended system prompt", "error", err)
 		return
 	}

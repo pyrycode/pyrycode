@@ -514,3 +514,43 @@ now addressed in § Design; the sections below describe the revised plan.)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+### 2026-09-08 — Phase B, all three Open Questions resolved
+
+**1. The resolver is held in an `atomic.Pointer`, not a plain field.** Open
+Question 1 asked whether the install precedes every reader goroutine's creation.
+It does not: `startRelayV2` launches `mgr.Run` well before the point where it
+installs the transition observer, and `Run` creates a per-conn `appFrameWorker` on
+every handshake — one of the goroutines that reaches `Pool.Activate`. A conn
+completing its handshake in that window would read the field concurrently with the
+install's write, which is a real data race however narrow. The design's stated
+"`SetTransitionObserver`'s contract verbatim" is therefore **wrong for this
+field**, and `Pool.clientIdentity` is `atomic.Pointer[ClientIdentityResolver]`
+instead. `SetClientIdentityResolver`'s doc carries the argument so the atomic is
+not "simplified" back later. This is the fallback the § Security review's
+Concurrency finding named in advance, so no re-review was owed; nothing else in the
+design moves, and the install still sits beside the transition install for
+discoverability rather than being hoisted above `mgr.Run`.
+
+**2. No consumer formats `ActiveConn` wholesale — nothing to fix.** Open Question
+2's SHOULD FIX found no `%+v`, `%v` or `slog.Any` on an `ActiveConn` at any of the
+fan-out sites; every one reads `c.ConnID` / `c.Interactive` by field. The
+obligation landed as documentation on `ActiveConn` only, which is what makes a
+future wholesale format a visible mistake rather than a silent leak.
+
+**3. The bootstrap session names no client — confirmed inherited, not
+introduced.** `Pool.New`'s bootstrap `Session` literal sets no `systemPromptPath`
+(its file is daemon-scoped and lives on the `Pool`), so `refreshSystemPrompt`
+early-returns for it exactly as it has since #2150, and it carries neither a
+conversation prompt nor a client name. Unchanged by this ticket.
+
+**4. `attachedClients` owns the cancelled-ctx contract rather than borrowing it.**
+`TestPool_AttachedClients_Total` failed on first run: the implementation wrapped an
+already-cancelled ctx and called the resolver anyway, leaving AC #4's
+"already-cancelled context yields no identity" true only because the production
+resolver happens to respect ctx. An explicit `ctx.Err()` check now answers before
+the call, so the totality holds for any resolver — a test double or a future second
+implementation included. This delivers the § Error handling table as written; it
+does not change it.

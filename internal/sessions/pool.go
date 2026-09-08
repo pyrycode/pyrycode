@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pyrycode/pyrycode/internal/conversations"
@@ -187,6 +188,18 @@ type Pool struct {
 	// on shutdown. Read-only after New, so no lock; buildSession is its only
 	// other reader.
 	systemPromptPath string
+
+	// clientIdentity is the resolver naming the clients attached when a session's
+	// appended prompt is composed (#2148), installed by SetClientIdentityResolver
+	// and read only by attachedClients. A nil-or-unset pointer means no relay is
+	// wired — foreground mode, v1, and almost every test here — and yields no
+	// client names rather than an error.
+	//
+	// Atomic rather than a plain field, unlike transitionObserver above it: the
+	// install runs inside startRelayV2 with the relay manager's Run goroutine
+	// already started, and Run creates the per-conn workers that reach
+	// Pool.Activate. SetClientIdentityResolver's doc has the full argument.
+	clientIdentity atomic.Pointer[ClientIdentityResolver]
 
 	// convReg and convRegistryPath mirror Config.ConversationsRegistry /
 	// .ConversationsRegistryPath. Read-only after New — set once,
@@ -2066,7 +2079,7 @@ func (p *Pool) Activate(ctx context.Context, id SessionID) error {
 	if err != nil {
 		return err
 	}
-	p.refreshSystemPrompt(sess)
+	p.refreshSystemPrompt(ctx, sess)
 	if p.activeCap <= 0 {
 		return sess.Activate(ctx)
 	}

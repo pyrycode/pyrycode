@@ -1034,12 +1034,26 @@ func runSupervisor(args []string) error {
 		bootstrapIDFn:     func() string { return string(pool.BootstrapID()) },
 		defaultCwd:        defaultCwd,
 		transitions:       pool,
-		qse:               qse,
-		sessionErr:        see,
-		blockedNotify:     blocked,
-		debugBundler:      debugBundler,
-		settings:          settingsUpdaterAdapter{pool},
-		snapshotSettings:  snapshotSettings,
+		// #2148: the relay leg hands back its open-conn enumerator, and this closure
+		// — the only place that names both packages — maps it onto the pool's
+		// resolver. The two ActiveConn fields cross as untrusted text and are judged
+		// nowhere on this path; sessions.admitClient is the single door.
+		setClientIdentity: func(enum func(context.Context) []relay.ActiveConn) {
+			pool.SetClientIdentityResolver(func(ctx context.Context) []sessions.ClientIdentity {
+				conns := enum(ctx)
+				out := make([]sessions.ClientIdentity, 0, len(conns))
+				for _, c := range conns {
+					out = append(out, sessions.ClientIdentity{Name: c.DeviceName, Version: c.ClientVersion})
+				}
+				return out
+			})
+		},
+		qse:              qse,
+		sessionErr:       see,
+		blockedNotify:    blocked,
+		debugBundler:     debugBundler,
+		settings:         settingsUpdaterAdapter{pool},
+		snapshotSettings: snapshotSettings,
 		runSettings: func(convID string) (boundRunSettings, bool) {
 			return resolveBoundRunSettings(convReg, pool, convID)
 		},
