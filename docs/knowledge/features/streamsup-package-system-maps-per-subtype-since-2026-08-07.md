@@ -103,3 +103,35 @@ written and completely unreachable in production if any of claude's actual bytes
 don't match the shared target's field types. Check a subtype's fixture against `streamLine`'s
 declared field types before writing the switch arm, not after finding the RED run that says the
 arm never fired.
+
+**Recovering a denial from the `result` line's own list, because the line's absence is the
+daemon's normal case, not a rare drop (#2234).** A fourth, independent decode target off the same
+`result` bytes, `resultDenialsLine{ PermissionDenials []resultDenialEntry }`, reads
+`permission_denials[].tool_name`/`tool_use_id` — never `tool_input`, which is the tool's full input
+and the client already holds it from the matching `tool_use` frame, so decoding it would be the
+same leak `session_id`/`uuid` were already refused for on `system/permission_denied` itself.
+Measured 2026-09-08 across every committed capture under `internal/e2e/realclaude/testdata`: the
+`bypass_approval_argv_v2.1.239_*` arms — launched with `--permission-prompt-tool`, the way
+`cmd/pyry/mcp_config.go` launches claude in production — report 9 denials in `result` and **zero**
+`permission_denied` lines. In the posture the daemon actually runs, the line this document called
+above "the only thing on this surface distinguishing a blocked call" never arrives at all; the
+`result` array is the primary channel a real deployment sees, not a hedge against a hypothetical
+drop.
+
+`Parser.deniedThisTurn map[string]struct{}` tracks which ids already produced a marker from their
+own line this turn, so the same id is never reported twice; it is cleared unconditionally at the
+same `result`-arm boundary `thinkingSinceEmit` and `assistantErrorCategory` already reset, rather
+than minting a second reset point. Its residual runs the opposite direction from those two
+neighbours: a stale id left by a child that dies before its `result` line **suppresses** a later
+turn's genuine marker, rather than publishing a wrong one. That is accepted rather than fought,
+because a suppressed marker is a second report of a call the client has already seen denied, never
+the only report of one, and because claude's `tool_use_id`s are per-call unique — a later turn
+colliding with a stale one is not a shape claude produces.
+
+**Test-writing trap: a per-line parser cannot carry state between the line and the `result` that
+follows it.** `replayDenialCapture` originally built one fresh `Parser` per captured line; against
+the very captures cited above, that reported all seven denials twice, because a `deniedThisTurn` set
+starting empty on every call never remembers a marker the previous line already produced. The fix
+was to feed a whole capture through one parser instead of one per line. Any capture-replay helper
+that constructs a `Parser` more than once per turn cannot exercise this class of cross-line state —
+check the helper's parser lifetime before trusting what it reports about a dedup path.
