@@ -174,6 +174,12 @@ type ToolResultPayload struct {
 // daemon does not forward it under any name — a value seen on this wire is always
 // one of the two fields declared here.
 //
+// A FOURTH FIELD, ErrorCategory (#2224), rides beside them without joining them: it
+// is read off an `assistant` line rather than the `result` line, and it names why the
+// API stopped serving the turn rather than how the turn ended. It takes every wire
+// rule the three below state — open set, no omitempty, claude-authored, bounded and
+// unsanitized — and adds one they do not need, at its own declaration.
+//
 // No omitempty on any of them, per this file's rule as stated at ToolResultPayload:
 // absence and the zero value mean the same thing, always emitting the key keeps the
 // testdata fixture pinning the full shape, a client built before this landed ignores
@@ -207,6 +213,26 @@ type TurnEndPayload struct {
 	// It is what makes a context overflow legible at all, since that turn's subtype
 	// is plain `success`. Carries Outcome's SECURITY paragraph unchanged.
 	TerminalReason string `json:"terminal_reason"`
+	// ErrorCategory is the API error an `assistant` line in the turn reported at the
+	// wrapper level (#2224): rate_limit, overloaded, account_on_hold,
+	// authentication_failed, billing_error, invalid_request, model_not_found,
+	// server_error, oauth_org_not_allowed, max_output_tokens, unknown — an OPEN set
+	// on the three fields above's rule, empty when claude sent none or the value was
+	// past its bound. It answers a question the other three cannot: WHY the API
+	// stopped serving the turn, rather than how the turn ended.
+	//
+	// A DIFFERENT KIND OF CLAIM FROM ITS NEIGHBOURS, and a client that renders it
+	// like them gets it wrong. Outcome and TerminalReason describe the TURN; half of
+	// these values describe the ACCOUNT, and the daemon verifies none of them — it
+	// carried a string off claude's stdout. Show it as claude's report, never as the
+	// daemon's own finding about the operator's billing or credentials.
+	//
+	// SECURITY: claude-authored text, bounded by the daemon and NOT sanitized —
+	// Outcome's SECURITY paragraph verbatim, including that the render boundary
+	// owing the sanitization is the CLIENT's. It is spelled `error_category` rather
+	// than `error` because a key of that name beside is_error reads as its detail,
+	// and this is neither that nor an error object.
+	ErrorCategory string `json:"error_category"`
 }
 
 // StallPayload is the body of an Envelope whose Type == TypeStall

@@ -286,6 +286,44 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// #2224's category maps through, and it is the ONLY field set on this
+			// row: the event carries no stop shape at all, so a mapper that folded
+			// the category into one of #2223's fields — or that only populated it
+			// when a stop shape was present — reddens here rather than passing on a
+			// row where every field happened to be set.
+			name: "TurnEnd carries the assistant-level error category",
+			ev: turnevent.TurnEnd{
+				Reason:        turnevent.TurnEndReasonEndTurn,
+				ErrorCategory: "rate_limit",
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+				ErrorCategory: "rate_limit",
+			},
+			wantOK: true,
+		},
+		{
+			// The category is mapped UNCAPPED here, its producer having bounded it at
+			// construction. A 512-byte value — twice maxTurnEndStopField, a length
+			// streamsup could never emit — must therefore arrive intact rather than
+			// dropped or cut, which is what proves the second bound really is absent
+			// rather than merely untested.
+			name: "TurnEnd error category is not re-bounded by the mapper",
+			ev: turnevent.TurnEnd{
+				Reason:        turnevent.TurnEndReasonEndTurn,
+				ErrorCategory: strings.Repeat("c", 512),
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+				ErrorCategory: strings.Repeat("c", 512),
+			},
+			wantOK: true,
+		},
+		{
 			// The window fields are NOT published, and this is the row that keeps
 			// that true now that the variant has publishable fields at all: an event
 			// carrying windows produces a payload with no trace of them. Without it,

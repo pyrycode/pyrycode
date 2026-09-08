@@ -84,12 +84,20 @@ type ToolUpdate struct {
 }
 
 // TurnEnd marks the end of a claude turn, carrying the reason, — since #2101 —
-// the context window claude reported for each model the turn touched, and —
-// since #2223 — the STOP SHAPE claude itself reported for the turn.
+// the context window claude reported for each model the turn touched, since
+// #2223 the STOP SHAPE claude itself reported for the turn, and — since #2224 —
+// the API ERROR CATEGORY an assistant line in the turn reported.
 //
 // ACP models end-of-turn as the stopReason return value of session/prompt, not
 // as an event; converting TurnEnd back into that RPC return is the ACP
 // adapter's job, not this model's. Here we just carry the reason.
+//
+// EVERY OTHER FIELD IS READ OFF THE `result` LINE; ErrorCategory IS NOT. It comes
+// off an `assistant` line earlier in the same turn and is REMEMBERED until the
+// boundary, which makes it the only field here whose value the producer had to hold
+// across lines rather than read at the moment of emit. That is a property of the
+// producer, not of this type — a consumer reads all six the same way — but it is
+// why streamsup's Parser doc, and not this one, carries the residual argument.
 //
 // TWO CLASSIFICATIONS RIDE THIS VARIANT AND THEY ARE NEVER RECONCILED. Reason is
 // the DAEMON's two-value reading, derived from the subtype by streamsup's
@@ -118,8 +126,8 @@ type ToolUpdate struct {
 // no wire consumer wants it yet and #2102 owns whatever publication it needs — so
 // neither window cap states a percentage of the v2 application-envelope, quoting
 // one being a bound measured against a wire that data never touches. The three
-// stop fields below ARE published, so their shared cap (streamsup's
-// maxTurnEndStopField) does state one.
+// stop fields below ARE published, and so is #2224's ErrorCategory, so their
+// shared cap (streamsup's maxTurnEndStopField) does state one.
 //
 // This variant is therefore no longer comparable with ==. Nothing compared it
 // (the only TurnEnd{} in the tree is the sealed-interface assertion below), and
@@ -234,6 +242,37 @@ type TurnEnd struct {
 	// Empty means absent-or-over-cap, is bounded by the same maxTurnEndStopField,
 	// and carries Outcome's SECURITY paragraph unchanged.
 	TerminalReason string
+	// ErrorCategory is the API error an `assistant` line in this turn reported at
+	// the WRAPPER level — a sibling of `message`, never a content block (#2224).
+	// Documented values are authentication_failed, oauth_org_not_allowed,
+	// account_on_hold, billing_error, rate_limit, overloaded, invalid_request,
+	// model_not_found, server_error, max_output_tokens and unknown.
+	//
+	// AN OPEN SET carried VERBATIM, empty meaning absent-or-over-cap, bounded by the
+	// same maxTurnEndStopField that drops rather than cuts: Outcome's four rules
+	// hold here unchanged and are not restated.
+	//
+	// IT IS CLAUDE'S REPORT, NOT THE DAEMON'S FINDING, and this is the one thing a
+	// consumer must not get wrong. Half these values name an ACCOUNT state rather
+	// than a turn state — account_on_hold, billing_error, authentication_failed —
+	// where Outcome and TerminalReason describe only how the turn stopped. The
+	// daemon does not verify any of them: it read a string off claude's stdout and
+	// carried it. A surface that renders one as its own assertion about the
+	// operator's account is presenting model-authored text as daemon chrome, which
+	// is the trap protocol.QuestionDismissedPayload's outcome field exists to avoid.
+	// Attribute it to claude wherever it is shown.
+	//
+	// NOTHING IN THE DAEMON ACTS ON IT, deliberately and as of #2224 structurally:
+	// no retry, no backoff, no teardown and no routing is keyed on this value
+	// anywhere. That is what keeps a fabricated rate_limit a misleading label rather
+	// than an actuator, and whoever first makes the daemon behave differently on it
+	// owes the review that turns it into one.
+	//
+	// SECURITY: claude-authored text, bounded and NOT sanitized, so Outcome's
+	// SECURITY paragraph applies verbatim — the render boundary owing
+	// control-character and terminal-escape stripping is the CLIENT's, named as such
+	// in docs/protocol-mobile.md § turn_end.
+	ErrorCategory string
 }
 
 // ModelWindow is one entry of TurnEnd.ModelWindows: the context window claude

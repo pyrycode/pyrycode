@@ -299,5 +299,30 @@ verifier's full-module gate.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+**2026-09-08 — measured size, correcting this plan's own estimate.** The Context
+section's sizing note predicted ~820 lines of total written work. The actual is ~1085:
+302 spec, 340 across the eight tracked files, and a 443-line
+`internal/streamsup/assistant_error_test.go`. Both underestimates are prose, not
+design: the test file's nine functions each carry a table plus the argument for why
+that table is not vacuous, and `parser.go`'s change is 244 lines of which the great
+majority is the three doc-site corrections and the residual argument rather than code.
+The implementation matched the plan's design in every respect — no interface moved, no
+approach was replaced — so nothing else here is a departure. Recorded because a
+sizing estimate that is quietly wrong is worth less to the next ticket than one that
+is measured, and the shape of the miss is the reusable part: **a ticket whose
+deliverable is partly the correction of heavily-argued docs costs its line budget in
+prose, and counting the code is counting the smaller half.**
+
+**2026-09-08 — one doc claim the plan did not anticipate.** `maxTurnEndStopField`'s
+closing paragraph argued that no rate bound is owed because "a `result` line is the
+turn boundary, so this fires once per TURN". That is false for the new field, whose
+bound is applied once per `assistant` line. The paragraph is corrected in place rather
+than left standing: what remains once-per-turn is the field's *publication*, and the
+per-line application is an O(1) length test against a line already bounded by
+`defaultMaxParseBuf`, retaining nothing — which is why a rate bound is still not owed.
+Within AC 5's scope, not a design change.
 </content>
 </invoke>
