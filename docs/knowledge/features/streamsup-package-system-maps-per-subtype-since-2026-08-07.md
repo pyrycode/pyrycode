@@ -25,3 +25,15 @@ structurally unreachable from any `system` line whatever its subtype, and `TestP
 IgnoredLineTypesIsTheMeasuredSet` above is unaffected. `emitSystemSubtype`'s `case` arms are the single
 enumeration of the mapped set; every comment describing the drop rule (this file included) points there
 rather than restating it — a fifth captured subtype is a new case arm there, not a new sibling ticket.
+
+**Compaction's seam is now observed, still unmapped (#2229).** A live capture against claude 2.1.259
+(2026-09-08) settled the question #1074 left open: compaction arrives as two more subtypes on this
+same enumeration, not a new top-level type. `system/status` carries `status:"compacting"` while
+compaction runs and `status:null` plus `compact_result`/`compact_error` when it ends; a separate
+`system/compact_boundary` line carries `compact_metadata` (`trigger`, `pre_tokens`, `post_tokens`,
+`duration_ms`). Both still fall through `emitSystemSubtype`'s `default` to `emitUnrecognized` today,
+so mapping either onto `turnevent.Compacting` (declared since #1074, unconstructed since #1348 deleted
+its only producer) is a sixth and seventh `case` arm here, exactly like the fifth. See
+[the capture that observed this](e2e-realclaude-compaction-capture-test-go.md) for why a mapper still
+can't be built from this paragraph alone — the fixture that would back a reader's assertion did not
+survive the run that produced it.
