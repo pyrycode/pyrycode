@@ -47,6 +47,18 @@ const maxUnrecognizedRaw = 16 << 10
 // (internal/e2e/realclaude/testdata/dropped_lines_v2.1.220.json), so 256 is
 // roughly 9x the observed maximum: room for a format claude has not shipped yet,
 // and still a hard cut on anything that has stopped being an identifier.
+//
+// AMENDED 2026-09-08 (#2232): it now caps three fields on a SECOND event as well —
+// turnevent.ToolCallDenied's ToolName, ToolCallID and DecisionReasonType — so the
+// enumeration in the first sentence names one event of the two. Reused rather than
+// duplicated because those are identifiers and short vendor tokens of exactly this
+// shape (the longest is a 30-byte tool_use_id in the #2232 captures, and the
+// observed tool_name is 4), and a second constant of the same value bounding the
+// same shape would be a number to keep in step for nothing. It does NOT follow that
+// the overflow ANSWER is shared: this constant's own event cuts and reports, while
+// every field it caps on ToolCallDenied is dropped — the cap is a size, the answer
+// is the field's, and turnevent.ToolCallDenied.ToolCallID states why the two events
+// part company on the same identifier.
 const maxTaskFieldID = 256
 
 // maxTaskDescription caps the Description field, which is model-authored and
@@ -389,6 +401,45 @@ const maxCompactField = 256
 // default classifies turnMarkNone, which makes every one of them droppable at the
 // fan-in — the same posture turnevent.Unrecognized carries.
 const maxCompactTrigger = 256
+
+// maxDenialProse caps the TWO claude-authored prose fields one
+// system/permission_denied line publishes — message and decision_reason (#2232).
+// Applied at CONSTRUCTION, exactly as the caps above are, so an oversized value
+// never enters the event stream, the push queue, or any log.
+//
+// ONE CONSTANT OVER TWO FIELDS, as maxTaskFieldID serves three and maxCompactField
+// serves two: both are claude's prose about the same refusal, and a future change
+// to one budget should move the other.
+//
+// IT CUTS RATHER THAN DROPS, which is the opposite answer to the three token fields
+// on the same event and is maxCompactField's reasoning: a cut sentence still reads
+// as what it is, where a cut token would match nothing while still looking like one.
+// The cut IS reported (turnevent.ToolCallDenied.TruncatedFields) because the same
+// event drops three other fields, so an empty value cannot speak for itself here the
+// way maxCompactTrigger's can.
+//
+// MEASURED against the committed captures (#2232, claude 2.1.239, seven denials
+// across three arms of bypass_reescalation_v2.1.239_*): the longest message is 400
+// bytes — a sandbox refusal naming the session's allowed working directories — so
+// 2048 is roughly 5x the observation. decision_reason is UNOBSERVED (absent from all
+// seven) and rides this constant rather than earning one from an observation nobody
+// has: it is claude's prose about the same refusal, which is the strongest thing
+// that can be said about a field never seen.
+//
+// The envelope arithmetic, in maxUnrecognizedRaw's style: worst case one
+// ToolCallDenied carries 3*256 + 2*2048 = 4864 bytes of claude-derived text. That is
+// 7.4% of the v2 application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap) and DELIBERATELY the same worst case
+// turnevent.BackgroundTaskStarted carries, so this event family keeps ONE number a
+// reader can hold rather than a per-variant figure to re-derive. Escaping is mild
+// for maxUnrecognizedRaw's reason. Nothing reaches the wire in this slice — #2233
+// owns the frame — so the number is the budget that ticket inherits, not a live one.
+//
+// No RATE bound and none is owed here. One application per denial line, an O(1)
+// length test against a line already capped by defaultMaxParseBuf, reaching a
+// synchronous sink with no queue in this package. A model looping on refused calls
+// is a fan-out question, and it belongs to the ticket that puts the event on a wire.
+const maxDenialProse = 2 << 10
 
 // compactingEndedMsg is the Debug message the falling edge emits, as a literal so
 // the test asserting the record's attribute set is closed can find it by message
@@ -3146,6 +3197,16 @@ func (p *Parser) consumeLine(line []byte) {
 		if p.dropHarnessProseLine(line) {
 			return
 		}
+		// A SECOND known shape, and it fails the decode above for the same reason the
+		// first one does (#2232): claude's system/permission_denied line carries
+		// `message` as a STRING, where streamLine declares *streamMessage, so the
+		// whole line errors on that one field and the subtype never reaches
+		// emitSystemSubtype. The two gates are disjoint by type — that one requires
+		// `user`, this one `system` — and both sit inside the failure branch, so the
+		// happy path pays nothing and no successfully-decoded line can reach either.
+		if p.consumePermissionDeniedLine(line) {
+			return
+		}
 		// Not even the type is known here, so Kind stays empty. Previously this
 		// dropped without recording anything at all.
 		p.emitUnrecognized(turnevent.UnrecognizedUndecodable, "", line)
@@ -3477,9 +3538,183 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitCompactingStatus(line)
 	case "compact_boundary":
 		return p.emitCompactionBoundary(line)
+	case "permission_denied":
+		return p.emitPermissionDenied(line)
 	default:
 		return false
 	}
+}
+
+// consumePermissionDeniedLine maps a system/permission_denied line that FAILED
+// streamLine's decode, reporting whether it handled it. Called from consumeLine's
+// decode-failure branch, beside dropHarnessProseLine and for the same class of
+// reason.
+//
+// IT IS THE PRODUCTION PATH, not a fallback, and the switch arm beside it is the
+// theoretical one — which is the opposite of how the pair reads. MEASURED against
+// the seven committed denials (#2232): every one carries `message` as a STRING,
+// streamLine declares that key as *streamMessage, and encoding/json fails the WHOLE
+// line on the mismatch. So a real denial never reaches sl.Type at all; before this
+// gate it fell straight to emitUnrecognized and cost the operator a per-denial
+// unrecognized_message row. emitSystemSubtype's arm still handles the shapes that DO
+// decode — a line with no message key, or one whose message is an object — and both
+// paths run the same mapping, which is what makes the subtype mapped whatever shape
+// it arrives in.
+//
+// THE MATCH IS DELIBERATELY NARROW, on dropHarnessProseLine's and
+// consumeToolProgress' argument: this gate can only take a line away from
+// emitUnrecognized, so its safety is entirely in how little it matches. Two exact
+// keywords from the top-level envelope and nothing else — no subtype prefix, no
+// type-only match. A line that is not valid JSON at all fails this decode too and
+// falls through to the surfaced tier, where it belongs.
+//
+// Its own two-field envelope rather than streamLine, necessarily: the struct this
+// line already failed cannot be the one that recognises it.
+func (p *Parser) consumePermissionDeniedLine(line []byte) bool {
+	var envelope struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+	}
+	if err := json.Unmarshal(line, &envelope); err != nil {
+		return false
+	}
+	if envelope.Type != "system" || envelope.Subtype != "permission_denied" {
+		return false
+	}
+	return p.emitPermissionDenied(line)
+}
+
+// emitPermissionDenied decodes a system/permission_denied line and emits one
+// turnevent.ToolCallDenied, reporting that it consumed the line either way. Field
+// mapping and cap numbers come from the committed captures
+// (internal/e2e/realclaude/testdata/bypass_reescalation_v2.1.239_*, seven denials
+// across three arms), never from a hand-built payload.
+//
+// TWO CALLERS, both handing it the TOP-LEVEL bytes: emitSystemSubtype's case arm
+// for a line that decoded into streamLine, and consumePermissionDeniedLine for one
+// that could not because claude spells `message` as a string. See that function for
+// which of the two a real denial takes — it is not the one this arm's position
+// suggests.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, and
+// here that is the whole forgery argument rather than a call-shape convention. Both
+// callers gate on the top-level type and hand this arm the same bytes, so a tool
+// result whose text is literally a permission_denied line cannot forge a denial:
+// streamLine's doc states the property, that control shapes are read from the top
+// level only and nested content is never re-scanned. Decoding this payload from
+// anywhere else would let claude's own tool output claim a call was blocked.
+//
+// IT GATES ON NOTHING, and that is the decision this arm's shape rests on. The two
+// precedents beside it both gate — emitModelAnnounced emits nothing for a model-less
+// init, emitCompactionBoundary nothing without compact_metadata — and both do so
+// because the gated field IS the payload while a sibling event has already reported
+// the fact. Neither holds here. The SUBTYPE is the payload: nothing else on this
+// surface separates a denied call from one that ran and failed, which is the entire
+// defect being fixed, so a field-less line is still news. And a gate would re-drop
+// the line SILENTLY the first time claude renames a key — restoring the defect in
+// the one case nobody would look. emitBackgroundTaskStarted's rule applies instead:
+// absence is claude's to choose, the field lands empty, the event still fires. AC
+// 4's TestDropcapClassification row pins this: a line with no fields at all is
+// recorded there as mapped, so a gate added later reddens that row.
+//
+// TWO CONSUMING PATHS:
+//
+//   - undecodable (a numeric tool_name, say) → Debug naming the subtype, no event.
+//     emitBackgroundTaskStarted's arm verbatim and on its ground: the subtype is a
+//     message-name keyword rather than payload, and no claude-authored field was
+//     decoded on this path. NOT surfaced as an Unrecognized — keeping system whole
+//     on ignoredLineTypes is what makes "no system line reaches the unrecognized
+//     lane" structural, and that outranks surfacing a malformed line of a known
+//     subtype.
+//   - decodable → exactly one event, whatever the five fields hold.
+//
+// NOTHING IS LOGGED ON THE EMITTING PATH, and that is load-bearing rather than
+// tidy. `message` names absolute host paths in every captured line and may quote a
+// refused command line, so it is the field a drop site would be most tempted to
+// explain itself with and the one that must never reach a log. emitThinkingProgress'
+// posture otherwise applies: everything decoded reaches the event, so a second sink
+// would be a record to keep in step for no diagnostic gain.
+//
+// OVERFLOW IS CUT-OR-DROP PER FIELD, and both answers are live here for the reasons
+// stated at each one below. The event reports BOTH, which is what lets a consumer
+// tell a value the daemon emptied from one claude never sent.
+func (p *Parser) emitPermissionDenied(line []byte) bool {
+	var dl systemPermissionDeniedLine
+	if err := json.Unmarshal(line, &dl); err != nil {
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "permission_denied")
+		return true
+	}
+
+	var cut, dropped []string
+	// cutField is emitBackgroundTaskStarted's `bound` helper under a name that says
+	// which of the two answers it is, because this arm has both.
+	cutField := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// dropField is maxCompactTrigger's answer, generalised to report itself.
+	// truncateField is deliberately not called: the value is emptied, not shortened.
+	// No UTF-8 scrub is owed on this path either — encoding/json already replaced
+	// invalid input bytes with U+FFFD on the way into a Go string, which
+	// truncateField's own doc states, and the only mid-rune hazard is a cut this
+	// branch does not make.
+	dropField := func(value, name string, limit int) string {
+		if len(value) > limit {
+			dropped = append(dropped, name)
+			return ""
+		}
+		return value
+	}
+	// Sequential statements rather than a composite literal: both reports are ordered
+	// by these calls, and inside a literal that order would rest on the left-to-right
+	// operand rule rather than on something a reader sees. The names are the
+	// DAEMON's — tool_call_id, not claude's tool_use_id.
+	toolName := dropField(dl.ToolName, "tool_name", maxTaskFieldID)
+	toolCallID := dropField(dl.ToolUseID, "tool_call_id", maxTaskFieldID)
+	message := cutField(dl.Message, "message", maxDenialProse)
+	decisionReasonType := dropField(dl.DecisionReasonType, "decision_reason_type", maxTaskFieldID)
+	decisionReason := cutField(dl.DecisionReason, "decision_reason", maxDenialProse)
+
+	p.emit(turnevent.ToolCallDenied{
+		ToolName:           toolName,
+		ToolCallID:         toolCallID,
+		Message:            message,
+		DecisionReasonType: decisionReasonType,
+		DecisionReason:     decisionReason,
+		// nil when nothing was cut or dropped: neither append ran.
+		TruncatedFields: cut,
+		DroppedFields:   dropped,
+	})
+	return true
+}
+
+// systemPermissionDeniedLine is the decoded payload of one system/permission_denied
+// line. Kept separate from streamLine for systemTaskStartedLine's reason: that is
+// the line-level SEGMENTATION struct and stays at Type/Subtype/Message.
+//
+// The field set is exactly what the committed captures show plus the two the vendor
+// declares, and nothing invented. The two keys the captured lines also carry are
+// deliberately absent — uuid, which nothing in the daemon reads, and session_id,
+// which is claude's session identity and NOT the daemon's conversation identity.
+// Absent from the DECODE TARGET is a stronger guarantee than a scrub or a test
+// sweep, because a field that is never declared cannot leak.
+//
+// DecisionReasonType and DecisionReason are declared although NO CAPTURED LINE
+// CARRIES EITHER. They are on SDKPermissionDeniedMessage in
+// @anthropic-ai/claude-agent-sdk@0.3.263 and the consumer wants them, the decode
+// costs nothing when claude omits them, and their absence is pinned as an
+// observation by TestParser_DenialCaptureYieldsEmptyDecisionReasons rather than
+// assumed away. Every field is a plain string, so a non-string value fails the whole
+// decode and takes the undecodable path — fail-closed, per emitPermissionDenied.
+type systemPermissionDeniedLine struct {
+	ToolName           string `json:"tool_name"`
+	ToolUseID          string `json:"tool_use_id"`
+	Message            string `json:"message"`
+	DecisionReasonType string `json:"decision_reason_type"`
+	DecisionReason     string `json:"decision_reason"`
 }
 
 // toolProgressHeartbeatTrue is the ONE byte sequence the heartbeat marker

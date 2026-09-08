@@ -95,6 +95,20 @@ One failure mode: the line will not decode into the shape (a numeric `tool_name`
 1. Whether a classifier or deny-rule denial at a later claude carries `decision_reason_type` is unanswered and deliberately not chased: the decode is tolerant either way, so a fresh capture would change documentation and no code.
 2. Whether `DroppedFields` should be lifted onto the sibling variants that drop silently today (`CompactionBoundary.Trigger`) — not in scope here; this event is the first with more than one drop-bounded field, which is what makes the report worth carrying.
 
+## Revisions
+
+### 2026-09-08 — the line never reached `emitSystemSubtype`, so the arm alone maps nothing
+
+**What changed.** A second entry point, `consumePermissionDeniedLine`, added inside `consumeLine`'s DECODE-FAILURE branch beside `dropHarnessProseLine`, matching the top-level `system` + `permission_denied` envelope and running the same `emitPermissionDenied` mapping. The `emitSystemSubtype` case arm stays and is unchanged.
+
+**What drove it.** Not a review finding — the RED run. Three hermetic rows came back as `turnevent.Unrecognized` instead of the new event, and the discriminator was the presence of a `message` key. `streamLine.Message` is declared `*streamMessage`, and claude spells `message` on this line as a **string**, so `encoding/json` fails the WHOLE line on that one field. Every one of the seven captured denials carries a string `message`, so no real denial ever reached `sl.Type`, the `ignoredLineTypes` branch, or the switch. The arm as planned would have been unreachable in production while passing every hermetic test built on a field-less line.
+
+**What it corrects in the ticket.** The Context's mechanism ("the line falls to that branch's silent debug drop") is wrong, and so is the Technical Note asserting that "no `unrecognized_message` frame for the line" was already true. Today each denial costs the operator a surfaced noise row. `TestParser_DenialCaptureCostsNoUnrecognizedRow` pins the new state at zero across every line of all four arms — whole-record rather than denial-only, because a gate matching too widely would take other undecodable lines away from the surfaced tier and no other test here would see it.
+
+**Why this is not a restructuring the ticket forbade.** The Technical Notes say not to restructure the `ignoredLineTypes` branch while adding the arm, and it is untouched — the new gate sits in a different branch, the decode-failure one, and `dropHarnessProseLine` is the in-file precedent for exactly this shape of problem (a `user` line whose string `content` fails the same decode). The two gates are disjoint by type. Both entry points remain necessary: a denial line with no `message` key decodes fine and takes the switch arm, which is the path AC 4's first row pins.
+
+**Consequent test change.** `TestDropcapClassification` gains TWO rows rather than one — a bare line for the switch arm and the no-gate decision, and claude's actual shape for the recovery gate. Each records something the other cannot.
+
 ## Security review
 
 **Verdict:** PASS

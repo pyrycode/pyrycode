@@ -1629,6 +1629,125 @@ type CompactionBoundary struct {
 	PostTokens *int
 }
 
+// ToolCallDenied reports that claude refused a tool call it was about to make. It
+// maps claude's system/permission_denied line (#2232), and it exists because
+// nothing else on this surface distinguishes a BLOCKED call from one that ran and
+// failed: claude announces the denial here and then writes the same rejection text
+// into a tool_result carrying is_error, which is all a client could previously see.
+//
+// THE NAME IS THE DAEMON'S AND DELIBERATELY NOT PermissionDenied. That spelling
+// would sit beside PermissionRequest and PermissionResponse in this package, which
+// are the MODAL ask/answer pair, and a reader would take it for that pair's
+// negative answer. It is not: NOTHING ASKED. A denial resolved by an operator
+// answering a --permission-prompt-tool modal, or inside a PreToolUse hook, produces
+// no permission_denied line at all (#2234 covers that gap). The words used here are
+// ToolStart's and ToolUpdate's, which is also what keeps a claude rename of the
+// subtype landing in the parser and nowhere else.
+//
+// It opens and closes no turn, exactly as CompactionBoundary does not.
+//
+// EVERY FIELD IS claude's, AND SO IS THE FACT OF THE DENIAL — CompactionBoundary's
+// class of variant rather than Compacting's. A fabricated or simply mistaken line
+// can name the ToolCallID of a call that ACTUALLY RAN AND SUCCEEDED, and a client
+// that trusts it renders a successful call as blocked. The daemon does NOT verify
+// the id against a call it saw and deliberately will not: the cross-check needs
+// parser state this mapping refuses to hold, and it would silently drop a denial
+// whose call preceded a session rotation, which is #2232's own defect restored. Two
+// things bound the damage instead. The join is the CLIENT'S — an id matching no
+// tool call it has seen renders as unattributed, never as a match. And NOTHING IN
+// THE DAEMON ACTS ON ANY FIELD HERE: no retry, no backoff, no teardown and no
+// routing is keyed on them, which is what keeps a fabricated value a misleading
+// label rather than an actuator. Whoever first makes the daemon behave differently
+// on one owes the review that changes that.
+//
+// The two keys the captured lines also carry are deliberately NOT fields, on
+// BackgroundTaskStarted's rule: session_id, which is claude's session identity and
+// NOT the daemon's conversation identity, and uuid, claude's per-line message id
+// that nothing in the daemon reads. Both are absent from streamsup's decode target,
+// so the exclusion is structural rather than a scrub. Like every variant here it
+// carries no conversation identity of the DAEMON's — the bridge injects that.
+//
+// Every string is claude-derived and bounded by the producer AT CONSTRUCTION
+// (streamsup's maxTaskFieldID / maxDenialProse), so an oversized payload never
+// enters the event stream, a queue, or a log.
+type ToolCallDenied struct {
+	// ToolName is claude's name for the tool it refused ("Bash" in all seven
+	// captured lines). An OPEN SET carried verbatim, on TurnEnd.Outcome's rule.
+	//
+	// DROPPED rather than cut when it exceeds its cap, on maxTurnEndStopField's
+	// reasoning: a consumer switches on this token against claude's tool set, so a
+	// cut name would match nothing while still looking like a tool. Unlike
+	// CompactionBoundary.Trigger the drop IS reported — see DroppedFields.
+	ToolName string
+	// ToolCallID is the call claude refused: claude's tool_use_id, under the name
+	// ToolStart and ToolUpdate already carry for the same identifier, so a consumer
+	// joins the three with no vocabulary lookup. All seven captured denials share
+	// their id with the assistant tool_use before them and the tool_result after.
+	//
+	// DROPPED rather than cut, and this is the field where that answer matters most:
+	// the id is JOINED against a tool call the client already saw, so a cut id joins
+	// to nothing while still looking like a real handle — strictly worse than an
+	// absent one, which the client can see. ModelWindow.ModelID gives the identical
+	// answer for the identical reason.
+	//
+	// THIS DIVERGES FROM BackgroundTaskStarted.ToolCallID, which cuts and reports the
+	// same identifier under the same name, and the divergence is stated at both ends
+	// rather than left for a reader to find. That field predates the join-key rule
+	// maxTurnEndStopField and ModelWindow.ModelID settled; nothing joins on it today.
+	ToolCallID string
+	// Message is claude's rejection text — the prose it also writes into the
+	// tool_result. Every captured line is a sandbox refusal naming the absolute host
+	// paths of the session's allowed working directories.
+	//
+	// CUT rather than dropped, on maxCompactField's reasoning: a cut sentence still
+	// reads as what it is. The cut is reported in TruncatedFields.
+	//
+	// SECURITY: claude-authored, bounded by the daemon and NOT sanitized. For a
+	// rule-based denial it may quote the command line that was refused, which can
+	// carry whatever an operator typed. Safe to RENDER as text, never to execute or
+	// re-shell — BackgroundTaskStarted.Description's rule, and the same hazard.
+	Message string
+	// DecisionReasonType is claude's word for WHAT denied the call — "classifier",
+	// "asyncAgent", "mode" and "rule" are the documented values
+	// (SDKPermissionDeniedMessage in @anthropic-ai/claude-agent-sdk@0.3.263).
+	//
+	// OBSERVED ABSENT IN ALL SEVEN CAPTURED LINES at claude 2.1.239, and that absence
+	// is PINNED as an observation rather than assumed away
+	// (TestParser_DenialCaptureYieldsEmptyDecisionReasons). It is decoded anyway
+	// because the consumer wants it and the decode is tolerant either way. Empty
+	// therefore means claude sent nothing — a reader must not mistake it for a value,
+	// which is what the two report slices below make decidable.
+	//
+	// DROPPED rather than cut when over-cap, on ToolName's reasoning: a token from a
+	// documented set is matched, not read.
+	DecisionReasonType string
+	// DecisionReason is claude's free-form explanation of the denial, absent in all
+	// seven captured lines exactly as DecisionReasonType is. CUT rather than dropped
+	// and reported in TruncatedFields, on Message's reasoning, and it carries
+	// Message's SECURITY reading verbatim.
+	DecisionReason string
+	// TruncatedFields names the fields the producer CUT to fit their caps, in
+	// declaration order, using the DAEMON's snake_case names: "message",
+	// "decision_reason". nil when nothing was cut, never an empty non-nil slice, so a
+	// consumer can emit it as absent rather than [].
+	TruncatedFields []string
+	// DroppedFields names the fields the producer EMPTIED for exceeding their caps,
+	// in declaration order, under the daemon's names: "tool_name", "tool_call_id"
+	// (not claude's tool_use_id — the report names the field it describes),
+	// "decision_reason_type". nil when nothing was dropped.
+	//
+	// A SECOND REPORT SLICE IS NEW TO THIS PACKAGE, and it is what makes the drop
+	// answer usable on more than one field. CompactionBoundary.Trigger drops without
+	// a report because it is the ONLY droppable value on that event, so an empty
+	// trigger is unambiguous. Here three fields drop, and without this an empty
+	// ToolName could not be told apart from a tool_name claude never sent — the same
+	// absence-versus-value confusion DecisionReasonType's doc exists to prevent. A
+	// field named here was emptied BY THE DAEMON; a field empty and named in neither
+	// slice was empty when claude sent it. BackgroundTaskRoster.DroppedTasks already
+	// gives the family this vocabulary for overflow-by-dropping.
+	DroppedFields []string
+}
+
 // ConversationReset reports that claude reset the conversation and mounted a
 // fresh transcript under a new id. It maps claude's top-level
 // `conversation_reset` line (#2134) — the announcement claude writes on its own
@@ -1773,6 +1892,7 @@ func (Stall) isTurnEvent()                 {}
 func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
 func (CompactionBoundary) isTurnEvent()    {}
+func (ToolCallDenied) isTurnEvent()        {}
 func (ConversationReset) isTurnEvent()     {}
 func (Unrecognized) isTurnEvent()          {}
 

@@ -46,9 +46,17 @@ const compactionCaptureVersion = "2.1.259"
 // compactionPinnedShapes IS THE MEASUREMENT THIS TICKET COMMITS: the envelope each
 // compaction line arrived on, spelled "type" when the line carried no subtype and
 // "type/subtype" when it did. That distinction is the point — Parser.emitSystemSubtype
-// enumerates five `system` subtypes and sends everything else to emitUnrecognized,
-// so whether a compaction line is a new arm in that switch or a new top-level type
-// decides the whole shape of #2227's and #2228's mapping.
+// maps `system` per subtype, so whether a compaction line is a new arm in that switch
+// or a new top-level type decides the whole shape of #2227's and #2228's mapping.
+//
+// CORRECTED 2026-09-08 (#2232), two errors in one sentence. It carried a COUNT of
+// that switch's arms, which the arms themselves are the one enumeration of and which
+// was stale within a ticket of being written; no comment should carry one, and this
+// correction adds no replacement. And it said an unmatched subtype is sent to
+// emitUnrecognized — it is not, and never was: the match sits INSIDE consumeLine's
+// ignoredLineTypes branch, so an unmatched `system` subtype falls to that branch's
+// silent debug drop and the surfaced tier is structurally unreachable from any
+// `system` line.
 //
 // IT WAS EMPTY ON PURPOSE UNTIL THE LIVE GATE HAD RUN, and it is what sequenced this
 // family. The fixture could not exist before `make e2e-realclaude` produced it, which
