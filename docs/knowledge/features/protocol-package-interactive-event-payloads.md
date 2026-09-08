@@ -1,20 +1,23 @@
-# Interactive event payloads (#607, #638, #1074, #2237)
+# Interactive event payloads (#607, #638, #1074, #2237, #2233)
 
 The **v2 additive application events** — the wire representation of
-`internal/turnevent`'s neutral turn-event model (#606). All nine are **binary →
+`internal/turnevent`'s neutral turn-event model (#606). All ten are **binary →
 phone only**, sent **only** to a phone whose `interactive` capability was echoed in
 `hello_ack`; an old phone never sees them and keeps the coarse v1 `message`
 fan-out. Spec source: `docs/protocol-mobile.md` § Interactive events. They map 1:1
 to the `Type*` constants `TypeTurnState` / `TypeAssistantDelta` / `TypeToolUse` /
 `TypeToolResult` / `TypeTurnEnd` (all #607), `TypeStall` (#638), `TypeApiRetry`
-/ `TypeCompacting` (#1074), and `TypeCompactionBoundary` (#2237, its own const
-block — see [Envelope types](protocol-package-constants-codes-go-envelope-types.md)).
+/ `TypeCompacting` (#1074), `TypeCompactionBoundary` (#2237, its own const
+block), and `TypeToolDenied` (#2233, also its own const block — see
+[Envelope types](protocol-package-constants-codes-go-envelope-types.md)).
 The first five are the wire form of ACP-shaped turn events; `stall`, `api_retry`,
 and `compacting` are the wire form of **internal-only** signals (no ACP
 equivalent) — `stall` added in #638, the other two in #1074 as PTY-derived status
-peers of `stall`. `compaction_boundary` is neither: a claude-authored fact with no
-ACP mapping and no PTY lineage of its own, conversation-scoped like `stall` but
-carrying no daemon-computed field at all — see below.
+peers of `stall`. `compaction_boundary` and `tool_denied` are neither: both are
+claude-authored facts with no ACP mapping and no PTY lineage of their own —
+`compaction_boundary` is conversation-scoped like `stall` and carries no
+daemon-computed field at all (see below); `tool_denied` is turn-scoped like
+`tool_use`/`tool_result`, the frame it joins on `tool_use_id`.
 
 ```go
 type TurnStatePayload struct {
@@ -91,6 +94,24 @@ type CompactionBoundaryPayload struct {
     Trigger        string `json:"trigger"`     // claude's compact_metadata.trigger, open-set, bounded+dropped not cut
     PreTokens      *int   `json:"pre_tokens"`  // NO omitempty — absence must reach the wire as null, never 0
     PostTokens     *int   `json:"post_tokens"` // claude's own shape marks this one optional
+}
+
+// #2233 — the wire form of turnevent.ToolCallDenied: claude REFUSED a tool call it had
+// already announced. Turn-scoped like ToolUsePayload/ToolResultPayload, the two frames
+// it joins on ToolUseID — unlike CompactionBoundaryPayload and the status peers above it.
+// It is a frame of its own rather than two fields on ToolResultPayload: the denial line
+// arrives BEFORE the tool result, and #2234's result-line recovery reports denials whose
+// tool_result frame has already shipped, which a field on a sent frame cannot answer.
+type ToolDeniedPayload struct {
+    ConversationID     string   `json:"conversation_id"`
+    TurnID             string   `json:"turn_id"`
+    ToolUseID          string   `json:"tool_use_id"`           // byte-identical to tool_use / tool_result for the same call
+    ToolName           string   `json:"tool_name"`              // NOT `name` — see below
+    DecisionReasonType string   `json:"decision_reason_type"`   // empty in every captured denial
+    DecisionReason     string   `json:"decision_reason"`        // empty in every captured denial
+    Message            string   `json:"message"`                // claude's rejection prose
+    TruncatedFields    []string `json:"truncated_fields"`       // nil -> null; NO MarshalJSON
+    DroppedFields      []string `json:"dropped_fields"`         // nil -> null; NO MarshalJSON
 }
 ```
 
@@ -227,6 +248,54 @@ type CompactionBoundaryPayload struct {
   to the line later. A sweep asserting no uuid appears in the marshalled event is
   a tripwire against a future field, not a proof about today's code — the actual
   guarantee is the three-field decode target itself.
+- **`ToolDeniedPayload` (#2233) spells its tool token `tool_name`, not `name`, and the
+  divergence from `ToolUsePayload.Name` is deliberate, not drift.** On `tool_use` the
+  tool *is* the subject, so an unqualified `name` is unambiguous; here it is one named
+  thing among several, and the binding reason is the two report slices below: they name
+  fields by keys *this* frame carries, so the producer's token and the wire key have to
+  be the same string.
+- **`TruncatedFields`/`DroppedFields` make three states decidable for the same field,
+  and that is the whole reason a `ToolDeniedPayload` needs two slices where
+  `CompactionBoundaryPayload.Trigger` needed none.** For any of `tool_use_id`,
+  `tool_name`, `decision_reason_type`, `decision_reason`, `message`: empty and named in
+  neither slice means claude sent nothing; empty and named in `dropped_fields` means the
+  daemon emptied an over-cap value; present and named in `truncated_fields` means the
+  daemon cut claude's text to fit. `RateLimitedPayload.TruncatedFields` only ever needed
+  the first two readings because nothing on that event drops; `trigger` needed none of
+  the three because it is the only droppable value on its frame, so an empty `trigger`
+  is already unambiguous. Both slices are `nil` when nothing fired and reach the wire as
+  `null`, `RateLimitedPayload`'s posture rather than `BackgroundTaskRosterPayload`'s
+  nil→`[]`: an allocated `[]` here would tell a phone claude's cut text is complete.
+- **The report slices are the frame's own vocabulary, and the producer's field name for
+  the join key is not it.** `turnevent.ToolCallDenied.TruncatedFields`/`DroppedFields`
+  name the id `tool_call_id` — the daemon's internal field name — but this frame
+  publishes it as `tool_use_id`. `internal/turnbridge`'s `deniedReportKeys` translates
+  exactly that one token at the bridge and copies the slice unconditionally rather than
+  aliasing the event's array (see [turnbridge-package.md](turnbridge-package.md)); a
+  token naming a key the frame does not carry is one a client cannot look up. **When a
+  payload's field name diverges from the producing event's, a report slice naming that
+  field needs translating at the same seam** — nothing in the type system catches a
+  missed rename, since both sides are plain `[]string` and a round-trip fixture is
+  byte-equal either way.
+- **A doc comment's claim that a report slice lists its tokens "in declaration order" is
+  not provable by anything that runs, and shipped false here.** `ToolDeniedPayload`'s
+  `TruncatedFields`/`DroppedFields` doc comments enumerate their tokens in *this
+  struct's* field order, but the actual order is the producer's call order —
+  `internal/streamsup`'s `emitPermissionDenied` appends `dropField`/`cutField` calls in
+  its own sequence, and `deniedReportKeys` preserves index order while renaming one
+  token — so the wire ships `["message","decision_reason"]` (the reverse of the
+  declared order) and `["tool_name","tool_use_id","decision_reason_type"]` (a
+  transposition of it), pinned by this ticket's own fixture and table test one screen
+  away from the comment that contradicts them. Neither catches it: `roundTripEnvelope`'s
+  byte-exact re-marshal proves *struct field* → JSON *key* order (the real "declaration
+  order is wire order" rule, and it does hold — see below), not the *contents* of a
+  `[]string` value; and nothing compares the slice against the false order because both
+  slices are consumed by membership, not position. Flagged by code review as a
+  non-blocking SHOULD FIX and left uncorrected as of #2233. The lesson generalises past
+  this one struct: a report slice's runtime order is a fact about the producer's call
+  sequence, never a fact inferable from the consuming struct's field declarations, and
+  a future field-order claim on one needs re-deriving from the producer, not copied
+  from a sibling.
 - **Pure DTOs: no methods, no constructors, no `Validate()`.** Identical posture to
   every v1 slice. The intersection-of-capabilities trust decision, the
   internal-event → envelope mapping, and the capability-gated push all live in the

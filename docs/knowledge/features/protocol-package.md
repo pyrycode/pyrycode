@@ -108,7 +108,7 @@ search can reach it.
 - [`Envelope`](protocol-package-types-envelope.md) — The outer wire shape every application frame conforms to (`docs/protocol-mobile.md` § Message envelope, lines 177–201). 
 - [`RoutingEnvelope`](protocol-package-types-routingenvelope.md) — The relay-prepended `{conn_id, frame}` wrapper used on the binary↔relay leg only (spec § Routing envelope, lines 100–122). 
 - [Handshake / control payloads (#271)](protocol-package-handshake-control-payloads.md) — Five DTOs that slot into `Envelope.Payload (json.RawMessage)` once the dispatcher reads `Envelope.Type`. 
-- [Interactive event payloads (#607, #638, #1074)](protocol-package-interactive-event-payloads.md) — The **v2 additive application events** — the wire representation of `internal/turnevent`'s neutral turn-event model (#606). 
+- [Interactive event payloads (#607, #638, #1074, #2237, #2233)](protocol-package-interactive-event-payloads.md) — The **v2 additive application events** — the wire representation of `internal/turnevent`'s neutral turn-event model (#606). 
 - [Background-task event payloads (#1393; mapping wired #1394)](protocol-package-background-task-event-payloads.md) — The v2 wire shape for the three **background-task events** — work claude starts that outlives the turn that started it (a `local_bash`…
 - [Thinking-progress event payload (#1386)](protocol-package-thinking-progress-event-payload.md) — The v2 wire shape for claude's **only mid-turn proof of life** on the stream-json surface. 
 - [Rate-limited event payload (#1405; mapping #1410)](protocol-package-rate-limited-event-payload.md) — The v2 wire shape for claude's **usage-limit report**. 
