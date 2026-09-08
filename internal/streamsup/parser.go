@@ -2604,6 +2604,58 @@ type userLine struct {
 	IsSynthetic bool `json:"isSynthetic"`
 }
 
+// harnessProseLine is the decode target for a `user` line whose message content
+// is a JSON STRING rather than the block array streamMessage declares. It exists
+// only on consumeLine's decode-failure path, and it is a second target rather than
+// a widening of streamMessage for resultStopLine's stated reason: the two fail
+// independently, and nothing here can disturb the segmentation or the block model
+// that every other user line goes through.
+//
+// WHY A STRING CONTENT IS ITS OWN SHAPE. streamMessage.Content is
+// []json.RawMessage, so a string content fails json.Unmarshal for the WHOLE line
+// and consumeLine reports it as UnrecognizedUndecodable before emitUser is ever
+// reached. That verdict is honest as far as it goes — the line really does not fit
+// the block model — but it fires ahead of the harness-prose suppression emitUser
+// has carried since #2087, so the flag that was already correct for these lines was
+// simply unreachable.
+//
+// PROVENANCE, measured on #2227's real-claude lap (claude 2.1.259, 2026-09-08).
+// The compact turn's census was `system/status: 2, system/compact_boundary: 1,
+// system/init: 1, user: 2, result/success: 1`, and both user lines land here:
+// claude's compaction summary, re-seeding the context as a message the person never
+// wrote (isSynthetic true, isReplay false), and the harness echoing the slash
+// command's own stdout as `<local-command-stdout>Compacted </local-command-stdout>`
+// (isReplay true, no isSynthetic key at all). Two lines, two DIFFERENT flags, which
+// is why both are read and neither subsumes the other — the same OR'd-triggers
+// shape harnessNoOutputNudge argues for at block level, for the same reason.
+//
+// Both flags are read BY VALUE, exactly as userLine.IsSynthetic is: an absent key
+// and an explicit false both mean "surface it". Fail-open is the direction that
+// keeps a genuinely new string-content line visible instead of swallowed, and the
+// unflagged case has its own test pinning that it still reaches the wire.
+type harnessProseLine struct {
+	Type    string `json:"type"`
+	Message struct {
+		// A string, so this target decodes exactly the lines the primary one
+		// cannot. A block-array content fails HERE instead, which is the correct
+		// direction: such a line's decode failure was about something else, and it
+		// belongs on the unrecognized lane.
+		Content string `json:"content"`
+	} `json:"message"`
+
+	// IsSynthetic marks a line claude's HARNESS authored. Same key and same
+	// semantics as userLine's — deliberately not shared through one type, because
+	// this target must not grow a tool_use_result field and that one must not grow
+	// a string content.
+	IsSynthetic bool `json:"isSynthetic"`
+	// IsReplay marks a line claude is REPLAYING rather than producing anew. On the
+	// compact turn it is what the stdout echo carries; more generally, a replayed
+	// line is one the client has either already seen or was never meant to, so
+	// suppressing it is also what stops compaction double-posting preserved
+	// messages into the person's own history.
+	IsReplay bool `json:"isReplay"`
+}
+
 // jsonKey is a presence-only decode target: a *jsonKey field is non-nil exactly
 // when its key is present with a non-null value, and retains NO BYTE of it.
 //
@@ -3053,6 +3105,15 @@ func (p *Parser) consumeLine(line []byte) {
 	}
 	var sl streamLine
 	if err := json.Unmarshal(line, &sl); err != nil {
+		// One known shape gets a second look before the line is called
+		// unrecognized: a harness-authored `user` line whose content is a string,
+		// which fails the decode above for its content alone. See
+		// dropHarnessProseLine. The gate sits INSIDE the failure branch, so the
+		// happy path pays nothing for it and no successfully-decoded line can reach
+		// it.
+		if p.dropHarnessProseLine(line) {
+			return
+		}
 		// Not even the type is known here, so Kind stays empty. Previously this
 		// dropped without recording anything at all.
 		p.emitUnrecognized(turnevent.UnrecognizedUndecodable, "", line)
@@ -5470,6 +5531,48 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			ResultDetail: detail,
 		})
 	}
+}
+
+// dropHarnessProseLine reports whether line is a harness-authored `user` line
+// carrying string content, consuming it in silence when it is. Called ONLY after
+// streamLine's decode has already failed.
+//
+// This is the parser's SECOND suppression tier and the first at LINE level;
+// harnessNoOutputNudge documents the block-level one. The two do not overlap and
+// neither can stand in for the other: a harness line whose content is a proper
+// block array decodes normally and is caught by emitUser's guard, and one whose
+// content is a string never reaches emitUser at all. Splitting them this way is
+// what keeps the block-level alarm — an unknown BLOCK type on a flagged line still
+// surfaces — from being blanketed by a line-level flag.
+//
+// WHAT IT COSTS TO GET WRONG, in the direction that matters. Before this arm a
+// compact turn put claude's whole conversation summary on the wire as an
+// unrecognized_message: the frame's Raw is the offending line, the line is 3182
+// bytes of transcript in the one captured case, and a client renders it as a noise
+// row. So the arm removes a disclosure as well as the noise, which is why it is
+// stated here rather than left to read as tidying.
+//
+// THE MATCH IS DELIBERATELY NARROW: type `user`, a content that decodes as a
+// string, and at least one of the two flags claude stamps on lines it authored or
+// replayed. A string-content user line with neither flag still reaches
+// emitUnrecognized, because "claude started emitting a new shape here" is exactly
+// the alarm that lane exists to raise and nothing observed licenses widening past
+// the two flags. Logged content-free — site and the flag NAMES only, never a byte
+// of the line — matching the block-level drop above, and for the sharper reason
+// that the content this arm drops is a conversation transcript.
+func (p *Parser) dropHarnessProseLine(line []byte) bool {
+	var hp harnessProseLine
+	if err := json.Unmarshal(line, &hp); err != nil {
+		return false
+	}
+	if hp.Type != "user" || (!hp.IsSynthetic && !hp.IsReplay) {
+		return false
+	}
+	p.log.Debug("streamsup: dropping harness-authored user prose line",
+		"site", string(turnevent.UnrecognizedUndecodable),
+		"is_synthetic", hp.IsSynthetic,
+		"is_replay", hp.IsReplay)
+	return true
 }
 
 // emit forwards one event to the sink. A nil sink is a no-op guard — the parser

@@ -307,3 +307,50 @@ asserting `Compacting` edges has nothing to assert until the arm exists, and the
 producer no live evidence covers, which is precisely the state #1074 left behind and this ticket
 exists to end. Cutting there produces two children neither of which can be verified alone. The
 overage is stated and absorbed rather than paid for with a ticket that cannot stand up.
+
+### 2026-09-08 — AC 2 was not structural, and the live gate proved it
+
+The plan's Context argued that AC 2 followed from the seam: every compaction line arrives as a
+`system` subtype, an unmapped `system` subtype is dropped by `ignoredLineTypes` rather than surfaced,
+so zero `unrecognized_message` frames came free and "AC 2 is structural rather than earned". The
+real-claude gate falsified that on the first lap. `TestRealClaude_CompactingEdges` passed AC 1 —
+exactly one `compacting:true` then one `compacting:false`, in order, on a live `/compact` turn — and
+failed AC 2 with two frames.
+
+**What they were.** The census of the same lap (recovered from the capture probe's artifact
+directory, since the fixture itself went out with the worktree again) puts the compact turn at seven
+lines: `system/status: 2`, `system/compact_boundary: 1`, `system/init: 1`, `user: 2`,
+`result/success: 1`. The two `user` lines are the frames. They are compaction's CONSEQUENCES rather
+than compaction lines by subtype — claude's conversation summary, re-seeded as a message the person
+never wrote, and the harness echoing the slash command's stdout as
+`<local-command-stdout>Compacted </local-command-stdout>` — so a reading of the seam that enumerated
+subtypes could not have found them. The plan's error was not the seam; it was treating a claim about
+subtypes as a claim about a turn.
+
+**Why they reached the wire, which is the part worth keeping.** Both carry `message.content` as a
+JSON **string**, not the block array `streamMessage` declares. So `json.Unmarshal` fails for the
+whole line and `consumeLine`'s undecodable branch fires BEFORE `emitUser` is reached — and the
+summary line already carried `isSynthetic: true`, the flag `emitUser` has suppressed harness prose on
+since #2087. The suppression that covered this line existed and was correct; a decode that never got
+that far is the only reason it never ran. The frame that went out carried the line's own bytes as
+`Raw`, so a compact turn put 3182 bytes of conversation summary into a client noise row.
+
+**The fix**, `dropHarnessProseLine`: a second decode target on the decode-failure path only, matching
+type `user` + string content + `isSynthetic || isReplay`, dropped with a content-free Debug. Two
+flags rather than one because the two observed lines carry different ones, and neither subsumes the
+other — the same OR'd-triggers shape `harnessNoOutputNudge` argues for at block level. This is the
+parser's second suppression tier and its first at line level; the block-level tier is unchanged and
+the two cannot overlap. A string-content `user` line carrying NEITHER flag still surfaces, which is
+what keeps the arm from becoming a blanket over the alarm `emitUnrecognized` exists to raise.
+
+**Scope.** This is production behaviour the plan did not prescribe, and it is in scope rather than a
+§ Scope Discipline violation: AC 2 is this ticket's own criterion, the ticket's Context says in terms
+that the zero-unrecognized criterion "is not a formality", and the lines being suppressed are the
+compact turn's own output. It lands in `internal/streamsup/parser.go`, already one of the plan's two
+production files, so the Files-read set is unchanged.
+
+**One thing that is not a fix.** The live test's red said "2 unrecognized_message frame(s)" and its
+trace rendered every `Unrecognized` as the same token, so the failure named a criterion and nothing
+about which lines broke it; diagnosing it took a census from a different probe's leftovers. The trace
+now carries `Site` and `Kind` — both bounded, neither the line — because a gate this session cannot
+re-run at will has to spend its one lap saying something actionable.

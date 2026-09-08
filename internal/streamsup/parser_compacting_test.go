@@ -262,3 +262,125 @@ func TestParser_CompactingRisingEdgeLogsNothingFromTheLine(t *testing.T) {
 		t.Fatalf("the rising edge emitted %d log record(s), want 0: %v", len(got), got)
 	}
 }
+
+// The two `user` lines a real compact turn puts on the wire AFTER the falling
+// edge, transcribed from the capture record #2229's probe wrote during the
+// 2026-09-08 real-claude lap against claude 2.1.259 (recovered from that run's
+// artifact directory; the fixture the probe wrote in-repo went out with the
+// detached worktree, which is the whole of why compactionPinnedShapes is still
+// empty). Both carry `message.content` as a JSON STRING rather than the block
+// array streamMessage declares, which is the property that matters here — it is
+// what makes streamLine's decode fail and so what kept isSynthetic, the flag the
+// parser has suppressed harness prose on since #2087, from ever being consulted.
+//
+// The envelope keys and the flag values are byte-exact from the capture. The
+// summary PROSE is elided: the captured line ran 3182 bytes, and the discriminator
+// this file asserts on is the envelope, never the text, so carrying the whole
+// summary would buy nothing and put a page of claude's conversation transcript in
+// a test file. Eliding it cannot make the row vacuous — a shortened body is still
+// a string body, so it still fails the same decode and still reaches the same arm.
+const (
+	// isSynthetic:true, isReplay:false — claude's compaction summary, re-seeding
+	// the context as a message the person never wrote.
+	compactSummaryUserLine = `{"type":"user","message":{"role":"user","content":` +
+		`"This session is being continued from a previous conversation that ran out of context. ` +
+		`The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary ` +
+		`Request and Intent:\n   [elided]\n"},"session_id":"s","parent_tool_use_id":null,` +
+		`"uuid":"e9d8ca32-d112-4cfd-876b-656936a4ee31","timestamp":"2026-09-08T03:44:00.501Z",` +
+		`"isReplay":false,"isSynthetic":true}`
+	// isReplay:true, and NO isSynthetic key at all — the harness echoing the slash
+	// command's own stdout. The two lines carry different flags, which is why the
+	// arm reads both and neither trigger subsumes the other.
+	compactStdoutUserLine = `{"type":"user","message":{"role":"user","content":` +
+		`"<local-command-stdout>Compacted </local-command-stdout>"},"session_id":"s",` +
+		`"parent_tool_use_id":null,"uuid":"24a6df51-e9e5-4657-bee9-1baf429b91dc",` +
+		`"timestamp":"2026-09-08T03:44:00.614Z","isReplay":true}`
+	// The same shape carrying NEITHER flag. Not observed — constructed to pin the
+	// arm's narrowness, because a suppression that swallowed every string-content
+	// user line would be the failure emitUnrecognized exists to prevent.
+	compactUnflaggedUserLine = `{"type":"user","message":{"role":"user","content":"plain prose"},` +
+		`"session_id":"s","uuid":"f0f0f0f0-0000-0000-0000-00000000f0f0"}`
+)
+
+// compactingEvents is compactingRun's sibling for the rows that assert on an
+// event's FIELDS rather than on its kind. The trace projection collapses every
+// Unrecognized to one token, which is exactly the information a reader needs here
+// — #2227's live gate failed with "2 unrecognized_message frame(s)" and no way to
+// tell which lines they were, and that cost a whole gate lap.
+func compactingEvents(t *testing.T, lines ...string) []turnevent.Event {
+	t.Helper()
+	var got []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { got = append(got, ev) }, discardLogger())
+	for _, line := range lines {
+		if _, err := p.Write([]byte(line + "\n")); err != nil {
+			t.Fatalf("Write(%.40s) err = %v, want nil", line, err)
+		}
+	}
+	return got
+}
+
+// TestParser_CompactTurnUserLinesStaySilent is AC 2 over the half of the compact
+// turn the plan got wrong.
+//
+// The plan argued AC 2 was STRUCTURAL: every compaction line arrives as a `system`
+// subtype, and an unmapped `system` subtype is dropped by ignoredLineTypes rather
+// than surfaced, so zero unrecognized frames followed from the seam. #2227's live
+// gate falsified that — the compact turn emitted two frames, and the census of the
+// same run names them: alongside the two `system/status` lines and the
+// `system/compact_boundary`, the turn carries `user: 2`. Neither is a compaction
+// line by subtype; both are consequences of one.
+//
+// They reach emitUnrecognized as UNDECODABLE, not as an unknown user block, and
+// that distinction is the fix. streamMessage.Content is []json.RawMessage; both
+// lines carry content as a string, so json.Unmarshal fails on the whole line and
+// consumeLine's undecodable branch fires BEFORE emitUser is ever called. The
+// isSynthetic guard that would have dropped the summary was already there and
+// already correct — it was simply unreachable behind a decode that never got that
+// far. The frame that reached the wire carried the line's own bytes as Raw, so a
+// compact turn put claude's entire conversation summary into a client noise row.
+func TestParser_CompactTurnUserLinesStaySilent(t *testing.T) {
+	t.Parallel()
+
+	got := compactingEvents(t,
+		compactingStartLine, compactingEndLine, compactBoundaryLine,
+		compactSummaryUserLine, compactStdoutUserLine, compactingResultLine,
+	)
+	for i, ev := range got {
+		u, ok := ev.(turnevent.Unrecognized)
+		if !ok {
+			continue
+		}
+		t.Fatalf("event %d is an unrecognized_message (site=%q kind=%q raw=%.60q); the compact "+
+			"turn's own user lines are harness-authored — the summary re-seeding the context and "+
+			"the slash command's stdout echo — and neither is the person's speech or the model's",
+			i, u.Site, u.Kind, u.Raw)
+	}
+	// Non-vacuity: the arm must still have suppressed something, or a row that
+	// stopped producing these lines at all would read as a pass.
+	if len(got) == 0 {
+		t.Fatal("no events at all; the sequence should still produce both compacting edges")
+	}
+}
+
+// TestParser_CompactTurnUnflaggedUserLineStillSurfaces is the other half, and the
+// one that keeps the suppression from becoming a blanket. A string-content user
+// line carrying NEITHER isSynthetic nor isReplay is not something the harness has
+// claimed authorship of, so it stays visible — the same fail-open direction
+// emitUser takes for an unknown block type, and the reason the arm reads two flags
+// by value instead of matching the shape alone.
+func TestParser_CompactTurnUnflaggedUserLineStillSurfaces(t *testing.T) {
+	t.Parallel()
+
+	got := compactingEvents(t, compactUnflaggedUserLine)
+	if len(got) != 1 {
+		t.Fatalf("got %d event(s), want exactly 1 unrecognized_message: %v", len(got), got)
+	}
+	u, ok := got[0].(turnevent.Unrecognized)
+	if !ok {
+		t.Fatalf("got %T, want turnevent.Unrecognized", got[0])
+	}
+	if u.Site != turnevent.UnrecognizedUndecodable {
+		t.Errorf("site = %q, want %q: the line genuinely does not fit the block model, and "+
+			"reporting where it failed is the honest answer", u.Site, turnevent.UnrecognizedUndecodable)
+	}
+}

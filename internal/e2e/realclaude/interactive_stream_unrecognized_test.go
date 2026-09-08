@@ -30,6 +30,19 @@ package realclaude
 // carries #2228's payload — not for want of a mapping, which is a distinction a
 // reader deciding whether a new subtype should surface needs.
 //
+// CORRECTED 2026-09-08 (#2227, second): the split above is stated in TYPES and
+// SUBTYPES, and there is now one drop that keys on NEITHER. A `user` line whose
+// message content is a JSON string is suppressed when claude flags it isSynthetic
+// or isReplay — see streamsup.dropHarnessProseLine. It sits on the DECODE-FAILURE
+// path rather than in any enumeration, because string content fails the block-array
+// decode for the whole line, which is exactly how it used to slip past the
+// harness-prose suppression emitUser has carried since #2087. Measured on #2227's
+// live lap: a compact turn emits two such lines — claude's conversation summary
+// re-seeding the context, and the slash command's stdout echo — and before the arm
+// both reached this lane, the first carrying 3182 bytes of transcript as its Raw.
+// An unflagged string-content user line still surfaces, so the alarm this test
+// guards is narrowed by two flags rather than by a shape.
+//
 // CORRECTED 2026-08-19 (#1500): control_response is the SECOND type in that
 // consumed-by-its-own-arm category, so the "anything else" below now has two
 // exceptions rather than one. It is the ack the daemon solicits for itself on an

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -39,6 +40,16 @@ type cedgeCollector struct {
 // cedgeTrace renders one event as the token this test asserts on. Only the three
 // kinds the acceptance criteria name are distinguished; everything else collapses to
 // "other" so a turn's ordinary traffic does not have to be enumerated to be ignored.
+//
+// An Unrecognized carries its SITE and KIND into the token, and that is a scar
+// rather than a flourish. The first live lap of this test failed with "2
+// unrecognized_message frame(s)" and a trace whose every unrecognized entry read
+// alike, so the red said a criterion was unmet and nothing whatever about which
+// lines did it; the diagnosis took a separate census recovered from a sibling
+// probe's artifact directory. A live gate this test cannot re-run at will has to
+// spend its one lap saying something actionable. Site and Kind are the parser's own
+// two discriminators and are BOUNDED — a site keyword and a message type, never the
+// line — so carrying them cannot turn a failure message into a transcript dump.
 func cedgeTrace(ev turnevent.Event) string {
 	switch e := ev.(type) {
 	case turnevent.Compacting:
@@ -49,11 +60,15 @@ func cedgeTrace(ev turnevent.Event) string {
 	case turnevent.TurnEnd:
 		return "turn_end"
 	case turnevent.Unrecognized:
-		return "unrecognized"
+		return fmt.Sprintf("%s%s/%s", cedgeUnrecognized, e.Site, e.Kind)
 	default:
 		return "other"
 	}
 }
+
+// cedgeUnrecognized is the prefix every unrecognized token carries, so the AC-2
+// assertion counts the class while the trace keeps the discriminators.
+const cedgeUnrecognized = "unrecognized:"
 
 func (c *cedgeCollector) add(ev turnevent.Event) {
 	c.mu.Lock()
@@ -72,6 +87,19 @@ func (c *cedgeCollector) count(from int, want string) int {
 	n := 0
 	for _, tr := range c.snapshot()[from:] {
 		if tr == want {
+			n++
+		}
+	}
+	return n
+}
+
+// countPrefix is count's sibling for a token class rather than a token: the
+// unrecognized tokens carry their site and kind, so the AC-2 assertion has to
+// count the family.
+func (c *cedgeCollector) countPrefix(from int, prefix string) int {
+	n := 0
+	for _, tr := range c.snapshot()[from:] {
+		if strings.HasPrefix(tr, prefix) {
 			n++
 		}
 	}
@@ -249,16 +277,23 @@ func TestRealClaude_CompactingEdges(t *testing.T) {
 	}
 
 	// --- AC 2 --------------------------------------------------------------------
-	// The whole compaction family arrives as `system` subtypes, so every one of them
-	// is either claimed by emitSystemSubtype or dropped by ignoredLineTypes and NONE
-	// may reach a client as a noise row. This is the assertion that would have caught
-	// the alternative reading of the seam — a top-level type of its own, which falls
-	// through to emitUnrecognized.
-	if n := collector.count(sentAt, "unrecognized"); n != 0 {
+	// Nothing the compact turn emits may reach a client as a noise row. The plan
+	// argued this was structural — the compaction lines are all `system` subtypes,
+	// and an unmapped one is dropped by ignoredLineTypes rather than surfaced — and
+	// the first live lap falsified that: the turn's census was `system/status: 2,
+	// system/compact_boundary: 1, system/init: 1, user: 2, result/success: 1`, and
+	// the two USER lines were the frames. They are compaction's consequences rather
+	// than compaction lines by subtype (claude's summary re-seeding the context, and
+	// the slash command's stdout echo), they carry string content so they failed
+	// streamLine's decode ahead of the suppression that already covered them, and
+	// the frame that reached the wire carried the whole summary as its Raw. See
+	// dropHarnessProseLine. This assertion is what holds that closed on the surface
+	// where it was found.
+	if n := collector.countPrefix(sentAt, cedgeUnrecognized); n != 0 {
 		t.Fatalf("#2227: the `/compact` turn produced %d unrecognized_message frame(s), want 0. "+
-			"Compaction arriving on an envelope emitSystemSubtype does not claim would put a noise "+
-			"row in the operator's chat for a line the daemon does in fact recognise.\n  trace: %v",
-			n, turn)
+			"The trace names each one as unrecognized:<site>/<kind> — read those first, since "+
+			"site and kind are what say whether a line arrived on an envelope the parser does not "+
+			"claim or failed to decode at all.\n  trace: %v", n, turn)
 	}
 }
 
