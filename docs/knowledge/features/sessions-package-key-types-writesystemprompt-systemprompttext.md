@@ -1,9 +1,11 @@
-# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150)
+# `writeSystemPrompt` + `systemPromptText` (#2093, per-session since #2150, client-named since #2148)
 
 ```go
 func composeSystemPrompt(operator string) string
+func composeSystemPromptFor(operator string, clients []ClientIdentity) string
 func writeSystemPrompt(registryPath string, id SessionID, text string) (string, error)
 func (p *Pool) conversationPrompt(label string) string
+func (p *Pool) attachedClients(ctx context.Context) []ClientIdentity
 func (p *Pool) refreshSystemPrompt(sess *Session)
 func (p *Pool) SystemPromptFor(id SessionID) (string, error)
 ```
@@ -67,6 +69,61 @@ site, so the tri-state stays in the registry. `label` is the conversation id
 at both production call sites (`create_conversation` → `Pool.Mint`, and
 `sessionRouter.revive` → `Pool.Revive`), so no mint/revive signature widened
 to carry a resolver.
+
+## Naming the attached client (#2148)
+
+`composeSystemPromptFor(operator, clients)` names the clients attached *at
+compose time* — spawn-time, not per-turn, and never restated mid-session,
+because the appended prompt file is read once when the child spawns. It
+**delegates to `composeSystemPrompt(operator)` whenever `clientSection(clients)`
+returns `""`**, rather than branching on an equivalent condition, so the
+no-clients / all-fields-empty path is byte-identical to the pre-#2148 text
+*structurally* — `TestSystemPromptText_Pinned` and `TestComposeSystemPrompt`
+needed no call-site edit and no re-transcription of the pin.
+
+`(*Pool).attachedClients(ctx)` is the resolver, and — like `conversationPrompt`
+— it is **total**: no resolver installed, a resolver returning `nil`, and an
+already-cancelled ctx all yield `nil` rather than blocking or erroring. Unlike
+`conversationPrompt`, whose totality is a property of the registry lookups it
+performs, `attachedClients`' totality had to be asserted explicitly: an
+early implementation wrapped the caller's ctx in a bounded timeout and called
+the resolver regardless, so "an already-cancelled ctx yields no identity" was
+only true because the production resolver happened to check `ctx.Err()`
+itself. Its own test (`TestPool_AttachedClients_Total`) caught it once a
+resolver that *doesn't* check ctx was substituted. **A totality contract has
+to be enforced at the symbol whose doc states it, not borrowed from whichever
+implementation currently satisfies it** — the same trap `conversationPrompt`
+avoids by performing the check itself rather than trusting its callers.
+
+`admitClient` is the one untrusted→trusted door both fields cross through
+before either can reach the file: valid UTF-8, non-blank after trimming,
+within its byte bound, and every rune display-safe (no C0, no C1/DEL, no
+`"`, since the admitted value is rendered inside quotes and the delimiter
+itself must be refused for no value to close the structure around it). An
+inadmissible name drops the whole client; an inadmissible version drops only
+the version. **Refusal, not truncation or escaping** — `MaxWorkspaceLabelBytes`'
+posture: the byte bound alone is a cost control, never a safety claim, and the
+character-set refusal is what actually holds the prompt's structure.
+`clientSection` then sorts and dedupes the admitted set and renders it as one
+daemon-authored, quoted transcription; more than `maxNamedClients` admitted
+collapses to no section at all rather than a truncated list under a sentence
+that claims completeness.
+
+**A resource bound and a display-validation door are different concerns and
+belong in different packages.** `internal/relay` retains `DeviceName` /
+`ClientVersion` verbatim off the wire but drops (never truncates) a value over
+`maxRetainedClientNameBytes`/`maxRetainedClientVersionBytes` — a memory/copy-cost
+ceiling at the point an authenticated client can park bytes that get copied into
+every `ActiveConn` snapshot the fan-out takes per turn. `admitClient` here owns
+the character set and the *display* bound instead. The instinct to fold both
+into "the one validating door" would have put a memory-safety concern behind a
+door that only runs when a session is about to spawn — the wrong place to stop
+an allocation multiplier. See
+[the relay enumeration doc](v2-session-manager-state-machine-concurrency-safe-open-session-enumeratio.md)
+for the retention side.
+
+See [docs/specs/architecture/2148-client-identity-system-prompt.md](../../specs/architecture/2148-client-identity-system-prompt.md)
+for the full design, the trust-boundary walk, and the security review.
 
 ## The mint-window trap this design exists to avoid
 
@@ -136,7 +193,10 @@ a sentence for whoever next touches this file's teardown.
 ## No log line ever carries prompt bytes
 
 Only paths and wrapped `os` errors are interpolated into any error string or
-log line, on every path — construction, refresh, removal. The one live test
+log line, on every path — construction, refresh, removal. #2148 extends this
+rule to the two client-identity strings: `admitClient` is silent by
+construction, so a refused hostile name has no log line to appear in at all,
+by design rather than by omission. The one live test
 gap this surfaced: an argv-level assertion (reading claude's spawn record out
 of `internal/streamsup`'s log) cannot tell "bytes reached the file" from
 "bytes reached the reply" — it would pass against a claude that ignored the

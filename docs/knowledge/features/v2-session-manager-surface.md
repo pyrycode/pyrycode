@@ -190,13 +190,25 @@ func ReassembleBundle(frames []protocol.Envelope) ([]byte, error)
 // disabled — a phone advertising last_event_id then just gets the live stream.
 func (m *V2SessionManager) SetReplaySource(ring *eventring.Ring, currentConv func() string)
 
-// ActiveConn is one open v2 session in the capability-aware enumeration (#626):
-// its routing conn-id and the negotiated interactive-capability decision
-// recorded at handshake. Holds only non-secret routing/decision data — never a
-// *V2Session, CipherState, key, or plaintext.
+// ActiveConn is one open v2 session in the capability-aware enumeration: its
+// routing conn-id, the negotiated interactive-capability decision recorded at
+// handshake, and what the client reported about itself there (#2148). It holds
+// no *V2Session, CipherState, key, or plaintext, so the snapshot is safe to hand
+// to a consumer goroutine.
+//
+// DeviceName and ClientVersion are REMOTE-AUTHORED, UNVALIDATED display strings
+// — the only fields here that are not daemon-authored routing/decision data,
+// which is why they carry an obligation the other two do not: a consumer MUST
+// NOT log them, interpolate them into an error, or format the struct wholesale
+// (%+v, slog.Any), which would emit them into the daemon log by accident.
+// internal/sessions' admitClient is the gate the one consumer that renders them
+// uses. Both are "" for a client that reported nothing and for one whose value
+// exceeded maxRetainedClientNameBytes/maxRetainedClientVersionBytes.
 type ActiveConn struct {
-    ConnID      string
-    Interactive bool
+    ConnID        string
+    Interactive   bool
+    DeviceName    string
+    ClientVersion string
 }
 
 // Concurrency-safe snapshot of every session currently in V2StateOpen (#588,
