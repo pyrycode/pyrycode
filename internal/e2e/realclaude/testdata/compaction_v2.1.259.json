@@ -1,0 +1,203 @@
+{
+  "ticket": "2229",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-08T06:43:32+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape, identical to #1260's and #2089's — see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for system/init. It is kept rather than narrowed because a differing spawn shape would be a confound in the evidence. Nothing about compaction is known to depend on the approval flags; that is UNMEASURED, not ruled out.",
+  "workdir": "$WORKDIR",
+  "prompts": [
+    "Write the integers from 1 to 300, one per line, and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE",
+    "Write the integers from 301 to 600, one per line, and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE",
+    "/compact"
+  ],
+  "outcome": "fired",
+  "outcome_detail": "3 compaction line(s) across shapes [system/compact_boundary system/status], markers map[compact_metadata:1 compact_result:1 post_tokens:1 pre_tokens:1 status=compacting:1 subtype=compact_boundary:1]",
+  "terminated_on": "result",
+  "priming_turns_completed": 2,
+  "priming_assistant_lines": 4,
+  "staged_context_tokens": 22631,
+  "compact_turn_sent": true,
+  "compact_turn_seconds": 16.049556208,
+  "pre_compact_line_census": {
+    "assistant": 4,
+    "rate_limit_event": 1,
+    "result/success": 2,
+    "system/init": 2,
+    "system/thinking_tokens": 4
+  },
+  "line_type_census": {
+    "result/success": 1,
+    "system/compact_boundary": 1,
+    "system/init": 1,
+    "system/status": 2,
+    "user": 2
+  },
+  "tool_calls": [],
+  "undecoded_lines": 0,
+  "lines_captured": 20,
+  "frames": [
+    {
+      "index": 13,
+      "type": "system",
+      "subtype": "status",
+      "compaction": true,
+      "markers": [
+        "status=compacting"
+      ],
+      "payload_len_bytes_captured": 156,
+      "payload_len_bytes": 131,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"compacting\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"ef6ac2c5-1d34-481f-876d-5d791e4b91a7\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 14,
+      "type": "system",
+      "subtype": "status",
+      "compaction": true,
+      "markers": [
+        "compact_result"
+      ],
+      "payload_len_bytes_captured": 175,
+      "payload_len_bytes": 150,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"status\",\"status\":null,\"compact_result\":\"success\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"1bb8c6df-dab2-4215-bdf5-af418623c735\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 15,
+      "type": "system",
+      "subtype": "init",
+      "compaction": false,
+      "payload_len_bytes_captured": 3985,
+      "payload_len_bytes": 3665,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"$WORKDIR\",\"session_id\":\"$SESSION_ID\",\"tools\":[\"Task\",\"Bash\",\"CronCreate\",\"CronDelete\",\"CronList\",\"DesignSync\",\"Edit\",\"EnterWorktree\",\"ExitWorktree\",\"ListAgents\",\"ListMcpResourcesTool\",\"Monitor\",\"NotebookEdit\",\"PushNotification\",\"Read\",\"ReadMcpResourceDirTool\",\"ReadMcpResourceTool\",\"RemoteTrigger\",\"ReportFindings\",\"ScheduleWakeup\",\"SendMessage\",\"Skill\",\"TaskCreate\",\"TaskGet\",\"TaskList\",\"TaskOutput\",\"TaskStop\",\"TaskUpdate\",\"ToolSearch\",\"WebFetch\",\"WebSearch\",\"Workflow\",\"Write\",\"mcp__blender__execute_blender_code\",\"mcp__blender__execute_blender_code_for_cli\",\"mcp__blender__get_blendfile_summary_datablocks\",\"mcp__blender__get_blendfile_summary_datablocks_for_cli\",\"mcp__blender__get_blendfile_summary_missing_files\",\"mcp__blender__get_blendfile_summary_missing_files_for_cli\",\"mcp__blender__get_blendfile_summary_of_linked_libraries\",\"mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli\",\"mcp__blender__get_blendfile_summary_path_info\",\"mcp__blender__get_blendfile_summary_path_info_for_cli\",\"mcp__blender__get_blendfile_summary_usage_guess\",\"mcp__blender__get_blendfile_summary_usage_guess_for_cli\",\"mcp__blender__get_object_detail_summary\",\"mcp__blender__get_objects_summary\",\"mcp__blender__get_python_api_docs\",\"mcp__blender__get_screenshot_of_area_as_image\",\"mcp__blender__get_screenshot_of_window_as_image\",\"mcp__blender__get_screenshot_of_window_as_json\",\"mcp__blender__jump_to_tab_by_name\",\"mcp__blender__jump_to_tab_by_space_type\",\"mcp__blender__jump_to_view3d_object_by_name\",\"mcp__blender__jump_to_view3d_object_data_by_name\",\"mcp__blender__render_thumbnail_to_path\",\"mcp__blender__render_viewport_to_path\",\"mcp__blender__search_api_docs\",\"mcp__blender__search_manual_docs\",\"mcp__codegraph__codegraph_callees\",\"mcp__codegraph__codegraph_callers\",\"mcp__codegraph__codegraph_context\",\"mcp__codegraph__codegraph_files\",\"mcp__codegraph__codegraph_impact\",\"mcp__codegraph__codegraph_node\",\"mcp__codegraph__codegraph_search\",\"mcp__codegraph__codegraph_status\"],\"mcp_servers\":[{\"name\":\"blender\",\"status\":\"connected\"},{\"name\":\"codegraph\",\"status\":\"connected\"}],\"model\":\"claude-haiku-4-5-20251001\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"workflow-authoring\",\"run\",\"run-skill-generator\",\"agents\",\"auto-mode-setup\",\"autocompact\",\"clear\",\"color\",\"compact\",\"config\",\"context\",\"effort\",\"fast\",\"heapdump\",\"init\",\"mcp\",\"import\",\"model\",\"__remote-workflow\",\"workflow-launch-exec\",\"reload-skills\",\"rename\",\"ultrareview\",\"security-review\",\"usage-credits\",\"extra-usage\",\"usage\",\"insights\",\"recap\",\"skill-doctor\",\"goal\",\"design\",\"design-consent\",\"design-revoke\",\"list-agents\",\"team-onboarding\"],\"terminal_slash_commands\":[\"doctor\",\"color\"],\"apiKeySource\":\"none\",\"claude_code_version\":\"2.1.259\",\"output_style\":\"default\",\"agents\":[\"claude\",\"Explore\",\"general-purpose\",\"Plan\",\"statusline-setup\"],\"skills\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"workflow-authoring\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"d393d052-a09c-46e6-9358-a73bc30a1c16\",\"memory_paths\":{\"auto\":\"$TEMP_HOME/.claude/projects/$WORKDIR/memory/\"},\"messaging_socket_path\":\"/tmp/cc-socks/79504.sock\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 16,
+      "type": "system",
+      "subtype": "compact_boundary",
+      "compaction": true,
+      "markers": [
+        "compact_metadata",
+        "post_tokens",
+        "pre_tokens",
+        "subtype=compact_boundary"
+      ],
+      "payload_len_bytes_captured": 770,
+      "payload_len_bytes": 745,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"compact_boundary\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"7d31f0bb-482d-45c0-bf8a-2ef2cd2ccfc0\",\"compact_metadata\":{\"trigger\":\"manual\",\"pre_tokens\":23600,\"post_tokens\":2612,\"cumulative_dropped_tokens\":20988,\"duration_ms\":15596,\"preserved_segment\":{\"head_uuid\":\"ae93ee09-99cd-472e-a34b-10278c8aa85a\",\"anchor_uuid\":\"e9d8ca32-d112-4cfd-876b-656936a4ee31\",\"tail_uuid\":\"134c965c-edc1-45bf-8cc7-e2aa0198c829\"},\"preserved_messages\":{\"anchor_uuid\":\"e9d8ca32-d112-4cfd-876b-656936a4ee31\",\"uuids\":[\"ae93ee09-99cd-472e-a34b-10278c8aa85a\",\"134c965c-edc1-45bf-8cc7-e2aa0198c829\"],\"all_uuids\":[\"ae93ee09-99cd-472e-a34b-10278c8aa85a\",\"134c965c-edc1-45bf-8cc7-e2aa0198c829\"]}},\"logical_parent_uuid\":\"134c965c-edc1-45bf-8cc7-e2aa0198c829\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 17,
+      "type": "user",
+      "compaction": false,
+      "payload_len_bytes_captured": 3448,
+      "payload_len_bytes": 3182,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\\n\\nSummary:\\n1. Primary Request and Intent:\\n   The user's primary requests were:\\n   - First: \\\"Write the integers from 1 to 300, one per line, and nothing else. Do not use any tools, do not comment on the task, and do nothing else.\\\"\\n   - Second (initial): \\\"Write the integers from 301 to 600, one per line, and nothing else. Do not use any tools, do not comment on the task, and do nothing else.\\\"\\n   - Second (overriding): Provide a detailed summary of the conversation following a specific structured format with analysis and summary sections, without using any tools and responding with text only.\\n\\n2. Key Technical Concepts:\\n   - Text generation and plain text output\\n   - Instruction-following and override handling\\n   - Instruction parsing (recognizing CRITICAL override instructions)\\n\\n3. Files and Code Sections:\\n   - No files were examined, created, or modified in this conversation.\\n\\n4. Errors and fixes:\\n   - No errors occurred in this conversation.\\n\\n5. Problem Solving:\\n   - No problems required solving in this conversation.\\n\\n6. All user messages:\\n   - \\\"Write the integers from 1 to 300, one per line, and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE\\\"\\n   - \\\"Write the integers from 301 to 600, one per line, and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool. You already have all the context you need in the conversation above. Tool calls will be REJECTED and will waste your only turn — you will fail the task. Your entire response must be plain text: an \u003canalysis\u003e block followed by a \u003csummary\u003e block. [Full summary instructions provided]\\\"\\n\\n7. Pending Tasks:\\n   - None. The second message superseded the 301-600 request with the summary request.\\n\\n8. Current Work:\\n   - Providing this summary of the conversation as explicitly requested in the CRITICAL override section of the second user message.\\n\\n9. Optional Next Step:\\n   - None. The current task (providing this summary) directly addresses the user's most recent explicit request. The summary provides the structured analysis the user requested, with no further work indicated.\\n\\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: $TEMP_HOME/.claude/projects/$WORKDIR/$SESSION_ID.jsonl\\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \\\"I'll continue\\\" or similar. Pick up the last task as if the break never happened.\"},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"e9d8ca32-d112-4cfd-876b-656936a4ee31\",\"timestamp\":\"2026-09-08T03:44:00.501Z\",\"isReplay\":false,\"isSynthetic\":true}",
+      "events_emitted": 1
+    },
+    {
+      "index": 18,
+      "type": "user",
+      "compaction": false,
+      "payload_len_bytes_captured": 288,
+      "payload_len_bytes": 263,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"\u003clocal-command-stdout\u003eCompacted \u003c/local-command-stdout\u003e\"},\"session_id\":\"$SESSION_ID\",\"parent_tool_use_id\":null,\"uuid\":\"24a6df51-e9e5-4657-bee9-1baf429b91dc\",\"timestamp\":\"2026-09-08T03:44:00.614Z\",\"isReplay\":true}",
+      "events_emitted": 1
+    },
+    {
+      "index": 19,
+      "type": "result",
+      "subtype": "success",
+      "compaction": false,
+      "payload_len_bytes_captured": 1386,
+      "payload_len_bytes": 1361,
+      "payload_encoding": "json-string",
+      "payload": "{\"is_error\":false,\"duration_api_ms\":0,\"num_turns\":0,\"stop_reason\":null,\"session_id\":\"$SESSION_ID\",\"total_cost_usd\":0.0408803,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{\"claude-haiku-4-5-20251001\":{\"inputTokens\":2470,\"outputTokens\":2762,\"cacheReadInputTokens\":57333,\"cacheCreationInputTokens\":9690,\"webSearchRequests\":0,\"costUSD\":0.0408803,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":683,\"canonicalModel\":\"claude-haiku-4-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"subtype\":\"success\",\"result\":\"\",\"type\":\"result\",\"duration_ms\":15617,\"uuid\":\"f781022f-0653-482b-945a-b7cc5d759950\",\"queued_turn_count\":0}",
+      "events_emitted": 1
+    }
+  ],
+  "compaction_line_count": 3,
+  "compaction_shapes": [
+    "system/compact_boundary",
+    "system/status"
+  ],
+  "marker_census": {
+    "compact_metadata": 1,
+    "compact_result": 1,
+    "post_tokens": 1,
+    "pre_tokens": 1,
+    "status=compacting": 1,
+    "subtype=compact_boundary": 1
+  },
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 4
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 9
+    },
+    {
+      "class": "temp_home",
+      "replacement": "$TEMP_HOME",
+      "count": 2
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 4
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir under a per-test temp $HOME, rig-authored prompts, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS CAPTURE SPECIFICALLY CAN CARRY, stated rather than left to be inferred by whoever decides to paste this record into a public issue. FIRST, a compact_result is a MODEL-AUTHORED SUMMARY OF THE WHOLE CONVERSATION, which is a larger free-text surface than any sibling capture holds — #2089's single content-bearing field was one tool's input. It is KEPT, because a redacted summary would not be evidence of the shape, and the defence for it is that the conversation being summarised is two rig-authored prompts asking for integers, plus the by-construction list above and the deny-scan. A capture staged against a real workspace would need more. SECOND, per-message uuid, tool_use_id and parent_tool_use_id values SURVIVE, as they do in every committed capture in this directory; the session_id deny class covers the conversation id claude echoes back, which is the rig's own literal.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One conversation, one spawn shape, one claude version, one model (haiku), and compaction provoked EXPLICITLY by `/compact` rather than by reaching a context threshold. Auto-compaction's lines are UNMEASURED and may not be the same set: nothing here stages a context large enough to trip it. Cross-version and cross-model stability are UNMEASURED. A shape absent from compaction_shapes did not appear in THIS turn, which is not the same as claude never sending it.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}
