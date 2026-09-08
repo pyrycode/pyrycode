@@ -87,7 +87,23 @@ step already made. A check for a condition the decoder cannot produce is not
 defense in depth — it is untested code with no path to ever redden, and the
 test written to cover it proves nothing about the property it names.
 
-## The requester's own name skipped the gate the minted name got, on a premise that was false
+## The requester's own name skipped the gate the minted name got, on a premise that was false — closed by #2219, not by upgrading this comment
+
+**Resolved.** `RegisterPushToken` now runs the same character-class check
+`mintLabelIsDisplaySafe` runs here, before `UpdatePushRegistration` and before the dedupe
+comparison — see [`relay-package-handlers.md` § Display-safety
+gate](relay-package-handlers.md#display-safety-gate-on-device_name-and-platform-2219). The
+paragraph below is kept as written because the mistake it documents (a security review's
+"no prior actor could do X" premise) is the reusable lesson; the fix it names is done.
+
+**What #2219 did *not* upgrade this comment to say, deliberately:** closing the
+`register_push_token` door is not the same as making `Device.Name` display-safe as a type
+invariant. A name written to `devices.json` before the #2219 gate existed is read back
+unchecked, and `pyry pair --name` — operator-authored — stays deliberately ungated, for
+the reason this function's own doc block states. `pairingMinterV2.MintPairing`'s comment
+now says exactly that rather than flipping "tracked, not closed" to "handled": rewriting
+a known residual into an invariant claim is the same false-confidence shape the original
+paragraph below argues against, one level up.
 
 The plan's security review closed the log-injection question with "no client
 could author a device label before this ticket" — true of the *minted*
@@ -121,7 +137,7 @@ by convention but has a second, less obvious remote writer already wired in.
 - [`pyry pair` — CLI device-pairing verb family](pyry-pair-command.md) — the
   shared `mintDevice` step, and why the CLI passes `grantorHash: ""`.
 - [`devices.json` Registry](devices-registry.md) — `UpdatePushRegistration`,
-  the pre-existing unchecked `Device.Name` writer, and #2219.
+  gated one step upstream by #2219, not inside the registry itself.
 - [Pairing request/reply payloads (#2126)](protocol-package-types-pairing-payloads.md) —
   the frozen wire shapes this handler answers.
 - [Error codes](protocol-package-constants-codes-go-error-codes-21.md) — the

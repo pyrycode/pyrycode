@@ -35,6 +35,7 @@ The handler never touches those fields itself.
 |---|---|---|
 | `c.Auth() == nil` (dispatcher routed an unauth conn here — bug; defence-in-depth) | `error`: `Code=auth.invalid_token`, `Retryable=false` | none |
 | `env.Payload` not JSON-decodable as `RegisterPushTokenPayload` | `error`: `Code=protocol.malformed`, `Retryable=false`, static message (decode-error text NOT echoed) | none |
+| `DeviceName` over `protocol.MaxDeviceNameBytes`, or `DeviceName`/`Platform` carries a C0 control (LF/CR/ESC included), DEL, or a C1 control (#2219) | `error`: `Code=protocol.malformed`, `Retryable=false`, static per-branch message (value NOT echoed) | none — checked before the dedupe comparison, see § below |
 | Payload `(Platform, Token, DeviceName)` equals snapshot `(Platform, PushToken, Name)` | `ack` | **none — does NOT call `UpdatePushRegistration`, does NOT call `Save` (the dedupe contract)** |
 | `reg.UpdatePushRegistration` returns `false` (concurrent revoke between auth-accept and frame arrival) | `error`: `Code=auth.invalid_token`, `Retryable=false` (same UX as unauth) | none |
 | `reg.Save` returns non-nil | `error`: `Code=server.binary_busy`, `Retryable=true`, `RetryAfterS=nil` | **in-memory IS mutated; disk is not** (phone retries; dedupe will succeed on retry) |
@@ -58,6 +59,63 @@ The protocol's `device_name` makes the phone the source of truth for self-report
 
 Documented post-condition, mirroring `Validate`'s `LastSeenAt` pattern: in-memory is the runtime source of truth; the next successful Save catches disk up. Test pins `reg.FindByTokenHash(...).PushToken == "new-fcm"` after the failed call.
 
+### Display-safety gate on `device_name` and `platform` (#2219)
+
+`Device.Name` is remote-authored — the phone sets its own name via this frame, and
+`UpdatePushRegistration` (see [`devices-registry.md`](devices-registry.md#phase-3-foundation-250))
+assigns it verbatim. Nothing checked its shape until #2219, so a device naming itself
+`"kitchen\nfake log line"` could forge a line in the daemon's log, an `audit.Entry.DeviceLabel`
+entry, or a `pyry pair list` row. Three guards run **after decode and before the dedupe
+comparison**:
+
+1. `len(p.DeviceName) > protocol.MaxDeviceNameBytes` → refuse.
+2. `DeviceName` carries a C0 control (including LF, CR, ESC), DEL, or a C1 control (U+0080–U+009F) → refuse.
+3. `Platform` carries the same character classes → refuse (no byte bound — `platform` has none to anchor; its ceiling stays the ~65519-byte application-envelope cap).
+
+**The predicate is a third restatement, not a shared import.** `internal/relay` →
+`mintLabelIsDisplaySafe` (see
+[the mint-pairing seam](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md))
+already refuses the identical set, and `internal/sessions` → `admissibleClientField` refuses
+a superset (adds `"` and invalid-UTF-8, for reasons specific to a system-prompt rendering).
+Importing either was rejected: `handlers` importing `internal/relay` puts a child
+package's dependency on its own parent in place for a six-line loop, and exporting the
+predicate from `internal/protocol` would break that package's pure-DTO posture (see
+`RegisterPushTokenPayload` below). The three copies must move together — the refused set
+is specified once, by `mintLabelIsDisplaySafe`'s doc block, and the other two restate it.
+
+**The ordering is load-bearing, not stylistic.** The dedupe branch acks without writing
+when the payload triple equals the stored one. A device whose name was stored *before*
+this gate existed could otherwise repeat that unsafe name forever and be acked — never
+reaching a guard — if the guards ran after the comparison. Running them first makes "an
+unsafe value is refused" true of every frame, not just every *changed* frame. This is the
+one property in the file no other test can distinguish (see Test surface below).
+
+**A test value spelling a C0 control must not also spell a substrate escape sequence.**
+The first draft's ESC rows embedded a full CSI run (`\x1b[31m`, an SGR color code) to look
+like a realistic terminal-injection payload. `cmd/substrate-guard` bans the ESC-then-`[`
+source byte sequence outside a two-path allowlist that a handlers test file does not
+join, so both rows reddened the merge gate — after every test tier and `staticcheck` had
+already passed. The predicate refuses ESC as a C0 control on its own; the CSI tail
+exercised no additional branch, so the fix drops it (`kitchen\x1bpad`, not
+`kitchen\x1b[31mpad`) with no loss of coverage. The `\u`-escape spelling of ESC also clears
+the scan, and was rejected for the same reason a passing-for-the-wrong-reason test is
+rejected elsewhere in this file: it evades the gate rather than satisfying it.
+
+Storage stays verbatim on the accept path — no truncation, escaping or repair — matching
+`MintPairingPayload`'s refuse-never-truncate posture for the same label
+(see [`protocol-package-types-pairing-payloads.md`](protocol-package-types-pairing-payloads.md)).
+The published contract is in
+[`docs/protocol-mobile.md` § Application message types](../../protocol-mobile.md#application-message-types).
+
+**Closing this door is not the same as making `Device.Name` display-safe as a type
+invariant**, and the `pairingMinterV2.MintPairing` seam comment this ticket corrects makes
+exactly that distinction rather than flipping to "handled": a name written to
+`devices.json` before this gate existed is read back unchecked (out of scope), and
+`pyry pair --name` stays deliberately ungated — `mintLabelIsDisplaySafe`'s own doc block
+states why that check does not live in the shared mint step. See
+[the mint-pairing seam doc](v2-session-manager-state-machine-inbound-mint-pairing-pairingminter-seam.md)
+for the full correction.
+
 ### Sub-package isolation
 
 `handlers` imports `internal/devices`, `internal/dispatch`, and `internal/protocol`. **It does NOT import `internal/relay`.** The new `internal/dispatch` edge (added #319) is cycle-free because `internal/dispatch`'s only handler-direction dependency is the `Handler` function type, which `handlers` consumes structurally. `auth.go` stays in `internal/relay` proper alongside the live Noise_IK handshake that now consumes its two WS close-code constants (see [`relay-package.md` § Auth](relay-package.md#auth-ws-close-code-constants-authgo)) — it is no longer a per-type handler or a dispatch gate.
@@ -73,8 +131,12 @@ The `wrap(connID, inReplyTo, nextID, envType, payload)` file-local helper from #
 | `relay: register_push_token save failed` | Warn | `event=register_push_token.save_failed`, `conn_id`, `device_name`, `err` |
 | `relay: register_push_token device gone mid-conn` | Warn | `event=register_push_token.gone_mid_conn`, `conn_id`, `device_name` |
 | `relay: register_push_token unauth` | Warn | `event=register_push_token.unauth`, `conn_id`, `code=auth.invalid_token` |
+| `relay: register_push_token malformed` | Warn | `event=register_push_token.malformed`, `conn_id` — **no `err` field (#2219)** |
+| `relay: register_push_token unsafe field` (3 branches: oversize name, unsafe name, unsafe platform) | Warn | `event`, `conn_id` only — no field value, no length, no bound |
 
 Push token (FCM/APNs registration id) is opaque infrastructure data, not a secret on par with the phone-side device token — but is still NOT logged (no operational signal worth the noise). Device-side token from auth is NEVER read or logged. Device name IS logged on every path that has one (write/dedupe/save-failed/gone-mid-conn) — the inverse of #249's reject-path discipline, because the handler runs post-auth: the caller has already cleared the auth gate, so there is nothing to enumerate. Unauth (`device == nil`) by definition has no name to log.
+
+**The malformed branch lost its `err` field in #2219, and the three new reject branches were never given one.** `encoding/json` quotes offending input into its error text, and a type error midway through a well-formed object returns an error with fields already populated from supplied bytes — so logging the decode error was itself a display-safety hole, on the exact branch meant to catch unsafe input. The three unsafe-field branches name neither the field, the value, its length, nor the bound: which field failed is not an oracle worth withholding value over, but distinguishing them buys the client nothing it did not already hold, since it authored both fields — the same reasoning `pairing.not_permitted` publishes for its own refusal.
 
 ### Test surface (rewritten #319)
 
@@ -89,6 +151,20 @@ Push token (FCM/APNs registration id) is opaque infrastructure data, not a secre
 - `TestRegisterPushToken_MalformedPayload_EmitsProtocolMalformed` — `env.Payload = []byte("not-json")`; asserts `Code=protocol.malformed`, `Retryable=false`. New case; replaces the deleted `TestHandle_MalformedFrame_ReturnsSentinel` (the dispatcher owns the malformed-frame path now).
 
 `newTestConn(t, dev)` and `makeRequest(t, payload)` are the file-local helpers; the `assertEnvelopeShape` / `equalRouting` / `makeRegisterRouting` helpers from #250 are gone with the sentinel.
+
+#### Display-safety gate tests (#2219)
+
+Table-driven additions covering the three new reject branches: every C0 control (LF, CR,
+ESC included), DEL, and every C1 control, each on both `device_name` and `platform`; the
+`MaxDeviceNameBytes` boundary (exactly at the bound stored, one byte over refused); the
+character-set edges (U+001F refused / U+0020 accepted, U+007E accepted / U+007F refused,
+U+009F refused / U+00A0 accepted, `"` accepted — the last pins that the predicate does
+**not** inherit `admissibleClientField`'s extra quote rule); and the ordering test, an
+unsafe `Name` already stored pre-gate that repeats verbatim in the payload, which must be
+refused rather than deduped. Four mutants — guards moved after the dedupe comparison, the
+byte-bound off-by-one, the predicate copy-pasting `admissibleClientField`'s `"` rule, and
+a C1-range off-by-one — were each confirmed to redden exactly the test row written for it,
+via `go test -overlay` (no worktree writes).
 
 #### e2e (`internal/e2e/register_push_token_test.go`, new #319)
 
