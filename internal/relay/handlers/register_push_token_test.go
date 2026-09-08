@@ -548,6 +548,12 @@ func seededDevice() devices.Device {
 //
 // Every value embeds the character MID-STRING, so a check that only inspected a
 // prefix or a suffix would pass the table while leaving the injection possible.
+//
+// The ESC rows carry a BARE ESC, deliberately not the ESC-then-open-bracket that
+// starts a real ANSI run: cmd/substrate-guard bans that source sequence in every
+// .go file outside its two-path allowlist, with no per-line exemption. The gate
+// refuses ESC as a C0 control on its own, so the CSI tail exercised no extra
+// branch — do not "complete" these values.
 func TestRegisterPushToken_UnsafeFieldValues_EmitProtocolMalformedNoWrite(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -559,13 +565,13 @@ func TestRegisterPushToken_UnsafeFieldValues_EmitProtocolMalformedNoWrite(t *tes
 		{"device_name TAB", "device_name", "kitchen\tpad"},
 		{"device_name LF forges a log line", "device_name", "kitchen\nfake log line"},
 		{"device_name CR", "device_name", "kitchen\rfake log line"},
-		{"device_name ESC begins an ANSI run", "device_name", "kitchen\x1b[31mred"},
+		{"device_name ESC", "device_name", "kitchen\x1bpad"},
 		{"device_name U+001F top of C0", "device_name", "kitchen\x1fpad"},
 		{"device_name DEL", "device_name", "kitchen\x7fpad"},
 		{"device_name U+0085 NEL in C1", "device_name", "kitchen\u0085pad"},
 		{"device_name U+009F top of C1", "device_name", "kitchen\u009fpad"},
 		{"platform LF", "platform", "fcm\nfake log line"},
-		{"platform ESC", "platform", "fcm\x1b[31m"},
+		{"platform ESC", "platform", "fcm\x1bpad"},
 		{"platform DEL", "platform", "fcm\x7f"},
 		{"platform U+009F", "platform", "fcm\u009f"},
 	}

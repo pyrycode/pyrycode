@@ -317,3 +317,20 @@ name what is left, not just what closed" above, then re-walked).
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-08
+
+## Revisions
+
+### 2026-09-08 — the ESC rows carry a bare ESC (verifier finding: `substrate-guard` red)
+
+No design change: the refused set, the three guards, their ordering and the published
+contract are unchanged. Only the two ESC **test values** are respelled.
+
+They originally read `kitchen\x1b[31mred` and `fcm\x1b[31m`. `cmd/substrate-guard` bans
+the ESC-escape-then-open-bracket source sequence in every `.go` file outside a two-path
+allowlist, with no per-line exemption, so both rows reddened the merge gate. The gate
+under test refuses ESC as a C0 control on its own — the CSI tail exercised no additional
+branch — so the values became `kitchen\x1bpad` and `fcm\x1bpad`, which keep the
+mid-string embedding the rest of the table uses. This matches how the sibling test for
+the same character set spells its ESC case against `mintLabelIsDisplaySafe`. The `\u`
+spelling of ESC would also clear the scan and was rejected: it evades a merge gate rather
+than satisfying it.
