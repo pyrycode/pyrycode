@@ -119,7 +119,12 @@ Hermetic throughout. Rows go beside #2227's, whose line literals are transcribed
 
 ## Revisions
 
-*(none yet — appended in Phase B if the design moves)*
+**2026-09-08 — the design did not move; both open questions resolved.**
+
+- **Open question 1** was answered inside § Security review at plan time and needed no design change: same class of provenance as #2224's `ErrorCategory`, different class of shape, and the difference is documented at three sites (`turnevent.Compacting.ErrorText`, `protocol.CompactingPayload.ErrorText`, § `compacting` of `docs/protocol-mobile.md`) rather than mitigated differently. The SHOULD FIX it raised — *do not inherit #2224's paragraph verbatim* — landed as written.
+- **Open question 2 resolved YES, and the capture landed.** The security review's File-operations gate was run before `git add`: ten of the record's eleven credential-scan classes applied at capture time, the eleventh being a literal-value scan of an unset `ANTHROPIC_API_KEY`, and an independent sweep for key, bearer, JWT, AWS-key, long-hex, home-path and operator-name shapes returned zero hits. The record's own rationale states the conversation it summarises is two rig prompts asking for integers. Of the three surviving records the one matching #2227's transcription was chosen (its `user` summary line is the 3182-byte one that file's comment names), so the hand-authored literals and the committed bytes describe the same lap. `compactionPinnedShapes` was filled from the record's own `compaction_shapes` in the same commit, as `compactionReaderGate` requires. `TestRealClaudeCompactionCaptureShapesArePinned` and `TestCompactionFixtureReplayReachesBothEdges` both pass rather than skip — the drop clause was not reached.
+
+**One departure from the plan's letter, stated because the plan named the number.** § Design's fifth stale claim listed `systemStatusLine`'s "declared for the LOG" sentence; rewriting it also repointed its `#2228` reference to `#2237`, since #2228 is closed and #2237 is the live owner of the trigger and token counts. Only sentences this ticket authors or rewrites carry the new number; the eight other `#2228` references in the tree are untouched, and repointing them is not this ticket's work.
 
 ## Security review
 
