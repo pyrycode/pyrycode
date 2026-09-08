@@ -1463,10 +1463,20 @@ type ApiRetry struct {
 	Total   int
 }
 
-// Compacting is a PTY-derived status peer of Stall: claude's auto-compaction
-// banner. Banner-only (tui-driver streams no progress payload), so Active — the
-// rising (true) / falling (false) edge — is the only field beyond the
-// bridge-injected conversation id.
+// Compacting reports that claude is compacting the conversation. Active is the
+// rising (true) / falling (false) edge; like every variant here it carries no
+// conversation identity, which the bridge injects when mapping to the wire.
+//
+// CORRECTED 2026-09-08 (#2227): this doc said "a PTY-derived status peer of Stall",
+// and that was false in both directions rather than merely dated. #1348 deleted the
+// tui-driver path that made it true, leaving the variant with no producer at all
+// from then until now; and the producer this ticket supplies is the stream-json one,
+// streamsup's emitCompactingStatus, which maps claude's system/status line — the
+// seam #2229's live capture observed. The parenthetical the sentence rested on
+// ("tui-driver streams no progress payload") went with it: Active is the only field
+// because the EDGE is what lights the banner, not because a deleted driver was
+// silent about the rest. #2228 is the ticket that adds claude's trigger and token
+// counts on top of this edge.
 type Compacting struct{ Active bool }
 
 // ConversationReset reports that claude reset the conversation and mounted a

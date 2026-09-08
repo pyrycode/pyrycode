@@ -1521,6 +1521,27 @@ func TestDropcapClassification(t *testing.T) {
 			why: "the highest-rate ignored subtype",
 		},
 		{
+			name: "system/status", line: `{"type":"system","subtype":"status","status":null}`,
+			wantReason: dropcapReasonIgnoredType, wantDrop: true,
+			why: "CORRECTED (#2227): no longer the one measured-and-dropped subtype left standing " +
+				"— it is MAPPED now, onto the turnevent.Compacting edge pair from a case arm in " +
+				"streamsup.emitSystemSubtype. The verdict is unchanged and is derived rather than " +
+				"declared: THIS line closes an edge no line opened, which is emitCompactingStatus's " +
+				"silent arm, so the shipped parser emits nothing for it and dropcapClassify's " +
+				"default arm still reads it as a drop. Sending a status:\"compacting\" line first " +
+				"flips it, which is what makes the row a pin on the edge state rather than on the " +
+				"subtype",
+		},
+		{
+			name: "system/compact_boundary", line: `{"type":"system","subtype":"compact_boundary"}`,
+			wantReason: dropcapReasonIgnoredType, wantDrop: true,
+			why: "#2227 left this one dropped on purpose: it carries compact_metadata — the " +
+				"trigger and token counts #2228 publishes — and an arm for it would emit a " +
+				"duplicate edge with nothing to add. The one measured-and-dropped subtype left " +
+				"standing, and the first to be dropped by a decision rather than for want of a " +
+				"mapping",
+		},
+		{
 			name: "rate_limit_event", line: `{"type":"rate_limit_event"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
 			why: "CORRECTED (#1404): no longer the second ignoredLineTypes member — the type is " +

@@ -125,8 +125,11 @@ type Inbound interface{ isInbound() }          // permission.go (#700) — inbou
 
 ## The outbound `Event` variants (`event.go`, `permission.go`)
 
-Six ACP-shaped outbound turn events plus three internal-only, PTY-derived status
-peers (`Stall`, `ApiRetry`, `Compacting`):
+Six ACP-shaped outbound turn events plus three internal-only status peers (`Stall`,
+`ApiRetry`, `Compacting`). `Stall` and `ApiRetry` are still PTY-derived with no
+producer since #1348 deleted the terminal-driving path that built them; `Compacting`
+is not — `internal/streamsup`'s `emitCompactingStatus` has mapped it off the
+stream-json `system/status` line since #2227, the first of the three to regain one:
 
 | Type | Fields | Notes |
 |---|---|---|
@@ -138,7 +141,7 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
 | `ModelWindow` (#2101, element type — not an `Event`, no marker) | `ModelID string`, `WindowTokens int` | one model's context-window reading off the `result` line's `modelUsage` map, sorted by `ModelID` |
 | `Stall` (#638) | *none* (`struct{}`) | **internal-only** onset marker; no ACP equivalent — mobile adapter sends it, the future ACP adapter (#600) drops it; see below |
 | `ApiRetry` (#1074) | `Active bool`, `Current, Total int` | **internal-only** status peer of `Stall`: claude's live API-error retry state. `Active` is the rising/falling edge; `Current`/`Total` are the parsed `attempt N/M` counter (`{0,0}` when unparsed) |
-| `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Banner-only — tui-driver streams no progress payload, so `Active` is the only field |
+| `Compacting` (#1074) | `Active bool` | **internal-only** status peer of `Stall`: claude's auto-compaction banner. Mapped from the stream-json `system/status` line since #2227 (`internal/streamsup`'s `emitCompactingStatus`) — `Active` is the only field because the edge is what lights the banner, not because a deleted driver was silent about the rest; #2228 would add claude's trigger and token counts on top of it |
 | `Unrecognized` | `Site UnrecognizedSite`, `Kind string`, `Raw string`, `Truncated bool` | **internal-only** diagnostic, and the one variant that is not a claude sub-state: the stream parser met output it has no mapping for. `Site` is a closed enum (`line_type` / `assistant_block` / `user_block` / `undecodable`); `Kind` is the offending type, empty for `undecodable`; `Raw` is the offending JSON already truncated by the producer, a `string` and not `json.RawMessage` because a truncated blob is no longer valid JSON |
 | `PermissionRequest` (#700, `permission.go`) | `RequestID, ToolCallID, Title string`, `Options []PermissionOption` | daemon asks the consumer to answer a permission modal; correlated to its `PermissionResponse` by `RequestID`; see § The permission seam |
 | `SlashCommandList` (#1854, produced #1877, published #2003) | `Commands []SlashCommand`, `DroppedCommands int` | claude's slash-command inventory for this session + working directory — the `commands` array of the same `initialize` reply `ModelList` carries `models` from. Constructed and emitted since #1877, entry-count bounded and its drop counted since #1826, reaching an interactive conn's wire since #2003 — see below |
@@ -220,7 +223,10 @@ peers (`Stall`, `ApiRetry`, `Compacting`):
   (#600, `acpbridge.MapUpdate`) the same way `Stall` is: no ACP equivalent. The
   mapper copies `Current`/`Total` verbatim on both edges (tui-driver hands the
   last-known counter on `Hidden` "so the final render stays coherent"); a `{0,0}`
-  value is a legitimate "retrying, count unknown" state, not an error.
+  value is a legitimate "retrying, count unknown" state, not an error. The
+  tui-driver framing above is provenance for the shape, not current wiring for
+  both fields alike — `ApiRetry` still has no producer, but `Compacting` has had
+  a stream-json one since #2227 (see the `Compacting` row above).
 
 - **`RawInput` is opaque.** Typed `json.RawMessage` (undecoded pass-through
   bytes). The package **never inspects, parses, or mutates it** — consumers decode

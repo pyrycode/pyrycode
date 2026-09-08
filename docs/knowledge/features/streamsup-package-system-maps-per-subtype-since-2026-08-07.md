@@ -26,14 +26,24 @@ IgnoredLineTypesIsTheMeasuredSet` above is unaffected. `emitSystemSubtype`'s `ca
 enumeration of the mapped set; every comment describing the drop rule (this file included) points there
 rather than restating it — a fifth captured subtype is a new case arm there, not a new sibling ticket.
 
-**Compaction's seam is now observed, still unmapped (#2229).** A live capture against claude 2.1.259
-(2026-09-08) settled the question #1074 left open: compaction arrives as two more subtypes on this
-same enumeration, not a new top-level type. `system/status` carries `status:"compacting"` while
-compaction runs and `status:null` plus `compact_result`/`compact_error` when it ends; a separate
-`system/compact_boundary` line carries `compact_metadata` (`trigger`, `pre_tokens`, `post_tokens`,
-`duration_ms`). Both still fall through `emitSystemSubtype`'s `default` to `emitUnrecognized` today,
-so mapping either onto `turnevent.Compacting` (declared since #1074, unconstructed since #1348 deleted
-its only producer) is a sixth and seventh `case` arm here, exactly like the fifth. See
-[the capture that observed this](e2e-realclaude-compaction-capture-test-go.md) for why a mapper still
-can't be built from this paragraph alone — the fixture that would back a reader's assertion did not
-survive the run that produced it.
+**Compaction is now mapped, and only one of its two observed subtypes got an arm (#2227).** A live
+capture against claude 2.1.259 (2026-09-08, #2229) settled the question #1074 left open: compaction
+arrives as two more subtypes on this same enumeration, not a new top-level type. `system/status`
+carries `status:"compacting"` while compaction runs and `status:null` plus `compact_result`/
+`compact_error` when it ends; a separate `system/compact_boundary` line carries `compact_metadata`
+(`trigger`, `pre_tokens`, `post_tokens`, `duration_ms`). Only `status` got the sixth `case` arm here
+(`emitCompactingStatus`, mapping onto `turnevent.Compacting` — declared since #1074, unconstructed from
+\#1348's deletion of its only producer until now). `compact_boundary` is a **deliberate** non-mapping,
+not a gap: it carries nothing this edge pair needs, its metadata is #2228's payload, and an arm for it
+would emit a duplicate edge with nothing to add — it inherits `status`'s former title as the one
+measured-and-dropped `system` subtype left standing.
+
+The falling edge is wide by design: any `status` other than `"compacting"` closes it, `compact_result`
+included, because a missed close (a stuck "compacting" banner) is a worse operator-facing failure than
+a spurious one (a banner that closes a beat early). See
+[the send-half suppression tiers](streamsup-package-send-half-writeturn.md) for a subtlety this ticket's
+own zero-unrecognized criterion exposed: compaction's *consequences* — claude's summary and the harness's
+`/compact` echo — arrive as `user` lines, not `system` ones, and needed a separate suppression the
+subtype-level seam argument didn't predict. The fixture [#2229's capture wrote](e2e-realclaude-compaction-capture-test-go.md)
+still never landed in the tree, so #2227 proved its edges with a live assertion instead of a fixture
+replay — see that document for what that fixture's continued absence still blocks.

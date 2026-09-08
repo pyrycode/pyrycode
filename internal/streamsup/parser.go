@@ -340,6 +340,30 @@ const (
 // variants do. Revisit on an OBSERVED rate, as #1385 did.
 const maxModelField = 256
 
+// maxCompactField caps the two claude-authored fields one system/status line
+// carries when compaction ENDS — compact_result and compact_error (#2227). 256, the
+// family's value, and a separate constant for maxRateLimitField's stated reason.
+//
+// THE ONLY CAP IN THIS FILE THAT BOUNDS A LOG RATHER THAN AN EVENT, which is the
+// whole reason it needs its own paragraph. Neither field reaches the wire: the
+// event this mapping produces is turnevent.Compacting{Active bool}, a boolean the
+// parser computes, so no byte claude wrote crosses the transport and the envelope
+// arithmetic the caps above do has no term here. What the cap bounds is a Debug
+// record, and emitUnrecognized states the package rule that record is an exception
+// to. See emitCompactingStatus for why the exception is taken and why #2224 rather
+// than emitRateLimit is the precedent that governs it.
+//
+// No RATE bound, and here that is derived rather than inherited: the log fires on
+// the FALLING edge only, an edge can fall only from one that rose, and a rising
+// edge is idempotent while open. So the ceiling is one record per completed
+// compaction — not per line, whatever claude sends.
+const maxCompactField = 256
+
+// compactingEndedMsg is the Debug message the falling edge emits, as a literal so
+// the test asserting the record's attribute set is closed can find it by message
+// rather than by position.
+const compactingEndedMsg = "streamsup: compaction ended"
+
 // maxModelResolved caps turnevent.ModelOption.ResolvedModel — claude's concrete
 // identifier for one entry of the initialize reply's models array. Applied at
 // CONSTRUCTION, exactly as the caps above are, so an oversized value never enters
@@ -1623,6 +1647,22 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // dropped category is precisely today's behaviour, while a stale one is a false
 // statement about the operator's account.
 //
+// AMENDED 2026-09-08 (#2227): there are THREE pieces of cross-line state. compacting
+// is the open/closed edge of a compaction banner, and it takes NEITHER of the two
+// arguments above by inheritance. It is not a counter, so #1385's defence does not
+// reach it; and #2224's answer — the write launders the residual — has no analogue,
+// because no line writes this field on the way past.
+//
+// WHAT IS ACTUALLY NEW IS THAT THE RESET BECAME OBSERVABLE. A client MIRRORS this
+// field: the desktop lights a banner on the rising edge and clears it on the falling
+// one. The two fields above could be reset in silence because nothing outside the
+// parser held a copy — for the counter nothing at all, for the category the same emit
+// that published it. Clearing this one in silence would leave the parser and the
+// banner disagreeing with no later line to reconcile them, so the `result` arm emits
+// a falling edge before clearing. THE SINGLE RESET POINT IS UNCHANGED and remains the
+// whole of the cross-turn argument; what moved is that the reset now says so on the
+// wire. Its residual is bounded by that same reset and is argued at the field.
+//
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
 // writer), so Write — hence buf and the sink calls — is only ever invoked
@@ -1674,6 +1714,37 @@ type Parser struct {
 	// goroutine has finished, which is the happens-before edge between the two
 	// writers. A future concurrent reader guards both fields, not one.
 	assistantErrorCategory string
+
+	// compacting is the open/closed state of the compaction edge pair (#2227): true
+	// between the system/status line reporting status:"compacting" and the one
+	// reporting anything else. Written only by emitCompactingStatus and by
+	// consumeLine's one reset; see emitCompactingStatus for the state machine.
+	//
+	// THE FIRST FIELD HERE WHOSE VALUE A CLIENT MIRRORS, and that is what makes its
+	// reset different in kind from the two above rather than merely third. The
+	// counter's reset is invisible by construction and the category's is published by
+	// the very emit it precedes; this one has to be PUBLISHED to be a reset at all,
+	// because the desktop's banner holds a copy and a silent clear would leave the
+	// two disagreeing with no later line to reconcile them. consumeLine's `result`
+	// arm therefore emits a falling edge before it clears the field. Still the one
+	// reset point — what changed is that the reset is observable, not where it is.
+	//
+	// ITS RESIDUAL IS BOUNDED BY THAT RESET RATHER THAN BY A WRITE, which is where it
+	// parts company with #2224 and the parting must not be papered over. A child that
+	// dies mid-compaction leaves this true on a long-lived parser (cmd/pyry builds one
+	// per session, not per turn) and there is no per-line write to launder it the way
+	// every assistant line launders the category. What makes that acceptable is that
+	// the stale value is not a false claim about a later turn: the client's banner is
+	// already lit, the stale true correctly suppresses a duplicate rising edge, and
+	// the next `result` line emits the falling edge and clears. The cost is a banner
+	// outliving its compaction by at most one turn boundary — the fail-safe direction,
+	// and cheaper than a second reset path, which would buy a second boundary to keep
+	// correct for a field whose whole design rests on there being one.
+	//
+	// The single-writer invariant covers it exactly as it covers the two above,
+	// including across a child respawn. A future concurrent reader guards all THREE
+	// fields, not two.
+	compacting bool
 
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
@@ -1997,6 +2068,33 @@ type systemBackgroundTaskEntry struct {
 type systemThinkingTokensLine struct {
 	EstimatedTokens      int `json:"estimated_tokens"`
 	EstimatedTokensDelta int `json:"estimated_tokens_delta"`
+}
+
+// systemStatusLine is the decoded payload of one system/status line — the subtype
+// claude uses to announce that compaction started and that it finished (#2227).
+// Kept separate from streamLine for resultStopLine's reason, and
+// TestStreamLine_StaysSegmentationOnly enforces that boundary.
+//
+// Status IS THE STATE MACHINE'S ONLY INPUT and it is a plain string, per
+// systemThinkingTokensLine's rule: absent, null and "" are one reading here
+// (not compacting) and nothing acts differently on the three, so a *string would
+// buy a distinction no consumer answers. A status of any other JSON type fails the
+// whole decode and takes emitCompactingStatus's undecodable path, which touches
+// nothing — the conservative direction, since a status this parser cannot read
+// must not be read as a compaction ending.
+//
+// CompactResult and CompactError are declared for the LOG, not for the machine:
+// nothing branches on either, which is what makes the falling edge a function of
+// Status alone (see emitCompactingStatus for why that width is the point). The
+// captured line carries compaction's outcome across both fields; compact_metadata,
+// which the sibling compact_boundary line carries, is deliberately NOT declared
+// here. Absence from the decode target is a stronger guarantee than a sweep —
+// #2228 is the ticket that publishes the trigger and the token counts, and until
+// it lands those values are structurally unreachable from this code.
+type systemStatusLine struct {
+	Status        string `json:"status"`
+	CompactResult string `json:"compact_result"`
+	CompactError  string `json:"compact_error"`
 }
 
 // rateLimitEventLine is the decoded payload of one top-level rate_limit_event
@@ -2506,6 +2604,58 @@ type userLine struct {
 	IsSynthetic bool `json:"isSynthetic"`
 }
 
+// harnessProseLine is the decode target for a `user` line whose message content
+// is a JSON STRING rather than the block array streamMessage declares. It exists
+// only on consumeLine's decode-failure path, and it is a second target rather than
+// a widening of streamMessage for resultStopLine's stated reason: the two fail
+// independently, and nothing here can disturb the segmentation or the block model
+// that every other user line goes through.
+//
+// WHY A STRING CONTENT IS ITS OWN SHAPE. streamMessage.Content is
+// []json.RawMessage, so a string content fails json.Unmarshal for the WHOLE line
+// and consumeLine reports it as UnrecognizedUndecodable before emitUser is ever
+// reached. That verdict is honest as far as it goes — the line really does not fit
+// the block model — but it fires ahead of the harness-prose suppression emitUser
+// has carried since #2087, so the flag that was already correct for these lines was
+// simply unreachable.
+//
+// PROVENANCE, measured on #2227's real-claude lap (claude 2.1.259, 2026-09-08).
+// The compact turn's census was `system/status: 2, system/compact_boundary: 1,
+// system/init: 1, user: 2, result/success: 1`, and both user lines land here:
+// claude's compaction summary, re-seeding the context as a message the person never
+// wrote (isSynthetic true, isReplay false), and the harness echoing the slash
+// command's own stdout as `<local-command-stdout>Compacted </local-command-stdout>`
+// (isReplay true, no isSynthetic key at all). Two lines, two DIFFERENT flags, which
+// is why both are read and neither subsumes the other — the same OR'd-triggers
+// shape harnessNoOutputNudge argues for at block level, for the same reason.
+//
+// Both flags are read BY VALUE, exactly as userLine.IsSynthetic is: an absent key
+// and an explicit false both mean "surface it". Fail-open is the direction that
+// keeps a genuinely new string-content line visible instead of swallowed, and the
+// unflagged case has its own test pinning that it still reaches the wire.
+type harnessProseLine struct {
+	Type    string `json:"type"`
+	Message struct {
+		// A string, so this target decodes exactly the lines the primary one
+		// cannot. A block-array content fails HERE instead, which is the correct
+		// direction: such a line's decode failure was about something else, and it
+		// belongs on the unrecognized lane.
+		Content string `json:"content"`
+	} `json:"message"`
+
+	// IsSynthetic marks a line claude's HARNESS authored. Same key and same
+	// semantics as userLine's — deliberately not shared through one type, because
+	// this target must not grow a tool_use_result field and that one must not grow
+	// a string content.
+	IsSynthetic bool `json:"isSynthetic"`
+	// IsReplay marks a line claude is REPLAYING rather than producing anew. On the
+	// compact turn it is what the stdout echo carries; more generally, a replayed
+	// line is one the client has either already seen or was never meant to, so
+	// suppressing it is also what stops compaction double-posting preserved
+	// messages into the person's own history.
+	IsReplay bool `json:"isReplay"`
+}
+
 // jsonKey is a presence-only decode target: a *jsonKey field is non-nil exactly
 // when its key is present with a non-null value, and retains NO BYTE of it.
 //
@@ -2955,6 +3105,15 @@ func (p *Parser) consumeLine(line []byte) {
 	}
 	var sl streamLine
 	if err := json.Unmarshal(line, &sl); err != nil {
+		// One known shape gets a second look before the line is called
+		// unrecognized: a harness-authored `user` line whose content is a string,
+		// which fails the decode above for its content alone. See
+		// dropHarnessProseLine. The gate sits INSIDE the failure branch, so the
+		// happy path pays nothing for it and no successfully-decoded line can reach
+		// it.
+		if p.dropHarnessProseLine(line) {
+			return
+		}
 		// Not even the type is known here, so Kind stays empty. Previously this
 		// dropped without recording anything at all.
 		p.emitUnrecognized(turnevent.UnrecognizedUndecodable, "", line)
@@ -3017,6 +3176,25 @@ func (p *Parser) consumeLine(line []byte) {
 		// reach it. Both calls sit BELOW the accumulator reset and both results are
 		// passed INTO the same emit, so no decode outcome can reorder, duplicate or
 		// suppress the boundary.
+		//
+		// THE THIRD FIELD'S RESET IS CONDITIONAL ON THE WIRE (#2227) and that is not
+		// an exception being carved out of the paragraph above, it is what a reset MEANS
+		// for a value a client mirrors. The state clear is as unconditional as its two
+		// neighbours — every result subtype passes here and no other line clears it —
+		// but a silent clear would leave the desktop's banner lit against a parser that
+		// believes it is dark, and nothing later reconciles the two. So the falling edge
+		// is emitted when, and only when, one is open. Emitting it unconditionally would
+		// put a compacting:false on every turn that ever ends, which is a claim about a
+		// compaction that never ran; the guard is what keeps the frame meaningful.
+		//
+		// ORDERED BEFORE THE TurnEnd BELOW, deliberately: a client that sees the boundary
+		// first has already closed the turn holding a lit banner, which is the stuck
+		// banner AC 5 exists to forbid. The two emits are in one arm precisely so that
+		// order cannot be separated from the reset it belongs to.
+		if p.compacting {
+			p.compacting = false
+			p.emit(turnevent.Compacting{Active: false})
+		}
 		p.thinkingSinceEmit = 0
 		errorCategory := p.assistantErrorCategory
 		p.assistantErrorCategory = ""
@@ -3190,8 +3368,16 @@ func (p *Parser) consumeLine(line []byte) {
 			// CORRECTED 2026-08-19 (#1600): init has left the examples for the same
 			// reason — it maps to turnevent.ModelAnnounced now, so a model-carrying init
 			// no longer reaches this Debug at all and a model-less one is consumed
-			// silently by that arm. status is the one measured-and-dropped subtype left
-			// standing.
+			// silently by that arm.
+			//
+			// CORRECTED 2026-09-08 (#2227): status has left too — it maps to the
+			// turnevent.Compacting edge pair now. compact_boundary is the one
+			// measured-and-dropped subtype left standing, and unlike its predecessors in
+			// this sentence it is dropped by a DECISION rather than for want of a
+			// mapping: it carries compaction's trigger and token counts, which is #2228's
+			// payload, and an arm here would emit a duplicate edge with nothing to add.
+			// That it costs no unrecognized_message is the property this branch provides
+			// — which is why AC 2 of #2227 is structural rather than earned.
 			//
 			// system/init is a per-turn marker (spike § 1), not a session-open event,
 			// and it is still NOT the accumulator's boundary. The parser is no longer
@@ -3237,6 +3423,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitThinkingProgress(line)
 	case "init":
 		return p.emitModelAnnounced(line)
+	case "status":
+		return p.emitCompactingStatus(line)
 	default:
 		return false
 	}
@@ -3739,6 +3927,103 @@ func (p *Parser) emitThinkingProgress(line []byte) bool {
 	})
 	return true
 }
+
+// emitCompactingStatus maps one system/status line onto the turnevent.Compacting
+// edge pair (#2227), always consuming the line. It is the producer #1074's wire
+// frame has been waiting for: protocol.CompactingPayload, turnbridge.MapEvent's arm
+// and the desktop's banner all shipped, and the only code that ever constructed the
+// event was the terminal path #1348 deleted.
+//
+// THE SEAM IS OBSERVED, NOT ASSUMED. #2229 drove a live compacting turn against
+// claude 2.1.259 and found compaction arriving as two `system` subtypes rather than
+// a top-level type of its own: status:"compacting" while it runs, status:null plus
+// compact_result/compact_error when it ends, and a sibling compact_boundary carrying
+// the metadata. Both are subtypes, which is what makes zero unrecognized_message a
+// structural property of this mapping rather than something it has to earn — see
+// consumeLine's ignoredLineTypes branch.
+//
+// THE STATE MACHINE has two states and four transitions, and every one of them is a
+// row of TestParser_CompactingEdges:
+//
+//   - closed + "compacting"  → open,   emit Active:true
+//   - open   + "compacting"  → open,   SILENCE (no second rising edge)
+//   - open   + anything else → closed, emit Active:false
+//   - closed + anything else → closed, SILENCE (nothing to fall from)
+//
+// THE FALLING EDGE IS DELIBERATELY WIDE — any status that is not "compacting"
+// closes it, not only the null the capture happened to record — and the width is
+// the substance of this function rather than a loose comparison. The two failure
+// directions are not symmetric. A missed falling edge leaves a banner asserting
+// "claude is compacting" for the rest of the turn: a false statement to the operator,
+// and the exact defect the criterion "the banner cannot stick" names. A spurious one
+// ends a banner early, which is smaller and self-correcting. So compact_result is NOT
+// a discriminator — a failed compaction closes the edge exactly as a successful one
+// does — and a status value claude has not shipped yet closes it too. Narrowing this
+// to a match on null would make the mapping depend on a field claude leaves EMPTY,
+// which is the weakest thing in the capture to hang it on.
+//
+// AN UNDECODABLE LINE CONSUMES AND TOUCHES NOTHING, per emitThinkingProgress's
+// precedent and for the same reason emitRateLimit's rung 3 stays silent: a status
+// this parser cannot read is not evidence that compaction ended, and inventing the
+// observation would be worse than missing it. The residual that leaves — an edge
+// held open by a line we could not parse — is bounded by consumeLine's `result`
+// reset, which closes it at the turn boundary whatever happened inside the turn.
+// Surfacing it as an Unrecognized instead is refused for the family's standing
+// reason, and here that refusal is load-bearing: it is what the zero-unrecognized
+// live gate rests on for a subtype the daemon does in fact recognise.
+//
+// THE LOG IS THIS PACKAGE'S ONE EXCEPTION TO "NEVER THE CONTENT ITSELF", and it is
+// taken knowingly rather than drifted into. emitUnrecognized states that rule and now
+// carries a pointer here. Three things bound the exception. It fires on the falling
+// edge only, so at most once per completed compaction whatever claude sends. It
+// carries exactly two fields, both through truncateField at maxCompactField, and
+// compact_metadata is not even declared on the decode target. And the precedent that
+// governs it is #2224, not emitRateLimit: decodeAssistantError already bounds
+// claude-authored error text at 256 bytes and publishes it ON THE WIRE, so a bounded
+// copy in a Debug the production daemon does not print is strictly less exposure than
+// the package already ships. What the exception buys is the only diagnostic there is
+// for a compaction that FAILED — the event carries a bare boolean, so without this
+// record a failed compaction and a successful one are indistinguishable everywhere.
+//
+// NOTHING FROM THE LINE REACHES THE EVENT. Active is a bool this function computes
+// from a string comparison; no compact_result, no compact_error, no token count and
+// no trigger crosses the transport. A hostile line can move a boolean and nothing
+// else, which is the whole of this mapping's wire-facing blast radius.
+func (p *Parser) emitCompactingStatus(line []byte) bool {
+	var sl systemStatusLine
+	if err := json.Unmarshal(line, &sl); err != nil {
+		// The subtype is a message-name keyword, not payload — emitThinkingProgress's
+		// formulation verbatim, and neither claude-authored field is logged here: on
+		// this path they were never decoded.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "status")
+		return true
+	}
+
+	if sl.Status == compactingStatus {
+		if !p.compacting {
+			p.compacting = true
+			p.emit(turnevent.Compacting{Active: true})
+		}
+		return true
+	}
+	if !p.compacting {
+		return true
+	}
+	p.compacting = false
+	result, resultTruncated := truncateField(sl.CompactResult, maxCompactField)
+	detail, detailTruncated := truncateField(sl.CompactError, maxCompactField)
+	p.log.Debug(compactingEndedMsg,
+		"compact_result", result,
+		"compact_error", detail,
+		"truncated", resultTruncated || detailTruncated)
+	p.emit(turnevent.Compacting{Active: false})
+	return true
+}
+
+// compactingStatus is the ONE system/status value that opens the edge. Every other
+// value, the empty string included, closes an open one — see emitCompactingStatus
+// for why that asymmetry is the design rather than a missing case.
+const compactingStatus = "compacting"
 
 // emitRateLimit decodes one top-level rate_limit_event line and emits at most one
 // turnevent.RateLimited. It never emits an Unrecognized, and it returns nothing:
@@ -4885,6 +5170,13 @@ func truncateField(s string, limit int) (string, bool) {
 // maxUnrecognizedRaw first so an oversized payload never enters the event stream.
 // The log records site, type, and byte count only — never the content itself,
 // which is the package's standing rule; the content crosses the wire, not the log.
+//
+// CORRECTED 2026-09-08 (#2227): "the package's standing rule" now has exactly one
+// exception, named here so the sentence above does not go quietly false.
+// emitCompactingStatus logs compact_result and compact_error, both capped at
+// maxCompactField, on a falling edge only. It is the inverse of this site's shape and
+// that is why it needed an argument: there the content does NOT cross the wire, so a
+// log is the only place a failed compaction is visible at all.
 func (p *Parser) emitUnrecognized(site turnevent.UnrecognizedSite, kind string, raw []byte) {
 	text, truncated := truncateRaw(raw)
 	p.log.Debug("streamsup: unrecognized payload",
@@ -5239,6 +5531,48 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			ResultDetail: detail,
 		})
 	}
+}
+
+// dropHarnessProseLine reports whether line is a harness-authored `user` line
+// carrying string content, consuming it in silence when it is. Called ONLY after
+// streamLine's decode has already failed.
+//
+// This is the parser's SECOND suppression tier and the first at LINE level;
+// harnessNoOutputNudge documents the block-level one. The two do not overlap and
+// neither can stand in for the other: a harness line whose content is a proper
+// block array decodes normally and is caught by emitUser's guard, and one whose
+// content is a string never reaches emitUser at all. Splitting them this way is
+// what keeps the block-level alarm — an unknown BLOCK type on a flagged line still
+// surfaces — from being blanketed by a line-level flag.
+//
+// WHAT IT COSTS TO GET WRONG, in the direction that matters. Before this arm a
+// compact turn put claude's whole conversation summary on the wire as an
+// unrecognized_message: the frame's Raw is the offending line, the line is 3182
+// bytes of transcript in the one captured case, and a client renders it as a noise
+// row. So the arm removes a disclosure as well as the noise, which is why it is
+// stated here rather than left to read as tidying.
+//
+// THE MATCH IS DELIBERATELY NARROW: type `user`, a content that decodes as a
+// string, and at least one of the two flags claude stamps on lines it authored or
+// replayed. A string-content user line with neither flag still reaches
+// emitUnrecognized, because "claude started emitting a new shape here" is exactly
+// the alarm that lane exists to raise and nothing observed licenses widening past
+// the two flags. Logged content-free — site and the flag NAMES only, never a byte
+// of the line — matching the block-level drop above, and for the sharper reason
+// that the content this arm drops is a conversation transcript.
+func (p *Parser) dropHarnessProseLine(line []byte) bool {
+	var hp harnessProseLine
+	if err := json.Unmarshal(line, &hp); err != nil {
+		return false
+	}
+	if hp.Type != "user" || (!hp.IsSynthetic && !hp.IsReplay) {
+		return false
+	}
+	p.log.Debug("streamsup: dropping harness-authored user prose line",
+		"site", string(turnevent.UnrecognizedUndecodable),
+		"is_synthetic", hp.IsSynthetic,
+		"is_replay", hp.IsReplay)
+	return true
 }
 
 // emit forwards one event to the sink. A nil sink is a no-op guard — the parser

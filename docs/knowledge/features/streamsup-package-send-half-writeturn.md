@@ -43,6 +43,7 @@ forge a turn boundary:
 | `system/background_tasks_changed` | one `BackgroundTaskRoster` (#1381, below) — the family's one **aggregate** variant |
 | `system/thinking_tokens` | **at most one** `ThinkingProgress` per `minThinkingTokensPerEvent` (64) tokens of accumulated `estimated_tokens_delta` (#1385, below) — the family's one **rate-bounded** variant; most lines emit nothing |
 | `system/init` | one `ModelAnnounced` **unless** `model` is absent, empty, or undecodable (#1600, below) — the family's only variant naming what claude is actually running, once per **turn** |
+| `system/status` | zero or one `Compacting` (#2227, below): `Active:true` on `status:"compacting"` while none is already open, `Active:false` on any *other* status while one is — the family's one **edge-paired** variant. `system/compact_boundary` stays unmapped, on the ignored-and-silent side, as a deliberate carve-out rather than an oversight (its `compact_metadata` is #2228's payload) |
 | `rate_limit_event` | one `turnevent.RateLimited` **unless** `rate_limit_info.status` is the one measured-benign value or the line carries no decodable `rate_limit_info` (#1404, below) — the family's **first non-`system` mapping**, and the one whose gate suppresses the common case rather than the rare one |
 | `control_response` | nothing, for every shape but one — consumed **content-free**, matched on the top-level `type` ALONE so any `subtype` is consumed (#1500) — **except** a `success`-subtype response whose `response.response.models` decodes to a non-empty array, which emits one `turnevent.ModelList` (#1811, below). This is still the ack the daemon **solicits for itself**: interrupt on this path is a stdin `control_request` and claude answers ~40 ms later on the same stdout, so without the arm every interrupt fired a false `unrecognized_message`. Shape authority for the two content-free sibling shapes is the verbatim capture in [`set-permission-mode-inband-probe.md`](set-permission-mode-inband-probe.md#the-control_response-received-verbatim) — `subtype` and `request_id` nest **under `response`**, inverting the request side, so `streamLine.Subtype` decodes empty. CORRECTED 2026-08-27 (#1811): this used to say a `subtype:"error"` NAK is consumed indistinguishably from a success, deliberately, because discriminating it would cost a decode target for the nested object. #1811 built that decode target for an unrelated reason (publishing the model list) and the NAK gap closed as a side effect — the arm's one Debug record now carries a `reason` that names `nak` distinctly from `ack`/`commands_only`/`model_list`/`undecodable` — the fifth keyword, `commands_only`, split off `ack` by #1890 (below). CORRECTED 2026-09-03 (#2064): a second, independent decode of the same top-level line bytes (`noteControlAck`, target `controlAckLine`, holding only `subtype`/`request_id`) now runs above this arm and feeds `PostureGate` — it changes which of these five outcomes a line lands on **not at all**, by construction: a field added to `controlResponseLine` instead would have moved a non-string `request_id` payload from the model-list rung to the undecodable one, which is exactly what the separate target avoids. See [Posture gate](streamsup-package-posture-gate-spawn-permission-mode-ack.md) |
 | any other type, and any line/block that fails to decode | one `Unrecognized` — the **surfaced** tier (see below) |
@@ -148,3 +149,24 @@ One effect worth recording because it's easy to undervalue next to the chat-clut
 body no longer reaches a paired phone at all. Before this, `Unrecognized.Raw` carried it (capped, but up
 to `maxUnrecognizedRaw`) over the relay to any client rendering the frame; after, it leaves the process
 nowhere — not on the wire, not in a log.
+
+**AMENDED 2026-09-08 (#2227): a subtype-level "zero unrecognized" argument does not cover a subtype's
+*consequences* on other line types, and only a live run caught the gap.** The plan for mapping
+compaction argued AC 2 (zero `unrecognized_message` on a compacting turn) was structural rather than
+earned, because every compaction line is a `system` subtype and an unmapped `system` subtype is dropped
+silently rather than surfaced. True as far as it went — but the live gate still failed AC 2 with two
+frames, both `user` lines: claude's own compaction summary re-seeded as a message the person never wrote,
+and the harness echoing the `/compact` command's stdout. Neither is a `system` line, so no subtype-level
+argument was ever going to catch them; they reached `emitUnrecognized` because their `message.content` is
+a JSON **string**, which fails `streamLine`'s decode before `emitUser`'s existing flag guard — the one
+covering `harnessNoOutputNudge` and the skill-body case above — is ever reached. Both carried a flag that
+guard would have honored (`isSynthetic` on one, a new `isReplay` on the other), so the suppression that
+was already correct for these lines was simply unreachable on this shape.
+
+The fix, `dropHarnessProseLine`, is a **third suppression tier and the first at the decode-failure path**
+rather than a widening of the block-level one: it runs only after `streamLine`'s `json.Unmarshal` has
+already failed, matches `type:"user"` plus a **string** `message.content` plus either flag, and drops in
+silence. The general lesson for the next subtype mapping: a "this subtype maps cleanly, so the
+zero-unrecognized criterion is free" argument is a claim about lines of that subtype, not about the turn
+those lines cause claude to emit as a side effect on a *different* type — check what else a live capture
+of the same turn contains before calling a surfaced-frames criterion structural.
