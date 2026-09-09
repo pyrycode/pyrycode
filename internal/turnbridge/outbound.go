@@ -472,10 +472,24 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// nothing here reads, validates, or re-serialises it, because a mapping
 		// that enumerated known patch keys would silently discard every key
 		// claude ships next.
+		//
+		// Two of claude's subtypes produce this event and they fill DISJOINT
+		// fields (#2245) — Patch from task_updated, Status and Summary from
+		// task_notification. This adapter does not care which: it copies all four
+		// fields whatever their state, so an empty one crosses as empty and a
+		// consumer reads a non-empty Status as "a terminal state was reported".
+		// Branching here on which subtype produced the event would put a second
+		// copy of that rule in a place with no access to the answer.
+		//
+		// Every string crosses verbatim: the producer bounded them at construction
+		// (streamsup's maxTaskFieldID / maxTaskPatch / maxTaskSummary) and this
+		// adapter is pure and re-caps nothing.
 		return protocol.TypeBackgroundTaskUpdated, protocol.BackgroundTaskUpdatedPayload{
 			ConversationID:  tc.ConversationID,
 			TaskID:          e.TaskID,
 			Patch:           e.Patch,
+			Status:          e.Status,
+			Summary:         e.Summary,
 			TruncatedFields: e.TruncatedFields,
 		}, true
 	case turnevent.BackgroundTaskRoster:

@@ -679,6 +679,55 @@ func TestBackgroundTaskUpdatedPayload_RoundTrip(t *testing.T) {
 	roundTripEnvelope(t, env, payload, raw)
 }
 
+// TestBackgroundTaskUpdatedPayload_TerminalRoundTrip pins the SECOND shape this
+// one frame carries (#2245): the terminal state claude reports on its
+// system/task_notification line.
+//
+// A second fixture rather than fields added to the first, and the pair is the
+// assertion. The two producing subtypes fill DISJOINT fields, so one fixture
+// carrying both patch and status would be a shape the daemon cannot emit, and it
+// would let a wire regression that merged the two sets pass. Keeping them apart is
+// what makes each one's empty half load-bearing.
+func TestBackgroundTaskUpdatedPayload_TerminalRoundTrip(t *testing.T) {
+	raw := readFixture(t, "background_task_updated_terminal.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeBackgroundTaskUpdated {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeBackgroundTaskUpdated)
+	}
+
+	var payload BackgroundTaskUpdatedPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	// The join key AC2 names: the same task_id the sibling fixture carries, which
+	// is what a client uses to reach the background_task_started that opened the
+	// row this frame closes.
+	if payload.TaskID != "task_01ABC" {
+		t.Errorf("TaskID: got %q, want %q", payload.TaskID, "task_01ABC")
+	}
+	if payload.Status != "completed" {
+		t.Errorf("Status: got %q, want %q — the one terminal token ever captured", payload.Status, "completed")
+	}
+	if payload.Summary != "cat /tmp/pyry-fifo" {
+		t.Errorf("Summary: got %q, want the fixture's summary", payload.Summary)
+	}
+	// The load-bearing empty: a line of this subtype carries no patch key and the
+	// daemon synthesizes none, so a producer that manufactured one to report the
+	// terminal state would falsify this type's own SECURITY block.
+	if payload.Patch != "" {
+		t.Errorf("Patch: got %q, want empty on a frame produced by task_notification", payload.Patch)
+	}
+	if payload.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil — nothing in this fixture approaches a cap", payload.TruncatedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
 func TestBackgroundTaskRosterPayload_RoundTrip(t *testing.T) {
 	raw := readFixture(t, "background_task_roster.json")
 
@@ -1830,6 +1879,7 @@ const (
 	capTaskPatch             = 4096 // internal/streamsup.maxTaskPatch
 	capTaskRosterEntries     = 8    // internal/streamsup.maxTaskRosterEntries
 	capTaskRosterDescription = 512  // internal/streamsup.maxTaskRosterDescription
+	capTaskSummary           = 4096 // internal/streamsup.maxTaskSummary
 )
 
 // TestBackgroundTaskPayloads_FitV2EnvelopeCap constructs each payload with every
@@ -1892,10 +1942,18 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 			name: "updated",
 			typ:  TypeBackgroundTaskUpdated,
 			payload: BackgroundTaskUpdatedPayload{
-				ConversationID:  convID,
-				TaskID:          fill(capTaskFieldID),
+				ConversationID: convID,
+				TaskID:         fill(capTaskFieldID),
+				// All four claude-derived fields at once, which is MORE than any
+				// single frame can carry: the two producing subtypes fill disjoint
+				// sets (#2245), so patch is never populated alongside status and
+				// summary. The row is deliberately the impossible worst case anyway
+				// — it measures the TYPE's ceiling rather than an arm's, which is
+				// the number a third producing subtype would have to fit inside.
 				Patch:           fill(capTaskPatch),
-				TruncatedFields: []string{"task_id", "patch"},
+				Status:          fill(capTaskFieldID),
+				Summary:         fill(capTaskSummary),
+				TruncatedFields: []string{"task_id", "patch", "status", "summary"},
 			},
 		},
 		{name: "roster", typ: TypeBackgroundTaskRoster, payload: roster},

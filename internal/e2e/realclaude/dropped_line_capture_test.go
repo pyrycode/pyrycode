@@ -1604,6 +1604,17 @@ func TestDropcapClassification(t *testing.T) {
 				"Unrecognized — a per-denial noise row — rather than being dropped at all",
 		},
 		{
+			name: "system/task_notification", line: `{"type":"system","subtype":"task_notification"}`,
+			why: "#2245: MAPPED, onto turnevent.BackgroundTaskUpdated — the SECOND subtype producing " +
+				"that event, and the transition nothing in the background-task family could express " +
+				"before. Like permission_denied above and unlike its three drop neighbours, the arm " +
+				"GATES ON NOTHING, so this bare line still maps: absence of a field is claude's to " +
+				"choose, so the fields land empty rather than the line being refused. Add a gate and " +
+				"this row goes red. The subtype has no row here before now because it was never " +
+				"observed on this surface; #2247 captured it on a turn that finally let a " +
+				"backgrounded command finish",
+		},
+		{
 			name: "rate_limit_event", line: `{"type":"rate_limit_event"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
 			why: "CORRECTED (#1404): no longer the second ignoredLineTypes member — the type is " +

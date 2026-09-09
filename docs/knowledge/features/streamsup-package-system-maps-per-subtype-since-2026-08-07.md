@@ -1,6 +1,8 @@
 # `system` maps per-subtype since 2026-08-07 (#1380) — the wholesale-drop design's first crack
 **`system` maps per-subtype since 2026-08-07 (#1380) — the wholesale-drop design's first crack.** `status`
-and any never-seen subtype stay silent exactly as before. Five subtypes are now mapped:
+and any never-seen subtype stay silent exactly as before. This document is a chronicle: `emitSystemSubtype`'s
+`case` arms are the one live enumeration of the mapped set (see below), and each dated entry here is the arm
+that landed at that point, not a running total — the count below is the *original* five.
 `system/task_started` → `turnevent.BackgroundTaskStarted` (`TaskID`, `ToolCallID` — claude's
 `tool_use_id`, renamed to match `ToolStart`/`ToolUpdate`'s field name for the same identifier —
 `Description`, `TaskType`, `TruncatedFields`); `system/task_updated` → `turnevent.BackgroundTaskUpdated`
@@ -218,3 +220,47 @@ carries the one fact a client should act on with care: `session` means claude ke
 the fallback model, so a later `ModelAnnounced` reporting a different model has no other explanation on
 this wire — a consumer should read this event as the swap's claimed *cause* and `ModelAnnounced` as its
 *confirmed result*, never treat the fallback label itself as the daemon's authoritative model state.
+
+**Tenth arm, `task_notification` (#2245) — the family's first shared event, and the first arm named for the
+line rather than the event because of it.** `emitSystemSubtype`'s tenth case, `emitBackgroundTaskNotification`,
+maps `system/task_notification` onto the *existing* `turnevent.BackgroundTaskUpdated` rather than a new
+variant — the obvious-looking alternative, a fourth background-task frame, was rejected because it would add
+a frame whose only difference from `task_updated`'s is which fields it fills. Two subtypes now produce one
+event, and they fill DISJOINT fields: `task_updated` fills `Patch` and leaves `Status`/`Summary` empty;
+`task_notification` fills `Status`/`Summary` and leaves `Patch` empty. A non-empty `Status` is therefore what
+tells a consumer a terminal state was reported, and that reading is stated on the event, the wire payload and
+`docs/protocol-mobile.md` rather than left to be inferred — no daemon-authored discriminator field names
+which line produced the frame, since a field like that would be exactly the invented content `Patch`'s own
+contract forbids one field over. `emitBackgroundTaskNotification` is named for the *line*, unlike its three
+siblings, which take the variant's name: here two functions produce one event, so a name matching the event
+would collide with the peer that already has it. See
+[the protocol payload doc](protocol-package-background-task-event-payloads.md) for the wire shape, the
+widened SECURITY posture (`Summary` is the family's second field that can carry a literal command line, after
+`BackgroundTaskStarted.Description`), and the envelope arithmetic — the arm's own worst case is 4608 bytes
+(7.0% of the 65519-byte cap), but the fit-cap test measures the *event type's* ceiling at 8704 bytes (13.3%)
+since nothing structural stops a third producing subtype filling all four fields someday. `Status` stays a
+plain string, not a closed set: one token (`completed`) has ever been observed, and the capture's own
+`limitations` record that `failed`/`stopped` are documented but never staged — the same call this family
+already made once for `BackgroundTaskStarted.TaskType`. No patch is synthesized to carry the terminal state:
+the captured line carries no `patch` key, and manufacturing one would have falsified both `Patch` doc
+comments' promise that the field holds claude's own bytes alone.
+
+Landing the tenth arm meant correcting **four** committed statements that had gone stale, one found only while
+reading rather than named by the ticket: `ignoredLineTypes`' "Still dropped in silence" paragraph (which had
+named `task_notification` as measured absent — #2247 captured it since), `parser_test.go`'s silence row for
+the subtype, `turnevent.BackgroundTaskRoster`'s "no terminal, finish, or completion event exists in this
+family" paragraph, and `docs/protocol-mobile.md`'s 2026-08-09 changelog entry making the same claim. Each was
+amended with a dated correction in place rather than rewritten, on the #1404 `rate_limit_event` pattern this
+same comment already used.
+
+**Test-writing trap: a value sweep for a dropped field is vacuous when the field's one captured value is the
+empty string.** `output_file` is excluded from `systemTaskNotificationLine` by design (documented as a path on
+the operator's host — "a field that is never declared cannot leak," `systemTaskUpdatedLine`'s guarantee), but
+the committed capture's `output_file` happens to be `""`. Sweeping the emitted event's string fields for that
+value would match every unset field and pass identically whether or not the field were actually declared and
+carried — it proves nothing. The assertion has to move to where the guarantee actually lives: reflection over
+`systemTaskNotificationLine`'s declared `json` tags, asserting no field maps to `output_file`. The other three
+excluded keys (`tool_use_id`, `uuid`, `session_id`) have non-empty captured values and stay covered by the
+ordinary reflection-based value sweep — only the empty-string case needed the structural version. Check
+whether a to-be-excluded field's one captured value is empty before writing a drop test as a value sweep; if
+it is, the sweep is decoration and the exclusion needs a structural assertion instead.

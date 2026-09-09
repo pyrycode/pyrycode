@@ -578,11 +578,6 @@ func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 		// row and would break the live zero-unrecognized gate on the next claude
 		// release that adds a chatty one.
 		{"system/a_subtype_invented_next_year", `{"type":"system","subtype":"a_subtype_invented_next_year"}`},
-		// task_notification is measured ABSENT on this surface — the capture's
-		// expected_absent holds exactly it, and it was seen once on the HEADLESS
-		// surface only. So it has no captured payload and this row is necessarily
-		// synthesized; it invents no field structure beyond the subtype name.
-		{"system/task_notification", `{"type":"system","subtype":"task_notification"}`},
 	}
 	for _, tc := range lines {
 		if got := collectEvents(tc.line); got != nil {
@@ -600,7 +595,8 @@ func TestParser_IgnoredLineTypesStaySilent(t *testing.T) {
 // taskPatchCapFixture is a THIRD literal even though it currently equals
 // taskDescriptionCapFixture, mirroring the production split: the two bound
 // different fields for different reasons, and sharing a fixture would let a
-// change to one silently retarget the other's proof.
+// change to one silently retarget the other's proof. taskSummaryCapFixture is a
+// FOURTH on the identical grounds (#2245).
 //
 // taskRosterEntriesCapFixture is the first fixture pinning a CARDINALITY rather
 // than a byte length (#1381), and the same reasoning carries over unchanged: a
@@ -612,6 +608,7 @@ const (
 	taskPatchCapFixture             = 4096
 	taskRosterEntriesCapFixture     = 8
 	taskRosterDescriptionCapFixture = 512
+	taskSummaryCapFixture           = 4096
 )
 
 // taskStartedLineFixture builds a system/task_started line from the four mapped
@@ -1391,6 +1388,384 @@ func TestParser_TaskUpdatedDropIsLoggedContentFree(t *testing.T) {
 
 	for _, r := range rec.all() {
 		for _, leak := range []string{ev.Patch, malformedPatchValue, capturedSession} {
+			if strings.Contains(r.msg, leak) {
+				t.Errorf("record message carries claude-derived content: %q", r.msg)
+			}
+			for k, v := range r.attrs {
+				if strings.Contains(v, leak) {
+					t.Errorf("record %q attr %q carries claude-derived content; this path logs the subtype only", r.msg, k)
+				}
+			}
+		}
+	}
+}
+
+// taskNotificationEvent drives one line through the shipped parser and returns
+// the single BackgroundTaskUpdated it must emit. Peer of taskUpdatedEvent: the
+// two subtypes produce the SAME event, which is the whole shape of #2245.
+func taskNotificationEvent(t *testing.T, line string) turnevent.BackgroundTaskUpdated {
+	t.Helper()
+	got := collectEvents(line)
+	if len(got) != 1 {
+		t.Fatalf("event count: got %d, want 1 (%#v)", len(got), got)
+	}
+	ev, ok := got[0].(turnevent.BackgroundTaskUpdated)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.BackgroundTaskUpdated", got[0])
+	}
+	return ev
+}
+
+// TestParser_TaskNotificationMapsFromCapture is #2245's central assertion: the
+// CAPTURED system/task_notification line becomes one turnevent.BackgroundTaskUpdated
+// carrying the task id and the terminal state claude reported.
+//
+// This line used to be a row in TestParser_IgnoredLineTypesStaySilent asserting
+// the opposite, exactly as task_updated's did before #1382. That row was not an
+// oversight: the subtype was genuinely dropped until #2247 committed a payload to
+// declare from, and a synthesized row was the only honest option until then.
+//
+// The field assertions are DERIVED from the capture's own payload rather than
+// pinned, for TestParser_TaskUpdatedMapsFromCapture's reason: the capture is
+// redacted, so a pinned expectation risks pinning a placeholder while a derived
+// one still catches a field swap. status carries the one pinned literal, as a
+// canary that the reader picked the right record at all.
+func TestParser_TaskNotificationMapsFromCapture(t *testing.T) {
+	t.Parallel()
+	line := capturedTaskNotificationLine(t)
+
+	var payload map[string]any
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+
+	ev := taskNotificationEvent(t, string(line))
+
+	routes := []struct {
+		field     string
+		claudeKey string
+		got       string
+	}{
+		{"TaskID", "task_id", ev.TaskID},
+		{"Status", "status", ev.Status},
+		{"Summary", "summary", ev.Summary},
+	}
+	for _, r := range routes {
+		want, _ := payload[r.claudeKey].(string)
+		if want == "" {
+			t.Fatalf("the capture carries no string %q, so the routing of %s cannot be proven against it", r.claudeKey, r.field)
+		}
+		if r.got != want {
+			t.Errorf("%s: got %q, want the capture's %s = %q", r.field, r.got, r.claudeKey, want)
+		}
+	}
+
+	// The canary: proves the reader selected the task_notification record rather
+	// than some other system line that happens to decode into the same shape. It
+	// is also the only value here worth pinning — the record's limitations state
+	// that `failed` and `stopped` were never staged, so this is the one terminal
+	// token this repo has ever seen.
+	if ev.Status != "completed" {
+		t.Errorf("Status: got %q, want %q (the capture's one observed terminal state)", ev.Status, "completed")
+	}
+	// AC3, at the point it is decided: the line carries no `patch` key, and the
+	// daemon synthesizes none from the terminal state. A Patch assembled here
+	// would falsify both turnevent.BackgroundTaskUpdated.Patch's contract and
+	// protocol.BackgroundTaskUpdatedPayload's, which promise a consumer that the
+	// field holds claude's own bytes and nothing else.
+	if _, ok := payload["patch"]; ok {
+		t.Fatalf("the captured line carries a patch key, so the no-synthesis assertion below would not be proving what it claims")
+	}
+	if ev.Patch != "" {
+		t.Errorf("Patch: got %q, want empty — this subtype's line carries no patch and the daemon synthesizes none", ev.Patch)
+	}
+	if ev.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil — the captured line is 249 bytes on the wire, far under every cap", ev.TruncatedFields)
+	}
+}
+
+// TestParser_TaskNotificationDropsClaudesUnmappedKeys is AC4 plus the family's
+// standing omissions, and it asserts them at TWO levels because one level alone
+// would be weaker than it looks.
+//
+// The STRUCTURAL half is the one AC4 actually needs. output_file's captured value
+// is the EMPTY STRING, so sweeping the emitted event for it would match every
+// unset field and prove nothing; worse, it would pass identically if the field
+// were declared and carried. So the assertion is made where the guarantee lives:
+// systemTaskNotificationLine declares no field whose json tag is output_file, and
+// therefore no code path in the daemon ever holds a value for it. A field that is
+// never declared cannot leak.
+//
+// The VALUE half covers the three keys whose captured values are non-empty, swept
+// by reflection over every string field of the event so a field added later is
+// covered without anyone remembering to extend a list.
+func TestParser_TaskNotificationDropsClaudesUnmappedKeys(t *testing.T) {
+	t.Parallel()
+	line := capturedTaskNotificationLine(t)
+
+	var payload map[string]any
+	if err := json.Unmarshal(line, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+
+	// Structural: the decode target's declared json tags, against the keys the
+	// capture proves claude sends.
+	declared := map[string]bool{}
+	lt := reflect.TypeOf(systemTaskNotificationLine{})
+	for i := 0; i < lt.NumField(); i++ {
+		tag, _, _ := strings.Cut(lt.Field(i).Tag.Get("json"), ",")
+		declared[tag] = true
+	}
+	for _, key := range []string{"output_file", "tool_use_id", "uuid", "session_id"} {
+		if _, ok := payload[key]; !ok {
+			t.Fatalf("the capture carries no %q key, so asserting that the decode target omits it would be vacuous", key)
+		}
+		if declared[key] {
+			t.Errorf("systemTaskNotificationLine declares a field tagged %q; it is deliberately NOT decoded — "+
+				"output_file is a path on the operator's host, tool_use_id has no reader, and uuid and "+
+				"session_id are the family's standing omissions", key)
+		}
+	}
+	if len(declared) != 3 {
+		t.Errorf("systemTaskNotificationLine declares %d json fields, want 3 (task_id, status, summary) — "+
+			"the capture pins nine top-level keys and this target's whole discipline is that it declares "+
+			"three of them", len(declared))
+	}
+
+	// Value: the three dropped keys whose captured values are non-empty, swept
+	// over the emitted event. output_file is absent from this list on purpose —
+	// its captured value is "" and a sweep for it would match every unset field.
+	ev := taskNotificationEvent(t, string(line))
+	rv := reflect.ValueOf(ev)
+	var swept int
+	for _, key := range []string{"tool_use_id", "uuid", "session_id"} {
+		v, _ := payload[key].(string)
+		if v == "" {
+			t.Fatalf("the capture carries no string %q, so the drop assertion would be vacuous", key)
+		}
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Field(i).Kind() != reflect.String {
+				continue
+			}
+			swept++
+			if rv.Field(i).String() == v {
+				t.Errorf("field %s carries claude's %s (%q); it is deliberately NOT on this event",
+					rv.Type().Field(i).Name, key, v)
+			}
+		}
+	}
+	// The sweep visiting nothing would pass silently, which is the one way this
+	// assertion could rot into decoration. A LITERAL floor, not an expression
+	// derived from the event's own shape, for TestParser_TaskUpdatedMapsFromCapture's
+	// reason: three keys over four string fields (TaskID, Patch, Status, Summary).
+	const wantSwept = 12
+	if swept != wantSwept {
+		t.Errorf("the sweep visited %d field/key pairs, want %d — a field was added to or removed from "+
+			"BackgroundTaskUpdated and this floor is what says so", swept, wantSwept)
+	}
+}
+
+// taskNotificationLineFixture builds a system/task_notification line from the
+// three mapped keys. It invents NO field structure — the keys are exactly the
+// capture's — and exists only to vary the VALUES, which is what the cap proof
+// needs and what the capture cannot supply: the captured line is 249 bytes with a
+// 9-byte summary, far under every cap.
+func taskNotificationLineFixture(t *testing.T, taskID, status, summary string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]string{
+		"type":    "system",
+		"subtype": "task_notification",
+		"task_id": taskID,
+		"status":  status,
+		"summary": summary,
+	})
+	if err != nil {
+		t.Fatalf("marshalling task_notification fixture: %v", err)
+	}
+	return string(b)
+}
+
+// TestParser_TaskNotificationBoundsClaudeText is AC5: every claude-authored string
+// this subtype puts on the wire is cut to its cap at CONSTRUCTION and the cut is
+// reported the way the family already reports one.
+//
+// Cap values come from the LITERAL fixtures, never from the constants they
+// validate, per taskStartedCapCheat's rule: a fixture built from its own constant
+// follows that constant green when someone halves it.
+func TestParser_TaskNotificationBoundsClaudeText(t *testing.T) {
+	t.Parallel()
+
+	const smallID = "task-1"
+	overID := strings.Repeat("i", taskFieldIDCapFixture+1)
+	overStatus := strings.Repeat("s", taskFieldIDCapFixture+1)
+	overSummary := strings.Repeat("m", taskSummaryCapFixture+1)
+
+	tests := []struct {
+		name                                     string
+		taskID, status, summary                  string
+		wantCut                                  []string
+		wantLenTaskID, wantLenStatus, wantLenSum int
+	}{
+		{
+			name: "nothing over cap is reported", taskID: smallID, status: "completed", summary: "done",
+			wantCut: nil, wantLenTaskID: len(smallID), wantLenStatus: len("completed"), wantLenSum: len("done"),
+		},
+		{
+			name: "an oversized summary is cut and named", taskID: smallID, status: "completed", summary: overSummary,
+			wantCut: []string{"summary"}, wantLenTaskID: len(smallID), wantLenStatus: len("completed"),
+			wantLenSum: taskSummaryCapFixture,
+		},
+		{
+			name: "an oversized status is cut and named", taskID: smallID, status: overStatus, summary: "done",
+			wantCut: []string{"status"}, wantLenTaskID: len(smallID), wantLenStatus: taskFieldIDCapFixture,
+			wantLenSum: len("done"),
+		},
+		{
+			// All three at once, named in DECLARATION order (task_id, status,
+			// summary), which is what makes the value deterministic and pinnable.
+			// patch never appears: this subtype's arm does not fill it.
+			name:   "three fields over cap are named in declaration order",
+			taskID: overID, status: overStatus, summary: overSummary,
+			wantCut:       []string{"task_id", "status", "summary"},
+			wantLenTaskID: taskFieldIDCapFixture, wantLenStatus: taskFieldIDCapFixture,
+			wantLenSum: taskSummaryCapFixture,
+		},
+		{
+			// The <= boundary: a field of exactly its cap is not truncated.
+			name:    "every field exactly at its cap is not truncated",
+			taskID:  strings.Repeat("i", taskFieldIDCapFixture),
+			status:  strings.Repeat("s", taskFieldIDCapFixture),
+			summary: strings.Repeat("m", taskSummaryCapFixture),
+			wantCut: nil, wantLenTaskID: taskFieldIDCapFixture, wantLenStatus: taskFieldIDCapFixture,
+			wantLenSum: taskSummaryCapFixture,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ev := taskNotificationEvent(t, taskNotificationLineFixture(t, tc.taskID, tc.status, tc.summary))
+
+			if !reflect.DeepEqual(ev.TruncatedFields, tc.wantCut) {
+				t.Errorf("TruncatedFields: got %#v, want %#v", ev.TruncatedFields, tc.wantCut)
+			}
+			if len(ev.TaskID) != tc.wantLenTaskID {
+				t.Errorf("len(TaskID): got %d, want %d", len(ev.TaskID), tc.wantLenTaskID)
+			}
+			if len(ev.Status) != tc.wantLenStatus {
+				t.Errorf("len(Status): got %d, want %d", len(ev.Status), tc.wantLenStatus)
+			}
+			if len(ev.Summary) != tc.wantLenSum {
+				t.Errorf("len(Summary): got %d, want %d", len(ev.Summary), tc.wantLenSum)
+			}
+			// AC3 on every row: no input to this subtype's arm can produce a patch,
+			// because the daemon has none to carry and synthesizes nothing.
+			if ev.Patch != "" {
+				t.Errorf("Patch: got %q, want empty on every task_notification event", ev.Patch)
+			}
+		})
+	}
+
+	t.Run("a cut mid-rune yields valid UTF-8", func(t *testing.T) {
+		t.Parallel()
+		// The cap is a BYTE count, so it can land inside a multi-byte rune. The value
+		// rides a JSON string field downstream, where an invalid sequence would be
+		// silently replaced, so the producer scrubs it here instead. The padding puts
+		// the first multi-byte rune so its bytes straddle the cut.
+		pad := strings.Repeat("m", taskSummaryCapFixture-1)
+		ev := taskNotificationEvent(t, taskNotificationLineFixture(t, smallID, "completed", pad+strings.Repeat("€", 8)))
+
+		if !reflect.DeepEqual(ev.TruncatedFields, []string{"summary"}) {
+			t.Fatalf("TruncatedFields: got %#v, want [summary]", ev.TruncatedFields)
+		}
+		if !utf8.ValidString(ev.Summary) {
+			t.Errorf("Summary is not valid UTF-8 after a mid-rune cut")
+		}
+		// Short of the cap, not at it: the empty replacement DELETES the partial rune
+		// rather than replacing it.
+		if len(ev.Summary) > taskSummaryCapFixture {
+			t.Errorf("len(Summary): got %d, want <= %d", len(ev.Summary), taskSummaryCapFixture)
+		}
+	})
+}
+
+// TestParser_TaskNotificationDropIsLoggedContentFree applies the package's standing
+// rule to the fourth subtype: nothing derived from claude's output reaches a log.
+// The content crosses the wire, not the log.
+//
+// summary is this subtype's most attractive thing to log while debugging a
+// malformed line — it is the field most likely to hold a readable account of what
+// went wrong — which is why the decode-failure path is driven here with a
+// distinctive one.
+func TestParser_TaskNotificationDropIsLoggedContentFree(t *testing.T) {
+	t.Parallel()
+
+	captured := capturedTaskNotificationLine(t)
+	var payload map[string]any
+	if err := json.Unmarshal(captured, &payload); err != nil {
+		t.Fatalf("decoding the captured payload: %v", err)
+	}
+	capturedSession, _ := payload["session_id"].(string)
+	if capturedSession == "" {
+		t.Fatalf("the capture carries no session_id, so the leak sweep would be vacuous")
+	}
+
+	// A task_notification line the shape cannot decode (task_id is a number), so
+	// the decode-failure path runs. Its summary carries a distinctive literal, and
+	// the whole point is that it must appear in no log record.
+	const malformedSummaryValue = "rm -rf /tmp/never-log-this-summary"
+	malformed := `{"type":"system","subtype":"task_notification","task_id":42,` +
+		`"status":"failed","summary":"` + malformedSummaryValue + `"}`
+
+	rec := &logRecorder{}
+	var events []turnevent.Event
+	p := NewParser(func(ev turnevent.Event) { events = append(events, ev) }, slog.New(rec))
+	if _, err := p.Write(append(append([]byte(nil), captured...), '\n')); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+	if _, err := p.Write([]byte(malformed + "\n")); err != nil {
+		t.Fatalf("Write err = %v, want nil", err)
+	}
+
+	// The malformed line is dropped, and NOT as an Unrecognized: keeping `system`
+	// whole on ignoredLineTypes is what makes "no system line reaches the
+	// unrecognized lane" structural, and it is what AC1's no-unrecognized half
+	// rests on.
+	if len(events) != 1 {
+		t.Fatalf("event count: got %d, want 1 (the captured line only) — %#v", len(events), events)
+	}
+	ev, ok := events[0].(turnevent.BackgroundTaskUpdated)
+	if !ok {
+		t.Fatalf("event type: got %T, want turnevent.BackgroundTaskUpdated", events[0])
+	}
+	// The captured summary as the parser itself carried it, so the leak candidate
+	// is derived from the shipped mapping rather than transcribed.
+	if ev.Summary == "" {
+		t.Fatalf("the mapped Summary is empty, so the leak sweep over it would be vacuous")
+	}
+
+	const dropMsg = "streamsup: dropping undecodable system line"
+	var sawDrop bool
+	for _, r := range rec.all() {
+		if r.msg != dropMsg {
+			continue
+		}
+		if !reflect.DeepEqual(r.attrs, map[string]string{"subtype": "task_notification"}) {
+			// The task_updated sweep runs in its own test, so any other subtype here
+			// means this line took a path it should not have.
+			continue
+		}
+		sawDrop = true
+	}
+	if !sawDrop {
+		t.Fatalf("no %q record naming task_notification: the decode-failure path never ran, so its leak sweep is vacuous", dropMsg)
+	}
+
+	for _, r := range rec.all() {
+		for _, leak := range []string{ev.Summary, ev.Status, malformedSummaryValue, capturedSession} {
+			if leak == "" {
+				continue
+			}
 			if strings.Contains(r.msg, leak) {
 				t.Errorf("record message carries claude-derived content: %q", r.msg)
 			}

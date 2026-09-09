@@ -1816,9 +1816,13 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksNoLogLeak(t *testing.T) {
 
 	// A distinct marker in EVERY claude-derived string of all three variants,
 	// including each roster row's three.
+	// This list is enumerated BY HAND, so widening one of the three variants does
+	// not widen the sweep — a new claude-derived field stays untested until its
+	// marker lands here. #2245's two are the case in point: Summary is unbounded
+	// model prose, the field on this family with the most to leak.
 	secrets := []string{
 		"SECRETTASKIDZZZ", "SECRETTOOLCALLZZZ", "SECRETDESCZZZ", "SECRETTASKTYPEZZZ",
-		"SECRETPATCHZZZ",
+		"SECRETPATCHZZZ", "SECRETSTATUSZZZ", "SECRETSUMMARYZZZ",
 		"SECRETROWIDZZZ", "SECRETROWTYPEZZZ", "SECRETROWDESCZZZ",
 	}
 	for _, ev := range []turnevent.Event{
@@ -1828,7 +1832,13 @@ func TestInteractiveTurnEmitterV2_BackgroundTasksNoLogLeak(t *testing.T) {
 			Description: "SECRETDESCZZZ",
 			TaskType:    "SECRETTASKTYPEZZZ",
 		},
+		// Two events of this variant, because its two producing subtypes fill
+		// disjoint fields: one event can never carry both a patch and a terminal
+		// state, so a single fixture would leave one half of the variant unswept.
 		turnevent.BackgroundTaskUpdated{TaskID: "SECRETTASKIDZZZ", Patch: "SECRETPATCHZZZ"},
+		turnevent.BackgroundTaskUpdated{
+			TaskID: "SECRETTASKIDZZZ", Status: "SECRETSTATUSZZZ", Summary: "SECRETSUMMARYZZZ",
+		},
 		turnevent.BackgroundTaskRoster{Tasks: []turnevent.BackgroundTask{
 			{TaskID: "SECRETROWIDZZZ", TaskType: "SECRETROWTYPEZZZ", Description: "SECRETROWDESCZZZ"},
 		}},

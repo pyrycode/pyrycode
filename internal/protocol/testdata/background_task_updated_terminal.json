@@ -1,0 +1,1 @@
+{"id":707,"type":"background_task_updated","ts":"2026-05-08T10:33:24Z","payload":{"conversation_id":"c1","task_id":"task_01ABC","patch":"","status":"completed","summary":"cat /tmp/pyry-fifo","truncated_fields":null}}
