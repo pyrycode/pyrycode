@@ -263,8 +263,55 @@ func TestTurnEndPayload_RoundTrip(t *testing.T) {
 	if payload.ErrorCategory != "rate_limit" {
 		t.Errorf("ErrorCategory: got %q, want %q", payload.ErrorCategory, "rate_limit")
 	}
+	// #2260's four numbers, and the fixture's values are claude's own from the
+	// error_max_turns line of the committed permission_mode_switch_v2.1.239_plan
+	// capture rather than round figures. Two properties make the fixture pin
+	// something a tidier one would not. duration_api_ms EXCEEDS duration_ms, which is
+	// the reading the ticket exists to foreclose and the norm across the corpus; and
+	// no value is derivable from another, so a decoder that crossed two keys or read
+	// one off a neighbour cannot pass.
+	if payload.DurationMS != 24594 {
+		t.Errorf("DurationMS: got %d, want %d", payload.DurationMS, 24594)
+	}
+	if payload.DurationAPIMS != 27064 {
+		t.Errorf("DurationAPIMS: got %d, want %d", payload.DurationAPIMS, 27064)
+	}
+	if payload.NumTurns != 5 {
+		t.Errorf("NumTurns: got %d, want %d", payload.NumTurns, 5)
+	}
+	if payload.CostUSDTotal != 0.1608898 {
+		t.Errorf("CostUSDTotal: got %v, want %v", payload.CostUSDTotal, 0.1608898)
+	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestTurnEndPayload_TurnTotalsAreOptional is the "optional means no omitempty, not a
+// pointer" contract measured from the client's side: a frame minted before #2260
+// landed must decode without error, with the four numbers at zero and every field
+// beside them intact.
+//
+// The sibling-survival check is the half a decode-succeeded assertion would miss — a
+// decode that "worked" but dropped error_category would pass the first check alone.
+func TestTurnEndPayload_TurnTotalsAreOptional(t *testing.T) {
+	t.Parallel()
+	// The pre-#2260 payload shape, byte for byte.
+	const legacy = `{"conversation_id":"c1","turn_id":"t7","stop_reason":"end_turn",` +
+		`"outcome":"error_max_turns","is_error":true,"terminal_reason":"max_turns",` +
+		`"error_category":"rate_limit"}`
+
+	var payload TurnEndPayload
+	if err := json.Unmarshal([]byte(legacy), &payload); err != nil {
+		t.Fatalf("a payload without the turn totals must decode, got: %v", err)
+	}
+	if payload.DurationMS != 0 || payload.DurationAPIMS != 0 || payload.NumTurns != 0 || payload.CostUSDTotal != 0 {
+		t.Errorf("turn totals: got {%d %d %d %v}, want all zero",
+			payload.DurationMS, payload.DurationAPIMS, payload.NumTurns, payload.CostUSDTotal)
+	}
+	if payload.Outcome != "error_max_turns" || payload.TerminalReason != "max_turns" ||
+		payload.ErrorCategory != "rate_limit" || !payload.IsError {
+		t.Errorf("sibling fields: got %+v", payload)
+	}
 }
 
 func TestStallPayload_RoundTrip(t *testing.T) {

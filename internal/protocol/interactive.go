@@ -322,11 +322,45 @@ type ToolDeniedPayload struct {
 // rule the three below state — open set, no omitempty, claude-authored, bounded and
 // unsanitized — and adds one they do not need, at its own declaration.
 //
+// FOUR NUMBERS RIDE BESIDE THEM (#2260) and they are a different CLASS from every
+// field above: claude-authored like the four strings, but numeric, so none of the
+// string rules transfers. They are declared individually below and share the rules in
+// the four paragraphs after this one.
+//
+// TWO OF THE FOUR ARE RUNNING TOTALS AND TWO ARE PER TURN, and the pair that looks
+// most alike is the pair that disagrees — DurationAPIMS is a session total while
+// DurationMS is this turn's. The daemon differences neither and holds no previous
+// line's value to difference one against.
+//
+// A ZERO IS A NUMBER CLAUDE SENT, not a field the daemon failed to read, and a client
+// that treats one as a gap mislabels a real turn. claude reports duration_api_ms 0 and
+// num_turns 0 on an observed line whose duration_ms is 15617 and whose cost is
+// non-zero. Absent, null, an unreadable value and an explicit 0 are one reading, and
+// no field distinguishes them because nothing a client does depends on which it is.
+//
+// NOTHING IS CLAMPED, RANGE-CHECKED OR ORDERED — RateLimitedPayload's posture for its
+// own two numbers. In particular the daemon applies NO duration_api_ms <= duration_ms
+// consistency check, because it would reject the ordinary case, and a negative arrives
+// as claude sent it.
+//
+// SECURITY: claude-authored, and threat 1 lands OUTWARD — but NOT in the shape
+// Outcome's SECURITY paragraph states, so a client must not carry that paragraph
+// across. A JSON number holds no control character, terminal escape, markup or URL, so
+// there is no sanitization owed and no length bound to look for; these grow no frame
+// because the bound is over the type's range rather than over claude's input length.
+// What DOES land is the misattribution half: the daemon verifies none of these
+// numbers, so rendering cost_usd_total as the daemon's own accounting of the
+// operator's spend presents model-authored data as trusted chrome — error_category's
+// trap reached through a number instead of a token. Attribute all four to claude.
+// Nothing in the daemon acts on any of them, spend enforcement included.
+//
 // No omitempty on any of them, per this file's rule as stated at ToolResultPayload:
 // absence and the zero value mean the same thing, always emitting the key keeps the
 // testdata fixture pinning the full shape, a client built before this landed ignores
 // the unknown keys, and one built after decodes a frame lacking them to the zero
-// value without error — which is the sense in which they are optional.
+// value without error — which is the sense in which they are optional. It holds for
+// the four numbers as written: a pointer would offer an absent-versus-zero
+// distinction, and there is none to offer, since claude sends zeros itself.
 type TurnEndPayload struct {
 	ConversationID string `json:"conversation_id"`
 	TurnID         string `json:"turn_id"`
@@ -375,6 +409,34 @@ type TurnEndPayload struct {
 	// than `error` because a key of that name beside is_error reads as its detail,
 	// and this is neither that nor an error object.
 	ErrorCategory string `json:"error_category"`
+	// DurationMS is how long THIS TURN took in milliseconds (#2260). PER TURN: it is
+	// non-monotonic across the committed captures, falling as often as it rises.
+	DurationMS int `json:"duration_ms"`
+	// DurationAPIMS is claude's duration_api_ms in milliseconds, and it is a RUNNING
+	// TOTAL for the session — NOT the API time inside this turn, which is the reading
+	// its name invites and the one a client is most likely to get wrong. It is larger
+	// than DurationMS on 53 of the 57 observed result lines, so reading it per turn
+	// renders eleven seconds of API work for a three-second turn.
+	//
+	// Differencing consecutive frames does not recover a per-turn figure either: the
+	// value already exceeds its own turn's DurationMS on the FIRST result line of 19
+	// of the 21 multi-turn captures, so whatever it sums is not bounded by the turn's
+	// wall clock. The daemon publishes what claude sent and differences nothing.
+	DurationAPIMS int `json:"duration_api_ms"`
+	// NumTurns is how many model round-trips THIS TURN made — per turn, on DurationMS's
+	// side of the split, not a count of turns in the session. It holds constant across
+	// consecutive frames of one session where a cumulative counter would climb.
+	NumTurns int `json:"num_turns"`
+	// CostUSDTotal is what the SESSION has cost so far in US dollars — a RUNNING TOTAL
+	// with DurationAPIMS, and undifferenced for the same reason.
+	//
+	// The wire spells it `cost_usd_total` where claude spells it total_cost_usd. That
+	// is deliberate and is the only respelling in this group; the other three keep
+	// claude's own key.
+	//
+	// IT IS CLAUDE'S ESTIMATE, NOT A BILLING STATEMENT, and on a subscription it is
+	// informational. See the four fields' shared rules below.
+	CostUSDTotal float64 `json:"cost_usd_total"`
 }
 
 // StallPayload is the body of an Envelope whose Type == TypeStall

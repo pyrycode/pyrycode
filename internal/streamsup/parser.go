@@ -2203,6 +2203,55 @@ type resultDenialEntry struct {
 	ToolUseID string `json:"tool_use_id"`
 }
 
+// resultTurnTotalsLine is the decoded payload of the four numeric keys one `result`
+// line carries about the turn it ends — how long the turn took, how long the API has
+// spent, how many round-trips the turn made, and what the session has cost (#2260).
+// Kept separate from streamLine for systemTaskStartedLine's reason, and
+// TestStreamLine_StaysSegmentationOnly enforces that boundary.
+//
+// A FOURTH TARGET ON THE SAME LINE, beside resultLine, resultStopLine and
+// resultDenialsLine, and the reason is the failure isolation resultStopLine's doc
+// argues — held now in four directions rather than three. Two of the siblings decode
+// shapes claude controls the INSIDE of: a map whose value shape is its own, and an
+// array whose element shape is its own. Folded into either, a hostile shape there
+// would also zero four numbers that decoded perfectly well, and a hostile number here
+// would erase the windows or the denials the daemon could otherwise recover. Four
+// targets fail independently, and none can disturb the turn boundary, which comes
+// from the already-decoded streamLine.
+//
+// INSIDE THIS TARGET THE FOUR FAIL AS A UNIT, deliberately, and that is the family's
+// posture rather than an oversight: resultStopLine states it for its pair and
+// resultDenialEntry for its two strings — a value of any other JSON type fails the
+// whole decode and takes the everything-absent path, which is the fail-closed
+// direction. userLine's json.RawMessage-per-field alternative would make this decode
+// infallible and isolate the four from each other; it is declined because that
+// property exists there to protect a field carrying a whole file body and an
+// IsSynthetic flag whose loss is a disclosure regression, and nothing of that weight
+// rides here. The entire cost of the unit failure is four informational numbers
+// reading zero — a state claude's own bytes already produce, per TurnEnd's shared doc.
+//
+// A JSON null decodes to the zero value WITHOUT failing, which is the one absent-shaped
+// value encoding/json accepts against a scalar; absent, null and an explicit 0 are one
+// reading here, as they are for resultModelUsage.ContextWindow.
+//
+// The captured line carries twenty-two keys; four are declared. Absence from the DECODE
+// TARGET is a stronger guarantee than a test sweep, because a field that is never
+// declared cannot leak — and the keys this omission is about are ttft_ms,
+// ttft_stream_ms and time_to_request_ms, which ride the same line on some claude
+// versions and are nothing this daemon publishes.
+//
+// THE THREE COUNTS ARE SIGNED ON PURPOSE, resultModelUsage.ContextWindow's argument
+// reused for a value nothing rejects: an unsigned type would wrap a negative reading
+// into an enormous positive duration and report it as fact. Unlike that field there is
+// no rejection here at all — see decodeTurnTotals for the no-clamp rule and why an
+// ordering check in particular is forbidden.
+type resultTurnTotalsLine struct {
+	DurationMS    int     `json:"duration_ms"`
+	DurationAPIMS int     `json:"duration_api_ms"`
+	NumTurns      int     `json:"num_turns"`
+	TotalCostUSD  float64 `json:"total_cost_usd"`
+}
+
 // assistantErrorLine is the decoded API-error category of one `assistant` line
 // (#2224). Kept separate from streamLine for resultStopLine's reason applied to a
 // different line type: the segmentation struct stays at Type/Subtype/Message, and
@@ -3519,12 +3568,18 @@ func (p *Parser) consumeLine(line []byte) {
 		p.deniedThisTurn = nil
 		windows, droppedWindows := decodeModelWindows(line)
 		isError, terminalReason := decodeStopShape(line)
+		// A THIRD DECODE OF THE SAME LINE, joining the two above rather than widening
+		// either (#2260). The ordering paragraph below covers it unchanged, and the
+		// independence runs both ways: no outcome of the two decodes above can zero
+		// these four numbers, and no outcome of this one can disturb the windows, the
+		// stop shape, the denials recovered next, or the boundary itself.
+		durationMS, durationAPIMS, numTurns, costUSDTotal := decodeTurnTotals(line)
 		// ORDERED BEFORE THE TurnEnd BELOW, which is AC 1's real content rather than a
 		// detail of it: a client closes the turn on that event, so a marker emitted
 		// after it would arrive for a turn already finished — #2232's defect restored
-		// under a different name. The call sits BELOW the resets with the two decodes
-		// above it, so no outcome of any of the three can reorder, duplicate or
-		// suppress the boundary.
+		// under a different name. The call sits BELOW the resets with the three decodes
+		// above it, so no outcome of any of them can reorder, duplicate or suppress the
+		// boundary.
 		p.emitRecoveredDenials(line, announced)
 		p.emit(turnevent.TurnEnd{
 			// resultTurnEndReason reads the UNBOUNDED subtype, deliberately: the cap
@@ -3547,6 +3602,16 @@ func (p *Parser) consumeLine(line []byte) {
 			ErrorCategory:       errorCategory,
 			ModelWindows:        windows,
 			DroppedModelWindows: droppedWindows,
+			// claude's four numbers VERBATIM and UNDIFFERENCED (#2260). Two of them are
+			// running totals and nothing here converts either into a per-turn delta —
+			// see turnevent.TurnEnd's shared doc for which two and why the arithmetic
+			// would be wrong. No cap is applied at this publish site, unlike the subtype
+			// above it, because there is nothing claude can lengthen: the bound is over
+			// the Go type's range and holds for every input.
+			DurationMS:    durationMS,
+			DurationAPIMS: durationAPIMS,
+			NumTurns:      numTurns,
+			CostUSDTotal:  costUSDTotal,
 		})
 	case "rate_limit_event":
 		// Its own arm rather than an ignoredLineTypes member with a subtype
@@ -6051,6 +6116,43 @@ func decodeStopShape(line []byte) (isError bool, terminalReason string) {
 		return false, ""
 	}
 	return sl.IsError, boundStopField(sl.TerminalReason)
+}
+
+// decodeTurnTotals reads the four numeric keys off one `result` line (#2260). A pure
+// function of the bytes: no receiver, no parser state read or written, nothing logged
+// on any path.
+//
+// decodeStopShape's three properties hold here verbatim and are not restated: it
+// cannot disturb what the line emits, every failure returns a value rather than an
+// error, and the decode error is DISCARDED rather than logged because encoding/json
+// quotes the offending input into its error text. (0, 0, 0, 0) is a complete answer to
+// "claude said nothing usable" — and, unlike its siblings, it is ALSO an answer claude
+// itself can send, which is why TurnEnd's shared doc has to say so rather than leaving
+// a consumer to read a zero as a daemon failure.
+//
+// THERE IS NO BOUND TO APPLY HERE, and that is the one way this differs from every
+// sibling decode in the family rather than an omission. Those bound claude-authored
+// TEXT, whose length claude chooses; these are numbers, whose worst case is the Go
+// type's own range — 20 bytes for an int, 24 for a float64 — so the frame cannot be
+// grown by anything claude sends. RateLimitedPayload.ResetsAt states the same argument
+// as "a float64 cannot grow".
+//
+// NOTHING IS CLAMPED, ROUNDED, RANGE-CHECKED OR ORDERED. In particular there is NO
+// duration_api_ms <= duration_ms check, and adding one would be a defect rather than a
+// hardening: duration_api_ms is a RUNNING TOTAL and exceeds the turn's own duration on
+// 53 of the 57 committed result lines, so the check would reject the ordinary case. A
+// negative is published as claude sent it.
+//
+// NEITHER RUNNING TOTAL IS DIFFERENCED, and this function is structurally incapable of
+// differencing one: it holds no previous line's value and the parser keeps none, so
+// the per-turn delta a consumer might expect is not something the daemon could produce
+// even by mistake.
+func decodeTurnTotals(line []byte) (durationMS, durationAPIMS, numTurns int, costUSDTotal float64) {
+	var tl resultTurnTotalsLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		return 0, 0, 0, 0
+	}
+	return tl.DurationMS, tl.DurationAPIMS, tl.NumTurns, tl.TotalCostUSD
 }
 
 // decodeAssistantError reads the wrapper-level API error category off one `assistant`

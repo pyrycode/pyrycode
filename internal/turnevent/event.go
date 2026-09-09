@@ -296,6 +296,86 @@ type TurnEnd struct {
 	// control-character and terminal-escape stripping is the CLIENT's, named as such
 	// in docs/protocol-mobile.md § turn_end.
 	ErrorCategory string
+	// DurationMS is how long THIS TURN took, in milliseconds, as claude reported it
+	// on the `result` line that ends the turn (#2260).
+	//
+	// PER TURN, NOT A RUNNING TOTAL, and the evidence is that it FALLS: measured
+	// 2026-09-09 across the 32 committed captures under internal/e2e/realclaude/testdata,
+	// it is non-monotonic in 13 of the 21 captures carrying more than one result line.
+	// Its neighbour DurationAPIMS is the opposite reading, which is the distinction the
+	// four fields' shared doc below exists to state.
+	DurationMS int
+	// DurationAPIMS is claude's duration_api_ms for the session so far, in milliseconds.
+	//
+	// A RUNNING TOTAL, AND THIS IS THE ONE READING MOST LIKELY TO BE GOT WRONG. The
+	// name invites "the API time inside this turn"; it is not. It is strictly
+	// monotonic across all 21 multi-turn captures and is LARGER than DurationMS on 53
+	// of the 57 observed result lines, so a consumer reading it as this turn's API
+	// time renders eleven seconds of API work for a three-second turn.
+	//
+	// DIFFERENCING CONSECUTIVE LINES DOES NOT RESCUE THAT READING EITHER. The value
+	// already exceeds its own turn's DurationMS on the FIRST result line of 19 of the
+	// 21 multi-turn captures, where a running total has accumulated nothing but that
+	// one turn — so whatever it sums, it is not bounded by the turn's wall clock.
+	//
+	// The daemon does NOT convert it into a per-turn delta, and holds no previous
+	// line's value to subtract one from: this decode publishes what claude sent for
+	// this line and remembers nothing across lines.
+	DurationAPIMS int
+	// NumTurns is claude's num_turns for THIS TURN — how many model round-trips it
+	// took, not a count of turns in the session.
+	//
+	// PER TURN, on DurationMS's side of the split. It holds at 2 across all three
+	// result lines of each bypass_reescalation_v2.1.239_* capture, where a cumulative
+	// counter would read 2, 4, 6; within one capture it rises 1 → 5 when a turn
+	// actually made more round-trips.
+	NumTurns int
+	// CostUSDTotal is claude's total_cost_usd: what the SESSION has cost so far, in
+	// US dollars. Spelled cost_usd_total on the wire, per #2199's shape — the one
+	// deliberate respelling in this group.
+	//
+	// A RUNNING TOTAL, with DurationAPIMS, and strictly monotonic across all 21
+	// multi-turn captures. Undifferenced, for that field's stated reason.
+	//
+	// IT IS CLAUDE'S ESTIMATE, NOT A BILLING STATEMENT. The daemon does not verify
+	// it, reconcile it against anything, or compute it — it read a number off
+	// claude's stdout and carried it. On a subscription it is informational.
+	CostUSDTotal float64
+	// THE FOUR NUMBERS ABOVE SHARE ONE SET OF RULES, stated once here rather than
+	// four times.
+	//
+	// A ZERO IS A NUMBER CLAUDE SENDS, not only a decode fallback, and a consumer
+	// reading one as "the daemon could not get this" mislabels a real turn.
+	// compaction_v2.1.259.json reports duration_api_ms 0 and num_turns 0 on a line
+	// whose duration_ms is 15617 and whose cost is non-zero. It is the only such line
+	// in the corpus, which is exactly why the collapse has to be documented rather
+	// than left to be discovered.
+	//
+	// NOTHING IS CLAMPED, RANGE-CHECKED OR ORDERED — RateLimited's posture for its own
+	// two numbers, and in particular there is NO DurationAPIMS <= DurationMS
+	// consistency check anywhere on this path, because it would reject 53 of the 57
+	// observed lines. A negative reading is published as claude sent it, which is why
+	// the three counts are signed: an unsigned type would wrap one into an enormous
+	// positive duration and report it as fact.
+	//
+	// SECURITY: claude-authored, and threat 1 lands OUTWARD — but NOT in the shape
+	// Outcome's SECURITY paragraph states, so that paragraph is deliberately not
+	// borrowed here. A JSON number cannot hold a control character, a terminal
+	// escape, markup or a URL, so there is no sanitization obligation to hand a
+	// client and no cap over claude's input length to apply; the bound is over the Go
+	// type's RANGE, so an int formats to at most 20 bytes and a float64 to at most 24
+	// and no hostile value can grow the frame. What DOES land is threat 1's
+	// misattribution half: these are claude's numbers and the daemon verifies none of
+	// them, so a surface rendering CostUSDTotal as its own accounting presents
+	// model-authored data as trusted chrome — ErrorCategory's trap, reached through a
+	// number instead of a token. Attribute all four to claude wherever they are shown.
+	//
+	// NOTHING IN THE DAEMON ACTS ON ANY OF THEM, deliberately and structurally: no
+	// retry, no backoff, no teardown, no routing — and, the one a future reader will
+	// reach for first, no budget or spend enforcement keyed on CostUSDTotal. That is
+	// what keeps a fabricated cost a misleading label rather than an actuator, and
+	// whoever first makes the daemon behave differently on one owes the review that
+	// turns it into one.
 }
 
 // ModelWindow is one entry of TurnEnd.ModelWindows: the context window claude
