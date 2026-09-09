@@ -688,6 +688,31 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// The SECOND producing subtype's shape (#2245). The empty Patch is the
+			// load-bearing half: a task_notification line carries no patch key and
+			// the daemon synthesizes none, so an adapter that filled the field from
+			// anything at all goes red here. Status and Summary carry values that
+			// cannot be confused with each other or with TaskID, so a mapping that
+			// crossed two wire keys does not pass on a symmetric fixture.
+			name: "BackgroundTaskUpdated from task_notification -> terminal state, no patch",
+			ev: turnevent.BackgroundTaskUpdated{
+				TaskID:          "task-1",
+				Status:          "completed",
+				Summary:         "cat /tmp/fifo",
+				TruncatedFields: []string{"summary"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskUpdated,
+			wantPayload: protocol.BackgroundTaskUpdatedPayload{
+				ConversationID:  "c1",
+				TaskID:          "task-1",
+				Status:          "completed",
+				Summary:         "cat /tmp/fifo",
+				TruncatedFields: []string{"summary"},
+			},
+			wantOK: true,
+		},
+		{
 			// The non-zero DroppedTasks is the load-bearing part of this row: it is
 			// a truncation report NOT called truncated_fields, and the roster
 			// deliberately has no top-level truncated_fields for a grep to land on.

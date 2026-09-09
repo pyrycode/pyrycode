@@ -263,3 +263,62 @@ func TestTaskNotificationReaderGateHasExactlyOneLegalSkip(t *testing.T) {
 		})
 	}
 }
+
+// capturedTaskNotificationLine returns the bytes of the ONE system/task_notification
+// line the committed capture holds, as claude sent them.
+//
+// It lives here rather than in capture_test.go because this file is the fourth
+// reader and owns the constants that address this record: capturedLines' docblock
+// forbids by name growing any of the three older readers a path parameter, and a
+// reader reaching for the wrong record would decode zero values rather than fail.
+//
+// Every provenance check the pin test makes is made again here rather than assumed
+// from it, because the two run independently and a helper that trusted a sibling
+// test to have run would hand a mapping assertion whatever bytes were on disk.
+//
+// Every failure is t.Fatalf and none is a skip: the capture is committed, so
+// absence is a broken premise rather than an unavailable resource. In particular a
+// count other than exactly one fatals HERE, one level below every assertion built
+// on the line, so none of them can pass vacuously.
+func capturedTaskNotificationLine(t *testing.T) []byte {
+	t.Helper()
+
+	raw, err := os.ReadFile(taskNotificationCapturePath)
+	if err != nil {
+		t.Fatalf("reading capture %s: %v — the fixture is committed, so its absence is a broken "+
+			"premise; taskNotificationReaderGate states the one leg on which it may be missing and "+
+			"that leg is spent", taskNotificationCapturePath, err)
+	}
+	var capture taskNotificationCaptureRecord
+	if err := json.Unmarshal(raw, &capture); err != nil {
+		t.Fatalf("decoding capture %s: %v", taskNotificationCapturePath, err)
+	}
+	if !capture.IsCapture {
+		t.Fatalf("%s: is_capture is false — a mapping proven against a hand-written payload proves "+
+			"only that the author and the mapper expected the same fields", taskNotificationCapturePath)
+	}
+	if got, _, _ := strings.Cut(capture.ClaudeVersion, " "); got != taskNotificationCaptureVersion {
+		t.Fatalf("%s: claude_version is %q, want %q", taskNotificationCapturePath,
+			capture.ClaudeVersion, taskNotificationCaptureVersion)
+	}
+
+	var lines [][]byte
+	for _, f := range capture.Frames {
+		if f.Type != "system" || f.Subtype != taskNotificationSubtype {
+			continue
+		}
+		if f.PayloadEncoding != "json-string" {
+			t.Fatalf("%s: frame %d payload_encoding = %q, want %q — a line that was not valid UTF-8 "+
+				"carries no replayable payload", taskNotificationCapturePath, f.Index,
+				f.PayloadEncoding, "json-string")
+		}
+		lines = append(lines, []byte(f.Payload))
+	}
+	if len(lines) != 1 {
+		t.Fatalf("%s: holds %d system/%s lines, want exactly 1. Zero makes every assertion built on "+
+			"this line vacuous; more than one makes \"the captured line\" ambiguous and this helper "+
+			"would be silently picking one", taskNotificationCapturePath, len(lines),
+			taskNotificationSubtype)
+	}
+	return lines[0]
+}

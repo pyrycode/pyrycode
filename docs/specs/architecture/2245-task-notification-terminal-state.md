@@ -147,6 +147,15 @@ Gate (§ B2): `go test -race` on `internal/streamsup`, `internal/turnevent`, `in
 
 (The log-leak sweep was an open question in the first draft of this plan; the security review reclassified it as a requirement, and it now sits in the testing strategy where a verifier can check it landed.)
 
+## Revisions
+
+**2026-09-10 — both open questions resolved, and one departure from the plan.**
+
+1. **`TestDropcapClassification` needed a row, and it got one.** Every neighbour in that table carries a row whose verdict is *derived* from the shipped parser rather than declared, and `task_notification` had none only because it had never been observed on that surface. The new row asserts the subtype now maps, and it pins something its three drop neighbours cannot: this arm **gates on nothing**, so a bare line carrying no fields still maps, where `init`, `status` and `compact_boundary` each read as drops because their arms have a gate a bare line does not satisfy. Adding a gate here turns the row red, which is what makes it a pin rather than a restatement. `dropcapExpectedSubtypes` is **unchanged**: it is a census-absence list naming what #1247 saw on the headless surface, not a mapped-versus-dropped list, so mapping the subtype does not move its membership.
+2. **The per-payload envelope worst case lives in `internal/protocol/interactive_test.go`, not in `turnbridge`.** `turnbridge`'s `maxV2AppEnvelope` is a test-local constant used for a different purpose and its docblock is explicit that this package enforces no envelope bound. The protocol table was the right place and it was widened — to all four claude-derived fields at once, which is deliberately **more than any single frame can carry**, so it measures the event type's 8704-byte ceiling rather than the arm's 4608. That is the number a third producing subtype would have to fit inside.
+
+**Departure: `internal/protocol/testdata/background_task_updated.json` had to change**, where the plan said it would stay untouched. `roundTripEnvelope` compares bytes exactly and neither new field is `omitempty` (the family's convention — `patch` is always present too), so the existing fixture no longer round-tripped. It gained `"status":""` and `"summary":""` and nothing else, which keeps it what it was: the pin on the patch-only shape. The new `background_task_updated_terminal.json` pins the other shape, and the pair is the assertion — a single fixture carrying both sets would be a frame the daemon cannot emit and would let a regression merging the two sets pass.
+
 ## Security review
 
 **Verdict:** PASS (first pass returned FAIL on two MUST FIX findings; the plan above was revised and the checklist re-run from the top)

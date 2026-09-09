@@ -702,8 +702,43 @@ type BackgroundTaskStartedPayload struct {
 // none. TaskID is the join key back to the background_task_started that opened
 // the task. claude's session_id is absent for its sibling's reason.
 //
-// TruncatedFields names the cut fields ("task_id", "patch"), null when nothing
-// was cut, and carries the same load as its sibling's.
+// TWO OF CLAUDE'S LINES PRODUCE THIS FRAME (#2245), and they fill DISJOINT
+// fields. system/task_updated fills patch and leaves status and summary empty;
+// system/task_notification fills status and summary and leaves patch empty. A
+// non-empty status is therefore what says a terminal state was reported on this
+// frame, and it is the transition a client needs to close a task row that
+// background_task_started opened. No field names the producing line: that would
+// be content the daemon invented, on a frame whose neighbouring field is
+// contractually claude's bytes alone.
+//
+// Status is CLAUDE'S REPORT, NOT THE DAEMON'S DETECTION. The daemon does not
+// verify that a task reporting a finish has stopped running, and it has observed
+// exactly one token ("completed"); the documented "failed" and "stopped" states
+// have never been captured. It is a plain string rather than a closed set for
+// that reason.
+//
+// TruncatedFields names the cut fields ("task_id", "patch", "status",
+// "summary"), null when nothing was cut, and carries the same load as its
+// sibling's. Because the two producing lines fill disjoint fields, one frame's
+// list can only name fields from one of them plus "task_id", which both carry.
+//
+// SECURITY: Summary is model-authored FREE TEXT with no documented length bound,
+// and this warning is stated here rather than delegated to the sibling section
+// for two reasons. It is the family's SECOND field that can carry a literal
+// command line — BackgroundTaskStartedPayload.Description is the first, and in
+// the one captured task_notification line summary IS the task's command. And
+// unlike patch, which a client is told to treat as an opaque blob, summary is
+// prose a client will actually render, so it reaches an HTML sink by the normal
+// path rather than by a mistake. Render it as INERT TEXT; never execute,
+// re-shell, or feed it to an HTML sink, an attribute, or a URL. Status is a short
+// token today but is claude-authored under the same rule. Both bounds are the
+// producer's, decided at construction (internal/streamsup/parser.go's
+// maxTaskFieldID / maxTaskSummary), so this struct re-decides no maximum.
+//
+// claude's output_file is deliberately ABSENT from this payload. It is documented
+// as a path on the operator's host, and it is not merely unset here — it is never
+// decoded anywhere in the daemon, so no code path holds it. A field that is never
+// declared cannot leak, which is a stronger guarantee than redacting one.
 //
 // SECURITY: Patch is claude's patch object — what CHANGED about the task —
 // carried WHOLE and unparsed as its serialized text, so nothing here is declared
@@ -725,6 +760,8 @@ type BackgroundTaskUpdatedPayload struct {
 	ConversationID  string   `json:"conversation_id"`
 	TaskID          string   `json:"task_id"`
 	Patch           string   `json:"patch"`
+	Status          string   `json:"status"`
+	Summary         string   `json:"summary"`
 	TruncatedFields []string `json:"truncated_fields"`
 }
 

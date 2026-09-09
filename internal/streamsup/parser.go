@@ -137,6 +137,49 @@ const maxTaskDescription = 4 << 10
 // budget.
 const maxTaskPatch = 4 << 10
 
+// maxTaskSummary caps the Summary field on a turnevent.BackgroundTaskUpdated —
+// claude's account of what a background task did, carried from its
+// system/task_notification line (#2245). Applied at CONSTRUCTION, exactly as the
+// caps above are, so an oversized payload never enters the event stream, the push
+// queue, or any log.
+//
+// Neither existing constant fits BY REASON, which is the test this family applies
+// rather than by value. maxTaskFieldID (256) caps machine-generated identifiers
+// and short vendor tokens, which have a bounded format; this is model-authored
+// free text with no documented bound, and 256 bytes would cut an ordinary summary
+// on arrival. maxTaskPatch caps an opaque blob a consumer is told not to parse;
+// this is prose a client renders.
+//
+// The observation spans both extremes of the field, which is why the value comes
+// from the envelope rather than from a multiple. The #2245 capture's summary is
+// the task's own command line at 9 bytes REDACTED (the record's
+// payload_len_bytes_captured minus payload_len_bytes is 143 bytes of redaction
+// across five sites, so the real value is longer); the same subtype in
+// parent_tool_use_v2.1.259.json carries multi-line model prose of roughly 120
+// bytes. Neither is a distribution to multiply.
+//
+// The envelope arithmetic, in maxUnrecognizedRaw's style, carries TWO numbers
+// deliberately. The task_notification ARM's worst case is one event holding
+// 256 + 256 + 4096 = 4608 bytes of claude-derived text, 7.0% of the v2
+// application-envelope cap of 65519 bytes (docs/protocol-mobile.md §
+// Application-envelope size cap) and deliberately in line with the family's
+// existing 4352 and 4864 so the family keeps ONE worst case a reader can hold.
+// The EVENT TYPE's ceiling is higher: the two producing subtypes fill disjoint
+// fields today, but nothing structural stops a third arm filling all four, which
+// would be 256 + 256 + 4096 + 4096 = 8704 bytes, 13.3%. Both are written down so
+// that a third arm is a decision somebody makes rather than a silent envelope
+// regression discovered later.
+//
+// 4096 is a quarter of maxUnrecognizedRaw's whole-line 16 KiB, the ordering that
+// must hold: one field of one KNOWN line must not approach the cap on an entire
+// UNKNOWN line.
+//
+// A separate constant even though it currently equals maxTaskDescription and
+// maxTaskPatch, for maxTaskPatch's stated reason: they bound different fields for
+// different reasons, and folding them into one would make a future change to any
+// one budget silently move the others.
+const maxTaskSummary = 4 << 10
+
 // maxTaskRosterEntries caps how many entries a turnevent.BackgroundTaskRoster
 // carries. It is the family's first CARDINALITY bound and the one dimension with
 // no precedent in this package: every cap above bounds text on a fixed field
@@ -1581,8 +1624,20 @@ const (
 // behind it — exactly where they were.
 //
 // Still dropped in silence: every system subtype emitSystemSubtype does not
-// match, including never-seen ones and task_notification (measured ABSENT on
-// this surface; seen once on the headless surface only).
+// match, including never-seen ones.
+//
+// CORRECTED 2026-09-10 (#2245): that sentence used to name task_notification as
+// a member of the dropped set, on the ground that it was measured ABSENT on this
+// surface and seen once on the headless surface only. Both halves of the
+// measurement were accurate when written and the conclusion has expired: #2247
+// staged a turn that let a backgrounded command FINISH and captured the line
+// here, so the subtype has an arm in emitSystemSubtype now and maps onto
+// turnevent.BackgroundTaskUpdated. The naming is removed rather than annotated
+// because it was a statement of SET MEMBERSHIP, which is the one kind of claim
+// this comment cannot leave standing once false — unlike the census rows above,
+// which are dated measurements and stay unedited. What replaces it is what was
+// always the authority: the set is emitSystemSubtype's case arms, and this
+// comment names no member of it.
 //
 // CORRECTED 2026-08-09 (#1404): rate_limit_event is no longer on this list and no
 // longer dropped whole. The census row above measures it as a TOP-LEVEL type
@@ -2162,6 +2217,44 @@ type systemTaskStartedLine struct {
 type systemTaskUpdatedLine struct {
 	TaskID string          `json:"task_id"`
 	Patch  json.RawMessage `json:"patch"`
+}
+
+// systemTaskNotificationLine is the decoded payload of one system/task_notification
+// line — the subtype that reports a background task ENDING (#2245). Kept separate
+// from streamLine for systemTaskStartedLine's reason, and separate from both task
+// siblings because the three subtypes share no payload shape beyond task_id.
+//
+// The field set is what the committed capture shows, MINUS four keys, and nothing
+// invented. The capture pins nine top-level keys (taskNotificationPinnedKeys in
+// task_notification_capture_test.go); three are declared here. Of the six that are
+// not, type and subtype are segmentation and belong to streamLine, uuid and
+// session_id are the family's standing omissions, and the remaining two are
+// deliberate exclusions worth stating:
+//
+//   - output_file is documented as A PATH ON THE OPERATOR'S HOST, the only
+//     path-shaped value this family's lines carry. Excluding it from the DECODE
+//     TARGET is a stronger guarantee than redacting it downstream, and it is the
+//     one systemTaskUpdatedLine's doc already states: a field that is never
+//     declared cannot leak. No code path in the daemon ever holds the value. The
+//     captured value happens to be the empty string, so the capture does not
+//     DEMONSTRATE the hazard — the documented field class is the reason, and
+//     #2247's capture built a whole third redaction mechanism around that class.
+//   - tool_use_id has no reader. The join key is task_id, and the
+//     BackgroundTaskStarted this line joins back to already published the tool
+//     call. Declaring it would also leave it empty on every event the task_updated
+//     arm produces, indistinguishable from claude omitting it.
+//
+// The Agent SDK additionally describes ambient, skip_transcript and usage. The
+// capture files all three under keys_documented_not_observed, so none is declared:
+// a docs page is a thing to CHECK a capture against, never a thing to declare from.
+//
+// All three fields are string, so a non-string value in ANY of them fails the whole
+// decode and takes the undecodable path. systemTaskUpdatedLine's asymmetry does not
+// arise here because no field on this line carries an unconstrained shape.
+type systemTaskNotificationLine struct {
+	TaskID  string `json:"task_id"`
+	Status  string `json:"status"`
+	Summary string `json:"summary"`
 }
 
 // resultLine is the decoded payload of one `result` line's modelUsage map — the
@@ -4091,6 +4184,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitBackgroundTaskStarted(line)
 	case "task_updated":
 		return p.emitBackgroundTaskUpdated(line)
+	case "task_notification":
+		return p.emitBackgroundTaskNotification(line)
 	case "background_tasks_changed":
 		return p.emitBackgroundTaskRoster(line)
 	case "thinking_tokens":
@@ -4858,6 +4953,90 @@ func (p *Parser) emitBackgroundTaskUpdated(line []byte) bool {
 	p.emit(turnevent.BackgroundTaskUpdated{
 		TaskID: taskID,
 		Patch:  patch,
+		// nil when nothing was cut: append never ran.
+		TruncatedFields: cut,
+	})
+	return true
+}
+
+// emitBackgroundTaskNotification decodes a system/task_notification line and emits
+// one turnevent.BackgroundTaskUpdated, reporting that it consumed the line either
+// way. It is the SECOND producer of that event (#2245): claude's task_notification
+// line reports a background task ENDING, which nothing in this family could express
+// before, and the event's doc states which fields each producer fills.
+//
+// Named for the LINE rather than for the event, unlike its three siblings. Those
+// map one subtype to one variant and take the variant's name; here two functions
+// produce one event, so a name matching the event would collide with the peer that
+// already has it. Field mapping comes from the committed capture
+// (internal/e2e/realclaude/testdata/task_notification_v2.1.259.json), never from a
+// hand-built payload and never from the Agent SDK's documented key list.
+//
+// NO PATCH IS SYNTHESIZED, and that is a contract rather than an omission. The
+// captured line carries no patch key at all, and turnevent.BackgroundTaskUpdated's
+// Patch is documented as claude's own object carried whole with nothing declared
+// about its contents. Reporting the terminal state as a manufactured patch object
+// would have been the obvious-looking move and would have made that doc — and
+// protocol.BackgroundTaskUpdatedPayload's — false, breaking the one guarantee a
+// consumer reads them for. The terminal state travels as its own declared fields
+// instead, and Patch stays empty on every event this function emits.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, and
+// the reason is load-bearing rather than a call-shape convention. streamLine's doc
+// states the property it preserves: control shapes are read from the top level only
+// and nested content is never re-scanned. Decoding this payload from anywhere else
+// would let a tool result whose text is literally a task_notification line forge a
+// task's DEATH — a client's row would close for a task still running, which is the
+// inverse of the symptom this family exists to fix.
+//
+// A payload that will not decode into the shape (a numeric task_id, a status that
+// is an object) is dropped with a content-free Debug and no event — NOT surfaced as
+// an Unrecognized, because keeping system whole on ignoredLineTypes is what makes
+// "no system line reaches the unrecognized lane" structural. An absent field is not
+// an error either: absence is claude's to choose, so the field lands empty rather
+// than inventing a validation rule.
+func (p *Parser) emitBackgroundTaskNotification(line []byte) bool {
+	var tl systemTaskNotificationLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content. None of the decoded fields is logged, and summary is the thing
+		// this handler is most tempted to explain itself with: it is the field most
+		// likely to hold a readable description of what went wrong.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "task_notification")
+		return true
+	}
+
+	var cut []string
+	bound := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// Sequential statements rather than a composite literal, for
+	// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these
+	// calls, and inside a literal that order would rest on the left-to-right
+	// operand rule rather than on something a reader sees. No name is translated —
+	// claude's keys and the daemon's fields agree.
+	//
+	// status takes maxTaskFieldID, reused rather than given a constant of its own:
+	// a short token from a set claude owns is the shape that constant's amendments
+	// already cover. summary takes its own, because model-authored free text is a
+	// different shape with a different reason — see maxTaskSummary.
+	taskID := bound(tl.TaskID, "task_id", maxTaskFieldID)
+	status := bound(tl.Status, "status", maxTaskFieldID)
+	summary := bound(tl.Summary, "summary", maxTaskSummary)
+
+	p.emit(turnevent.BackgroundTaskUpdated{
+		TaskID: taskID,
+		Status: status,
+		// Patch is left at its zero value deliberately — see the no-synthesis
+		// paragraph above. It is written out rather than omitted silently because a
+		// reader's first instinct here is that a field was forgotten.
+		Patch:   "",
+		Summary: summary,
 		// nil when nothing was cut: append never ran.
 		TruncatedFields: cut,
 	})

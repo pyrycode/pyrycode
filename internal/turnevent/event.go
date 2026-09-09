@@ -477,14 +477,31 @@ type BackgroundTaskStarted struct {
 }
 
 // BackgroundTaskUpdated announces that a background task claude already started
-// changed state. It maps claude's system/task_updated line (#1382), the second
-// system subtype the parser translates rather than drops, and is the peer of
-// BackgroundTaskStarted: that variant opens the task, this one reports what
-// happened to it afterwards.
+// changed state. It is the peer of BackgroundTaskStarted: that variant opens the
+// task, this one reports what happened to it afterwards.
 //
 // It exists so a task's state AFTER it starts is representable at all. Without
 // it, everything claude says about a running task is discarded at the parser and
 // a client can only ever know a task began.
+//
+// TWO OF CLAUDE'S SUBTYPES PRODUCE IT, and they fill DISJOINT fields:
+//
+//   - system/task_updated (#1382) fills Patch and leaves Status and Summary
+//     empty. It reports a mid-life change.
+//   - system/task_notification (#2245) fills Status and Summary and leaves Patch
+//     empty. It reports the task ENDING, which is the transition #1240's symptom
+//     needs and the one nothing in this family could express before.
+//
+// A non-empty Status is therefore what says a terminal state was reported on this
+// event. That reading is stated rather than left to be inferred, and it is why no
+// daemon-authored discriminator field exists here: a field naming the producing
+// subtype would be content the daemon invented, which is exactly what Patch's
+// contract forbids one field over.
+//
+// A SECOND event variant was the alternative and was rejected. The three shipped
+// background-task frames were carried to the wire together, and a client already
+// joins them on TaskID; a fourth would have added a frame whose only difference
+// from this one is which fields it fills.
 //
 // It opens and closes no turn, exactly as BackgroundTaskStarted does not — a
 // background task's lifecycle is orthogonal to the turn that spawned it, which
@@ -494,19 +511,28 @@ type BackgroundTaskStarted struct {
 // doc gives: translating at this boundary keeps a claude rename of task_updated
 // landing in the parser and nowhere else.
 //
-// The same two keys the captured line carries are deliberately NOT fields here,
-// for the same reasons (#1380):
+// Four keys the captured lines carry are deliberately NOT fields here:
 //
 //   - session_id — claude's session identity, which is NOT the daemon's
 //     conversation identity. A field of that name would invite a consumer, or
-//     a later wire mapper, to route on it.
-//   - uuid — claude's per-line message id, which nothing in the daemon reads.
+//     a later wire mapper, to route on it (#1380).
+//   - uuid — claude's per-line message id, which nothing in the daemon reads
+//     (#1380).
+//   - output_file — documented as A PATH ON THE OPERATOR'S HOST, and the only
+//     path-shaped value either line carries. Absence from the DECODE TARGET, not
+//     a redaction, is the guarantee: a field that is never declared cannot leak,
+//     so no code path in the daemon ever holds it (#2245).
+//   - tool_use_id — carried only by the task_notification line, and nothing here
+//     needs it: the join key is TaskID, and BackgroundTaskStarted already
+//     published the tool call as ToolCallID. Declaring it would ALSO leave it
+//     empty on every event the task_updated arm produces, which a consumer could
+//     not tell apart from claude omitting it (#2245).
 //
 // Every string field is claude-derived and is bounded by the producer AT
-// CONSTRUCTION (streamsup's maxTaskFieldID / maxTaskPatch), following
-// Unrecognized's precedent, so an oversized payload never enters the event
-// stream, a queue, or a log. Like every variant here it carries no conversation
-// identity — the bridge injects that.
+// CONSTRUCTION (streamsup's maxTaskFieldID / maxTaskPatch / maxTaskSummary),
+// following Unrecognized's precedent, so an oversized payload never enters the
+// event stream, a queue, or a log. Like every variant here it carries no
+// conversation identity — the bridge injects that.
 type BackgroundTaskUpdated struct {
 	// TaskID is claude's opaque handle for the task: the join key back to the
 	// BackgroundTaskStarted that opened it. Same name, no translation.
@@ -538,12 +564,52 @@ type BackgroundTaskUpdated struct {
 	// either way. Unlike a string-decoded field, Patch is the one place the scrub
 	// bites on the UNtruncated path too — see streamsup's truncateField.
 	Patch string
+	// Status is the terminal state claude reported for the task, from its
+	// system/task_notification line. Empty on every event the task_updated arm
+	// produces, and empty when claude omits the key.
+	//
+	// CLAUDE'S REPORT, NOT THE DAEMON'S DETECTION. The daemon does not verify that
+	// a task reporting a finish has stopped running; it carries a claim. That
+	// distinction is the same one BackgroundTaskRoster's doc enforces when it
+	// refuses to infer a finish from a task's disappearance, and a consumer must
+	// not read this field as an observation.
+	//
+	// A plain string, NOT a closed token set, for BackgroundTaskStarted.TaskType's
+	// reason. One token has been observed ("completed"); the capture's own
+	// limitations record that the documented "failed" and "stopped" states were
+	// never staged and that nothing in it says what they carry. A closed set would
+	// be declaring two of its three members from a docs page, which is the move
+	// this family refuses.
+	//
+	// Safe to RENDER as text, never to execute or re-shell — it is claude-authored
+	// like every other string here, and a short token today is not a guarantee
+	// about tomorrow's.
+	Status string
+	// Summary is claude's account of what the task did, from its
+	// system/task_notification line. Empty on every event the task_updated arm
+	// produces, and empty when claude omits the key.
+	//
+	// Model-authored FREE TEXT with no documented length bound, which is why it
+	// gets its own cap (streamsup's maxTaskSummary) rather than riding an
+	// identifier's. The observed values span both extremes of that: in the
+	// #2245 capture it is the task's literal command line, and in an earlier
+	// capture of the same subtype it is multi-line model prose.
+	//
+	// Safe to RENDER as inert text, NEVER to execute or re-shell. That warning is
+	// stated here rather than delegated to a sibling because this is the family's
+	// SECOND field that can carry a command line — BackgroundTaskStarted's
+	// Description is the first — and unlike Patch, which a consumer is told to
+	// treat as an opaque blob, this field is prose a client will actually render.
+	Summary string
 	// TruncatedFields names the fields the producer cut to fit their caps, in
-	// declaration order, using the DAEMON's snake_case names: "task_id",
-	// "patch". Neither is translated from claude's key here (contrast
+	// declaration order, using the DAEMON's snake_case names: "task_id", "patch",
+	// "status", "summary". None is translated from claude's key here (contrast
 	// BackgroundTaskStarted's tool_use_id -> "tool_call_id"). nil when nothing
 	// was cut, never an empty non-nil slice, so a consumer can emit it as absent
 	// rather than [].
+	//
+	// Because the two producing subtypes fill disjoint fields, one event's list
+	// can only ever name fields from ONE of them plus "task_id", which both carry.
 	TruncatedFields []string
 }
 
@@ -600,6 +666,17 @@ type BackgroundTask struct {
 // the daemon does not report a finish it cannot detect. Diffing successive
 // snapshots is a legitimate thing for a CONSUMER to do on its own terms — it is
 // not the daemon's inference to make.
+//
+// CORRECTED 2026-09-10 (#2245): the paragraph above is spent, and it is left
+// unedited because its reasoning is the thing that still holds. A terminal state
+// exists in the family now — BackgroundTaskUpdated.Status, from claude's
+// system/task_notification line, captured by #2247 on a turn that finally let a
+// backgrounded command FINISH. What changed is the evidence, not the principle:
+// the daemon still reports no finish it cannot detect, and it still refuses to
+// infer one from a roster diff. It reports this one because claude states it
+// outright, and Status is documented as claude's REPORT rather than the daemon's
+// observation for exactly that reason. This variant is unaffected: a roster stays
+// a snapshot, and it enumerates what is alive rather than what ended.
 //
 // It opens and closes no turn, exactly as its two siblings do not.
 //
