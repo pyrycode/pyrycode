@@ -72,7 +72,7 @@ const taskNotificationSubtype = "task_notification"
 // had to be landed by a follow-up ticket that also had to fill the pin its reader had
 // shipped empty. The promotion log on the producing side prints this slice's contents
 // ready to paste, so filling it needs no second reading of the record.
-var taskNotificationPinnedKeys = []string{}
+var taskNotificationPinnedKeys = []string{"output_file", "session_id", "status", "subtype", "summary", "task_id", "tool_use_id", "type", "uuid"}
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.
