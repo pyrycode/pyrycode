@@ -2218,6 +2218,35 @@ type assistantErrorLine struct {
 	Error string `json:"error"`
 }
 
+// assistantParentLine carries the `parent_tool_use_id` sibling of an `assistant`
+// line's `message` — the tool_use_id of the Agent/Task call that spawned the
+// subagent producing the line, or null on the main conversation (#2191).
+//
+// A THIRD TARGET RATHER THAN A WIDER assistantErrorLine, and that struct's own
+// docblock is the argument. It exists so a hostile `message` cannot blank the
+// category and a hostile `error` cannot blank the message; folding this key in
+// would put a THIRD value behind the same single point of failure, so an `error`
+// of a shape the target cannot hold would silently un-nest every subagent row on
+// the line. Two targets fail independently — a line whose error will not decode
+// still reports its parent, and one whose parent will not decode still reports
+// its error. TestParser_ParentToolUseID_LeavesTheAssistantErrorCategoryIntact is
+// that property in both directions.
+//
+// The USER line answers the same key the opposite way, by widening userLine, and
+// the two are not in tension: that struct's rule is "ONE decode, not two", because
+// a user line routinely carries a whole file and a second full pass over it is not
+// free. An assistant line carries the model's own blocks, so the second pass here
+// is affordable where it is not there. Read both docs before moving either field.
+//
+// json.RawMessage, NOT string, so the decode cannot fail on this key's value. The
+// type is not load-bearing on this side — an isolated target has nothing to lose
+// by failing — and it is chosen anyway so that ONE converter decides what a valid
+// value is for both line types, rather than two arms drifting into disagreeing
+// about the same key. It IS load-bearing on the user side; see userLine.
+type assistantParentLine struct {
+	ParentToolUseID json.RawMessage `json:"parent_tool_use_id"`
+}
+
 // systemBackgroundTasksLine is the decoded payload of one
 // system/background_tasks_changed line. Kept separate from streamLine for
 // systemTaskStartedLine's reason, and separate from both scalar targets because
@@ -2749,7 +2778,7 @@ type streamBlock struct {
 
 // userLine carries the TOP-LEVEL fields of one user line that live outside
 // `message` — siblings of type and message rather than something inside the
-// message. Both of its fields are of that shape, which is why they share one
+// message. Every one of its fields is of that shape, which is why they share one
 // struct and one decode.
 //
 // Kept separate from streamLine for systemTaskStartedLine's reason — streamLine
@@ -2803,6 +2832,33 @@ type userLine struct {
 	// false both mean "surface it", which is the safe default and the direction a
 	// presence-only decode would get backwards.
 	IsSynthetic bool `json:"isSynthetic"`
+
+	// ParentToolUseID is the Agent/Task call that spawned the subagent producing
+	// this line, or null on the main conversation (#2191). It is the third field
+	// of this struct's stated shape — a sibling of `message` on the LINE — which
+	// is why it belongs here rather than in a target of its own; the ASSISTANT
+	// line answers the same key the opposite way, and assistantParentLine argues
+	// why both are right.
+	//
+	// json.RawMessage IS LOAD-BEARING HERE, where on the assistant side it is
+	// merely tidy. This struct's whole shape is chosen so the decode CANNOT FAIL:
+	// ToolUseResult accepts any valid JSON value, IsSynthetic adds no failure
+	// mode, and emitUser's documented behaviour on a bad line is "ul stays zero,
+	// the block surfaces". A `string` here would break that — a
+	// parent_tool_use_id of `7` or `{}` would fail the WHOLE decode, taking
+	// IsSynthetic false with it and resurrecting the harness-authored text blocks
+	// #2087 removed, up to and including the 87244-char skill body that ticket
+	// names. That is a DISCLOSURE regression reachable by a value claude
+	// controls, not a cosmetic one, so it is pinned by
+	// TestParser_ParentToolUseID_LeavesTheUserSidecarIntact rather than left to
+	// this comment.
+	//
+	// It is therefore the exception to systemTaskUpdatedLine.TaskID's rule, and
+	// deliberately: that field is a plain string so a non-string fails the whole
+	// line, which is right when the id IS the line's meaning. Here the id is one
+	// optional attribute on a line that has other work to do, and failing the
+	// line would cost the tool_result mapping to protect a grouping hint.
+	ParentToolUseID json.RawMessage `json:"parent_tool_use_id"`
 }
 
 // harnessProseLine is the decode target for a `user` line whose message content
@@ -3346,10 +3402,16 @@ func (p *Parser) consumeLine(line []byte) {
 		// That is the latch Parser's doc argues, and it is what keeps a dead turn's
 		// category from riding into the next one's turn_end.
 		p.assistantErrorCategory = decodeAssistantError(line)
-		p.emitAssistant(sl.Message)
+		// The line bytes ride along for a SECOND sibling of `message` since #2191,
+		// the spawning Agent call. Passed rather than latched here beside the
+		// category, because it belongs to the line rather than to the turn —
+		// emitAssistant's doc argues the distinction and why latching it would be a
+		// bug.
+		p.emitAssistant(sl.Message, line)
 	case "user":
 		// The line bytes ride along so emitUser can decode the tool_use_result
-		// sidecar, a sibling of `message` rather than a field inside it (#2024).
+		// sidecar, a sibling of `message` rather than a field inside it (#2024) —
+		// and, since #2191, the spawning Agent call, a third field of that shape.
 		p.emitUser(sl.Message, line)
 	case "result":
 		// The turn boundary. The subtype selects the reason: an interrupted turn
@@ -5972,6 +6034,66 @@ func decodeAssistantError(line []byte) string {
 	return boundStopField(al.Error)
 }
 
+// decodeAssistantParent reads the `parent_tool_use_id` sibling off one assistant
+// line. A pure function of the bytes: no receiver, no parser state read or written,
+// nothing logged on any path — decodeAssistantError's shape, and its reason for
+// discarding the decode error rather than logging it. Every failure returns a value,
+// and "" is a complete answer to "claude named no spawning call".
+func decodeAssistantParent(line []byte) string {
+	var pl assistantParentLine
+	if err := json.Unmarshal(line, &pl); err != nil {
+		return ""
+	}
+	return parentToolUseID(pl.ParentToolUseID)
+}
+
+// parentToolUseID is the WHOLE of #2191's semantics for the key, and the one site
+// that decides them for both line types. A JSON string yields its decoded value;
+// every other JSON value — a number, an object, an array, null — and an absent key
+// yield "", which means "main thread".
+//
+// It is also the one site that applies the bound, so the cap cannot be applied twice
+// or forgotten on one of the two arms.
+//
+// THE CAP IS maxTaskFieldID, NOT A NEW CONSTANT. That constant caps a
+// machine-generated identifier, which is exactly this value's class; observed values
+// are `toolu_`-prefixed and around 30 bytes, so 256 is roughly 8x the observation —
+// the multiple-of-observation form that constant already uses. #2233's
+// consumePermissionDeniedLine applies the same cap to a tool_use_id on a frame that
+// ships, and is the precedent followed. ToolUseID's verbatim pass-through on these
+// same two frames is the older one, and is deliberately NOT followed: leaving a
+// claude-authored string bounded only by defaultMaxParseBuf puts that whole 4 MiB on
+// a NEVER-DROPPABLE frame (tool_result is control class 4413), where a frame over the
+// application-envelope cap is lost rather than truncated and the operator sees no row
+// at all. The check is O(1) against a line that cap has already bounded.
+//
+// IT DROPS RATHER THAN CUTS, and here that judgement is sharper than
+// maxTurnEndStopField's. This value is a JOIN KEY, not prose: a cut id matches no
+// tool_use_id while still LOOKING like one, so a client joining on it could file a
+// row under the wrong parent. Dropping degrades to "", which renders the row at top
+// level — the behaviour before this field existed, and an honest answer where a wrong
+// parent is not. The boundary is <=, matching boundStopField's, so a value of exactly
+// the cap is carried.
+//
+// No truncation report is owed, on maxTurnEndStopField's rule: a dropped scalar reads
+// as an absent one, and that is the intended reading. #2233 needed report arrays
+// because three of its fields are EMPTIED and empty had two meanings there; here empty
+// has exactly one, "main thread", which an over-cap id degrades into truthfully.
+//
+// No strings.ToValidUTF8 scrub, for boundStopField's reason: that function scrubs
+// because it CUTS and a cut can land mid-rune. Nothing here cuts, and the input is a
+// Go string encoding/json has already U+FFFD-replaced.
+func parentToolUseID(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	if len(s) > maxTaskFieldID {
+		return ""
+	}
+	return s
+}
+
 // boundStopField answers maxTurnEndStopField for one of the three claude-authored
 // strings turn_end publishes: the value unchanged, or empty when it exceeds the cap.
 //
@@ -6086,10 +6208,28 @@ func decodeModelWindows(line []byte) ([]turnevent.ModelWindow, int) {
 // (one block per JSONL line), a stream-json assistant event carries a whole
 // message that may hold several blocks; we iterate them and emit one event per
 // block, preserving order. A nil message or zero mappable blocks emits nothing.
-func (p *Parser) emitAssistant(msg *streamMessage) {
+//
+// It takes the RAW LINE BYTES as well as the message, since #2191, because the
+// spawning Agent call it reads is a sibling of `message` on the LINE rather than
+// a field inside it — so this call site is the only place it can meet the blocks.
+// emitUser's signature is the in-file precedent and states the same reason.
+//
+// DECODED HERE RATHER THAN LATCHED IN consumeLine, which is where #2224's
+// error category is read, and the difference is the point. That value belongs to
+// the TURN and has to survive until the turn_end fires, so it is parser state with
+// a reset boundary. This one belongs to the LINE and is consumed inside this call,
+// so there is nothing to latch — and latching it would be a bug, not merely
+// redundant: a residual would file the next main-thread line's tool calls under the
+// last subagent that ran. TestParser_ParentToolUseID_ReadsInnerDepthVerbatim drives
+// two lines through one parser and would redden on exactly that.
+//
+// The nil-message early return costs nothing here: a line with no message has no
+// blocks to attribute, so a parent id read from it would have no consumer.
+func (p *Parser) emitAssistant(msg *streamMessage, line []byte) {
 	if msg == nil {
 		return
 	}
+	parent := decodeAssistantParent(line)
 	for _, raw := range msg.Content {
 		block, ok := p.decodeBlock(raw)
 		if !ok {
@@ -6102,10 +6242,11 @@ func (p *Parser) emitAssistant(msg *streamMessage) {
 			p.emit(turnevent.ThoughtChunk{MessageID: msg.ID, Text: block.Thinking})
 		case "tool_use":
 			p.emit(turnevent.ToolStart{
-				ToolCallID: block.ID,
-				Title:      block.Name,
-				Kind:       toolKind(block.Name),
-				RawInput:   rawInput(block.Input),
+				ToolCallID:       block.ID,
+				ParentToolCallID: parent,
+				Title:            block.Name,
+				Kind:             toolKind(block.Name),
+				RawInput:         rawInput(block.Input),
 			})
 		default:
 			// No known-ignored list at block level: the measurement found exactly
@@ -6134,11 +6275,11 @@ func (p *Parser) decodeBlock(raw json.RawMessage) (streamBlock, bool) {
 // for harness-authored TEXT blocks, which are dropped in silence — see the guard
 // below for the two triggers.
 //
-// It takes the RAW LINE BYTES as well as the message because both of the
-// top-level fields it reads — the tool_use_result sidecar (#2024) and the
-// synthetic flag (#2087) — are siblings of `message` on the LINE rather than
-// fields inside it, so this type-switch call site is the only place they can meet
-// the blocks.
+// It takes the RAW LINE BYTES as well as the message because every top-level
+// field it reads — the tool_use_result sidecar (#2024), the synthetic flag
+// (#2087) and the spawning Agent call (#2191) — is a sibling of `message` on the
+// LINE rather than a field inside it, so this type-switch call site is the only
+// place they can meet the blocks.
 // consumeLine's rate_limit_event arm, which hands emitRateLimit(line) the same
 // way, is the in-file precedent.
 func (p *Parser) emitUser(msg *streamMessage, line []byte) {
@@ -6218,10 +6359,11 @@ func (p *Parser) emitUser(msg *streamMessage, line []byte) {
 			continue
 		}
 		p.emit(turnevent.ToolUpdate{
-			ToolCallID:   block.ToolUseID,
-			Status:       toolStatus(block.IsError),
-			Content:      toolResultContent(block.Content),
-			ResultDetail: detail,
+			ToolCallID:       block.ToolUseID,
+			ParentToolCallID: parentToolUseID(ul.ParentToolUseID),
+			Status:           toolStatus(block.IsError),
+			Content:          toolResultContent(block.Content),
+			ResultDetail:     detail,
 		})
 	}
 }

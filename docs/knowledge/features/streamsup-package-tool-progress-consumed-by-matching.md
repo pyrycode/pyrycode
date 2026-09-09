@@ -45,6 +45,29 @@ the output-chunked variant to key on. `consumeToolProgress`'s dated docblock
 records this as narrowed, not closed — a future capture would need either
 `CLAUDE_CODE_CONTAINER_ID` set or a staged command with incremental stdout.
 
+## `parent_tool_use_id` means something different here, and that scoped #2191's decode
+
+The committed `tool_progress_v2.1.259.json` is the fixture that proves it: 12 of its
+frames carry a non-null `parent_tool_use_id`, and none of them name a subagent spawn.
+On an `assistant`/`user` line the key means "the Agent/Task call that spawned the
+subagent producing this line"; on a `tool_progress` line it means "the tool call this
+heartbeat belongs to" — each heartbeat's own `tool_use_id` is a synthetic
+`…-heartbeat-N`, and its `parent_tool_use_id` is the real call's id, the Bash call
+these frames are progress for, not a spawning Agent call. A decoder that generalised
+the spawned-by reading to this line type would nest an ordinary Bash heartbeat under
+its own Bash row.
+
+This is `userLine`'s `tool_use_result`/`toolUseResult` hazard arriving from the other
+direction: there, two *spellings* collide; here, one spelling carries two *meanings*
+depending which line type it rides. #2191 scopes its decode to exactly the `assistant`
+and `user` arms of `consumeLine` for this reason — `consumeToolProgress` sits in a
+structurally disjoint branch and is never touched — and proves the negative by driving
+every frame of this fixture through the parser and asserting no `ToolStart`/`ToolUpdate`
+carries a non-empty `ParentToolCallID` at all. See
+[the decode-target family doc](streamsup-package-result-stop-shape-second-decode-target-and-dr.md)
+for where the two new targets live and why one widens `userLine` while the other gets
+its own struct.
+
 ## Related
 
 - [`system` maps per-subtype since 2026-08-07](streamsup-package-system-maps-per-subtype-since-2026-08-07.md) — the sibling design for a top-level type's *inner* varieties (system subtypes hidden inside `ignoredLineTypes`), vs. this type's varieties matched at the top level instead.

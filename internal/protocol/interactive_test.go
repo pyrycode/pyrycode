@@ -114,6 +114,15 @@ func TestToolUsePayload_RoundTrip(t *testing.T) {
 	if payload.ToolUseID != "tu1" {
 		t.Errorf("ToolUseID: got %q, want %q", payload.ToolUseID, "tu1")
 	}
+	// EMPTY IS THE BOUNDARY VALUE HERE (#2191), and the fixture is a MAIN-THREAD
+	// call on purpose: this is the frame every existing client already receives, so
+	// pinning it empty is what says "unchanged apart from the new key". The
+	// round-trip below pins the KEY's presence byte-for-byte — without it a future
+	// omitempty would drop the key and a client could not tell "main thread" from
+	// "a daemon too old to send it".
+	if payload.ParentToolUseID != "" {
+		t.Errorf("ParentToolUseID: got %q, want %q (main thread)", payload.ParentToolUseID, "")
+	}
 	if payload.Name != "WebSearch" {
 		t.Errorf("Name: got %q, want %q", payload.Name, "WebSearch")
 	}
@@ -153,6 +162,12 @@ func TestToolResultPayload_RoundTrip(t *testing.T) {
 	}
 	if payload.ToolUseID != "tu1" {
 		t.Errorf("ToolUseID: got %q, want %q", payload.ToolUseID, "tu1")
+	}
+	// Empty for the reason the tool_use fixture states, and it matters twice here:
+	// this frame is never-droppable control class, so its field set is the one a
+	// client cannot afford to guess at.
+	if payload.ParentToolUseID != "" {
+		t.Errorf("ParentToolUseID: got %q, want %q (main thread)", payload.ParentToolUseID, "")
 	}
 	// IsError==false is the boundary value: the fixture pins that a false
 	// bool stays on the wire (no omitempty would silently drop it).

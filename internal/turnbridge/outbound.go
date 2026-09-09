@@ -266,13 +266,21 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// wire. Allocating an empty map here would produce the same bytes while
 		// hiding which layer owns the decision — the BackgroundTaskRoster arm
 		// below states the same rule for the same reason.
+		// ParentToolUseID crosses VERBATIM and is not re-capped, this file's standing
+		// terms: streamsup's parentToolUseID bounds it at CONSTRUCTION, where every cap
+		// in that package is applied, so a second bound here would be a number to keep
+		// in step with one that already holds. The ONE transformation is the name —
+		// turnevent spells it ParentToolCallID after its own ToolCallID, and this frame
+		// carries it as parent_tool_use_id, matching the tool_use_id beside it. That is
+		// the ToolCallDenied arm below's rule: a token names a key the frame publishes.
 		return protocol.TypeToolUse, protocol.ToolUsePayload{
-			ConversationID: tc.ConversationID,
-			TurnID:         tc.TurnID,
-			ToolUseID:      e.ToolCallID,
-			Name:           e.Title,
-			InputSummary:   inputSummary(e.RawInput),
-			Input:          inputFields(e.RawInput),
+			ConversationID:  tc.ConversationID,
+			TurnID:          tc.TurnID,
+			ToolUseID:       e.ToolCallID,
+			ParentToolUseID: e.ParentToolCallID,
+			Name:            e.Title,
+			InputSummary:    inputSummary(e.RawInput),
+			Input:           inputFields(e.RawInput),
 		}, true
 	case turnevent.ToolUpdate:
 		// ResultDetail maps straight through, deliberately UNCAPPED here, and
@@ -288,13 +296,16 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// here would be a number to keep correct against a string that cannot
 		// grow — and, now that the alphabet is no longer pure ASCII, a rune cap
 		// that could split one of those two glyphs for no reason.
+		// ParentToolUseID: the ToolStart arm above states the pass-through and the
+		// rename, and both hold unchanged here.
 		return protocol.TypeToolResult, protocol.ToolResultPayload{
-			ConversationID: tc.ConversationID,
-			TurnID:         tc.TurnID,
-			ToolUseID:      e.ToolCallID,
-			IsError:        e.Status == turnevent.ToolStatusFailed,
-			ResultSummary:  resultSummary(e.Content),
-			ResultDetail:   e.ResultDetail,
+			ConversationID:  tc.ConversationID,
+			TurnID:          tc.TurnID,
+			ToolUseID:       e.ToolCallID,
+			ParentToolUseID: e.ParentToolCallID,
+			IsError:         e.Status == turnevent.ToolStatusFailed,
+			ResultSummary:   resultSummary(e.Content),
+			ResultDetail:    e.ResultDetail,
 		}, true
 	case turnevent.ToolCallDenied:
 		// TURN-SCOPED, unlike the status peers below: tc.TurnID is carried, and only
