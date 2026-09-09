@@ -401,7 +401,18 @@ func modeSwitchObservation(rows []modeSwitchAutoRow, model string) *modeSwitchAu
 // It t.Fatalf's when the instrument measured nothing — no child, no
 // control_response, or a reply carrying no models array — and it does so BEFORE
 // any arm spends a token.
-func runModeSwitchDiscovery(t *testing.T, claudeBin, workdir string) []modeSwitchAutoRow {
+// The second return is the value → resolvedModel mapping the same reply publishes,
+// added by #2279 and empty for a row that publishes no resolvedModel.
+//
+// It is DERIVED HERE rather than returned raw, and that placement is the whole
+// point: the reply carries `account` and `pid` beside `models`, this function is
+// where the rule against recording or logging it is stated, and handing the raw to a
+// caller that holds none of that discipline would put the payload one %v away from a
+// run log. A caller needs the mapping because an ALIAS cannot otherwise be told from
+// a genuinely different model — `haiku` and `claude-haiku-4-5` resolve alike, and a
+// measurement that switched between them would report the same id whether the change
+// applied or not.
+func runModeSwitchDiscovery(t *testing.T, claudeBin, workdir string) ([]modeSwitchAutoRow, map[string]string) {
 	t.Helper()
 
 	argv := []string{
@@ -491,11 +502,41 @@ func runModeSwitchDiscovery(t *testing.T, claudeBin, workdir string) []modeSwitc
 			"decode: %s", truncateString(string(models), stderrFixtureCap))
 	}
 
+	// Derived from the models ARRAY alone, which is what modeSwitchAutoRows hands
+	// back — the enclosing reply, with its `account` and `pid`, never leaves this
+	// function.
+	resolved := modeSwitchResolvedModels(models)
 	for _, r := range rows {
-		t.Logf("#2041[discovery]: model %q supportsAutoMode=%v (key present=%v, usable as argv=%v)",
-			r.Value, r.SupportsAutoMode, r.KeyPresent, modeSwitchModelValueOK(r.Value))
+		t.Logf("#2041[discovery]: model %q resolves to %q, supportsAutoMode=%v (key present=%v, "+
+			"usable as argv=%v)", r.Value, resolved[r.Value], r.SupportsAutoMode, r.KeyPresent,
+			modeSwitchModelValueOK(r.Value))
 	}
-	return rows
+	return rows, resolved
+}
+
+// modeSwitchResolvedModels maps each published `value` to its `resolvedModel`.
+//
+// It takes the models array modeSwitchAutoRows already located rather than
+// re-navigating the reply's three placements: one navigator is enough, and a second
+// would be the thing that drifts. A row publishing no resolvedModel maps to the empty
+// string, which a caller must read as "unknown" rather than as "resolves to nothing"
+// — the two are the same lookup on a map, so a caller comparing resolutions has to
+// require both sides non-empty before calling them equal or different.
+func modeSwitchResolvedModels(models json.RawMessage) map[string]string {
+	out := map[string]string{}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(models, &entries); err != nil {
+		return out
+	}
+	for _, entry := range entries {
+		var value, resolved string
+		_ = json.Unmarshal(entry["value"], &value)
+		_ = json.Unmarshal(entry["resolvedModel"], &resolved)
+		if value != "" {
+			out[value] = resolved
+		}
+	}
+	return out
 }
 
 // --- the fixture family -----------------------------------------------------------
@@ -571,7 +612,7 @@ func TestRealClaude_InBandModeSwitch_Probe(t *testing.T) {
 	versionRaw, versionToken := captureClaudeVersion(t)
 	t.Logf("#2041: claude version %q (token %q)", versionRaw, versionToken)
 
-	rows := runModeSwitchDiscovery(t, claudeBin, workdir)
+	rows, _ := runModeSwitchDiscovery(t, claudeBin, workdir)
 
 	capable := modeSwitchPickModel(rows, true, modeSwitchAutoCapablePreference)
 	incapable := modeSwitchPickModel(rows, false, modeSwitchAutoIncapablePreference)

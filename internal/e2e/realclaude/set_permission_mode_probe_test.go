@@ -718,6 +718,14 @@ type setModeFixtureRecord struct {
 	// init_lines.
 	EffortCapture *effortInitObservation `json:"effort_capture,omitempty"`
 
+	// SetModelCapture is #2279's block and is nil on every arm that sent no
+	// set_model request. Its inner fields carry no omitempty for EffortCapture's
+	// reason, sharpened by what this one measures: model_key_sent FALSE is the whole
+	// difference between the omitted and the null reset spellings, and an omitempty
+	// bool would spell that finding by ABSENCE — leaving the two arms' captures
+	// indistinguishable in exactly the case they exist to separate.
+	SetModelCapture *setModelObservation `json:"set_model_capture,omitempty"`
+
 	StdinWriteErrors       []string `json:"stdin_write_errors"`
 	StderrCapture          string   `json:"stderr_capture"`
 	ExitCode               int      `json:"exit_code"`
@@ -904,6 +912,23 @@ type setModeChildConfig struct {
 	// writeSetModeFixture is still the only thing that will write it.
 	fillRecord func(t *testing.T, rec *setModeFixtureRecord)
 
+	// controlLine, when non-nil, mints the arm's control request line instead of
+	// setModeControlLine. nil before #2279, so every committed capture's bytes are
+	// unchanged.
+	//
+	// It generalises setModeArm.targetMode from "a permission mode" to an opaque
+	// TARGET TOKEN whose wire meaning belongs to the minter. The empty token keeps
+	// its existing meaning — send no request at all — which is what #1595's two
+	// control arms rest on, so a caller whose every arm sends must give each one a
+	// non-empty token even where the request carries no value.
+	//
+	// A minter rather than a subtype string, because #2279's three reset spellings
+	// differ in whether the `model` key EXISTS: a subtype knob would still leave
+	// setModeControlLine emitting one fixed field set. What every minter must hold
+	// is marshalInterruptEnvelope's invariant — one physical line, the appended '\n'
+	// the only raw newline — since the driver writes the result unframed.
+	controlLine func(requestID, target string) ([]byte, error)
+
 	// screenFixture, when non-nil, is the last pass over the MARSHALLED record on
 	// its way to testdata/: it returns the bytes to write and a verdict, and false
 	// writes nothing at all. nil before #2251.
@@ -1041,7 +1066,11 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		// (*Runner).Interrupt mints its id from a monotonic counter. A fixed
 		// per-arm id keeps the fixture diffable.
 		requestID = "set-permission-mode-" + arm.name
-		line, err := setModeControlLine(requestID, arm.targetMode)
+		mint := cfg.controlLine
+		if mint == nil {
+			mint = setModeControlLine
+		}
+		line, err := mint(requestID, arm.targetMode)
 		if err != nil {
 			t.Fatalf("#1595[%s]: %v", arm.name, err)
 		}
@@ -1099,7 +1128,15 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 			// than derived from requestID: that one is empty on an arm sending no
 			// FIRST request, and deriving would silently mint a bare "-2".
 			requestIDTwo := "set-permission-mode-" + arm.name + "-2"
-			line, err := setModeControlLine(requestIDTwo, arm.secondTargetMode)
+			// Through the SAME minter as the first request, never setModeControlLine
+			// directly: a caller setting both cfg.controlLine and a second target
+			// would otherwise write two requests of two different subtypes into one
+			// child, with nothing in the record saying so.
+			mintTwo := cfg.controlLine
+			if mintTwo == nil {
+				mintTwo = setModeControlLine
+			}
+			line, err := mintTwo(requestIDTwo, arm.secondTargetMode)
 			if err != nil {
 				t.Fatalf("#1595[%s]: %v", arm.name, err)
 			}
