@@ -421,3 +421,41 @@ ABSENCE, so with all five present it now skips and contributes zero seconds, put
 #2272's 1196s. The underlying fragility is untouched and belongs to nobody's ticket: the next live arm
 anyone adds trips the same cap, and the `-timeout 20m` lives in the dispatcher's gate command rather than
 in this repo's Makefile, so it is not fixable from here. Filed separately rather than absorbed.
+
+### 2026-09-09 — the previous entry was wrong: the gate failed again, and this branch cannot pass it
+
+The entry above claimed that committing the captures would put the suite back under the cap. It did
+everything it said it would and the gate failed anyway. The claim was wrong in its arithmetic, not in its
+attribution, and the correction matters more than the ticket does.
+
+**What the second gate run did.** Branch at `34577e2367`, merged with `origin/main` at `9c9c61b73b`, wall
+clock 1210.6s, 430 executed / 1 failed / 14 skipped. `TestRealClaude_SetModelProbe` appears in the skip
+list, exactly as predicted, contributing zero live seconds. A different test was killed this time,
+`TestRealClaude_ToolLoopIntegrity`, and re-run alone against base it passes in **5.43s**. It is not a hang
+and never was; it was simply the test holding the floor when the alarm fired.
+
+**Why 1196s was never headroom.** The previous entry summed the elapsed times the run reported and read
+the result as the suite's cost. It is not. Of the 384 top-level test functions this package declares, only
+**191 reported a terminal action** in that run; the other **193 never ran at all**. Almost all of them are
+offline table tests that call `t.Parallel()`, so Go emits their `run` event, parks them until the
+sequential live tests finish, and they died with the binary. The summed 1194.4s is therefore a floor on the
+live half alone, with the entire offline half still owed. There was no four-second margin at #2272 to spend
+— the suite was already past the cap and the reported total could not show it.
+
+**The branch is not the cause, and this is now measured rather than argued.** Ticket #2287's gate ran
+against `feature/2287` at `f6644c6597` merged with the same `origin/main` `9c9c61b73b`. That branch carries
+its own two commits and none of this one's. It failed identically: same killed test, 430 executed, wall
+clock 1211.7s against this branch's 1210.6s. Two disjoint diffs at one base produce the same failure to the
+second, which is a property of the base. This branch's whole added test surface runs in 0.42s and sits in
+the parked tail that never executes.
+
+**Why the gate cannot see this.** The base comparison re-runs only the named failing test, alone, where it
+gets the full budget and passes. A single-test baseline is structurally unable to detect a whole-suite
+budget overrun, so every overrun is reported as a regression in whichever test the alarm interrupted.
+
+**Consequence for this ticket.** No change inside its scope can make the gate pass. Its live contribution
+is already zero and its offline contribution never executes. Cutting the live suite's runtime means editing
+other families' tests, which § Scope Discipline forbids and #2305 owns. So the ticket is marked blocked by
+#2305 rather than pushed through another rework round: a third failure would trip the dispatcher's
+`REWORK_LOOP_THRESHOLD` and park it under `error:rework-loop`, a label naming the wrong cause. The
+measurement itself is complete and has passed verification twice.
