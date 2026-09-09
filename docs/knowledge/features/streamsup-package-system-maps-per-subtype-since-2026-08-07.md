@@ -178,6 +178,33 @@ Write absence and wrong-type as two separate criteria with two separate expected
 future subtype's acceptance criteria are drafted from a documentation-derived (rather than
 capture-derived) field set.
 
+**`task_progress` is now measured and pinned, but still unmapped — the tenth subtype waiting on
+a `case` arm (#2248).** No production arm exists for it; `system/task_progress` still falls
+through to the unmapped-subtype silence every other unlisted subtype gets. What changed is that
+the string is no longer unmeasured in this repo: `internal/streamsup/task_progress_capture_test.go`
+reads the two verbatim `system/task_progress` frames `parent_tool_use_v2.1.259.json` already
+carried — captured for a different ticket's subagent-join question, kept only because that probe
+records the whole turn rather than a filtered quarry — and pins their shape as per-frame equality,
+not a union: `taskProgressPinnedKeys` for the top-level fields, `taskProgressPinnedUsageKeys` for
+the nested `usage` object. `taskProgressDocumentedKeys`, read off
+`@anthropic-ai/claude-agent-sdk@0.3.263`'s `SDKTaskProgressMessage`, is checked only as a set
+difference against the pin, never copied into it: `summary` is documented and not observed,
+because this staging is a local agent without the progress-summaries option and an MCP task
+always reports it. Whichever ticket adds the tenth `case` arm should read `summary`'s absence here
+as a fact about this staging, not about the subtype, and should not declare the field from the SDK
+docs alone.
+
+Two shared-fixture conventions worth carrying into that mapping ticket's own reader, since a
+sixth reader over a committed record is now the expected shape rather than a novelty: a second
+reader over an already-consumed record (`internal/streamsup/parent_tool_use_capture_test.go`
+reads the same file for its `parentPinnedAgentID`) should mint its own path/version constants
+rather than reuse the first reader's, and should not assert the two agree — two readers pinned at
+two claude releases over two records is a legitimate steady state an equality check would forbid.
+And a package-level pin slice must be declared already sorted, never sorted in place inside the
+reader: `-race` cannot see that mutation as a hazard while no parallel test happens to touch the
+same slice, so a `sort.StringsAreSorted` assertion (`TestTaskProgressPinsAreDeclaredSorted`) is the
+only thing standing behind the rule, not the comment describing it.
+
 **The two prose fields carry a sharper hazard than any prior arm's, because the request being
 described was refused.** `RefusalExplanation` and `Banner` are claude's own writing about *why* a
 request was declined, so — unlike `ToolCallDenied.Message`, which describes a tool call the daemon
