@@ -360,6 +360,17 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			// here: this arm maps an already-built event and knows nothing about which
 			// line any field came from.
 			ErrorCategory: e.ErrorCategory,
+			// #2260's four numbers, mapped straight through and UNDIFFERENCED. Two of
+			// them are running totals, and converting one into a per-turn delta is the
+			// mistake this arm is structurally unable to make: it maps a single event
+			// and holds no previous turn's value. Uncapped here on the same terms as
+			// the strings above, and for a stronger reason — those are bounded at
+			// construction by a constant this file would have to keep in step, whereas
+			// these are bounded by their Go types for every input claude can send.
+			DurationMS:    e.DurationMS,
+			DurationAPIMS: e.DurationAPIMS,
+			NumTurns:      e.NumTurns,
+			CostUSDTotal:  e.CostUSDTotal,
 		}, true
 	case turnevent.Stall:
 		// A stall carries conversation identity only — it is not turn-scoped and

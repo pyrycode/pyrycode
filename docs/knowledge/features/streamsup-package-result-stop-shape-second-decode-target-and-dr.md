@@ -134,3 +134,68 @@ property while still landing one converted value. The general form: adding a
 field to a struct whose existing fields were typed to make the decode
 infallible has to preserve that property with the same care a first design
 would, not just match the JSON shape.
+
+**#2260 adds a fourth target, `resultTurnTotalsLine`, for four numbers claude
+had always sent on this line and the daemon had never decoded** —
+`duration_ms`, `duration_api_ms`, `num_turns`, `total_cost_usd` (published as
+`cost_usd_total`, the family's one deliberate respelling). It sits beside
+`resultLine`, `resultStopLine` and `resultDenialsLine` on the isolation
+argument this family has made three times already, held now in a fourth
+direction: a hostile `modelUsage`, `permission_denials` or `is_error` shape
+cannot zero these four numbers, and a hostile number here cannot disturb the
+windows, the stop shape, the recovered denials or the turn boundary.
+
+**Inside the target the four fail as a unit, and that is a real divergence
+from `userLine`'s per-field isolation, not an oversight.** `resultStopLine`
+and `resultDenialEntry` already fail as a unit for their own field pairs;
+`userLine`'s `json.RawMessage`-per-field alternative, which would isolate
+these four from each other too, was considered and declined — that property
+exists there to protect a field carrying a whole file and an `IsSynthetic`
+flag whose loss is a disclosure regression, and nothing here weighs the
+same: the entire cost of a unit failure is four informational numbers
+reading zero, already indistinguishable from a zero claude sends on its own
+(`compaction_v2.1.259.json`'s `duration_api_ms: 0`/`num_turns: 0` line is
+real, not a decode fallback).
+
+**Plain `int`/`float64`, not pointers — a call this family had to make once
+each way.** `CompactionBoundary.PreTokens`/`PostTokens` are `*int` because
+`post_tokens` is optional in claude's own shape; these four are numeric and
+present on every observed `result` line across six claude versions, so an
+absent one would mean a decode failure or a future claude, never an ordinary
+shape — a pointer here would be answering a question that doesn't arise yet.
+
+**No consistency check between the two durations, and this is the family's
+first case where the obvious invariant would have been the bug.**
+`duration_api_ms` is a running total and `duration_ms` is per turn, so the
+first reads larger than the second on the large majority of observed lines —
+the norm, not an edge case. A `duration_api_ms <= duration_ms` check reads
+like exactly the kind of sanity bound this family applies elsewhere
+(`ResetsAt`, the model-window cap), and would have rejected most real
+captures. The general lesson for the next numeric field on this line: check
+whether a candidate is a running total before reaching for a consistency
+bound between siblings — the family's no-clamp posture (`RateLimitedPayload`'s)
+is the default here, not the exception, because claude's own numbers on this
+line don't obey the shape a client's intuition expects.
+
+**The claude-authored-but-unsanitized SECURITY posture this family states for
+its strings does not transfer to a number, and only half of it survives the
+trip.** A JSON number can't carry a control character, a terminal escape,
+markup or a URL, so there is no sanitization obligation and no length bound
+to state for these four — copying the string fields' paragraph verbatim would
+assert two things that are false. What does carry over is the misattribution
+half: `cost_usd_total` is a spend figure the daemon never verified, and a
+surface rendering it as its own accounting presents model-authored data as
+trusted chrome, the same trap `ErrorCategory` names for its own
+account-shaped values. State provenance per field for a numeric addition to
+this line, not just for a string one.
+
+**Testing note for the next capture-pinned addition to this line: a float64
+literal must be copied byte-for-byte from the capture, and the zero-bearing
+capture needs its own reader.** `0.037524600000000005` is the shortest
+round-trip spelling of that value — tidying it to `0.0375246` parses to a
+different `float64` and the assertion fails for a reason unrelated to the
+code. And `compaction_v2.1.259.json` is still the only capture in the corpus
+storing its lines under `frames`, with each line's JSON inside a string
+payload, rather than `stdout_events`; a helper that reads only the common
+shape will not see it, which matters here because it is also the only
+capture carrying an observed zero on either of these two numbers.

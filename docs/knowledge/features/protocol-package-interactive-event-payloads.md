@@ -62,6 +62,12 @@ type TurnEndPayload struct {
     TerminalReason string `json:"terminal_reason"` // claude's finer-grained cause; open-set
     // #2224 — claude's API error category, read off an `assistant` line, not `result`.
     ErrorCategory  string `json:"error_category"`  // why the API call failed; independent of Outcome
+    // #2260 — four more result-line numbers. DurationMS/NumTurns are per turn;
+    // DurationAPIMS/CostUSDTotal are session running totals the daemon never differences.
+    DurationMS     int     `json:"duration_ms"`
+    DurationAPIMS  int     `json:"duration_api_ms"`  // running total; routinely LARGER than DurationMS
+    NumTurns       int     `json:"num_turns"`
+    CostUSDTotal   float64 `json:"cost_usd_total"`   // claude spells this total_cost_usd; the one respelling
 }
 
 // #638 — the wire form of the internal-only turnevent.Stall onset marker.
@@ -171,6 +177,33 @@ type ToolDeniedPayload struct {
   unsanitized-render-boundary-is-the-client's posture as its three siblings,
   applied by the same producer constant (`maxTurnEndStopField`), which now
   covers all four fields rather than three.
+- **`DurationMS`/`DurationAPIMS`/`NumTurns`/`CostUSDTotal` (#2260) are four
+  more result-line numbers, and the pair that looks most alike is the pair
+  that disagrees.** `DurationMS`/`NumTurns` describe the turn that just
+  ended; `DurationAPIMS`/`CostUSDTotal` are session running totals that only
+  grow, and the daemon differences neither — both cross exactly as claude
+  sent them. **`DurationAPIMS` is routinely *larger* than `DurationMS`**,
+  which is the reading a client must not have: it is a running total, not an
+  inner slice of the turn's own wall clock, and differencing consecutive
+  `turn_end` frames does not recover a per-turn API time either. **A zero on
+  any of the four is a number claude sent, not a sign the daemon failed to
+  read the line** — one observed capture reports `duration_api_ms: 0` and
+  `num_turns: 0` beside a non-zero `duration_ms` and cost. Plain `int`/`float64`,
+  no pointers, unlike `CompactionBoundaryPayload`'s counts: all four keys are
+  present and numeric on every observed `result` line, so an absent one would
+  mean a decode failure or a future claude, not an ordinary shape. **Nothing
+  is clamped, range-checked or ordered** — in particular there is no
+  `duration_api_ms <= duration_ms` check, because it would reject the
+  majority of observed lines. **These four do NOT take `Outcome`'s
+  sanitization rule** — a JSON number carries no control character, escape,
+  markup or URL, so no bound and no render-boundary obligation exist for them
+  the way they do for the three claude-authored strings above — but the
+  *misattribution* half of the same threat still lands: `CostUSDTotal` is
+  claude's own estimate, not a billing statement, and the daemon verifies
+  none of it, so a client rendering it as its own accounting of the
+  operator's spend presents model-authored data as trusted chrome. See
+  `docs/protocol-mobile.md` § `turn_end` for the full per-turn/running-total
+  table.
 - **`Seq` is `int`, not `uint64`.** A per-turn counter that resets each turn (the
   package count-field idiom: `DebugBundleDonePayload.Total`); `uint64` is reserved
   for the session-monotonic `Envelope.ID`.
@@ -366,10 +399,18 @@ Eight golden round-trip tests in `interactive_test.go` decode each fixture throu
 boundary `Seq == 0` / `IsError == false`, `StopReason == "end_turn"`, and the
 `api_retry` fixture's non-zero `current`/`total`), then re-marshal
 byte-equivalently. `testdata/turn_end.json` gained `outcome`/`is_error`/
-`terminal_reason` (#2223) in `TurnEndPayload`'s declaration order — appended
-after `StopReason`, never interleaved, since `roundTripEnvelope` re-marshals
-the decoded struct and compares to the raw fixture, so declaration order *is*
-the wire's key order. The shared `roundTripEnvelope` helper re-marshals the
+`terminal_reason` (#2223), then `error_category` (#2224), then
+`duration_ms`/`duration_api_ms`/`num_turns`/`cost_usd_total` (#2260) — each in
+`TurnEndPayload`'s declaration order, appended after the previous field rather
+than interleaved, since `roundTripEnvelope` re-marshals the decoded struct and
+compares to the raw fixture, so declaration order *is* the wire's key order.
+\#2260's fixture values are chosen so `duration_api_ms > duration_ms`
+deliberately — a fixture where the two agreed would round-trip cleanly while
+pinning nothing about the reading the field exists to foreclose. A second
+test decodes a pre-#2260 frame missing all four keys and asserts they read
+their zero value while the other seven survive, the "optional means no
+`omitempty`, not a pointer" contract this package states at
+`ToolResultPayload`. The shared `roundTripEnvelope` helper re-marshals the
 **decoded payload struct** (not the original `RawMessage`) back into the envelope —
 that is what pins struct → wire shape, since a missing or reordered json tag only
 surfaces when the bytes are actually re-encoded (the original-`RawMessage`-passthrough

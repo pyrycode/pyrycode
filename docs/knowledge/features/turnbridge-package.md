@@ -74,7 +74,7 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
 | `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678; `ParentToolCallID` #2191, straight-through, no re-cap — bounded at construction) | true |
 | `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below; `ParentToolCallID` #2191, same rule) | true |
-| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason), Outcome: ev.Outcome, IsError: ev.IsError, TerminalReason: ev.TerminalReason, ErrorCategory: ev.ErrorCategory}` (#2223/#2224, straight-through, no cap here — see below) | true |
+| `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason), Outcome: ev.Outcome, IsError: ev.IsError, TerminalReason: ev.TerminalReason, ErrorCategory: ev.ErrorCategory, DurationMS: ev.DurationMS, DurationAPIMS: ev.DurationAPIMS, NumTurns: ev.NumTurns, CostUSDTotal: ev.CostUSDTotal}` (#2223/#2224/#2260, straight-through, no cap here — see below) | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |
 | `Compacting` (#1074) | `TypeCompacting` | `CompactingPayload{tc.ConversationID, ev.Active}` (`tc.TurnID`/`tc.Seq` ignored) | true |
@@ -114,7 +114,17 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
   it straight through unconditionally, because by the time an event reaches
   `MapEvent` the parser has already decided what, if anything, that turn's
   category is; the arm has no visibility into which line produced a field and
-  needs none. **The window pair on the same variant (`ModelWindows`,
+  needs none. **#2260's four numbers (`DurationMS`, `DurationAPIMS`, `NumTurns`,
+  `CostUSDTotal`) cross the same way, but for a different reason than the
+  strings beside them: there is no producer-side cap to stay in step with at
+  all** — `streamsup`'s `decodeTurnTotals` applies no clamp, range check or
+  ordering check to any of the four, so this arm's uncapped pass-through is
+  the *only* posture available, not a second line of defence declined in
+  favour of a first one. `DurationAPIMS`/`CostUSDTotal` are session running
+  totals the arm does not difference into a per-turn figure; nothing here
+  reads a prior event or holds state across turns to do that with anyway,
+  which is a structural argument, not merely an unimplemented one. **The
+  window pair on the same variant (`ModelWindows`,
   `DroppedModelWindows`) is still not forwarded** — this arm builds the payload
   field by field, so what reaches the wire is exactly what is named in the arm and
   nothing else. This is the first ticket where `TurnEnd` carries both a published

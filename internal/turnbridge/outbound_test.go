@@ -426,6 +426,54 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// #2260's four numbers map through, and they are the ONLY fields set on
+			// this row for the category row's reason: a mapper that populated them
+			// only alongside a stop shape would pass a row where everything happened
+			// to be set. The values are claude's own from a committed capture and are
+			// mutually non-derivable — no duration is a multiple of the turn count and
+			// the cost scales neither — so a crossed assignment reddens.
+			//
+			// duration_api_ms EXCEEDS duration_ms here deliberately. That is the
+			// ordinary case on this wire, and it is what a mapper "correcting" the
+			// pair into a per-turn figure would have to break.
+			name: "TurnEnd carries claude's turn totals undifferenced",
+			ev: turnevent.TurnEnd{
+				Reason:        turnevent.TurnEndReasonEndTurn,
+				DurationMS:    24594,
+				DurationAPIMS: 27064,
+				NumTurns:      5,
+				CostUSDTotal:  0.1608898,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+				DurationMS: 24594, DurationAPIMS: 27064, NumTurns: 5, CostUSDTotal: 0.1608898,
+			},
+			wantOK: true,
+		},
+		{
+			// The zeros claude itself sends, carried as claude sent them. The row is
+			// not a duplicate of the empty-event rows above: those reach zero because
+			// nothing was set, this one because a REAL turn reported duration_api_ms 0
+			// and num_turns 0 beside a non-zero duration and cost. A mapper that
+			// treated a zero as "nothing to report" and suppressed the pair — or that
+			// substituted the duration for the missing API figure — reddens here.
+			name: "TurnEnd carries the zeros claude sends beside non-zero siblings",
+			ev: turnevent.TurnEnd{
+				Reason:       turnevent.TurnEndReasonEndTurn,
+				DurationMS:   15617,
+				CostUSDTotal: 0.0408803,
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeTurnEnd,
+			wantPayload: protocol.TurnEndPayload{
+				ConversationID: "c1", TurnID: "t1", StopReason: "end_turn",
+				DurationMS: 15617, CostUSDTotal: 0.0408803,
+			},
+			wantOK: true,
+		},
+		{
 			// The window fields are NOT published, and this is the row that keeps
 			// that true now that the variant has publishable fields at all: an event
 			// carrying windows produces a payload with no trace of them. Without it,
