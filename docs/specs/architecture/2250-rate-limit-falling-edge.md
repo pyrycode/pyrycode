@@ -365,3 +365,37 @@ Gate: `go test -race ./internal/streamsup/... ./internal/turnbridge/... ./intern
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-10
+
+## Revisions
+
+### 2026-09-10 — implementation
+
+**Open question 1 resolved: no new drop-reason constant.** The closed-latch benign
+path keeps `rateLimitDropBenign`, which is still the honest reason — the reading IS
+benign and the latch is not claude's business to explain. The falling-edge path logs
+nothing at all, and the gate's comment says so, because it is the path a future edit
+is most tempted to annotate with the one value `emitRateLimit`'s doc forbids reaching
+a log.
+
+**Open question 2 resolved: the `Parser` amendment says SIX** and names the skipped
+fifth entry in one clause — #2246's task-progress map added a field and no entry
+because it took every argument above by inheritance. The sentence stays about this
+field: the gap is named as the reason the count jumps, not corrected as a defect.
+
+**Departure: the log sweep needed no new row.** The plan promised a fourth row in
+`TestParser_RateLimitIsLoggedContentFree`. It turned out that test already drove its
+four lines through ONE parser with a non-benign reading first, so its second line
+became the falling edge the moment the gate changed — the test went red on its event
+and drop counts, which is the RED the plan wanted, arriving from the existing
+sequence rather than a new one. Its counts moved (2 events, 2 drops), its comment now
+names the four paths, and the leak sweep covers the new emit path unchanged because
+the benign status and its limit type were already in the needle set. Adding a row
+beside it would have driven the same sequence twice.
+
+**Addition: three doc sites beyond the seven the ticket enumerated**, each a field
+whose own trap the falling edge creates rather than a restatement of the gate.
+`turnevent.RateLimited.LimitType` and `RateLimitedPayload`'s `LimitType` paragraph
+now say the clearing frame names a different limit than the warning it clears, and
+`turnevent.RateLimited.Utilization` says the clear carries nil. These are the two
+client readings the wire doc was already required to add; a client reading the Go
+types rather than the wire doc would otherwise have met neither.

@@ -971,14 +971,28 @@ type BackgroundTask struct {
 // actually in force exists on any claude version. A
 // plain string, not a closed enum, so the set gets measured the first time a real
 // limit fires rather than the daemon inventing one it has no evidence for. The
-// producer's gate is deliberately loud in the same direction: the one
-// measured-benign status is silent and any other non-empty status emits, so an
-// unrecognised status surfaces and a human looks rather than a real limit
-// vanishing. Dropping Status from this payload would silence that one layer later.
+// producer's gate is deliberately loud in the same direction: any non-empty status
+// other than the measured-benign one emits, so an unrecognised status surfaces and a
+// human looks rather than a real limit vanishing. Dropping Status from this payload
+// would silence that one layer later.
+//
+// THE BENIGN STATUS IS NOT ALWAYS SILENT, and a client that assumed it was reads
+// this frame backwards. Since #2250 the gate publishes a benign reading that FOLLOWS
+// a non-benign one on the same parser — the falling edge, which exists so a client
+// can take a quota banner down. Two things follow for a decode. The benign value is
+// the ONE value worth comparing against, and it is the only one measured stable on
+// every claude version on file; everything else stays an opaque label. And the frame
+// is not the limit lifting: claude reports one window per line and chooses which, so
+// a benign reading is claude declining to report a non-benign window. See
+// docs/protocol-mobile.md § rate_limited, which states both readings for a client,
+// and turnevent.RateLimited for the daemon-side argument.
 //
 // LimitType is WHICH limit is in force (five_hour and seven_day are the observed
 // values, the second riding the one non-benign status), a
-// plain string for Status's reason. ResetsAt is when claude says it lifts, as
+// plain string for Status's reason. The falling edge therefore names a DIFFERENT
+// limit than the warning it clears — every benign reading on record says five_hour —
+// so a client that keys a banner by this value never matches the frame that takes it
+// down; key it on the conversation. ResetsAt is when claude says it lifts, as
 // unix seconds, 0 when claude did not report it. Neither wire name tracks
 // claude's key: claude's are rateLimitType and resetsAt under rate_limit_info,
 // while these are turnevent.RateLimited's own field names in snake_case, so a

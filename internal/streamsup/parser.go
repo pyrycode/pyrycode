@@ -414,8 +414,14 @@ const minThinkingTokensPerEvent = 64
 // There is also no RATE bound, and its absence is deliberate:
 // minThinkingTokensPerEvent exists because thinking_tokens fires ~10 times per
 // turn, whereas rate_limit_event fires once per RUN (the capture's census) and
-// under the gate below a healthy run emits ZERO. There is nothing to bound in
-// frequency, so do not go looking for the constant that would. The exposure that
+// under the gate below a healthy run STILL emits ZERO — a run whose readings are
+// all benign trips no falling edge, since #2250's latch opens only on a non-benign
+// one. There is nothing to bound in frequency, so do not go looking for the
+// constant that would. Nor did the falling edge move the ceiling that would matter
+// if there were: each rung emits AT MOST ONCE and rung 4 adds no second emit to
+// any of them, so N lines still yield at most N events and the alternating sequence
+// a hostile claude would reach for produces exactly what N non-benign lines already
+// produce today. The exposure that
 // leaves is named rather than mechanised, per evidence-based fix selection:
 // once-per-run is MEASURED, not enforced, so a claude emitting thousands of
 // non-benign rate_limit_event lines would produce thousands of events, none of
@@ -430,20 +436,28 @@ const minThinkingTokensPerEvent = 64
 // task-id budget silently move this one.
 const maxRateLimitField = 256
 
-// benignRateLimitStatus is the ONE rate_limit_info.status value that produces no
+// benignRateLimitStatus is the ONE rate_limit_info.status value that can produce no
 // event. claude emits rate_limit_event once per run whatever the state of the
 // usage-limit window, so without this gate a 1:1 mapping would put one "you are
 // rate limited" event on every healthy turn.
 //
-// MEASURED, not chosen: every committed rate_limit_event record reads "allowed"
-// EXCEPT ONE, across four claude versions (2.1.158, 2.1.199, 2.1.220, 2.1.239).
-// The exception is the warning band, "allowed_warning", in
-// internal/e2e/realclaude/testdata/initialize_control_v2.1.239.json, and
-// TestParser_RateLimitWarningCaptureCarriesUtilization replays it — so the
-// exception is pinned against claude's own bytes rather than described here. The
-// count of records is deliberately not given: compactionPinnedShapes' correction
-// is the precedent, and a tally in a comment goes stale on the next capture while
-// the shape above does not.
+// CAN rather than DOES since #2250, and the qualifier is the whole of what that
+// slice changed here: this value is silent on a parser that has seen nothing else,
+// and PUBLISHED as the falling edge on one that has seen a non-benign reading. The
+// value set this constant partitions is unchanged; what is new is that the partition
+// is read against the parser's memory rather than against the line alone. See
+// emitRateLimit's rung 1 and rung 4.
+//
+// MEASURED, not chosen: the committed rate_limit_event records read "allowed" but
+// for the warning band, "allowed_warning", which
+// TestParser_RateLimitWarningCaptureCarriesUtilization replays — so the exception is
+// pinned against claude's own bytes rather than described here. Neither a count of
+// records nor a list of versions is given, and the omission is deliberate:
+// compactionPinnedShapes' correction is the precedent, and a tally in a comment goes
+// stale on the next capture while the shape above does not. CORRECTED 2026-09-10
+// (#2250): this carried exactly such a tally ("EXCEPT ONE, across four claude
+// versions") in the same paragraph that forbids one, and it had already gone wrong —
+// eight records on two of five versions now read the warning band.
 // What is still NOT measured is the rest of the value set: no capture of a limit
 // actually in force exists, so emitRateLimit is designed for that openly and
 // anything else emits.
@@ -1991,6 +2005,31 @@ const harnessNoOutputNudge = "[Your previous response had no visible output. Ple
 // one. THE SINGLE RESET POINT IS UNCHANGED and remains the whole of the cross-turn
 // argument.
 //
+// AMENDED 2026-09-10 (#2250): there are SIX pieces of cross-line state, and this is
+// the entry the chain above exists to make possible. The count jumps from FOUR
+// because #2246's taskProgressToolUses added a fifth field and no entry: it is
+// cleared at the one reset like its neighbours, publishes nothing when it is, and
+// took every argument above by inheritance, so it had nothing to add here.
+// rateLimitNonBenign is the opposite case in the one dimension that matters.
+//
+// IT IS THE FIRST PIECE OF CROSS-LINE STATE THE SINGLE RESET POINT DOES NOT CLEAR,
+// and that is a departure from the paragraph every entry above rests on rather than
+// an exemption from it. The reason is arithmetic, not preference: claude emits
+// rate_limit_event ONCE PER RUN, so the two readings the field exists to relate are
+// separated by at least one `result` line and usually by a whole child. Cleared at
+// the boundary, the latch would be gone before the reading that would have used it
+// ever arrived — the field would exist and never once fire. So the argument that
+// bounds its residual cannot be the reset, and is not: it is the NEXT READING, which
+// overwrites the latch either way. A child that dies after a non-benign reading
+// costs one extra benign frame describing a window claude has just reported, which
+// is compacting's fail-safe direction reached without a second reset path.
+//
+// #2227's published-reset question does arise and is answered differently. A client
+// mirrors this state too — it is a banner, exactly as compacting's is — but the
+// clear is not a silent state change needing a frame to announce it: the clearing
+// FRAME IS the state change, carrying claude's own benign reading. There is nothing
+// to publish separately because nothing happens separately.
+//
 // Single-writer invariant: os/exec drives a non-*os.File Config.Stdout through
 // exactly one internal goroutine (io.Copy of the child's stdout pipe into this
 // writer), so Write — hence buf and the sink calls — is only ever invoked
@@ -2153,6 +2192,50 @@ type Parser struct {
 	// bytes, so the read-modify-write it performs is the one that would need the
 	// guard first.
 	taskProgressToolUses map[string]int
+
+	// rateLimitNonBenign is true between a non-benign rate_limit_info.status and the
+	// benign reading that clears it (#2250). Written and read only by emitRateLimit;
+	// see that function's rung 4 for the state machine.
+	//
+	// THE FIRST FIELD HERE THAT consumeLine's ONE RESET DOES NOT CLEAR, and that is
+	// the substance of #2250 rather than an omission in it. Every field above is
+	// cleared there. This one cannot be: claude emits rate_limit_event ONCE PER RUN,
+	// the parser outlives the run (cmd/pyry builds one per session and streamsup
+	// rebinds the same one across child respawns, the invariant
+	// assistantErrorCategory's doc states), and in every realistic sequence the two
+	// readings are separated by at least one `result` line and usually by a whole
+	// child. A latch cleared at the turn boundary would therefore be gone before the
+	// reading that would have used it ever arrived — the field would exist and never
+	// once fire.
+	//
+	// ITS RESIDUAL IS BOUNDED BY THE NEXT READING RATHER THAN BY ANY RESET, which is
+	// where it parts company with compacting above. A child that dies after a
+	// non-benign reading leaves this true, and the cost is ONE extra benign frame on
+	// the next `allowed` reading — a frame reporting a window claude has just
+	// described, which is a true statement rather than a stale one. The direction is
+	// the same fail-safe one compacting's residual takes, reached without a second
+	// reset path.
+	//
+	// IT HOLDS NO VALUE CLAUDE SENT. A bool, so no input can grow it and no
+	// remembered text can be republished — which is what makes "the clearing frame's
+	// fields come from the clearing reading, never from the remembered one" a
+	// property of the shape rather than a rule somebody has to keep. Like its
+	// neighbours it is not reachable by any dump: nothing formats a *Parser and no
+	// debug bundle reaches parser state.
+	//
+	// NOTHING IN THE DAEMON MAY KEY A BEHAVIOUR ON IT. It is unexported, has no
+	// accessor, and is read at exactly one place to decide whether one display frame
+	// is published. turnevent.RateLimited's "a REPORT, never a control input" rule
+	// reaches inside the producer here, because this is the first parser state
+	// DERIVED FROM CLAUDE'S BYTES that is designed to outlive the run.
+	//
+	// The single-writer invariant covers it exactly as it covers the five above, and
+	// here that invariant does real work rather than describing a buffer: this is the
+	// first field that DEPENDS on surviving a child respawn rather than merely
+	// tolerating one, so the happens-before edge is load-bearing — cmd.Wait returns
+	// only after the previous forwarder goroutine has finished. A future concurrent
+	// reader guards all SIX fields, not five.
+	rateLimitNonBenign bool
 
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
@@ -5880,13 +5963,16 @@ type compactMetadata struct {
 // mapping comes from the committed captures, never from a hand-built payload.
 //
 // THE GATE is the substance of this mapping; the field copying is routine. claude
-// emits this line ONCE PER RUN whatever the state of the usage-limit window —
-// status reads "allowed" in every committed record but one, i.e. almost every run
+// emits this line ONCE PER RUN whatever the state of the usage-limit window — the
+// benign status is what almost every committed record reads, i.e. almost every run
 // that produced one hit no limit at all — so a 1:1 mapping would put one "you are
-// rate limited" event on every healthy turn. status is the discriminator, and it has
-// three reachable readings:
+// rate limited" event on every healthy turn. status is the discriminator, and — with
+// the PARSER'S OWN MEMORY OF THE LAST ONE, which is what makes this a state machine
+// rather than a function of one line (#2250) — it has four reachable readings:
 //
-//  1. status == benignRateLimitStatus → SILENCE. The measured healthy case.
+//  1. status == benignRateLimitStatus, no non-benign reading before it on this
+//     parser → SILENCE. The measured healthy case, and the one the whole gate
+//     exists for.
 //
 //  2. status non-empty and not the benign value → ONE RateLimited. Emit for
 //     anything that is not the one measured-benign value, because the failure
@@ -5918,6 +6004,31 @@ type compactMetadata struct {
 //     field: emitBackgroundTaskStarted lands the field empty rather than inventing
 //     a validation rule, and landing empty on the GATE INPUT means the gate reads
 //     "no report was made", which is silence.
+//
+//  4. status == benignRateLimitStatus WITH a non-benign reading before it on this
+//     parser → ONE RateLimited, carrying the benign reading's own fields (#2250).
+//     THE FALLING EDGE, and it is a falling edge rather than a relaxation of rung 1.
+//     Rung 1's silence is load-bearing and unchanged, but it was unconditional, so
+//     the reading that would CLEAR a warning was dropped by the very rung that
+//     suppresses the routine one — a client that lit a banner on an allowed_warning
+//     had nothing that ever took it down.
+//
+//     THREE PROPERTIES FALL OUT OF WHERE THE WRITE SITS, and none of them is a rule
+//     anyone has to keep. It fires ONCE, because the latch is closed before the emit
+//     and a second benign reading takes rung 1. A turn boundary does not clear it,
+//     because consumeLine's one reset deliberately does not touch the field — see
+//     Parser.rateLimitNonBenign for why it cannot. And rungs 2 and 3 leave the latch
+//     alone, because both return before the switch can write, so a malformed or
+//     renamed container between the two readings cannot swallow the clear.
+//
+//     WHAT THE FRAME MAY CLAIM IS BOUNDED, and the doc must not upgrade it. claude
+//     reports ONE window per line and chooses which, so a return to the benign
+//     status is claude declining to report a non-benign window — not evidence that
+//     the warned limit lifted. On every record on file the clearing reading even
+//     names a DIFFERENT limit than the warning does (five_hour against seven_day)
+//     and carries no utilization at all. The honest reading is "claude's latest
+//     reading of the usage window is benign"; docs/protocol-mobile.md § rate_limited
+//     states both consequences for a client.
 //
 // The cost of rung 3 is real and is stated here rather than buried: a container
 // RENAME goes undetected by any automatic test. The available detector is the live
@@ -5957,14 +6068,28 @@ func (p *Parser) emitRateLimit(line []byte) {
 	}
 	switch rl.Info.Status {
 	case benignRateLimitStatus:
-		p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropBenign)
-		return
+		if !p.rateLimitNonBenign {
+			p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropBenign)
+			return
+		}
+		// Rung 4, the falling edge (#2250). The latch is closed BEFORE the emit below
+		// rather than after it, which is what makes the edge fire once: a second
+		// benign reading takes the silent branch one line up. Nothing is logged on
+		// this path — the event IS the record, and the value a drop site would be
+		// tempted to explain itself with is exactly the one emitRateLimit's doc
+		// forbids reaching a log.
+		p.rateLimitNonBenign = false
 	case "":
 		// Rung 3. An absent container, a present-but-empty one, and a container
 		// carrying no status all land here and are answered identically — which is
-		// what makes the plain-struct decode target sufficient.
+		// what makes the plain-struct decode target sufficient. It returns WITHOUT
+		// touching the latch, which is rung 4's precondition rather than an accident
+		// of ordering: a container claude renamed or dropped between the two readings
+		// would otherwise swallow the clear, restoring the stuck banner one shape in.
 		p.log.Debug(rateLimitDropMsg, "reason", rateLimitDropNoInfo)
 		return
+	default:
+		p.rateLimitNonBenign = true
 	}
 
 	var cut []string

@@ -3252,6 +3252,121 @@ func TestParser_RateLimitSilentRungsLogTheirReason(t *testing.T) {
 	})
 }
 
+// TestParser_RateLimitFallingEdgeLatchIsPerParser pins #2250's gate as a state
+// machine, over the sequences no capture holds and none can be made to.
+//
+// The composed-capture fixture (rate_limit_capture_test.go) proves the edge fires
+// over claude's own bytes; what it cannot express is what happens when a line the
+// gate SILENCES sits between the two readings, because no committed record carries a
+// rate_limit_event with an unusable container. Those rows are the ones that decide
+// whether the latch is written where a reader would expect: a rung that returns for
+// want of a report must leave the remembered reading alone, or a single malformed
+// line swallows the clear and the client's banner sticks anyway — the defect this
+// ticket exists to fix, restored one shape further in.
+//
+// Asserting the STATUSES IN ORDER rather than a count: a table that only counted
+// would pass on an implementation that emitted the warning twice and the clear never.
+func TestParser_RateLimitFallingEdgeLatchIsPerParser(t *testing.T) {
+	t.Parallel()
+
+	const (
+		limitType = "five_hour"
+		resetsAt  = int64(1785699000)
+		nonBenign = "exceeded"
+	)
+	warn := rateLimitLineFixture(t, nonBenign, limitType, resetsAt)
+	benign := rateLimitLineFixture(t, rateLimitBenignFixture, limitType, resetsAt)
+
+	tests := []struct {
+		name  string
+		lines []string
+		want  []string
+		why   string
+	}{
+		{
+			name:  "a parser that only ever reports the benign status stays silent",
+			lines: []string{benign, benign, benign},
+			want:  nil,
+			why: "the load-bearing silence: claude reports the window once per run whatever its " +
+				"state, so a healthy run must still emit nothing at all",
+		},
+		{
+			name:  "the falling edge fires once and then stops",
+			lines: []string{warn, benign, benign, benign},
+			want:  []string{nonBenign, rateLimitBenignFixture},
+			why: "further benign readings after the clear produce nothing until another " +
+				"non-benign one arrives — a client needs one frame to take a banner down, not one per run",
+		},
+		{
+			name:  "a turn boundary does not clear the latch",
+			lines: []string{warn, `{"type":"result","subtype":"success"}`, benign},
+			want:  []string{nonBenign, rateLimitBenignFixture},
+			why: "consumeLine's one reset point deliberately does NOT clear this field. Cleared " +
+				"there it would be gone before the reading that needs it arrives: claude emits this " +
+				"line once per run and the parser outlives the run",
+		},
+		{
+			name:  "a reading with no usable rate_limit_info leaves the latch alone",
+			lines: []string{warn, `{"type":"rate_limit_event"}`, benign},
+			want:  []string{nonBenign, rateLimitBenignFixture},
+			why: "the rung that returns for want of a report returns BEFORE the switch can write, " +
+				"so a container claude renamed or dropped cannot swallow the clear",
+		},
+		{
+			name:  "an undecodable line leaves the latch alone",
+			lines: []string{warn, `{"type":"rate_limit_event","rate_limit_info":"nope"}`, benign},
+			want:  []string{nonBenign, rateLimitBenignFixture},
+			why: "the undecodable arm returns before the decode's result is ever read, one rung " +
+				"earlier than the row above and for the same reason",
+		},
+		{
+			name:  "a second non-benign reading re-arms it",
+			lines: []string{warn, benign, warn, benign},
+			want:  []string{nonBenign, rateLimitBenignFixture, nonBenign, rateLimitBenignFixture},
+			why: "the edge is a pair, not a one-shot: a session that crosses the band twice must " +
+				"be able to clear the banner twice",
+		},
+		{
+			name:  "the clear is not owed to a status that merely differs in case",
+			lines: []string{rateLimitLineFixture(t, "Allowed", limitType, resetsAt), benign},
+			want:  []string{"Allowed", rateLimitBenignFixture},
+			why: "benignRateLimitStatus is matched byte-exact, so a recapitalised value opens the " +
+				"latch like any other non-benign reading rather than being folded into the silent rung",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, ev := range collectEventsFromLines(tt.lines) {
+				if rl, ok := ev.(turnevent.RateLimited); ok {
+					got = append(got, rl.Status)
+				}
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("statuses in order: got %v, want %v (%s)", got, tt.want, tt.why)
+			}
+		})
+	}
+
+	// Per-parser and not per-package, which is the property a /clear rotation makes
+	// observable: a rotation or an eviction mints a new parser, so a warning shown
+	// before one is not cleared after it. Named as a limitation on the wire rather
+	// than engineered around, and pinned here so the day it changes, this reddens.
+	t.Run("a fresh parser does not inherit another's open latch", func(t *testing.T) {
+		t.Parallel()
+		if got := collectEventsFromLines([]string{warn}); len(got) != 1 {
+			t.Fatalf("the first parser emitted %d events, want 1 — the second's silence proves nothing", len(got))
+		}
+		for _, ev := range collectEventsFromLines([]string{benign}) {
+			if rl, ok := ev.(turnevent.RateLimited); ok {
+				t.Errorf("a fresh parser emitted %#v for a benign reading; the latch is per-parser state "+
+					"and a new one starts closed", rl)
+			}
+		}
+	})
+}
+
 // rateLimitUtilizationLineFixture builds a non-benign rate_limit_event line whose
 // utilization term is the RAW JSON text given, with the empty string meaning the key
 // is omitted entirely.
@@ -3553,6 +3668,15 @@ func TestParser_RateLimitFieldCaps(t *testing.T) {
 // the field a drop site is most tempted to explain itself with, and the one value
 // on this line a future claude could make arbitrarily long or arbitrarily
 // revealing. Mirrors TestParser_HarnessNudgeDropIsLoggedContentFree.
+//
+// AMENDED 2026-09-10 (#2250): the sweep now covers FOUR paths, because it always
+// drove one parser and the second line's benign reading now follows a non-benign one
+// — which is rung 4, the falling edge. That path is the one a future edit is most
+// likely to explain itself with, since a benign status that EMITS looks like a
+// contradiction worth annotating, so it earns coverage here rather than a row of its
+// own: benignLimitType and the benign status are already in the leak set below, and
+// they now ride the emit path as well as a drop. The two counts moved with it and
+// nothing else did.
 func TestParser_RateLimitIsLoggedContentFree(t *testing.T) {
 	t.Parallel()
 	const (
@@ -3578,7 +3702,11 @@ func TestParser_RateLimitIsLoggedContentFree(t *testing.T) {
 	lines := []string{
 		// The emit path, first: it must produce the event and log nothing at all.
 		rateLimitLineFixture(t, emitStatus, emitLimitType, 1785699000),
+		// The SECOND emit path since #2250: a benign reading following the non-benign
+		// one above is the falling edge, so this line emits and logs nothing either.
 		rateLimitLineFixture(t, rateLimitBenignFixture, benignLimitType, 1785699000),
+		// Benign with the latch now closed — the ordinary silent rung, and its
+		// position after the edge is what makes it that rather than a second edge.
 		string(captured),
 		`{"type":"rate_limit_event","rate_limit_info":"` + undecodableMark + `"}`,
 	}
@@ -3588,16 +3716,20 @@ func TestParser_RateLimitIsLoggedContentFree(t *testing.T) {
 		}
 	}
 
-	if len(events) != 1 {
-		t.Fatalf("event count: got %d, want 1 (the non-benign line only) — %#v", len(events), events)
+	if len(events) != 2 {
+		t.Fatalf("event count: got %d, want 2 (the non-benign line, then the falling edge on the "+
+			"benign line after it) — %#v", len(events), events)
 	}
-	if _, ok := events[0].(turnevent.RateLimited); !ok {
-		t.Fatalf("event type: got %T, want turnevent.RateLimited", events[0])
+	for i, ev := range events {
+		if _, ok := ev.(turnevent.RateLimited); !ok {
+			t.Fatalf("event %d type: got %T, want turnevent.RateLimited", i, ev)
+		}
 	}
-	// Three drops and not four: the emit path logs nothing, which is the half of
-	// this test the drop-rung assertions cannot see.
-	if drops := rec.withMessage(rateLimitDropMsgFixture); len(drops) != 3 {
-		t.Errorf("drop records: got %d, want 3 (two benign, one undecodable): %+v", len(drops), drops)
+	// Two drops and not four: BOTH emit paths log nothing, which is the half of this
+	// test the drop-rung assertions cannot see.
+	if drops := rec.withMessage(rateLimitDropMsgFixture); len(drops) != 2 {
+		t.Errorf("drop records: got %d, want 2 (one benign with the latch closed, one undecodable): %+v",
+			len(drops), drops)
 	}
 
 	leaks := []string{
