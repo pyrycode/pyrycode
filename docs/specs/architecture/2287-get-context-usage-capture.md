@@ -412,3 +412,40 @@ above rather than deferred)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+**2026-09-09, during implementation.** Three additions the plan's design implied but did
+not enumerate. None changes a contract; they are recorded so a reviewer diffing the plan
+against the code does not read them as unplanned.
+
+- `WindowsObserved`' keys go through the redaction pass alongside the leaf-map keys. They
+  are model ids, which are claude-authored text — the same reason `contextwindow.Usage`
+  refuses to carry a model field. No model id has ever carried a path; the pass visits them
+  because a rule that admits a judgement call about which claude-authored strings are safe
+  is the rule this pass exists to replace.
+- Four offline tests beyond the plan's list: the arm table's distinctness lock, the wire
+  line's subtype-and-detail pin, the per-arm response correlation, and, on the hermetic
+  side, a row that both `detail` values were actually driven and a row on the unanswered
+  arm's spelling. The correlation test is the one this two-arms-on-one-stdin design needs
+  and a one-arm probe does not: both replies land on one stdout, so an arm that could claim
+  the other's would make every per-arm field describe the wrong request.
+- `math_IsNaN` / `math_IsInf` are two-line file locals rather than a `math` import, since
+  each is three tokens and the import would be the larger edit.
+
+**Measured size.** The plan estimated ~1650 lines of total written work against the sizing
+table's 800-line line, accepted on the floor rule. The actual is 3299: a 2386-line probe
+(883 of them comment, 38 declarations), a 499-line hermetic pin, and this 414-line plan.
+That is over the estimate as well as over the ceiling, and it is stated rather than
+trimmed — the comment ratio is this family's discipline, where each block states why an
+assertion is non-vacuous, and cutting it to hit a number would remove the part a later
+reader needs. The estimate was low; the boundary judgement (one deliverable, floor beats
+ceiling) is unchanged.
+
+**Open questions.** Question 1 (does the CLI answer the subtype, and is `detail` the field
+name) and question 3 (does a pinned `--session-id` reach the transcript filename) are
+unresolvable before the live gate runs, exactly as the plan states; both outcomes are
+recorded and pass, and neither can fail the run. Question 2 (where the payload sits) is
+resolved by construction: `cucapSubtypeOf` searches all three known placements and
+`cucapLeaves` records every numeric leaf by dotted path, so the record is readable whatever
+the nesting turns out to be.
