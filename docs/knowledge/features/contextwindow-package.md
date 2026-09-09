@@ -160,6 +160,14 @@ contradiction (a session exactly at its window is full, not evidence of a
 wrong belief) and keeps its window. This is deliberately not an error — see
 Error handling below.
 
+**`Read`'s reading was cross-checked against claude's own, live, on 2026-09-09 (#2287).**
+A `get_context_usage` control-request capture read the same session both ways: `Read`
+reported 21978 tokens against a 200000 window (10.99%), claude's own reply reported 21929
+and a top-level 11%. The two agree to within the tokens the transcript gained in the gap
+between claude's reply and `Read`'s later scan — no divergence to design around, and no
+change to `Read` followed from it. See
+[e2e-realclaude-context-usage-capture-test-go.md](e2e-realclaude-context-usage-capture-test-go.md).
+
 **The gap #2107 deliberately leaves open.** A window learned from the stream
 is known only from the session's first completed turn onward, and again only
 from the first completed turn after a daemon restart — `windows` answers a
