@@ -1960,6 +1960,20 @@ type Parser struct {
 	// that is legitimately touched from another goroutine and the single-writer
 	// invariant above does not extend to it.
 	postureGate *PostureGate
+
+	// canUseTool is the seam an answerer installs to receive claude's inbound
+	// permission asks (#2282). Nil until SetCanUseToolHandler is called, and nil is
+	// the production state today: nothing spawns with --permission-prompt-tool stdio,
+	// so no ask is produced and no handler is installed. #2284 changes both together.
+	//
+	// A SEAM, NOT STATE, and the distinction is what keeps it off the single-writer
+	// invariant above. No line reads it for meaning, no reset clears it, no residual
+	// can outlive a turn or a child: it is a destination, written once before the
+	// parser is handed to a runner and read on the forwarder goroutine thereafter.
+	// SetCanUseToolHandler states that happens-before as its contract, which is why
+	// this field carries no mutex where postureGate does — that one is genuinely
+	// touched from another goroutine and this one must not be.
+	canUseTool func(CanUseToolRequest)
 }
 
 var _ io.Writer = (*Parser)(nil)
@@ -1994,6 +2008,32 @@ func NewParser(sink func(turnevent.Event), logger *slog.Logger) *Parser {
 // the runner arming the gate and the parser releasing it are the same object by
 // construction. Never nil for a parser built by NewParser.
 func (p *Parser) PostureGate() *PostureGate { return p.postureGate }
+
+// SetCanUseToolHandler installs h as the destination for claude's inbound
+// can_use_tool permission asks (#2282). With none installed the parser consumes such
+// a line and drops it silently.
+//
+// A SETTER RATHER THAN A CONSTRUCTOR PARAMETER because NewParser's signature has nine
+// call sites and none of them answers an ask; the alternative was widening all nine to
+// pass nil. PostureGate's doc makes the same trade in the other direction, for a value
+// that had to exist ahead of both halves.
+//
+// CALL IT BEFORE THE PARSER IS HANDED TO A RUNNER, and that ordering is a CONTRACT,
+// not advice. h is read on the os/exec forwarder goroutine, so installing one after
+// the parser has started consuming stdout is a data race with no lock to save it. The
+// composition root builds the parser, installs its holds, and only then wires it as
+// Config.Stdout — the same window PostureGate() is read in.
+//
+// h IS CALLED SYNCHRONOUSLY, in stream order, on that forwarder goroutine — the same
+// contract NewParser states for sink. It must not block: a handler that waits stalls
+// every later line from the child, exactly as a blocking sink does. It must not call
+// back into this parser. Answering the ask from inside it is safe, because the answer
+// travels on the child's STDIN, a different fd from the stdout being drained here, so
+// no write can deadlock against this reader.
+//
+// h receives untrusted, claude-authored data — see CanUseToolRequest, which says what
+// that means for each field.
+func (p *Parser) SetCanUseToolHandler(h func(CanUseToolRequest)) { p.canUseTool = h }
 
 // noteControlAck releases the posture gate when line is the SUCCESS control_response
 // for the request_id the gate is armed against, and opens it on no other input. AC 2 in
@@ -2605,6 +2645,142 @@ type controlAckLine struct {
 		Subtype   string `json:"subtype"`
 		RequestID string `json:"request_id"`
 	} `json:"response"`
+}
+
+// canUseToolSubtype is the one inbound control-request subtype this parser claims.
+// Matched by EQUALITY against this daemon-authored constant, never by prefix and
+// never case-folded, which is what keeps a near-miss spelling — a later
+// can_use_tool_v2, a differently-cased variant — on the unrecognized lane where it
+// belongs rather than silently landing in a decoder written for a shape it is not.
+// permissionModeAllowed makes the same argument for the write direction.
+const canUseToolSubtype = "can_use_tool"
+
+// CanUseToolRequest is one inbound can_use_tool control request, decoded (#2282).
+// claude writes it on the same stdout this parser reads when the child was launched
+// with --permission-prompt-tool stdio, and it is the ask a client modal renders: far
+// more than an approval MCP tool receives, which is the whole reason for reading it
+// here.
+//
+// EVERY FIELD ON THIS TYPE IS CLAUDE-AUTHORED AND UNTRUSTED. That has to be said out
+// loud because the field names read like daemon-authored UI strings — Title,
+// DisplayName, Description — and a handler that renders one unescaped, or joins
+// BlockedPath onto a filesystem path, is the foreseeable misuse. This type IS the
+// trust boundary's marker: nothing outside the decode below constructs one, so a
+// value of this type in hand means "subprocess bytes". No field is length-capped
+// here, which is deliberate and bounded — see the parser's arm for why the cap
+// belongs to whoever first puts these on the wire (#2286), and defaultMaxParseBuf
+// for what bounds them in the meantime.
+//
+// FIELD TYPING FOLLOWS ONE RULE, and it is a consequence of provenance. The shapes
+// come from the Agent SDK type definitions the ticket cites rather than from a line a
+// live claude has been sent, and no fixture in this repo can check them. So a field
+// the ticket's own phrasing pins to a scalar is declared as that scalar, and every
+// field whose JSON shape is NOT pinned is json.RawMessage — which accepts any JSON
+// and therefore cannot turn a wrong guess into a failed decode and a LOST PERMISSION
+// ASK. A lost ask is the expensive failure here: claude waits for an answer that
+// never comes.
+//
+// RequestID is tagged `json:"-"` because it is the ENVELOPE's field, not the inner
+// request's, and canUseToolLine fills it after decoding. Declaring the 18 inner
+// fields once on this type rather than twice across a wrapper and a payload struct is
+// what that tag buys.
+//
+// DecisionReasonType is carried VERBATIM and is not validated against the eleven
+// spellings the ticket lists. Deciding what an unrecognised reason means belongs to
+// whoever renders or answers the ask; a vocabulary gate here would silently drop an
+// ask on a spelling a later claude adds. The contrast with permissionModeAllowed is
+// exact and worth holding: that gate bounds a value the daemon SENDS, where refusing
+// an unknown spelling is the safe direction. This is a value the daemon RECEIVES,
+// where refusing one throws away news.
+type CanUseToolRequest struct {
+	// RequestID is CLAUDE'S OWN correlation id, read off the envelope. An answer must
+	// echo it — see WriteCanUseToolAllow — or claude cannot match the two.
+	RequestID string `json:"-"`
+
+	ToolName  string `json:"tool_name"`
+	ToolUseID string `json:"tool_use_id"`
+	// AgentID is set only when the ask comes from inside a subagent.
+	AgentID string `json:"agent_id"`
+
+	// Input is the tool's arguments, carried BYTE-VERBATIM so an answerer can hand
+	// them straight back as an allow's updatedInput without a re-encode changing a
+	// single byte. Nothing here interprets them.
+	Input json.RawMessage `json:"input"`
+	// PermissionSuggestions is claude's proposed rule changes — what a client's
+	// "don't ask again" is built from. Carried opaquely and byte-verbatim for Input's
+	// reason; #2286 is the slice that interprets it.
+	PermissionSuggestions json.RawMessage `json:"permission_suggestions"`
+
+	// BlockedPath is a path claude reports IT refused. Never opened, stat-ed, joined
+	// or canonicalised by anything in this package — it is a string to show, and a
+	// consumer that later resolves it inherits the traversal question whole.
+	BlockedPath string `json:"blocked_path"`
+
+	// DecisionReason is why claude is asking, and DecisionReasonType classifies it.
+	// The reason is json.RawMessage under the typing rule above: the ticket pins the
+	// TYPE to one of eleven strings but says nothing about the reason's own shape, and
+	// a structured reason beside a classifying enum is at least as likely as prose.
+	DecisionReason     json.RawMessage `json:"decision_reason"`
+	DecisionReasonType string          `json:"decision_reason_type"`
+	// MatchedAskRule is the rule that produced the ask, shape unpinned by the ticket
+	// and so carried opaquely under the same rule.
+	MatchedAskRule json.RawMessage `json:"matched_ask_rule"`
+
+	ClassifierApprovable    bool `json:"classifier_approvable"`
+	SuppressAlwaysAllowRule bool `json:"suppress_always_allow_rule"`
+	DefaultToNo             bool `json:"default_to_no"`
+	RequiresUserInteraction bool `json:"requires_user_interaction"`
+
+	// The three strings a modal shows. Untrusted like every field here.
+	Title       string `json:"title"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description"`
+}
+
+// controlRequestSubtypeLine reads ONE question off an inbound control_request: which
+// subtype it is. It exists as its own target for controlAckLine's reason verbatim — a
+// field added to one target must not change another's decode outcome — and here that
+// separation does concrete work: a can_use_tool payload this parser cannot decode
+// must still be identifiable AS a can_use_tool, so the arm can ring the bell about
+// the right thing rather than silently mistaking it for a stranger's subtype.
+//
+// The nesting inverts the top level exactly as controlResponseLine's does: subtype
+// sits under `request`, so streamLine.Subtype decodes empty for this type and there
+// is nothing for an emitSystemSubtype-shaped dispatch to match on.
+type controlRequestSubtypeLine struct {
+	Request struct {
+		Subtype string `json:"subtype"`
+	} `json:"request"`
+}
+
+// canUseToolLine is the full decode target for a request already known to be a
+// can_use_tool. Its input is the TOP-LEVEL LINE BYTES like every sibling's, never a
+// nested field — streamLine's doc states the property that preserves, and it is what
+// stops a tool result whose text is literally a control shape from being read as one.
+type canUseToolLine struct {
+	RequestID string            `json:"request_id"`
+	Request   CanUseToolRequest `json:"request"`
+}
+
+// decodeCanUseTool decodes one inbound can_use_tool line, reporting whether it could.
+// The envelope's request_id is copied onto the returned value, which is the one thing
+// the nested decode cannot do for itself.
+//
+// IT LOGS NOTHING on the failure path, and that is the package's standing rule rather
+// than a missed diagnostic: encoding/json QUOTES the offending input bytes into its
+// error text, so `"err", err` would route claude's own strings into the daemon log
+// through a channel no per-attribute check can see. noteControlAck states the rule at
+// length and it is not weaker here. The caller reports the failure as an unrecognized
+// line, which carries the raw bytes to the wire — where a truncation cap applies —
+// rather than to the log.
+func decodeCanUseTool(line []byte) (CanUseToolRequest, bool) {
+	var decoded canUseToolLine
+	if err := json.Unmarshal(line, &decoded); err != nil {
+		return CanUseToolRequest{}, false
+	}
+	req := decoded.Request
+	req.RequestID = decoded.RequestID
+	return req, true
 }
 
 // modelOptionLine is one element of that array, reduced to the five keys the
@@ -3707,6 +3883,62 @@ func (p *Parser) consumeLine(line []byte) {
 		// which rung a models or commands payload lands on is untouched by construction.
 		p.noteControlAck(line)
 		p.emitModelList(line)
+	case "control_request":
+		// The first control line claude INITIATES rather than answers (#2282), and the
+		// direction is the whole novelty: every other control_request in this package is
+		// one the daemon wrote to the child's stdin. Under
+		// --permission-prompt-tool stdio claude does not call an approval MCP tool at
+		// all — it asks here, on the same stdout the parser already reads, and waits for
+		// a control_response on stdin.
+		//
+		// Without this arm every such ask fell to the default below and rang
+		// emitUnrecognized with turnevent.UnrecognizedLineType — the
+		// spend-the-alarm-on-a-routine-event failure the control_response, tool_progress
+		// and conversation_reset arms above each describe, and here it would fire once
+		// per gated tool call.
+		//
+		// Its own arm rather than an ignoredLineTypes member, for #1404's, #1500's and
+		// #2089's reasons verbatim: that list is documented as top-level types only and
+		// as MEASURED, and the 2026-07-27 census ran no child under this flag, so it
+		// could not have seen this type. Membership would also swallow every OTHER
+		// inbound control subtype in silence, which is the opposite of what AC 2 asks
+		// for.
+		//
+		// A MATCHER, and like emitConversationReset it deliberately does NOT hold
+		// "emitUnrecognized unreachable BY MATCHING" — the weaker of the two guarantees,
+		// taken on purpose twice over. A control request of another subtype and a
+		// can_use_tool this parser cannot decode BOTH fall through and still ring the
+		// bell, because each is genuinely news: the first is claude initiating something
+		// nothing here models, the second is the ask arriving in a shape this codec got
+		// wrong. Consuming either silently would hide exactly the report that tells
+		// anyone the vendor moved.
+		//
+		// The subtype is read on its own target before the payload is decoded, so those
+		// two outcomes stay distinguishable; see controlRequestSubtypeLine.
+		var cr controlRequestSubtypeLine
+		if err := json.Unmarshal(line, &cr); err == nil && cr.Request.Subtype == canUseToolSubtype {
+			if req, ok := decodeCanUseTool(line); ok {
+				// CONSUMED, whether or not anyone is listening. With no handler installed
+				// the ask is dropped SILENTLY — no event, no log — and that is safe only
+				// because no spawn passes --permission-prompt-tool stdio yet, so no ask can
+				// actually be produced in production. #2284 spawns under the flag and
+				// installs the answerer in the same slice, which is what keeps this from
+				// becoming a window where claude waits forever on an answer nobody is
+				// composing.
+				//
+				// The handler runs on THIS goroutine, in stream order, and holds untrusted
+				// claude-authored data; SetCanUseToolHandler states both contracts and
+				// CanUseToolRequest states what untrusted means per field.
+				if p.canUseTool != nil {
+					p.canUseTool(req)
+				}
+				return
+			}
+		}
+		// Written out rather than reached by `fallthrough`, for the two arms above's
+		// reason: default is not the next case in source order, and a fallthrough would
+		// also run the ignoredLineTypes test below — a test this type must never pass.
+		p.emitUnrecognized(turnevent.UnrecognizedLineType, sl.Type, line)
 	case "tool_progress":
 		// claude's in-flight progress frames (#2089). A long-running Bash call
 		// emits one every few seconds, and without this arm every one of them put
