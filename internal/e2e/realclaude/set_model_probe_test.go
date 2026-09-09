@@ -125,11 +125,10 @@ const (
 	setModelKeyCap = 128
 	setModelRowCap = 64
 
-	// The two redaction classes this file adds beyond newDropcapRedactor's own
-	// tempHome/artifactDir/workdir trio. See setModelBuildPass for why the binary
-	// path is not optional.
-	setModelClassClaudeBin    = "claude_binary_path"
-	setModelClassOperatorHome = "operator_home_path"
+	// The ONE redaction class this file adds beyond newDropcapRedactor's own table.
+	// See setModelBuildPass for why the binary path is not optional, and for why the
+	// operator's home needs no class here.
+	setModelClassClaudeBin = "claude_binary_path"
 
 	// FORCES a re-capture over an existing family. It is not the gate — see the
 	// gate's own comment in TestRealClaude_SetModelProbe — and a run that never sets
@@ -179,7 +178,14 @@ var setModelArmNames = []string{
 // publishes is skipped, and the fallback takes the first qualifying row in arrival
 // order. #2041 observed the live list drifting from the committed capture at the same
 // binary version, which is the whole argument for selecting out of the run's own list.
-var setModelTargetPreference = []string{"sonnet", "default", "opus"}
+//
+// `default` is deliberately ABSENT, though the live list publishes it and it would
+// qualify. It is the reset_default arm's target, and an accept arm that fell back to
+// it would send byte-identical requests from two arms that exist to measure different
+// things — a named switch and a reset — leaving the family with four measurements
+// under five names. The 2.1.259 capture selected `sonnet`; if the list ever stops
+// publishing a qualifying named model, no-qualifying-row is the honest outcome.
+var setModelTargetPreference = []string{"sonnet", "opus"}
 
 // --- the wire shapes -----------------------------------------------------------
 
@@ -309,18 +315,25 @@ func setModelPromptTwo(nonce int64) string {
 
 // --- selecting the accept arm's target -----------------------------------------
 
-// setModelResolve returns the resolved id the live list publishes for value,
-// falling back to value itself when the list publishes no row for it.
+// setModelDiffersFrom reports whether value PROVABLY resolves somewhere other than
+// launch, per the rule modeSwitchResolvedModels states for its callers: a row
+// publishing no resolvedModel maps to the empty string, which means "unknown" rather
+// than "resolves to nothing", so a comparison must require BOTH sides non-empty
+// before calling them equal or different.
 //
-// The fallback is what keeps the launch model comparable when it is absent from the
-// list, and it is deliberately not the empty string: an empty resolution on both
-// sides of a comparison would make an alias look DIFFERENT from the model it aliases,
-// which is the exact confound setModelPickTarget exists to prevent.
-func setModelResolve(resolved map[string]string, value string) string {
-	if r := resolved[value]; r != "" {
-		return r
-	}
-	return value
+// Unknown therefore answers false — not different — and the accept arm declines the
+// row. That direction is the whole point. An earlier draft fell back to the value's
+// own spelling when the list published no resolution, which made `haiku` and
+// `claude-haiku-4-5` compare as two different models and let an ALIAS OF THE LAUNCH
+// MODEL be selected as the target to switch to. The arm would then have sent a real
+// request, watched the init line report the model it started on, and recorded a no-op
+// as a successful switch — the exact confound setModelPickTarget exists to prevent.
+// Refusing is the conservative direction: it costs a capture that reports no
+// qualifying row, which is a FINDING about claude's model list, and the alternative
+// costs a measurement that is wrong while looking right.
+func setModelDiffersFrom(resolved map[string]string, value, launch string) bool {
+	a, b := resolved[value], resolved[launch]
+	return a != "" && b != "" && a != b
 }
 
 // setModelPickTarget returns a published model value the accept arm can switch TO,
@@ -337,16 +350,17 @@ func setModelResolve(resolved map[string]string, value string) string {
 //     bound, which keeps a pathological published value from inflating a committed
 //     capture, and a charset narrow enough to keep a path- or credential-shaped value
 //     off the wire.
-//   - the value must RESOLVE somewhere other than the launch model. An alias is the
-//     trap: `haiku` and `claude-haiku-4-5` resolve alike, so a run switching between
-//     them reports the same init model whether the change applied or not, and would
-//     record a no-op as a success.
+//   - the value must PROVABLY resolve somewhere other than the launch model, per
+//     setModelDiffersFrom. An alias is the trap: `haiku` and `claude-haiku-4-5`
+//     resolve alike, so a run switching between them reports the same init model
+//     whether the change applied or not, and would record a no-op as a success. A row
+//     whose resolution the list does not publish is unknown rather than different, and
+//     is declined.
 //   - the value must not be one of the reset sentinels. They cannot pass the shape
 //     check either, and that redundancy is deliberate: one is an equality test and
 //     the other a property of the charset, so neither answers for the other.
 func setModelPickTarget(rows []modeSwitchAutoRow, resolved map[string]string,
 	launchModel string, prefer []string) string {
-	launchResolved := setModelResolve(resolved, launchModel)
 	usable := func(value string) bool {
 		if value == "" || value == setModelResetOmitted || value == setModelResetNull {
 			return false
@@ -354,7 +368,7 @@ func setModelPickTarget(rows []modeSwitchAutoRow, resolved map[string]string,
 		if !modeSwitchModelValueOK(value) {
 			return false
 		}
-		return setModelResolve(resolved, value) != launchResolved
+		return setModelDiffersFrom(resolved, value, launchModel)
 	}
 	for _, name := range prefer {
 		for _, r := range rows {
@@ -708,7 +722,14 @@ func TestRealClaude_SetModelProbe(t *testing.T) {
 	// the run's OWN list rather than out of a table is what makes an alias-switch
 	// impossible rather than merely unlikely.
 	rows, resolved := runModeSwitchDiscovery(t, claudeBin, workdir)
-	launchResolved := setModelResolve(resolved, setModelLaunchModel)
+
+	// Both resolutions are read straight off the published map, empty included. These
+	// two reach the RECORD rather than a comparison, and an empty one is the honest
+	// entry for a model the list published no resolvedModel for — substituting the
+	// value's own spelling would write a resolution into the capture that claude never
+	// published. setModelDiffersFrom owns the comparison, and owns the rule that an
+	// unpublished resolution is unknown rather than different.
+	launchResolved := resolved[setModelLaunchModel]
 	target := setModelPickTarget(rows, resolved, setModelLaunchModel, setModelTargetPreference)
 	if target == "" {
 		t.Logf("#2279: FINDING — claude's live model list publishes no usable value resolving "+
@@ -725,7 +746,7 @@ func TestRealClaude_SetModelProbe(t *testing.T) {
 			"re-run.", setModelUnservable)
 		return
 	}
-	targetResolved := setModelResolve(resolved, target)
+	targetResolved := resolved[target]
 	published, pubTruncated := setModelPublishedRows(rows, resolved)
 	t.Logf("#2279: launch %q resolves to %q; accept arm targets %q resolving to %q",
 		setModelLaunchModel, launchResolved, target, targetResolved)
@@ -791,13 +812,22 @@ func TestRealClaude_SetModelProbe(t *testing.T) {
 // argv still reads as an argv and stays diffable against those siblings. This is a
 // redaction OF THE OPERATOR'S MACHINE, not of a credential: initControlScrubbed
 // remains the credential guard and runs first, unconditionally, inside the driver.
+//
+// THE OPERATOR'S HOME NEEDS NO CLASS HERE, and an earlier draft of this function
+// added one that could never install. newDropcapRedactor already registers every
+// spelling of realHome under dropcapClassOperatorHome, and dropcapRedactor.add
+// dedupes by VALUE regardless of class, so a second rule over the same string is
+// silently discarded — it would never reach substitutions(), and a reader would be
+// told a rule was protecting the record that was not there. The committed captures
+// report the class that actually fired: `operator_home`, the constructor's, never
+// this file's. Adding a class for a value the constructor already covers is the
+// mistake; the binary path is a class BECAUSE the constructor covers no such value.
 func setModelBuildPass(t *testing.T, home, artifactDir, workdir, claudeBin string,
 	nonce int64, arm string) *setModelPass {
 	t.Helper()
 
 	red := newDropcapRedactor(home, artifactDir, workdir, "", "", nonce)
 	red.addPathClass(setModelClassClaudeBin, "$CLAUDE_BIN", claudeBin)
-	red.addPathClass(setModelClassOperatorHome, "$OPERATOR_HOME", realHome)
 	scanner := newDropcapScanner(home, artifactDir, workdir)
 	return &setModelPass{red: red, scanner: &scanner, artifactDir: artifactDir, arm: arm}
 }
@@ -974,10 +1004,21 @@ func TestSetModelPickTarget_RefusesAnAliasOfTheLaunchModel(t *testing.T) {
 			map[string]string{"--dangerously-skip-permissions": "x"}, nil, ""},
 		{"refuses a reset sentinel", []modeSwitchAutoRow{{Value: setModelResetNull}},
 			map[string]string{setModelResetNull: "claude-sonnet-5"}, nil, ""},
-		{"an unresolved row is compared on its own spelling", []modeSwitchAutoRow{{Value: "sonnet"}},
-			map[string]string{}, nil, "sonnet"},
-		{"an unresolved row equal to the launch model is refused",
+		// The three unresolved cases are one rule, and the middle one is why the rule
+		// is what it is. With no published resolution a row is UNKNOWN rather than
+		// different, so all three are declined — including the row that really does
+		// name another model. An earlier draft compared unresolved rows on their own
+		// spelling, which got the first two of these right by accident and the middle
+		// one WRONG: `haiku` and `claude-haiku-4-5` are different strings, so an alias
+		// of the launch model was selected as something to switch to.
+		{"an unresolved row naming another model is declined as unknown",
+			[]modeSwitchAutoRow{{Value: "sonnet"}}, map[string]string{}, nil, ""},
+		{"an unresolved row aliasing the launch model under another spelling",
+			[]modeSwitchAutoRow{{Value: "haiku"}}, map[string]string{}, nil, ""},
+		{"an unresolved row equal to the launch model",
 			[]modeSwitchAutoRow{{Value: setModelLaunchModel}}, map[string]string{}, nil, ""},
+		{"a row resolved while the launch model is not", []modeSwitchAutoRow{{Value: "sonnet"}},
+			map[string]string{"sonnet": "claude-sonnet-5"}, nil, ""},
 		{"an empty list", nil, resolved, nil, ""},
 	}
 	for _, tc := range cases {
@@ -1172,7 +1213,7 @@ func TestSetModelRedaction_RemovesTheClaudeBinaryPathTheScannerWouldCatch(t *tes
 
 	out := string(pass.red.redact([]byte(record)))
 	if strings.Contains(out, claudeBin) {
-		t.Errorf("the redacted record still carries the claude binary path, so the screen would "+
+		t.Errorf("the redacted record still carries the claude binary path, so the screen would " +
 			"refuse every arm and the run would land nothing")
 	}
 	if !strings.Contains(out, "$CLAUDE_BIN") {

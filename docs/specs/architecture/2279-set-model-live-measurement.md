@@ -342,3 +342,82 @@ above and re-walked from the top)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — the live gate ran, and the measurement landed
+
+The dispatcher's live gate drove all five arms against claude 2.1.259. Every arm passed, the whole probe
+cost 23.7s, and the five captures are now committed under `internal/e2e/realclaude/testdata/`. The plan's
+four open questions are answered, and one answer contradicts what the family was built expecting.
+
+**1. Does claude 2.1.259 accept the subtype?** Yes. Every arm drew a
+`{"type":"control_response","response":{"subtype":"success", …}}` correlating to the request id it sent.
+The premise the family rests on holds, and neither sibling needs closing.
+
+**2. Does an accepted change show on the following turn's init line?** Yes. The accept arm launched pinned
+on `claude-haiku-4-5`, sent `"sonnet"`, and turn 2's `system/init` reported `claude-sonnet-5`. The change is
+observable exactly where #2280 needs to read it, and two turns are enough — the third turn Open Question 5
+held in reserve is not needed.
+
+**3. Alias or resolved id?** Resolved. The wire carried `sonnet`; the init line reported `claude-sonnet-5`.
+The capture keeps both strings, so #2280 can send an alias and must not expect it back verbatim.
+
+**4. Which reset spelling does claude honour?** All three, identically. Omitted, explicit `null` and the
+string `"default"` each drew a success ack and each moved the init line from `claude-haiku-4-5` to
+`claude-sonnet-5`, the account default. Two consequences for #2280. Its encoder may emit a plain string and
+needs neither a pointer nor a custom marshaller, which is the open choice its own body recorded as waiting
+on this capture. And reset overrides the launch `--model` flag rather than returning to it, which is a
+behaviour no sibling had assumed either way.
+
+**5. Does a refusal carry usable text? No — and there is no refusal.** This is the finding that changes a
+sibling's premise. The refuse arm sent `claude-no-such-model-2279`, a model no published row carries, and
+claude answered `subtype:"success"`, then reported that exact string as the model on the following init
+line, then failed the turn: `exit=1` with the turn's own result carrying `is_error`. So `set_model`
+validates nothing at the control layer. It accepts any string, echoes it back as the session's model, and
+the failure surfaces one turn later as a turn error rather than as a `control_response` of subtype `error`.
+The precedent this plan expected to diff against — #1595's `enable` arm, which drew a genuine
+`subtype:"error"` carrying explanatory text — does not apply. **#2281 cannot report a rejected model change
+from the ack, because there is no rejection in the ack.** It has to read the turn failure instead, or
+validate against the published model list before sending. That is a design change to a sibling, so it
+belongs on #2281 as a comment rather than being silently absorbed here.
+
+### 2026-09-09 — three findings from code review, fixed
+
+- `setModelResolve` is **replaced by `setModelDiffersFrom`**. The old helper fell back to a value's own
+  spelling when the list published no resolution, so `haiku` and `claude-haiku-4-5` compared as different
+  models and an ALIAS OF THE LAUNCH MODEL could be selected as the accept arm's target — the exact confound
+  the selector exists to prevent. The new rule is the one `modeSwitchResolvedModels` states for its
+  callers: a comparison requires both sides non-empty, and unknown answers "not different". Three table
+  cases pin it, and an overlay mutation restoring the old rule reddens all three. The two remaining call
+  sites only REPORT a resolution into the record, and now read the map directly so an unpublished
+  resolution records as empty rather than as a resolution claude never published.
+- The `setModelClassOperatorHome` **registration was inert and is removed**. `newDropcapRedactor` already
+  installs every spelling of `realHome`, and `dropcapRedactor.add` dedupes by value regardless of class, so
+  the second rule never reached `substitutions()`. The security property always held under the
+  constructor's rule — the committed captures report the class that actually fired, `operator_home`, never
+  this file's — but the plan's Security review named the removed line as one of two load-bearing fixes,
+  which was wrong. Only the claude-binary class was load-bearing there, and it is pinned by its own test.
+  `setModelBuildPass` now says why a value the constructor covers must not get a second class.
+- `"default"` is **removed from `setModelTargetPreference`**. It is the `reset_default` arm's target, so an
+  accept arm falling back to it would have sent a byte-identical request from two arms measuring different
+  things. The 2.1.259 run selected `sonnet` and is unaffected.
+
+The request-id prefix names the wrong subtype in the committed captures (`set-permission-mode-accept` on a
+`set_model` request), and is deliberately **left alone**. It is a correlation token, it matched on every
+arm, and changing the minter now would leave five committed captures that the current code could not
+reproduce — a worse trap for whoever re-captures at the next release than a stale prefix.
+
+### 2026-09-09 — why the gate failed, and why it will not fail again
+
+The gate reported one failure, `TestRealClaude_TaskNotificationCapture`, killed as a hang by the test
+binary's own `-timeout 20m`. It is not a defect in this branch and this branch did not break it. That test
+takes a fixed 361s and was 11 seconds from finishing when the alarm fired. The package's summed elapsed
+time has been climbing all day as tickets add live arms — 1073s on #2262, 1120s on #2269, 1196s on #2272 —
+and #2272 left four seconds of headroom under the 1200s cap. This ticket's 23.7s tipped it.
+
+Committing the captures resolves it without touching the timeout. The probe gates on the fixture family's
+ABSENCE, so with all five present it now skips and contributes zero seconds, putting the suite back at
+#2272's 1196s. The underlying fragility is untouched and belongs to nobody's ticket: the next live arm
+anyone adds trips the same cap, and the `-timeout 20m` lives in the dispatcher's gate command rather than
+in this repo's Makefile, so it is not fixable from here. Filed separately rather than absorbed.
