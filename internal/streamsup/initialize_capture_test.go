@@ -116,9 +116,24 @@ func initCapturePath(arm string) string {
 //
 // Deliberately NOT restated: control_request_sent, which is a raw `null` on the
 // no-request arm rather than a zero length and whose question control_request_id
-// already answers as a plain string; models_entry_fields, stdout_events,
-// turn_boundaries, redaction, credential_scan_applied; and every send_point /
+// already answers as a plain string; models_entry_fields, turn_boundaries,
+// redaction, credential_scan_applied; and every send_point /
 // after_send_point field, which the base capture does not carry at all.
+//
+// stdout_events WAS in that list until #2249, and the reason it left it rather
+// than growing a second reader is worth stating where the omission used to be. All
+// four records carry it, so it holds the "every field is in the subset all four
+// share" property the minimisation argument above rests on. The alternative was a
+// fifth self-contained reader in permission_denial_capture_test.go's shape, and
+// that shape does not transfer: every reader in this package reads a DIFFERENT
+// record shape, which is what makes reaching for the wrong one yield zero values
+// rather than a failure, and a second reader over THIS record would instead be a
+// third parallel struct of initControlFixtureRecord — doubling the silent-zero-value
+// risk this doc already names, for nothing. What the convention forbids is growing
+// a reader a PATH PARAMETER, because the provenance assertions are what stop a
+// hand-built file being swapped in behind them; this field adds none, and
+// capturedInitializeStdoutLines inherits every check rather than copying a weaker
+// set.
 type initCaptureRecord struct {
 	ClaudeVersion string `json:"claude_version"`
 	Arm           string `json:"arm"`
@@ -130,6 +145,12 @@ type initCaptureRecord struct {
 
 	ModelsPresent bool `json:"models_present"`
 	ModelsCount   int  `json:"models_count"`
+
+	// StdoutEvents is []json.RawMessage, which is what makes a replay a replay: each
+	// entry keeps claude's own line bytes, so the parser is fed what claude wrote
+	// rather than a re-encoding of what some decoder made of it. Read only through
+	// capturedInitializeStdoutLines, which compacts the recorder's indentation.
+	StdoutEvents []json.RawMessage `json:"stdout_events"`
 }
 
 // initCaptureResponse decodes ONE entry of control_responses: the control_response

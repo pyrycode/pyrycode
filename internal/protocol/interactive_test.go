@@ -832,13 +832,18 @@ func TestRateLimitedPayload_RoundTrip(t *testing.T) {
 	if payload.ConversationID != "c1" {
 		t.Errorf("ConversationID: got %q, want %q", payload.ConversationID, "c1")
 	}
-	// The fixture's status is deliberately NOT a value any capture carries.
-	// Every capture on record reads "allowed", which is the one value the
-	// producer's gate silences, so a realistic-looking alternative here would be
-	// an invention a client author could copy as if it were measured. The angle
+	// The fixture's status is deliberately NOT a value any capture carries, and the
+	// reason was RESTATED at #2249 rather than removed. It used to read "every capture
+	// on record reads allowed", which is no longer true: one record carries
+	// allowed_warning, the weekly warning band. What still holds is the part the choice
+	// rests on — "<unmeasured>" is a value no capture carries, so it cannot be copied
+	// out of this fixture as if it were observed, and the measured non-benign value is
+	// already pinned where it was measured (internal/streamsup's replay of the
+	// committed capture) rather than duplicated here. The angle
 	// brackets double as the escaping pin: encoding/json emits '<' and '>' in
 	// their six-byte \uXXXX form, so a claude-authored string survives the trip
-	// byte-exactly.
+	// byte-exactly — which is why this sentinel stays even though a realistic value
+	// now exists.
 	if payload.Status != "<unmeasured>" {
 		t.Errorf("Status: got %q, want %q", payload.Status, "<unmeasured>")
 	}
@@ -849,6 +854,16 @@ func TestRateLimitedPayload_RoundTrip(t *testing.T) {
 	}
 	if payload.ResetsAt != 1786012405 {
 		t.Errorf("ResetsAt: got %d, want %d", payload.ResetsAt, 1786012405)
+	}
+	// 0.94 is MEASURED, unlike the status one field up: it is the reading the committed
+	// allowed_warning capture carries, so the number a client author copies out of this
+	// fixture is one claude actually sent. The non-nil guard is load-bearing — a nil
+	// pointer dereferenced in the comparison would panic rather than report, and a
+	// field whose tag stopped matching decodes to nil rather than to a wrong number.
+	if payload.Utilization == nil {
+		t.Errorf("Utilization: got null, want 0.94")
+	} else if *payload.Utilization != 0.94 {
+		t.Errorf("Utilization: got %v, want 0.94", *payload.Utilization)
 	}
 	// Joined rather than compared as a set: the producer appends these names in
 	// declaration order (internal/streamsup/parser.go's two bound() calls), and a
@@ -890,6 +905,15 @@ func TestRateLimitedPayload_ZeroValue_RoundTrip(t *testing.T) {
 	if !bytes.Contains(canonical(t, raw), []byte(`"resets_at":0`)) {
 		t.Errorf("fixture must carry the reset timestamp explicitly as 0, got: %s", raw)
 	}
+	// The THIRD such guard, and the one whose two wrong answers are both plausible.
+	// The zero value of the reading is a nil pointer, which must reach the wire as
+	// null — "utilization":0 would say claude reported a fresh window, and a dropped
+	// key (an omitempty away) would say nothing at all. Pinning the fixture to null is
+	// what makes the round trip below assert the TYPE's behaviour rather than agree
+	// with whatever the fixture happens to carry.
+	if !bytes.Contains(canonical(t, raw), []byte(`"utilization":null`)) {
+		t.Errorf("fixture must carry the unreported reading as null, got: %s", raw)
+	}
 
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -915,6 +939,12 @@ func TestRateLimitedPayload_ZeroValue_RoundTrip(t *testing.T) {
 	if payload.ResetsAt != 0 {
 		t.Errorf("ResetsAt: got %d, want 0", payload.ResetsAt)
 	}
+	// Explicitly nil, not a dereferenced comparison against 0: those are the two
+	// different facts this field exists to keep apart, and the failure message renders
+	// them apart too.
+	if payload.Utilization != nil {
+		t.Errorf("Utilization: got %s, want null", utilOrNull(payload.Utilization))
+	}
 	// Explicitly nil, not len() == 0: len is 0 for both nil and [], and [] is the
 	// value this payload must never produce.
 	if payload.TruncatedFields != nil {
@@ -922,6 +952,79 @@ func TestRateLimitedPayload_ZeroValue_RoundTrip(t *testing.T) {
 	}
 
 	roundTripEnvelope(t, env, payload, raw)
+}
+
+// utilOrNull renders a reading pointer for a failure message, keeping nil and zero
+// visibly apart — countOrNull's reason, applied to the field whose whole contract is
+// that distinction. A message printing both as "0" would misdescribe the failure it
+// reports, and here that is the failure most likely to be reported.
+func utilOrNull(p *float64) string {
+	if p == nil {
+		return "null"
+	}
+	return strconv.FormatFloat(*p, 'g', -1, 64)
+}
+
+// TestRateLimitedPayload_AbsentUtilizationIsNullNotZero is #2249's AC 3 made
+// executable, and it takes TestCompactionBoundaryPayload_AbsentCountIsNullNotZero's
+// shape for the same reason: one payload cannot carry both an absent and a present
+// reading, so the claim needs two encodings compared against each other rather than
+// one round trip.
+//
+// What it asserts is the ENCODING direction, which is the only one that makes absence
+// survive to a client. Decoding null to a nil pointer is not the claim — the claim is
+// that nil encodes back to null rather than to 0 or to a dropped key, and that a
+// pointer to 0 encodes to 0. The final comparison is the criterion's own wording: the
+// two must not produce the same bytes. A plain float64 field makes them identical and
+// every other assertion in this file still passes, which is why this test exists.
+//
+// Deliberately not a third golden fixture. The two committed ones pin the populated
+// and the zero-value round trips, and what remains is a property of the TYPE's
+// marshalling rather than of any file's bytes.
+func TestRateLimitedPayload_AbsentUtilizationIsNullNotZero(t *testing.T) {
+	zero := 0.0
+	base := RateLimitedPayload{ConversationID: "c1", Status: "<unmeasured>", LimitType: "five_hour"}
+
+	absent := base
+	reported := base
+	reported.Utilization = &zero
+
+	absentBytes, err := json.Marshal(absent)
+	if err != nil {
+		t.Fatalf("marshal the absent reading: %v", err)
+	}
+	reportedBytes, err := json.Marshal(reported)
+	if err != nil {
+		t.Fatalf("marshal the reported reading: %v", err)
+	}
+
+	if !bytes.Contains(absentBytes, []byte(`"utilization":null`)) {
+		t.Errorf("an absent reading must encode as null, got: %s", absentBytes)
+	}
+	if !bytes.Contains(reportedBytes, []byte(`"utilization":0`)) {
+		t.Errorf("a reading claude reported as 0 must encode as 0, got: %s", reportedBytes)
+	}
+	if bytes.Equal(absentBytes, reportedBytes) {
+		t.Fatalf("a reading claude never sent encodes identically to one claude reported as 0, "+
+			"so a client cannot tell an unknown window from a fresh one: %s", absentBytes)
+	}
+
+	// Both directions, because a client reads before it writes: the bytes each side
+	// produced must decode back to the pointer state they came from. Without this a
+	// MarshalJSON that wrote the right bytes from the wrong state would pass above.
+	var backAbsent, backReported RateLimitedPayload
+	if err := json.Unmarshal(absentBytes, &backAbsent); err != nil {
+		t.Fatalf("unmarshal the absent reading: %v", err)
+	}
+	if err := json.Unmarshal(reportedBytes, &backReported); err != nil {
+		t.Fatalf("unmarshal the reported reading: %v", err)
+	}
+	if backAbsent.Utilization != nil {
+		t.Errorf("null decoded to %s, want nil", utilOrNull(backAbsent.Utilization))
+	}
+	if backReported.Utilization == nil || *backReported.Utilization != 0 {
+		t.Errorf("0 decoded to %s, want a pointer to 0", utilOrNull(backReported.Utilization))
+	}
 }
 
 // TestRateLimitedType_IsNotClaudesVocabulary pins the translation layer this

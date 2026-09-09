@@ -538,10 +538,23 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		//     not necessarily in a sane range, and 0 means claude did not report it
 		//     rather than "now" (turnevent.RateLimited.ResetsAt, and
 		//     RateLimitedPayload's SECURITY paragraph).
+		//   - Utilization is NOT clamped or range-checked either, and specifically not to
+		//     0..1: it is claude's number, not a bounded fraction, so a negative or an
+		//     above-one reading crosses exactly as a far-future ResetsAt does
+		//     (turnevent.RateLimited.Utilization, and RateLimitedPayload's SECURITY
+		//     paragraph, where both numbers are named together for the reason a reader
+		//     would otherwise infer that the second one was checked).
+		//   - THE POINTER CROSSES AS A POINTER, which is what keeps claude's presence
+		//     rather than collapsing it — nil means claude stated no reading and must not
+		//     become a 0, which on the wire is a FRESH window. That is the
+		//     CompactionBoundary arm's rule above, and it is not deep-copied for that
+		//     arm's three reasons: the producer allocates a fresh float64 per line,
+		//     retains neither, and nothing downstream mutates a payload.
 		//   - Neither string is re-capped. The producer bounded both at construction
 		//     (streamsup's maxRateLimitField), following Unrecognized's precedent, so
 		//     a second cap here would be a second place the limit is decided and the
-		//     two could disagree silently.
+		//     two could disagree silently. Utilization has no cap at all and wants none:
+		//     a float64 cannot grow, which is why ResetsAt has none either.
 		//   - A nil TruncatedFields is passed straight through, and HERE that nil is
 		//     what puts "truncated_fields":null on the wire. The roster arm above
 		//     looks identical and means the OPPOSITE: BackgroundTaskRosterPayload
@@ -559,6 +572,7 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Status:          e.Status,
 			LimitType:       e.LimitType,
 			ResetsAt:        e.ResetsAt,
+			Utilization:     e.Utilization,
 			TruncatedFields: e.TruncatedFields,
 		}, true
 	case turnevent.ModelAnnounced:

@@ -799,7 +799,9 @@ type BackgroundTask struct {
 // so this payload cannot carry them even by accident.
 //
 // Status is the field that says WHY the frame fired, and its value set beyond the
-// benign one is UNMEASURED — no capture of a limit actually in force exists. A
+// benign one is ALMOST ENTIRELY UNMEASURED: exactly one non-benign value is on
+// record (allowed_warning, the weekly warning band) and no capture of a limit
+// actually in force exists on any claude version. A
 // plain string, not a closed enum, so the set gets measured the first time a real
 // limit fires rather than the daemon inventing one it has no evidence for. The
 // producer's gate is deliberately loud in the same direction: the one
@@ -807,7 +809,8 @@ type BackgroundTask struct {
 // unrecognised status surfaces and a human looks rather than a real limit
 // vanishing. Dropping Status from this payload would silence that one layer later.
 //
-// LimitType is WHICH limit is in force ("five_hour" in all three captures), a
+// LimitType is WHICH limit is in force (five_hour and seven_day are the observed
+// values, the second riding the one non-benign status), a
 // plain string for Status's reason. ResetsAt is when claude says it lifts, as
 // unix seconds, 0 when claude did not report it. Neither wire name tracks
 // claude's key: claude's are rateLimitType and resetsAt under rate_limit_info,
@@ -815,6 +818,19 @@ type BackgroundTask struct {
 // claude rename does not move them. status coincides with claude's spelling but
 // is the daemon's chosen name for the field — it is what the producer's bound()
 // reports it as — and a generic English word rather than a vocabulary import.
+// utilization coincides the same way and for the same reason, which is why it is
+// NOT a member of the claude-key enumeration TestRateLimitedType_IsNotClaudesVocabulary
+// forbids on the wire.
+//
+// Utilization is how much of the window claude says is spent, and it is a POINTER
+// so null on the wire means claude reported nothing while 0 means claude reported
+// an untouched window. A client that reads a missing reading as zero renders a
+// fresh quota as an exhausted one, which is the failure this shape exists to
+// prevent — turnevent.RateLimited.Utilization's own doc is the single source of
+// truth for that argument and for why 0 cannot absorb absence the way ResetsAt's 0
+// can. The daemon always emits the key, so an absent reading is a literal null and
+// never a dropped key. It is not in TruncatedFields and has no cap, for ResetsAt's
+// reason: a float64 cannot grow.
 //
 // TruncatedFields names the fields the producer cut to fit its cap, using these
 // wire names ("status", "limit_type", in that order); it is null when nothing was
@@ -833,14 +849,21 @@ type BackgroundTask struct {
 // maximum: a second cap here would be a second place the limit is decided, and the
 // two could disagree silently. The constraint on turnevent.RateLimited follows the
 // data onto the wire — it is a REPORT, never a control input, so a client MUST NOT
-// branch security-relevant behaviour on Status, and ResetsAt is CLAUDE's number,
-// unvalidated in both directions: a consumer must not assume it lies in the
-// future, or in a sane range at all.
+// branch security-relevant behaviour on Status.
+//
+// BOTH NUMBERS ARE CLAUDE'S AND BOTH ARE UNVALIDATED IN BOTH DIRECTIONS, and saying
+// so of one while adding a second is how a client concludes the second was checked.
+// ResetsAt must not be assumed to lie in the future, or in a sane range at all.
+// Utilization is NOT a bounded fraction: it must not be assumed to lie in 0..1
+// either, so scaling a progress bar or a gauge by it without a range check is this
+// field's realistic bug, and a value above one is not evidence of anything but what
+// claude sent. Neither is clamped, rounded or rejected anywhere on the path.
 type RateLimitedPayload struct {
 	ConversationID  string   `json:"conversation_id"`
 	Status          string   `json:"status"`
 	LimitType       string   `json:"limit_type"`
 	ResetsAt        int64    `json:"resets_at"`
+	Utilization     *float64 `json:"utilization"`
 	TruncatedFields []string `json:"truncated_fields"`
 }
 
