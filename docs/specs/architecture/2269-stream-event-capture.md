@@ -272,3 +272,35 @@ was re-walked from the top.)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — the total-line boundary is exceeded, stated rather than split around
+
+The one-ticket boundary's total-written-work line is 800. This ticket lands 1439 lines of probe plus
+274 of plan, so it is over by roughly a factor of two. Nothing else on the boundary is close: zero
+production source files, zero new exported types, zero consumer call sites, four acceptance criteria,
+and eight reject branches across the verdict and the promotion gate.
+
+**It is not split, because the floor rule beats the ceiling here.** Every seam available — the walk
+from the live capture, the promotion gate from the probe it gates — produces a child whose only
+consumer is its sibling, and a slice that nothing outside the family calls is part of that sibling
+rather than a ticket. A capture probe without its promotion gate cannot be verified on its own, and
+no resume leg fixes that; the ceiling protects against a budget miss, which did not materialize (the
+run finished well inside both caps).
+
+**The estimate was measured against the wrong thing, and so was my own sketch.** The ticket's estimate
+line reads ~700 lines, citing #1688's probe as 575 lines at `7bb3432a`; that file is 1229 lines today.
+I sketched 610. The actual sibling captures in this package measure 1174 (#2089), 1229 (#1688) and
+1992 (#2262), so 1439 sits below the median of its three nearest analogues rather than above them.
+
+The gap is not padding. Comment share, measured across the four files: this one 21%, #2089 30%,
+#2262 22%, #1688 53%. This probe is the *least* prose-heavy of the family. A capture probe in this
+package is 1100–2000 lines because the shape itself — a record type, an ordered walk, a staging
+verdict, a promotion gate, a deny-scanned double write and an offline self-check per refusal arm —
+does not compress, and the package's convention makes each refusal argue for itself.
+
+The transferable correction, for the refiner's Sizing Guide and for the next builder here: **size a
+capture probe against the current line count of its named analogue, re-derived, not against a count
+quoted from an old commit.** A stale or partial analogue count is what made both this estimate and my
+sketch wrong in the same direction.
