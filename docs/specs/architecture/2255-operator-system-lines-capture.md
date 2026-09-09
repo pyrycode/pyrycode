@@ -471,3 +471,63 @@ first pass FAILED on them)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — the local slash command is chosen from the session's own inventory
+
+**What changed.** The plan named `/cost` as a fixed trigger. The implementation
+chooses the command at runtime from the session's `system/init` slash-command
+inventory, preferring `/cost` and falling back through `usage`, `context`, `status`.
+`oslcapPickLocalCommand` is the picker, `oslcapLocalCommandCandidates` the ordered
+list, and `TestOslcapPickLocalCommandPrefersTheTicketsCommand` pins both the
+preference and that no candidate mutates session state.
+
+**What drove it.** Measured, not anticipated. The init line committed in
+`dropped_lines_v2.1.220.json` carries a 46-command inventory that does NOT include
+`cost`, while it does include `usage`, `context`, `extra-usage` and `usage-credits`.
+A hardcoded `/cost` would have driven a turn claude answers as prose, recorded
+`local_command_output` as unobserved against a trigger that could not fire, and spent
+a whole live gate to learn a name. The ticket's command stays first in the list, so a
+session that has it drives it.
+
+**What the record gains.** `local_command_chosen`, `local_command_candidates` and
+`local_command_in_inventory` replace the plan's single `cost_in_slash_command_inventory`
+boolean, and the turn measurements are renamed to `local_command_turn_lines` and
+`local_command_turn_assistant_lines`. When no candidate is in the inventory the rig
+still drives the ticket's own command and records `local_command_in_inventory: false`,
+which makes that subtype inconclusive rather than silently skipped — the phase is
+`local-command` rather than `cost` for the same reason.
+
+**AC 1 is unaffected in substance.** It asks for a `/cost` user turn; the rig sends
+one whenever the session knows the command, and records which command it sent and why
+when it does not.
+
+### 2026-09-09 — two smaller departures
+
+- The hook witness is re-read and its verdicts recounted after every phase, not only
+  after the blocked turn. Whether a slash-command turn fires a `UserPromptSubmit` hook
+  at all is itself unmeasured, and the full ordered list is the only place that shows.
+- `oslcapFrame`'s `events_emitted` doc was corrected before it shipped: the plan's
+  reading ("non-zero means the drop set moved") is true only of a line that DECODES.
+  On one that does not, the single event is the `Unrecognized` the decode failure
+  produced — the same event `decode_verdict` is read from. The two fields are to be
+  read together.
+
+### Size, actual
+
+The file landed at about 2430 lines against the plan's ~1350 estimate, on 84 offline
+subtests. The overshoot is comment density and table rows rather than new design: the
+nearest analogue, #2247, is 1753 lines for a single trigger, and this ticket drives
+three and sweeps a fourth. Recorded here rather than smoothed over, because the sizing
+guide's ceiling is calibrated from actuals.
+
+### Open questions
+
+All four remain open by design — each is a question only a live claude can answer, and
+the record is built to answer them rather than to assume them. Question 1 (does a
+`UserPromptSubmit` hook run under `--dangerously-skip-permissions`) is answered by
+`hook_invocations` and `hook_blocked_count`; question 2 (is `.claude/commands` re-read
+mid-session) by `custom_command_honoured`; question 3 (does a local-command turn close)
+by the phase's `terminated_on`; question 4 (does `--settings` perturb the surface) by
+`spawn_shape` beside `settings_content`.
