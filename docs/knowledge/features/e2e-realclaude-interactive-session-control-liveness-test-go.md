@@ -67,6 +67,17 @@
   namespace. Zero production files touched. See
   [`codebase/1153.md`](../codebase/1153.md).
 
+  **Known gap (found reviewing #2250, not fixed there): the `protocol.TypeRateLimited` arm of
+  `drainForCompletedTurn` can false-red since `internal/streamsup`'s rate-limit gate grew a falling
+  edge.** The arm accepts only the one non-benign status on record and `Fatalf`s on anything else, on
+  the premise that a live run observes at most one `rate_limited` reading. A falling edge — the
+  producer publishing a *benign* reading after a non-benign one on the same parser — can now reach it
+  across a mid-session child respawn, and a benign status hits the fatal branch with a message that
+  points at the wrong cause. Reproducing it needs a warning-band account plus a mid-session respawn, a
+  combination no committed capture produces, so this is a named risk rather than an observed failure;
+  see [streamsup-package-system-thinking-tokens-turnevent-thinkingpro.md](streamsup-package-system-thinking-tokens-turnevent-thinkingpro.md)
+  for the producer-side gate.
+
 - `interactive_stream_modal_resolution_test.go` (#1154) — the stream-json
   **sibling** of #1030's `TestInteractiveModalResolution`, not a replacement:
   #1030 proves the same answer round-trip under the default PTY runner; this

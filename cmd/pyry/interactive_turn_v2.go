@@ -427,7 +427,11 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// ahead of the report. Like turn_state this flows through emit() and is NOT
 		// a droppable delta (the droppable set is assistant_delta only, #610), so it
 		// holds a queue slot; that is bounded by the producer rather than here —
-		// emitRateLimit's gate fires at most once per run.
+		// emitRateLimit's gate emits at most once per rate_limit_event line, and
+		// claude sends one per run. Since #2250 that gate publishes a benign reading
+		// as well, when one follows a non-benign one, so a run can carry the clear as
+		// well as the warning; the per-line ceiling is what bounds the queue and it
+		// did not move.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ModelAnnounced:

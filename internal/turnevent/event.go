@@ -935,10 +935,22 @@ type ThinkingProgress struct {
 	EstimatedTokensDelta int
 }
 
-// RateLimited reports that claude's usage-limit window is in a state other than
-// the one measured-benign one. It maps claude's top-level rate_limit_event line
-// (#1404) — the fifth claude line-type the parser translates rather than drops,
-// and the first that is not a `system` subtype.
+// RateLimited reports a reading of claude's usage-limit window that the producer's
+// gate judged worth repeating: the window entering a state other than the one
+// measured-benign one, and — since #2250 — its RETURN to that benign state after
+// such a reading. It maps claude's top-level rate_limit_event line (#1404) — the
+// fifth claude line-type the parser translates rather than drops, and the first that
+// is not a `system` subtype.
+//
+// SO A RateLimited MAY CARRY THE BENIGN STATUS, which reads as a contradiction in
+// the name and is the one thing about this variant worth knowing before the fields.
+// It is the FALLING EDGE, and it exists because the gate's silence on the benign
+// reading was unconditional: a consumer that lit something on a warning had no event
+// that ever took it down. No second variant was minted for it and no daemon-computed
+// boolean marks it, because every field here is claude's and the benign Status IS
+// the discriminator — see Status. The edge is per-PARSER state, so a consumer must
+// not assume one arrives: a session rotation mints a fresh parser, and a warning
+// raised before one is never cleared by an event.
 //
 // It exists so a turn that stops making progress because of a usage limit is
 // representable inside the daemon at all. Until #1404 the line was dropped whole
@@ -947,13 +959,14 @@ type ThinkingProgress struct {
 // The NAME is the daemon's, not claude's, for the reason BackgroundTaskStarted's
 // doc gives — and, as with BackgroundTaskRoster, the translation earns more here
 // than insulation from a rename. claude emits rate_limit_event ONCE PER RUN
-// whatever the window's state (status reads "allowed" in every committed record but
-// one, i.e. almost every run that produced one hit no limit at all), so a variant
-// called RateLimitEvent or RateLimitStatus would read as a periodic report and
-// invite a consumer to draw one row per healthy turn. This variant fires only
-// when the producer's gate says a limit is in force; the name states that
-// condition, and it sits with the family's other condition-named variants
-// (Stall, Compacting, ApiRetry).
+// whatever the window's state, and almost every run that produced one hit no limit
+// at all, so a variant called RateLimitEvent or RateLimitStatus would read as a
+// periodic report and invite a consumer to draw one row per healthy turn. This
+// variant fires on a CHANGE the gate judged worth repeating and never on the routine
+// benign reading; the name states that condition, and it sits with the family's
+// other condition-named variants (Stall, Compacting, ApiRetry). What the name does
+// NOT state is the falling edge above, and that is the accepted cost of keeping one
+// variant for one line rather than splitting a claude line-type across two.
 //
 // It is a REPORT, never a control input. Nothing in the daemon may key a
 // behaviour on it: no backoff, no throttle, no retry, no turn suspension, no
@@ -992,6 +1005,15 @@ type RateLimited struct {
 	// warning band, against limit_type "seven_day" — and no capture of
 	// a limit actually in force exists. A frame is therefore NOT proof that anything
 	// was blocked: every turn in that capture ran normally.
+	//
+	// SINCE #2250 THE BENIGN VALUE IS ITSELF A READING THIS FIELD CARRIES, and it is
+	// the ONE value a consumer compares against — the falling edge's discriminator,
+	// and the only value measured stable on every claude version on file. That does
+	// not make the field a closed set in the other direction: everything else here
+	// stays an opaque label to render and never to branch on. What the benign value
+	// means on THIS event is bounded too — claude reports one window per line and
+	// chooses which, so a benign reading is claude declining to report a non-benign
+	// window, not evidence that the warned limit lifted.
 	// Carrying claude's raw string is how the rest of that
 	// set gets measured the first time a real limit fires, instead of the daemon
 	// inventing an enum it has no evidence for — so a plain string rather than a
@@ -1004,6 +1026,12 @@ type RateLimited struct {
 	// type called RateLimited stutters; the daemon's snake_case name for
 	// TruncatedFields purposes is "limit_type". A plain string, not a closed enum,
 	// for Status's reason.
+	//
+	// THE FALLING EDGE NAMES A DIFFERENT LIMIT THAN THE WARNING IT CLEARS, and this
+	// is the field's own trap since #2250. Every benign reading on record says
+	// "five_hour" and every warning says "seven_day", so a consumer that keys a
+	// banner by this value never matches the event that takes it down. Key the
+	// banner on the conversation, not on the limit.
 	LimitType string
 	// ResetsAt is when claude says the limit lifts, as UNIX SECONDS. 0 when claude
 	// did not report it — and the event still fires, because absence of the detail
@@ -1032,7 +1060,10 @@ type RateLimited struct {
 	// meaningful reading — a fresh window — so folding the two would present an
 	// untouched quota as an exhausted one. That is the measured case rather than a
 	// hypothetical: every committed record carrying the benign status omits this key,
-	// and the single record that carries it is the single non-benign one.
+	// and the single record that carries it is the single non-benign one. Since #2250
+	// that measurement has a consequence rather than only a shape: the falling edge
+	// carries the benign reading's fields, so a consumer expecting the clear to say
+	// "now 40% spent" gets nil and must degrade rather than render a number.
 	//
 	// It is CLAUDE's number and it is unvalidated in BOTH directions, exactly as
 	// ResetsAt is. NOT a bounded fraction: a consumer must not assume it lies in

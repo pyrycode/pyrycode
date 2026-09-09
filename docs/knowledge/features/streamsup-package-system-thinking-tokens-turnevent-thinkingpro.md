@@ -16,7 +16,8 @@ See [codebase/1385.md](../codebase/1385.md).
 **`rate_limit_event` → `turnevent.RateLimited` is the fifth mapping, the first that is not a `system`
 subtype, and its substance is a gate rather than the field copy (#1404).** claude emits this line **once
 per run** whatever the state of the usage-limit window. `status` is the discriminator, with three
-reachable readings, all decided and stated at `emitRateLimit`: (1) `status ==
+reachable readings as of #1404 (a fourth was added by #2250, below), all decided and stated at
+`emitRateLimit`: (1) `status ==
 benignRateLimitStatus` ("allowed") → silence; (2) `status` non-empty and not the benign value → one
 `RateLimited`, because the failure direction is the safe one — an unrecognised status surfaces and a human
 looks, rather than a real limit vanishing; (3) `rate_limit_info` absent, present-but-empty, or the line
@@ -60,7 +61,54 @@ actually needs survives unweakened: **no capture shows a limit actually in force
 `allowed_warning`, a warning band, never a hard block), which is why the rung is unchanged and only the
 sentence describing it moved. Following `compactionPinnedShapes`' own corrected-note precedent, the
 replacement carries no new count to go stale on the next capture — a statement of shape (benign in every
-record but one) rather than a number.
+record but one) rather than a number. **That precedent itself proved fragile: #2250's own attempt to
+restate this tally landed wrong** (a verifier re-measurement found more `allowed_warning` records than the
+branch's comment claimed, two of them missed because they store the line as a JSON string under `payload`
+rather than a nested object, undercounting any census that walks only the decoded shape) — left uncorrected
+as non-blocking, since the paragraph's own rule is to give no number at all. Treat any specific count
+in this area's comments as provisional; the shape claim (benign except a warning band, never a limit
+actually in force) is the only part worth trusting without re-deriving it.
+
+**The gate gained a fourth reading, a falling edge, in #2250: `status == benignRateLimitStatus` *with* a
+non-benign reading having preceded it on the same parser → one `RateLimited`, carrying the benign reading's
+own fields, never the remembered non-benign one's.** The state is one unexported `Parser` bool,
+`rateLimitNonBenign` — opened by a non-benign reading, closed immediately before the emit it triggers,
+which is what makes the edge fire once rather than on every benign line after it. Without it, the reading
+that would clear a quota banner was dropped by the very rung that suppresses the routine benign one, so a
+client that lit a warning on `allowed_warning` had nothing that ever took it down. See
+[protocol-package-rate-limited-event-payload.md](protocol-package-rate-limited-event-payload.md) for the
+two measured client-facing consequences (the clearing frame names a different `limit_type` and carries no
+`utilization`).
+
+**It is the first piece of cross-line `Parser` state that `consumeLine`'s single reset point deliberately
+does not clear, and the reason generalises beyond this field.** `compacting`'s published falling edge is
+the near analogue in shape — parser-held, publish-then-close — but not in reset: `compacting` clears at the
+`result` arm because a compaction and the frame reporting it land inside the same turn. `rate_limit_event`
+fires once per *run*, so the two readings this latch relates are separated by at least one `result` line
+and usually a whole child respawn; clearing at the turn boundary would retire the latch before the reading
+that needs it ever arrived. The lesson for the next parser-held edge: whether the reset point applies is a
+question about the *spacing* of the two readings relative to that reset, not about whether an edge-pair
+precedent exists. The residual here is bounded by the *next reading* rather than by any reset — a child
+that dies with the latch open costs at most one extra benign frame on the next `allowed` reading, which
+describes a window claude has just reported rather than a stale one.
+
+**Testing lesson: an edge can be composed from captures of its endpoints even when no capture of the edge
+itself can be produced on demand.** No account can be made to cross a warning band and back inside one
+run, so there is no single fixture for this falling edge. `internal/streamsup`'s `capturedInitialize` arm
+family already held one record carrying the warning reading (plus a `result` line later in the same
+record) and further arms each carrying one benign reading; feeding several arms' lines through one
+`Parser` in sequence is still a replay of claude's own bytes, not a hand-built payload. The closed arm
+selector (`initCaptureArms`) is what keeps it that way — a composing helper that took a path instead of
+arm names would let a hand-built file slip in behind the provenance assertions.
+
+**Known gap, found by review, left open by scope rather than fixed: `internal/e2e/realclaude`'s
+`interactive_stream_liveness_test.go` drain can false-red on this edge.** Its `protocol.TypeRateLimited`
+arm was written to accept only the one non-benign status on record and fail on anything else, on the
+premise that a live run observes at most one reading. That held before #2250: it does not hold across a
+mid-session child respawn, which the falling edge can cross, so a run that respawns while the account sits
+in a warning band can deliver a *benign*-status falling-edge frame to that arm and hit its fatal branch —
+a live-gate red pointing at a constant that is fine. Triggering it needs a warning-band account plus a
+mid-session respawn, a combination no committed capture produces, so this is named rather than fixed.
 
 **`system/init` → `turnevent.ModelAnnounced` is the sixth mapping, a fifth `system` subtype, and the
 first that reports what the daemon itself ASKED FOR versus what claude actually RAN (#1600).** The

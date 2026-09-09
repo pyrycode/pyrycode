@@ -584,10 +584,16 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		//
 		// Every field crosses VERBATIM and nothing is invented: this is translation,
 		// not policy. The decision "is this worth telling a person" was already made
-		// upstream by emitRateLimit's three-rung gate (a benign status produces no
-		// event at all), so a second, differently-shaped filter here would silently
-		// diverge from the producer's — the hazard the ThinkingProgress arm above
-		// names. Hence no filtering, no defaulting, and specifically:
+		// upstream by emitRateLimit's four-rung gate, so a second, differently-shaped
+		// filter here would silently diverge from the producer's — the hazard the
+		// ThinkingProgress arm above names. That gate is a STATE MACHINE rather than a
+		// per-line test since #2250: a benign status is silent on its own but IS
+		// published when it follows a non-benign reading, which is the falling edge a
+		// client clears a quota banner on. So the arm that looks most droppable here is
+		// the one that must not be dropped, and a filter added here on the benign value
+		// would delete the clear while leaving the warning — the exact defect #2250
+		// fixed, restored one layer down. Hence no filtering, no defaulting, and
+		// specifically:
 		//
 		//   - ResetsAt is NOT clamped or range-checked in either direction. It is
 		//     claude's number, not the daemon's clock: not necessarily in the future,
@@ -622,7 +628,9 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 		// Status is the one field that says WHY the report fired, and the producer's
 		// gate is deliberately loud in that direction — any non-benign status emits,
 		// so an unrecognised one surfaces and a human looks. Dropping it here would
-		// silence that one layer later.
+		// silence that one layer later, and since #2250 it would also leave the
+		// falling edge indistinguishable from the warning: the benign value IS the
+		// client's discriminator for the clear, no daemon-computed flag marking it.
 		return protocol.TypeRateLimited, protocol.RateLimitedPayload{
 			ConversationID:  tc.ConversationID,
 			Status:          e.Status,

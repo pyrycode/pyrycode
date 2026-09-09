@@ -138,6 +138,32 @@ func capturedRateLimitInfos(t *testing.T, arm string) []capturedRateLimitInfo {
 	return out
 }
 
+// capturedLineTypeIndexes re-derives WHERE in one arm's recorded stdout the lines of
+// a given top-level type sit, from each line's own envelope.
+//
+// Positions rather than a count, because the two callers below need an ORDER between
+// two different types — a reading and the turn boundary that follows it — and a pair
+// of counts cannot express that. Same re-derivation discipline capturedRateLimitInfos
+// applies to the readings themselves: what is asserted about the record is measured
+// from the record.
+func capturedLineTypeIndexes(t *testing.T, arm, typ string) []int {
+	t.Helper()
+
+	var out []int
+	for i, line := range capturedInitializeStdoutLines(t, arm) {
+		var envelope struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &envelope); err != nil {
+			t.Fatalf("%s: a captured line does not decode as JSON: %v", initCapturePath(arm), err)
+		}
+		if envelope.Type == typ {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // replayInitializeCapture feeds every line of one arm through ONE parser, in the
 // order claude wrote them, and returns the usage-limit events it emitted beside the
 // count of turnevent.Unrecognized the same replay produced.
@@ -149,6 +175,26 @@ func capturedRateLimitInfos(t *testing.T, arm string) []capturedRateLimitInfo {
 // than the one line under test.
 func replayInitializeCapture(t *testing.T, arm string) (rateLimited []turnevent.RateLimited, unrecognized int) {
 	t.Helper()
+	return replayInitializeCaptures(t, arm)
+}
+
+// replayInitializeCaptures is the SAME replay over several arms in sequence, and it
+// is the whole of #2250's fixture: one parser, several records' lines fed through it
+// in the order given.
+//
+// It exists because no capture of a FALLING EDGE can be taken. That would need an
+// account crossing a warning band and back inside one run, and claude reports the
+// window once per run — so the sequence is COMPOSED from committed single-reading
+// records instead. That is composition of captured bytes, not a hand-built payload:
+// every line still comes from capturedInitializeStdoutLines, and the arm names still
+// come from initCaptureArms' closed set. Deliberately NOT grown a path parameter,
+// which is the one change that would put a hand-built file behind the provenance
+// assertions capturedInitialize exists to enforce.
+//
+// The single-arm form above delegates here so there is ONE replay implementation and
+// a change to it cannot make the two disagree.
+func replayInitializeCaptures(t *testing.T, arms ...string) (rateLimited []turnevent.RateLimited, unrecognized int) {
+	t.Helper()
 
 	sink := func(ev turnevent.Event) {
 		switch e := ev.(type) {
@@ -159,9 +205,11 @@ func replayInitializeCapture(t *testing.T, arm string) (rateLimited []turnevent.
 		}
 	}
 	p := NewParser(sink, discardLogger())
-	for _, line := range capturedInitializeStdoutLines(t, arm) {
-		if _, err := p.Write(append(bytes.Clone(line), '\n')); err != nil {
-			t.Fatalf("%s: Write err = %v, want nil", initCapturePath(arm), err)
+	for _, arm := range arms {
+		for _, line := range capturedInitializeStdoutLines(t, arm) {
+			if _, err := p.Write(append(bytes.Clone(line), '\n')); err != nil {
+				t.Fatalf("%s: Write err = %v, want nil", initCapturePath(arm), err)
+			}
 		}
 	}
 	return rateLimited, unrecognized
@@ -299,6 +347,109 @@ func TestParser_RateLimitBenignCaptureArmsReportNoUtilization(t *testing.T) {
 	if benign != 3 {
 		t.Errorf("swept %d benign arms, want 3 — a control over fewer proves less than it claims "+
 			"about the warning arm's count", benign)
+	}
+}
+
+// TestParser_RateLimitFallingEdgeAcrossComposedCaptures is #2250's first three
+// criteria in one pass over nothing but committed bytes: a non-benign reading, a
+// turn boundary, then two benign readings, all through ONE parser.
+//
+// THE SEQUENCE IS COMPOSED, NOT CAPTURED, and the distinction is the fixture's whole
+// design — see replayInitializeCaptures. The three arms are chosen for what their
+// records already contain rather than for variety: the base arm carries the single
+// allowed_warning reading on record and a result line LATER IN THE SAME RECORD, and
+// each benign arm carries exactly one allowed reading. So base -> benign -> benign
+// replays warning, boundary, clear, silence.
+//
+// EVERY PREMISE IS RE-DERIVED FROM THE RECORDS' OWN BYTES, and three of them exist
+// to stop the conclusion passing vacuously. The boundary must sit AFTER the reading
+// in the base arm, or the turn-boundary criterion is asserted over a record where no
+// boundary intervened. The two arms' limit types must DIFFER, or the assertion that
+// the clearing event carries the clearing reading's fields — rather than the
+// remembered warning's — compares two equal values and cannot fail. And the warning
+// reading must carry a utilization while the clearing one does not, for the same
+// reason one field further on.
+func TestParser_RateLimitFallingEdgeAcrossComposedCaptures(t *testing.T) {
+	t.Parallel()
+
+	const (
+		warnArm  = initCaptureArmBase
+		clearArm = initCaptureArmBeforeFirstTurn
+		quietArm = initCaptureArmAfterCompletedTurn
+	)
+
+	warned := capturedRateLimitInfos(t, warnArm)
+	if len(warned) != 1 || warned[0].Status == benignRateLimitStatus {
+		t.Fatalf("%s: the record holds %d rate_limit_event lines and the first reads status %q, want "+
+			"exactly 1 carrying a NON-benign status — this arm is the falling edge's opening reading",
+			initCapturePath(warnArm), len(warned), warned[0].Status)
+	}
+	readings := capturedLineTypeIndexes(t, warnArm, "rate_limit_event")
+	boundaries := capturedLineTypeIndexes(t, warnArm, "result")
+	if len(boundaries) == 0 || boundaries[len(boundaries)-1] < readings[0] {
+		t.Fatalf("%s: the record's result lines sit at %v and its reading at %v — no turn boundary "+
+			"follows the reading, so a replay of this arm cannot say a boundary failed to clear the latch",
+			initCapturePath(warnArm), boundaries, readings[0])
+	}
+
+	cleared := capturedRateLimitInfos(t, clearArm)
+	if len(cleared) != 1 || cleared[0].Status != benignRateLimitStatus {
+		t.Fatalf("%s: the record holds %d rate_limit_event lines and the first reads status %q, want "+
+			"exactly 1 carrying the benign %q — this arm is the falling edge itself",
+			initCapturePath(clearArm), len(cleared), cleared[0].Status, benignRateLimitStatus)
+	}
+	if quiet := capturedRateLimitInfos(t, quietArm); len(quiet) != 1 || quiet[0].Status != benignRateLimitStatus {
+		t.Fatalf("%s: want exactly 1 rate_limit_event carrying the benign %q — this arm is the SECOND "+
+			"benign reading, and the fire-once claim is empty if it carries none",
+			initCapturePath(quietArm), benignRateLimitStatus)
+	}
+	if cleared[0].LimitType == warned[0].LimitType {
+		t.Fatalf("both arms name limit_type %q, so asserting the clearing event carries the clearing "+
+			"reading's value cannot distinguish it from the remembered warning's. On record these differ "+
+			"(seven_day against five_hour), which is itself a client-visible fact", cleared[0].LimitType)
+	}
+	if warned[0].Utilization == nil || cleared[0].Utilization != nil {
+		t.Fatalf("the warning reading's utilization is %v and the clearing one's is %v, want a value "+
+			"then an absence — every benign record on file omits the key, and the pair is what makes "+
+			"the nil assertion below a measurement rather than a coincidence",
+			warned[0].Utilization, cleared[0].Utilization)
+	}
+
+	got, unrecognized := replayInitializeCaptures(t, warnArm, clearArm, quietArm)
+	if unrecognized != 0 {
+		t.Errorf("the composed replay produced %d turnevent.Unrecognized events, want 0", unrecognized)
+	}
+	if len(got) != 2 {
+		t.Fatalf("the composed replay produced %d RateLimited events, want exactly 2 — the warning, "+
+			"then the falling edge on the FIRST benign reading and nothing on the second\n%+v", len(got), got)
+	}
+
+	if got[0].Status != warned[0].Status {
+		t.Errorf("the first event's status is %q, want the warning arm's own %q", got[0].Status, warned[0].Status)
+	}
+	edge := got[1]
+	if edge.Status != cleared[0].Status {
+		t.Errorf("the falling edge's status is %q, want claude's own %q verbatim — the benign value IS "+
+			"the client's discriminator, so a daemon-chosen label here would be unreadable",
+			edge.Status, cleared[0].Status)
+	}
+	if edge.LimitType != cleared[0].LimitType {
+		t.Errorf("the falling edge's limit_type is %q, want the CLEARING reading's %q. %q is the "+
+			"remembered warning's, and republishing it would describe a window claude did not report",
+			edge.LimitType, cleared[0].LimitType, warned[0].LimitType)
+	}
+	if edge.ResetsAt != cleared[0].ResetsAt {
+		t.Errorf("the falling edge's resets_at is %d, want the clearing reading's %d (the warning's was %d)",
+			edge.ResetsAt, cleared[0].ResetsAt, warned[0].ResetsAt)
+	}
+	if edge.Utilization != nil {
+		t.Errorf("the falling edge carries utilization %v, want nil — the clearing reading omits the "+
+			"key, and carrying the warning's %v forward would tell a client the window is still 94%% spent",
+			*edge.Utilization, *warned[0].Utilization)
+	}
+	if edge.TruncatedFields != nil {
+		t.Errorf("the falling edge reports %v truncated, want nil — no captured value is near its cap",
+			edge.TruncatedFields)
 	}
 }
 
