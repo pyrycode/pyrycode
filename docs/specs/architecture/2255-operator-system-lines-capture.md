@@ -531,3 +531,84 @@ the record is built to answer them rather than to assume them. Question 1 (does 
 mid-session) by `custom_command_honoured`; question 3 (does a local-command turn close)
 by the phase's `terminated_on`; question 4 (does `--settings` perturb the surface) by
 `spawn_shape` beside `settings_content`.
+
+### 2026-09-09 (rework) — the commands_changed witness is read from the wire, and a measured-impossible trigger is a finding
+
+The first live lap ran the whole session green on everything except one row.
+`make e2e-realclaude` executed 1126 tests, and
+`TestRealClaude_OperatorSystemLinesCapture` failed by design: `commands_changed` had
+neither a captured line nor a witnessed trigger, so the run refused to publish a rig
+failure as an absence and the fixture was not promoted. Three of the four subtypes had
+already answered.
+
+**What the lap measured.** `informational` was OBSERVED — one verbatim line, decoding
+into `streamLine`, `message` absent, keys `content`, `level`, `prevent_continuation`,
+`session_id`, `subtype`, `type`, `uuid`. That also answers open question 1: a
+`UserPromptSubmit` hook does run under `--dangerously-skip-permissions`, two
+invocations with verdicts `[blocked passed]`, and the child answered the next unmarked
+turn. `local_command_output` was unobserved with its trigger witnessed as fired, which
+is a valid finding for #2257. `notification` was unobserved with no trigger, as
+designed.
+
+**The defect, and it is the rig's.** `oslcapInitSlashCommands` returned the FIRST
+`system/init` line's inventory and every caller read it, including the
+`commands_changed` witness. So `probe_command_in_init_inventory` asked what the session
+knew BEFORE the rig wrote anything — false by construction however claude behaves — and
+the only remaining witness was `custom_command_honoured`, a stochastic read of model
+prose that came back false. The record's own census shows what was thrown away:
+`system/init: 4` across four turns. Claude re-broadcasts the full slash-command
+inventory on EVERY turn, so whether a mid-session file write reached the inventory was
+sitting on the wire in two post-write init lines that the rig never read.
+
+**What changed.** `oslcapInitInventories` reads every init line in a half-open window;
+`oslcapInitSlashCommands` is now the first-line case of it, which is still correct for
+the local-command witness because that one does ask about the pre-write state. The rig
+snapshots a pre-write baseline before touching the workdir and, after the two turns
+that follow, compares every post-write init inventory against it. `TriggerFired` for
+`commands_changed` now turns on a wire measurement — the probe present in a post-write
+inventory, or the inventory differing from the baseline at all — with
+`custom_command_honoured` kept as a second and independent fabric rather than the only
+one. `oslcapSameInventory` is order-insensitive so a reordering cannot manufacture the
+witness.
+
+**The design change under it.** A trigger that did not fire was one verdict and is now
+two. The rig failing to perform a trigger says nothing about claude and must refuse
+promotion. The rig performing it correctly and MEASURING that the mechanism has no
+effect is a finding of exactly the kind this ticket commissions, and refusing
+promotion for it parks the capture forever on a mechanism that will never work while
+taking down the three subtypes that did answer. `oslcapSubtype.TriggerCouldNotFire`
+carries the second, `finish` counts it as conclusive, and its note places it in the
+same standing as `notification` — no known trigger — reached by measurement rather than
+by assumption. The guard against that becoming a loophole is a three-part condition:
+the rig wrote the file, claude re-broadcast the inventory at least once afterwards so a
+measurement EXISTS, and that measurement says the write did not reach it. Zero
+post-write init lines is still INCONCLUSIVE and still refuses promotion.
+
+**AC 4 is served more directly, not less.** It asks for "an unobserved record naming
+the trigger attempted and the witness that that trigger fired". The witness is now the
+session's own re-broadcast inventory rather than an inference from whether a later turn
+was honoured, and AC 1's "a slash-command inventory that changes mid-session" is
+measured as the words say rather than proxied.
+
+**The three verifier NITs are fixed in the same commit**, since all three sit in the
+code this rework touches. The inventory phase records `Sent: false` — nothing was
+written to the child there, the trigger was a file appearing on disk. `oslcapAwaitInit`
+waits on an init line's presence rather than a non-empty inventory, and is called after
+a turn has been sent rather than at spawn, where it could only ever time out its whole
+budget and then record init as unobserved beside a 50-command inventory read from the
+same session — which is what the lap recorded. `oslcapCollect` states the equivalence
+between the two index spaces its phase attribution compares, and names
+`lines_dropped_over_cap` as the field that tells a reader when it no longer holds.
+
+**Tests.** Three new offline tests and two extended ones, 103 subtests from 84, none
+skipped: `TestOslcapInitInventoriesReadsEveryInitLine` (with the non-vacuity row a
+first-line-only helper still passes), `TestOslcapSameInventoryIgnoresOrder`,
+`TestOslcapCommandsChangedVerdictNeedsAPostWriteMeasurement` (six rows over
+`oslcapSubtypeRecords`, including the no-measurement row that must stay inconclusive),
+plus the measured-impossible arm in the subtype-verdict table and both a promoting and
+a still-refusing row in `TestOslcapFixtureWorthyRefusesEveryBadCapture`.
+
+**Open question 2 is now answerable either way.** Whether claude re-reads
+`.claude/commands` mid-session is read from `probe_in_post_write_inventory` beside
+`inventory_changed_mid_session`, and a false pair is a measured answer rather than a
+rig failure. Questions 1, 3 and 4 are answered by the first lap's record.

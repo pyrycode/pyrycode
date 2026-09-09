@@ -596,12 +596,26 @@ func oslcapTopLevelKeys(raw []byte) []string {
 	return keys
 }
 
-// oslcapInitSlashCommands returns the first system/init line's slash-command
-// inventory. It is the claude-side half of the /cost trigger's witness: a command
-// absent from this list is one the session does not know, and a turn naming it would
-// be answered as prose.
-func oslcapInitSlashCommands(lines []dropcapCaptured) []string {
-	for _, c := range lines {
+// oslcapInitInventories returns the slash-command inventory carried by EVERY
+// system/init line in the half-open window [from, to), oldest first.
+//
+// Claude re-emits an init line PER TURN on this input path rather than once per
+// session — the 2026-09-09 live lap saw four of them across four turns — so the
+// slash-command inventory is re-broadcast on every turn and a mid-session change to
+// it is visible on the wire. Reading only the first init line, which is what this
+// helper replaced, throws that away: it makes "is the probe command in the inventory"
+// a question about the session's STATE BEFORE the rig acted, which is false by
+// construction however claude behaves. That is the miss the first live lap paid for.
+func oslcapInitInventories(lines []dropcapCaptured, from, to int) [][]string {
+	if from < 0 {
+		from = 0
+	}
+	if to > len(lines) {
+		to = len(lines)
+	}
+	out := [][]string{}
+	for i := from; i < to; i++ {
+		c := lines[i]
 		if !c.Decoded || c.Type != "system" || c.Subtype != "init" {
 			continue
 		}
@@ -611,9 +625,46 @@ func oslcapInitSlashCommands(lines []dropcapCaptured) []string {
 		if err := json.Unmarshal(c.Raw, &init); err != nil {
 			continue
 		}
-		return init.SlashCommands
+		out = append(out, init.SlashCommands)
+	}
+	return out
+}
+
+// oslcapInitSlashCommands returns the FIRST system/init line's slash-command
+// inventory. It is the claude-side half of the local-command trigger's witness: a
+// command absent from this list is one the session does not know, and a turn naming
+// it would be answered as prose.
+//
+// The first line specifically, because that witness asks what the session knew
+// before the rig touched anything. The commands_changed witness asks the opposite
+// question and reads oslcapInitInventories over a post-write window instead.
+func oslcapInitSlashCommands(lines []dropcapCaptured) []string {
+	if invs := oslcapInitInventories(lines, 0, len(lines)); len(invs) > 0 {
+		return invs[0]
 	}
 	return nil
+}
+
+// oslcapSameInventory reports whether two slash-command inventories hold the same
+// set of names. Order-insensitive on purpose: the question the commands_changed
+// witness asks is whether the CONTENTS moved, and claude is under no obligation to
+// serialise the list in a stable order between turns. Treating a reordering as a
+// change would manufacture the very witness this rig has to earn.
+func oslcapSameInventory(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	seen := make(map[string]int, len(a))
+	for _, s := range a {
+		seen[s]++
+	}
+	for _, s := range b {
+		seen[s]--
+		if seen[s] < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // oslcapAssistantLines counts the assistant lines in the half-open window [from, to).
@@ -683,15 +734,23 @@ func oslcapAwaitQuietTurn(recorder *dropcapRecorder, wantResults, sentAt int, qu
 	}
 }
 
-// oslcapAwaitInit polls for the session's system/init line, which carries the
-// slash-command inventory the /cost witness reads. Waiting for it rather than
-// snapshotting whenever the first send happens to finish is what keeps that witness
-// from being a race.
+// oslcapAwaitInit polls for a system/init line carrying a slash-command inventory.
+//
+// It is called AFTER a turn has been sent, never before one. Claude emits init per
+// turn on this input path, so a poll that starts at spawn observes nothing, times
+// out its whole budget and then records init as unobserved while the line is sitting
+// in the very next phase's window — which is what the 2026-09-09 lap recorded, with
+// init_observed false beside a 50-command inventory read from the same session.
+//
+// The emptiness arm is deliberate and is NOT the same as waiting on a non-empty
+// inventory: an init line carrying an empty slash_commands array HAS been observed,
+// and reporting it as unobserved would make the field name promise more than it
+// measures. The count is carried separately for that reason.
 func oslcapAwaitInit(recorder *dropcapRecorder, within time.Duration) bool {
 	deadline := time.Now().Add(within)
 	for {
 		lines, _ := recorder.snapshot()
-		if len(oslcapInitSlashCommands(lines)) > 0 {
+		if len(oslcapInitInventories(lines, 0, len(lines))) > 0 {
 			return true
 		}
 		if time.Now().After(deadline) {
@@ -769,8 +828,22 @@ type oslcapSubtype struct {
 	Trigger        string `json:"trigger"`
 	TriggerWitness string `json:"trigger_witness"`
 	TriggerFired   bool   `json:"trigger_fired"`
-	Conclusive     bool   `json:"conclusive"`
-	Note           string `json:"note"`
+
+	// TriggerCouldNotFire is the third reading, and separating it from the second is
+	// what the 2026-09-09 lap forced. A trigger that did not fire is TWO different
+	// things: the rig failed to perform it, which is a defect and says nothing about
+	// claude; or the rig performed it correctly and MEASURED that the mechanism has no
+	// effect on the surface it targets, which is a finding about claude of exactly the
+	// kind this ticket commissions. Collapsing the second into the first parks the
+	// capture forever on a mechanism that will never work, and takes the subtypes that
+	// DID answer down with it.
+	//
+	// It is set only where the measurement itself was taken — see the commands_changed
+	// row in oslcapSubtypeRecords for the three-part condition. An unmeasured miss
+	// stays in the default arm, which is what keeps this from being a loophole.
+	TriggerCouldNotFire bool   `json:"trigger_could_not_fire"`
+	Conclusive          bool   `json:"conclusive"`
+	Note                string `json:"note"`
 }
 
 // finish fills Conclusive and Note from what has been measured. An empty Trigger
@@ -780,7 +853,7 @@ func (s *oslcapSubtype) finish() {
 	if s.FrameIndices == nil {
 		s.FrameIndices = []int{}
 	}
-	s.Conclusive = s.Observed || s.TriggerFired
+	s.Conclusive = s.Observed || s.TriggerFired || s.TriggerCouldNotFire
 	switch {
 	case s.Observed:
 		s.Note = fmt.Sprintf("observed: %d line(s) at frame indices %v, carried verbatim in frames. "+
@@ -794,6 +867,13 @@ func (s *oslcapSubtype) finish() {
 		s.Note = fmt.Sprintf("unobserved with the trigger WITNESSED as fired (%s): claude sent no such "+
 			"line on this session, so this is a finding about claude and the mapping ticket drops the "+
 			"subtype rather than inventing its fields", s.TriggerWitness)
+	case s.TriggerCouldNotFire:
+		s.Note = fmt.Sprintf("unobserved because the trigger COULD NOT fire, measured rather than "+
+			"assumed (%s): the rig performed the trigger correctly and the session shows the mechanism "+
+			"had no effect on the surface it targets, so this subtype has no known trigger on this "+
+			"input path — the same standing as the row with no trigger at all, reached by measurement. "+
+			"A mapping ticket must not read this as claude never sending one; it says only that "+
+			"nothing reachable from here provokes it", s.TriggerWitness)
 	default:
 		s.Note = fmt.Sprintf("INCONCLUSIVE: the trigger did not fire (%s), so this run says nothing "+
 			"about claude either way. This is the rig failing to provoke the thing it meant to measure, "+
@@ -827,20 +907,36 @@ type oslcapRecord struct {
 
 	// The trigger witnesses. Without these an unobserved row cannot tell "claude sent
 	// nothing" from "the trigger never fired", and only the first is a result.
-	InitObserved                bool     `json:"init_observed"`
-	HookInvocations             int      `json:"hook_invocations"`
-	HookBlockedCount            int      `json:"hook_blocked_count"`
-	HookVerdicts                []string `json:"hook_verdicts"`
-	ChildAliveAfterBlock        bool     `json:"child_alive_after_block"`
-	SlashCommandCountAtInit     int      `json:"slash_command_count_at_init"`
-	LocalCommandChosen          string   `json:"local_command_chosen"`
-	LocalCommandCandidates      []string `json:"local_command_candidates"`
-	LocalCommandInInventory     bool     `json:"local_command_in_inventory"`
-	ProbeCommandInInitInventory bool     `json:"probe_command_in_init_inventory"`
-	LocalCommandTurnLines       int      `json:"local_command_turn_lines"`
-	LocalCommandTurnAssistant   int      `json:"local_command_turn_assistant_lines"`
-	CommandFileBytes            int      `json:"command_file_bytes"`
-	CustomCommandHonoured       bool     `json:"custom_command_honoured"`
+	InitObserved              bool     `json:"init_observed"`
+	HookInvocations           int      `json:"hook_invocations"`
+	HookBlockedCount          int      `json:"hook_blocked_count"`
+	HookVerdicts              []string `json:"hook_verdicts"`
+	ChildAliveAfterBlock      bool     `json:"child_alive_after_block"`
+	SlashCommandCountAtInit   int      `json:"slash_command_count_at_init"`
+	LocalCommandChosen        string   `json:"local_command_chosen"`
+	LocalCommandCandidates    []string `json:"local_command_candidates"`
+	LocalCommandInInventory   bool     `json:"local_command_in_inventory"`
+	LocalCommandTurnLines     int      `json:"local_command_turn_lines"`
+	LocalCommandTurnAssistant int      `json:"local_command_turn_assistant_lines"`
+	CommandFileBytes          int      `json:"command_file_bytes"`
+	CustomCommandHonoured     bool     `json:"custom_command_honoured"`
+
+	// The commands_changed witness, measured on the wire rather than in model prose.
+	// Claude re-broadcasts the slash-command inventory in an init line every turn, so
+	// whether a mid-session file write reached the inventory is a thing this session
+	// SAYS rather than a thing the rig infers from whether a later turn was honoured.
+	//
+	// PreWrite is the inventory before the rig wrote anything and PostWrite covers
+	// every init line after it. ProbeInPreWriteInventory is expected false and is
+	// carried anyway: a true there would mean the probe name was already taken and
+	// the trigger measured nothing, which is a rig fault the record has to be able to
+	// state.
+	InitLinesObserved          int  `json:"init_lines_observed"`
+	ProbeInPreWriteInventory   bool `json:"probe_in_pre_write_inventory"`
+	PostWriteInitLines         int  `json:"post_write_init_lines"`
+	PostWriteInventorySize     int  `json:"post_write_inventory_size"`
+	ProbeInPostWriteInventory  bool `json:"probe_in_post_write_inventory"`
+	InventoryChangedMidSession bool `json:"inventory_changed_mid_session"`
 
 	// A content-free census of everything else on the wire — AC 4.
 	LineTypeCensus   map[string]int `json:"line_type_census"`
@@ -906,9 +1002,14 @@ func (rec *oslcapRecord) set(outcome, format string, args ...any) {
 	rec.OutcomeDetail = fmt.Sprintf(format, args...)
 }
 
-// unfiredTriggers names the triggered subtypes whose trigger did not fire — the rig
-// failures, and the only thing standing between this run and a promotable fixture
+// unfiredTriggers names the triggered subtypes this run reached no verdict on — the
+// rig failures, and the only thing standing between this run and a promotable fixture
 // once the version and encodings are right.
+//
+// A subtype whose trigger was measured to be INCAPABLE of firing is not one of them.
+// That is a finding about claude, and holding the fixture back for it would park the
+// capture forever on a mechanism that will never work while taking down the subtypes
+// that did answer. See oslcapSubtype.TriggerCouldNotFire.
 func (rec *oslcapRecord) unfiredTriggers() []string {
 	out := []string{}
 	for _, s := range rec.Subtypes {
@@ -930,6 +1031,11 @@ func (rec *oslcapRecord) unfiredTriggers() []string {
 // whose trigger never fired says nothing about claude, and a fixture recording it as
 // "unobserved" would be exactly the confusion this ticket exists to remove.
 //
+// Conclusiveness has THREE ways to be reached, not two, and the third is what the
+// 2026-09-09 live lap forced: a trigger the rig performed correctly and MEASURED to
+// have no effect is a finding, not a rig failure. Only a trigger whose outcome was
+// never measured refuses promotion.
+//
 // The notification row is exempt from that rule and can never be conclusive: it has
 // no trigger, so requiring it would refuse every capture this rig can produce.
 //
@@ -945,7 +1051,7 @@ func (rec *oslcapRecord) fixtureWorthy() (string, bool) {
 			"oslcapFixtureVersion, then re-run", got, oslcapFixtureVersion), false
 	}
 	if unfired := rec.unfiredTriggers(); len(unfired) > 0 {
-		return fmt.Sprintf("%v had no line AND no witnessed trigger, so the record says nothing about "+
+		return fmt.Sprintf("%v had no line AND no measured verdict on their trigger, so the record says nothing about "+
 			"claude for them. Promoting it would publish a rig failure as an absence", unfired), false
 	}
 	// The mapping tickets' readers will read a json-string payload, and
@@ -974,6 +1080,17 @@ func (rec *oslcapRecord) fixtureWorthy() (string, bool) {
 // oslcapCollect builds a frame for every captured line of the four subtypes, and for
 // nothing else: the rest of the session is a content-free census, which is what keeps
 // this fixture readable while still accounting for every line.
+//
+// Phase attribution compares two index spaces that are equal only up to the capture
+// cap, and the equality is stated here because a frame's `phase` is what tells
+// #2256-#2259 which trigger produced a line. A phase's FirstLineIndex is a snapshot
+// slice length; a frame's Index is dropcapCaptured.Index, the recorder's `seen`
+// counter, which keeps counting lines it drops once dropcapMaxCaptureBytes is
+// exceeded. Below that cap nothing is dropped and the two are the same number. Above
+// it they diverge and every attribution here silently shifts — so a run reporting a
+// non-zero lines_dropped_over_cap has unreliable phases, which is why that count is
+// in the record rather than only in a log line. Five short turns do not approach
+// 8 MiB, so this is a bound to know about, not a live defect.
 func oslcapCollect(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor, phases []oslcapPhase) []oslcapFrame {
 	t.Helper()
 	out := []oslcapFrame{}
@@ -1237,11 +1354,6 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 		return p.FirstLineIndex, true
 	}
 
-	// --- preamble: the init line carries the slash-command inventory --------------
-	// Waited for rather than read whenever the first send happens to finish, so the
-	// /cost witness is a measurement and not a race.
-	rec.InitObserved = oslcapAwaitInit(recorder, oslcapInitWait)
-
 	// --- phase 1: the blocked prompt ---------------------------------------------
 	if _, ok := send(oslcapPhaseBlock, oslcapBlockPrompt(nonce), oslcapBlockBudget); !ok {
 		return
@@ -1265,6 +1377,25 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 	livenessLines, _ := recorder.snapshot()
 	rec.ChildAliveAfterBlock = oslcapAssistantLines(livenessLines, livenessFrom, len(livenessLines)) > 0
 
+	// --- the pre-write inventory, read before the rig touches anything ------------
+	// This is the baseline the commands_changed witness is measured against, so it
+	// has to be snapshotted BEFORE the command file exists. It is read here rather
+	// than at spawn because claude emits init per turn: at spawn there is no init
+	// line to read, and polling for one there only burns its whole budget.
+	//
+	// The local-command pick reads the same baseline — that witness asks what the
+	// session knew before the rig acted, which is this list.
+	rec.InitObserved = oslcapAwaitInit(recorder, oslcapInitWait)
+	preWriteLines, _ := recorder.snapshot()
+	writeBoundary := len(preWriteLines)
+	preWriteInventory := oslcapInitSlashCommands(preWriteLines)
+	rec.InitLinesObserved = len(oslcapInitInventories(preWriteLines, 0, writeBoundary))
+	rec.SlashCommandCountAtInit = len(preWriteInventory)
+	rec.LocalCommandChosen, rec.LocalCommandInInventory = oslcapPickLocalCommand(preWriteInventory)
+	// Expected FALSE. A true means the probe name was already taken, so a post-write
+	// hit would prove nothing and the trigger measured a state it did not create.
+	rec.ProbeInPreWriteInventory = oslcapContains(preWriteInventory, oslcapCommandName)
+
 	// --- phase 3: the inventory change -------------------------------------------
 	token := oslcapCommandToken(nonce)
 	commandPath, written, err := oslcapWriteCommandFile(workdir, token)
@@ -1277,9 +1408,13 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 	rec.CommandFilePath = red.str(commandPath)
 	rec.CommandFileContent = red.str(oslcapCommandBody(token))
 
+	// Sent is FALSE, and the phase carries no prompt for the same reason: nothing was
+	// written to the child here. The trigger was a file appearing on disk while the
+	// session was live, and a phase claiming a turn was sent with no prompt to show
+	// for it would misdescribe that to every reader of the committed fixture.
 	inventoryLines, _ := recorder.snapshot()
 	inventory := oslcapPhase{
-		Name: oslcapPhaseInventory, Sent: true, FirstLineIndex: len(inventoryLines),
+		Name: oslcapPhaseInventory, Sent: false, FirstLineIndex: len(inventoryLines),
 	}
 	inventoryStart := time.Now()
 	if tncapAwaitSubtype(recorder, oslcapSubtypeCommandsChanged, oslcapInventoryWatch, tncapResultIsNotTheEnd) {
@@ -1302,15 +1437,8 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 	rec.CustomCommandHonoured = oslcapAssistantCarriesToken(commandLines, commandFrom, token)
 
 	// --- phase 5: the local command ----------------------------------------------
-	// The command is chosen from the session's OWN inventory rather than assumed —
-	// see oslcapLocalCommandCandidates for the measurement behind that.
-	slashCommands := oslcapInitSlashCommands(commandLines)
-	rec.SlashCommandCountAtInit = len(slashCommands)
-	rec.LocalCommandChosen, rec.LocalCommandInInventory = oslcapPickLocalCommand(slashCommands)
-	// Expected FALSE: the command file is written after init. A true here would mean
-	// the inventory was already carrying it, which changes what the trigger measured.
-	rec.ProbeCommandInInitInventory = oslcapContains(slashCommands, oslcapCommandName)
-
+	// The command was chosen from the session's OWN pre-write inventory rather than
+	// assumed — see oslcapLocalCommandCandidates for the measurement behind that.
 	costFrom, ok := send(oslcapPhaseLocalCommand, oslcapSlashPrompt(rec.LocalCommandChosen), oslcapCostBudget)
 	if !ok {
 		return
@@ -1318,6 +1446,28 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 	costLines, _ := recorder.snapshot()
 	rec.LocalCommandTurnLines = len(costLines) - costFrom
 	rec.LocalCommandTurnAssistant = oslcapAssistantLines(costLines, costFrom, len(costLines))
+
+	// --- the post-write inventory: the commands_changed witness -------------------
+	// Read here rather than during the inventory phase because the measurement needs
+	// init lines that only a TURN produces, and phases 4 and 5 have now produced two.
+	// Every init line after the file write is compared against the pre-write baseline;
+	// a probe hit or any set difference means the inventory moved mid-session, which
+	// is the change a commands_changed push would be announcing.
+	//
+	// Both halves are kept because they answer different questions. The probe hit says
+	// the rig's OWN change landed. A set difference says the inventory moved at all,
+	// which covers the case where claude re-scans on some schedule of its own.
+	postInventories := oslcapInitInventories(costLines, writeBoundary, len(costLines))
+	rec.PostWriteInitLines = len(postInventories)
+	for _, inv := range postInventories {
+		rec.PostWriteInventorySize = len(inv)
+		if oslcapContains(inv, oslcapCommandName) {
+			rec.ProbeInPostWriteInventory = true
+		}
+		if !oslcapSameInventory(preWriteInventory, inv) {
+			rec.InventoryChangedMidSession = true
+		}
+	}
 
 	// --- phase 6: settle ---------------------------------------------------------
 	// notification has no trigger, so the only thing that can be done for it is to
@@ -1373,7 +1523,8 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 
 	rec.Subtypes = oslcapSubtypeRecords(rec)
 	if unfired := rec.unfiredTriggers(); len(unfired) > 0 {
-		rec.set(oslcapDidNotFire, "%v had neither a captured line nor a witnessed trigger", unfired)
+		rec.set(oslcapDidNotFire, "%v had neither a captured line nor a measured verdict on their trigger",
+			unfired)
 	} else {
 		observed := []string{}
 		for _, s := range rec.Subtypes {
@@ -1391,23 +1542,30 @@ func TestRealClaude_OperatorSystemLinesCapture(t *testing.T) {
 	// the exposure the deny-scan exists to prevent.
 	//
 	// An unobserved subtype is NOT a failure — it is the result this ticket
-	// commissions. A trigger that did not fire is, because the record then says
-	// nothing about claude for that subtype and a fixture carrying it would publish a
-	// rig failure as an absence.
+	// commissions, and neither is one whose trigger was MEASURED to be incapable of
+	// firing. What fails is a trigger whose outcome was never measured at all, because
+	// the record then says nothing about claude for that subtype and a fixture
+	// carrying it would publish a rig failure as an absence.
 	if unfired := rec.unfiredTriggers(); len(unfired) > 0 {
-		t.Fatalf("#2255: %v had no captured line AND no witnessed trigger, so this run says nothing "+
-			"about claude for them and the fixture was NOT promoted.\n"+
+		t.Fatalf("#2255: %v had no captured line AND no measured verdict on their trigger, so this run "+
+			"says nothing about claude for them and the fixture was NOT promoted.\n"+
 			"  hook: %d invocation(s) %v, %d blocked; child alive after the block: %v\n"+
-			"  inventory: %d bytes written, custom command honoured: %v; init carried %d slash "+
-			"command(s), the chosen local command %q among them: %v, the probe among them: %v\n"+
+			"  inventory: %d bytes written, custom command honoured: %v; the pre-write init carried %d "+
+			"slash command(s) over %d init line(s), the chosen local command %q among them: %v, the "+
+			"probe among them: %v\n"+
+			"  post-write: %d init line(s) re-broadcast an inventory of %d; probe present: %v; "+
+			"inventory differed from the baseline: %v\n"+
 			"  local-command turn: %d line(s), %d of them assistant lines\n"+
 			"  phases: %v\n"+
 			"  line types: %v; tools called: %v; tool_result errors: %d; undecoded: %d\n"+
-			"Read each subtype's note in the record: only a row whose trigger FIRED says anything "+
-			"about claude, and the rest are the rig failing to provoke what it meant to measure",
+			"Read each subtype's note in the record: a row says something about claude only when its "+
+			"trigger FIRED or was measured unable to, and the rest are the rig failing to measure what "+
+			"it meant to. Zero post-write init lines is that failure for commands_changed",
 			unfired, rec.HookInvocations, rec.HookVerdicts, rec.HookBlockedCount, rec.ChildAliveAfterBlock,
 			rec.CommandFileBytes, rec.CustomCommandHonoured, rec.SlashCommandCountAtInit,
-			rec.LocalCommandChosen, rec.LocalCommandInInventory, rec.ProbeCommandInInitInventory,
+			rec.InitLinesObserved, rec.LocalCommandChosen, rec.LocalCommandInInventory,
+			rec.ProbeInPreWriteInventory, rec.PostWriteInitLines, rec.PostWriteInventorySize,
+			rec.ProbeInPostWriteInventory, rec.InventoryChangedMidSession,
 			rec.LocalCommandTurnLines, rec.LocalCommandTurnAssistant, rec.Phases, rec.LineTypeCensus, rec.ToolCalls,
 			rec.ToolResultErrors, rec.UndecodedLines)
 	}
@@ -1452,11 +1610,31 @@ func oslcapSubtypeRecords(rec *oslcapRecord) []oslcapSubtype {
 			Subtype: oslcapSubtypeCommandsChanged,
 			Trigger: "a project slash command written into the workdir's .claude/commands mid-session, " +
 				"then invoked",
-			TriggerWitness: fmt.Sprintf("%d bytes written while the child was live, absent from the "+
-				"init inventory beforehand (%v), and the later invocation was honoured: %v — which is "+
-				"the claude-side half, since a file on disk alone says only that the rig did its part",
-				rec.CommandFileBytes, rec.ProbeCommandInInitInventory, rec.CustomCommandHonoured),
-			TriggerFired: rec.CommandFileBytes > 0 && rec.CustomCommandHonoured,
+			TriggerWitness: fmt.Sprintf("%d bytes written while the child was live and absent from the "+
+				"pre-write inventory of %d (%v); across the %d init line(s) claude re-broadcast after "+
+				"that write the probe was present: %v and the inventory differed from the baseline: %v; "+
+				"the later invocation was honoured: %v",
+				rec.CommandFileBytes, rec.SlashCommandCountAtInit, rec.ProbeInPreWriteInventory,
+				rec.PostWriteInitLines, rec.ProbeInPostWriteInventory, rec.InventoryChangedMidSession,
+				rec.CustomCommandHonoured),
+			// The wire measurement leads and the model-behaviour one backs it: an init
+			// line carrying the probe IS the inventory having changed mid-session, which
+			// is what AC 1 asks for, while an honoured invocation is a second and
+			// independent fabric for the same claim.
+			TriggerFired: rec.CommandFileBytes > 0 &&
+				(rec.ProbeInPostWriteInventory || rec.InventoryChangedMidSession || rec.CustomCommandHonoured),
+
+			// Measured-impossible, not rig-broken. All three parts are required: the rig
+			// wrote the file, claude re-broadcast the inventory at least once afterwards
+			// so a measurement EXISTS, and that measurement says the write did not reach
+			// it. Without the middle part there is nothing to conclude from and the row
+			// falls to the default INCONCLUSIVE arm, which is what keeps this from being
+			// a way to promote a capture that simply did not look.
+			TriggerCouldNotFire: rec.CommandFileBytes > 0 &&
+				rec.PostWriteInitLines > 0 &&
+				!rec.ProbeInPostWriteInventory &&
+				!rec.InventoryChangedMidSession &&
+				!rec.CustomCommandHonoured,
 		},
 		{
 			// No Trigger, and that emptiness is what finish() reads to keep this row
@@ -2058,6 +2236,28 @@ func TestOslcapFixtureWorthyRefusesEveryBadCapture(t *testing.T) {
 			},
 			true,
 		},
+		{
+			// The row the 2026-09-09 lap forced. Holding the fixture back for a
+			// mechanism MEASURED to have no effect parks the capture forever and
+			// takes the subtypes that did answer down with it.
+			"a trigger measured unable to fire is conclusive, so the capture is promoted",
+			func(r *oslcapRecord) {
+				s := oslcapSubtype{
+					Subtype: oslcapSubtypeCommandsChanged, Trigger: "a trigger",
+					TriggerWitness: "a witness", TriggerCouldNotFire: true,
+				}
+				s.finish()
+				r.Subtypes[2] = s
+			},
+			true,
+		},
+		{
+			// ...and the boundary under it: unmeasured is still a refusal, so the
+			// row above is a verdict rather than a way past the gate.
+			"the same subtype with neither verdict is still refused",
+			func(r *oslcapRecord) { r.Subtypes[2] = triggered(oslcapSubtypeCommandsChanged, false, false) },
+			false,
+		},
 		{"never fired", func(r *oslcapRecord) { r.Outcome = oslcapDidNotFire }, false},
 		{"instrument broken", func(r *oslcapRecord) { r.Outcome = oslcapInstrumentBroken }, false},
 		{"a different claude release", func(r *oslcapRecord) { r.ClaudeVersion = "2.1.260 (Claude Code)" }, false},
@@ -2124,6 +2324,7 @@ func TestOslcapSubtypeVerdictSeparatesRigFailureFromFinding(t *testing.T) {
 		wantFinding     bool
 		wantRigFailure  bool
 		wantNoTriggerly bool
+		wantMeasured    bool
 	}{
 		{
 			name:           "observed",
@@ -2140,6 +2341,17 @@ func TestOslcapSubtypeVerdictSeparatesRigFailureFromFinding(t *testing.T) {
 			name:           "unobserved with a trigger that did not fire is a rig failure",
 			sub:            oslcapSubtype{Subtype: "s", Trigger: "t", TriggerWitness: "w"},
 			wantRigFailure: true,
+		},
+		{
+			// The row the 2026-09-09 lap forced. It sits between the two above and
+			// must read as neither: not the finding that claude declined to send a
+			// line, and not the rig failure that says nothing at all.
+			name: "unobserved with a trigger measured unable to fire is conclusive and not a rig failure",
+			sub: oslcapSubtype{
+				Subtype: "s", Trigger: "t", TriggerWitness: "w", TriggerCouldNotFire: true,
+			},
+			wantConclusive: true,
+			wantMeasured:   true,
 		},
 		{
 			name:            "unobserved with no trigger at all is neither",
@@ -2166,9 +2378,202 @@ func TestOslcapSubtypeVerdictSeparatesRigFailureFromFinding(t *testing.T) {
 				t.Errorf("note reads as a rig failure = %v, want %v\n  got: %s",
 					got, tc.wantRigFailure, sub.Note)
 			}
-			if got := strings.Contains(sub.Note, "no known trigger"); got != tc.wantNoTriggerly {
+			// Deliberately not "no known trigger", which BOTH the no-trigger row and
+			// the measured-impossible row say — the second reaches that standing by
+			// measurement, which is the whole distinction. The discriminators are the
+			// clause unique to each.
+			if got := strings.Contains(sub.Note, "watched across the whole session"); got != tc.wantNoTriggerly {
 				t.Errorf("note reads as the no-trigger case = %v, want %v\n  got: %s",
 					got, tc.wantNoTriggerly, sub.Note)
+			}
+			if got := strings.Contains(sub.Note, "COULD NOT fire"); got != tc.wantMeasured {
+				t.Errorf("note reads as the measured-impossible case = %v, want %v\n  got: %s",
+					got, tc.wantMeasured, sub.Note)
+			}
+		})
+	}
+}
+
+// TestOslcapCommandsChangedVerdictNeedsAPostWriteMeasurement pins the three-part
+// condition that separates "the rig performed the trigger and measured it dead" from
+// "the rig never measured". The middle part is the one that matters: with no
+// post-write init line there is nothing to conclude from, and the row must stay
+// INCONCLUSIVE rather than promote a capture that simply did not look.
+//
+// It runs against oslcapSubtypeRecords rather than a hand-built oslcapSubtype, so a
+// change to the condition that leaves the struct's shape alone still reddens.
+func TestOslcapCommandsChangedVerdictNeedsAPostWriteMeasurement(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                string
+		rec                 oslcapRecord
+		wantFired           bool
+		wantCouldNotFire    bool
+		wantConclusive      bool
+		wantNoteMentionsRig bool
+	}{
+		{
+			name: "the probe reached a post-write inventory: the inventory changed mid-session",
+			rec: oslcapRecord{
+				CommandFileBytes: 154, PostWriteInitLines: 2, ProbeInPostWriteInventory: true,
+			},
+			wantFired: true, wantConclusive: true,
+		},
+		{
+			name: "the inventory moved without the probe: still a mid-session change",
+			rec: oslcapRecord{
+				CommandFileBytes: 154, PostWriteInitLines: 2, InventoryChangedMidSession: true,
+			},
+			wantFired: true, wantConclusive: true,
+		},
+		{
+			name: "the invocation was honoured: the second, independent fabric",
+			rec: oslcapRecord{
+				CommandFileBytes: 154, PostWriteInitLines: 2, CustomCommandHonoured: true,
+			},
+			wantFired: true, wantConclusive: true,
+		},
+		{
+			// The 2026-09-09 shape, once the rig reads the post-write init lines it
+			// was throwing away.
+			name: "written, re-broadcast twice, and absent from both: measured unable to fire",
+			rec: oslcapRecord{
+				CommandFileBytes: 154, PostWriteInitLines: 2,
+			},
+			wantCouldNotFire: true, wantConclusive: true,
+		},
+		{
+			name: "no post-write init line means no measurement, so it stays inconclusive",
+			rec: oslcapRecord{
+				CommandFileBytes: 154, PostWriteInitLines: 0,
+			},
+			wantNoteMentionsRig: true,
+		},
+		{
+			name:                "the file was never written, so the rig never performed the trigger",
+			rec:                 oslcapRecord{CommandFileBytes: 0, PostWriteInitLines: 2},
+			wantNoteMentionsRig: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := tc.rec
+			var sub oslcapSubtype
+			for _, s := range oslcapSubtypeRecords(&rec) {
+				if s.Subtype == oslcapSubtypeCommandsChanged {
+					sub = s
+				}
+			}
+			if sub.Subtype == "" {
+				t.Fatal("oslcapSubtypeRecords emitted no commands_changed row")
+			}
+			if sub.TriggerFired != tc.wantFired {
+				t.Errorf("TriggerFired = %v, want %v", sub.TriggerFired, tc.wantFired)
+			}
+			if sub.TriggerCouldNotFire != tc.wantCouldNotFire {
+				t.Errorf("TriggerCouldNotFire = %v, want %v", sub.TriggerCouldNotFire, tc.wantCouldNotFire)
+			}
+			if sub.Conclusive != tc.wantConclusive {
+				t.Errorf("Conclusive = %v, want %v", sub.Conclusive, tc.wantConclusive)
+			}
+			if got := strings.Contains(sub.Note, "INCONCLUSIVE"); got != tc.wantNoteMentionsRig {
+				t.Errorf("note reads as a rig failure = %v, want %v\n  got: %s",
+					got, tc.wantNoteMentionsRig, sub.Note)
+			}
+			// The witness has to carry the measurement a reader would check the
+			// verdict against, not just the verdict.
+			if !strings.Contains(sub.TriggerWitness, "init line(s) claude re-broadcast") {
+				t.Errorf("witness does not report the post-write measurement it turns on: %s",
+					sub.TriggerWitness)
+			}
+		})
+	}
+}
+
+// TestOslcapInitInventoriesReadsEveryInitLine is the fix for the miss the first live
+// lap paid for: the rig read only the FIRST init line, so its commands_changed
+// witness asked what the session knew BEFORE the rig acted and was false by
+// construction however claude behaved.
+//
+// The non-vacuity row is the last one — a helper that still returned only the first
+// inventory passes every other row here.
+func TestOslcapInitInventoriesReadsEveryInitLine(t *testing.T) {
+	t.Parallel()
+	init := func(cmds ...string) dropcapCaptured {
+		raw, err := json.Marshal(map[string]any{
+			"type": "system", "subtype": "init", "slash_commands": cmds,
+		})
+		if err != nil {
+			t.Fatalf("marshalling the init line: %v", err)
+		}
+		return dropcapCaptured{Decoded: true, Type: "system", Subtype: "init", Raw: raw}
+	}
+	lines := []dropcapCaptured{
+		init("usage", "context"),
+		{Decoded: true, Type: "assistant"},
+		{Decoded: false, Type: "system", Subtype: "init", Raw: []byte("{not json")},
+		init("usage", "context", oslcapCommandName),
+		init("usage", "context", oslcapCommandName),
+	}
+
+	all := oslcapInitInventories(lines, 0, len(lines))
+	if len(all) != 3 {
+		t.Fatalf("read %d inventories, want 3 (the undecoded init line is skipped, not counted)", len(all))
+	}
+	if got := oslcapInitSlashCommands(lines); len(got) != 2 {
+		t.Errorf("oslcapInitSlashCommands returned %v, want the FIRST line's two commands", got)
+	}
+
+	// The window is what makes "post-write" mean anything: the baseline line is
+	// outside it and the two that carry the probe are inside.
+	post := oslcapInitInventories(lines, 1, len(lines))
+	if len(post) != 2 {
+		t.Fatalf("read %d post-write inventories, want 2", len(post))
+	}
+	for i, inv := range post {
+		if !oslcapContains(inv, oslcapCommandName) {
+			t.Errorf("post-write inventory %d does not carry the probe: %v", i, inv)
+		}
+	}
+	// Out-of-range bounds are clamped rather than panicking: the live caller derives
+	// `from` from a snapshot length taken earlier than the one it reads.
+	if got := oslcapInitInventories(lines, -5, len(lines)+5); len(got) != 3 {
+		t.Errorf("clamped bounds read %d inventories, want 3", len(got))
+	}
+	if got := oslcapInitInventories(lines, len(lines), len(lines)); len(got) != 0 {
+		t.Errorf("an empty window read %d inventories, want 0", len(got))
+	}
+}
+
+// TestOslcapSameInventoryIgnoresOrder guards the witness against manufacturing itself.
+// Claude is under no obligation to serialise the slash-command list in a stable order
+// between turns, and a reordering read as a change would report a mid-session
+// inventory change on every session — which is exactly the false witness this rig has
+// to earn rather than assume.
+func TestOslcapSameInventoryIgnoresOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		a, b []string
+		want bool
+	}{
+		{"identical", []string{"a", "b"}, []string{"a", "b"}, true},
+		{"reordered is the SAME inventory", []string{"a", "b", "c"}, []string{"c", "a", "b"}, true},
+		{"both empty", nil, []string{}, true},
+		{"an addition is a change", []string{"a"}, []string{"a", "b"}, false},
+		{"a removal is a change", []string{"a", "b"}, []string{"a"}, false},
+		{"a swap of equal length is a change", []string{"a", "b"}, []string{"a", "c"}, false},
+		{"a duplicate is not a free slot", []string{"a", "a"}, []string{"a", "b"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := oslcapSameInventory(tc.a, tc.b); got != tc.want {
+				t.Errorf("oslcapSameInventory(%v, %v) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+			if got := oslcapSameInventory(tc.b, tc.a); got != tc.want {
+				t.Errorf("oslcapSameInventory is not symmetric on (%v, %v)", tc.a, tc.b)
 			}
 		})
 	}
