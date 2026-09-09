@@ -427,6 +427,238 @@ func WriteInitialize(w io.Writer, requestID string) error {
 	return nil
 }
 
+// controlResponseSuccessSubtype is the envelope subtype every answer this package
+// writes carries, deny included, and the choice is a reading of the protocol rather
+// than a detail. `success` says "this control request was processed"; `error` says
+// "I could not process it at all" — the shape claude itself uses when it refuses a
+// set_permission_mode, captured verbatim in
+// docs/knowledge/features/set-permission-mode-inband-probe.md. A DENIED tool call is
+// a processed request whose answer happens to be no, so it is a success carrying a
+// deny payload; sending `error` for it would tell claude the answer never arrived.
+//
+// See marshalCanUseToolDeny for the provenance caveat this constant inherits.
+const controlResponseSuccessSubtype = "success"
+
+// controlResponse is the stream-json control ANSWER written back to claude's
+// held-open stdin — the first inbound-answering envelope in this file, where its
+// four siblings above all initiate. Its nesting is the exact inverse of
+// controlRequest's and is MEASURED: the verbatim capture under "The
+// `control_response` received, verbatim" in
+// docs/knowledge/features/set-permission-mode-inband-probe.md shows subtype and
+// request_id nested UNDER `response`, with the payload nested one level deeper
+// again. That capture is an answer claude sent the daemon; this type is the same
+// shape sent back the other way.
+//
+// Like every envelope in this file it is marshalled structured, never
+// string-concatenated, so it is exactly one physical line.
+type controlResponse struct {
+	Type     string               `json:"type"` // "control_response"
+	Response controlResponseInner `json:"response"`
+}
+
+// controlResponseInner carries the envelope subtype, the request id being answered,
+// and the subtype-specific payload one level deeper.
+//
+// RequestID is CLAUDE'S OWN id, echoed back verbatim from the request being
+// answered — the one field in this package's control envelopes that is not locally
+// minted, and the inversion is the whole point: claude cannot correlate an answer to
+// its ask by anything else. It is NOT an authorisation of any kind; it selects which
+// ask an answer belongs to and nothing more.
+//
+// Response is `any` rather than a concrete type because the two payloads have
+// disjoint field sets and merging them into one struct would give each direction
+// fields that are wrong for it. Exactly two concrete types ever occupy it —
+// permissionAllowResult and permissionDenyResult below — and both are constructed in
+// this file, so the looseness is bounded by the two call sites rather than by
+// convention. json.Marshal encodes whatever it holds recursively, so the structured
+// encoding, and with it the one-physical-line property, reaches all the way down.
+type controlResponseInner struct {
+	Subtype   string `json:"subtype"`
+	RequestID string `json:"request_id"`
+	Response  any    `json:"response"`
+}
+
+// permissionAllowResult is the PermissionResult payload for an approved tool call.
+//
+// Both omitempty tags are load-bearing rather than cosmetic, in controlRequestInner's
+// Mode's sense: an answerer approving a call unchanged carries neither field, and
+// without the tags every bare approval would grow "updatedInput":null and
+// "updatedPermissions":null — a claim that the answerer wants the input REPLACED with
+// nothing, rather than left alone. TestMarshalCanUseToolAllow's byte-exact wants are
+// what hold this.
+//
+// Both are json.RawMessage because nothing in this package interprets either: the
+// input is claude's own, carried back byte-verbatim from CanUseToolRequest.Input if
+// the answerer passes it through, and the permission rules are #2286's to understand.
+// The type also carries a safety property worth naming — see marshalCanUseToolAllow.
+type permissionAllowResult struct {
+	Behavior           string          `json:"behavior"` // "allow"
+	UpdatedInput       json.RawMessage `json:"updatedInput,omitempty"`
+	UpdatedPermissions json.RawMessage `json:"updatedPermissions,omitempty"`
+}
+
+// permissionDenyResult is the PermissionResult payload for a refused tool call.
+//
+// Message is deliberately NOT omitempty, breaking the pattern its two siblings above
+// follow, and the asymmetry is the point: a wordless refusal is a real answer and
+// must stay distinguishable from a malformed one. A reader that saw no `message` key
+// could not tell "the operator gave no reason" from "the field was lost".
+//
+// Interrupt IS omitempty. It asks claude to abandon the whole turn rather than merely
+// skip the call, which is a strictly larger action, and false is the answer for every
+// deny that does not ask for it. Sending "interrupt":false on each one would put a
+// field on the wire whose value is the default — the same argument Mode's omitempty
+// makes in controlRequestInner.
+type permissionDenyResult struct {
+	Behavior  string `json:"behavior"` // "deny"
+	Message   string `json:"message"`
+	Interrupt bool   `json:"interrupt,omitempty"`
+}
+
+// marshalCanUseToolAllow returns the single newline-terminated control_response line
+// approving the can_use_tool request identified by requestID. updatedInput and
+// updatedPermissions are optional; a nil for either drops its key entirely.
+//
+// PROVENANCE IS WEAKER HERE THAN FOR THIS FILE'S FOUR OUTBOUND SIBLINGS, and saying
+// so is part of the contract. Their wants were MEASURED — driven through a live child
+// and confirmed by its answer (#1595, #2041, #1763). This payload's field names come
+// from the Agent SDK type definitions the ticket cites, not from a line a live claude
+// has been sent, so no "measured" claim is made for them. The ENVELOPE around them is
+// measured (see controlResponse). #2284's live gate is what confirms the payload.
+//
+// The two json.RawMessage parameters look like the injection surface this file's
+// other encoders do not have, and they are not, for a reason worth stating because it
+// is not obvious. encoding/json compacts a Marshaler's output and VALIDATES it as
+// JSON, so bytes that are not well-formed — a raw newline inside a string literal,
+// which is exactly what an injection attempt looks like — fail the marshal and this
+// function returns an error having written nothing. Bytes that ARE well-formed cannot
+// contain a raw newline outside a string either, because compaction strips it. So the
+// appended '\n' remains the sole raw newline for every input, well-formed or not:
+// one physical line by construction, never by trust in the caller.
+func marshalCanUseToolAllow(requestID string, updatedInput, updatedPermissions json.RawMessage) ([]byte, error) {
+	env := controlResponse{
+		Type: "control_response",
+		Response: controlResponseInner{
+			Subtype:   controlResponseSuccessSubtype,
+			RequestID: requestID,
+			Response: permissionAllowResult{
+				Behavior:           "allow",
+				UpdatedInput:       updatedInput,
+				UpdatedPermissions: updatedPermissions,
+			},
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// marshalCanUseToolDeny returns the single newline-terminated control_response line
+// refusing the can_use_tool request identified by requestID, with message as the
+// stated reason and interrupt asking claude to abandon the turn rather than skip the
+// call.
+//
+// MESSAGE IS THE ONE UNTRUSTED FREE-TEXT FIELD THIS PACKAGE EVER WRITES TO A CHILD'S
+// STDIN, and it is why this path is structured encoding rather than concatenation.
+// An answerer may draw the words from CLAUDE'S OWN BYTES — CanUseToolRequest carries
+// several strings a modal would naturally quote back, DecisionReason and Description
+// among them — so it must be treated as hostile. Marshalled as a JSON string value,
+// json.Marshal escapes every metacharacter including every newline, so the appended
+// '\n' stays the sole raw newline and the message cannot open a second stream-json
+// line on the child's stdin. That matters concretely: a second line is where a
+// `result` (a forged turn end), a `control_request` (an interrupt), or a second
+// permission answer would be read from. Same invariant marshalTurnEnvelope holds for
+// an untrusted prompt, and the same construction holds it.
+//
+// It shares marshalCanUseToolAllow's provenance caveat: the payload's field names are
+// the SDK's, not a measured line's.
+func marshalCanUseToolDeny(requestID, message string, interrupt bool) ([]byte, error) {
+	env := controlResponse{
+		Type: "control_response",
+		Response: controlResponseInner{
+			Subtype:   controlResponseSuccessSubtype,
+			RequestID: requestID,
+			Response: permissionDenyResult{
+				Behavior:  "deny",
+				Message:   message,
+				Interrupt: interrupt,
+			},
+		},
+	}
+	b, err := json.Marshal(env)
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// WriteCanUseToolAllow writes one control_response line onto w, the child's held-open
+// stdin (from Runner.Stdin), approving the can_use_tool request identified by
+// requestID. It mirrors WriteInitialize exactly: nil-check first, marshal, one Write,
+// never close w — the io.Writer type structurally forbids a half-close/EOF forgery,
+// which on a stream-json child would mean "no more input" and take the live session
+// down without killing it.
+//
+// requestID must be CLAUDE'S OWN id, taken from the CanUseToolRequest being answered,
+// and this is the one Write* in this file where a locally-minted id would be WRONG:
+// the whole point of the echo is that claude matches the answer to its ask. There is
+// no in-repo caller yet — #2284 installs the answerer that becomes one.
+//
+// A nil w means no live child: ErrNoLiveChild, nothing written (checked first, so no
+// panic and no partial write). A marshal failure — reachable here, unlike in this
+// file's four siblings, when updatedInput or updatedPermissions is not well-formed
+// JSON — and a write failure (e.g. EPIPE when the pipe closed mid-teardown) are
+// returned wrapped, never mis-reported as the retryable ErrNoLiveChild. Both refusals
+// write zero bytes: a half-written envelope on the child's stdin is worse than no
+// answer, because claude would read the fragment as the head of some other line.
+//
+// No wrap carries the payload. An answerer's updatedInput is a settings-shaped value
+// in the sense #833 draws, and routing it into the daemon log through an error return
+// is the channel ErrUnsupportedPermissionMode's doc exists to close.
+func WriteCanUseToolAllow(w io.Writer, requestID string, updatedInput, updatedPermissions json.RawMessage) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalCanUseToolAllow(requestID, updatedInput, updatedPermissions)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal can_use_tool allow: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write can_use_tool allow: %w", err)
+	}
+	return nil
+}
+
+// WriteCanUseToolDeny writes one control_response line onto w, the child's held-open
+// stdin (from Runner.Stdin), refusing the can_use_tool request identified by
+// requestID. It is WriteCanUseToolAllow's twin in every respect above — the same
+// nil-check-first ordering, the same single Write, the same refusal to close w, the
+// same requirement that requestID be claude's own echoed id.
+//
+// The one difference is what may be hostile. A marshal failure is not reachable here
+// (two strings and a bool), so the defensive branch stays for symmetry; what this
+// direction carries instead is message, whose untrusted content marshalCanUseToolDeny
+// documents and neutralises by construction.
+//
+// No wrap carries the message, for WriteCanUseToolAllow's reason and one more: the
+// message may be claude's own prose, and an error return is not a channel any
+// per-attribute log check can see.
+func WriteCanUseToolDeny(w io.Writer, requestID, message string, interrupt bool) error {
+	if w == nil {
+		return ErrNoLiveChild
+	}
+	env, err := marshalCanUseToolDeny(requestID, message, interrupt)
+	if err != nil {
+		return fmt.Errorf("streamsup: marshal can_use_tool deny: %w", err)
+	}
+	if _, err := w.Write(env); err != nil {
+		return fmt.Errorf("streamsup: write can_use_tool deny: %w", err)
+	}
+	return nil
+}
+
 // WriteTurn writes one user-turn stream-json envelope for prompt onto w, the
 // child's held-open stdin (from Runner.Stdin). It writes exactly once and never
 // closes w — holding stdin open for the next turn is the whole point of this
