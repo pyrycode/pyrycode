@@ -1,0 +1,291 @@
+{
+  "ticket": "2191",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-09T21:05:29+03:00",
+  "is_capture": true,
+  "model": "sonnet",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "sonnet",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape, identical to #1260's, #2089's and #2229's, with ONE difference stated rather than left to be diffed: --allowed-tools is omitted entirely, so the Agent/Task tool is reachable. Nothing about parent_tool_use_id is known to depend on the approval flags; that is UNMEASURED, not ruled out.",
+  "workdir": "$WORKDIR",
+  "prompts": [
+    "Use the Task tool to launch exactly ONE general-purpose subagent. Give that subagent this instruction verbatim: `Read the file alpha.txt and then read the file beta.txt in the current working directory, then reply with the two marker strings you found.` Do not read either file yourself — the subagent must perform both reads. Launch exactly one subagent, use no other tools yourself, and when it reports back reply with the two markers and nothing else. run=$NONCE"
+  ],
+  "outcome": "fired",
+  "outcome_detail": "5 frame(s) attributed to Agent call \"toolu_01LRXMtrx8W1mm14U6LywqAP\"; subagent tools [Read]",
+  "terminated_on": "result",
+  "turn_seconds": 16.048929083,
+  "agent_tool_use_id": "toolu_01LRXMtrx8W1mm14U6LywqAP",
+  "agent_tool_name": "Agent",
+  "agent_call_count": 1,
+  "attributed_frames": 5,
+  "subagent_tool_calls": [
+    "Read"
+  ],
+  "distinct_parent_ids": [
+    "toolu_01LRXMtrx8W1mm14U6LywqAP"
+  ],
+  "nested_spawn_observed": false,
+  "line_type_census": {
+    "assistant": 5,
+    "rate_limit_event": 1,
+    "result/success": 1,
+    "system/init": 1,
+    "system/task_notification": 1,
+    "system/task_progress": 2,
+    "system/task_started": 1,
+    "system/task_updated": 1,
+    "user": 4
+  },
+  "tool_calls": [
+    "Agent",
+    "Read"
+  ],
+  "undecoded_lines": 0,
+  "lines_captured": 17,
+  "frames": [
+    {
+      "index": 0,
+      "type": "system",
+      "subtype": "init",
+      "payload_len_bytes_captured": 3937,
+      "payload_len_bytes": 3608,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"$WORKDIR\",\"session_id\":\"$SESSION_ID\",\"tools\":[\"Task\",\"Bash\",\"CronCreate\",\"CronDelete\",\"CronList\",\"DesignSync\",\"Edit\",\"EnterWorktree\",\"ExitWorktree\",\"ListAgents\",\"ListMcpResourcesTool\",\"Monitor\",\"NotebookEdit\",\"PushNotification\",\"Read\",\"ReadMcpResourceDirTool\",\"ReadMcpResourceTool\",\"RemoteTrigger\",\"ReportFindings\",\"ScheduleWakeup\",\"SendMessage\",\"Skill\",\"TaskOutput\",\"TaskStop\",\"ToolSearch\",\"WebFetch\",\"WebSearch\",\"Workflow\",\"Write\",\"mcp__blender__execute_blender_code\",\"mcp__blender__execute_blender_code_for_cli\",\"mcp__blender__get_blendfile_summary_datablocks\",\"mcp__blender__get_blendfile_summary_datablocks_for_cli\",\"mcp__blender__get_blendfile_summary_missing_files\",\"mcp__blender__get_blendfile_summary_missing_files_for_cli\",\"mcp__blender__get_blendfile_summary_of_linked_libraries\",\"mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli\",\"mcp__blender__get_blendfile_summary_path_info\",\"mcp__blender__get_blendfile_summary_path_info_for_cli\",\"mcp__blender__get_blendfile_summary_usage_guess\",\"mcp__blender__get_blendfile_summary_usage_guess_for_cli\",\"mcp__blender__get_object_detail_summary\",\"mcp__blender__get_objects_summary\",\"mcp__blender__get_python_api_docs\",\"mcp__blender__get_screenshot_of_area_as_image\",\"mcp__blender__get_screenshot_of_window_as_image\",\"mcp__blender__get_screenshot_of_window_as_json\",\"mcp__blender__jump_to_tab_by_name\",\"mcp__blender__jump_to_tab_by_space_type\",\"mcp__blender__jump_to_view3d_object_by_name\",\"mcp__blender__jump_to_view3d_object_data_by_name\",\"mcp__blender__render_thumbnail_to_path\",\"mcp__blender__render_viewport_to_path\",\"mcp__blender__search_api_docs\",\"mcp__blender__search_manual_docs\",\"mcp__codegraph__codegraph_callees\",\"mcp__codegraph__codegraph_callers\",\"mcp__codegraph__codegraph_context\",\"mcp__codegraph__codegraph_files\",\"mcp__codegraph__codegraph_impact\",\"mcp__codegraph__codegraph_node\",\"mcp__codegraph__codegraph_search\",\"mcp__codegraph__codegraph_status\"],\"mcp_servers\":[{\"name\":\"blender\",\"status\":\"connected\"},{\"name\":\"codegraph\",\"status\":\"connected\"}],\"model\":\"claude-sonnet-5\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"workflow-authoring\",\"run\",\"run-skill-generator\",\"agents\",\"auto-mode-setup\",\"autocompact\",\"clear\",\"color\",\"compact\",\"config\",\"context\",\"effort\",\"fast\",\"heapdump\",\"init\",\"mcp\",\"import\",\"model\",\"__remote-workflow\",\"workflow-launch-exec\",\"reload-skills\",\"rename\",\"ultrareview\",\"security-review\",\"usage-credits\",\"extra-usage\",\"usage\",\"insights\",\"recap\",\"skill-doctor\",\"goal\",\"design\",\"design-consent\",\"design-revoke\",\"list-agents\",\"team-onboarding\"],\"terminal_slash_commands\":[\"doctor\",\"color\"],\"apiKeySource\":\"none\",\"claude_code_version\":\"2.1.259\",\"output_style\":\"default\",\"agents\":[\"claude\",\"Explore\",\"general-purpose\",\"Plan\",\"statusline-setup\"],\"skills\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"workflow-authoring\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"a6d41010-6117-4407-bd20-ccfbc6dacd15\",\"memory_paths\":{\"auto\":\"$TEMP_HOME/.claude/projects/$WORKDIR/memory/\"},\"messaging_socket_path\":\"/tmp/cc-socks/35714.sock\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 1,
+      "type": "rate_limit_event",
+      "payload_len_bytes_captured": 419,
+      "payload_len_bytes": 394,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed_warning\",\"resetsAt\":1789365600,\"rateLimitType\":\"seven_day\",\"utilization\":0.76,\"isUsingOverage\":false,\"surpassedThreshold\":0.75,\"unifiedWindows\":{\"five_hour\":{\"utilization\":0.13,\"resetsAt\":1788984000},\"seven_day\":{\"utilization\":0.76,\"resetsAt\":1789365600}}},\"uuid\":\"97ae50f8-a00d-42b5-afef-1a9ada363246\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 2,
+      "type": "assistant",
+      "payload_len_bytes_captured": 1222,
+      "payload_len_bytes": 1197,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_011CetJs24TzQypowVNEhgjk\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"EsoCCqgBCBEYAipAahCKUkZNhLO3OSUyjrP5r+X6fVHYg7JCI0I2uQ9pLfjIlkape/HmoN2VfGJMq8UwnzC2/Fy25GtsNiJZ1XhNojIPY2xhdWRlLXNvbm5ldC01OABCCHRoaW5raW5nWiQ3N2IyNjYwZi02YjFlLTRmZTAtOWQ4MS0xYTVmY2QzMzlmOTZyEOkXsIj6XH1BPjln6glzuVCIAQGoAe6/htUGsAECEgwtyNjpFdmlAutIabIaDH0fNEf6u90gXJn3HSIweKMS/ajTxaBsxkMOgyZ8jGHiFVPmSQuyDjMgIlVMmK/4ikNJVq8rMOFja/lf8y9hKk/cBzA7pyyAmhEXv8HxV5FUAtMoTmfD5ESgd3UMVbkp4gs/MAgtEsFgG+VPpHUkT1YlNliy7sni4JbucgBxQClRI7ILLipPSt59rAK1xSugGAE=\"}],\"container\":null,\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":10707,\"cache_read_input_tokens\":18534,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":10707},\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"diagnostics\":null,\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"f9af4f33-fc1a-4e95-a40c-e7a1c00d59be\",\"timestamp\":\"2026-09-09T18:05:34.803Z\",\"request_id\":\"req_011CetJs1UFH8nBd4kEagQ9S\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 3,
+      "type": "assistant",
+      "tool_use_ids": [
+        "toolu_01LRXMtrx8W1mm14U6LywqAP"
+      ],
+      "payload_len_bytes_captured": 1102,
+      "payload_len_bytes": 1077,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_011CetJs24TzQypowVNEhgjk\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"name\":\"Agent\",\"input\":{\"description\":\"Read alpha.txt and beta.txt for markers\",\"subagent_type\":\"general-purpose\",\"prompt\":\"Read the file alpha.txt and then read the file beta.txt in the current working directory, then reply with the two marker strings you found.\",\"run_in_background\":false},\"caller\":{\"type\":\"direct\"}}],\"container\":null,\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":10707,\"cache_read_input_tokens\":18534,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":10707},\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"diagnostics\":null,\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"afa56b7c-387e-4ba5-97ed-10e3a436d771\",\"timestamp\":\"2026-09-09T18:05:35.864Z\",\"request_id\":\"req_011CetJs1UFH8nBd4kEagQ9S\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 4,
+      "type": "system",
+      "subtype": "task_started",
+      "payload_len_bytes_captured": 524,
+      "payload_len_bytes": 499,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"a8eec1cd5e109aa38\",\"tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"description\":\"Read alpha.txt and beta.txt for markers\",\"subagent_type\":\"general-purpose\",\"is_backgrounded\":false,\"spawn_depth\":1,\"task_type\":\"local_agent\",\"prompt\":\"Read the file alpha.txt and then read the file beta.txt in the current working directory, then reply with the two marker strings you found.\",\"uuid\":\"32f2b71f-3569-4798-9cbe-a983a3201033\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 5,
+      "type": "user",
+      "parent_tool_use_id": "toolu_01LRXMtrx8W1mm14U6LywqAP",
+      "payload_len_bytes_captured": 504,
+      "payload_len_bytes": 479,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Read the file alpha.txt and then read the file beta.txt in the current working directory, then reply with the two marker strings you found.\"}]},\"parent_tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"46cf181f-f72b-41c0-a3c2-30f6283f8929\",\"timestamp\":\"2026-09-09T18:05:35.874Z\",\"subagent_type\":\"general-purpose\",\"task_description\":\"Read alpha.txt and beta.txt for markers\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 6,
+      "type": "system",
+      "subtype": "task_progress",
+      "payload_len_bytes_captured": 374,
+      "payload_len_bytes": 349,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_progress\",\"task_id\":\"a8eec1cd5e109aa38\",\"tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"description\":\"Reading alpha.txt\",\"subagent_type\":\"general-purpose\",\"usage\":{\"total_tokens\":16207,\"tool_uses\":1,\"duration_ms\":3839},\"last_tool_name\":\"Read\",\"uuid\":\"5339f616-c118-49fb-bb7f-6549e7050100\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 7,
+      "type": "assistant",
+      "parent_tool_use_id": "toolu_01LRXMtrx8W1mm14U6LywqAP",
+      "tool_use_ids": [
+        "toolu_01WAR86LLmsQa72SgN3P8reE"
+      ],
+      "payload_len_bytes_captured": 1094,
+      "payload_len_bytes": 961,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_011CetJsTCKZj2UFUk3kLiW6\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01WAR86LLmsQa72SgN3P8reE\",\"name\":\"Read\",\"input\":{\"file_path\":\"$WORKDIR/alpha.txt\"},\"caller\":{\"type\":\"direct\"}}],\"container\":null,\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":16088,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":16088,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"diagnostics\":null,\"context_management\":null},\"parent_tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"bad69903-c699-4596-b36d-12805ecaf9aa\",\"timestamp\":\"2026-09-09T18:05:39.709Z\",\"request_id\":\"req_011CetJsSabszFRCXuQnGtWt\",\"subagent_type\":\"general-purpose\",\"task_description\":\"Read alpha.txt and beta.txt for markers\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 8,
+      "type": "user",
+      "parent_tool_use_id": "toolu_01LRXMtrx8W1mm14U6LywqAP",
+      "tool_use_ids": [
+        "toolu_01WAR86LLmsQa72SgN3P8reE"
+      ],
+      "payload_len_bytes_captured": 452,
+      "payload_len_bytes": 427,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01WAR86LLmsQa72SgN3P8reE\",\"type\":\"tool_result\",\"content\":\"1\\tpyry-2191-alpha-marker\\n2\\t\"}]},\"parent_tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"1c718d06-334c-4f8f-bf13-78d0f5af2e80\",\"timestamp\":\"2026-09-09T18:05:39.734Z\",\"subagent_type\":\"general-purpose\",\"task_description\":\"Read alpha.txt and beta.txt for markers\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 9,
+      "type": "system",
+      "subtype": "task_progress",
+      "payload_len_bytes_captured": 373,
+      "payload_len_bytes": 348,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_progress\",\"task_id\":\"a8eec1cd5e109aa38\",\"tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"description\":\"Reading beta.txt\",\"subagent_type\":\"general-purpose\",\"usage\":{\"total_tokens\":16246,\"tool_uses\":2,\"duration_ms\":4546},\"last_tool_name\":\"Read\",\"uuid\":\"d6700b72-44ae-457f-941d-365dbc538324\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 10,
+      "type": "assistant",
+      "parent_tool_use_id": "toolu_01LRXMtrx8W1mm14U6LywqAP",
+      "tool_use_ids": [
+        "toolu_01MBCi2bQ79dotofRkLqJB6m"
+      ],
+      "payload_len_bytes_captured": 1093,
+      "payload_len_bytes": 960,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_011CetJsTCKZj2UFUk3kLiW6\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01MBCi2bQ79dotofRkLqJB6m\",\"name\":\"Read\",\"input\":{\"file_path\":\"$WORKDIR/beta.txt\"},\"caller\":{\"type\":\"direct\"}}],\"container\":null,\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":16088,\"cache_read_input_tokens\":0,\"cache_creation\":{\"ephemeral_5m_input_tokens\":16088,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":2,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"diagnostics\":null,\"context_management\":null},\"parent_tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"30f8a593-38f8-496b-96f5-d114f5c9dd48\",\"timestamp\":\"2026-09-09T18:05:40.416Z\",\"request_id\":\"req_011CetJsSabszFRCXuQnGtWt\",\"subagent_type\":\"general-purpose\",\"task_description\":\"Read alpha.txt and beta.txt for markers\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 11,
+      "type": "user",
+      "parent_tool_use_id": "toolu_01LRXMtrx8W1mm14U6LywqAP",
+      "tool_use_ids": [
+        "toolu_01MBCi2bQ79dotofRkLqJB6m"
+      ],
+      "payload_len_bytes_captured": 451,
+      "payload_len_bytes": 426,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01MBCi2bQ79dotofRkLqJB6m\",\"type\":\"tool_result\",\"content\":\"1\\tpyry-2191-beta-marker\\n2\\t\"}]},\"parent_tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"ad299067-7c88-41c3-9590-566d7946c156\",\"timestamp\":\"2026-09-09T18:05:40.429Z\",\"subagent_type\":\"general-purpose\",\"task_description\":\"Read alpha.txt and beta.txt for markers\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 12,
+      "type": "system",
+      "subtype": "task_updated",
+      "payload_len_bytes_captured": 226,
+      "payload_len_bytes": 201,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_updated\",\"task_id\":\"a8eec1cd5e109aa38\",\"patch\":{\"status\":\"completed\",\"end_time\":1788977142652},\"uuid\":\"98306dd1-0638-49b6-ab2a-d308b4c8444b\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 13,
+      "type": "system",
+      "subtype": "task_notification",
+      "payload_len_bytes_captured": 656,
+      "payload_len_bytes": 498,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"a8eec1cd5e109aa38\",\"tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"status\":\"completed\",\"output_file\":\"/private/tmp/claude-501/$WORKDIR/$SESSION_ID/tasks/a8eec1cd5e109aa38.output\",\"summary\":\"The two marker strings found are:\\n\\n- alpha.txt: `pyry-2191-alpha-marker`\\n- beta.txt: `pyry-2191-beta-marker`\",\"usage\":{\"total_tokens\":17915,\"tool_uses\":2,\"duration_ms\":6780},\"uuid\":\"6c1589d6-6c16-4f41-ba97-e8d309a29f9c\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 14,
+      "type": "user",
+      "tool_use_ids": [
+        "toolu_01LRXMtrx8W1mm14U6LywqAP"
+      ],
+      "payload_len_bytes_captured": 1972,
+      "payload_len_bytes": 1947,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01LRXMtrx8W1mm14U6LywqAP\",\"type\":\"tool_result\",\"content\":[{\"type\":\"text\",\"text\":\"The two marker strings found are:\\n\\n- alpha.txt: `pyry-2191-alpha-marker`\\n- beta.txt: `pyry-2191-beta-marker`\"},{\"type\":\"text\",\"text\":\"agentId: a8eec1cd5e109aa38 (use SendMessage with to: 'a8eec1cd5e109aa38', summary: '\u003c5-10 word recap\u003e' to continue this agent)\\n\u003cusage\u003esubagent_tokens: 17938\\ntool_uses: 2\\nduration_ms: 6781\u003c/usage\u003e\"}]}]},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"9c77f34e-994f-4afe-a3a6-5b90fe391700\",\"timestamp\":\"2026-09-09T18:05:42.655Z\",\"tool_use_result\":{\"status\":\"completed\",\"prompt\":\"Read the file alpha.txt and then read the file beta.txt in the current working directory, then reply with the two marker strings you found.\",\"agentId\":\"a8eec1cd5e109aa38\",\"agentType\":\"general-purpose\",\"harnessNoteCount\":0,\"harnessTailCount\":0,\"harnessSectionHash\":\"b6e096beb67c7bf2\",\"content\":[{\"type\":\"text\",\"text\":\"The two marker strings found are:\\n\\n- alpha.txt: `pyry-2191-alpha-marker`\\n- beta.txt: `pyry-2191-beta-marker`\"}],\"resolvedModel\":\"claude-sonnet-5\",\"totalDurationMs\":6781,\"totalTokens\":17938,\"totalToolUseCount\":2,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":1791,\"cache_read_input_tokens\":16088,\"output_tokens\":57,\"output_tokens_details\":{\"thinking_tokens\":0},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":1791},\"inference_geo\":\"not_available\",\"iterations\":[{\"input_tokens\":2,\"output_tokens\":57,\"cache_read_input_tokens\":16088,\"cache_creation_input_tokens\":1791,\"cache_creation\":{\"ephemeral_5m_input_tokens\":1791,\"ephemeral_1h_input_tokens\":0},\"type\":\"message\"}],\"speed\":\"standard\"},\"toolStats\":{\"readCount\":2,\"searchCount\":0,\"bashCount\":0,\"editFileCount\":0,\"linesAdded\":0,\"linesRemoved\":0,\"otherToolCount\":0}}}",
+      "events_emitted": 1
+    },
+    {
+      "index": 15,
+      "type": "assistant",
+      "payload_len_bytes_captured": 792,
+      "payload_len_bytes": 767,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\",\"id\":\"msg_011CetJsx6cz6mfYNiF124VT\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"pyry-2191-alpha-marker\\npyry-2191-beta-marker\"}],\"container\":null,\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":406,\"cache_read_input_tokens\":29241,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":406},\"output_tokens\":1,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"},\"diagnostics\":null,\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"e5778dac-51aa-419f-be1a-fea861a882da\",\"timestamp\":\"2026-09-09T18:05:45.345Z\",\"request_id\":\"req_011CetJswVQgPfYsm7JCxs4m\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 16,
+      "type": "result",
+      "subtype": "success",
+      "payload_len_bytes_captured": 2107,
+      "payload_len_bytes": 2082,
+      "payload_encoding": "json-string",
+      "payload": "{\"duration_api_ms\":16188,\"stop_reason\":\"end_turn\",\"session_id\":\"$SESSION_ID\",\"total_cost_usd\":0.1085551,\"usage\":{\"input_tokens\":4,\"cache_creation_input_tokens\":11113,\"cache_read_input_tokens\":47775,\"output_tokens\":231,\"output_tokens_details\":{\"thinking_tokens\":22},\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":11113,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"not_available\",\"iterations\":[{\"input_tokens\":2,\"output_tokens\":28,\"cache_read_input_tokens\":29241,\"cache_creation_input_tokens\":406,\"cache_creation\":{\"ephemeral_5m_input_tokens\":0,\"ephemeral_1h_input_tokens\":406},\"type\":\"message\"}],\"speed\":\"standard\"},\"modelUsage\":{\"claude-haiku-4-5-20251001\":{\"inputTokens\":1002,\"outputTokens\":15,\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.001077,\"contextWindow\":200000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"canonicalModel\":\"claude-haiku-4-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"},\"claude-sonnet-5\":{\"inputTokens\":8,\"outputTokens\":554,\"cacheReadInputTokens\":63863,\"cacheCreationInputTokens\":28992,\"webSearchRequests\":0,\"costUSD\":0.10747810000000001,\"contextWindow\":1000000,\"maxOutputTokens\":64000,\"thinkingTokens\":46,\"canonicalModel\":\"claude-sonnet-5\",\"provider\":\"firstParty\",\"costBasis\":\"list\"}},\"permission_denials\":[],\"terminal_reason\":\"completed\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":1,\"requested\":{\"background\":0,\"foreground\":1,\"unset\":0},\"started_in_background\":0,\"max_depth\":1,\"spawned_by_subagents\":0,\"completed\":1,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{\"general-purpose\":1}},\"is_error\":false,\"num_turns\":2,\"subtype\":\"success\",\"api_error_status\":null,\"result\":\"pyry-2191-alpha-marker\\npyry-2191-beta-marker\",\"ttft_ms\":4817,\"type\":\"result\",\"duration_ms\":15397,\"uuid\":\"3959cb8f-9e92-47cb-aab1-b86ab9bd2003\",\"ttft_stream_ms\":4288,\"time_to_request_ms\":13,\"queued_turn_count\":0}",
+      "events_emitted": 1
+    }
+  ],
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 19
+    },
+    {
+      "class": "temp_home",
+      "replacement": "$TEMP_HOME",
+      "count": 1
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 6
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir under a per-test temp $HOME, rig-authored prompts, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS CAPTURE SPECIFICALLY CAN CARRY. The readable surface of the workdir is TWO rig-authored marker lines, so a subagent that read both files read nothing about the host; the workdir path itself is a declared substitution class. Per-message uuid, tool_use_id and PARENT_TOOL_USE_ID values SURVIVE, as they do in every committed capture in this directory — and here that is the point rather than an inherited default: the join this fixture exists to prove is unreadable without them. The session_id deny class covers the conversation id claude echoes back, which is the rig's own literal.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One conversation, one spawn shape, one claude version, one model (sonnet), one subagent, and delegation requested EXPLICITLY rather than chosen by claude for a task that warranted it. NESTING DEPTH IS UNMEASURED HERE and deliberately so: a depth claude chooses is not provokable on demand, so the verbatim-read property is proven against a synthesized line in streamsup (TestParser_ParentToolUseID_ReadsInnerDepthVerbatim) rather than against these bytes. If this turn DID nest, nested_spawn_observed says so and the frames are here — but nothing asserts on it. Cross-version and cross-model stability are UNMEASURED. Subagent TEXT is absent by construction: without --forward-subagent-text claude emits only the subagent's tool_use and tool_result blocks.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}

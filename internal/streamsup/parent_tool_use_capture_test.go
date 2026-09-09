@@ -62,7 +62,7 @@ const parentCaptureVersion = "2.1.259"
 // below re-derives its subject from each line's OWN bytes rather than from the
 // record's labels — so committing the record does not turn this into a measurement
 // agreeing with itself.
-const parentPinnedAgentID = ""
+const parentPinnedAgentID = "toolu_01LRXMtrx8W1mm14U6LywqAP"
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.

@@ -1,0 +1,1116 @@
+{
+  "claude_version_raw": "2.1.259 (Claude Code)",
+  "claude_version": "2.1.259",
+  "arm": "sonnet_effort",
+  "launch_yolo_flag": false,
+  "argv": [
+    "$HOME/.local/bin/claude",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "claude-sonnet-5",
+    "--max-turns",
+    "6",
+    "--permission-prompt-tool",
+    "mcp__pyry_approve__approve",
+    "--mcp-config",
+    "\u003cmcp-config: run-local temp path redacted\u003e",
+    "--strict-mcp-config",
+    "--permission-mode",
+    "default",
+    "--effort",
+    "low"
+  ],
+  "prompts": [
+    "Reply with exactly the word READY and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE",
+    "/effort high",
+    "Reply with exactly the word DONE and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE"
+  ],
+  "requested_mode": "",
+  "control_request_id": "",
+  "control_request_sent": null,
+  "control_responses": null,
+  "control_response_request_id_matched": false,
+  "init_permission_modes": [
+    "default",
+    "default",
+    "default"
+  ],
+  "stdout_events": [
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "$WORKDIR",
+      "session_id": "$SESSION_ID",
+      "tools": [
+        "Task",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskOutput",
+        "TaskStop",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-sonnet-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "workflow-authoring",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "skill-doctor",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.259",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "workflow-authoring",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "944e7d04-1c12-49e4-8ea5-ad6cbe7b2b2b",
+      "memory_paths": {
+        "auto": "$TEMP_HOME/.claude/projects/$WORKDIR/memory/"
+      },
+      "messaging_socket_path": "$MESSAGING_SOCKET",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "rate_limit_event",
+      "rate_limit_info": {
+        "status": "allowed_warning",
+        "resetsAt": 1789365600,
+        "rateLimitType": "seven_day",
+        "utilization": 0.76,
+        "isUsingOverage": false,
+        "surpassedThreshold": 0.75,
+        "unifiedWindows": {
+          "five_hour": {
+            "utilization": 0.12,
+            "resetsAt": 1788984000
+          },
+          "seven_day": {
+            "utilization": 0.76,
+            "resetsAt": 1789365600
+          }
+        }
+      },
+      "uuid": "f1a770a9-83d6-4983-ae12-92e662ba5b72",
+      "session_id": "$SESSION_ID"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-sonnet-5",
+        "id": "msg_011CetJLCp1ch7C2zov7sQfp",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "READY"
+          }
+        ],
+        "container": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 9230,
+          "cache_read_input_tokens": 19923,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 9230
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": null,
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "$SESSION_ID",
+      "uuid": "76966966-c35e-476d-88ea-ee7a44833874",
+      "timestamp": "2026-09-09T17:58:34.139Z",
+      "request_id": "req_011CetJLBzedGwxFzz48YBLG"
+    },
+    {
+      "duration_api_ms": 3041,
+      "stop_reason": "end_turn",
+      "session_id": "$SESSION_ID",
+      "total_cost_usd": 0.0419286,
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 9230,
+        "cache_read_input_tokens": 19923,
+        "output_tokens": 4,
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 9230,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 2,
+            "output_tokens": 4,
+            "cache_read_input_tokens": 19923,
+            "cache_creation_input_tokens": 9230,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 9230
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 930,
+          "outputTokens": 10,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.00098,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        },
+        "claude-sonnet-5": {
+          "inputTokens": 2,
+          "outputTokens": 4,
+          "cacheReadInputTokens": 19923,
+          "cacheCreationInputTokens": 9230,
+          "webSearchRequests": 0,
+          "costUSD": 0.0409486,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 64000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-sonnet-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "is_error": false,
+      "num_turns": 1,
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "READY",
+      "ttft_ms": 2369,
+      "type": "result",
+      "duration_ms": 2399,
+      "uuid": "b58b19e7-a7f7-4720-b81f-083196c34f1c",
+      "ttft_stream_ms": 2322,
+      "time_to_request_ms": 161,
+      "queued_turn_count": 0
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "$WORKDIR",
+      "session_id": "$SESSION_ID",
+      "tools": [
+        "Task",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskOutput",
+        "TaskStop",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-sonnet-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "workflow-authoring",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "skill-doctor",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.259",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "workflow-authoring",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "bbcf1fdc-4670-4859-bc1b-742d9a4d9e83",
+      "memory_paths": {
+        "auto": "$TEMP_HOME/.claude/projects/$WORKDIR/memory/"
+      },
+      "messaging_socket_path": "$MESSAGING_SOCKET",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "diagnostics": null,
+        "id": "4d90ea50-0b4f-4a56-b97c-40cea0df4ab3",
+        "container": null,
+        "model": "\u003csynthetic\u003e",
+        "role": "assistant",
+        "stop_details": null,
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "type": "message",
+        "usage": {
+          "output_tokens_details": null,
+          "input_tokens": 0,
+          "output_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": null,
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": null,
+          "iterations": null,
+          "speed": null
+        },
+        "content": [
+          {
+            "type": "text",
+            "text": "Set effort level to high (this session only): Comprehensive implementation with extensive testing and documentation"
+          }
+        ],
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "is_meta": true,
+      "local_command_source": "\u003clocal-command-stdout\u003eSet effort level to high (this session only): Comprehensive implementation with extensive testing and documentation\u003c/local-command-stdout\u003e",
+      "session_id": "$SESSION_ID",
+      "uuid": "04ab08d8-6b24-45a9-b814-6ef0d81a3fc6",
+      "timestamp": "2026-09-09T17:58:34.210Z"
+    },
+    {
+      "is_error": false,
+      "duration_api_ms": 0,
+      "num_turns": 0,
+      "stop_reason": null,
+      "session_id": "$SESSION_ID",
+      "total_cost_usd": 0.0419286,
+      "usage": {
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "output_tokens": 0,
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 0,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "",
+        "iterations": [],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 930,
+          "outputTokens": 10,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.00098,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        },
+        "claude-sonnet-5": {
+          "inputTokens": 2,
+          "outputTokens": 4,
+          "cacheReadInputTokens": 19923,
+          "cacheCreationInputTokens": 9230,
+          "webSearchRequests": 0,
+          "costUSD": 0.0409486,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 64000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-sonnet-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        }
+      },
+      "permission_denials": [],
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "subtype": "success",
+      "result": "Set effort level to high (this session only): Comprehensive implementation with extensive testing and documentation",
+      "type": "result",
+      "duration_ms": 7,
+      "uuid": "1aea0008-b165-4e64-b8a3-11c336d8ac34",
+      "queued_turn_count": 0
+    },
+    {
+      "type": "system",
+      "subtype": "init",
+      "cwd": "$WORKDIR",
+      "session_id": "$SESSION_ID",
+      "tools": [
+        "Task",
+        "AskUserQuestion",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "DesignSync",
+        "Edit",
+        "EnterPlanMode",
+        "EnterWorktree",
+        "ExitPlanMode",
+        "ExitWorktree",
+        "ListAgents",
+        "Monitor",
+        "NotebookEdit",
+        "PushNotification",
+        "Read",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskOutput",
+        "TaskStop",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "mcp_servers": [
+        {
+          "name": "pyry_approve",
+          "status": "connected"
+        }
+      ],
+      "model": "claude-sonnet-5",
+      "permissionMode": "default",
+      "slash_commands": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "workflow-authoring",
+        "run",
+        "run-skill-generator",
+        "agents",
+        "auto-mode-setup",
+        "autocompact",
+        "clear",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "effort",
+        "fast",
+        "heapdump",
+        "init",
+        "mcp",
+        "import",
+        "model",
+        "__remote-workflow",
+        "workflow-launch-exec",
+        "reload-skills",
+        "rename",
+        "ultrareview",
+        "security-review",
+        "usage-credits",
+        "extra-usage",
+        "usage",
+        "insights",
+        "recap",
+        "skill-doctor",
+        "goal",
+        "design",
+        "design-consent",
+        "design-revoke",
+        "list-agents",
+        "team-onboarding"
+      ],
+      "terminal_slash_commands": [
+        "doctor",
+        "color"
+      ],
+      "apiKeySource": "none",
+      "claude_code_version": "2.1.259",
+      "output_style": "default",
+      "agents": [
+        "claude",
+        "Explore",
+        "general-purpose",
+        "Plan",
+        "statusline-setup"
+      ],
+      "skills": [
+        "deep-research",
+        "design-sync",
+        "dataviz",
+        "update-config",
+        "verify",
+        "debug",
+        "code-review",
+        "simplify",
+        "batch",
+        "fewer-permission-prompts",
+        "doctor",
+        "loop",
+        "schedule",
+        "claude-api",
+        "workflow-authoring",
+        "run",
+        "run-skill-generator"
+      ],
+      "plugins": [],
+      "capabilities": [
+        "interrupt_receipt_v1",
+        "interrupt_cancel_queued_v1",
+        "msg_lifecycle_v1"
+      ],
+      "analytics_disabled": false,
+      "product_feedback_disabled": false,
+      "uuid": "ab0d0b4d-7c83-4dc9-a393-be52d2a1d713",
+      "memory_paths": {
+        "auto": "$TEMP_HOME/.claude/projects/$WORKDIR/memory/"
+      },
+      "messaging_socket_path": "$MESSAGING_SOCKET",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    },
+    {
+      "type": "assistant",
+      "message": {
+        "model": "claude-sonnet-5",
+        "id": "msg_011CetJLNsVSLHQYNHEMgYAd",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "DONE"
+          }
+        ],
+        "container": null,
+        "stop_reason": null,
+        "stop_sequence": null,
+        "stop_details": null,
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 9492,
+          "cache_read_input_tokens": 19923,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 9492
+          },
+          "output_tokens": 1,
+          "service_tier": "standard",
+          "inference_geo": "not_available"
+        },
+        "diagnostics": {
+          "cache_miss_reason": {
+            "type": "unavailable"
+          }
+        },
+        "context_management": null
+      },
+      "parent_tool_use_id": null,
+      "session_id": "$SESSION_ID",
+      "uuid": "6a0825af-7d59-4011-878c-2d90327cce62",
+      "timestamp": "2026-09-09T17:58:36.479Z",
+      "request_id": "req_011CetJLNF3KKtf21C7T7P9N"
+    },
+    {
+      "duration_api_ms": 5207,
+      "stop_reason": "end_turn",
+      "session_id": "$SESSION_ID",
+      "total_cost_usd": 0.08393520000000002,
+      "usage": {
+        "input_tokens": 2,
+        "cache_creation_input_tokens": 9492,
+        "cache_read_input_tokens": 19923,
+        "output_tokens": 5,
+        "output_tokens_details": {
+          "thinking_tokens": 0
+        },
+        "server_tool_use": {
+          "web_search_requests": 0,
+          "web_fetch_requests": 0
+        },
+        "service_tier": "standard",
+        "cache_creation": {
+          "ephemeral_1h_input_tokens": 9492,
+          "ephemeral_5m_input_tokens": 0
+        },
+        "inference_geo": "not_available",
+        "iterations": [
+          {
+            "input_tokens": 2,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 19923,
+            "cache_creation_input_tokens": 9492,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 9492
+            },
+            "type": "message"
+          }
+        ],
+        "speed": "standard"
+      },
+      "modelUsage": {
+        "claude-haiku-4-5-20251001": {
+          "inputTokens": 930,
+          "outputTokens": 10,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0,
+          "webSearchRequests": 0,
+          "costUSD": 0.00098,
+          "contextWindow": 200000,
+          "maxOutputTokens": 32000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-haiku-4-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        },
+        "claude-sonnet-5": {
+          "inputTokens": 4,
+          "outputTokens": 9,
+          "cacheReadInputTokens": 39846,
+          "cacheCreationInputTokens": 18722,
+          "webSearchRequests": 0,
+          "costUSD": 0.0829552,
+          "contextWindow": 1000000,
+          "maxOutputTokens": 64000,
+          "thinkingTokens": 0,
+          "canonicalModel": "claude-sonnet-5",
+          "provider": "firstParty",
+          "costBasis": "list"
+        }
+      },
+      "permission_denials": [],
+      "terminal_reason": "completed",
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required",
+      "subagent_stats": {
+        "spawned": 0,
+        "requested": {
+          "background": 0,
+          "foreground": 0,
+          "unset": 0
+        },
+        "started_in_background": 0,
+        "max_depth": 0,
+        "spawned_by_subagents": 0,
+        "completed": 0,
+        "failed": 0,
+        "killed": {
+          "parent": 0,
+          "user": 0,
+          "system": 0
+        },
+        "refused": {
+          "depth_limit": 0,
+          "concurrency_limit": 0,
+          "budget": 0
+        },
+        "by_type": {}
+      },
+      "is_error": false,
+      "num_turns": 1,
+      "subtype": "success",
+      "api_error_status": null,
+      "result": "DONE",
+      "ttft_ms": 2164,
+      "type": "result",
+      "duration_ms": 2186,
+      "uuid": "a8d4e9af-94fa-4a3a-8e17-15ef1da67cfb",
+      "ttft_stream_ms": 2108,
+      "time_to_request_ms": 16,
+      "queued_turn_count": 0
+    }
+  ],
+  "non_json_line_count": 0,
+  "turn_boundaries": [
+    3,
+    6,
+    9
+  ],
+  "probe_outcomes": [
+    {
+      "tool_use_names": null,
+      "tool_result_seen": false,
+      "tool_result_is_error": false,
+      "permission_denials": 0,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": null,
+      "tool_result_seen": false,
+      "tool_result_is_error": false,
+      "permission_denials": 0,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    },
+    {
+      "tool_use_names": null,
+      "tool_result_seen": false,
+      "tool_result_is_error": false,
+      "permission_denials": 0,
+      "result_subtype": "success",
+      "result_is_error": false,
+      "result_observed": true
+    }
+  ],
+  "model": "claude-sonnet-5",
+  "approval": {
+    "requests": null,
+    "requests_seen": 0,
+    "requests_dropped": 0,
+    "decode_errors": 0,
+    "non_approve_requests": 0,
+    "stages": null
+  },
+  "effort_capture": {
+    "launch_level": "low",
+    "inband_level": "high",
+    "launch_flag_seen": true,
+    "inband_prompt": "/effort high",
+    "acknowledgement": "Set effort level to high (this session only): Comprehensive implementation with extensive testing and documentation",
+    "acknowledgement_seen": true,
+    "mcp_servers": "[{\"name\":\"pyry_approve\",\"status\":\"connected\"}]",
+    "init_lines": [
+      {
+        "index": 0,
+        "keys": [
+          "agents",
+          "analytics_disabled",
+          "apiKeySource",
+          "capabilities",
+          "claude_code_version",
+          "cwd",
+          "fast_mode_disabled_reason",
+          "fast_mode_state",
+          "mcp_servers",
+          "memory_paths",
+          "messaging_socket_path",
+          "model",
+          "output_style",
+          "permissionMode",
+          "plugins",
+          "product_feedback_disabled",
+          "session_id",
+          "skills",
+          "slash_commands",
+          "subtype",
+          "terminal_slash_commands",
+          "tools",
+          "type",
+          "uuid"
+        ],
+        "keys_truncated": false,
+        "claude_code_version": "2.1.259",
+        "permission_mode": "default",
+        "effort": "",
+        "effort_present": false
+      },
+      {
+        "index": 4,
+        "keys": [
+          "agents",
+          "analytics_disabled",
+          "apiKeySource",
+          "capabilities",
+          "claude_code_version",
+          "cwd",
+          "fast_mode_disabled_reason",
+          "fast_mode_state",
+          "mcp_servers",
+          "memory_paths",
+          "messaging_socket_path",
+          "model",
+          "output_style",
+          "permissionMode",
+          "plugins",
+          "product_feedback_disabled",
+          "session_id",
+          "skills",
+          "slash_commands",
+          "subtype",
+          "terminal_slash_commands",
+          "tools",
+          "type",
+          "uuid"
+        ],
+        "keys_truncated": false,
+        "claude_code_version": "2.1.259",
+        "permission_mode": "default",
+        "effort": "",
+        "effort_present": false
+      },
+      {
+        "index": 7,
+        "keys": [
+          "agents",
+          "analytics_disabled",
+          "apiKeySource",
+          "capabilities",
+          "claude_code_version",
+          "cwd",
+          "fast_mode_disabled_reason",
+          "fast_mode_state",
+          "mcp_servers",
+          "memory_paths",
+          "messaging_socket_path",
+          "model",
+          "output_style",
+          "permissionMode",
+          "plugins",
+          "product_feedback_disabled",
+          "session_id",
+          "skills",
+          "slash_commands",
+          "subtype",
+          "terminal_slash_commands",
+          "tools",
+          "type",
+          "uuid"
+        ],
+        "keys_truncated": false,
+        "claude_code_version": "2.1.259",
+        "permission_mode": "default",
+        "effort": "",
+        "effort_present": false
+      }
+    ],
+    "credential_scan_applied": {
+      "ANTHROPIC_API_KEY": false,
+      "CLAUDE_CODE_OAUTH_TOKEN": true,
+      "anthropic-key-prefix": true,
+      "artifact_dir": true,
+      "home-path-prefix": true,
+      "messaging_socket_path": true,
+      "operator_home": true,
+      "private-var-folders-prefix": true,
+      "temp_home": true,
+      "users-path-prefix": true,
+      "var-folders-prefix": true,
+      "workdir": true
+    }
+  },
+  "stdin_write_errors": null,
+  "stderr_capture": "",
+  "exit_code": 0,
+  "wait_error": "",
+  "context_deadline_tripped": false,
+  "duration_ms": 5893,
+  "scanner_error": ""
+}

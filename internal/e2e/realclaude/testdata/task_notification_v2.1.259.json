@@ -1,0 +1,208 @@
+{
+  "ticket": "2247",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-09T21:09:37+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape, identical to #1260's and #2089's — see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for system/init. Nothing about the background-task family is known to depend on the approval flags; that is UNMEASURED, not ruled out.",
+  "env_delta": [
+    "BASH_DEFAULT_TIMEOUT_MS=5000"
+  ],
+  "workdir": "$WORKDIR",
+  "prompt": "Use the Bash tool exactly once to run this command verbatim: cat $FIFO. Do not chain it with \u0026\u0026 or ;, do not add any flags or redirections, do not comment on it, and do nothing else. run=$NONCE",
+  "outcome": "fired",
+  "outcome_detail": "1 system/task_notification frame(s), keys [output_file session_id status subtype summary task_id tool_use_id type uuid]",
+  "terminated_on": "budget",
+  "foreground_call_observed": true,
+  "background_task_observed": true,
+  "fifo_held_seconds": 3.275288875,
+  "turn_seconds": 360.0020865,
+  "line_type_census": {
+    "assistant": 2,
+    "rate_limit_event": 1,
+    "system/init": 1,
+    "system/task_notification": 1,
+    "system/task_started": 1,
+    "system/thinking_tokens": 2,
+    "tool_progress": 11
+  },
+  "tool_calls": [
+    "Bash"
+  ],
+  "tool_result_errors": 0,
+  "undecoded_lines": 0,
+  "lines_captured": 19,
+  "frame_count": 2,
+  "notification_frame_count": 1,
+  "frames": [
+    {
+      "index": 6,
+      "type": "system",
+      "subtype": "task_started",
+      "payload_len_bytes_captured": 402,
+      "payload_len_bytes": 259,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_started\",\"task_id\":\"buwavm27r\",\"tool_use_id\":\"toolu_01RVFCkACkpA1cv8gmvXjKSj\",\"description\":\"cat $FIFO\",\"is_backgrounded\":false,\"task_type\":\"local_bash\",\"uuid\":\"6caee1dd-849b-4262-be8e-5e55fc3fc9ae\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 1,
+      "keys": [
+        "description",
+        "is_backgrounded",
+        "session_id",
+        "subtype",
+        "task_id",
+        "task_type",
+        "tool_use_id",
+        "type",
+        "uuid"
+      ],
+      "ambient_present": false,
+      "skip_transcript_present": false
+    },
+    {
+      "index": 7,
+      "type": "system",
+      "subtype": "task_notification",
+      "payload_len_bytes_captured": 392,
+      "payload_len_bytes": 249,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"task_notification\",\"task_id\":\"buwavm27r\",\"tool_use_id\":\"toolu_01RVFCkACkpA1cv8gmvXjKSj\",\"status\":\"completed\",\"output_file\":\"\",\"summary\":\"cat $FIFO\",\"uuid\":\"23918def-8963-446b-99b9-727233bb7491\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 0,
+      "keys": [
+        "output_file",
+        "session_id",
+        "status",
+        "subtype",
+        "summary",
+        "task_id",
+        "tool_use_id",
+        "type",
+        "uuid"
+      ],
+      "ambient_present": false,
+      "skip_transcript_present": false
+    }
+  ],
+  "key_presence": [
+    {
+      "subtype": "task_started",
+      "fired": true,
+      "line_count": 1,
+      "lines_with_ambient": 0,
+      "lines_with_skip_transcript": 0,
+      "note": "fired carrying NEITHER key, matching dropped_lines_v2.1.220.json"
+    },
+    {
+      "subtype": "task_updated",
+      "fired": false,
+      "line_count": 0,
+      "lines_with_ambient": 0,
+      "lines_with_skip_transcript": 0,
+      "note": "did not fire in this turn; nothing here says whether claude sends these keys on this subtype, only that this turn carried no line to read them from"
+    },
+    {
+      "subtype": "background_tasks_changed",
+      "fired": false,
+      "line_count": 0,
+      "lines_with_ambient": 0,
+      "lines_with_skip_transcript": 0,
+      "note": "did not fire in this turn; nothing here says whether claude sends these keys on this subtype, only that this turn carried no line to read them from"
+    }
+  ],
+  "observed_notification_keys": [
+    "output_file",
+    "session_id",
+    "status",
+    "subtype",
+    "summary",
+    "task_id",
+    "tool_use_id",
+    "type",
+    "uuid"
+  ],
+  "documented_notification_keys": [
+    "ambient",
+    "output_file",
+    "skip_transcript",
+    "status",
+    "summary",
+    "task_id",
+    "tool_use_id",
+    "usage"
+  ],
+  "keys_documented_not_observed": [
+    "ambient",
+    "skip_transcript",
+    "usage"
+  ],
+  "keys_observed_not_documented": [
+    "session_id",
+    "subtype",
+    "type",
+    "uuid"
+  ],
+  "unredacted_path_fields": [],
+  "fixture_staged": true,
+  "fixture_stage_detail": "staged with `git add`. A run in a worktree the dispatcher discards stages into an index that goes with it, so the artifact-dir record remains the copy that survives",
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "fifo_path",
+      "replacement": "$FIFO",
+      "count": 3
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 3
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 1
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir, a rig-authored prompt (bgIdlePrompt), a `cat \u003cfifo\u003e` that produces no output, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS SUBTYPE SPECIFICALLY CAN CARRY, named so a person deciding whether to paste this record into a public issue is told rather than left to infer: task_notification is documented to carry output_file, A PATH ON THE OPERATOR'S HOST, and that is a field class no record in this family has carried before. The two inherited mechanisms cover the classes they know — the temp $HOME, os.TempDir(), the workdir, the operator's real home, and the home and temp-directory prefixes enumerated by dropcapFixedNeedles, any of which fails the whole write closed. Those prefixes are named here by symbol and NOT spelled out, because this string is itself written into the record and then deny-scanned: a rationale that quotes a needle fails the scan it describes. A path under a prefix none of those know would pass both, so tncapUnredactedPathFields is a third mechanism of its own: it refuses to PROMOTE a record whose quarry frames still carry a value beginning with '/' after redaction, and names the field rather than the value. A refusal costs one live turn; a promotion costs a public leak. DELIBERATELY KEPT, because removing them would defeat the ticket: the subtype's own structural fields, claude's task and tool identifiers, the task description (which is the rig's own `cat $FIFO` command line), status tokens, token counts and durations.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One turn, one spawn shape, one claude version, one model (haiku), one tool (Bash), one terminal state. Cross-version, cross-model and cross-tool stability are UNMEASURED. The status this record observes is whatever a `cat` reaching EOF produces; the documented `failed` and `stopped` states are NOT staged here and nothing in this record says what they carry. A companion subtype absent from key_presence's fired set did not appear in THIS turn, which is not the same as claude never emitting it — dropped_lines_v2.1.220.json fired all three under a staging that never let the task finish, and tool_progress_v2.1.259.json fired task_started alone, so per-turn variation in that family is measured rather than hypothetical.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}

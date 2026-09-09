@@ -96,7 +96,22 @@ type effortInitPin struct {
 // for the compaction capture three sources offered the same numbers — the ticket
 // body, a recovered temp-directory record and the committed fixture — and they did
 // not agree. Only the committed file is something a later reviewer can re-open.
-var effortInitPins = []effortInitPin{}
+var effortInitPins = []effortInitPin{
+	{Keys: effortInitCapturedInitKeys, ClaudeCodeVersion: "2.1.259", PermissionMode: "default", Effort: "", EffortPresent: false},
+	{Keys: effortInitCapturedInitKeys, ClaudeCodeVersion: "2.1.259", PermissionMode: "default", Effort: "", EffortPresent: false},
+	{Keys: effortInitCapturedInitKeys, ClaudeCodeVersion: "2.1.259", PermissionMode: "default", Effort: "", EffortPresent: false},
+}
+
+// effortInitCapturedInitKeys is the full sorted key set of every init line in the
+// committed capture. All three lines carry the same 24 keys, so one slice serves
+// the three entries above; `effort` is absent from every one of them, which is the
+// finding the pins record.
+var effortInitCapturedInitKeys = []string{
+	"agents", "analytics_disabled", "apiKeySource", "capabilities", "claude_code_version", "cwd",
+	"fast_mode_disabled_reason", "fast_mode_state", "mcp_servers", "memory_paths", "messaging_socket_path",
+	"model", "output_style", "permissionMode", "plugins", "product_feedback_disabled", "session_id", "skills",
+	"slash_commands", "subtype", "terminal_slash_commands", "tools", "type", "uuid",
+}
 
 // The four states of (fixture, pin). Only the first is a skip, and only on the leg
 // before the live gate has ever run.

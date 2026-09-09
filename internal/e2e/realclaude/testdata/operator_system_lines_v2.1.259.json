@@ -1,0 +1,259 @@
+{
+  "ticket": "2255",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-09T21:04:49+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--settings",
+    "$TEMP_HOME/oslcap-rig/settings.json",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape — see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for system/init — PLUS a --settings file, which no other capture in this family passes. That file is this ticket's entire informational trigger: it declares one UserPromptSubmit command hook and nothing else, no permissions object and no defaultMode, so it adds a hook and changes no posture. It reaches claude through streamsup.Config.Args, not through internal/sessions, and it is scoped to THIS child: it is not the operator's own settings file and cannot outlive the per-test temp $HOME. Whether the presence of a hook alters anything else on this surface is UNMEASURED, not ruled out; settings_content and hook_script_content carry exactly what was written.",
+  "workdir": "$WORKDIR",
+  "prompts": [
+    "Reply with the single word ACK and nothing else. Do not use any tools. PYRY-2255-BLOCKME run=$NONCE",
+    "Reply with the single word OK and nothing else. Do not use any tools. run=$NONCE",
+    "/oslcap-probe",
+    "/usage"
+  ],
+  "settings_content": "{\n  \"hooks\": {\n    \"UserPromptSubmit\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"$TEMP_HOME/oslcap-rig/hook.sh\"\n          }\n        ]\n      }\n    ]\n  }\n}\n",
+  "hook_script_content": "#!/bin/sh\n# Rig-authored by pyry's #2255 capture. Blocks ONLY a prompt carrying the rig\n# marker, so later turns on the same child still run. Records one word per\n# invocation and never the payload.\npayload=$(cat)\ncase \"$payload\" in\n  *'PYRY-2255-BLOCKME'*)\n    printf '%s\\n' 'blocked' \u003e\u003e '$TEMP_HOME/oslcap-rig/hook-witness.log'\n    printf '%s\\n' 'blocked by the pyry 2255 capture rig: this prompt carries the rig marker' \u003e\u00262\n    exit 2\n    ;;\nesac\nprintf '%s\\n' 'passed' \u003e\u003e '$TEMP_HOME/oslcap-rig/hook-witness.log'\nexit 0\n",
+  "command_file_content": "Reply with exactly the following token and nothing else. Do not use any tools, do not explain, do not add punctuation.\n\nOSLCAP-CMD-OK-$NONCE\n",
+  "command_file_path": "$WORKDIR/.claude/commands/oslcap-probe.md",
+  "outcome": "fired",
+  "outcome_detail": "every triggered subtype is conclusive; observed [informational=1] out of 16 captured line(s)",
+  "phases": [
+    {
+      "name": "block",
+      "prompt": "Reply with the single word ACK and nothing else. Do not use any tools. PYRY-2255-BLOCKME run=$NONCE",
+      "sent": true,
+      "first_line_index": 0,
+      "line_count": 3,
+      "terminated_on": "result",
+      "seconds": 1.504672958
+    },
+    {
+      "name": "liveness",
+      "prompt": "Reply with the single word OK and nothing else. Do not use any tools. run=$NONCE",
+      "sent": true,
+      "first_line_index": 3,
+      "line_count": 7,
+      "terminated_on": "result",
+      "seconds": 1.506493625
+    },
+    {
+      "name": "inventory",
+      "sent": false,
+      "first_line_index": 10,
+      "line_count": 0,
+      "terminated_on": "budget",
+      "seconds": 25.16362
+    },
+    {
+      "name": "command",
+      "prompt": "/oslcap-probe",
+      "sent": true,
+      "first_line_index": 10,
+      "line_count": 3,
+      "terminated_on": "result",
+      "seconds": 0.50175275
+    },
+    {
+      "name": "local-command",
+      "prompt": "/usage",
+      "sent": true,
+      "first_line_index": 13,
+      "line_count": 3,
+      "terminated_on": "result",
+      "seconds": 0.502214292
+    },
+    {
+      "name": "settle",
+      "sent": false,
+      "first_line_index": 16,
+      "line_count": 0,
+      "terminated_on": "budget",
+      "seconds": 10.06408425
+    }
+  ],
+  "subtypes": [
+    {
+      "subtype": "informational",
+      "observed": true,
+      "line_count": 1,
+      "frame_indices": [
+        1
+      ],
+      "trigger": "a --settings file declaring one UserPromptSubmit command hook, which exits 2 with a reason on stderr for a prompt carrying the rig marker and passes everything else",
+      "trigger_witness": "the hook script appended 2 verdict(s) [blocked passed] to its own witness file, 1 of them a block; the child answered the next unmarked turn: true",
+      "trigger_fired": true,
+      "trigger_could_not_fire": false,
+      "conclusive": true,
+      "note": "observed: 1 line(s) at frame indices [1], carried verbatim in frames. The field set to map is exactly what those payloads show and nothing else"
+    },
+    {
+      "subtype": "local_command_output",
+      "observed": false,
+      "line_count": 0,
+      "frame_indices": [],
+      "trigger": "a user turn whose text is exactly the local slash command /usage, chosen from [cost usage context status] by what the session's own init inventory carried",
+      "trigger_witness": "the command was in the session's own init inventory of 50: true; the turn was sent and produced 3 line(s), 1 of them assistant lines (a zero is consistent with local handling and a non-zero with the text being answered as prose)",
+      "trigger_fired": true,
+      "trigger_could_not_fire": false,
+      "conclusive": true,
+      "note": "unobserved with the trigger WITNESSED as fired (the command was in the session's own init inventory of 50: true; the turn was sent and produced 3 line(s), 1 of them assistant lines (a zero is consistent with local handling and a non-zero with the text being answered as prose)): claude sent no such line on this session, so this is a finding about claude and the mapping ticket drops the subtype rather than inventing its fields"
+    },
+    {
+      "subtype": "commands_changed",
+      "observed": false,
+      "line_count": 0,
+      "frame_indices": [],
+      "trigger": "a project slash command written into the workdir's .claude/commands mid-session, then invoked",
+      "trigger_witness": "154 bytes written while the child was live and absent from the pre-write inventory of 50 (false); across the 2 init line(s) claude re-broadcast after that write the probe was present: false and the inventory differed from the baseline: false; the later invocation was honoured: false",
+      "trigger_fired": false,
+      "trigger_could_not_fire": true,
+      "conclusive": true,
+      "note": "unobserved because the trigger COULD NOT fire, measured rather than assumed (154 bytes written while the child was live and absent from the pre-write inventory of 50 (false); across the 2 init line(s) claude re-broadcast after that write the probe was present: false and the inventory differed from the baseline: false; the later invocation was honoured: false): the rig performed the trigger correctly and the session shows the mechanism had no effect on the surface it targets, so this subtype has no known trigger on this input path — the same standing as the row with no trigger at all, reached by measurement. A mapping ticket must not read this as claude never sending one; it says only that nothing reachable from here provokes it"
+    },
+    {
+      "subtype": "notification",
+      "observed": false,
+      "line_count": 0,
+      "frame_indices": [],
+      "trigger": "",
+      "trigger_witness": "",
+      "trigger_fired": false,
+      "trigger_could_not_fire": false,
+      "conclusive": false,
+      "note": "unobserved, and NOT an absence claim: this subtype has no known trigger, so it was watched across the whole session and nothing here provoked it. A mapping ticket must not read this row as claude never sending one — it says only that nothing in this session did"
+    }
+  ],
+  "init_observed": true,
+  "hook_invocations": 2,
+  "hook_blocked_count": 1,
+  "hook_verdicts": [
+    "blocked",
+    "passed"
+  ],
+  "child_alive_after_block": true,
+  "slash_command_count_at_init": 50,
+  "local_command_chosen": "usage",
+  "local_command_candidates": [
+    "cost",
+    "usage",
+    "context",
+    "status"
+  ],
+  "local_command_in_inventory": true,
+  "local_command_turn_lines": 3,
+  "local_command_turn_assistant_lines": 1,
+  "command_file_bytes": 154,
+  "custom_command_honoured": false,
+  "init_lines_observed": 2,
+  "probe_in_pre_write_inventory": false,
+  "post_write_init_lines": 2,
+  "post_write_inventory_size": 50,
+  "probe_in_post_write_inventory": false,
+  "inventory_changed_mid_session": false,
+  "line_type_census": {
+    "assistant": 4,
+    "rate_limit_event": 1,
+    "result/success": 4,
+    "system/informational": 1,
+    "system/init": 4,
+    "system/thinking_tokens": 2
+  },
+  "tool_calls": [],
+  "tool_result_errors": 0,
+  "undecoded_lines": 0,
+  "lines_captured": 16,
+  "frame_count": 1,
+  "frames": [
+    {
+      "index": 1,
+      "phase": "block",
+      "type": "system",
+      "subtype": "informational",
+      "decodes_into_stream_line": true,
+      "decode_verdict": "decodes",
+      "message_json_type": "absent",
+      "keys": [
+        "content",
+        "level",
+        "prevent_continuation",
+        "session_id",
+        "subtype",
+        "type",
+        "uuid"
+      ],
+      "payload_len_bytes_captured": 579,
+      "payload_len_bytes": 447,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"informational\",\"content\":\"UserPromptSubmit operation blocked by hook:\\n[$TEMP_HOME/oslcap-rig/hook.sh]: blocked by the pyry 2255 capture rig: this prompt carries the rig marker\\n\\n\\nOriginal prompt: Reply with the single word ACK and nothing else. Do not use any tools. PYRY-2255-BLOCKME run=$NONCE\",\"level\":\"warning\",\"prevent_continuation\":true,\"uuid\":\"261d8c88-f4ef-4efa-96e7-78dac57c0bf9\",\"session_id\":\"$SESSION_ID\"}",
+      "events_emitted": 0
+    }
+  ],
+  "unredacted_path_fields": [],
+  "fixture_staged": true,
+  "fixture_stage_detail": "staged with `git add`. A run in a worktree the dispatcher discards stages into an index that goes with it, so the artifact-dir record remains the copy that survives",
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 6
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 2
+    },
+    {
+      "class": "temp_home",
+      "replacement": "$TEMP_HOME",
+      "count": 5
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 2
+    }
+  ],
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh non-git workdir under a per-test temp $HOME, rig-authored prompts, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS CAPTURE SPECIFICALLY CAN CARRY, stated rather than left to be inferred by whoever decides to paste this record into a public issue. FIRST, the local-command output is a usage and spend report. On a session of four short turns under a fresh temp home the figures describe the rig, but the surface is the operator's account and the line may name a plan or a billing window. It is KEPT, because a redacted local-command output would not be evidence of the shape the mapping ticket has to declare. SECOND, an informational line is hook feedback: on the happy path it echoes the rig's own block reason, and on a failing path it can echo the shell's error naming the hook script, which is why the temp-home class and oslcapUnredactedPathFields both cover it. THIRD, a commands-changed line is a full slash-command inventory, the operator-derived class dropcapRedactionRationale already names for system/init, in a second dress. FOURTH, per-message uuid, tool_use_id and parent_tool_use_id values SURVIVE, as they do in every committed capture in this directory. The hook script deliberately writes NEITHER the payload claude hands it NOR any environment variable: it appends one fixed word per invocation, so the credential the child inherits cannot reach the witness file through it.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "limitations": "One session, one spawn shape, one claude version, one model (haiku), and three triggers driven once each. A subtype recorded unobserved did not appear on THIS session under THIS trigger, which is not the same as claude never sending it — read the subtype's note, which names which reading its own row supports. Cross-version, cross-model and cross-surface stability are UNMEASURED. The notification row supports no absence claim at all: nothing here provokes it, because no trigger for it is known. Auto-provoked variants of the other three (a hook on some other event, a local command other than the one driven, an inventory change from outside the workdir) are UNMEASURED and may carry different fields.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}
