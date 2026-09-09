@@ -72,8 +72,8 @@ wire payload (#607). Every field is carried verbatim from `tc` + the event:
 | `ev` concrete type | `typ` | `payload` | `ok` |
 |---|---|---|---|
 | `TextChunk` | `TypeAssistantDelta` | `AssistantDeltaPayload{tc.ConversationID, tc.TurnID, tc.Seq, ev.Text}` | true |
-| `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678) | true |
-| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below) | true |
+| `ToolStart` | `TypeToolUse` | `ToolUsePayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, Name: ev.Title, InputSummary: inputSummary(ev.RawInput), Input: inputFields(ev.RawInput)}` (#1678; `ParentToolCallID` #2191, straight-through, no re-cap — bounded at construction) | true |
+| `ToolUpdate` | `TypeToolResult` | `ToolResultPayload{…, ToolUseID: ev.ToolCallID, ParentToolUseID: ev.ParentToolCallID, IsError: ev.Status == ToolStatusFailed, ResultSummary: resultSummary(ev.Content), ResultDetail: ev.ResultDetail}` (#2024, extended #2025, straight-through, no cap here — see below; `ParentToolCallID` #2191, same rule) | true |
 | `TurnEnd` | `TypeTurnEnd` | `TurnEndPayload{…, StopReason: string(ev.Reason), Outcome: ev.Outcome, IsError: ev.IsError, TerminalReason: ev.TerminalReason, ErrorCategory: ev.ErrorCategory}` (#2223/#2224, straight-through, no cap here — see below) | true |
 | `Stall` (#639) | `TypeStall` | `StallPayload{tc.ConversationID}` (`tc.TurnID`/`tc.Seq` ignored — not turn-scoped, not a delta) | true |
 | `ApiRetry` (#1074) | `TypeApiRetry` | `ApiRetryPayload{tc.ConversationID, ev.Active, ev.Current, ev.Total}` (`tc.TurnID`/`tc.Seq` ignored) | true |

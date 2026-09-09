@@ -113,6 +113,7 @@ search can reach it.
 - [tool_result_sidecar_probe_test.go](e2e-realclaude-tool-result-sidecar-probe-test-go.md) — the `toolUseResult` sidecar the transcript names arrives on claude's stdout too, but spelled `tool_use_result`, snake_case not camelCase; a one-spelling probe reported the inverse finding first.
 - [tool_progress_capture_test.go](e2e-realclaude-tool-progress-capture-test-go.md) — the live `tool_progress` capture: a from-scratch FIFO-hold helper found a `sync.Once`-cleanup hang that killed a 20-minute gate run, and the probe arms on the committed fixture's absence rather than an env var so `make e2e-realclaude` doesn't skip it vacuously.
 - [compaction_capture_test.go](e2e-realclaude-compaction-capture-test-go.md) — the live `/compact` capture: confirmed the seam (`system/status` + `system/compact_boundary`) but the dispatcher's gate-only run never commits, so the 2026-09-08 fixture fired and was lost — read before assuming #2227/#2228 have bytes to read.
+- [parent_tool_use_capture_test.go](e2e-realclaude-parent-tool-use-capture-test-go.md) — the live `parent_tool_use_id` capture: runs sonnet, not this family's usual haiku, because the probe's whole premise is that claude delegates rather than inlining two reads — a cheaper model produces a green run with no subagent in it. Fixture not yet committed as of #2191's landing.
 - [e2e-harness.md](e2e-realclaude-e2e-harness-md.md) — see the document
 - [1415](e2e-realclaude-related-tickets-1415-1439.md) — see the document
 - [1440](e2e-realclaude-related-tickets-1440-1447.md) — see the document

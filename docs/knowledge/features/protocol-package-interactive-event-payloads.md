@@ -33,21 +33,23 @@ type AssistantDeltaPayload struct {
 }
 
 type ToolUsePayload struct {
-    ConversationID string `json:"conversation_id"`
-    TurnID         string `json:"turn_id"`
-    ToolUseID      string `json:"tool_use_id"`
-    Name           string `json:"name"`
-    InputSummary   string `json:"input_summary"` // human-readable précis, not raw input
-    Input          map[string]string `json:"input"` // tool input's own fields, capped (#1678)
+    ConversationID  string `json:"conversation_id"`
+    TurnID          string `json:"turn_id"`
+    ToolUseID       string `json:"tool_use_id"`
+    ParentToolUseID string `json:"parent_tool_use_id"` // Agent/Task call's own ToolUseID, "" on the main thread (#2191)
+    Name            string `json:"name"`
+    InputSummary    string `json:"input_summary"` // human-readable précis, not raw input
+    Input           map[string]string `json:"input"` // tool input's own fields, capped (#1678)
 }
 
 type ToolResultPayload struct {
-    ConversationID string `json:"conversation_id"`
-    TurnID         string `json:"turn_id"`
-    ToolUseID      string `json:"tool_use_id"` // matches the tool_use this completes
-    IsError        bool   `json:"is_error"`
-    ResultSummary  string `json:"result_summary"` // human-readable précis, not raw output
-    ResultDetail   string `json:"result_detail"` // daemon-composed display text, e.g. a read's line count (#2024)
+    ConversationID  string `json:"conversation_id"`
+    TurnID          string `json:"turn_id"`
+    ToolUseID       string `json:"tool_use_id"` // matches the tool_use this completes
+    ParentToolUseID string `json:"parent_tool_use_id"` // ToolUsePayload's field, same meaning (#2191)
+    IsError         bool   `json:"is_error"`
+    ResultSummary   string `json:"result_summary"` // human-readable précis, not raw output
+    ResultDetail    string `json:"result_detail"` // daemon-composed display text, e.g. a read's line count (#2024)
 }
 
 type TurnEndPayload struct {
@@ -315,6 +317,16 @@ type ToolDeniedPayload struct {
   make). `InputSummary` is untouched by this change: same meaning, same
   value, same cap, and it remains the whole-input fallback when the total
   budget drops a field.
+- **`ParentToolUseID` (#2191) is a display and join hint, not a capability, and the security
+  review made the daemon say so at both structs.** A client that reads a `tool_use_id`-shaped
+  field could reasonably try to look it up or dereference it; nothing in the daemon does either
+  — no code branches on the value, so a subagent that persuades claude to name an unrelated
+  call's id mislabels one row's parent and nothing more. Bounded and dropped (not cut) at
+  `maxTaskFieldID` by `internal/streamsup`'s `parentToolUseID`, the producer's own join-key
+  reasoning: a cut id would still look like a real one and could join a row to the wrong parent,
+  where an empty value degrades to top-level rendering, the pre-#2191 behaviour. See
+  [turnevent-package.md](turnevent-package.md) § `ToolStart`/`ToolUpdate` for the field's origin
+  and [turnbridge-package.md](turnbridge-package.md) for the straight-through mapping arm.
 - **`ToolUsePayload.MarshalJSON` (#1678) is the file's second custom
   marshaller, following `BackgroundTaskRosterPayload`'s pattern exactly:** a
   nil `Input` normalises to `"input":{}`, never `"input":null`, because the

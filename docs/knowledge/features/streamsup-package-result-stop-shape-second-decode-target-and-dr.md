@@ -92,3 +92,45 @@ line — see [turnevent-package.md](turnevent-package.md) § `TurnEnd` for the
 cross-line latch design and its residual/fail-closed argument, which is a
 parser-state question rather than a decode-isolation one and belongs there
 instead.
+
+**#2191 adds two more targets and, for the first time in the family, bounds
+one of them by `maxTaskFieldID` instead of `maxTurnEndStopField`.** The key
+is `parent_tool_use_id`, read off `assistant` and `user` lines to publish
+`turnevent.ToolStart`/`ToolUpdate`'s `ParentToolCallID`. `maxTurnEndStopField`
+covers "short open-set tokens matched against a known list" — this value is
+the opposite shape, a machine-minted identifier a client *joins* on, which is
+`maxTaskFieldID`'s class (the constant #2233 already applies to a
+`tool_use_id` on a shipping frame). Getting this wrong in either direction
+would be silent: a token-class cap here would just happen to be the same 256
+bytes, so nothing would fail — the constant to reach for is a question the
+*value's* semantics answer, not something the cap's number can tell you.
+
+**Which target widens and which gets its own struct split down the middle of
+the family, one target each way, and both docblocks are right about their own
+line.** `assistantErrorLine`'s independence argument governs the assistant
+side — a hostile `parent_tool_use_id` shape must not blank the error
+category and vice versa — so the assistant line gets a new sibling target,
+`assistantParentLine`, not a fourth field bolted onto `assistantErrorLine`.
+`userLine`'s "one decode, not two" argument governs the user side the
+opposite way: the key is folded into the existing `userLine` struct rather
+than given a fourth target, because a user line routinely carries a whole
+file and a second full pass over it is not free. Read the argument as
+belonging to the *line*, not to the family — a decode-isolation ruling from
+one sibling does not generalize to the other just because the same key is at
+stake.
+
+**On the `userLine` side, the field's Go type is load-bearing, not
+stylistic.** Every existing `userLine` field is chosen so the decode *cannot
+fail* — `ToolUseResult` is `json.RawMessage` for exactly that reason, and the
+struct's failure mode is documented as "the block surfaces unmodified." A
+plain `string` field for `parent_tool_use_id` would break that property: a
+value of `7` or `{}` — both valid JSON, both something claude could emit —
+would fail the whole `userLine` unmarshal and zero `IsSynthetic` along with
+it, resurrecting the harness-prose rows #2087 removed (an 87 KB skill body,
+by that ticket's own measurement) as a disclosure regression reachable by a
+value claude controls. `ParentToolUseID json.RawMessage`, decoded through the
+shared `parentToolUseID` converter both lines call, keeps the "cannot fail"
+property while still landing one converted value. The general form: adding a
+field to a struct whose existing fields were typed to make the decode
+infallible has to preserve that property with the same care a first design
+would, not just match the JSON shape.
