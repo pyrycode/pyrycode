@@ -79,6 +79,23 @@ yet) should get a real call site in its own test rather than ship unexercised on
 caller: nothing in the build flagged the gap, and giving it one also pinned that the wide and narrow
 readers agree byte for byte.
 
+**Extending `initCaptureRecord` beat minting a fifth self-contained reader over the same record
+(#2249), and the package's own "one reader per capture family" convention argued for the extension once
+read for what it actually protects.** #2249 needed the captures' `stdout_events` array — present but
+deliberately unread by this file — to replay a `rate_limit_event` line through the parser. The surface
+reading of the convention (each capture family gets its own fully self-contained reader, own path
+constants, own provenance checks — `permission_denial_capture_test.go`'s shape) argues for a fifth
+reader here too. The property the convention actually protects is narrower: *no reader can decode
+another's record shape*, so reaching for the wrong one fails loudly rather than silently returning zero
+values. A second reader over the *same* `initialize`-ack record would have doubled the risk this file's
+own doc already names — a parallel struct next to `initControlFixtureRecord`, where a field rename lands
+as a silent zero rather than a build failure — for nothing, since the record shape is identical. Adding
+`stdout_events` as a field and riding `capturedInitialize`'s existing arm selector and provenance checks
+kept the actual rule intact: what the convention forbids is giving a reader a **path parameter**, and
+this added none. The general check for the next slice that wants one more field off an existing capture:
+grep for whether the field already exists in the record before reaching for a template that builds a new
+reader.
+
 **Decoding the initialize ack into `turnevent.ModelList` (#1811).** `emitModelList` reaches the
 capture's `models` array through a **shape discriminant**, not through correlating
 `Runner.nextControlID`'s minted `request_id`: the writer discards its id inline
