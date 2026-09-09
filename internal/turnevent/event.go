@@ -22,7 +22,8 @@ import "encoding/json"
 
 // Event is the sealed sum type of outbound turn events: TextChunk,
 // ThoughtChunk, ToolStart, ToolUpdate, TurnEnd, BackgroundTaskStarted,
-// BackgroundTaskUpdated, BackgroundTaskRoster, ThinkingProgress, the
+// BackgroundTaskUpdated, BackgroundTaskRoster, BackgroundTaskProgress,
+// ThinkingProgress, the
 // internal-only status peers Stall, ApiRetry, and Compacting, the compaction
 // boundary CompactionBoundary, and the diagnostic marker Unrecognized.
 // The unexported marker
@@ -712,6 +713,159 @@ type BackgroundTaskRoster struct {
 	// at the level where it happens — a text cut is a property of one entry and
 	// rides that entry.
 	DroppedTasks int
+}
+
+// BackgroundTaskProgress reports that a background task claude already started is
+// still doing work, and what it is doing right now. It maps claude's
+// system/task_progress line (#2246), the fifth background-task subtype the parser
+// translates rather than drops.
+//
+// It exists so a long-running task shows something MOVING between the
+// BackgroundTaskStarted that opened it and the BackgroundTaskUpdated that closes
+// it. Those two are edges; without this a client draws a row that sits silent for
+// however long the task runs, which is the half of #1240's symptom that survived
+// #2245.
+//
+// A FOURTH VARIANT RATHER THAN A WIDENING OF BackgroundTaskUpdated, and the
+// captured field set is what decides it — the opposite call from #2245's, made on
+// the same test. Two of claude's ten keys settle it. Description here is the
+// task's CURRENT ACTIVITY ("Reading alpha.txt"), where Description everywhere else
+// in this family is the task's OPENING description, a field this family has
+// already seen carry a literal operator command line; putting two meanings under
+// one name on one task row is a wire-contract trap no later ticket can undo. And
+// SubagentType and LastToolName describe the AGENT DOING THE WORK, not what
+// happened to the task, which is what BackgroundTaskUpdated's doc says that event
+// reports. #2245 could widen because its subtype reported a task's state; this one
+// reports an agent's activity.
+//
+// Nothing here synthesizes a Patch, for the reason emitBackgroundTaskNotification's
+// doc gives: BackgroundTaskUpdated.Patch is contractually claude's own bytes, and a
+// manufactured one would make that promise false. Reporting progress as a patch
+// object would have been the obvious-looking shortcut to reusing that event.
+//
+// The NAME is the daemon's, not claude's, for the reason BackgroundTaskStarted's
+// doc gives — and the discriminating word is "progress", what the daemon reports,
+// rather than claude's subtype spelling. It also disambiguates against
+// ThinkingProgress, which reports the MODEL reasoning inside a turn; this reports a
+// background task's subagent working outside one.
+//
+// RATE. The producer emits at most one of these per
+// streamsup.minTaskToolCallsPerEvent tool calls a task's own counter advances, so
+// the event stream carries fewer of them than claude emits lines — on the committed
+// capture, 2 lines become 1 event. Two consequences a consumer must not get wrong,
+// and they are ThinkingProgress's two: the events do NOT enumerate claude's lines,
+// and the ABSENCE of one within any window does NOT mean the task stalled. It may
+// only mean the counter has not advanced far enough yet. Do not build a "task
+// stalled" inference on the gap between two of these; nothing in the daemon detects
+// that, and BackgroundTaskRoster's doc refuses the neighbouring inference.
+//
+// THE BOUND IS PER TASK, which is where it parts company with ThinkingProgress's.
+// That one is a single counter for the whole turn; this is keyed by ids claude
+// chooses, so the producer retains a small bounded map — see
+// streamsup.maxTaskProgressTasks. A consequence rides that bound and is stated here
+// because a consumer cannot see it: past the producer's task-cardinality cap a task
+// gets NO progress events at all. Its opening and terminal frames are unaffected,
+// so a silent row is still a row that opens and closes correctly.
+//
+// It opens and closes no turn, exactly as the four variants above do not — a
+// background task's lifecycle is orthogonal to the turn that spawned it, which is
+// the whole #1240 point.
+//
+// Three keys the captured lines carry are deliberately NOT fields here, on the set
+// BackgroundTaskUpdated's doc states and for its reasons: session_id, claude's
+// session identity and NOT the daemon's conversation identity (#1380); uuid,
+// claude's per-line message id, which nothing in the daemon reads (#1380); and
+// tool_use_id, whose join key is TaskID and whose tool call BackgroundTaskStarted
+// already published as ToolCallID (#2245).
+//
+// claude's documented `summary` is NOT a field either, and its absence is a
+// MEASUREMENT rather than an omission. The Agent SDK describes it for a local agent
+// only with the progress-summaries option, and always for an MCP task; the
+// committed capture is a local agent without that option and carries no such key,
+// which task_progress_capture_test.go pins deliberately. Declaring it would be a
+// field taken from a docs page, which is the one thing this family's rule forbids.
+// If a client needs it, that is a new capture under a staging nobody has run.
+//
+// Every string field is claude-derived and is bounded by the producer AT
+// CONSTRUCTION (streamsup's maxTaskFieldID / maxTaskDescription), following
+// Unrecognized's precedent, so an oversized payload never enters the event stream, a
+// queue, or a log. The three integers need no cap: they cannot grow. Like every
+// variant here it carries no conversation identity — the bridge injects that.
+type BackgroundTaskProgress struct {
+	// TaskID is claude's opaque handle for the task: the join key back to the
+	// BackgroundTaskStarted that opened it. Same name, no translation.
+	//
+	// It is ALSO the producer's rate-bound key, which is a second load it does not
+	// carry anywhere else in this family. An empty TaskID is claude's to choose and
+	// still produces an event; the producer buckets every unkeyed line together so
+	// nothing escapes the bound, which means two simultaneous unkeyed tasks would
+	// share one counter and each report less often.
+	TaskID string
+	// Description is what the task is doing RIGHT NOW, from the emitting line —
+	// "Reading alpha.txt" in the capture. NOT the task's opening description, which
+	// travels on BackgroundTaskStarted under the same name and is the reason this
+	// variant exists rather than a wider BackgroundTaskUpdated.
+	//
+	// Model-authored FREE TEXT with no documented length bound, which is why it
+	// takes the same cap as its namesake (streamsup's maxTaskDescription) rather
+	// than an identifier's. It does NOT take the roster's tighter one:
+	// maxTaskRosterDescription is smaller because a roster multiplies the field by a
+	// count claude chooses within ONE event, and this event carries it once.
+	//
+	// Safe to RENDER as inert text, NEVER to execute or re-shell. Both captured
+	// values NAME A FILE the subagent is reading, so in practice this field carries
+	// path fragments from the operator's host even though claude's documented
+	// path-shaped key is not present on this subtype. A consumer must not read it as
+	// a safe label, and its namesake already carries a literal command line.
+	Description string
+	// SubagentType is claude's kind for the agent doing the work
+	// ("general-purpose" in the capture).
+	//
+	// A plain string rather than a closed enum, for BackgroundTaskStarted.TaskType's
+	// reason: one value has been observed and a closed set would be declaring its
+	// other members from nowhere. Claude-authored, so it is safe to RENDER and never
+	// to execute — a short token today is not a guarantee about tomorrow's.
+	SubagentType string
+	// LastToolName is the tool the subagent most recently invoked ("Read" in the
+	// capture), which is the other half of what SubagentType says: who is working
+	// and with what.
+	//
+	// Tool-authored under the same rule as SubagentType, plain string for the same
+	// reason, safe to RENDER and never to execute. It is NOT a claim that the tool
+	// finished, or succeeded: claude states a name, and nothing here observes the
+	// call.
+	LastToolName string
+	// TotalTokens, ToolUses and DurationMS are claude's own readings off the
+	// emitting line's nested usage object, carried verbatim.
+	//
+	// CUMULATIVE PER TASK, not per line and not per turn, and that is the property a
+	// consumer gets wrong by default: two of these events for one task carry a
+	// growing total, so their values must never be summed. Diff them if a rate is
+	// wanted. This is the mirror image of ThinkingProgress's hazard, where the
+	// per-line deltas a consumer receives do NOT sum to the turn's total — there the
+	// trap is adding, here it is adding numbers that already include each other.
+	//
+	// The producer accumulates NOTHING: every value here is the byte claude put on
+	// the line that produced this event, so no number on this variant is arithmetic
+	// the daemon did. The rate bound reads ToolUses to decide whether a line earns an
+	// event, and reading is all it does.
+	//
+	// A counter is not guaranteed monotonic across a turn. The producer handles a
+	// counter that goes backwards without silencing the task, but nothing repairs the
+	// VALUES: a consumer that subtracts two readings must tolerate a negative result,
+	// exactly as ThinkingProgress.EstimatedTokens' non-monotonicity requires.
+	TotalTokens int
+	ToolUses    int
+	DurationMS  int
+	// TruncatedFields names the fields the producer cut to fit their caps, in
+	// declaration order, using the DAEMON's snake_case names: "task_id",
+	// "description", "subagent_type", "last_tool_name". No name is translated here —
+	// claude's keys and these fields agree, unlike BackgroundTaskStarted's
+	// tool_use_id -> "tool_call_id". nil when nothing was cut, never an empty
+	// non-nil slice, so a consumer can emit it as absent rather than [].
+	//
+	// The three integers can never appear here: nothing cuts an int.
+	TruncatedFields []string
 }
 
 // ThinkingProgress reports that claude is actively reasoning, and roughly how
@@ -2223,27 +2377,28 @@ type Location struct {
 
 // The events are pure value types, so each marker is implemented on a value
 // receiver: TextChunk{}, not only &TextChunk{}, satisfies Event.
-func (TextChunk) isTurnEvent()             {}
-func (ThoughtChunk) isTurnEvent()          {}
-func (ToolStart) isTurnEvent()             {}
-func (ToolUpdate) isTurnEvent()            {}
-func (TurnEnd) isTurnEvent()               {}
-func (BackgroundTaskStarted) isTurnEvent() {}
-func (BackgroundTaskUpdated) isTurnEvent() {}
-func (BackgroundTaskRoster) isTurnEvent()  {}
-func (ThinkingProgress) isTurnEvent()      {}
-func (RateLimited) isTurnEvent()           {}
-func (ModelAnnounced) isTurnEvent()        {}
-func (ModelList) isTurnEvent()             {}
-func (SlashCommandList) isTurnEvent()      {}
-func (Stall) isTurnEvent()                 {}
-func (ApiRetry) isTurnEvent()              {}
-func (Compacting) isTurnEvent()            {}
-func (CompactionBoundary) isTurnEvent()    {}
-func (ToolCallDenied) isTurnEvent()        {}
-func (ModelRefusalFallback) isTurnEvent()  {}
-func (ConversationReset) isTurnEvent()     {}
-func (Unrecognized) isTurnEvent()          {}
+func (TextChunk) isTurnEvent()              {}
+func (ThoughtChunk) isTurnEvent()           {}
+func (ToolStart) isTurnEvent()              {}
+func (ToolUpdate) isTurnEvent()             {}
+func (TurnEnd) isTurnEvent()                {}
+func (BackgroundTaskStarted) isTurnEvent()  {}
+func (BackgroundTaskUpdated) isTurnEvent()  {}
+func (BackgroundTaskRoster) isTurnEvent()   {}
+func (BackgroundTaskProgress) isTurnEvent() {}
+func (ThinkingProgress) isTurnEvent()       {}
+func (RateLimited) isTurnEvent()            {}
+func (ModelAnnounced) isTurnEvent()         {}
+func (ModelList) isTurnEvent()              {}
+func (SlashCommandList) isTurnEvent()       {}
+func (Stall) isTurnEvent()                  {}
+func (ApiRetry) isTurnEvent()               {}
+func (Compacting) isTurnEvent()             {}
+func (CompactionBoundary) isTurnEvent()     {}
+func (ToolCallDenied) isTurnEvent()         {}
+func (ModelRefusalFallback) isTurnEvent()   {}
+func (ConversationReset) isTurnEvent()      {}
+func (Unrecognized) isTurnEvent()           {}
 
 var (
 	_ Event = TextChunk{}
@@ -2254,6 +2409,7 @@ var (
 	_ Event = BackgroundTaskStarted{}
 	_ Event = BackgroundTaskUpdated{}
 	_ Event = BackgroundTaskRoster{}
+	_ Event = BackgroundTaskProgress{}
 	_ Event = ThinkingProgress{}
 	_ Event = RateLimited{}
 	_ Event = ModelAnnounced{}

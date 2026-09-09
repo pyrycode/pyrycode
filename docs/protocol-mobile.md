@@ -500,6 +500,7 @@ Unchanged from v1 except where noted. Every type below is sent as the **decrypte
 | **`background_task_started`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude started work that outlives the turn that spawned it (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_updated`** | binary → phone | no | **New in v2** (interactive, capability-gated). A background task claude already started changed (#1394), or **ended** (#2245). See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`background_task_roster`** | binary → phone | no | **New in v2** (interactive, capability-gated). Snapshot of the background tasks claude is tracking; an empty list says nothing is alive (#1394). See [Interactive events](#interactive-events-v2-capability-gated). |
+| **`background_task_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). A running background task is still working, and what it is doing right now (#2246). Rate-bounded per task; absence proves nothing. Not to be confused with claude's separate `tool_progress`. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`thinking_progress`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude is actively reasoning, and roughly how much — its only mid-turn proof of life on the stream-json surface (#1386). Rate-bounded; absence proves nothing. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`rate_limited`** | binary → phone | no | **New in v2** (interactive, capability-gated). claude's usage-limit window is in a state other than the one measured-benign one — why, which limit, and when claude says it lifts (#1405). Shape declared by #1405, emitted since #1410. See [Interactive events](#interactive-events-v2-capability-gated). |
 | **`model_announced`** | binary → phone | no | **New in v2** (interactive, capability-gated). The model claude named for the current turn on its `system/init` line (#1616). **Not** the per-session override the three `model` fields elsewhere in this document carry. Shape declared by #1616, emitted since #1638. See [Interactive events](#interactive-events-v2-capability-gated). |
@@ -754,7 +755,7 @@ The daemon MUST echo only what it itself supports — the agreed set is the **in
 
 ### Interactive events (v2, capability-gated)
 
-These seventeen envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
+These eighteen envelope types form the structured live-session stream. They are sent **binary → phone only**, and **only** to a phone whose `interactive` capability was echoed in `hello_ack`; an old phone never receives them. They are the wire representation of the daemon's neutral internal turn-event model. All *payload* fields are always present (no omitempty) so boundary values like `seq: 0` and `is_error: false` are explicit on the wire.
 
 **Replay cursor (`event_id`, #649).** Every frame in this stream additionally carries an envelope-level `event_id` (the optional `Envelope` field above) — the durable id the daemon assigns to each structured event as it records it in a bounded per-conversation event ring (ADR 025 § Backpressure / replay). It is **not** the same as the envelope's `id`: `id` is a per-connection counter that resets each reconnect, whereas `event_id` is connection-independent, identical across all interactive connections for a given logical event, and strictly increasing in the daemon's emit order. **Retention is per conversation; the id space is not** (#2022). One ring-wide counter assigns every id, so an id is never shared by two conversations and a conversation's own ids ascend without being contiguous — ids belonging to other conversations sit between them, and the first id a conversation is assigned is normally far above 1. **A client may therefore keep one scalar cursor**: no event the daemon emits later, in any conversation, can carry an id at or below one already seen. A client that keys its cursor per conversation is equally correct and unaffected. A phone records the latest `event_id` it has seen and, on mid-turn reconnect, advertises it as `last_event_id` in its `hello`; the daemon then replays the missed tail from the ring (or emits a `resync` marker if it fell off the bounded window). The **producer** side (the daemon stamping `event_id` outbound) landed in #649; the reconnect **consumer** (`hello.last_event_id`, ring replay, and the `resync` marker) landed in #647 — see [Reconnect replay & resync](#reconnect-replay--resync-consumer-647) below.
 
@@ -1135,7 +1136,13 @@ So the parser has **two tiers**, and the split is the whole design:
   #1404 the parser also maps `rate_limit_event` — a **top-level line type, not
   a `system` subtype**, so the count of five above is unaffected — to
   `turnevent.RateLimited`, which reaches this wire as
-  [`rate_limited`](#rate_limited) (#1405), documented below. Every other `system`
+  [`rate_limited`](#rate_limited) (#1405), documented below. **The count of
+  five above is stale and is deliberately not re-counted here** (#2246): #2227,
+  #2237, #2232, #2267, #2245 and #2246 have each added a parser arm since, so
+  replacing it with a sixth number would swap one wrong count for another. The
+  authority is `streamsup.emitSystemSubtype`'s case arms, which fail a build when
+  they go stale where a number in prose does not; repairing this paragraph is
+  documentation work of its own. Every other `system`
   subtype is still silently dropped exactly as before, and none of this changes what
   surfaces as `unrecognized_message` — a subtype the parser doesn't recognize
   at all still falls through to the silent-drop tier, not this frame.
@@ -1405,6 +1412,90 @@ a **list** of command lines is a more tempting shape to feed somewhere structure
 than a single one. Render every row as inert text; never execute, re-shell, or
 feed it to an HTML sink, an attribute, or a URL.
 
+#### `background_task_progress`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `conversation_id` | string | Conversation whose turn spawned the task. |
+| `task_id` | string | The join key back to the `background_task_started` that opened the task. |
+| `description` | string | What the task is doing **right now** — "Reading alpha.txt" in the captured frames. **Not** the task's opening description, which `background_task_started` carries under the same name. |
+| `subagent_type` | string | claude's kind for the agent doing the work (`general-purpose` in the capture). |
+| `last_tool_name` | string | The tool that agent most recently invoked (`Read` in the capture). Not a claim that the call finished or succeeded. |
+| `total_tokens` | int | claude's token reading for the task as of the emitting line. **Cumulative per task** — see below. |
+| `tool_uses` | int | How many tool calls the task's agent has made as of the emitting line. **Cumulative per task**, and the counter the daemon's rate bound reads. |
+| `duration_ms` | int | How long the task has been running as of the emitting line, in milliseconds. **Cumulative per task**. |
+| `truncated_fields` | array of string \| null | Names of the fields the daemon cut: `task_id`, `description`, `subagent_type`, `last_tool_name`. `null` when nothing was cut. The three integers can never appear here. |
+
+Like its three siblings it is **binary → phone only**, `interactive`-gated, and
+carries an envelope-level `event_id`.
+
+`background_task_progress` (#2246) is the fourth background-task frame and the
+one that fills the gap between the other three: `background_task_started` opens a
+task, `background_task_updated` reports what happened to it, `background_task_roster`
+lists what is alive, and this one says a running task is **still working**. Without
+it a client draws a task row that sits silent for however long the task runs. Join
+it to the rest on `task_id`. Like its siblings it carries no `turn_id` and opens and
+closes no turn — a background task's lifecycle is orthogonal to the turn that
+spawned it.
+
+**It is a separate frame from `background_task_updated`, not a wider one**, and
+the reason matters to a client rather than only to the daemon. `description` here
+is the task's **current activity**; `description` on `background_task_started` is
+the task's **opening description**, which for claude's `local_bash` task type is a
+literal command line. Those are two different things, and carrying both under one
+name on one task row would be a contract a client could not undo later. The other
+half is that `subagent_type` and `last_tool_name` describe the **agent doing the
+work**, not what happened to the task, which is what `background_task_updated`
+reports. No `patch` is synthesized here or anywhere: that field is contractually
+claude's own bytes.
+
+**`task_progress` is not `tool_progress`.** claude's vocabulary carries both, they
+mean different things, and conflating them is the documented easy mistake around
+this frame. This frame's name carries the `background_task_` prefix for exactly
+that reason.
+
+Four things a client will otherwise get wrong.
+
+**1. The frames are rate-bounded, per task, and do not enumerate claude's lines.**
+The daemon emits at most one frame per **2 tool calls** a task's own `tool_uses`
+advances. On the committed capture, **2 lines became 1 frame**. The bound is on the
+counter's advance rather than on the line count, so a task whose counter jumps by
+two or more per line produces one frame per line — the halving describes the
+measured shape, not a guarantee. Do not treat a frame as "claude produced one line".
+
+**2. Absence proves nothing.** A gap between two frames does **not** mean the task
+stalled; it may only mean the counter has not advanced far enough yet. Nothing in
+the daemon detects a stalled background task, and no frame reports one. There is a
+second reason absence proves nothing, and it has no workaround at the client: the
+daemon tracks a bounded number of concurrent tasks (**8**), and a task beyond that
+receives **no progress frames at all**. Its `background_task_started` and its
+terminal `background_task_updated` are unaffected, so a silent row still opens and
+closes correctly.
+
+**3. The three counters are cumulative per task and must never be summed.** Two
+frames for one task carry growing values, so adding them double-counts. Diff them
+if a rate is wanted. They are also **not guaranteed monotonic** — claude restarts
+cumulative counters, demonstrably so on the neighbouring `thinking_progress`
+readings — so a client that subtracts two readings must tolerate a negative result
+rather than treating one as an error.
+
+**4. The values are the producing line's own.** The daemon accumulates nothing and
+computes nothing: every number on this frame is the byte claude put on the line that
+produced it. The rate bound reads `tool_uses` to decide whether a line earns a frame,
+and reading is all it does.
+
+**SECURITY.** `description` is model-authored **free text** with no documented
+length bound, and it is the field this frame exists to carry. Both captured values
+**name a file** the agent is reading, so a stream of these frames is a stream of path
+fragments from the operator's host — even though claude's documented path-shaped key
+is not present on this subtype at all. Do not read it as a safe label.
+`subagent_type` and `last_tool_name` are short model- and tool-authored tokens under
+the same rule; a short token today is not a guarantee about tomorrow's. Render all
+three as **inert text**; never execute, re-shell, or feed them to an HTML sink, an
+attribute, or a URL. The rule is repeated here rather than delegated to
+`background_task_started` because these values arrive **repeatedly for one row**,
+which is the shape a client is most likely to bind straight into a template.
+
 #### `thinking_progress`
 
 | Field | Type | Meaning |
@@ -1655,7 +1746,7 @@ itself owns.
 
 #### `session_transition`
 
-Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the seventeen turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
+Direction **binary → phone** (outbound v2 session-boundary marker; not in `v1TypeSet` — an old phone never receives it). This is a **session-boundary marker, distinct from the eighteen turn-stream events above** — it does not belong to the structured live-session stream and carries no `event_id`. It is the wire form of `pyrycode-mobile#336`'s `ThreadItem.SessionBoundary`: the daemon's session rotated, so the phone renders a boundary marker instead of inferring one from message fields that do not exist.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1672,7 +1763,7 @@ The **producer** is **#657**. Until a server-side workspace-change source exists
 
 #### `model_list`
 
-Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the seventeen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
+Direction **binary → phone** (outbound v2 model inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the eighteen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though it rides the same live interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on. It carries what claude returns from a `control_request` with subtype `initialize` on the control channel the daemon already writes to, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of what claude will accept for the conversation, not a delta. That same `initialize` reply publishes a second per-conversation menu, [`slash_command_list`](#slash_command_list): this frame inventories the **identities** claude will run as, that one inventories the **verbs** the working directory will accept.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -1741,7 +1832,7 @@ Four things a client will otherwise get wrong:
 
 #### `slash_command_list`
 
-Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the seventeen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though the live-lane emission rides the same interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on; the connect-time copy deliberately carries none. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
+Direction **binary → phone** (outbound v2 slash-command inventory; not in `v1TypeSet` — an old phone never receives it). This is a **conversation-scoped menu, distinct from the eighteen turn-stream events above** — it is not a `turnevent` variant and is not one of those events, though the live-lane emission rides the same interactive lane they do and carries an `event_id` like them, which is what the delivery window below turns on; the connect-time copy deliberately carries none. It carries the `commands` array claude returns from a `control_request` with subtype `initialize`, the same reply [`model_list`](#model_list) is drawn from, so it arrives on a `control_response` rather than on the turn stream; receiving one **neither opens nor closes a turn**. It is a **snapshot** of the commands this session *in this working directory* will accept, not a delta. `model_list` inventories the **identities** claude will run as; this one inventories the **verbs**.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -3610,6 +3701,7 @@ This document is itself the architecture artefact for #430 (ticket carries `secu
 
 ## Changelog
 
+- `2026-09-10`: **A running background task now says it is still working** (#2246) — a new frame, [`background_task_progress`](#background_task_progress), carrying `task_id`, the task's **current activity**, the agent doing it, the tool it last used, and `claude`'s three per-task counters. **The gap was the silence between the two edges.** A client opened a task row on [`background_task_started`](#background_task_started) and, since #2245, could close it on a terminal [`background_task_updated`](#background_task_updated); in between, `claude`'s `system/task_progress` line had no arm in the parser and fell through to a silent drop, so a long-running task showed nothing moving for however long it ran. **It is a separate frame rather than two more fields on `background_task_updated`, and the captured field set decided it** — the opposite call from #2245's, made on the same test. `description` here is the task's **current activity** ("Reading alpha.txt"), where `description` everywhere else in this family is the task's **opening** description, which this family has already seen carry a literal operator command line; two meanings under one name on one task row is a contract a client could not undo. And `subagent_type` and `last_tool_name` describe the **agent doing the work**, not what happened to the task, which is what `background_task_updated` reports. **No `patch` is synthesized**, for #2245's reason. **`task_progress` is not `tool_progress`** — `claude` ships both, they mean different things, and the frame carries the `background_task_` prefix so a client cannot conflate them. **The frames are rate-bounded per task**, which is this frame's real work rather than a copy of a sibling's: on the capture the subagent's tool-call count tracked the line count 1:1, so a subagent making fifty tool calls would have put fifty rows on the wire. The daemon emits at most one frame per **2 tool calls** a task's own `tool_uses` advances — 2 lines became 1 frame on the capture. **The bound is on the counter's advance, not the line count**, so a counter jumping by two or more per line produces one frame per line; the halving describes the measured shape, not a guarantee. **Absence proves nothing**, for two separate reasons: a gap may only mean the counter has not advanced, and a task beyond the daemon's **8** concurrent-task limit receives no progress frames at all while its opening and terminal frames are unaffected. **The three counters are cumulative per task, so summing them double-counts** — diff them for a rate — and they are **not guaranteed monotonic**, so a client subtracting two readings must tolerate a negative result. **Every number is the producing line's own**: the daemon accumulates nothing and computes nothing, and the rate bound only *reads* `tool_uses`. **`summary` is deliberately absent, and that absence is a measurement rather than a gap**: the SDK documents it for a local agent only with the progress-summaries option and always for an MCP task, and the committed capture is a local agent without that option, so declaring it would have been a field taken from a docs page. `session_id`, `uuid` and `tool_use_id` are absent on the family's standing rule, and none is decoded anywhere in the daemon. **`description` names a file the agent is reading** in both captured frames, so a stream of these frames is a stream of path fragments from the operator's host, and the render-as-inert-text rule is restated at it rather than inherited because these values arrive repeatedly for one row. All four strings are cut to the daemon's caps at construction and any cut is named in `truncated_fields`. No `turn_id`, no turn lifecycle; the other three background-task frames are unchanged. Also **corrected four stale counts**: § Interactive events, `session_transition`, `model_list` and `slash_command_list` all said "seventeen" turn-stream events; all four now read eighteen. **Deliberately not re-counted**: § `unrecognized_message`'s "five `system` subtypes", which was already stale before this ticket — #2227, #2237, #2232, #2267 and #2245 each added a parser arm without moving it — so a sixth number there would replace one wrong count with another. The authority is `streamsup.emitSystemSubtype`'s case arms, and repairing that paragraph is documentation work of its own.
 - `2026-09-10`: **A background task can now reach a terminal state on the wire** (#2245) — [`background_task_updated`](#background_task_updated) gains two fields, `status` and `summary`, mapped from `claude`'s `system/task_notification` line. **The gap was that nothing the daemon sent ever said a task ended.** A row a client opened on [`background_task_started`](#background_task_started) stayed open for the rest of the session: `patch` reported mid-life changes, the roster is a snapshot the daemon refuses to diff on a client's behalf, and the terminal transition had no representation at all. **This falsifies the 2026-08-09 entry below**, which stated that no terminal/finish event exists in the family, deliberately, because that transition had never been observed. The reasoning stood; the evidence expired. #2247 staged a turn that finally let a backgrounded command **finish** and committed the line, so the subtype has a parser arm now instead of falling through to a silent drop. **One frame, two producing lines, disjoint fields**: `system/task_updated` fills `patch`, `system/task_notification` fills `status` and `summary`, and nothing fills both. **A non-empty `status` is the signal**, and there is deliberately no field naming which line produced the frame — that would be daemon-invented content on a frame whose `patch` is contractually `claude`'s own bytes and nothing else. **`status` is `claude`'s report, not the daemon's detection**: the daemon does not verify that a task claiming a finish has stopped running, and it still refuses to infer a finish from a roster diff. **It is a plain string, not an enumeration** — `completed` is the one value ever captured, and the `failed` and `stopped` states the SDK documents have never been staged, so a client switching exhaustively over three tokens would be trusting a docs page over a measurement. **No `patch` is synthesized to carry the terminal state**, which was the obvious-looking move and would have made this frame's own contract false; a `task_notification` frame's `patch` is empty because the line carries none. **`output_file` is not on the frame and is decoded nowhere**: `claude` sends it and it is documented as a path on the operator's host, so no value for it exists anywhere in the daemon to be sent, which is a stronger guarantee than omitting it at the wire. **`summary` is the second field in this family that can carry a literal command line** — in the one captured frame it *is* the task's command — and unlike `patch` it is prose a client renders, so the render-as-inert-text rule is restated at it rather than inherited. Both new fields are cut to the daemon's caps at construction and any cut is named in `truncated_fields`. No new frame type, no `turn_id`, no turn lifecycle; the other two background-task frames are unchanged.
 - `2026-09-09`: **A turn now says how long it took, how many round-trips it made, and what the session has cost** (#2260) — [`turn_end`](#turn_end) gains four optional numbers off the `result` line it is already built from: `duration_ms`, `duration_api_ms`, `num_turns` and `cost_usd_total`. `claude`'s own turn boundary has carried all four all along and the daemon decoded none of them, so a client had **no time-per-turn and no cost reading at all** and could only re-derive one from the transcript. **Two of the four are running totals and two are per turn, and the pair that looks most alike is the pair that disagrees** — which is the reading this frame now has to foreclose rather than merely publish. `duration_ms` and `num_turns` describe the turn; `duration_api_ms` and `cost_usd_total` only grow. **`duration_api_ms` exceeding `duration_ms` is the observable tell, and it is the norm** (53 of 57 observed lines), so a client reading it as the API time *inside* the turn renders eleven seconds of API work for a three-second turn. **Differencing consecutive frames does not rescue that reading**: the value already exceeds its own turn's `duration_ms` on the **first** `result` line of 19 of the 21 multi-turn captures, where a running total has accumulated nothing but that turn — whatever it sums is not bounded by the turn's wall clock. The daemon **differences nothing** and publishes what `claude` sent. **A `0` is a number `claude` sends, not a decode fallback**, and this is the reading most likely to be got wrong: one observed line reports `duration_api_ms: 0` and `num_turns: 0` beside a `duration_ms` of `15617` and a non-zero cost, so a client treating a zero as "the daemon could not read this" mislabels a real turn; absent, `null`, unreadable and an explicit `0` are one reading. **The wire spells `cost_usd_total` where `claude` spells `total_cost_usd`** — deliberate, and the only respelling in the group. **Plain numbers, not pointers**, unlike [`compaction_boundary`](#compaction_boundary)'s counts: all four keys are present and numeric on all 57 observed lines, so absence would mean a decode failure or a future `claude` rather than an ordinary shape, and there is no absent-versus-zero distinction to offer. **Nothing is clamped, range-checked or ordered** — [`rate_limited`](#rate_limited)'s posture — and in particular there is **no `duration_api_ms <= duration_ms` check**, which would reject 53 of the 57 lines. **They are `claude`-authored but do NOT take `outcome`'s sanitization rule**, and a client must not carry that paragraph across: a JSON number holds no control character, terminal escape, markup or URL, so nothing is owed at the render boundary and no length bound exists to look for, these growing no frame because the bound is over the numeric type's range. What does carry over is the **misattribution** half — `cost_usd_total` is `claude`'s **estimate, not a billing statement**, and rendering it as the daemon's own accounting of the operator's spend presents model-authored data as trusted chrome, [`error_category`](#turn_end)'s trap reached through a number. **Nothing in the daemon acts on any of them, spend enforcement included.** **No live capture was taken and none was needed** — every value is already in committed bytes across six `claude` versions, so the evidence is a replay, including the lone zero-bearing capture, which is stored in a **different shape** from the other 31 and needed its own reader to be seen at all. `stop_reason`, `outcome`, `is_error`, `terminal_reason` and `error_category` are unchanged for every input. The nested `usage` token counts on the same line are #2261's.
 - `2026-09-09`: **A quota warning can now say how much of the window is spent** (#2249) — [`rate_limited`](#rate_limited) carries a fifth field, `utilization`, so the frame reads "94% of your weekly window" rather than only "something is wrong". **The gap was at the decode target, which is why nothing downstream could have been patched around it.** The daemon's `rate_limit_info` target declared three keys, so `claude`'s reading was discarded before any event existed and reached neither the internal variant nor this wire shape. A client receiving the frame knew a limit existed but not how close it was, which is the one thing a user can act on. **The evidence is a committed capture, not a hand-built shape**: the single `allowed_warning` reading on record carries `utilization: 0.94` beside `rateLimitType: seven_day`, and a hermetic replay of those bytes is what proves the mapping. **`null` and `0` are different facts and this is the reading most likely to be got wrong** — the same trap [`compaction_boundary`](#compaction_boundary)'s `post_tokens` carries, and here absence is the **common** case rather than the exceptional one: every observed benign report omits the key entirely. A client reading a missing reading as zero renders a **fresh window as an exhausted one**. Degrade instead, and say a limit was reported without claiming how much of it is spent; the daemon always emits the key, so an unreported reading is a literal `null` and never a dropped key. **It is `claude`'s number and NOT a bounded fraction** — not clamped, rounded, rescaled or range-checked anywhere on the path, [`rate_limited`](#rate_limited)'s own `resets_at` posture — so scaling a gauge by it without a range check is the realistic bug, and a value the daemon could not read as a number produces **no frame at all** rather than one carrying an invented reading. **It is not a member of `truncated_fields` and has no cap**, because a number cannot be cut and a `float64`'s encoding is bounded by its type. **Nothing in the daemon acts on it**, and a number invites a threshold far more strongly than an opaque status label does: the constraint is unchanged and is restated at the field for exactly that reason. **Forwarding the benign `allowed` reading so a client can CLEAR a warning is #2250** and the gate is untouched here — only a non-benign status still emits. **The `status` and `limit_type` rows are unchanged**; this section was already current on the `allowed_warning` observation, and what lagged were the daemon's own code comments, which called the non-benign value set unmeasured when one value is now measured.

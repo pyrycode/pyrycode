@@ -1615,6 +1615,29 @@ func TestDropcapClassification(t *testing.T) {
 				"backgrounded command finish",
 		},
 		{
+			name: "system/task_progress", line: `{"type":"system","subtype":"task_progress"}`,
+			wantReason: dropcapReasonIgnoredType, wantDrop: true,
+			why: "#2246: the subtype IS one streamsup.emitSystemSubtype maps now — it becomes a " +
+				"turnevent.BackgroundTaskProgress. The verdict is unchanged and is derived rather " +
+				"than declared, in system/init's and system/status's shape: THIS line carries no " +
+				"usage.tool_uses, and a non-positive counter is emitBackgroundTaskProgress's guard, " +
+				"so the shipped parser emits nothing for it and dropcapClassify's default arm still " +
+				"reads it as a drop. The row BELOW carries the counter and flips the verdict, which " +
+				"is what makes this pair a pin on the guard rather than on the subtype. NOTE the " +
+				"divergence from task_notification above, which gates on nothing and maps bare: this " +
+				"arm gates because the counter is what its rate bound reads, and a line with none " +
+				"cannot be placed against a previous value",
+		},
+		{
+			name: "system/task_progress with a counter", wantDrop: false,
+			line: `{"type":"system","subtype":"task_progress","task_id":"t-1","usage":{"tool_uses":2}}`,
+			why: "#2246: MAPPED, and this is the control for the row above. tool_uses 2 is the rate " +
+				"bound's own quantum, so an untracked task crosses it on its first line and the " +
+				"parser emits. Without this row the pair above would pass vacuously on a parser " +
+				"that had no arm for the subtype at all — which is exactly the state this ticket " +
+				"changed",
+		},
+		{
 			name: "rate_limit_event", line: `{"type":"rate_limit_event"}`,
 			wantReason: dropcapReasonIgnoredType, wantDrop: true,
 			why: "CORRECTED (#1404): no longer the second ignoredLineTypes member — the type is " +

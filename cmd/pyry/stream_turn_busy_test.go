@@ -599,6 +599,13 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		{turnevent.BackgroundTaskStarted{TaskID: "t-1"}, turnMarkNone},
 		{turnevent.BackgroundTaskUpdated{TaskID: "t-1"}, turnMarkNone},
 		{turnevent.BackgroundTaskRoster{}, turnMarkNone},
+		// #2246. Neither an opener nor a closer, and it is the strongest case in the
+		// family for the whitelist's default being load-bearing rather than merely
+		// correct: this variant fires REPEATEDLY while a task runs, so opening a mark
+		// on one would wedge the conversation many times over on work that is
+		// orthogonal to the turn. The default already answers it, so this row asserts
+		// that answer rather than a new arm — turnMarkFor is unchanged by that ticket.
+		{turnevent.BackgroundTaskProgress{TaskID: "t-1", ToolUses: 2}, turnMarkNone},
 		{turnevent.ThinkingProgress{EstimatedTokens: 184}, turnMarkNone},
 		{turnevent.RateLimited{Status: "allowed", LimitType: "five_hour"}, turnMarkNone},
 		{turnevent.ModelAnnounced{Model: "claude-haiku-4-5-20251001"}, turnMarkNone},

@@ -522,6 +522,37 @@ func MapEvent(ev turnevent.Event, tc TurnContext) (typ string, payload any, ok b
 			Tasks:          tasks,
 			DroppedTasks:   e.DroppedTasks,
 		}, true
+	case turnevent.BackgroundTaskProgress:
+		// The fourth background-task frame, same posture as the three above: not
+		// turn-scoped, so tc.TurnID and tc.Seq are ignored and the payload has no field
+		// for either. A background task's work outlives the turn that spawned it.
+		//
+		// Every field crosses VERBATIM and nothing is invented: the producer bounded
+		// the four strings at construction (streamsup's maxTaskFieldID /
+		// maxTaskDescription) and this adapter is pure and re-caps nothing. The three
+		// integers cross including a zero — a task reporting no tokens or no elapsed
+		// time is a legitimate reading, exactly as ThinkingProgress's {0,0} is.
+		//
+		// NO SUPPRESSION BRANCH, on the ThinkingProgress arm's rule and for its reason:
+		// the producer's rate bound (streamsup.minTaskToolCallsPerEvent) already decides
+		// which of claude's lines earn an event, and a second, differently-shaped filter
+		// here would silently diverge from it. In particular nothing here compares this
+		// event's counters against a previous one — this adapter keeps no state, and the
+		// per-task memory that decides the rate lives in the producer where the bound is.
+		//
+		// TruncatedFields rides along because a payload that dropped it would present
+		// claude's cut text to a phone as complete.
+		return protocol.TypeBackgroundTaskProgress, protocol.BackgroundTaskProgressPayload{
+			ConversationID:  tc.ConversationID,
+			TaskID:          e.TaskID,
+			Description:     e.Description,
+			SubagentType:    e.SubagentType,
+			LastToolName:    e.LastToolName,
+			TotalTokens:     e.TotalTokens,
+			ToolUses:        e.ToolUses,
+			DurationMS:      e.DurationMS,
+			TruncatedFields: e.TruncatedFields,
+		}, true
 	case turnevent.ThinkingProgress:
 		// Conversation identity only, like the status peers above: tc.TurnID and
 		// tc.Seq are ignored and the payload has no field for either. It is a

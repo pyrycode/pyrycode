@@ -62,6 +62,7 @@ func TestIsKnownAppType(t *testing.T) {
 		{"background_task_roster-rejected", TypeBackgroundTaskRoster, false, ErrUnknownType},
 		// the v2-only thinking-progress reading: an outbound binary → phone event
 		// an old phone never receives, so IsKnownAppType must reject it.
+		{"background_task_progress-rejected", TypeBackgroundTaskProgress, false, ErrUnknownType},
 		{"thinking_progress-rejected", TypeThinkingProgress, false, ErrUnknownType},
 		// the v2-only usage-limit report: an outbound binary → phone event an old
 		// phone never receives, so IsKnownAppType must reject it. Rejection is also
@@ -284,6 +285,8 @@ var v2OnlyTypes = map[string]bool{
 	TypeBackgroundTaskStarted: true,
 	TypeBackgroundTaskUpdated: true,
 	TypeBackgroundTaskRoster:  true,
+	// v2 background-task activity reading.
+	TypeBackgroundTaskProgress: true,
 	// v2 thinking-progress reading.
 	TypeThinkingProgress: true,
 	// v2 usage-limit report.
@@ -391,6 +394,8 @@ func TestTypeConstants_V1V2Partition(t *testing.T) {
 		// v2 background-task vocabulary.
 		TypeBackgroundTaskStarted, TypeBackgroundTaskUpdated,
 		TypeBackgroundTaskRoster,
+		// v2 background-task activity reading.
+		TypeBackgroundTaskProgress,
 		// v2 thinking-progress reading.
 		TypeThinkingProgress,
 		// v2 usage-limit report.

@@ -180,32 +180,82 @@ Write absence and wrong-type as two separate criteria with two separate expected
 future subtype's acceptance criteria are drafted from a documentation-derived (rather than
 capture-derived) field set.
 
-**`task_progress` is now measured and pinned, but still unmapped — the tenth subtype waiting on
-a `case` arm (#2248).** No production arm exists for it; `system/task_progress` still falls
-through to the unmapped-subtype silence every other unlisted subtype gets. What changed is that
-the string is no longer unmeasured in this repo: `internal/streamsup/task_progress_capture_test.go`
-reads the two verbatim `system/task_progress` frames `parent_tool_use_v2.1.259.json` already
-carried — captured for a different ticket's subagent-join question, kept only because that probe
-records the whole turn rather than a filtered quarry — and pins their shape as per-frame equality,
-not a union: `taskProgressPinnedKeys` for the top-level fields, `taskProgressPinnedUsageKeys` for
-the nested `usage` object. `taskProgressDocumentedKeys`, read off
-`@anthropic-ai/claude-agent-sdk@0.3.263`'s `SDKTaskProgressMessage`, is checked only as a set
-difference against the pin, never copied into it: `summary` is documented and not observed,
-because this staging is a local agent without the progress-summaries option and an MCP task
-always reports it. Whichever ticket adds the tenth `case` arm should read `summary`'s absence here
-as a fact about this staging, not about the subtype, and should not declare the field from the SDK
-docs alone.
+**`task_progress` was measured and pinned by #2248, then mapped by #2246 — the eleventh `case`
+arm.** `internal/streamsup/task_progress_capture_test.go` reads the two verbatim
+`system/task_progress` frames `parent_tool_use_v2.1.259.json` already carried — captured for a
+different ticket's subagent-join question, kept only because that probe records the whole turn
+rather than a filtered quarry — and pins their shape as per-frame equality, not a union:
+`taskProgressPinnedKeys` for the top-level fields, `taskProgressPinnedUsageKeys` for the nested
+`usage` object. `taskProgressDocumentedKeys`, read off `@anthropic-ai/claude-agent-sdk@0.3.263`'s
+`SDKTaskProgressMessage`, is checked only as a set difference against the pin, never copied into
+it: `summary` is documented and not observed, because this staging is a local agent without the
+progress-summaries option and an MCP task always reports it. `#2246` declared `summary` nowhere
+— neither `systemTaskProgressLine` nor `protocol.BackgroundTaskProgressPayload` — on the family's
+rule that a documented-but-unobserved field is a fact about the staging, not the subtype; a new
+capture with the progress-summaries option is what would change that, not the SDK docs.
 
-Two shared-fixture conventions worth carrying into that mapping ticket's own reader, since a
-sixth reader over a committed record is now the expected shape rather than a novelty: a second
-reader over an already-consumed record (`internal/streamsup/parent_tool_use_capture_test.go`
-reads the same file for its `parentPinnedAgentID`) should mint its own path/version constants
-rather than reuse the first reader's, and should not assert the two agree — two readers pinned at
-two claude releases over two records is a legitimate steady state an equality check would forbid.
-And a package-level pin slice must be declared already sorted, never sorted in place inside the
-reader: `-race` cannot see that mutation as a hazard while no parallel test happens to touch the
-same slice, so a `sort.StringsAreSorted` assertion (`TestTaskProgressPinsAreDeclaredSorted`) is the
-only thing standing behind the rule, not the comment describing it.
+Two shared-fixture conventions worth carrying into a later ticket's own reader over a committed
+record: a second reader over an already-consumed record
+(`internal/streamsup/parent_tool_use_capture_test.go` reads the same file for its
+`parentPinnedAgentID`) should mint its own path/version constants rather than reuse the first
+reader's, and should not assert the two agree — two readers pinned at two claude releases over two
+records is a legitimate steady state an equality check would forbid. And a package-level pin slice
+must be declared already sorted, never sorted in place inside the reader: `-race` cannot see that
+mutation as a hazard while no parallel test happens to touch the same slice, so a
+`sort.StringsAreSorted` assertion (`TestTaskProgressPinsAreDeclaredSorted`) is the only thing
+standing behind the rule, not the comment describing it.
+
+**Eleventh arm, `task_progress` (#2246) — a separate frame, and the family's first rate bound
+argued from a delta the daemon computes rather than one claude gives.** `emitSystemSubtype`'s
+eleventh case, `emitBackgroundTaskProgress`, maps `system/task_progress` to a new
+`turnevent.BackgroundTaskProgress` rather than widening `BackgroundTaskUpdated` — decided by the
+captured field set, not by economy of frames. `description` on this subtype is the task's
+*current activity* ("Reading alpha.txt"), where `description` everywhere else in this family is
+its *opening* one; putting both meanings under one name on one task row would have been a
+wire-contract trap no later ticket could undo. See
+[protocol-package-background-task-event-payloads.md](protocol-package-background-task-event-payloads.md)
+for the wire shape.
+
+The rate bound gates on the advance of claude's own `usage.tool_uses` counter,
+`minTaskToolCallsPerEvent = 2`, argued from a single observed task rather than
+`minThinkingTokensPerEvent`'s four bursts: the ceiling is the observed task's whole advance (any
+higher silences the only task ever measured), the floor is that 1 is not a bound at all, and the
+two meet — the evidence is too thin to also supply a safety margin, and that thinness is stated at
+the constant rather than dressed up. Unlike `thinking_tokens`' `estimated_tokens_delta`, which
+claude supplies fresh and already non-negative each line, `tool_uses` is *cumulative per task*, so
+the delta here is the daemon's own arithmetic against a value it kept from a previous line. That
+moves the overflow hazard: `emitThinkingProgress`'s `d <= 0` guard rules out a bad delta claude
+sent, but a `task_progress` counter that fails to advance is a case that *arrives* rather than one
+claude rules out, because `prev` is the daemon's own retained state. Left ignored, it leaves a
+stale high-water mark no realistic advance climbs out of — silence for that task for the rest of
+the turn. `emitBackgroundTaskProgress` answers it by re-baselining down (storing the lower `seen`
+without emitting) rather than ignoring the line, so an alternating counter still emits at least
+every other line; the discriminating assertion for this class of fix is always the event *after*
+the anomaly; one that only checks the first event cannot tell "re-baselined" from "silently
+ignored" apart.
+
+The per-task state (`Parser.taskProgressToolUses map[string]int`, capped at
+`maxTaskProgressTasks = 8`, follows `deniedThisTurn` in every dimension) has a cardinality-cap
+choice worth naming because the obvious alternative inverts the bound rather than merely
+relaxing it: treating an *untracked* task past the cap as if its previous value were zero would
+restore the 1:1 emit-every-line rate for exactly the tasks a runaway or hostile input arranges to
+be past the cap — the cap would still bound memory but would stop bounding the rate for the tasks
+that need it most. The arm instead drops a past-cap line with no event, accepting silence for the
+ninth-plus concurrent task as the safer failure: it silences one task's progress decoration, never
+the turn's own liveness signal, and that task's opening and terminal frames are untouched.
+
+**The dropcap classification pair, and why this arm cannot take `task_notification`'s posture.**
+`emitBackgroundTaskNotification` (#2245) gates on nothing — a bare
+`{"type":"system","subtype":"task_notification"}` still maps, because absence of a field is
+claude's to choose — so its `TestDropcapClassification` row is a single MAPPED line.
+`emitBackgroundTaskProgress` cannot follow that precedent: its rate bound reads
+`usage.tool_uses`, and a line carrying no counter has nothing to compare against a previous value,
+so a bare line is consumed with no event. The correct row is therefore a *pair* — a bare line
+pinning the DROP the guard produces, and a second line carrying `usage.tool_uses` at the bound
+pinning the MAP — on the same shape `system/init` and `system/status` already use for a gated
+arm. Copying the neighbouring `task_notification` row here would have asserted the wrong verdict;
+the general check before writing a `TestDropcapClassification` row for a new gated arm is whether
+the gate can fire on an empty/absent field, not whether the subtype is "in the mapped family."
 
 **The two prose fields carry a sharper hazard than any prior arm's, because the request being
 described was refused.** `RefusalExplanation` and `Banner` are claude's own writing about *why* a

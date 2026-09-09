@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -1956,6 +1957,28 @@ func TestBackgroundTaskPayloads_FitV2EnvelopeCap(t *testing.T) {
 				TruncatedFields: []string{"task_id", "patch", "status", "summary"},
 			},
 		},
+		{
+			name: "progress",
+			typ:  TypeBackgroundTaskProgress,
+			payload: BackgroundTaskProgressPayload{
+				ConversationID: convID,
+				TaskID:         fill(capTaskFieldID),
+				Description:    fill(capTaskDescription),
+				SubagentType:   fill(capTaskFieldID),
+				LastToolName:   fill(capTaskFieldID),
+				// The three integers are at their type's widest so the row measures the
+				// envelope rather than a comfortable reading. They contribute no
+				// claude-derived TEXT term, which is why this frame's text worst case —
+				// 256 + 4096 + 256 + 256 = 4864 bytes — is background_task_started's to
+				// the byte: three identifier-shaped fields plus one description, the
+				// same shape. The two rows' SERIALISED sizes differ only by key names
+				// and the integers, which is what the log line below shows.
+				TotalTokens:     math.MaxInt64,
+				ToolUses:        math.MaxInt64,
+				DurationMS:      math.MaxInt64,
+				TruncatedFields: []string{"task_id", "description", "subagent_type", "last_tool_name"},
+			},
+		},
 		{name: "roster", typ: TypeBackgroundTaskRoster, payload: roster},
 	}
 
@@ -2805,5 +2828,113 @@ func TestToolDeniedType_IsNotClaudesVocabulary(t *testing.T) {
 	}
 	if TypeToolDenied == "permission_denied" {
 		t.Error("TypeToolDenied must not adopt claude's own subtype spelling")
+	}
+}
+
+// TestBackgroundTaskProgressPayload_RoundTrip pins #2246's wire shape.
+//
+// The fixture's values are the committed capture's own second frame plus a
+// conversation id the bridge injects, so the golden bytes and the producer's
+// measurement cannot drift apart silently. The three integers carry DIFFERENT
+// values on purpose, following ThinkingProgressPayload's fixture: equal ones would
+// let a struct that wired two wire keys to one field pass.
+func TestBackgroundTaskProgressPayload_RoundTrip(t *testing.T) {
+	raw := readFixture(t, "background_task_progress.json")
+
+	var env Envelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != TypeBackgroundTaskProgress {
+		t.Errorf("Type: got %q, want %q", env.Type, TypeBackgroundTaskProgress)
+	}
+
+	var payload BackgroundTaskProgressPayload
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"ConversationID", payload.ConversationID, "c1"},
+		{"TaskID", payload.TaskID, "a8eec1cd5e109aa38"},
+		{"Description", payload.Description, "Reading beta.txt"},
+		{"SubagentType", payload.SubagentType, "general-purpose"},
+		{"LastToolName", payload.LastToolName, "Read"},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s: got %q, want %q", f.name, f.got, f.want)
+		}
+	}
+	for _, f := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"TotalTokens", payload.TotalTokens, 16246},
+		{"ToolUses", payload.ToolUses, 2},
+		{"DurationMS", payload.DurationMS, 4546},
+	} {
+		if f.got != f.want {
+			t.Errorf("%s: got %d, want %d", f.name, f.got, f.want)
+		}
+	}
+	if payload.TruncatedFields != nil {
+		t.Errorf("TruncatedFields: got %v, want nil", payload.TruncatedFields)
+	}
+
+	roundTripEnvelope(t, env, payload, raw)
+}
+
+// TestBackgroundTaskProgressType_IsNotClaudesSubtype pins the translation layer,
+// for TestThinkingProgressType_IsNotClaudesSubtype's reason: the daemon is the ONE
+// place a claude rename lands, and naming the wire type after claude's own
+// `system/task_progress` subtype would undo that.
+//
+// The near-miss it must refuse is SPECIFIC and is why this test is not a
+// restatement of the constant. claude's own vocabulary carries a DIFFERENT
+// top-level type spelled tool_progress, already consumed elsewhere in the daemon,
+// and the two are documented as the easy mistake on this ticket. A wire name that
+// dropped the "background_task_" prefix would be indistinguishable from a frame
+// about that other thing.
+func TestBackgroundTaskProgressType_IsNotClaudesSubtype(t *testing.T) {
+	if TypeBackgroundTaskProgress == "task_progress" {
+		t.Errorf("wire type is claude's subtype %q; it must be the daemon's own name", TypeBackgroundTaskProgress)
+	}
+	if TypeBackgroundTaskProgress == "tool_progress" {
+		t.Errorf("wire type is claude's UNRELATED tool_progress type; the two are documented as the " +
+			"easy conflation on this frame and mean different things")
+	}
+	if !strings.HasPrefix(TypeBackgroundTaskProgress, "background_task_") {
+		t.Errorf("wire type %q does not carry the family prefix, so a client cannot tell it from a "+
+			"frame about claude's separate tool_progress type", TypeBackgroundTaskProgress)
+	}
+	if TypeBackgroundTaskProgress != "background_task_progress" {
+		t.Errorf("wire type: got %q, want %q", TypeBackgroundTaskProgress, "background_task_progress")
+	}
+}
+
+// TestBackgroundTaskProgressPayload_DeclaresNoneOfClaudesOmittedKeys is the wire
+// half of the family's standing-omission rule, asserted STRUCTURALLY over the
+// struct's json tags rather than over one marshalled value.
+//
+// A value sweep would prove nothing here: every omitted key's absence looks
+// identical to a field that happens to be empty, and it would pass unchanged if
+// somebody declared the field and left it unset. Absence from the TYPE is the
+// guarantee, and it is the only form of it that also covers `summary`, which no
+// captured line carries a value for.
+func TestBackgroundTaskProgressPayload_DeclaresNoneOfClaudesOmittedKeys(t *testing.T) {
+	declared := map[string]bool{}
+	pt := reflect.TypeOf(BackgroundTaskProgressPayload{})
+	for i := range pt.NumField() {
+		declared[strings.Split(pt.Field(i).Tag.Get("json"), ",")[0]] = true
+	}
+	for _, key := range []string{"session_id", "uuid", "tool_use_id", "summary", "output_file", "patch"} {
+		if declared[key] {
+			t.Errorf("BackgroundTaskProgressPayload declares %q — see turnevent.BackgroundTaskProgress "+
+				"for the omission set and why each is absent from the DECODE TARGET upstream too", key)
+		}
 	}
 }
