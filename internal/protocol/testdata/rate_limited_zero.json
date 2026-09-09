@@ -1,1 +1,1 @@
-{"id":711,"type":"rate_limited","ts":"2026-08-09T10:33:26Z","payload":{"conversation_id":"","status":"","limit_type":"","resets_at":0,"truncated_fields":null}}
+{"id":711,"type":"rate_limited","ts":"2026-08-09T10:33:26Z","payload":{"conversation_id":"","status":"","limit_type":"","resets_at":0,"utilization":null,"truncated_fields":null}}

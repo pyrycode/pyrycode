@@ -428,3 +428,58 @@ a child whose single deliverable is consumed by its one sibling — the floor th
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — implementation
+
+**Open question 3 resolved: no frame-count sentence moves.** Those sentences count `####`
+headings from § `turn_state` through § `model_announced`, and this slice adds a field to an
+existing section rather than a heading. Checked against the section while editing; the four
+counting sentences #2233 corrected to "seventeen" are untouched.
+
+**Open questions 1 and 2 were resolved during planning and the implementation held to both.**
+The populated fixture keeps the `<unmeasured>` status sentinel with its stated reason corrected,
+and no third golden fixture was added.
+
+**One departure from the plan's stated shape, no design change.** The plan's testing strategy
+implied a generic pointer helper for the parser table; the implementation uses addressable locals
+instead, which is `TestParser_CompactBoundaryPublishesTriggerAndCounts`' idiom in that same
+package for that same absent-versus-present table. The turnbridge rows use fresh-allocation
+closures rather than shared variables, because that table's standing rule is that `ev` and
+`wantPayload` hold separately-allocated values — with a pointer field, sharing one variable would
+make `reflect.DeepEqual` pass on the fact that both sides name it rather than on the pointee.
+
+**Three mutants were run against the finished tests via `go test -overlay`, and all three were
+killed.** This is the evidence that the absent-versus-zero pair is load-bearing rather than
+decorative, and it is recorded because the pointer is the whole ticket:
+
+| Mutant | What it did | Killed by |
+|---|---|---|
+| A | dropped the producer's pass-through (`Utilization: nil`) | the four value rows of the parser table, and the capture replay |
+| B | collapsed absence into zero, the plain-`float64` equivalent | the absent and explicit-null rows only — the two a value type passes |
+| C | added `omitempty` to the wire tag | the zero-value round trip and the absent-versus-zero encoding test |
+
+Mutant B is the important one: it is the shape a reviewer would propose as a simplification, and
+it passes every assertion except the pair this ticket exists for.
+
+**Beyond the sweep as planned**, two paragraphs were corrected that the grep for `three captures`
+/ `five_hour` / `UNMEASURED` did not surface but this field falsifies: `maxRateLimitField`'s
+amplification arithmetic (now naming two no-term contributors and the float's bounded encoding),
+and `rateLimitEventLine`'s omission list (`surpassedThreshold`, which the warning capture carries
+beside the reading this target now reads, is named as deliberately left out).
+
+**Verified rather than assumed, since the ticket forbids touching it:** `internal/e2e/realclaude`
+still compiles under its build tag, and the hermetic `internal/e2e` rate-limit round trip through
+a real daemon to a fake phone passes with the new field present. Neither was edited.
+
+**The size estimate was wrong and the actual measurement is recorded here rather than left for
+someone to re-derive.** § Sizing predicted ~850 lines against the refiner's ~950. The measured
+total is **1431 added lines**: 430 in the `spec` commit plus 1001 in the `feat` commit. The gap is
+almost entirely test lines, and the three largest items say where it went — the capture replay at
+331, the parser's two new tables at 221, and the wire tests at 113. **Every one of the six
+structural boundaries held** (4 production files, 0 new exported types, 0 simultaneous call-site
+updates, 4 criteria, 3 reject branches), which is the useful calibration finding: the line ceiling
+was the only line exceeded, and it was exceeded by the proof rather than by the change. A sizing
+pass that wants to predict this shape should count the replay reader as a deliverable of its own,
+since it is 23% of the diff and is a test-only artifact no production boundary counts.
