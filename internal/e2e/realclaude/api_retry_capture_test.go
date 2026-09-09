@@ -146,6 +146,16 @@ const (
 	// stream finished in the gap between two retries and cut the capture short of
 	// the very lines it exists to record.
 	arcapQuiet = 90 * time.Second
+	// What the turn must leave behind for its own teardown: cancel the runner and
+	// wait it out (arcapRunExitWait), shut the listener down (arcapShutdownWait),
+	// then collect, marshal, scan and write the record twice. Generous on purpose —
+	// this reserve is the difference between a capture that lands and one whose
+	// evidence dies with the killed binary.
+	arcapDeadlineReserve = 3 * time.Minute
+	// Below this there is not enough turn left to be worth spending the tokens on: a
+	// retry ladder observed at 2.1.259 ran ten attempts over ~181 s, so a window
+	// under two minutes cannot see one out.
+	arcapMinTurnBudget = 2 * time.Minute
 )
 
 // The server's own bounds. A bare http.ListenAndServe with no timeouts is the
@@ -728,6 +738,46 @@ func arcapAwaitTurn(recorder *dropcapRecorder, sentAt int, quiet, budget time.Du
 	}
 }
 
+// arcapTurnBudgetWithin sizes the turn against the TEST BINARY'S OWN DEADLINE, not
+// against the turn alone. Returns the budget to spend and the reason to skip when
+// there is not enough deadline left to spend anything.
+//
+// The failure this exists to stop is measured, and it is this probe's: on
+// 2026-09-09 the live gate ran `go test -timeout 20m` over the whole package, this
+// capture spent 182 s of it, and a sibling capture was still running when the
+// binary's timeout fired. A binary killed by that timeout runs NO cleanups, so it
+// records nothing at all — the tokens are spent and the evidence is lost, which for
+// this probe means the ticket's entire deliverable. The package overview for
+// initialize_control_probe_test.go closes by asking the next budget addition here
+// to check the invocation's timeout rather than sum the per-step ceilings; this is
+// that check.
+//
+// Skipping is the right arm rather than a shortened turn: a capture cut off
+// mid-ladder publishes a weaker absence than the one already committed, and a
+// forced re-capture is always re-runnable under a longer timeout.
+func arcapTurnBudgetWithin(t *testing.T) (time.Duration, string) {
+	t.Helper()
+	deadline, ok := t.Deadline()
+	if !ok {
+		// No -timeout at all, so nothing to be starved by and nothing to reserve for.
+		return arcapTurnBudget, ""
+	}
+	return arcapBudgetFor(time.Until(deadline))
+}
+
+// arcapBudgetFor is the arithmetic half, split out because a *testing.T's deadline
+// comes from the go command and cannot be set from inside a test.
+func arcapBudgetFor(remaining time.Duration) (time.Duration, string) {
+	spendable := remaining - arcapDeadlineReserve
+	if spendable < arcapMinTurnBudget {
+		return 0, fmt.Sprintf("the test binary's deadline leaves %s, and this capture needs a %s "+
+			"turn plus %s to write its record; a binary killed by -timeout runs no cleanups and "+
+			"records nothing, so the tokens would buy no evidence. Re-run with a longer -timeout",
+			remaining.Round(time.Second), arcapMinTurnBudget, arcapDeadlineReserve)
+	}
+	return min(arcapTurnBudget, spendable), ""
+}
+
 // arcapFixturePath composes the fixture name from the version claude actually
 // printed, and refuses any token that cannot safely be one.
 //
@@ -779,24 +829,59 @@ func (rec *arcapRecord) stagingVerdict() string {
 			"or it failed before its first upstream call. Its silence says NOTHING about "+
 			"system/api_retry, and re-running will not change it",
 			arcapEnvVar, rec.Staging.BaseURL)
-	case rec.Staging.RequestsSeen <= rec.spawnFloor():
-		return fmt.Sprintf("the upstream failed and claude did not retry it within one child: the "+
-			"listener saw %d request(s) answered %d, while the supervisor spawned claude %d "+
-			"time(s), so NO single child demonstrably made more than one upstream call. An absent "+
-			"system/api_retry here says the retry path never ran, NOT that it runs without "+
-			"announcing itself — a strictly weaker result than this capture was staged for. Two "+
-			"live possibilities: the staged status is not in claude's retryable set, or what looks "+
-			"like a ladder is the supervisor respawning a child that died on the broken upstream",
-			rec.Staging.RequestsSeen, rec.Staging.AnsweredStatus, rec.SpawnsObserved)
 	default:
-		return fmt.Sprintf("claude RETRIED a failing upstream: the listener saw %d request(s), "+
-			"answered %d to each, across %d spawn(s) — so by pigeonhole at least one child made "+
-			"more than one upstream call — and the turn ended on %s. The staging WORKED, so a zero "+
-			"here is a finding about claude, that it retries without putting system/api_retry on "+
-			"the stream-json surface, and it is to be routed back rather than fixed by loosening "+
-			"the classifier", rec.Staging.RequestsSeen, rec.Staging.AnsweredStatus,
+		endpoint, repeats := rec.busiestEndpoint()
+		if repeats <= rec.spawnFloor() {
+			return fmt.Sprintf("the upstream failed and claude did not demonstrably retry it: the "+
+				"listener saw %d request(s) answered %d, across %d spawn(s), and its busiest single "+
+				"endpoint (%s) took %d of them — so NO single child provably called the SAME "+
+				"endpoint twice. An absent system/api_retry here says the retry path never ran, NOT "+
+				"that it runs without announcing itself, which is a strictly weaker result than this "+
+				"capture was staged for. Three live readings: the staged status is not in claude's "+
+				"retryable set; what looks like a ladder is the supervisor respawning a child that "+
+				"died on the broken upstream; or the requests are DIFFERENT calls of one attempt, "+
+				"since the listener answers every path alike and a token count followed by a "+
+				"completion is two requests and no retry at all",
+				rec.Staging.RequestsSeen, rec.Staging.AnsweredStatus, rec.SpawnsObserved,
+				endpoint, repeats)
+		}
+		return fmt.Sprintf("claude RETRIED a failing upstream: the listener saw %d request(s) "+
+			"answered %d, of which %d hit the SAME endpoint (%s), across %d spawn(s) — so by "+
+			"pigeonhole at least one child called that one endpoint more than once — and the turn "+
+			"ended on %s. The staging WORKED, so a zero here is a finding about claude, that it "+
+			"retries without putting system/api_retry on the stream-json surface, and it is to be "+
+			"routed back rather than fixed by loosening the classifier",
+			rec.Staging.RequestsSeen, rec.Staging.AnsweredStatus, repeats, endpoint,
 			rec.SpawnsObserved, rec.TerminatedOn)
 	}
+}
+
+// busiestEndpoint names the single census key that took the most requests, and how
+// many. It is the request count the finding may be read from, and the plain total
+// is not.
+//
+// The distinction is the one #2299's review caught: the listener answers 529 to
+// every path, so a total above the spawn count proves only that some child made
+// more than one upstream CALL — one child asking a token-counting endpoint and then
+// the messages endpoint would satisfy it while having retried nothing. Counting
+// within a key is what makes the pigeonhole argument about a repeat of the same
+// call. The observed 2.1.259 capture reads 12 POSTs to /v1/messages beside a single
+// HEAD probe, and only the 12 licenses the claim.
+//
+// Ties break on the key name so the verdict prose is stable across runs, and a
+// census truncated by arcapMaxCensusKeys can only UNDERSTATE the busiest key, which
+// is the safe direction: it weakens the verdict, never strengthens it.
+func (rec *arcapRecord) busiestEndpoint() (string, int) {
+	best, most := "", 0
+	for key, n := range rec.Staging.RequestCensus {
+		if n > most || (n == most && key < best) {
+			best, most = key, n
+		}
+	}
+	if best == "" {
+		return "none", 0
+	}
+	return best, most
 }
 
 // spawnFloor is the smallest number of children the requests could have been
@@ -888,6 +973,13 @@ func TestRealClaude_APIRetryCapture(t *testing.T) {
 			"  %s=1 go test -tags e2e_realclaude -timeout 20m -v \\\n"+
 			"    -run '^TestRealClaude_APIRetryCapture$' ./internal/e2e/realclaude/",
 			existing, arcapEnableEnv)
+	}
+
+	// Sized against the binary's deadline before a single token is spent, because a
+	// capture killed by -timeout runs no cleanups and writes no record at all.
+	budget, tooLate := arcapTurnBudgetWithin(t)
+	if tooLate != "" {
+		t.Skipf("#2262 api_retry capture: %s", tooLate)
 	}
 
 	claudeBin := resolveClaudeBin(t)
@@ -1012,6 +1104,10 @@ func TestRealClaude_APIRetryCapture(t *testing.T) {
 
 	prompt := arcapPrompt(nonce)
 	rec.Prompt = red.str(prompt)
+	// Read BEFORE the turn goes out, so the quiescence arm requires a line the turn
+	// itself produced. claude has already emitted system/init by now, and a literal
+	// zero here would let that pre-turn line satisfy the arm on its own.
+	preTurn, _ := recorder.snapshot()
 	turnStart := time.Now()
 	if err := streamsup.WriteTurn(ctx, stdin, []byte(prompt)); err != nil {
 		rec.Staging = stage.observe()
@@ -1019,7 +1115,7 @@ func TestRealClaude_APIRetryCapture(t *testing.T) {
 			"driven: %v", red.str(err.Error()))
 		t.Fatalf("#2262: %s", rec.OutcomeDetail)
 	}
-	rec.TerminatedOn = arcapAwaitTurn(recorder, 0, arcapQuiet, arcapTurnBudget)
+	rec.TerminatedOn = arcapAwaitTurn(recorder, len(preTurn), arcapQuiet, budget)
 	rec.TurnSeconds = time.Since(turnStart).Seconds()
 
 	argv, spawns := observeSpawns()
@@ -1069,6 +1165,9 @@ func arcapCollect(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) [
 		// not re-derived. The reason field is spent on the classification below, so it
 		// is passed empty.
 		entry := dropcapMakeEntry(c, "", red)
+		// One parse per line, read twice. Building a second parser for the same bytes
+		// would answer identically and cost another allocation per captured line.
+		events := parseOne(t, string(c.Raw))
 		out = append(out, arcapFrame{
 			Index:                   entry.Index,
 			Type:                    entry.Type,
@@ -1076,14 +1175,14 @@ func arcapCollect(t *testing.T, lines []dropcapCaptured, red *dropcapRedactor) [
 			APIRetry:                arcapIsAPIRetry(c.Type, c.Subtype),
 			Confusables:             arcapConfusables(c.Raw),
 			DecodesIntoStreamLine:   arcapDecodesIntoStreamLine(c.Raw),
-			ParserUndecodable:       arcapParserUndecodable(parseOne(t, string(c.Raw))),
+			ParserUndecodable:       arcapParserUndecodable(events),
 			MessageJSONType:         arcapMessageJSONType(c.Raw),
 			PayloadLenBytesCaptured: entry.PayloadLenBytesCaptured,
 			PayloadLenBytes:         entry.PayloadLenBytes,
 			PayloadEncoding:         entry.PayloadEncoding,
 			Payload:                 entry.Payload,
 			PayloadB64:              entry.PayloadB64,
-			EventsEmitted:           len(parseOne(t, string(c.Raw))),
+			EventsEmitted:           len(events),
 		})
 	}
 	return out
@@ -1438,9 +1537,12 @@ func TestArcapStagingVerdictSeparatesEveryReading(t *testing.T) {
 			wantPhrase: "never reached",
 		},
 		{
-			name:       "the upstream failed once and claude did not retry",
-			rec:        arcapRecord{Staging: arcapStaging{RequestsSeen: 1}},
-			wantPhrase: "did not retry",
+			name: "the upstream failed once and claude did not retry",
+			rec: arcapRecord{Staging: arcapStaging{
+				RequestsSeen:  1,
+				RequestCensus: map[string]int{"POST /v1/messages": 1},
+			}},
+			wantPhrase: "did not demonstrably retry",
 		},
 		{
 			// THE ROW A REQUEST COUNT ALONE WOULD GET WRONG. Three requests across
@@ -1450,18 +1552,51 @@ func TestArcapStagingVerdictSeparatesEveryReading(t *testing.T) {
 			name: "three requests across three spawns is a respawn ladder, not a retry ladder",
 			rec: arcapRecord{
 				SpawnsObserved: 3,
-				Staging:        arcapStaging{RequestsSeen: 3},
+				Staging: arcapStaging{
+					RequestsSeen:  3,
+					RequestCensus: map[string]int{"POST /v1/messages": 3},
+				},
 			},
-			wantPhrase: "spawned claude 3 time(s)",
+			wantPhrase: "across 3 spawn(s)",
 		},
 		{
+			// THE ROW A SPAWN-ADJUSTED COUNT STILL GETS WRONG, and the reason the
+			// verdict counts within a key. Two requests from ONE child, to two
+			// DIFFERENT endpoints, is a token count followed by a completion: two
+			// upstream calls of a single attempt, and no retry anywhere. Reading the
+			// total against the spawn count would publish it as the finding.
+			name: "two endpoints from one child is one attempt, not a retry",
+			rec: arcapRecord{
+				SpawnsObserved: 1,
+				Staging: arcapStaging{
+					RequestsSeen: 2,
+					RequestCensus: map[string]int{
+						"POST /v1/messages":              1,
+						"POST /v1/messages/count_tokens": 1,
+					},
+				},
+				TerminatedOn: arcapTerminatedResult,
+			},
+			wantPhrase: "DIFFERENT calls of one attempt",
+		},
+		{
+			// The shape the 2.1.259 capture actually took: one child, a single HEAD
+			// connectivity probe, and a ladder of POSTs to one endpoint. Only the
+			// repeats within that one key license the claim.
 			name: "claude retried a failing upstream and said nothing on the stream",
 			rec: arcapRecord{
-				SpawnsObserved: 2,
-				Staging:        arcapStaging{RequestsSeen: 7},
-				TerminatedOn:   arcapTerminatedResult,
+				SpawnsObserved: 1,
+				Staging: arcapStaging{
+					RequestsSeen: 13,
+					RequestCensus: map[string]int{
+						"POST /v1/messages": 12,
+						"HEAD /api/hello":   1,
+					},
+				},
+				TerminatedOn: arcapTerminatedResult,
 			},
 			wantFinding: true,
+			wantPhrase:  "SAME endpoint (POST /v1/messages)",
 		},
 	}
 	for _, tc := range tests {
@@ -1478,6 +1613,68 @@ func TestArcapStagingVerdictSeparatesEveryReading(t *testing.T) {
 			}
 			if tc.wantPhrase != "" && !strings.Contains(got, tc.wantPhrase) {
 				t.Errorf("stagingVerdict() must contain %q; got: %s", tc.wantPhrase, got)
+			}
+		})
+	}
+}
+
+// TestArcapTurnBudgetRespectsTheBinaryDeadline. The regression this guards is
+// measured and it is this probe's own: on 2026-09-09 the live gate ran the package
+// under `-timeout 20m`, this capture spent 182 s of it, and a sibling capture was
+// still running when the binary's timeout fired. A binary killed that way runs no
+// cleanups and writes no record, so the tokens buy nothing.
+//
+// The deadline cannot be set on a *testing.T from a test, so the arithmetic is
+// proved through arcapBudgetFor and the wiring is left to the one-line caller.
+func TestArcapTurnBudgetRespectsTheBinaryDeadline(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		remaining time.Duration
+		want      time.Duration
+		wantSkip  bool
+	}{
+		{
+			name:      "a whole 20-minute invocation leaves room for the full turn",
+			remaining: 20 * time.Minute,
+			want:      arcapTurnBudget,
+		},
+		{
+			// The turn shrinks rather than overrunning: 8 minutes left, 3 reserved for
+			// teardown and the record write, so 5 to spend and not the 6 it wants.
+			name:      "a part-spent invocation shortens the turn to what is left",
+			remaining: 8 * time.Minute,
+			want:      8*time.Minute - arcapDeadlineReserve,
+		},
+		{
+			name:      "too little left to see a retry ladder out, so nothing is spent",
+			remaining: 4 * time.Minute,
+			wantSkip:  true,
+		},
+		{
+			name:      "a deadline already passed never starts a turn",
+			remaining: -time.Second,
+			wantSkip:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, tooLate := arcapBudgetFor(tc.remaining)
+			if (tooLate != "") != tc.wantSkip {
+				t.Fatalf("arcapBudgetFor(%s) skip = %q, want skip = %v", tc.remaining, tooLate,
+					tc.wantSkip)
+			}
+			if tc.wantSkip {
+				return
+			}
+			if got != tc.want {
+				t.Errorf("arcapBudgetFor(%s) = %s, want %s", tc.remaining, got, tc.want)
+			}
+			if got > tc.remaining-arcapDeadlineReserve {
+				t.Errorf("arcapBudgetFor(%s) = %s, which leaves under the %s the record write "+
+					"needs; a binary killed by -timeout records nothing", tc.remaining, got,
+					arcapDeadlineReserve)
 			}
 		})
 	}

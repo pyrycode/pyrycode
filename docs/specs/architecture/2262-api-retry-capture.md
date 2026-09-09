@@ -417,3 +417,63 @@ demonstrably called twice, whether that is one request or several spread across 
 
 Nothing else in the design moves; no acceptance criterion changes; the security review's findings
 are unaffected, since the new handler writes nothing and reads only the runner's own log records.
+
+### 2026-09-09 — the capture fired, and the record is the answer to all three open questions
+
+The live gate ran the probe at claude 2.1.259 and it **fired**. The record is committed as
+`internal/e2e/realclaude/testdata/api_retry_v2.1.259.json`, recovered from the artifact directory
+exactly as this plan's Context section said it would have to be — the in-repo write died with the
+gate's worktree, and the out-of-worktree copy is what survived.
+
+**What the bytes say.** Ten `system/api_retry` lines across a thirteen-line turn, after thirteen
+upstream requests answered 529, all from one spawn. The payload carries `attempt` (1 through 10),
+`max_retries`, `retry_delay_ms` (585 ms rising to 37.7 s), `error_status`, `error` (`overloaded`),
+`session_id` and `uuid`. The last two are in no docs page, which is the whole reason this family
+declares field sets from captures rather than from documentation. `no_response` never appeared.
+
+**AC 3's answer, and it is the easy one.** Every `api_retry` line decodes into the `streamLine`
+mirror, the shipped parser finds none of them undecodable, and `message` is **absent** — so the
+mapping needs no `consumePermissionDeniedLine`-style gate and can read the line in
+`emitSystemSubtype` like the other eight.
+
+**One finding the mapping ticket needs and nobody asked for.** A turn that exhausts its retries
+closes as `result` with subtype **`success`**, carrying `terminal_reason: "api_error"` and a
+`<synthetic>`-model assistant message holding the error prose. Subtype alone would read that turn
+as having succeeded.
+
+The three open questions are answered by the run: claude **does** honour `ANTHROPIC_BASE_URL` on a
+subscription OAuth login; 529 **is** in its retryable set; and the 90 s quiet window was never
+tested, because the turn ended on `result` after 181 s.
+
+### 2026-09-09 — two fixes the gate and the review forced
+
+**The turn was sized against itself, not against the invocation.** The gate ran the package under
+`-timeout 20m`, this capture spent 182 s of it, and a sibling capture was still running when the
+binary's timeout fired — a failure this branch introduced. The design now sizes the turn from
+`t.Deadline()`: `arcapTurnBudgetWithin` reserves `arcapDeadlineReserve` for teardown and the record
+write, shortens the turn to what is left, and skips outright below `arcapMinTurnBudget` rather than
+starting a turn whose evidence a `-timeout` kill would discard along with every cleanup.
+`arcapBudgetFor` is the arithmetic half, split out because a test cannot set its own deadline, and
+`TestArcapTurnBudgetRespectsTheBinaryDeadline` proves the four readings offline.
+
+To be plain about which fix closes the gate failure: **the committed fixture does.** The probe's
+gate is the fixture's absence, so with the record landed the capture skips and costs no turn at
+all. The deadline guard defends the only path that still spends one, a forced re-capture, where the
+hazard is not a starved sibling but this probe's own evidence being killed mid-turn.
+
+**The strongest verdict overclaimed.** Requests above the spawn count proves some child made more
+than one upstream *call*, not that those calls were retries of one another — one child asking a
+token-counting endpoint and then the messages endpoint would have read as a retry ladder. The
+verdict now counts within a single census key: `arcapRecord.busiestEndpoint` names the busiest
+endpoint and its repeats, and only repeats **above** `spawnFloor()` license the finding. The
+committed capture satisfies it on twelve POSTs to one endpoint beside a single HEAD probe, and
+`TestArcapStagingVerdictSeparatesEveryReading` gains the row that would otherwise slip through —
+two requests, one spawn, two different endpoints — asserting it does not read as the finding.
+
+Two review nits are also closed: `arcapCollect` parses each line once instead of twice, and
+`arcapAwaitTurn`'s `sentAt` now receives the pre-turn line count its doc always described, so a
+`system/init` line that arrived before the turn can no longer satisfy the quiescence arm alone.
+
+No acceptance criterion changes, and the security review is unaffected: no new input is read, the
+listener is untouched, and the new code reads only the record's own counters and the test binary's
+deadline.
