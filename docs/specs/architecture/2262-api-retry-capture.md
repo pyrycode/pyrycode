@@ -309,7 +309,10 @@ Each is resolved by the live run, not by implementation, and any that changes th
 ## Size — one boundary exceeded, deliberately
 
 Production source files: 0. New exported types: 0. Consumer call sites: 0. Acceptance criteria: 5.
-Reject branches: 6. Total written work: ~1200 lines, which is **over the 800-line ceiling**.
+Reject branches: 6. Total written work: ~1200 lines estimated, **1820 actual** (1795 probe + spec),
+either way **over the 800-line ceiling**. The estimate ran about 50% light, and the excess is
+almost entirely the offline half: eight self-checks, seven of them table-driven, against four
+analogue probes that carry three or four each.
 
 It stays one ticket on the floor rule. There is one deliverable — a committed record — and every
 available cut leaves a child with a single consumer: a listener nothing but this run calls, or a
@@ -389,3 +392,28 @@ over the pre-revision plan was FAIL.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — a request count alone cannot mean "claude retried"
+
+The plan's verdict table read the request count as a retry count: two or more requests was the
+finding. That is wrong, and wrong in the direction that publishes a false claim. `streamsup`
+restarts a crashed child, and a broken upstream is exactly the condition that crashes one, so N
+requests can be N children each making a single attempt — a respawn ladder reading as a retry
+ladder.
+
+The design now observes the spawn count from the runner's own log record and reads the two numbers
+together. `arcapSpawnLog` replaces `newDropcapArgvHandler` at this probe's `Config.Logger` slot; it
+keeps the first argv exactly as that one does and additionally counts `spawning claude` records.
+`spawns_observed` ships in the record beside `requests_seen`, and only `requests_seen` **above**
+`spawns_observed` licenses the finding, since that is what proves by pigeonhole that some single
+child made more than one upstream call.
+
+The verdict table's third row widens accordingly: it now covers every run where no child
+demonstrably called twice, whether that is one request or several spread across as many spawns.
+`TestArcapStagingVerdictSeparatesEveryReading` gains the row a request count alone would get wrong
+— three requests across three spawns — and asserts it does not read as the finding.
+
+Nothing else in the design moves; no acceptance criterion changes; the security review's findings
+are unaffected, since the new handler writes nothing and reads only the runner's own log records.
