@@ -1889,6 +1889,136 @@ type ToolCallDenied struct {
 	DroppedFields []string
 }
 
+// ModelRefusalFallback reports that a turn ended with stop reason `refusal`, that
+// claude retried it on a fallback model, and — when Scope says so — that the
+// session stays on that model. It maps claude's system/model_refusal_fallback line
+// (#2267), and it exists because the swap was otherwise SILENT: a client saw the
+// label change on the next ModelAnnounced with nothing explaining it.
+//
+// THE NAME IS THE DAEMON'S, and it joins the Model* family — ModelAnnounced,
+// ModelList, ModelWindow — because a change of the model claude is running is that
+// family's subject. It deliberately does not shorten to ModelSwapped: a
+// local-scoped fallback is a one-turn retry rather than a swap, so the shorter name
+// would over-claim on half the documented set.
+//
+// IT DOES NOT REPLACE ModelAnnounced, AND A CONSUMER MUST NOT TREAT IT AS THE
+// AUTHORITY ON WHAT CLAUDE IS RUNNING. This event is claude's announcement of what
+// it will run NEXT; ModelAnnounced is what it says it IS running. Read the swap's
+// CAUSE here and its RESULT there. A client that updated its model state from
+// FallbackModel rather than waiting for the following announcement would be
+// trusting a prediction as an observation, and a mistaken line would then park it
+// on a label claude never adopted.
+//
+// It opens and closes no turn, exactly as ModelAnnounced does not.
+//
+// EVERY FIELD IS claude's, AND SO IS THE FACT OF THE FALLBACK — CompactionBoundary's
+// class of variant rather than Compacting's. The daemon verifies none of it and has
+// nothing on this surface to verify it against. What bounds the damage is that
+// NOTHING IN THE DAEMON ACTS ON ANY FIELD HERE: no routing, no retry, no model
+// selection and no session setting is keyed on them, which is what keeps a
+// fabricated value a misleading label rather than an actuator. Whoever first makes
+// the daemon behave differently on one owes the review that changes that.
+//
+// FIVE OF CLAUDE'S ELEVEN KEYS ARE DELIBERATELY NOT FIELDS, on BackgroundTaskStarted's
+// rule, and all five are absent from streamsup's decode target so the exclusion is
+// structural rather than a scrub. `trigger` and `direction` are constants restating
+// the subtype, which this type's identity already carries. `request_id` is an
+// API-side identifier nothing in the daemon reads. `retracted_message_uuids` and
+// `refused_user_message_uuid` name claude's MESSAGE identity, which no daemon
+// surface can join against — assistant_delta carries turn_id and seq, not these. A
+// consumer therefore CANNOT honour the retraction of the refused partial response,
+// and that is a stated limit of this wire rather than an omission to fix here.
+//
+// THE FIELD SET IS DOCUMENTATION-DERIVED, NOT CAPTURE-DERIVED — read 2026-09-07 from
+// the Claude Code headless docs and @anthropic-ai/claude-agent-sdk@0.3.263's
+// sdk.d.ts against a daemon on claude 2.1.259. No capture of this line exists and
+// none can be taken, because a refusal cannot be provoked without a prompt this repo
+// should not contain. So every key is treated as optional: a type definition names
+// keys the wire does not always send, the way `effort` is documented on system/init
+// and absent from all 58 committed init lines. Nothing here is an observation.
+//
+// Every string is claude-derived and bounded by the producer AT CONSTRUCTION
+// (streamsup's maxTaskFieldID / maxDenialProse), so an oversized payload never
+// enters the event stream, a queue, or a log. Bounded and UTF-8-valid is ALL any of
+// them is: nothing on this path strips control characters or terminal escape
+// sequences, which is ModelAnnounced.Model's caveat and applies to all six fields.
+// A client-facing slice owes the sanitization at its own render boundary.
+type ModelRefusalFallback struct {
+	// Scope is how long the fallback lasts: "session" means claude keeps the session
+	// on FallbackModel, so a LATER ModelAnnounced will report a different model and
+	// this event is the only thing that explains why; "local" means the retry was for
+	// the one refused turn and the model reverts.
+	//
+	// AN OPEN SET carried verbatim, on TurnEnd.Outcome's rule — the two values above
+	// are documented, not exhaustive, and a third is claude's to add.
+	//
+	// DROPPED rather than cut when over-cap, on maxTurnEndStopField's reasoning: a
+	// consumer matches this token against the two values it knows, so a cut one
+	// matches nothing while still looking like a scope. The drop IS reported — see
+	// DroppedFields.
+	Scope string
+	// OriginalModel is the model that refused; FallbackModel is the one claude
+	// retried on. Both are claude's identifiers carried VERBATIM per
+	// ModelAnnounced.Model's rule: no lowercasing, no alias expansion, no
+	// date-stamping, no family mapping, and no lookup against any published model
+	// list. That doc states why the value is not reliably dated and need not appear
+	// in any published list, which is an argument for carrying it untouched rather
+	// than repairing it here.
+	//
+	// DROPPED rather than cut, on ToolCallDenied.ToolCallID's reasoning: a consumer
+	// joins FallbackModel against the ModelAnnounced it already holds, so a cut label
+	// joins to nothing while still looking like a real one — strictly worse than an
+	// absent label, which the consumer can see.
+	OriginalModel string
+	FallbackModel string
+	// RefusalCategory is claude's classification of what it refused — an OPEN string,
+	// "cyber" and "bio" being the documented examples.
+	//
+	// IT IS CLAUDE'S ASSERTION ABOUT THE REQUEST, NEVER THE DAEMON'S FINDING, and the
+	// distinction is load-bearing because this value is accusatory in a way no sibling
+	// variant's fields are: it says a user's request drew that classification. The
+	// daemon neither derives nor checks it. A mistaken or fabricated line therefore
+	// attributes a category to a user who triggered none, which is
+	// ToolCallDenied.ToolCallID's misattribution one degree worse. A consumer must
+	// render it as claude's claim, attributed, and must not act on it.
+	//
+	// DROPPED rather than cut, on Scope's reasoning: a token, matched rather than read.
+	RefusalCategory string
+	// RefusalExplanation is claude's display-only prose about the refusal, and Banner
+	// is the announcement text claude wrote for the swap itself (its `content` key —
+	// named for the role the documentation gives it, which is documentation-derived
+	// like every other statement about this line).
+	//
+	// CUT rather than dropped and reported in TruncatedFields, on
+	// maxCompactField's reasoning: a cut sentence still reads as what it is.
+	//
+	// SECURITY: claude-authored, bounded by the daemon and NOT sanitized. These are
+	// prose about a request that was REFUSED, so unlike ToolCallDenied.Message — which
+	// describes a call the daemon made — they can quote or paraphrase the USER's own
+	// words back out. They may also quote the command line or code claude declined to
+	// produce. Safe to RENDER as text, never to execute or re-shell —
+	// BackgroundTaskStarted.Description's rule, and the same hazard.
+	RefusalExplanation string
+	Banner             string
+	// TruncatedFields names the fields the producer CUT to fit their caps, in
+	// declaration order, using the DAEMON's snake_case names: "refusal_explanation",
+	// "banner". nil when nothing was cut, never an empty non-nil slice, so a consumer
+	// can emit it as absent rather than [].
+	TruncatedFields []string
+	// DroppedFields names the fields the producer EMPTIED for exceeding their caps, in
+	// declaration order, under the daemon's names: "scope", "original_model",
+	// "fallback_model", "refusal_category" — not claude's api_refusal_category, since
+	// the report names the field it describes rather than the key it came from, which
+	// is ToolCallDenied.DroppedFields' rule.
+	//
+	// Two report slices for ToolCallDenied's reason: four fields here drop, so an empty
+	// Scope could not otherwise be told apart from a scope claude never sent. A field
+	// named here was emptied BY THE DAEMON; a field empty and named in neither slice
+	// was empty when claude sent it. That distinction is the whole of this type's
+	// answer to a documentation-derived field set, where ANY key may simply be absent.
+	DroppedFields []string
+}
+
 // ConversationReset reports that claude reset the conversation and mounted a
 // fresh transcript under a new id. It maps claude's top-level
 // `conversation_reset` line (#2134) — the announcement claude writes on its own
@@ -2034,6 +2164,7 @@ func (ApiRetry) isTurnEvent()              {}
 func (Compacting) isTurnEvent()            {}
 func (CompactionBoundary) isTurnEvent()    {}
 func (ToolCallDenied) isTurnEvent()        {}
+func (ModelRefusalFallback) isTurnEvent()  {}
 func (ConversationReset) isTurnEvent()     {}
 func (Unrecognized) isTurnEvent()          {}
 

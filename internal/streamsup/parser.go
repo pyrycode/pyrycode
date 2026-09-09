@@ -59,6 +59,23 @@ const maxUnrecognizedRaw = 16 << 10
 // every field it caps on ToolCallDenied is dropped — the cap is a size, the answer
 // is the field's, and turnevent.ToolCallDenied.ToolCallID states why the two events
 // part company on the same identifier.
+//
+// AMENDED 2026-09-09 (#2267): a THIRD event now, turnevent.ModelRefusalFallback's
+// Scope, OriginalModel, FallbackModel and RefusalCategory — so the first sentence's
+// enumeration names one event of three and the count is deliberately not restated
+// here, since the authority is the constant's call sites. Reused on the paragraph
+// above's grounds: two documented scope values, two model labels and a short
+// classification token are exactly this shape. Its overflow answer follows
+// ToolCallDenied's rather than this constant's own event's — all four DROP — for the
+// reason stated at each field, and the divergence is the same one that paragraph
+// already records.
+//
+// The multiple is the weakest it has been, and that is stated rather than hidden.
+// The two earlier events multiplied over an OBSERVED maximum; #2267's field set is
+// documentation-derived with no capture in existence, so 256 is a multiple of nothing
+// for those four fields. What justifies it instead is the shape argument above plus
+// the envelope arithmetic at maxDenialProse: a model identifier at 256 bytes has long
+// since stopped being one, whatever claude ships.
 const maxTaskFieldID = 256
 
 // maxTaskDescription caps the Description field, which is model-authored and
@@ -450,6 +467,29 @@ const maxCompactTrigger = 256
 // length test against a line already capped by defaultMaxParseBuf, reaching a
 // synchronous sink with no queue in this package. A model looping on refused calls
 // is a fan-out question, and it belongs to the ticket that puts the event on a wire.
+//
+// AMENDED 2026-09-09 (#2267): it caps TWO MORE prose fields on a second event,
+// turnevent.ModelRefusalFallback's RefusalExplanation and Banner, so "the TWO
+// claude-authored prose fields one system/permission_denied line publishes" now names
+// half of what this constant bounds. Four fields over two events, on the
+// one-constant-over-several-fields form above: all four are claude's prose about a
+// refusal, and a change to one budget should move the others. Both new fields CUT and
+// are reported, on the same reasoning.
+//
+// THE ENVELOPE ARITHMETIC ABOVE NO LONGER COVERS EVERY EVENT THIS CONSTANT BOUNDS,
+// and the new number is stated rather than left to be re-derived from a sentence that
+// reads as if it did. A ModelRefusalFallback carries FOUR token fields, not three, for
+// a worst case of 4*256 + 2*2048 = 5120 bytes — 7.8% of the 65519-byte v2
+// application-envelope cap (docs/protocol-mobile.md § Application-envelope size cap)
+// against ToolCallDenied's 4864 and 7.4%. The family's "one number a reader can hold"
+// claim is therefore now a range, 4864 to 5120, and the reason it was not held flat by
+// shaving a cap is that the alternative — minting a fifth constant to save 256 bytes
+// out of 65519 — buys a number to keep in step for a quarter of one percent. Nothing
+// reaches the wire in this slice, so it is the budget #2265 inherits.
+//
+// The rate paragraph above holds unchanged, and for one more reason of its own: a
+// session-scoped fallback stops re-announcing by definition, and a local-scoped one
+// fires at most once per refused turn. Both are turn-paced rather than model-paced.
 const maxDenialProse = 2 << 10
 
 // maxTurnDenials caps BOTH dimensions of one turn's denial bookkeeping (#2234): how
@@ -3831,6 +3871,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitCompactionBoundary(line)
 	case "permission_denied":
 		return p.emitPermissionDenied(line)
+	case "model_refusal_fallback":
+		return p.emitModelRefusalFallback(line)
 	default:
 		return false
 	}
@@ -4124,6 +4166,179 @@ func (p *Parser) emitRecoveredDenials(line []byte, announced map[string]struct{}
 	if dropped > 0 {
 		p.log.Debug(recoveredDenialsCutMsg, "dropped", dropped)
 	}
+}
+
+// emitModelRefusalFallback decodes a system/model_refusal_fallback line and emits one
+// turnevent.ModelRefusalFallback, reporting that it consumed the line either way. It
+// is emitPermissionDenied's shape throughout — decode target, no gate, cut-or-drop per
+// field, two report slices, undecodable → Debug — and every place it departs is
+// called out below rather than left for a reader to spot.
+//
+// THE FIELD SET IS DOCUMENTATION-DERIVED, NOT CAPTURE-DERIVED, and that inverts this
+// arm's relationship to its evidence. emitPermissionDenied's caps and field mapping
+// come from seven committed captures; nothing here does. The keys were read
+// 2026-09-07 from the Claude Code headless docs and
+// @anthropic-ai/claude-agent-sdk@0.3.263's sdk.d.ts, with the daemon on claude
+// 2.1.259, and no capture of this line exists or can be taken — a refusal cannot be
+// provoked without a prompt this repo should not contain. So every key is treated as
+// optional and nothing is gated (see below), which is the only posture a decode can
+// take against a field set nobody has observed.
+//
+// ONE CALLER, and the prediction that makes that true is worth writing down because
+// its analogue's failed. streamLine declares type, subtype and message, the documented
+// field set carries NO message key, so the line decodes cleanly and reaches
+// emitSystemSubtype's arm. That is the opposite of permission_denied, whose message is
+// a string where streamLine declares *streamMessage — one wrongly-typed key on the
+// shared target failed the WHOLE top-level decode and left #2232's correctly-written
+// arm unreachable in production until consumePermissionDeniedLine recovered it.
+// BECAUSE THE FIELD SET HERE IS DOCUMENTATION-DERIVED, THE CLEAN DECODE IS A
+// PREDICTION AND NOT A MEASUREMENT: should the real line carry a message key of any
+// scalar type, consumeLine's decode fails and this mapping is unreachable exactly as
+// that one was. No recovery gate is built for it speculatively — such a gate can only
+// take a line away from the surfaced tier, so its safety is entirely in how little it
+// matches, and one written against a shape nobody has seen is unbounded in the wrong
+// direction. Whoever sees the first real line should read this paragraph first.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, on
+// streamLine's stated property that control shapes are read from the top level and
+// nested content is never re-scanned. A tool result whose text is literally a
+// model_refusal_fallback line therefore cannot forge one.
+//
+// IT GATES ON NOTHING, emitPermissionDenied's decision on its ground and one step
+// more forcefully. The SUBTYPE is the payload: nothing else on this surface explains
+// why the model changed, so a field-less line is still news. A gate would re-drop the
+// line SILENTLY the first time claude renames a key — the defect this arm exists to
+// end — and here it would additionally rest on a guess, since no observation says any
+// key is reliably present.
+//
+// FIVE OF CLAUDE'S ELEVEN KEYS ARE NOT DECLARED on the decode target, which is what
+// keeps them out rather than a scrub; systemModelRefusalFallbackLine states which and
+// why. trigger and direction restate the subtype; request_id is API-side; the two
+// message-uuid keys name claude's message identity, which no daemon surface can join
+// against.
+//
+// TWO CONSUMING PATHS:
+//
+//   - undecodable (a numeric scope, say) → Debug naming the subtype, no event.
+//     emitPermissionDenied's arm verbatim and on its ground. Per-field type tolerance
+//     would be a real divergence from the family and is deliberately not built: the
+//     failure has not been observed, and a capture is what would justify it.
+//   - decodable → exactly one event, whatever the six fields hold.
+//
+// NOTHING IS LOGGED ON THE EMITTING PATH, and it is load-bearing here for a reason
+// one degree past emitPermissionDenied's. Its message describes a tool call the daemon
+// made; these two prose fields are claude's writing about a request that was REFUSED,
+// so they can quote or paraphrase the USER's own words back out. They must never reach
+// a log, and the undecodable Debug above carries the subtype keyword only.
+func (p *Parser) emitModelRefusalFallback(line []byte) bool {
+	var fl systemModelRefusalFallbackLine
+	if err := json.Unmarshal(line, &fl); err != nil {
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "model_refusal_fallback")
+		return true
+	}
+
+	var cut, dropped []string
+	// The two bounding closures are emitPermissionDenied's, kept LOCAL rather than
+	// lifted into a shared helper. That is a decision: this file already has three such
+	// closures (emitBackgroundTaskStarted's `bound` and that arm's pair), each carrying
+	// its own doc saying which of the two answers it is, so a local pair is the file's
+	// established shape; and extracting one would edit a shipped arm for no behavioural
+	// gain. Revisit on a third caller, not a second.
+	cutField := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// truncateField is deliberately not called here: the value is emptied, not
+	// shortened. No UTF-8 scrub is owed on this path either — encoding/json already
+	// replaced invalid input bytes with U+FFFD on the way into a Go string, and the
+	// only mid-rune hazard is a cut this branch does not make.
+	dropField := func(value, name string, limit int) string {
+		if len(value) > limit {
+			dropped = append(dropped, name)
+			return ""
+		}
+		return value
+	}
+	// Sequential statements rather than a composite literal, per emitPermissionDenied:
+	// both reports are ordered by these calls, and inside a literal that order would
+	// rest on the left-to-right operand rule rather than on something a reader sees.
+	//
+	// The names are the DAEMON's, and three of the six differ from claude's key —
+	// refusal_category not api_refusal_category, refusal_explanation not
+	// api_refusal_explanation, banner not content. The report names the FIELD it
+	// describes, which is turnevent.ModelRefusalFallback.DroppedFields' rule; the api_
+	// prefix is API-side vocabulary the daemon does not adopt.
+	//
+	// The four tokens DROP and the two prose fields CUT, each on the reasoning stated
+	// at its field: a cut token matches nothing while still looking like one, and
+	// fallback_model is additionally JOINED against the ModelAnnounced a client already
+	// holds; a cut sentence still reads as prose.
+	scope := dropField(fl.Scope, "scope", maxTaskFieldID)
+	originalModel := dropField(fl.OriginalModel, "original_model", maxTaskFieldID)
+	fallbackModel := dropField(fl.FallbackModel, "fallback_model", maxTaskFieldID)
+	refusalCategory := dropField(fl.APIRefusalCategory, "refusal_category", maxTaskFieldID)
+	refusalExplanation := cutField(fl.APIRefusalExplanation, "refusal_explanation", maxDenialProse)
+	banner := cutField(fl.Content, "banner", maxDenialProse)
+
+	// No parser state is read or written — not p.compacting, not p.deniedThisTurn, not
+	// the accumulator — which is emitCompactionBoundary's shape and means no
+	// turn-boundary reset has anything of this arm's to reset.
+	p.emit(turnevent.ModelRefusalFallback{
+		Scope:              scope,
+		OriginalModel:      originalModel,
+		FallbackModel:      fallbackModel,
+		RefusalCategory:    refusalCategory,
+		RefusalExplanation: refusalExplanation,
+		Banner:             banner,
+		// nil when nothing was cut or dropped: neither append ran.
+		TruncatedFields: cut,
+		DroppedFields:   dropped,
+	})
+	return true
+}
+
+// systemModelRefusalFallbackLine is the decoded payload of one
+// system/model_refusal_fallback line. Kept separate from streamLine for
+// systemTaskStartedLine's reason: that is the line-level SEGMENTATION struct and stays
+// at Type/Subtype/Message.
+//
+// SIX OF CLAUDE'S ELEVEN DOCUMENTED KEYS ARE DECLARED, AND THE OTHER FIVE ARE THE
+// CONTROL RATHER THAN A SCRUB — systemTaskUpdatedLine's rule, which
+// systemPermissionDeniedLine already applies to session_id and uuid. A field that is
+// never declared cannot leak. The five, and why each is refused:
+//
+//   - trigger ("refusal") and direction ("retry") are constants restating the subtype,
+//     which turnevent.ModelRefusalFallback's own identity already carries.
+//   - request_id is an API-side identifier nothing in the daemon reads.
+//   - retracted_message_uuids and refused_user_message_uuid name claude's MESSAGE
+//     identity, which no daemon surface can join against — assistant_delta carries
+//     turn_id and seq, not these. A consumer therefore cannot honour the retraction of
+//     the refused partial response. That is a stated limit of this wire, recorded on
+//     the event type, and not something to solve by carrying ids nothing can resolve.
+//
+// EVERY FIELD IS A PLAIN STRING, so a non-string value fails the whole decode and
+// takes the undecodable path — fail-closed, per emitModelRefusalFallback. That
+// includes retracted_message_uuids being an array on the real line: undeclared, so
+// encoding/json never looks at its type at all.
+//
+// NO FIELD SET HERE IS AN OBSERVATION. The keys are documentation-derived (see
+// emitModelRefusalFallback for the sources and the date), and no capture of this line
+// exists to check them against, so a key may simply not arrive. That is why the arm
+// gates on none of them.
+type systemModelRefusalFallbackLine struct {
+	Scope         string `json:"scope"`
+	OriginalModel string `json:"original_model"`
+	FallbackModel string `json:"fallback_model"`
+	// The Go names keep claude's api_ prefix while the daemon's field names drop it, so
+	// the rename happens once, visibly, at the emit site rather than silently here.
+	APIRefusalCategory    string `json:"api_refusal_category"`
+	APIRefusalExplanation string `json:"api_refusal_explanation"`
+	// Content is claude's banner text for the swap. Named for the key here and for its
+	// role on the event, per the note above about where renames happen.
+	Content string `json:"content"`
 }
 
 // systemPermissionDeniedLine is the decoded payload of one system/permission_denied

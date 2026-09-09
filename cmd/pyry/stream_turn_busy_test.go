@@ -658,6 +658,16 @@ func TestTurnMarkFor_TotalOverEveryVariant(t *testing.T) {
 		// variant set beside the marker-derived one this test reads, which is the drift
 		// the guard exists to foreclose.
 		{turnevent.ToolCallDenied{ToolName: "Bash", ToolCallID: "toolu-1"}, turnMarkNone},
+		// #2267. Neither an opener nor a closer, and its argument is the ModelAnnounced
+		// row's rather than the ToolCallDenied row's above: an announcement about WHICH
+		// MODEL is running is not a boundary inside a turn. It also arrives strictly
+		// INSIDE one — the fallback is a retry of a turn that ended with stop reason
+		// `refusal`, so a turn is open when it lands and the TurnEnd that clears it still
+		// follows. Opening a mark here would be redundant, never a wedge. The whitelist's
+		// default already answers it, so this row asserts an existing answer rather than a
+		// new arm; turnMarkFor is unchanged by that ticket, and its default-arm comment
+		// does NOT gain this variant's name for the reason the row above states.
+		{turnevent.ModelRefusalFallback{Scope: "session", FallbackModel: "claude-sonnet-4-5"}, turnMarkNone},
 	}
 
 	covered := make([]string, 0, len(tests))
