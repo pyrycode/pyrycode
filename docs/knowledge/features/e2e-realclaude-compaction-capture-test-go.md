@@ -85,6 +85,16 @@ bytes** at assertion time rather than comparing against the same constant it fee
 the parser — a self-agreement would pass even if both sides had quietly drifted
 from the fixture together.
 
+### The next probe built the recovery in rather than relying on a rescue
+
+[`api_retry_capture_test.go`](e2e-realclaude-api-retry-capture-test-go.md) (#2262) is the first in
+this family designed from the outset to write its record twice — to an `os.MkdirTemp` artifact
+directory outside any worktree, and to the in-repo fixture path — specifically because of the
+paragraph above. The gate-only run lost the in-repo copy exactly as predicted, but the
+artifact-directory copy was recovered by a plain repair-leg commit rather than needing an
+opportunistic rescue riding an unrelated ticket the way this file's fixture did via #2236. Any new
+capture probe in this family should default to the double-write rather than treat it as optional.
+
 ### Related
 
 - [streamsup's per-subtype map](streamsup-package-system-maps-per-subtype-since-2026-08-07.md) — the
@@ -98,3 +108,5 @@ from the fixture together.
   [`operator_system_lines_capture_test.go`](e2e-realclaude-operator-system-lines-capture-test-go.md)
   — four more captures that fired clean in the dispatcher's own gate-only worktree and lost the
   fixture the same way; none has an opportunistic-commit repair yet.
+- [`api_retry_capture_test.go`](e2e-realclaude-api-retry-capture-test-go.md) — the probe that closed
+  the gap with a built-in double-write, above.

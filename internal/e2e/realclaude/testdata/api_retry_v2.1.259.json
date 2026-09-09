@@ -1,0 +1,303 @@
+{
+  "ticket": "2262",
+  "claude_version": "2.1.259 (Claude Code)",
+  "captured_at": "2026-09-09T14:17:17+03:00",
+  "is_capture": true,
+  "model": "haiku",
+  "spawn_shape": [
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--dangerously-skip-permissions",
+    "--session-id",
+    "$SESSION_ID"
+  ],
+  "spawn_shape_delta": "The YOLO interactive shape, identical to #1260's, #2089's and #2229's — see dropcapSpawnShapeDelta for what production's non-yolo spawn adds and what that implies for system/init. It is kept rather than narrowed because a differing spawn shape would be a confound in the evidence, and its blast radius is structurally smaller here than in any sibling: with a 529-only upstream claude can never receive a model response, so it can never be told to run a tool at all.",
+  "env_delta": [
+    "ANTHROPIC_BASE_URL=http://127.0.0.1:53050"
+  ],
+  "workdir": "$WORKDIR",
+  "prompt": "Reply with the single word ok and nothing else. Do not use any tools, do not comment on the task, and do nothing else. run=$NONCE",
+  "outcome": "fired",
+  "outcome_detail": "10 system/api_retry line(s) across 13 captured line(s), after 13 upstream request(s); terminated_on=result",
+  "absence_claim_valid": true,
+  "staging_verdict": "claude RETRIED a failing upstream: the listener saw 13 request(s), answered 529 to each, across 1 spawn(s) — so by pigeonhole at least one child made more than one upstream call — and the turn ended on result. The staging WORKED, so a zero here is a finding about claude, that it retries without putting system/api_retry on the stream-json surface, and it is to be routed back rather than fixed by loosening the classifier",
+  "terminated_on": "result",
+  "turn_seconds": 181.081442583,
+  "spawns_observed": 1,
+  "staging": {
+    "env_var": "ANTHROPIC_BASE_URL",
+    "base_url": "http://127.0.0.1:53050",
+    "listen_addr": "127.0.0.1:53050",
+    "loopback_only": true,
+    "answered_status": 529,
+    "answered_body": "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"staged upstream failure (pyrycode #2262)\"}}",
+    "forwards_requests": false,
+    "records_headers_or_bodies": false,
+    "requests_seen": 13,
+    "request_census": {
+      "HEAD /api/hello": 1,
+      "POST /v1/messages": 12
+    },
+    "census_keys_dropped": 0,
+    "first_request_at": "2026-09-09T14:17:17.089421+03:00",
+    "last_request_at": "2026-09-09T14:20:17.703408+03:00"
+  },
+  "lines_captured": 13,
+  "frames": [
+    {
+      "index": 0,
+      "type": "system",
+      "subtype": "init",
+      "api_retry": false,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 3951,
+      "payload_len_bytes": 3638,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"$WORKDIR\",\"session_id\":\"$SESSION_ID\",\"tools\":[\"Task\",\"Bash\",\"CronCreate\",\"CronDelete\",\"CronList\",\"DesignSync\",\"Edit\",\"EnterWorktree\",\"ExitWorktree\",\"ListAgents\",\"ListMcpResourcesTool\",\"Monitor\",\"NotebookEdit\",\"PushNotification\",\"Read\",\"ReadMcpResourceDirTool\",\"ReadMcpResourceTool\",\"RemoteTrigger\",\"ReportFindings\",\"ScheduleWakeup\",\"SendMessage\",\"Skill\",\"TaskCreate\",\"TaskGet\",\"TaskList\",\"TaskOutput\",\"TaskStop\",\"TaskUpdate\",\"WebFetch\",\"WebSearch\",\"Workflow\",\"Write\",\"mcp__blender__execute_blender_code\",\"mcp__blender__execute_blender_code_for_cli\",\"mcp__blender__get_blendfile_summary_datablocks\",\"mcp__blender__get_blendfile_summary_datablocks_for_cli\",\"mcp__blender__get_blendfile_summary_missing_files\",\"mcp__blender__get_blendfile_summary_missing_files_for_cli\",\"mcp__blender__get_blendfile_summary_of_linked_libraries\",\"mcp__blender__get_blendfile_summary_of_linked_libraries_for_cli\",\"mcp__blender__get_blendfile_summary_path_info\",\"mcp__blender__get_blendfile_summary_path_info_for_cli\",\"mcp__blender__get_blendfile_summary_usage_guess\",\"mcp__blender__get_blendfile_summary_usage_guess_for_cli\",\"mcp__blender__get_object_detail_summary\",\"mcp__blender__get_objects_summary\",\"mcp__blender__get_python_api_docs\",\"mcp__blender__get_screenshot_of_area_as_image\",\"mcp__blender__get_screenshot_of_window_as_image\",\"mcp__blender__get_screenshot_of_window_as_json\",\"mcp__blender__jump_to_tab_by_name\",\"mcp__blender__jump_to_tab_by_space_type\",\"mcp__blender__jump_to_view3d_object_by_name\",\"mcp__blender__jump_to_view3d_object_data_by_name\",\"mcp__blender__render_thumbnail_to_path\",\"mcp__blender__render_viewport_to_path\",\"mcp__blender__search_api_docs\",\"mcp__blender__search_manual_docs\",\"mcp__codegraph__codegraph_callees\",\"mcp__codegraph__codegraph_callers\",\"mcp__codegraph__codegraph_context\",\"mcp__codegraph__codegraph_files\",\"mcp__codegraph__codegraph_impact\",\"mcp__codegraph__codegraph_node\",\"mcp__codegraph__codegraph_search\",\"mcp__codegraph__codegraph_status\"],\"mcp_servers\":[{\"name\":\"blender\",\"status\":\"connected\"},{\"name\":\"codegraph\",\"status\":\"connected\"}],\"model\":\"claude-haiku-4-5-20251001\",\"permissionMode\":\"bypassPermissions\",\"slash_commands\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"workflow-authoring\",\"run\",\"run-skill-generator\",\"agents\",\"auto-mode-setup\",\"autocompact\",\"clear\",\"color\",\"compact\",\"config\",\"context\",\"effort\",\"fast\",\"heapdump\",\"init\",\"mcp\",\"import\",\"model\",\"__remote-workflow\",\"workflow-launch-exec\",\"reload-skills\",\"rename\",\"security-review\",\"usage-credits\",\"extra-usage\",\"usage\",\"insights\",\"recap\",\"skill-doctor\",\"goal\",\"design\",\"design-consent\",\"design-revoke\",\"list-agents\",\"team-onboarding\"],\"terminal_slash_commands\":[\"doctor\",\"color\"],\"apiKeySource\":\"none\",\"claude_code_version\":\"2.1.259\",\"output_style\":\"default\",\"agents\":[\"claude\",\"Explore\",\"general-purpose\",\"Plan\",\"statusline-setup\"],\"skills\":[\"deep-research\",\"design-sync\",\"dataviz\",\"update-config\",\"verify\",\"debug\",\"code-review\",\"simplify\",\"batch\",\"fewer-permission-prompts\",\"doctor\",\"loop\",\"schedule\",\"claude-api\",\"workflow-authoring\",\"run\",\"run-skill-generator\"],\"plugins\":[],\"capabilities\":[\"interrupt_receipt_v1\",\"interrupt_cancel_queued_v1\",\"msg_lifecycle_v1\"],\"analytics_disabled\":false,\"product_feedback_disabled\":false,\"uuid\":\"fcf5db1c-e9b8-40a9-b00f-90d8d54c623a\",\"memory_paths\":{\"auto\":\"$TEMP_HOME/.claude/projects/$WORKDIR/memory/\"},\"messaging_socket_path\":\"/tmp/cc-socks/75653.sock\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\"}",
+      "events_emitted": 1
+    },
+    {
+      "index": 1,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 227,
+      "payload_len_bytes": 202,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":1,\"max_retries\":10,\"retry_delay_ms\":585,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"884e1c72-904a-4d82-bdcf-d880e842c39d\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 2,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 228,
+      "payload_len_bytes": 203,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":2,\"max_retries\":10,\"retry_delay_ms\":1130,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"de8a282a-b166-4362-b7d7-8ea767941fa1\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 3,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 228,
+      "payload_len_bytes": 203,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":3,\"max_retries\":10,\"retry_delay_ms\":2328,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"c68e9091-1f24-4cc5-bef4-dd9f5571c2e3\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 4,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 228,
+      "payload_len_bytes": 203,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":4,\"max_retries\":10,\"retry_delay_ms\":4702,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"5445ae70-0b6e-420e-809f-b462a8fe6a38\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 5,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 228,
+      "payload_len_bytes": 203,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":5,\"max_retries\":10,\"retry_delay_ms\":9770,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"c8013162-30dd-4a35-8c9d-22274723fa73\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 6,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 229,
+      "payload_len_bytes": 204,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":6,\"max_retries\":10,\"retry_delay_ms\":16263,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"5e0d42f0-733f-467d-a5d7-9f6b735d9816\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 7,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 229,
+      "payload_len_bytes": 204,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":7,\"max_retries\":10,\"retry_delay_ms\":39459,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"67786e08-05a5-49b6-a137-549d539c28f2\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 8,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 229,
+      "payload_len_bytes": 204,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":8,\"max_retries\":10,\"retry_delay_ms\":34923,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"3ed6fcad-3334-4a9e-aa4f-aba463647a09\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 9,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 229,
+      "payload_len_bytes": 204,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":9,\"max_retries\":10,\"retry_delay_ms\":33243,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"70555def-f810-4bf8-9e0f-5e38df61a125\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 10,
+      "type": "system",
+      "subtype": "api_retry",
+      "api_retry": true,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 230,
+      "payload_len_bytes": 205,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":10,\"max_retries\":10,\"retry_delay_ms\":37688,\"error_status\":529,\"error\":\"overloaded\",\"session_id\":\"$SESSION_ID\",\"uuid\":\"f42f7664-b624-431f-91c9-5c23dab8e817\"}",
+      "events_emitted": 0
+    },
+    {
+      "index": 11,
+      "type": "assistant",
+      "api_retry": false,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "object",
+      "payload_len_bytes_captured": 1063,
+      "payload_len_bytes": 1038,
+      "payload_encoding": "json-string",
+      "payload": "{\"type\":\"assistant\",\"message\":{\"diagnostics\":null,\"id\":\"66e53be7-a520-47af-ace8-7d7227fe7ba6\",\"container\":null,\"model\":\"\u003csynthetic\u003e\",\"role\":\"assistant\",\"stop_details\":null,\"stop_reason\":\"stop_sequence\",\"stop_sequence\":\"\",\"type\":\"message\",\"usage\":{\"output_tokens_details\":null,\"input_tokens\":0,\"output_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":null,\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":null,\"iterations\":null,\"speed\":null},\"content\":[{\"type\":\"text\",\"text\":\"API Error: 529 staged upstream failure (pyrycode #2262). This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:53050).\"}],\"context_management\":null},\"parent_tool_use_id\":null,\"session_id\":\"$SESSION_ID\",\"uuid\":\"6914da2b-dbb2-47af-9f75-ef5d7d16a577\",\"timestamp\":\"2026-09-09T11:20:17.705Z\",\"error\":\"server_error\",\"is_api_error_message\":true}",
+      "events_emitted": 1
+    },
+    {
+      "index": 12,
+      "type": "result",
+      "subtype": "success",
+      "api_retry": false,
+      "decodes_into_stream_line": true,
+      "parser_undecodable": false,
+      "message_json_type": "absent",
+      "payload_len_bytes_captured": 1318,
+      "payload_len_bytes": 1293,
+      "payload_encoding": "json-string",
+      "payload": "{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"$SESSION_ID\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":0,\"server_tool_use\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\"},\"modelUsage\":{},\"permission_denials\":[],\"terminal_reason\":\"api_error\",\"fast_mode_state\":\"off\",\"fast_mode_disabled_reason\":\"sdk_opt_in_required\",\"subagent_stats\":{\"spawned\":0,\"requested\":{\"background\":0,\"foreground\":0,\"unset\":0},\"started_in_background\":0,\"max_depth\":0,\"spawned_by_subagents\":0,\"completed\":0,\"failed\":0,\"killed\":{\"parent\":0,\"user\":0,\"system\":0},\"refused\":{\"depth_limit\":0,\"concurrency_limit\":0,\"budget\":0},\"by_type\":{}},\"is_error\":true,\"num_turns\":1,\"subtype\":\"success\",\"api_error_status\":529,\"result\":\"API Error: 529 staged upstream failure (pyrycode #2262). This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:53050).\",\"type\":\"result\",\"duration_ms\":180212,\"uuid\":\"b922766b-96b3-49ac-b07b-b5723f68f232\",\"queued_turn_count\":0}",
+      "events_emitted": 1
+    }
+  ],
+  "line_type_census": {
+    "assistant": 1,
+    "result/success": 1,
+    "system/api_retry": 10,
+    "system/init": 1
+  },
+  "api_retry_line_count": 10,
+  "confusable_census": {},
+  "message_json_type_census": {
+    "assistant message=object": 1,
+    "result/success message=absent": 1,
+    "system/api_retry message=absent": 10,
+    "system/init message=absent": 1
+  },
+  "stream_line_decode_failures": 0,
+  "parser_undecodable_lines": 0,
+  "undecoded_lines": 0,
+  "redaction": [
+    {
+      "class": "artifact_dir",
+      "replacement": "$ARTIFACT_DIR",
+      "count": 1
+    },
+    {
+      "class": "prompt_nonce",
+      "replacement": "$NONCE",
+      "count": 1
+    },
+    {
+      "class": "session_id",
+      "replacement": "$SESSION_ID",
+      "count": 14
+    },
+    {
+      "class": "temp_home",
+      "replacement": "$TEMP_HOME",
+      "count": 1
+    },
+    {
+      "class": "workdir",
+      "replacement": "$WORKDIR",
+      "count": 3
+    }
+  ],
+  "redaction_rules_installed": 20,
+  "redaction_rationale": "Inherited whole from #1260 (see dropcapRedactionRationale): a fresh empty non-git workdir under a per-test temp $HOME, a rig-authored prompt, no os.Environ() read into the record, the declared dropcapRedactor substitution table over every string, and dropcapScanner as a fail-closed deny-scan over the marshalled record. WHAT THIS STAGING SPECIFICALLY ADDS, stated rather than left to be inferred by whoever decides to paste this record into a public issue. Redirecting ANTHROPIC_BASE_URL means the operator's LIVE OAuth bearer token is sent, in plaintext, to a listener this rig owns. That is a real posture change from the TLS connection to the vendor's API it replaces, and it is irreducible: TLS here would need a certificate claude would reject, and a closed port that never receives the token also never yields requests_seen, which is this record's ONLY discriminator between 'the upstream call failed' and 'claude never arrived'. Three things bound it. The traffic never leaves the loopback interface (loopback_only, asserted from the bound address rather than from the string passed to Listen). The handler reads NOTHING — it never touches the request headers and never reads the body, so no header or body value exists anywhere in this record to redact; records_headers_or_bodies is that claim, and the server's ErrorLog is pinned to io.Discard so net/http cannot log request-derived bytes into the gate's output either. And the deny-scan arms on the token's own value as a needle over the whole marshalled record. DELIBERATELY KEPT: top-level types and subtypes, claude's own structural fields, model names, token counts, timestamps, the failing turn's error prose, and the method plus URL PATH of every request the listener saw (the query string is dropped). system/init carries the operator's local claude configuration inventory, which is kept for the reason dropcapRedactionRationale states at length and is a description of one machine rather than of claude.",
+  "credential_scan_applied": {
+    "ANTHROPIC_API_KEY": false,
+    "CLAUDE_CODE_OAUTH_TOKEN": true,
+    "anthropic-key-prefix": true,
+    "artifact_dir": true,
+    "home-path-prefix": true,
+    "operator_home": true,
+    "private-var-folders-prefix": true,
+    "temp_home": true,
+    "users-path-prefix": true,
+    "var-folders-prefix": true,
+    "workdir": true
+  },
+  "credential_scan_skipped": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "credential_scan_needles": 41,
+  "limitations": "One turn, one spawn shape, one claude version, one model (haiku), one staged failure status (529), and the upstream redirected by ONE environment variable whose behaviour on a subscription OAuth login is itself unmeasured. A subtype absent from line_type_census did not appear in THIS turn, which is not the same as claude never sending it — and an absence here is weaker still than in a sibling capture, because the turn was staged to FAIL and a failing turn's line set is not a normal turn's. Whether claude emits system/api_retry on a retry that eventually SUCCEEDS is UNMEASURED: nothing here can stage one. requests_seen is a count of upstream calls, not of retries: streamsup restarts a crashed child and a broken upstream is exactly what crashes one, so it is only requests_seen ABOVE spawns_observed that proves any single child called twice — which is why both numbers ship and why staging_verdict reads them together.",
+  "lines_dropped_over_cap": 0,
+  "bytes_dropped_over_cap": 0,
+  "partials_dropped": 0,
+  "blank_lines": 0,
+  "unterminated_partial_len": 0
+}
