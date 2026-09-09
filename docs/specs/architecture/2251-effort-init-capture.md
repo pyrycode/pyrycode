@@ -309,6 +309,23 @@ other line of the boundary holds: **zero** production source files, zero new exp
 consumer call sites requiring simultaneous update (both `dropcapRedactor` additions are new methods,
 and `writeSetModeFixture` has one caller), five acceptance criteria, no state-machine reject fan-out.
 
+## Revisions
+
+**2026-09-09 — the record declares the deny-scan but not the substitution counts.**
+§ Design listed `redaction`, `credential_scan_applied` and `credential_scan_skipped` as fields of
+the `effort_capture` block. Only `credential_scan_applied` shipped, and the omission is forced
+rather than a trim: the substitution runs on the **marshalled** record, so a count table describing
+that pass cannot be inside the bytes it describes — writing it before the marshal would commit a
+table of zeroes, and `dropcapRecord` avoids the same problem only because it redacts field by
+field, which § Design rejects here for leak-by-forgotten-field. The alternative, a hand-written
+declaration of the table's classes, would be a second copy of `newDropcapRedactor`'s own list and
+would drift from it. The counts and the not-applied classes are logged by the screen instead.
+`credential_scan_skipped` went the same way: `scanner.applied()` already answers per class whether
+the needle ran, which is the fact worth committing, and the run-time skip list is logged.
+
+Nothing else in the design moved. Every open question in § Open questions is still open by
+construction — each is answered by the live lap, not by this implementation.
+
 ## Security review
 
 **Verdict:** PASS (second pass — the first found one MUST FIX, now designed out above)
