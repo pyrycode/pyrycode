@@ -314,3 +314,21 @@ neither is weakened, bypassed, or given a new caller.
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — the sorted-pin finding got a test, not just a declaration
+
+The security review's second SHOULD FIX asked that the pins be declared already sorted so
+no reader sorts a package-level var in place. Phase B does that, and adds one test the plan
+did not name: `TestTaskProgressPinsAreDeclaredSorted`.
+
+The reason is the finding's own argument carried one step further. That finding is unusual
+in that `-race` would probably not catch a regression of it — no parallel test touches these
+slices today, so the detector has nothing to trip on and an in-place sort would ship latent.
+A rule whose enforcement mechanism is a comment, protecting against a hazard the race
+detector cannot see, is a rule with nothing behind it. The test is deterministic code of
+different fabric from the advisory prose, which is what that situation calls for.
+
+Nothing else departed from the design as committed. Both Open questions were resolved in
+the plan and neither reopened during implementation.
