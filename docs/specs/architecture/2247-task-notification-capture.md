@@ -390,3 +390,59 @@ streamsup reader and its four-quadrant gate are exactly as designed, pin still h
 `task_notification` at 2.1.259 is still the live gate's to answer. The difference is that the answer is
 now trustworthy: before this leg a zero-frame result could not distinguish "the surface does not emit
 it" from "the rig never waited", and `stagingVerdict`'s third arm asserted the former either way.
+
+### 2026-09-09 — rework leg 2, from the real-claude gate's FAIL
+
+The live gate ran the suite with real credentials — 1030 tests executed, 1029 passed — and
+`TestRealClaude_TaskNotificationCapture` was the single failure. It did not fail on anything claude did.
+It failed on the rig's own prose.
+
+**What happened.** `tncapRedactionRationale` is a record field whose subject IS the deny-scan, and it
+documented the scan's coverage by spelling the prefixes out: `/Users/`, `/home/`, `/var/folders/` and
+`/private/var/folders/`. Those are four of the five literals `dropcapFixedNeedles` searches for. The
+record was marshalled, `tncapSeal` scanned it, and all four classes hit at once. The scan is fail-closed,
+so **nothing was written** — not the artifact record, not the fixture — and the probe fatalled after a
+360 s live turn inside a 1400 s gate lap that spent real tokens and produced no evidence at all.
+
+The mechanism behaved exactly as designed. The bytes it refused were the rig's own, and the four
+simultaneous classes are the signature: no payload from claude would carry all four.
+
+**Why the leg-1 work did not catch it.** `tncapSeal` was leg 1's fix and it is correct — it scans the
+blob that is actually written. The gap is that its offline test feeds it *synthetic* records. Nothing
+offline ever scanned the record's own compile-time constants, so the one string in the file guaranteed
+to discuss deny needles was the one string never checked against them.
+
+**Fix, in two parts of different fabric.**
+
+1. The rationale now names the prefixes **by symbol** (`dropcapFixedNeedles`) rather than quoting them,
+   and says in-line why: a rationale that quotes a needle fails the scan it describes. The sibling
+   `dropcapRedactionRationale` already had this shape — it names the mechanisms and never the literals —
+   which is the convention this file should have followed.
+2. `TestTncapRigAuthoredProseCarriesNoDenyNeedle` is the deterministic net. The advisory rule ("do not
+   quote a needle in prose the record carries") was followed carefully and broken anyway, so the net is
+   code rather than another rule. It scans the record's rig-authored constants and every `stagingVerdict`
+   arm against `dropcapFixedNeedles`, and carries a third arm proving it is not vacuous.
+
+To make the net scan *the same bytes the probe writes* rather than a copy that drifts, the record's
+constant half is extracted into `tncapSeedRecord`. The live probe seeds from it and fills the measured
+fields in at the call site; the test marshals it and scans it. A constant added to the record is covered
+without anyone remembering to add it to a list — which is the failure mode that produced this leg.
+
+**Non-vacuity, proven against the real defect rather than a synthetic one.** Reverting the rationale to
+the exact text that failed the gate, via `go test -overlay` with no worktree writes, reddens the net with
+the same four classes the gate reported:
+
+```
+tncapSeedRecord carries deny class(es) [home-path-prefix private-var-folders-prefix
+users-path-prefix var-folders-prefix] in its OWN constants
+```
+
+That is the live failure reproduced offline in 0.00 s instead of 1400 s.
+
+**Unchanged:** the `## Security review` verdict stands, including leg 1's `[Subprocess]` amendment. No
+production file, `streamLine` untouched, the streamsup reader and its four-quadrant gate exactly as
+designed, pin still honestly empty. Scope is the same three files.
+
+**Open question 1 is still open, and is now actually reachable.** Whether a released FIFO fires
+`task_notification` at 2.1.259 could not be answered by this lap, because the record that would have
+answered it was never written. The next gate lap is the first one that can produce evidence either way.

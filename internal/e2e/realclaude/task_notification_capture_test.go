@@ -228,8 +228,10 @@ const tncapRedactionRationale = "Inherited whole from #1260 (see dropcapRedactio
 	"into a public issue is told rather than left to infer: task_notification is documented to carry " +
 	"output_file, A PATH ON THE OPERATOR'S HOST, and that is a field class no record in this family has " +
 	"carried before. The two inherited mechanisms cover the classes they know — the temp $HOME, " +
-	"os.TempDir(), the workdir, the operator's real home, and the deny-scan's fixed /Users/, /home/, " +
-	"/var/folders/ and /private/var/folders/ prefixes, any of which fails the whole write closed. A path " +
+	"os.TempDir(), the workdir, the operator's real home, and the home and temp-directory prefixes " +
+	"enumerated by dropcapFixedNeedles, any of which fails the whole write closed. Those prefixes are " +
+	"named here by symbol and NOT spelled out, because this string is itself written into the record " +
+	"and then deny-scanned: a rationale that quotes a needle fails the scan it describes. A path " +
 	"under a prefix none of those know would pass both, so tncapUnredactedPathFields is a third " +
 	"mechanism of its own: it refuses to PROMOTE a record whose quarry frames still carry a value " +
 	"beginning with '/' after redaction, and names the field rather than the value. A refusal costs one " +
@@ -340,6 +342,39 @@ type tncapRecord struct {
 	PartialsDropped        int `json:"partials_dropped"`
 	BlankLines             int `json:"blank_lines"`
 	UnterminatedPartialLen int `json:"unterminated_partial_len"`
+}
+
+// tncapSeedRecord returns the record's RIG-AUTHORED half: every field whose value is
+// a compile-time constant of this file, rather than something claude, the clock or
+// the filesystem produced. The live probe seeds its record from here and then fills
+// the measured fields in.
+//
+// It is a function so the offline deny-scan net can scan EXACTLY the bytes the probe
+// puts in the record instead of a second copy of the same literals. A copy drifts,
+// and the drift is silent until a live turn is spent: #2247's first live lap died on
+// tncapRedactionRationale spelling out the very prefixes dropcapFixedNeedles searches
+// for, which failed the scan closed and wrote nothing — 1400 s of gate and a real
+// token spend for a defect that is a string comparison to find.
+//
+// Keep this constants-only. A field whose value depends on the run belongs at the
+// call site, because the net cannot judge what it cannot know offline.
+func tncapSeedRecord() *tncapRecord {
+	return &tncapRecord{
+		Ticket:    tncapTicket,
+		IsCapture: true,
+		Model:     tncapModel,
+		// A FIXED LITERAL, never harvested from os.Environ().
+		EnvDelta:                   []string{dropcapBashTimeoutEnv + "=" + tncapBashTimeoutMS},
+		SpawnShapeDelta:            tncapSpawnShapeDelta,
+		Frames:                     []tncapFrame{},
+		KeyPresence:                []tncapPresence{},
+		ObservedNotificationKeys:   []string{},
+		DocumentedNotificationKeys: tncapDocumentedKeys,
+		UnredactedPathFields:       []string{},
+		RedactionRationale:         tncapRedactionRationale,
+		CredentialScanSkipped:      []string{},
+		Limitations:                tncapLimitations,
+	}
 }
 
 func (rec *tncapRecord) set(outcome, format string, args ...any) {
@@ -741,26 +776,13 @@ func TestRealClaude_TaskNotificationCapture(t *testing.T) {
 	scanner := newDropcapScanner(home, artifactDir, workdir)
 	t.Logf("#2247 capture artifacts: %s", red.str(artifactDir))
 
-	rec := &tncapRecord{
-		Ticket:        tncapTicket,
-		ClaudeVersion: probeClaudeVersion(claudeBin),
-		CapturedAt:    time.Now().Format(time.RFC3339),
-		IsCapture:     true,
-		Model:         tncapModel,
-		// A FIXED LITERAL, never harvested from os.Environ().
-		EnvDelta:                   []string{dropcapBashTimeoutEnv + "=" + tncapBashTimeoutMS},
-		SpawnShapeDelta:            tncapSpawnShapeDelta,
-		Workdir:                    red.str(workdir),
-		Frames:                     []tncapFrame{},
-		KeyPresence:                []tncapPresence{},
-		ObservedNotificationKeys:   []string{},
-		DocumentedNotificationKeys: tncapDocumentedKeys,
-		UnredactedPathFields:       []string{},
-		RedactionRationale:         tncapRedactionRationale,
-		CredentialScanApplied:      scanner.applied(),
-		CredentialScanSkipped:      []string{},
-		Limitations:                tncapLimitations,
-	}
+	// The constants come from tncapSeedRecord so the offline deny-scan net scans the
+	// same bytes this run writes; everything measured is filled in here.
+	rec := tncapSeedRecord()
+	rec.ClaudeVersion = probeClaudeVersion(claudeBin)
+	rec.CapturedAt = time.Now().Format(time.RFC3339)
+	rec.Workdir = red.str(workdir)
+	rec.CredentialScanApplied = scanner.applied()
 	rec.set(tncapInstrumentBroken, "did not reach a classification point")
 
 	t.Cleanup(func() { tncapWriteRecord(t, artifactDir, red, scanner, rec) })
@@ -1636,6 +1658,84 @@ func TestTncapBudgetOutlastsItsPhases(t *testing.T) {
 			tncapTurnBudget, phases, tncapRendezvousWait, tncapBackgroundWait, tncapNotificationWait)
 	}
 	t.Logf("turn budget %s, phases at most %s, margin %s", tncapTurnBudget, phases, tncapTurnBudget-phases)
+}
+
+// TestTncapRigAuthoredProseCarriesNoDenyNeedle is the net that would have saved
+// #2247's first live lap, and it is deliberately of different fabric from the rule it
+// enforces. "Do not quote a deny needle in prose the record carries" is advisory, it
+// was followed carefully, and it was broken anyway — because tncapRedactionRationale's
+// whole SUBJECT is the deny-scan, and the natural way to document a prefix list is to
+// write the prefixes down.
+//
+// What happened: the rationale spelled out all four path prefixes dropcapFixedNeedles
+// searches for. The record was marshalled, the fail-closed scan hit four classes at
+// once, nothing was written, and the probe fatalled — after a 360 s live turn inside a
+// 1400 s gate lap that spent real tokens. The scan behaved exactly as designed. The
+// bytes it refused were the rig's own, and the diagnosis is a string comparison.
+//
+// Scope is the RIG-AUTHORED surface only. A needle in claude's bytes is the live
+// scan's to catch, after dropcapRedactor has had its turn; that is a different
+// mechanism answering a different question and it is not what this test is for.
+func TestTncapRigAuthoredProseCarriesNoDenyNeedle(t *testing.T) {
+	t.Parallel()
+
+	// The fixed half only. The dynamic needles are the live run's own paths, which no
+	// offline test can know and which cannot appear in a compile-time constant.
+	scanner := dropcapScanner{needles: dropcapFixedNeedles()}
+
+	t.Run("the record's rig-authored seed", func(t *testing.T) {
+		t.Parallel()
+		blob, err := json.Marshal(tncapSeedRecord())
+		if err != nil {
+			t.Fatalf("marshal the seed record: %v", err)
+		}
+		if hits, _ := scanner.scan(blob); len(hits) > 0 {
+			t.Errorf("tncapSeedRecord carries deny class(es) %v in its OWN constants, so the live "+
+				"probe fails its write closed and produces nothing: name the prefixes by symbol "+
+				"(dropcapFixedNeedles) rather than spelling them out", hits)
+		}
+	})
+
+	t.Run("every stagingVerdict arm", func(t *testing.T) {
+		t.Parallel()
+		// stagingVerdict is prose built at runtime and it lands in a record that is
+		// written on the did-not-fire path — the path where evidence matters most and
+		// where a scan hit would destroy the very evidence the arm exists to give.
+		for _, tc := range []struct {
+			name string
+			rec  tncapRecord
+		}{
+			{"claude never opened the FIFO", tncapRecord{}},
+			{"started but never backgrounded", tncapRecord{ForegroundCallObserved: true}},
+			{"released and nothing came", tncapRecord{
+				ForegroundCallObserved: true,
+				BackgroundTaskObserved: true,
+				HeldSeconds:            12.5,
+			}},
+		} {
+			if hits, _ := scanner.scan([]byte(tc.rec.stagingVerdict())); len(hits) > 0 {
+				t.Errorf("stagingVerdict arm %q carries deny class(es) %v", tc.name, hits)
+			}
+		}
+	})
+
+	t.Run("the net reddens on a needle", func(t *testing.T) {
+		t.Parallel()
+		// Non-vacuity, established without mutating the file: append a needle to the
+		// one field the real defect was in. If this arm passes, the two above prove
+		// nothing — an empty needle list would make them green forever.
+		rec := tncapSeedRecord()
+		rec.RedactionRationale += " and a stray /Users/ prefix spelled out in prose"
+		blob, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("marshal the seeded record: %v", err)
+		}
+		hits, _ := scanner.scan(blob)
+		if !tncapContains(hits, dropcapDenyUsers) {
+			t.Errorf("scanning a seed record whose rationale carries that prefix did not report %q; "+
+				"hits = %v, so the arms above are vacuous", dropcapDenyUsers, hits)
+		}
+	})
 }
 
 // tncapContains is a local spelling of "is s in xs", used by the presence-flag
