@@ -92,3 +92,9 @@ from the fixture together.
 - [`tool_progress_capture_test.go`](e2e-realclaude-tool-progress-capture-test-go.md) — the
   fixture-absence gate and in-repo promotion pattern this probe copies, and the contrasting case
   where the fixture did land.
+- [`task_notification_capture_test.go`](e2e-realclaude-task-notification-capture-test-go.md),
+  [`effort_init_capture_test.go`](e2e-realclaude-effort-init-capture-test-go.md),
+  [`parent_tool_use_capture_test.go`](e2e-realclaude-parent-tool-use-capture-test-go.md) and
+  [`operator_system_lines_capture_test.go`](e2e-realclaude-operator-system-lines-capture-test-go.md)
+  — four more captures that fired clean in the dispatcher's own gate-only worktree and lost the
+  fixture the same way; none has an opportunistic-commit repair yet.
