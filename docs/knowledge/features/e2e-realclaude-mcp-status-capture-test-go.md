@@ -68,6 +68,63 @@ the writer's entire contract is "the scan precedes every filesystem call," and t
 that technically doesn't go through it. Any future edit that puts a non-constant value in a
 post-scan-marshalled field would defeat that contract silently.
 
+### A record's zero values and a genuine empty measurement can be the same bytes
+
+`TestRealClaude_MCPStatusCapture` used to return the moment `mcapAwaitInit` reported the init
+line missing, and the snapshot, census and frame collection all sat below that return — so every
+`instrument-broken` record read `lines_captured: 0`, `frames: []`, `line_type_census: null`, and
+those looked exactly like a claude that printed nothing. They were the constructor's zero values;
+the pass that would have measured anything never ran. Seven gate runs on 2026-09-09 shipped that
+ambiguity and it fit two opposite causes — a silent claude, or one printing lines that were never
+`system/init` — equally well.
+
+`mcapFillCapture` is now the only place that assigns `LinesCaptured`, the cap counters,
+`LineTypeCensus`, `UndecodedLines`, `Frames` and `StderrCapture`, and `mcapPersist` calls it before
+`mcapWriteRecord` on every terminating path, not just the happy one. That alone isn't what makes a
+broken run readable: `mcapCensus` and `mcapCollect` return non-nil empty results, and none of
+these fields carries `omitempty`, so a pass that ran and saw nothing writes `{}`/`[]` while a
+record that was never filled still writes `null`. A field added to this group later that keeps
+that non-nil-empty return but picks up `omitempty` would quietly re-collapse the distinction this
+ticket exists to create.
+
+### Redact a free-text field before capping it, not after
+
+`mcapFillCapture` runs `red.str` over the child's stderr before `capFixtureCapture` bounds it at
+`stderrFixtureCap`, and the order is load-bearing rather than stylistic. Capping first can slice a
+`/var/folders/...` build path mid-string; the leftover fragment stops matching the redactor's
+substitution rule (built for the whole path) while it still trips `dropcapFixedNeedles`' fixed
+`/var/folders/` literal, so the deny-scan refuses the entire write over a truncation artifact
+rather than anything actually captured. `TestMcapStderrIsRedactedBeforeItIsCapped` pins the
+ordering with a path positioned to trip exactly that failure if the two calls are swapped.
+
+### A silent child gets a shorter wait than one that is merely slow
+
+`mcapAwaitInit` used to be a bool, so a claude that said nothing before `system/init` and a claude
+that was legitimately slow to start both held the full `mcapInitBudget` (2m) before the probe gave
+up — two minutes of every gate run, for evidence that never landed. It now returns one of
+`mcapInitSeen`, `mcapInitSilent` or `mcapInitAbsent`, and a run that produces no output at all is
+cut at `mcapInitSilenceBudget` (30s) while a run that's producing *anything* — including a lone
+blank line or an unterminated partial — keeps the full budget. That distinction is
+`mcapSawOutput`, which reads `dropcapCaps`' `BlankLines`, `LinesOverCap`, `PartialsDropped` and
+`UnterminatedPartial` counters rather than only counting kept lines, specifically so a child
+writing something illegible is never mistaken for one saying nothing. The 30s figure is a starting
+point, not a measurement — the seven 2026-09-09 runs all held the full budget and never produced
+the line, so the record's new `init_wait` field is what lets the next gate run retune it from
+evidence instead of another guess.
+
+### Known landmine: this file's fixture-promotion test asserts the wrong side of the promotion
+
+`TestMcapPersistFillsARecordThatNeverReachedTheHappyPath` closes by asserting that
+`mcapFixturePath` does not exist on disk, when the property it means to prove is that *this test*
+declined to promote one — `rec.fixtureWorthy()` reporting not-worthy. Those come apart the moment
+a future ticket lands the committed fixture: `mcpStatusCapturePath` in `internal/streamsup`'s
+`mcpStatusReaderGate` resolves to the same file `mcapFixturePath` names here, so a legitimate
+fixture landing anywhere in the tree will fail this test on a promotion it never attempted, and
+the failure message will blame the writer. Code review caught this and it was left unfixed as
+non-blocking; whoever files the remedy this ticket enables (a `fired` record or a recorded-absence
+fixture, per the ticket's own out-of-scope note) should swap the assertion to `fixtureWorthy()`'s
+return before landing anything at that path.
+
 ### Related
 
 - [`compaction_capture_test.go`](e2e-realclaude-compaction-capture-test-go.md) — the
