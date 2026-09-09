@@ -367,6 +367,13 @@ const (
 	dropcapClassFIFOPath     = "fifo_path"
 	dropcapClassSessionID    = "session_id"
 	dropcapClassNonce        = "prompt_nonce"
+
+	// dropcapClassMessagingSocket is claude's OWN socket, echoed into system/init as
+	// messaging_socket_path and spelled /tmp/cc-socks/<pid>.sock. It is added by
+	// addPathClass rather than by newDropcapRedactor, because no caller of that
+	// constructor can know the value: claude mints the path, and it is first legible
+	// to a probe in the very bytes being redacted. #2251 added it.
+	dropcapClassMessagingSocket = "messaging_socket_path"
 )
 
 // dropcapSubstitution declares one applied class. count sits with the value it
@@ -456,12 +463,46 @@ func newDropcapRedactor(tempHome, artifactDir, workdir, fifoPath, sessionID stri
 	addPath(dropcapClassOperatorHome, "$HOME", realHome)
 	addPath(dropcapClassTempDir, "$TMPDIR", strings.TrimSuffix(os.TempDir(), "/"))
 	r.add(dropcapClassSessionID, "$SESSION_ID", sessionID)
+	// A nonce of ZERO is a live footgun, not a degenerate no-op: FormatInt spells it
+	// "0", which is not empty, so add's guard passes it through and every zero digit
+	// in the record becomes $NONCE. Every caller passes a real timestamp; a caller
+	// with no per-run value to hide must still pass one rather than 0.
 	r.add(dropcapClassNonce, "$NONCE", strconv.FormatInt(nonce, 10))
 
+	r.resort()
+	return r
+}
+
+// resort restores the longest-value-first order, so a shorter path cannot shadow a
+// longer one that contains it. It is the constructor's invariant, lifted so the
+// two late adders below restore the same one rather than each keeping a copy.
+func (r *dropcapRedactor) resort() {
 	sort.SliceStable(r.rules, func(i, j int) bool {
 		return len(r.rules[i].value) > len(r.rules[j].value)
 	})
-	return r
+}
+
+// addValueClass extends the table with one class whose value is discovered while
+// the run is in flight — claude's own session_id, say, on a probe that spawns
+// claude directly rather than through streamsup.Config's SessionID and so cannot
+// supply one.
+//
+// A method rather than a seventh constructor parameter, and not to spare the nine
+// call sites: NONE of them could pass these values, because none of them exists
+// yet at construction time. Every rule the constructor installs is knowable before
+// the child starts; these are readable only from what the child wrote.
+func (r *dropcapRedactor) addValueClass(class, replacement, value string) {
+	r.add(class, replacement, value)
+	r.resort()
+}
+
+// addPathClass is addValueClass over every spelling of a path, which is what the
+// constructor's own addPath does for the six classes it installs.
+func (r *dropcapRedactor) addPathClass(class, replacement, path string) {
+	for _, spelling := range dropcapPathSpellings(path) {
+		r.add(class, replacement, spelling)
+	}
+	r.resort()
 }
 
 func (r *dropcapRedactor) add(class, replacement, value string) {

@@ -707,6 +707,17 @@ type setModeFixtureRecord struct {
 	// and an omitempty int would spell that finding by ABSENCE.
 	Approval *bypassArgvApproval `json:"approval,omitempty"`
 
+	// EffortCapture is #2251's block and is nil on every arm that set no effort. Its
+	// inner fields carry no omitempty for Approval's reason, sharpened by what this
+	// one measures: the whole capture exists to make an ABSENT effort key mean
+	// something, and an omitempty bool spelling launch_flag_seen false by absence
+	// would leave the two witnesses unreadable in exactly the case they carry.
+	//
+	// Named effort_capture rather than effort so it cannot be mistaken for the init
+	// line's own key of that name, which is the thing being measured and lives inside
+	// init_lines.
+	EffortCapture *effortInitObservation `json:"effort_capture,omitempty"`
+
 	StdinWriteErrors       []string `json:"stdin_write_errors"`
 	StderrCapture          string   `json:"stderr_capture"`
 	ExitCode               int      `json:"exit_code"`
@@ -741,8 +752,15 @@ func setModeFixturePath(t *testing.T, versionToken, arm string) string {
 // that fences an offline file off from the committed testdata/, and a sibling
 // writeXFixture would be a second route to packageDir that every one of those
 // entries silently fails to cover.
+// screen is setModeChildConfig.screenFixture, threaded through rather than reached
+// for: this writer is package-level and takes no config. A nil screen writes the
+// marshalled record unchanged, which is every caller before #2251. A screen that
+// returns false writes NOTHING and this function returns an empty path — the
+// caller decides what to say about a refusal, because only it knows what the
+// screen was looking for.
 func writeSetModeFixture(t *testing.T, rec *setModeFixtureRecord,
-	fixturePath func(t *testing.T, versionToken, arm string) string) string {
+	fixturePath func(t *testing.T, versionToken, arm string) string,
+	screen func(t *testing.T, data []byte) ([]byte, bool)) string {
 	t.Helper()
 	dir := filepath.Join(packageDir(t), "testdata")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -752,6 +770,13 @@ func writeSetModeFixture(t *testing.T, rec *setModeFixtureRecord,
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		t.Fatalf("#1595: marshal fixture for arm %q: %v", rec.Arm, err)
+	}
+	if screen != nil {
+		screened, ok := screen(t, data)
+		if !ok {
+			return ""
+		}
+		data = screened
 	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
@@ -864,6 +889,36 @@ type setModeChildConfig struct {
 	// credential: initControlScrubbed below is the credential guard and runs first,
 	// unconditionally, whether or not this is set.
 	redactRunLocal func(string) string
+
+	// fillRecord, when non-nil, is called with the completed record after it is
+	// built and BEFORE it is marshalled, so a caller can record an observation only
+	// the finished record can produce. nil before #2251.
+	//
+	// It exists because approval above cannot serve: that closure is handed no
+	// record, and #2251's observation — which init lines claude emitted, what each
+	// carried, and which turn's assistant text acknowledged the in-band change — is
+	// read out of the very fields runSetModeChild has just assembled.
+	//
+	// It may MUTATE the record. That is the point, and it is safe here for the same
+	// reason approval's timing is: nothing has read the record yet, and
+	// writeSetModeFixture is still the only thing that will write it.
+	fillRecord func(t *testing.T, rec *setModeFixtureRecord)
+
+	// screenFixture, when non-nil, is the last pass over the MARSHALLED record on
+	// its way to testdata/: it returns the bytes to write and a verdict, and false
+	// writes nothing at all. nil before #2251.
+	//
+	// It sees bytes rather than fields because a redaction applied field by field
+	// leaks whatever field its author forgot, and this record carries claude's
+	// verbatim stdout. redactRunLocal above is the narrow, informative pass over the
+	// argv; this is the whole-record sweep and the deny-scan behind it, and #2251's
+	// AC 5 is the requirement that a scan hit leave nothing on disk.
+	//
+	// It is a knob on the CONFIG and a parameter to the writer, rather than a second
+	// writer function: that one is the single fenced route to packageDir, named on
+	// eleven finOfflineExecBans lists, and a sibling would be a route none of them
+	// cover.
+	screenFixture func(t *testing.T, data []byte) ([]byte, bool)
 }
 
 // The stages setModeChildConfig.mark names, in drive order. Each fires AFTER that
@@ -1183,7 +1238,13 @@ func runSetModeChild(t *testing.T, claudeBin, workdir string, arm setModeArm,
 		ScannerError:           scannerErr,
 	}
 
-	path := writeSetModeFixture(t, record, cfg.fixturePath)
+	if cfg.fillRecord != nil {
+		cfg.fillRecord(t, record)
+	}
+	path := writeSetModeFixture(t, record, cfg.fixturePath, cfg.screenFixture)
+	if path == "" {
+		path = "<not written: the caller's screen refused these bytes>"
+	}
 	t.Logf("#1595[%s]: model %q, %d line(s), init modes %v, %d control_response(s), exit=%d, deadline_tripped=%v, %s",
 		arm.name, cfg.model, len(lines), record.InitPermissionModes, len(responses), exitCode,
 		record.ContextDeadlineTripped, duration.Round(time.Millisecond))
