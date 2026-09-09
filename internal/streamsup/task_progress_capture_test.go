@@ -453,6 +453,49 @@ func TestTaskProgressReaderGateHasExactlyOneLegalSkip(t *testing.T) {
 	}
 }
 
+// capturedTaskProgressLines returns the bytes of the committed system/task_progress
+// lines, in record order, as claude sent them — what #2246's mapping assertions
+// replay through the shipped parser.
+//
+// It goes through taskProgressCapture rather than re-reading the file, unlike
+// capturedTaskNotificationLine's independent read of ITS record. The difference is
+// which failure each guards. That helper duplicates its sibling's provenance checks
+// because the two readers are separate functions over separate constants, and one
+// trusting the other to have run would hand a mapping assertion whatever bytes were
+// on disk. Here the gate, the version check and the envelope check all live in the
+// ONE reader this file already has, so calling it is how those checks run — reading
+// the file a second time is what would skip them.
+//
+// The task-count assertion is this helper's own and belongs at this level: the rate
+// bound is keyed PER TASK, so a record whose frames spanned two tasks would make
+// every count assertion built on these lines mean something different, and it would
+// do so silently. Both frames carrying one id is the staging #2246's bound is
+// argued from, not an incidental property.
+func capturedTaskProgressLines(t *testing.T) [][]byte {
+	t.Helper()
+	_, frames := taskProgressCapture(t)
+
+	ids := map[string]bool{}
+	lines := make([][]byte, 0, len(frames))
+	for _, f := range frames {
+		var tl struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal([]byte(f.Payload), &tl); err != nil {
+			t.Fatalf("%s: frame %d payload does not decode: %v", taskProgressCapturePath, f.Index, err)
+		}
+		ids[tl.TaskID] = true
+		lines = append(lines, []byte(f.Payload))
+	}
+	if len(ids) != 1 {
+		t.Fatalf("%s: the %d captured %s frames span %d task ids, not 1. #2246's rate bound is keyed "+
+			"per task, so a multi-task record silently changes what every count assertion built on "+
+			"these lines measures — re-read the record before trusting a count taken from it",
+			taskProgressCapturePath, len(frames), taskProgressCensusKey, len(ids))
+	}
+	return lines
+}
+
 // taskProgressSortedKeys returns a decoded object's own top-level key set, sorted.
 // The slice is built here and sorted here, so nothing package-level is mutated.
 func taskProgressSortedKeys(obj map[string]json.RawMessage) []string {

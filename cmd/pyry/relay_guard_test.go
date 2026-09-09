@@ -318,6 +318,11 @@ var excludedTypes = map[string]string{
 	"TypeBackgroundTaskStarted": "push",
 	"TypeBackgroundTaskUpdated": "push",
 	"TypeBackgroundTaskRoster":  "push",
+	// outbound push — the v2 background-task activity reading (#2246). A fourth
+	// member of the block above rather than a group of its own: the frame's subject
+	// is the same turn-independent work, and it is outbound-only exactly as the
+	// three are.
+	"TypeBackgroundTaskProgress": "push",
 
 	// outbound push — the v2 thinking-progress reading (#1386). Outbound-only
 	// like the three above, so it must be excluded here from the moment the

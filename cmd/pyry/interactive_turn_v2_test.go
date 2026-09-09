@@ -3594,3 +3594,125 @@ const (
 	toolDeniedReasonTypeFixture = "qq-reasontype-sentinel"
 	toolDeniedReasonFixture     = "qq-reason-sentinel"
 )
+
+// AC1's wire leg: a turnevent.BackgroundTaskProgress reaches a mobile client as a
+// background_task_progress frame carrying conversation identity and every one of the
+// event's fields — and only a phone that negotiated `interactive` receives it.
+//
+// Without this the whole mapping stops at the daemon boundary: MapEvent would return
+// ok == false, the emitter's default arm would debug-log it as an unknown event, and
+// nothing would reach a phone. That is not hypothetical — it is the state #1385 left
+// behind and #1386 had to open a second ticket to fix, which is why this frame's
+// producer and its emitter arm ship together.
+//
+// Every fixture value differs so a handler that crossed two fields goes red here.
+func TestInteractiveTurnEmitterV2_BackgroundTaskProgressFansOutToInteractiveOnly(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{
+		{ConnID: "a", Interactive: true},
+		{ConnID: "b", Interactive: false},
+	}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	e.Handle(context.Background(), turnevent.BackgroundTaskProgress{
+		TaskID:       "a8eec1cd5e109aa38",
+		Description:  "Reading beta.txt",
+		SubagentType: "general-purpose",
+		LastToolName: "Read",
+		TotalTokens:  16246,
+		ToolUses:     2,
+		DurationMS:   4546,
+	})
+
+	if got := len(bcast.pushes); got != 1 {
+		t.Fatalf("pushed %d envelopes; want exactly 1 (interactive conn only)", got)
+	}
+	p := bcast.pushes[0]
+	if p.connID != "a" {
+		t.Fatalf("pushed to conn %q; want interactive conn %q", p.connID, "a")
+	}
+	if p.env.Type != protocol.TypeBackgroundTaskProgress {
+		t.Fatalf("envelope type: got %q, want %q", p.env.Type, protocol.TypeBackgroundTaskProgress)
+	}
+	if len(pushesFor(bcast.pushes, "b")) != 0 {
+		t.Fatalf("non-interactive conn b received the %s frame", protocol.TypeBackgroundTaskProgress)
+	}
+
+	var got protocol.BackgroundTaskProgressPayload
+	if err := json.Unmarshal(p.env.Payload, &got); err != nil {
+		t.Fatalf("decode background_task_progress payload: %v", err)
+	}
+	want := protocol.BackgroundTaskProgressPayload{
+		ConversationID: testConvID,
+		TaskID:         "a8eec1cd5e109aa38",
+		Description:    "Reading beta.txt",
+		SubagentType:   "general-purpose",
+		LastToolName:   "Read",
+		TotalTokens:    16246,
+		ToolUses:       2,
+		DurationMS:     4546,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("payload:\n got %#v\nwant %#v", got, want)
+	}
+	// The wire literal is the daemon's own name, never claude's system/task_progress
+	// subtype and never its unrelated top-level tool_progress type. Asserted on the
+	// envelope BYTES reaching the conn, which a constant splice cannot launder;
+	// internal/protocol's TestBackgroundTaskProgressType_IsNotClaudesSubtype pins the
+	// constant itself.
+	if p.env.Type != "background_task_progress" {
+		t.Fatalf("wire type literal: got %q, want %q", p.env.Type, "background_task_progress")
+	}
+}
+
+// AC1's lifecycle leg: a background-task progress frame opens and closes no turn.
+//
+// It matters more for this variant than for its three background-task neighbours,
+// because this one fires REPEATEDLY while a task runs: a handler that opened a turn
+// on it would wedge the conversation once per progress line, on work that is
+// orthogonal to the turn by construction. The frame is handled bare before any turn,
+// the tracker's fields are asserted directly, and a following content event proves a
+// fresh turn still opens afterwards.
+func TestInteractiveTurnEmitterV2_BackgroundTaskProgressNoLifecycleMutation(t *testing.T) {
+	t.Parallel()
+	cur := &stubCursor{}
+	cur.set(testConvID)
+	bcast := &fakeInteractiveBcast{snapshots: [][]relay.ActiveConn{{{ConnID: "a", Interactive: true}}}}
+	e := newInteractiveTurnEmitterV2(cur, bcast, discardLogger())
+
+	// Two of them, because one frame cannot show that a repeating variant leaves the
+	// tracker alone every time rather than only the first time.
+	for _, uses := range []int{2, 4} {
+		e.Handle(context.Background(), turnevent.BackgroundTaskProgress{TaskID: "t-1", ToolUses: uses})
+	}
+
+	// A turn_state anywhere in the sequence is the observable signature of a
+	// transitionTo call, so the exact frame sequence is the assertion.
+	want := []string{protocol.TypeBackgroundTaskProgress, protocol.TypeBackgroundTaskProgress}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, want) {
+		t.Fatalf("bare background_task_progress envelopes: got %v, want %v", got, want)
+	}
+	if e.inTurn {
+		t.Error("background_task_progress opened a turn; inTurn must stay false")
+	}
+	if e.turnID != "" {
+		t.Errorf("background_task_progress minted a turn id: got %q, want empty", e.turnID)
+	}
+	if e.currentState != "" {
+		t.Errorf("background_task_progress set currentState: got %q, want empty", e.currentState)
+	}
+
+	e.Handle(context.Background(), turnevent.TextChunk{Text: "hello"})
+	e.flushDelta(context.Background())
+	wantTypes := []string{
+		protocol.TypeBackgroundTaskProgress,
+		protocol.TypeBackgroundTaskProgress,
+		protocol.TypeTurnState,      // responding — a fresh turn opens afterwards
+		protocol.TypeAssistantDelta, // hello
+	}
+	if got := pushTypes(bcast.pushes); !slices.Equal(got, wantTypes) {
+		t.Fatalf("post-progress envelopes:\n got %v\nwant %v", got, wantTypes)
+	}
+}

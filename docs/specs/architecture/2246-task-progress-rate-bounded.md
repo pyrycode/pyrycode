@@ -466,3 +466,69 @@ was re-walked from the top afterwards)
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-10
+
+## Revisions
+
+### 2026-09-10 — the arm gates, so its dropcap row is a PAIR rather than a mapped row
+
+**What changed.** The Testing strategy said `TestDropcapClassification` gains "a row
+recording the subtype as MAPPED, in the shape #2245 added". It gains two rows, and the
+bare one records a DROP.
+
+**Why.** Implementing the guard made a divergence explicit that the plan's rule table
+implied without naming. `emitBackgroundTaskNotification` GATES ON NOTHING — a bare
+`{"type":"system","subtype":"task_notification"}` still maps, because absence of a field
+is claude's to choose — and #2245's dropcap row records exactly that. This arm cannot
+take that posture: the counter is what its rate bound reads, and a line carrying none
+cannot be placed against a previous value, so a bare line is consumed silently. That is
+`system/init`'s and `system/status`'s shape rather than `task_notification`'s: both are
+mapped subtypes whose bare fixture still classifies as a drop because of the arm's own
+gate, and both rows say so.
+
+**The contract.** The bare row asserts the drop and names the guard; a second row
+carrying `usage.tool_uses` at the bound asserts the map. The pair is what makes it a pin
+on the GUARD rather than on the subtype — and the control row is what stops the first
+passing vacuously against a parser with no arm for the subtype at all, which is the state
+this ticket changed.
+
+### 2026-09-10 — independent fixture literals for both new constants
+
+**What changed.** The Testing strategy did not say where the tests take the bound and
+the cardinality cap from. They take them from `taskToolCallsPerEventFixture` and
+`taskProgressTasksCapFixture`, two new literals beside the package's existing six.
+
+**Why.** A test written against `minTaskToolCallsPerEvent` follows the constant green in
+either direction, which is `taskStartedCapCheat`'s stated rule and the precedent
+`taskRosterEntriesCapFixture` set for a cardinality. It matters more for the rate bound
+than for any cap in that block: the value rests on an argument — a ceiling of 2 from the
+observed task's whole advance, a floor of 2 because 1 is not a bound — that only holds
+while the number does, so a self-referential table would let the number move and spend
+the argument silently.
+
+**Verified rather than reasoned about.** Both constants were mutated over a scratch
+overlay (`minTaskToolCallsPerEvent` 2 → 3, `maxTaskProgressTasks` 8 → 4, one run, no
+worktree writes). Every rate, cardinality, capture-replay and cap test in the set turns
+red.
+
+### 2026-09-10 — documentation counts
+
+Four live sentences reading "seventeen turn-stream events" now read eighteen, this being
+a new `turnevent` variant that reaches the wire. § `unrecognized_message`'s "five
+`system` subtypes" is deliberately NOT re-counted: it was already stale before this
+ticket — five arms have landed since it was written — so a sixth number would swap one
+wrong count for another. A pointer to `emitSystemSubtype`'s case arms is added there
+instead, and the changelog says the repair is documentation work of its own.
+
+## Open questions — resolved
+
+- **Whether `2` survives a second capture.** Unresolved by design and left as a standing
+  condition rather than a question this ticket could answer: no second capture exists.
+  What changed is that the argument is now enforced rather than merely written down —
+  `taskToolCallsPerEventFixture` reddens a whole test set if the number moves, so raising
+  it is a deliberate act with the ceiling argument in front of the person doing it. The
+  constant's doc states the only admissible reason: a NEW capture whose task advances
+  further.
+- **Whether `summary` ever arrives.** Unchanged, and now enforced from two sides. It is
+  absent from `systemTaskProgressLine` and from `BackgroundTaskProgressPayload`, and both
+  omissions are asserted structurally over the json tags rather than by sweeping a value
+  — the only form of assertion available for a key no captured line carries.

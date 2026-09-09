@@ -360,7 +360,8 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// means something is genuinely wrong and you want to see it.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
-	case turnevent.BackgroundTaskStarted, turnevent.BackgroundTaskUpdated, turnevent.BackgroundTaskRoster:
+	case turnevent.BackgroundTaskStarted, turnevent.BackgroundTaskUpdated, turnevent.BackgroundTaskRoster,
+		turnevent.BackgroundTaskProgress:
 		// claude's background-task lifecycle (#1394), taking the same shape as the
 		// status peers above: NO turn-lifecycle mutation (no startTurnIfNeeded /
 		// transitionTo / endTurn; inTurn, turnID, currentState untouched). A
@@ -376,6 +377,16 @@ func (e *interactiveTurnEmitterV2) Handle(ctx context.Context, ev turnevent.Even
 		// droppable set is assistant_delta only, #610), so a burst holds queue
 		// slots; the producer already caps roster entries, and these only fire on
 		// claude's own lifecycle lines.
+		//
+		// BackgroundTaskProgress (#2246) joins the case list rather than earning an arm
+		// of its own, because every sentence above already describes it: same subject,
+		// same non-turn-scoped posture, same flush-then-emit. What is NOT already true
+		// of it is the last clause — this variant does not fire only on claude's
+		// lifecycle lines, it fires repeatedly while a task runs. That is exactly why
+		// its producer carries a rate bound (streamsup.minTaskToolCallsPerEvent) where
+		// its three neighbours carry none, and, as with thinking progress, no second cap
+		// is imposed here: a filter in this file would silently diverge from the one
+		// that decided the event existed.
 		e.flushDelta(ctx)
 		e.emitMapped(ctx, convID, ev)
 	case turnevent.ThinkingProgress:
@@ -832,6 +843,16 @@ func eventKind(ev turnevent.Event) string {
 		return "background_task_updated"
 	case turnevent.BackgroundTaskRoster:
 		return "background_task_roster"
+	case turnevent.BackgroundTaskProgress:
+		// The variant NAME only, for the arms above's reason — and here the temptation
+		// is sharper than on any neighbour, because this variant's Description is a
+		// readable account of what a subagent is doing and would make a genuinely
+		// useful-looking log field. It is claude's text and it names a file, so it stays
+		// out. The arm exists for the OTHER call sites, not for this file's default:
+		// the handler case above claims the variant on this lane, but the ACP surface
+		// drops it via acpbridge's own default and logs the kind, which would otherwise
+		// read "unknown" for a variant the daemon does recognize.
+		return "background_task_progress"
 	case turnevent.ThinkingProgress:
 		// The variant NAME only, for the arms above's reason — though here there
 		// is nothing claude-derived to be tempted by in the first place: both

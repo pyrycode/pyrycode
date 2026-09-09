@@ -251,6 +251,101 @@ const maxTaskRosterEntries = 8
 // bytes is all there is; TruncatedFields is what will surface that if it bites.
 const maxTaskRosterDescription = 512
 
+// maxTaskProgressTasks caps how many task ids Parser.taskProgressToolUses
+// remembers within one turn — the cardinality half of #2246's rate bound, and the
+// family's SECOND cardinality bound after maxTaskRosterEntries.
+//
+// It bounds a different SHAPE from that one, which is why it is a constant rather
+// than a reuse. maxTaskRosterEntries caps a list inside ONE event, decided and spent
+// at construction; this caps a map the parser RETAINS across lines, keyed by ids
+// claude chooses. maxTurnDenials is the closer structural neighbour — the family's
+// other retained, claude-keyed collection — and Parser.taskProgressToolUses follows
+// its every dimension.
+//
+// The count is 8, derived the way maxTaskRosterEntries derives its own rather than
+// borrowed from it: the committed capture holds ONE task, so 8 is 8x the observation,
+// the multiple-of-observation form maxTaskFieldID uses. That it lands on the family's
+// existing figure for concurrent background tasks is a check on the derivation, not
+// its source — and the two are free to diverge, since one caps what a client is shown
+// at once and this caps what the parser remembers.
+//
+// NOT maxTurnDenials' 16, which is the other number it could have been reached for by
+// analogy. That constant's own doc argues 16 from a model looping on a refused tool,
+// a mechanism with no counterpart here: a background task is opened by a tool call
+// that succeeded, and nothing retries one.
+//
+// The RETAINED size, in maxTaskRosterEntries' arithmetic style:
+//
+//   - One entry: maxTaskFieldID + one int = 256 + 8 = 264 bytes, and the key is the
+//     value the event PUBLISHED, after the cut — emitPermissionDenied's rule, so an
+//     id too long to publish is also too long to remember.
+//   - Worst case: 8 * 264 = 2112 bytes held for at most one turn. Two orders of
+//     magnitude under the whole-line 4 MiB defaultMaxParseBuf already admits, and it
+//     contributes NO envelope term at all: nothing here crosses the wire.
+//
+// PAST THE CAP A TASK GETS NO PROGRESS EVENTS, which is a behavioural choice and not
+// a fallout. The alternative — treat an untracked task's previous value as zero and
+// emit — restores the one-frame-per-line rate the bound exists to refuse, for exactly
+// the tasks a runaway input arranges to be past the cap, so the bound would invert
+// under the pressure it was built for. Silence for a ninth concurrent task is the
+// cheaper failure because progress is a liveness decoration rather than a
+// state-machine edge: it silences one task and not the turn, and that task's opening
+// and terminal frames are untouched, so its row still opens and closes correctly.
+// deniedThisTurn stops growing at its own cap and accepts an analogous cost.
+const maxTaskProgressTasks = 8
+
+// minTaskToolCallsPerEvent is the advance in one task's cumulative usage.tool_uses
+// that earns one turnevent.BackgroundTaskProgress (#2246). The package's SECOND
+// constant bounding FREQUENCY rather than size, and a `min` for
+// minThinkingTokensPerEvent's reason: it is the smallest quantum that earns an event.
+//
+// WHY THAT COUNTER AND NOT THE OTHER TWO the line carries. tool_uses is the only one
+// of the three whose absent baseline is genuinely zero — a task begins having made no
+// tool calls — so a first line's advance against nothing is a true reading. In the
+// committed capture total_tokens reads 16207 on the FIRST line, the subagent's whole
+// context already counted, so a delta against an absent baseline would be 16207: a
+// number that says nothing about progress and would emit on every task's first line
+// whatever bound was chosen. duration_ms is wall clock, so a bound on it would key
+// emission on the subagent's SPEED rather than on its activity, and a subagent blocked
+// inside one long tool call would report nothing while doing the most work. tool_uses
+// is also the counter measured to track the line count, which is what makes a bound on
+// it a bound on the frame rate at all.
+//
+// THE ARGUMENT IS THINNER THAN minThinkingTokensPerEvent'S, and that is stated rather
+// than dressed up. That constant had four bursts of 126-197 tokens to take a ceiling
+// and a halving margin from. Here the record is one task and two lines.
+//
+//   - CEILING, from the data, in that constant's own form: the observed task's whole
+//     tool-call advance is 2 (tool_uses reads 1 then 2). Any bound above 2 emits
+//     NOTHING for the only task ever measured — the whole-burst-goes-silent failure,
+//     one order of magnitude thinner than the one behind 126.
+//   - FLOOR: 1 is not a bound. At 1 every line emits and the mapping is the
+//     one-frame-per-line shape this constant exists to refuse.
+//
+// The two meet, so the observation pins the value exactly rather than leaving a range
+// to take a margin inside. It is a real reduction — the captured turn's 2 lines become
+// 1 event, and a subagent making fifty tool calls produces twenty-five events rather
+// than fifty. Power of two by arithmetic rather than by taste: 2 is the only value the
+// bounds admit. Raising it needs a NEW capture whose task advances further, never a
+// wish for a quieter wire.
+//
+// THE BOUND IS ON THE COUNTER'S ADVANCE, NOT ON THE LINE COUNT, and the difference is
+// a limit rather than a detail. A tool_uses advancing by two or more per line emits on
+// every line, so the halving above describes the measured shape and not a guarantee.
+// minThinkingTokensPerEvent has the identical property — a delta of 64 on every line
+// emits on every line — and the three background-task variants beside this one have no
+// rate bound at all, so this is the family's posture rather than a regression in it.
+// These events are not droppable deltas (the droppable set is assistant_delta only,
+// #610), so a burst holds queue slots; that is the cost maxRateLimitField's doc
+// already records as accepted across the family, bounded by the same existing
+// backpressure. Named rather than mechanised, per evidence-based fix selection:
+// revisit on an OBSERVED rate, as #1385 did.
+//
+// There is deliberately no envelope arithmetic, for minThinkingTokensPerEvent's
+// reason: what this bounds is how often an event fires, and the event's SIZE is
+// bounded by the field caps at turnevent.BackgroundTaskProgress.
+const minTaskToolCallsPerEvent = 2
+
 // minThinkingTokensPerEvent is the accumulated estimated_tokens_delta that earns
 // one turnevent.ThinkingProgress. It is the package's first constant bounding
 // FREQUENCY rather than SIZE, and a `min` rather than a `max` because it is the
@@ -2009,6 +2104,56 @@ type Parser struct {
 	// fields, not three.
 	deniedThisTurn map[string]struct{}
 
+	// taskProgressToolUses maps a background task's id to the cumulative
+	// usage.tool_uses carried by the last system/task_progress line that PRODUCED an
+	// event for it, during the turn now open (#2246). Written and read only by
+	// emitBackgroundTaskProgress, cleared only by consumeLine's one reset.
+	//
+	// NOT AN ACCUMULATOR, which is the difference from thinkingSinceEmit above and
+	// the property AC 4 rests on. That field sums deltas claude supplied; this one
+	// only ever REMEMBERS a number claude sent, so nothing published on a
+	// BackgroundTaskProgress is arithmetic the daemon did. The subtraction that
+	// decides an emit reads this value and discards the result.
+	//
+	// A MAP RATHER THAN A COUNTER, and that is forced rather than chosen. claude's
+	// counters here are cumulative PER TASK, so a single turn-wide counter would mix
+	// two tasks' progress into one bound and let a busy task silence a quiet one.
+	// The cost is that the key set comes from the far side of the connection, which
+	// is a memory-growth surface rather than a tidiness question — so this follows
+	// deniedThisTurn in every dimension:
+	//
+	//   - LAZILY ALLOCATED and cleared by setting nil, so a session that never
+	//     delegates pays no allocation at all. A nil map reads as empty on lookup and
+	//     len, which is the same answer an empty one gives, so no call site
+	//     distinguishes the two.
+	//   - BOUNDED IN BOTH DIMENSIONS. maxTaskProgressTasks caps the CARDINALITY, and
+	//     maxTaskFieldID has already capped each id before it is recorded — the emit
+	//     function records the value it published, after the cut. So no input can
+	//     grow this past 8 * (256 bytes + one int).
+	//   - RETAINED ONLY INSIDE A TURN. Nothing formats a *Parser and no debug bundle
+	//     reaches parser state, so the ids are not reachable by any dump.
+	//
+	// INVARIANT: every value stored here is > 0. The emit function's guard refuses a
+	// non-positive tool_uses before any store, and the re-baseline branch stores a
+	// value that already passed it. `seen - stored` is therefore a subtraction of two
+	// non-negative ints, which cannot overflow whatever claude sends — the reason the
+	// crossing test is written subtracted, exactly as thinkingSinceEmit's is, and
+	// with the pressure HIGHER here because the second operand is the daemon's own
+	// retained number rather than one claude supplied fresh on each line.
+	//
+	// NOTHING DELETES AN ENTRY WHEN A TASK ENDS. A delete on the task_notification
+	// arm would couple two arms and buy a second boundary to keep correct, which is
+	// what having one boundary avoids. The residual across a child that dies without
+	// a `result` fails in the safe direction: an extra event for a task whose counter
+	// is already past the bound, never silence.
+	//
+	// The single-writer invariant covers it exactly as it covers the four above,
+	// including across a child respawn. A future concurrent reader guards all FIVE
+	// fields, not four — and this is the SECOND that holds a collection of claude's
+	// bytes, so the read-modify-write it performs is the one that would need the
+	// guard first.
+	taskProgressToolUses map[string]int
+
 	// postureGate is the ack signal this parser releases for the runner it is
 	// installed on (#2064). Minted in NewParser, read by the runner through
 	// PostureGate(). It carries its OWN mutex, so it is the one piece of parser state
@@ -2255,6 +2400,60 @@ type systemTaskNotificationLine struct {
 	TaskID  string `json:"task_id"`
 	Status  string `json:"status"`
 	Summary string `json:"summary"`
+}
+
+// systemTaskProgressLine is the decoded payload of one system/task_progress line —
+// the subtype that reports a background task still WORKING (#2246). Kept separate
+// from streamLine for systemTaskStartedLine's reason, and separate from all three
+// task siblings because no two of the four subtypes share a payload shape beyond
+// task_id.
+//
+// The field set is what the committed capture shows, MINUS five keys, and nothing
+// invented. The capture pins ten top-level keys (taskProgressPinnedKeys in
+// task_progress_capture_test.go); five are declared here. Of the five that are not,
+// type and subtype are segmentation and belong to streamLine, and the remaining
+// three are the family's standing omissions, stated at
+// turnevent.BackgroundTaskUpdated: session_id, uuid and tool_use_id.
+//
+// claude's documented `summary` is NOT declared, and its absence is a MEASUREMENT.
+// The capture files it under keys_documented_not_observed — the SDK describes it for
+// a local agent only with the progress-summaries option, and always for an MCP task,
+// and this record is a local agent without that option. A docs page is a thing to
+// CHECK a capture against, never a thing to declare from, so measuring what those
+// stagings send is a new capture rather than a field added here.
+//
+// The four strings are string, so a non-string value in any of them fails the whole
+// decode and takes the undecodable path. Usage is a NESTED STRUCT rather than a
+// json.RawMessage: systemTaskUpdatedLine's permissive typing is for a value whose
+// shape claude owns and nothing reads, whereas every key inside this object is read
+// and one of them decides whether the line emits at all. A usage that is not an
+// object, or whose counters are not numbers, therefore fails the decode rather than
+// arriving as bytes nobody can compare.
+type systemTaskProgressLine struct {
+	TaskID       string                  `json:"task_id"`
+	Description  string                  `json:"description"`
+	SubagentType string                  `json:"subagent_type"`
+	LastToolName string                  `json:"last_tool_name"`
+	Usage        systemTaskProgressUsage `json:"usage"`
+}
+
+// systemTaskProgressUsage is that line's nested usage object, whose three keys are
+// exactly what taskProgressPinnedUsageKeys pins and nothing invented. A top-level key
+// set says nothing about a nested shape, which is why the capture pins both.
+//
+// An ABSENT usage key decodes to this struct's zero value, so all three read 0. That
+// is deliberate and is not a validation rule: absence is claude's to choose, and
+// emitBackgroundTaskProgress's guard treats a zero ToolUses as nothing to report,
+// which is the same reading an explicit 0 gets.
+//
+// The three are int and SIGNED on purpose, for resultModelUsage.ContextWindow's
+// reason: a negative reading has to be OBSERVABLE for the emit function to handle it,
+// and an unsigned type would wrap one into an enormous positive count and act on it
+// as fact. That matters most for ToolUses, which the rate bound subtracts.
+type systemTaskProgressUsage struct {
+	TotalTokens int `json:"total_tokens"`
+	ToolUses    int `json:"tool_uses"`
+	DurationMS  int `json:"duration_ms"`
 }
 
 // resultLine is the decoded payload of one `result` line's modelUsage map — the
@@ -3875,6 +4074,16 @@ func (p *Parser) consumeLine(line []byte) {
 		// wrong one, which is argued at the field.
 		announced := p.deniedThisTurn
 		p.deniedThisTurn = nil
+		// THE FIFTH FIELD'S RESET (#2246), and the first here that is a plain clear with
+		// nothing read off it: no arm below consults a task's progress history, so unlike
+		// the three read-and-clear neighbours above there is no value to carry past the
+		// reset. Unconditional like all four, so a cancelled turn carries no task's
+		// counter into the next one. Nothing is emitted to announce it, on the compacting
+		// field's own test: a reset needs publishing only when a client MIRRORS the
+		// value, and a client holds no copy of this — it holds rows the opening and
+		// terminal frames drive, which this clear does not touch. The residual direction
+		// is argued at the field: an extra event, never silence.
+		p.taskProgressToolUses = nil
 		windows, droppedWindows := decodeModelWindows(line)
 		isError, terminalReason := decodeStopShape(line)
 		// A THIRD DECODE OF THE SAME LINE, joining the two above rather than widening
@@ -4186,6 +4395,8 @@ func (p *Parser) emitSystemSubtype(subtype string, line []byte) bool {
 		return p.emitBackgroundTaskUpdated(line)
 	case "task_notification":
 		return p.emitBackgroundTaskNotification(line)
+	case "task_progress":
+		return p.emitBackgroundTaskProgress(line)
 	case "background_tasks_changed":
 		return p.emitBackgroundTaskRoster(line)
 	case "thinking_tokens":
@@ -5037,6 +5248,169 @@ func (p *Parser) emitBackgroundTaskNotification(line []byte) bool {
 		// reader's first instinct here is that a field was forgotten.
 		Patch:   "",
 		Summary: summary,
+		// nil when nothing was cut: append never ran.
+		TruncatedFields: cut,
+	})
+	return true
+}
+
+// emitBackgroundTaskProgress decodes a system/task_progress line and emits at most
+// ONE turnevent.BackgroundTaskProgress, reporting that it consumed the line either
+// way. Field mapping comes from the committed capture
+// (internal/e2e/realclaude/testdata/parent_tool_use_v2.1.259.json, pinned in
+// task_progress_capture_test.go), never from a hand-built payload and never from the
+// Agent SDK's documented key list.
+//
+// Named for the EVENT, like its three task siblings and unlike
+// emitBackgroundTaskNotification: one subtype produces one variant here, so there is
+// no peer for the variant's name to collide with.
+//
+// LIKE emitThinkingProgress AND UNLIKE ITS TASK SIBLINGS, this mapping is not a pure
+// function of one line: it is rate-bounded, so most lines accumulate and emit
+// nothing. The rule, with `seen` the line's usage.tool_uses and `prev` the remembered
+// value for this task (0 when untracked):
+//
+//	seen <= 0                    -> consume, no event               (guard)
+//	untracked and map full       -> consume, no event               (cardinality)
+//	seen <= prev                 -> prev = seen; consume, no event  (re-baseline)
+//	seen - prev < bound          -> consume, no event               (accumulate)
+//	otherwise                    -> prev = seen; emit
+//
+// with the map cleared at the `result` arm in consumeLine. The accumulate branch
+// stores NOTHING, which is what keeps prev the last EMITTED value and makes the
+// accumulation implicit in claude's own cumulative counter — see
+// Parser.taskProgressToolUses for why that is AC 4's enforcement rather than a
+// convenience.
+//
+// TWO DEPARTURES FROM emitThinkingProgress, and both are why this function is longer
+// than a copy of it would be.
+//
+// THE DELTA IS COMPUTED, NOT GIVEN. That function reads a delta claude supplied and
+// already made non-negative; here the counters are cumulative per task, so any delta
+// is arithmetic against a previous value the daemon had to keep. So the crossing test
+// is written SUBTRACTED — `seen - prev >= bound`, never `prev + bound <= seen` —
+// and the reason is stronger here than there. Both operands are in [0, MaxInt] by the
+// invariant at the field, so the difference is representable whatever claude sends and
+// the failure is unrepresentable rather than guarded against; the additive form
+// overflows on a large prev, reads false forever, and silences that task for the rest
+// of the turn from one version-drifted line. Do not "simplify" it back.
+//
+// A COUNTER THAT FAILS TO ADVANCE ARRIVES, rather than being ruled out. seen == prev
+// is a case claude can produce (a progress line fired for something other than a tool
+// call), and seen < prev is claude restarting a counter — which it demonstrably does
+// on the neighbouring subtype, at every inference request. Both re-baseline DOWN
+// rather than being ignored, and that is the computed-delta analogue of that
+// function's `d <= 0` guard: ignoring a backwards counter would leave a stale
+// high-water mark no realistic advance climbs out of, and silence is the single
+// outcome this family's rate-bounded mappings refuse. The re-baseline stores a value
+// already > 0, for a key already present, so it can neither break the invariant nor
+// grow the map, and an alternating counter emits at most every other line.
+//
+// AN EMPTY task_id IS A BUCKET LIKE ANY OTHER, not a drop and not a bypass. The
+// family's rule is that absence is claude's to choose and the field lands empty;
+// keying on "" keeps that rule AND keeps the bound, where dropping would depart from
+// it and treating unkeyed lines as unbounded would defeat it. The cost is that two
+// simultaneous unkeyed tasks share one counter and each reports less often, which
+// degrades a report a client could not attach to a row anyway.
+//
+// The decode's input is `line` — the TOP-LEVEL bytes — never a nested field, and that
+// is not a call-shape convention. streamLine's doc states the property it preserves:
+// control shapes are read from the top level only and nested content is never
+// re-scanned. Decoding this payload from anywhere else would let a tool result whose
+// text is literally a task_progress line forge a progress report — a liveness claim
+// about a task, on a frame a remote client draws a row from. Lower value to forge than
+// a task's death or a whole roster, and refused on the same rule rather than on a
+// judgement about its value.
+//
+// A payload that will not decode into the shape (a numeric task_id, a usage that is
+// not an object) is dropped with a content-free Debug and no event — NOT surfaced as
+// an Unrecognized, because keeping system whole on ignoredLineTypes is what makes "no
+// system line reaches the unrecognized lane" structural. NOTHING DERIVED FROM THE LINE
+// IS LOGGED on any path, and the four SILENT branches are where that rule is most
+// tempting to bend: a drop with no diagnostic invites "just the task id" or "just the
+// count". emitThinkingProgress refuses the identical bend for a token number and
+// emitBackgroundTaskRoster for an entry count.
+func (p *Parser) emitBackgroundTaskProgress(line []byte) bool {
+	var tl systemTaskProgressLine
+	if err := json.Unmarshal(line, &tl); err != nil {
+		// The subtype is a message-name keyword, not payload — the same class as
+		// sl.Type in the drop log above, so this adds no new category of logged
+		// content. Neither the counters nor description is logged, and description is
+		// the thing this handler is most tempted to explain itself with: it names what
+		// the subagent is reading, which reads like a diagnostic and is a file path.
+		p.log.Debug("streamsup: dropping undecodable system line", "subtype", "task_progress")
+		return true
+	}
+
+	// Absent, zero and negative all land here and are treated identically: no tool
+	// call to report, and nothing remembered. It also establishes the field's
+	// invariant for every store below — see Parser.taskProgressToolUses.
+	seen := tl.Usage.ToolUses
+	if seen <= 0 {
+		return true
+	}
+
+	var cut []string
+	bound := func(value, name string, limit int) string {
+		out, truncated := truncateField(value, limit)
+		if truncated {
+			cut = append(cut, name)
+		}
+		return out
+	}
+	// Sequential statements rather than a composite literal, for
+	// emitBackgroundTaskStarted's reason: TruncatedFields is ordered by these calls,
+	// and inside a literal that order would rest on the left-to-right operand rule
+	// rather than on something a reader sees. No name is translated — claude's keys
+	// and the daemon's fields agree.
+	//
+	// task_id is bound BEFORE it is used as the map key, which is
+	// emitPermissionDenied's rule and not an ordering accident: the key is the value
+	// the event publishes, so an id too long to publish is also too long to remember.
+	taskID := bound(tl.TaskID, "task_id", maxTaskFieldID)
+	description := bound(tl.Description, "description", maxTaskDescription)
+	subagentType := bound(tl.SubagentType, "subagent_type", maxTaskFieldID)
+	lastToolName := bound(tl.LastToolName, "last_tool_name", maxTaskFieldID)
+
+	prev, tracked := p.taskProgressToolUses[taskID]
+	// Growth stops at maxTaskProgressTasks — see that constant for why an untracked
+	// task past the cap goes silent rather than emitting on every line.
+	if !tracked && len(p.taskProgressToolUses) >= maxTaskProgressTasks {
+		return true
+	}
+	if seen <= prev {
+		// Re-baseline. Reached only when the key is already present (prev is 0 for an
+		// untracked task and seen is > 0 here), so this cannot grow the map, and seen
+		// has passed the guard, so it cannot break the invariant.
+		p.taskProgressToolUses[taskID] = seen
+		return true
+	}
+	// The COMPLEMENT of the doc's `seen - prev >= bound -> emit`, written this way so
+	// the accumulate branch returns early and the emit is the function's tail.
+	// Subtracted, never additive — see the doc above. Nothing is stored here: prev
+	// stays the last EMITTED value, so the accumulation lives in claude's cumulative
+	// counter rather than in a total the parser keeps.
+	if seen-prev < minTaskToolCallsPerEvent {
+		return true
+	}
+
+	if p.taskProgressToolUses == nil {
+		p.taskProgressToolUses = make(map[string]int, 1)
+	}
+	p.taskProgressToolUses[taskID] = seen
+	// The line's OWN values, never a running total: the event stays a pure function of
+	// the line that produced it, and the counters' cumulative-per-task reading is a
+	// documented consumer hazard on turnevent.BackgroundTaskProgress rather than a
+	// number invented here. No caps on the three ints — an int cannot blow the
+	// envelope.
+	p.emit(turnevent.BackgroundTaskProgress{
+		TaskID:       taskID,
+		Description:  description,
+		SubagentType: subagentType,
+		LastToolName: lastToolName,
+		TotalTokens:  tl.Usage.TotalTokens,
+		ToolUses:     seen,
+		DurationMS:   tl.Usage.DurationMS,
 		// nil when nothing was cut: append never ran.
 		TruncatedFields: cut,
 	})

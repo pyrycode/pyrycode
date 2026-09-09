@@ -428,8 +428,8 @@ const (
 	TypeUnrecognizedMessage = "unrecognized_message" // binary → phone, outbound v2 parser-gap diagnostic
 )
 
-// Mobile Protocol v2 background-task types. These three are the first frames in
-// the vocabulary whose subject is work that OUTLIVES the turn that started it —
+// Mobile Protocol v2 background-task types. These are the frames in the
+// vocabulary whose subject is work that OUTLIVES the turn that started it —
 // claude backgrounds a shell command and it keeps running after the assistant
 // reports end_turn. That gap is #1240's symptom exactly: the daemon reported
 // turn_end carrying end_turn and went idle while a command claude started was
@@ -440,9 +440,21 @@ const (
 // turn-lifecycle six: those describe a live turn's sub-states and its
 // lifecycle, and neither cluster's subject is turn-independent work.
 //
+// AMENDED 2026-09-10 (#2246): the block admits a periodic READING beside three
+// lifecycle frames, and the two sentences above are edited rather than annotated
+// because both were counts of a set that grew. background_task_progress reports
+// that a running task is still working and what it is doing, so it has no edges at
+// all — but this block's criterion is the frame's SUBJECT, turn-independent work,
+// not its shape, which is why it lands here and not beside thinking_progress. That
+// constant is grouped alone for the reason its own doc gives: its subject is neither
+// the turn's lifecycle nor turn-independent work.
+//
 // The NAMES are the daemon's, not claude's. internal/streamsup/parser.go
-// translates claude's system/task_started, system/task_updated and
-// system/background_tasks_changed subtypes into internal/turnevent variants, and
+// translates claude's system/task_started, system/task_updated,
+// system/background_tasks_changed and system/task_progress subtypes into
+// internal/turnevent variants — the authority on that set being
+// streamsup.emitSystemSubtype's case arms rather than this list, which is a reading
+// aid and fails no build when it goes stale — and
 // the wire follows the VARIANTS. The daemon is the single place a claude rename
 // lands; if every client read claude's vocabulary directly, one claude release
 // could break all of them at once with nothing in between to absorb it. In
@@ -453,16 +465,17 @@ const (
 // MUST NOT be added to inboundAppTypeSet in internal/protocol/envelope.go: these
 // are outbound binary → phone events an old phone never receives. The drift
 // detector in internal/protocol/compat_test.go partitions Type* constants
-// between inboundAppTypeSet and v2OnlyTypes; these three live in the latter.
+// between inboundAppTypeSet and v2OnlyTypes; these all live in the latter.
 //
 // The declaring ticket (#1393) was wire vocabulary only; #1394 added
-// internal/turnbridge's MapEvent cases for all three variants and the
-// docs/protocol-mobile.md section, so these frames now reach an interactive v2
-// mobile client.
+// internal/turnbridge's MapEvent cases for the first three variants and the
+// docs/protocol-mobile.md section, so those frames reach an interactive v2
+// mobile client. #2246 added the fourth end to end in one change.
 const (
-	TypeBackgroundTaskStarted = "background_task_started" // binary → phone, outbound v2 background-task open
-	TypeBackgroundTaskUpdated = "background_task_updated" // binary → phone, outbound v2 background-task change
-	TypeBackgroundTaskRoster  = "background_task_roster"  // binary → phone, outbound v2 background-task snapshot
+	TypeBackgroundTaskStarted  = "background_task_started"  // binary → phone, outbound v2 background-task open
+	TypeBackgroundTaskUpdated  = "background_task_updated"  // binary → phone, outbound v2 background-task change
+	TypeBackgroundTaskRoster   = "background_task_roster"   // binary → phone, outbound v2 background-task snapshot
+	TypeBackgroundTaskProgress = "background_task_progress" // binary → phone, outbound v2 background-task activity reading
 )
 
 // Mobile Protocol v2 thinking-progress reading. claude's mid-turn proof of life:

@@ -775,6 +775,67 @@ func TestMapEventOutbound(t *testing.T) {
 			wantOK: true,
 		},
 		{
+			// Every value is distinct — the four strings and the three integers —
+			// so a mapping that crossed two fields, or wired one source to two wire
+			// keys, goes red here rather than passing on a symmetric fixture. The
+			// counters are the capture's own second frame.
+			name: "BackgroundTaskProgress -> background_task_progress, every field verbatim",
+			ev: turnevent.BackgroundTaskProgress{
+				TaskID:          "a8eec1cd5e109aa38",
+				Description:     "Reading beta.txt",
+				SubagentType:    "general-purpose",
+				LastToolName:    "Read",
+				TotalTokens:     16246,
+				ToolUses:        2,
+				DurationMS:      4546,
+				TruncatedFields: []string{"description"},
+			},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskProgress,
+			wantPayload: protocol.BackgroundTaskProgressPayload{
+				ConversationID:  "c1",
+				TaskID:          "a8eec1cd5e109aa38",
+				Description:     "Reading beta.txt",
+				SubagentType:    "general-purpose",
+				LastToolName:    "Read",
+				TotalTokens:     16246,
+				ToolUses:        2,
+				DurationMS:      4546,
+				TruncatedFields: []string{"description"},
+			},
+			wantOK: true,
+		},
+		{
+			// The "not turn-scoped" claim under TEST for this variant too: tc carries
+			// a non-empty TurnID and a non-zero Seq, and the expected payload has no
+			// field either could land in.
+			name:    "BackgroundTaskProgress ignores turn addressing (not turn-scoped)",
+			ev:      turnevent.BackgroundTaskProgress{TaskID: "t-1", ToolUses: 2},
+			tc:      TurnContext{ConversationID: "c1", TurnID: "t-must-not-appear", Seq: 42},
+			wantTyp: protocol.TypeBackgroundTaskProgress,
+			wantPayload: protocol.BackgroundTaskProgressPayload{
+				ConversationID: "c1", TaskID: "t-1", ToolUses: 2,
+			},
+			wantOK: true,
+		},
+		{
+			// A zero counter maps rather than dropping, exactly as ThinkingProgress's
+			// zero value does. NO SECOND FILTER lives in this adapter: the producer's
+			// rate bound already decided which of claude's lines earned an event, and
+			// this row is what makes an added suppression branch here go red — the
+			// obvious-looking one being "a progress event with no tool uses says
+			// nothing, drop it", which would re-decide the producer's rule in a place
+			// with no access to the previous value it was decided against.
+			name:    "BackgroundTaskProgress zero value maps rather than dropping",
+			ev:      turnevent.BackgroundTaskProgress{},
+			tc:      tc,
+			wantTyp: protocol.TypeBackgroundTaskProgress,
+			wantPayload: protocol.BackgroundTaskProgressPayload{
+				ConversationID: "c1",
+			},
+			wantOK: true,
+		},
+		{
 			// The two readings differ, so a mapping that wired one field to both
 			// wire keys goes red here rather than passing on a symmetric fixture.
 			name:    "ThinkingProgress -> thinking_progress, both readings verbatim",

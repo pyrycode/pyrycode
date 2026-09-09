@@ -826,6 +826,74 @@ func (p BackgroundTaskRosterPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(p))
 }
 
+// BackgroundTaskProgressPayload is the body of an Envelope whose Type ==
+// TypeBackgroundTaskProgress (docs/protocol-mobile.md § background_task_progress,
+// #2246). Binary → phone direction; the wire form of
+// turnevent.BackgroundTaskProgress, the fourth background-task frame: the other
+// three open a task, report what happened to it, and list what is alive, and this
+// one says a running task is still working and what it is doing right now.
+//
+// It opens and closes no turn, so like its siblings there is no turn_id, and the
+// bridge supplies ConversationID because the internal event carries none. TaskID is
+// the join key back to the background_task_started that opened the task. claude's
+// session_id and uuid are absent for their sibling's reason, and so is tool_use_id —
+// the join key is task_id and the opening frame already published the tool call.
+//
+// A SEPARATE FRAME FROM background_task_updated, NOT A WIDER ONE, and the captured
+// field set is what decided it — the opposite call from #2245's, made on the same
+// test. `description` here is the task's CURRENT ACTIVITY, where `description` on
+// background_task_started is the task's OPENING description; carrying two meanings
+// under one name on one task row is a wire-contract trap a client cannot undo. And
+// `subagent_type` and `last_tool_name` describe the AGENT DOING THE WORK, not what
+// happened to the task, which is what background_task_updated reports. No `patch` is
+// synthesized here or anywhere: that field is contractually claude's own bytes.
+//
+// RATE. The daemon emits at most one of these per **2 tool calls** a task's own
+// counter advances, so fewer frames cross this wire than claude emits lines — on the
+// committed capture, 2 lines became 1 frame. Two consequences a client must not get
+// wrong, and they are thinking_progress's: the frames do NOT enumerate claude's
+// lines, and the ABSENCE of one within any window does NOT mean the task stalled. A
+// third rides the per-task bound: past the daemon's task-cardinality cap a task
+// receives no progress frames at all, and its opening and terminal frames are
+// unaffected, so a silent row still opens and closes correctly.
+//
+// TotalTokens, ToolUses and DurationMS are claude's own readings off the emitting
+// line, carried verbatim. CUMULATIVE PER TASK, so two frames for one task carry
+// growing values and MUST NOT be summed — diff them if a rate is wanted. They are
+// not guaranteed monotonic either: a client that subtracts two readings must
+// tolerate a negative result. The daemon accumulates nothing, so no number here is
+// arithmetic it did.
+//
+// TruncatedFields names the cut fields ("task_id", "description", "subagent_type",
+// "last_tool_name"), null when nothing was cut. The three integers can never appear
+// in it: nothing cuts an int.
+//
+// SECURITY: Description is model-authored FREE TEXT with no documented length bound,
+// and it is the field this frame exists to carry. Both captured values NAME A FILE
+// the subagent is reading, so in practice a stream of these frames is a stream of
+// path fragments from the operator's host — even though claude's documented
+// path-shaped key is not present on this subtype at all. A client must not read it as
+// a safe label. SubagentType and LastToolName are short model- and tool-authored
+// tokens under the same rule; a short token today is not a guarantee about
+// tomorrow's. Render all three as INERT TEXT; never execute, re-shell, or feed them
+// to an HTML sink, an attribute, or a URL — the sibling warning at
+// BackgroundTaskUpdatedPayload.Summary applies verbatim, and this frame repeats it
+// rather than delegating because these values arrive REPEATEDLY for one row, which is
+// the shape a client is most likely to bind straight into a template. All bounds are
+// the producer's, decided at construction (internal/streamsup/parser.go's
+// maxTaskFieldID / maxTaskDescription), so this struct re-decides no maximum.
+type BackgroundTaskProgressPayload struct {
+	ConversationID  string   `json:"conversation_id"`
+	TaskID          string   `json:"task_id"`
+	Description     string   `json:"description"`
+	SubagentType    string   `json:"subagent_type"`
+	LastToolName    string   `json:"last_tool_name"`
+	TotalTokens     int      `json:"total_tokens"`
+	ToolUses        int      `json:"tool_uses"`
+	DurationMS      int      `json:"duration_ms"`
+	TruncatedFields []string `json:"truncated_fields"`
+}
+
 // ThinkingProgressPayload is the body of an Envelope whose Type ==
 // TypeThinkingProgress (docs/protocol-mobile.md § thinking_progress, #1386).
 // Binary → phone direction; the wire form of turnevent.ThinkingProgress, the
