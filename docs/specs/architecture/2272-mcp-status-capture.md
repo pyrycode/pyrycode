@@ -350,3 +350,32 @@ Each is resolved by the live lap; any that changes the design gets a `## Revisio
 
 **Reviewer:** builder (self-review per the security-review checklist)
 **Date:** 2026-09-09
+
+## Revisions
+
+### 2026-09-09 — implementation
+
+**The written work is larger than the plan's estimate, and the shape is unchanged.** The plan sized
+this at roughly 1300 lines; the two files land at 1845 and 407. Nothing was added beyond the design
+above — the difference is comment density, which in this package is the convention rather than a
+choice, and the offline table count. Fifty offline assertions run under the build tag with no claude
+and no credentials. Recorded because the sizing paragraph above is a measurement other tickets read,
+and leaving it at 1300 would make the next capture ticket size against a number no capture has hit.
+
+**`mcapPersist` fails with `t.Errorf`, not `t.Fatalf`.** The plan inherited `ccapWriteRecord`'s
+shape, which fatals. That is wrong from inside a `t.Cleanup`: a fatal exits the goroutine mid-cleanup,
+so every cleanup registered earlier is skipped — here the stub listener's close-and-join, which would
+then leak. By the time the writer runs there is nothing left to abort, so failing the test and
+returning is the whole of what a fatal would buy. The writer itself still returns an error and writes
+nothing on a deny-scan hit; only the shell around it changed.
+
+**Open question 1 stands, and the design already answered it.** Whether claude serves `mcp_reconnect`
+and `mcp_toggle` on this input path is still unmeasured — the live lap resolves it. The probe gates
+the fixture on the `mcp_status` reply alone, so a silent verb is recorded in its own
+`terminated_on: budget` rather than costing the capture.
+
+**Open questions 2 and 3 are unresolved by construction and stay that way.** Both are about what
+claude puts in the reply, which is the measurement. The absent command's path is covered by the
+run-local redaction class up front rather than after the fact, so question 2 cannot turn into a
+failed write, and `config` is recorded as raw redacted bytes so question 3 records an absence as
+faithfully as a presence.
