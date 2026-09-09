@@ -135,3 +135,59 @@ starting empty on every call never remembers a marker the previous line already 
 was to feed a whole capture through one parser instead of one per line. Any capture-replay helper
 that constructs a `Parser` more than once per turn cannot exercise this class of cross-line state —
 check the helper's parser lifetime before trusting what it reports about a dedup path.
+
+**Ninth arm, `model_refusal_fallback` (#2267) — mapped from documentation, not from a capture, and
+that provenance decided the design rather than just caveating it.** `emitSystemSubtype`'s ninth case,
+`emitModelRefusalFallback`, maps `system/model_refusal_fallback` to `turnevent.ModelRefusalFallback`
+(`Scope`, `OriginalModel`, `FallbackModel`, `RefusalCategory`, `RefusalExplanation`, `Banner`). No
+capture of this line exists or can be taken — a refusal cannot be provoked on demand — so the decode
+target, `systemModelRefusalFallbackLine`, was built from the Claude Code docs and the Agent SDK's
+`sdk.d.ts` against a daemon on claude 2.1.259, six of claude's eleven documented keys declared and
+five refused as `systemTaskUpdatedLine`'s kind of control (identity-restating, API-internal, or
+naming a message id no daemon surface can join against). `emitPermissionDenied`'s two shapes both
+reappear unchanged: unconditional emission (a field-less line is still news, since the subtype is
+the whole payload) and an undecodable line producing a subtype-only Debug and no event, with per-field
+type tolerance deliberately refused on the same unobserved-failure rule. The four token fields
+(`Scope`, both model labels, `RefusalCategory`) drop on overflow and the two prose fields
+(`RefusalExplanation`, `Banner`) cut, reusing `maxTaskFieldID`/`maxDenialProse` rather than minting —
+the family's established boundary: a client matches or joins against a token, so a truncated one is
+worse than an empty one, while a truncated sentence still reads as prose.
+
+**The one new wrinkle documentation-derived provenance adds: a decode target built from field docs is
+a prediction about the wire, not a description of it, and that changes what belongs in the code versus
+what belongs in the plan.** `permission_denied`'s `message` collision with `streamLine`'s declared
+`*streamMessage` forced `consumePermissionDeniedLine`'s recovery path in `consumeLine`'s
+decode-failure branch; the documented `model_refusal_fallback` field set carries no `message` key at
+all, so no such collision is predicted and no recovery path was built speculatively — a gate written
+against a shape nobody has observed can only ever remove a line from the surfaced tier, never add one
+back correctly. If the real line does carry a `message` key of any scalar type, this arm is
+unreachable in production exactly as `permission_denied`'s was, and the fix is the same shape of
+recovery path, not a defensive one guessed in advance. Whoever captures the first real line should
+check that before assuming a silent drop elsewhere.
+
+**Acceptance-criteria trap this ticket exposed at refinement, not at implementation: "field absent"
+and "field wrong-typed" are different outcomes on this family's shared decode target, and an AC that
+conflates them asks the builder to violate the pattern.** A field simply missing from the JSON decodes
+fine and reaches the arm as a Go zero value — the ordinary, expected case in a documentation-derived
+mapping where nothing is guaranteed present. A field present with the wrong JSON type fails
+`encoding/json`'s decode for the *whole* target, per the general trap recorded above for
+`permission_denied` — there is no such thing as "that one field failed, the rest decoded." A criterion
+asking for "the event still fires, with the bad field empty" describes a per-field tolerance this
+family does not build, and can only be satisfied by breaking either the criterion or the pattern.
+Write absence and wrong-type as two separate criteria with two separate expected outcomes when a
+future subtype's acceptance criteria are drafted from a documentation-derived (rather than
+capture-derived) field set.
+
+**The two prose fields carry a sharper hazard than any prior arm's, because the request being
+described was refused.** `RefusalExplanation` and `Banner` are claude's own writing about *why* a
+request was declined, so — unlike `ToolCallDenied.Message`, which describes a tool call the daemon
+itself made — they can quote or paraphrase the user's own words back out, and `RefusalCategory` is an
+open string (`cyber`, `bio`, ...) asserting *what kind* of refusal it was, an accusatory classification
+of the user's request that the daemon does not verify and cannot verify — there is nothing on this
+surface to check it against. Both hazards are bounded the same way: nothing on the emitting path logs
+a decoded field, and nothing in the daemon acts on any of the six fields, so a fabricated or mistaken
+line is a misleading label a client renders, never something that drives daemon behavior. `Scope`
+carries the one fact a client should act on with care: `session` means claude keeps the *session* on
+the fallback model, so a later `ModelAnnounced` reporting a different model has no other explanation on
+this wire — a consumer should read this event as the swap's claimed *cause* and `ModelAnnounced` as its
+*confirmed result*, never treat the fallback label itself as the daemon's authoritative model state.
